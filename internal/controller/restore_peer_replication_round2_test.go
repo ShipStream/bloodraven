@@ -42,7 +42,7 @@ func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing
 	}
 	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
 		Confirm: testRestoreConfirm,
-		Source:  v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}},
+		Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
 	}
 	nn := fgNN(fg)
 	iad := &mockMySQL{readOnly: false, gtidExecuted: restoreRoundTwoUUID + ":1-10"}
@@ -92,7 +92,7 @@ func guardsRunner(cached, authoritative *v1alpha1.MysqlFailoverGroup) *TopologyM
 func heldGroupViews() (cached, authoritative *v1alpha1.MysqlFailoverGroup) {
 	authoritative = newTestFG()
 	authoritative.Status.ActiveSite = "dc1"
-	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: "full"}
+	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}
 	cached = authoritative.DeepCopy()
 	cached.Status.RestoreInPlace, cached.Status.RestoreReclones = nil, nil
@@ -142,7 +142,7 @@ func TestRestoreGuards_StaleCacheKeepsFreezeAndFence(t *testing.T) {
 	no := false
 	authoritative := newTestFG()
 	authoritative.Status.ActiveSite = "dc1"
-	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: "dc1", Scope: "full", RunID: "run-1"}
+	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, RunID: "run-1"}
 	authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"dc2"}}
 	authoritative.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "dc1", ConfirmToken: testRestoreConfirm, RunID: "run-1", PriorOfflineMode: &no, SessionsEvicted: true}
 	cached := authoritative.DeepCopy()
@@ -183,7 +183,7 @@ func TestInitRestoreProtection_InheritsEveryGuardOnReadFailure(t *testing.T) {
 func TestSync_NewManagerTakesRestoreGuardsFromUncachedRead(t *testing.T) {
 	cached, authoritative := heldGroupViews()
 	secret := newTestSecret()
-	secret.Data = map[string][]byte{"dsn": []byte("op:pw@tcp(127.0.0.1:1)/mysql")}
+	secret.Data = lifecycleSecretData()
 	cachedClient := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(cached, secret).Build()
 	reader := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -238,13 +238,13 @@ func TestEarlierRunQueueHeldWhenNextRunEndsInPreflight(t *testing.T) {
 			no := false
 			now := metav1.Now()
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: site, Scope: "full", JobName: inPlaceRestoreJobName(fg.Name, site),
+				Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, JobName: inPlaceRestoreJobName(fg.Name, site),
 				ConfirmTokenUsed: confirmA, CompletionTime: &now,
 			}
 			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1alpha1.RestoreReclonesArmed,
 				Pending: []string{peerName}, FencedGtidExecuted: peerGTID("1-10")}
 			fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: confirmA, RunID: "run-a", PriorOfflineMode: &no, SessionsEvicted: true}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			tm, mocks := withFenceRunner(r, c, fg)
 			r.Recorder = record.NewFakeRecorder(100)
 			mocks[site].gtidExecuted = peerGTID("1-14") // A's DROPs
@@ -314,19 +314,19 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 		queued      bool
 		wantHealthy string
 	}{
-		{"still queued", true, "no"},
-		{"queue gone", false, "yes"},
+		{"still queued", true, v1alpha1.LabelValueFalse},
+		{"queue gone", false, v1alpha1.LabelValueTrue},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cached := newTestFG()
 			cached.Status.ActiveSite = "dc1"
-			cached.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}, {Name: "dc2", State: "read-only", Replicating: true}}
+			cached.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
 			authoritative := cached.DeepCopy()
 			if tc.queued {
 				authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}
 			}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mysql-lion-dc2-x", Namespace: cached.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: cached.Name, labelSite: "dc2", labelRole: "replica", labelHealthy: "no"}}}
+				labelAppName: "mysql", labelInstance: cached.Name, v1alpha1.SiteLabel: "dc2", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: v1alpha1.LabelValueFalse}}}
 			r, c := newReconciler(cached, pod)
 			r.APIReader = fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
 			if err := r.syncPodLabels(context.Background(), getFG(t, c, cached)); err != nil {
@@ -336,8 +336,8 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 			if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Labels[labelHealthy] != tc.wantHealthy {
-				t.Fatalf("healthy = %q, want %q", got.Labels[labelHealthy], tc.wantHealthy)
+			if got.Labels[v1alpha1.HealthyLabel] != tc.wantHealthy {
+				t.Fatalf("healthy = %q, want %q", got.Labels[v1alpha1.HealthyLabel], tc.wantHealthy)
 			}
 		})
 	}

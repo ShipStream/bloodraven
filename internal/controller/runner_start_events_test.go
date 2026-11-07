@@ -52,7 +52,7 @@ func (h *startEventHarness) sync() []string {
 	return drainEvents(h.rec)
 }
 
-func (h *startEventHarness) setDSN(data map[string][]byte) {
+func (h *startEventHarness) setSecretData(data map[string][]byte) {
 	h.t.Helper()
 	ctx := context.Background()
 	var cur corev1.Secret
@@ -73,11 +73,11 @@ func (h *startEventHarness) setDSN(data map[string][]byte) {
 }
 
 func (h *startEventHarness) breakSecret() {
-	h.setDSN(map[string][]byte{"not-dsn": []byte("x")})
+	h.setSecretData(map[string][]byte{"password": []byte("pw")})
 }
 
 func (h *startEventHarness) fixSecret() {
-	h.setDSN(map[string][]byte{"dsn": []byte("op:pw@tcp(127.0.0.1:1)/mysql")})
+	h.setSecretData(lifecycleSecretData())
 }
 
 func (h *startEventHarness) deleteSecret() {
@@ -98,7 +98,7 @@ func countReason(events []string, eventType, reason string) int {
 }
 
 func startFailureWarnings(events []string) int {
-	return countReason(events, corev1.EventTypeWarning, ReasonTopologyManagerStartFailed)
+	return countReason(events, corev1.EventTypeWarning, v1alpha1.EventTopologyManagerStartFailed)
 }
 
 func (h *startEventHarness) startFailureTracked(nn types.NamespacedName) bool {
@@ -120,9 +120,9 @@ func TestStartFailureEvent_NeverStartedWarnsAfterOneResync(t *testing.T) {
 	}
 	ev := h.sync()
 	if startFailureWarnings(ev) != 1 || len(ev) != 1 {
-		t.Fatalf("second failure: want one %s Warning, got %v", ReasonTopologyManagerStartFailed, ev)
+		t.Fatalf("second failure: want one %s Warning, got %v", v1alpha1.EventTopologyManagerStartFailed, ev)
 	}
-	if !strings.Contains(ev[0], "no topology manager is running") || !strings.Contains(ev[0], "missing 'dsn' key") {
+	if !strings.Contains(ev[0], "no topology manager is running") || !strings.Contains(ev[0], `missing "username" key`) {
 		t.Fatalf("Warning message lacks the impact or the cause: %q", ev[0])
 	}
 	for i := 3; i <= 10; i++ {
@@ -219,8 +219,8 @@ func TestStartFailureEvent_RecoveryAnnouncedAndFloorSurvives(t *testing.T) {
 
 	h.fixSecret()
 	ev := h.sync()
-	if countReason(ev, corev1.EventTypeNormal, ReasonTopologyManagerStarted) != 1 {
-		t.Fatalf("recovery: want one Normal %s, got %v", ReasonTopologyManagerStarted, ev)
+	if countReason(ev, corev1.EventTypeNormal, v1alpha1.EventTopologyManagerStarted) != 1 {
+		t.Fatalf("recovery: want one Normal %s, got %v", v1alpha1.EventTopologyManagerStarted, ev)
 	}
 	if !strings.Contains(ev[0], "after 2 failed attempts") {
 		t.Fatalf("recovery message lacks the attempt count: %q", ev[0])
@@ -330,35 +330,18 @@ func TestStartFailureEvent_RecreatedWithinOneSyncGetsFreshFloor(t *testing.T) {
 	}
 }
 
-// Event messages are readable by anyone who can list Events in the
-// namespace, so no DSN parse failure may carry the password. The driver's own
-// errors can quote the DSN: without "@" the user:password is reported as an
-// unknown network name, and bad parameter values are echoed.
-func TestStartFailureEvent_MessageOmitsDSNPassword(t *testing.T) {
-	const secret = "s3cr3t-pw"
-	for _, tc := range []struct{ name, dsn string }{
-		{"unterminated address", "op:" + secret + "@tcp(127.0.0.1:1/mysql"},
-		{"missing @", "op:" + secret + "/mysql"},
-		{"password only", secret + "/mysql"},
-		{"bad bool param", "op:" + secret + "@tcp(127.0.0.1:1)/mysql?parseTime=" + secret},
-		{"unknown tls config", "op:" + secret + "@tcp(127.0.0.1:1)/mysql?tls=" + secret},
-		{"bad duration", "op:" + secret + "@tcp(127.0.0.1:1)/mysql?timeout=" + secret},
-		{"bad dbname escape", "op:" + secret + "@tcp(127.0.0.1:1)/" + secret + "%zz"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newStartEventHarness(t)
-			h.setDSN(map[string][]byte{"dsn": []byte(tc.dsn)})
-			h.sync()
-			ev := h.sync()
-			if startFailureWarnings(ev) != 1 {
-				t.Fatalf("want a Warning for the malformed DSN, got %v", ev)
-			}
-			if !strings.Contains(ev[0], "build site dc1 DSN") || !strings.Contains(ev[0], "DSN") {
-				t.Fatalf("Warning lost the site and DSN context: %q", ev[0])
-			}
-			if strings.Contains(ev[0], secret) {
-				t.Fatalf("Warning leaks the DSN password: %q", ev[0])
-			}
-		})
+// An operator Secret whose username is present but empty fails the start
+// the same way a missing key does, instead of dialing an empty account.
+func TestStartFailureEvent_EmptyUsernameFailsStart(t *testing.T) {
+	h := newStartEventHarness(t)
+	h.setSecretData(map[string][]byte{"username": {}, "password": []byte("pw")})
+
+	h.sync()
+	ev := h.sync()
+	if startFailureWarnings(ev) != 1 || len(ev) != 1 {
+		t.Fatalf("want one %s Warning, got %v", v1alpha1.EventTopologyManagerStartFailed, ev)
+	}
+	if !strings.Contains(ev[0], `has an empty value for key "username"`) {
+		t.Fatalf("Warning message lacks the cause: %q", ev[0])
 	}
 }

@@ -4,6 +4,7 @@
   "metadata": {
     "name": "playground",
     "namespace": "bloodraven-playground",
+    "uid": "5b0c6a2e-8d1f-4c7a-9e3b-2f6d1a4c8e90",
     "annotations": {
       "bloodraven.shipstream.io/last-failover": "2026-04-30T20:55:52Z",
       "bloodraven.shipstream.io/last-failover-target": "pdx"
@@ -22,41 +23,43 @@
       "maxLagSeconds": 30
     },
     "sites": [
-      {"name": "iad", "role": "primary-candidate", "zone": "zone-iad"},
-      {"name": "pdx", "role": "primary-candidate", "zone": "zone-pdx"},
-      {"name": "reader", "role": "read-only", "zone": "zone-reader"}
+      {"name": "iad", "role": "PrimaryCandidate", "zone": "zone-iad"},
+      {"name": "pdx", "role": "PrimaryCandidate", "zone": "zone-pdx"},
+      {"name": "reader", "role": "ReadOnly", "zone": "zone-reader"}
     ]
   },
   "status": {
     "activeSite": "pdx",
-    "lastFailover": "2026-04-30T20:55:52Z",
-    "lastFailoverTarget": "pdx",
-    "promotionGtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,\na3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7",
+    "lastFailover": {
+      "time": "2026-04-30T20:55:52Z",
+      "target": "pdx",
+      "promotionGtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,\na3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7"
+    },
     "sites": [
       {
         "name": "iad",
-        "state": "read-only",
-        "lastSeen": "2026-04-30T20:59:58Z",
+        "state": "ReadOnly",
+        "lastSeenTime": "2026-04-30T20:59:58Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-23,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7",
-        "replicating": false,
+        "replication": "Broken",
         "recoveryState": "RecoveryBlocked",
         "divergentGtid": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:20-23",
         "divergentTransactionCount": 4
       },
       {
         "name": "pdx",
-        "state": "writable",
-        "lastSeen": "2026-04-30T20:59:58Z",
+        "state": "Writable",
+        "lastSeenTime": "2026-04-30T20:59:58Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-9",
-        "replicating": false,
+        "replication": "NotApplicable",
         "sourceConvergenceState": "Converged"
       },
       {
         "name": "reader",
-        "state": "read-only",
-        "lastSeen": "2026-04-30T20:59:58Z",
+        "state": "ReadOnly",
+        "lastSeenTime": "2026-04-30T20:59:58Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-9",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0,
         "sourceHost": "mysql-playground-pdx-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged"
@@ -67,7 +70,7 @@
         "type": "Degraded",
         "status": "True",
         "reason": "DivergentTransactions",
-        "message": "Old primary iad has 4 divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=iad to recover",
+        "message": "Old primary iad has 4 divergent transactions — reclone it (kubectl bloodraven reclone playground iad, or annotate bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=5b0c6a2e-8d1f-4c7a-9e3b-2f6d1a4c8e90:gtidPrefix=a2cc879c-5f9d-11f1-9fae-8e47bc2a4544) to recover",
         "lastTransitionTime": "2026-04-30T20:58:12Z"
       }
     ]

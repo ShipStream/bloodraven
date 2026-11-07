@@ -14,7 +14,7 @@ package scenarios
 // on the active primary, which blocks every commit, then reads
 // @@gtid_executed and the server clock under the lock, and holds the lock
 // until the server clock has passed the next whole second, which is the
-// target T (stopDatetime admits no fraction, A-39). Every transaction
+// target T (stopTime admits no fraction, A-39). Every transaction
 // committed before the lock is in the set and has an original commit time
 // before T; every transaction committed after UNLOCK TABLES has one after T.
 // So the expected history at T is exact even while a writer commits
@@ -50,7 +50,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
+	"github.com/shipstream/bloodraven/internal/controller"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -64,9 +66,17 @@ import (
 const pitrMicroLayout = "2006-01-02T15:04:05.000000Z"
 
 // pitrTargetLayout is the whole-second UTC RFC 3339 form every PITR target
-// is written in: stopDatetime and the verification timestamp admit no
-// fraction (A-39).
+// is written in: both pointInTime.stopTime fields admit no fraction (A-39).
 const pitrTargetLayout = time.RFC3339
+
+// pitrTargetTime parses a fence target into the API's stopTime.
+func pitrTargetTime(target string) (metav1.Time, error) {
+	t, err := time.Parse(pitrTargetLayout, target)
+	if err != nil {
+		return metav1.Time{}, fmt.Errorf("PITR target %q: %w", target, err)
+	}
+	return metav1.NewTime(t), nil
+}
 
 // pitrFenceTarget is the target T for a fence whose server clock read now
 // under the lock: the next whole second, strictly after now, so every
@@ -222,7 +232,7 @@ func pitrArchiveBoundReady(mfg *v1alpha1.MysqlFailoverGroup, prefix, dest string
 	b := pitrFindBindingByDestination(mfg, dest)
 	bound := b != nil && b.State == v1alpha1.PITRArchiveBindingBound && b.ArchiveID != ""
 	verified := bound && pitrObservedArchiveID(mfg, prefix) == b.ArchiveID
-	ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
+	ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
 	settled := ready && backupProfileRolloutReady(mfg)
 	binding := "<none>"
 	if b != nil {
@@ -862,14 +872,14 @@ func pitrArchivePassphrases(env *runner.Env) [][]byte {
 }
 
 // pitrBackupDumpPassphrase is the passphrase a backup's dump is encrypted
-// with: the dump-key snapshot its status.artifactStorage.passphraseSecret
+// with: the dump-key snapshot its status.artifactStorage.passphraseSecretKeyRef
 // records (#203: an immutable per-backup copy, so a later edit of the
 // profile's Secret does not change it).
 func pitrBackupDumpPassphrase(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup) ([]byte, error) {
-	if b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecret == nil || b.Status.ArtifactStorage.PassphraseSecret.Name == "" {
-		return nil, fmt.Errorf("encrypted MysqlBackup %s records no status.artifactStorage.passphraseSecret", b.Name)
+	if b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef.Name == "" {
+		return nil, fmt.Errorf("encrypted MysqlBackup %s records no status.artifactStorage.passphraseSecretKeyRef", b.Name)
 	}
-	ref := b.Status.ArtifactStorage.PassphraseSecret
+	ref := b.Status.ArtifactStorage.PassphraseSecretKeyRef
 	sec, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("get dump key %s of MysqlBackup %s: %w", ref.Name, b.Name, err)
@@ -940,8 +950,8 @@ func pitrTrackedCRs(env *runner.Env, kind string) []string {
 type pitrExpectation struct {
 	// Backup is the backup key passed to pitrBackup.
 	Backup string
-	// Mode is timestamp or latest.
-	Mode string
+	// Mode is Timestamp or Latest.
+	Mode v1alpha1.PointInTimeMode
 	// Fence supplies T (timestamp mode) and the expected executed set.
 	Fence pitrFence
 	// Exclude is excludeGtids.
@@ -974,7 +984,7 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 		return fmt.Errorf("%s: status.pointInTime is not set", what)
 	}
 	wantMode := v1alpha1.PointInTimeModeTimestamp
-	if e.Mode == "latest" {
+	if e.Mode == v1alpha1.PointInTimeModeLatest {
 		wantMode = v1alpha1.PointInTimeModeLatest
 	}
 	if res.Mode != wantMode {
@@ -1045,12 +1055,16 @@ func assertPITRResult(env *runner.Env, what string, res *v1alpha1.PointInTimeRes
 }
 
 // pitrVerifySpec builds the verification's pointInTime block.
-func pitrVerifySpec(e pitrExpectation) *v1alpha1.PointInTimeVerificationSpec {
+func pitrVerifySpec(e pitrExpectation) (*v1alpha1.PointInTimeVerificationSpec, error) {
 	pit := &v1alpha1.PointInTimeVerificationSpec{Mode: e.Mode, ExcludeGtids: e.Exclude, ArchiveProfileName: e.ArchiveProfile}
-	if e.Mode == "timestamp" {
-		pit.Timestamp = e.Fence.T
+	if e.Mode == v1alpha1.PointInTimeModeTimestamp {
+		stop, err := pitrTargetTime(e.Fence.T)
+		if err != nil {
+			return nil, err
+		}
+		pit.StopTime = &stop
 	}
-	return pit
+	return pit, nil
 }
 
 // pitrVerify runs one MysqlBackupVerification of e.Backup and asserts the
@@ -1072,7 +1086,11 @@ func pitrStartVerify(ctx context.Context, env *runner.Env, scenarioID, db, label
 	name := fmt.Sprintf("%s-%s", pitrShortName(scenarioID, label), backupRunStamp(env))
 	pitrTrackCR(ctx, env, "MysqlBackupVerification", name)
 	query := pitrMarkerQuery(db, ctxFetch(env, "backupRunStem"), e.Markers)
-	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pitrVerifySpec(e), query, 1); err != nil {
+	pit, err := pitrVerifySpec(e)
+	if err != nil {
+		return "", err
+	}
+	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pit, query, 1); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -1087,10 +1105,10 @@ func pitrFinishVerify(ctx context.Context, env *runner.Env, name string, e pitrE
 	if err != nil {
 		return err
 	}
-	if v.Status.SanityCheck == nil || !v.Status.SanityCheck.Ran || v.Status.SanityCheck.ResultRow != "1" {
+	if v.Status.SanityCheck == nil || v.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || v.Status.SanityCheck.Result != "1" {
 		return fmt.Errorf("verification %s: marker rows are not exactly %v (sanity=%+v)", name, e.Markers, v.Status.SanityCheck)
 	}
-	if !conditionTrue(v.Status.Conditions, "Verified") {
+	if !conditionTrue(v.Status.Conditions, v1alpha1.ConditionVerified) {
 		return fmt.Errorf("verification %s missing Verified=True: %s", name, conditionsSummary(v.Status.Conditions))
 	}
 	return assertPITRResult(env, "verification "+name, v.Status.PointInTime, e)
@@ -1105,7 +1123,11 @@ func pitrVerifyRefused(ctx context.Context, env *runner.Env, scenarioID, db, lab
 	name := fmt.Sprintf("%s-%s", pitrShortName(scenarioID, label), backupRunStamp(env))
 	pitrTrackCR(ctx, env, "MysqlBackupVerification", name)
 	query := pitrMarkerQuery(db, ctxFetch(env, "backupRunStem"), e.Markers)
-	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pitrVerifySpec(e), query, 1); err != nil {
+	pit, err := pitrVerifySpec(e)
+	if err != nil {
+		return nil, err
+	}
+	if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backup:"+e.Backup), scenarioID, pit, query, 1); err != nil {
 		return nil, err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
@@ -1117,7 +1139,7 @@ func pitrVerifyRefused(ctx context.Context, env *runner.Env, scenarioID, db, lab
 	if v.Status.Phase != v1alpha1.VerificationPhaseFailed {
 		return v, err
 	}
-	cond := findCondition(v.Status.Conditions, "Verified")
+	cond := findCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != token {
 		return v, fmt.Errorf("verification %s: want Verified=False/%s, got %s (message %q)", name, token, conditionsSummary(v.Status.Conditions), v.Status.Message)
 	}
@@ -1273,8 +1295,8 @@ func pitrSiteReplicating(mfg *v1alpha1.MysqlFailoverGroup, site string) (bool, s
 		if st.Name != site {
 			continue
 		}
-		msg := fmt.Sprintf("state=%s replicating=%t recovery=%q lastSeen=%v", st.State, st.Replicating, st.RecoveryState, st.LastSeen)
-		return st.State == "read-only" && st.Replicating && st.RecoveryState != "RecoveryBlocked", msg, nil
+		msg := fmt.Sprintf("state=%s replication=%s recovery=%q lastSeen=%v", st.State, st.Replication, st.RecoveryState, st.LastSeenTime)
+		return st.State == v1alpha1.SiteStateReadOnly && st.Replication.Running() && st.RecoveryState != "RecoveryBlocked", msg, nil
 	}
 	return false, "site not in status", nil
 }
@@ -1325,37 +1347,39 @@ func pitrWaitPromotionRecorded(ctx context.Context, env *runner.Env, site string
 // no divergence recorded, confirmed by the group name (a cold reclone).
 // Building the value before the divergence report settles would pick the
 // wrong confirmation, which the operator rejects (F067).
-func pitrRecloneRequest(sites []v1alpha1.SiteStatus, site, group string, expectDivergent bool) (ready bool, value, msg string) {
-	for _, s := range sites {
+func pitrRecloneRequest(mfg *v1alpha1.MysqlFailoverGroup, site string, expectDivergent bool) (ready bool, value, msg string) {
+	for _, s := range mfg.Status.Sites {
 		if s.Name != site {
 			continue
 		}
 		div := strings.TrimSpace(s.DivergentGtid)
 		msg = fmt.Sprintf("state=%s recovery=%s divergentGtid=%q", s.State, s.RecoveryState, div)
-		if s.State != "read-only" {
+		if s.State != v1alpha1.SiteStateReadOnly {
 			return false, "", msg
 		}
 		if expectDivergent {
 			if s.RecoveryState != "RecoveryBlocked" || len(div) < 8 {
 				return false, "", msg + " (waiting for RecoveryBlocked with a divergent GTID)"
 			}
-			return true, site + ":" + div[:8], msg
+			return true, controller.RecloneAnnotationValueWithPrefix(mfg, site, div[:8]), msg
 		}
 		if div != "" || s.RecoveryState == "RecoveryBlocked" {
 			return false, "", msg + " (a cold reclone needs a site with no recorded divergence)"
 		}
-		return true, site + ":confirm=" + group, msg
+		return true, controller.RecloneAnnotationValue(mfg, site), msg
 	}
 	return false, "", "site absent"
 }
 
 // pitrRecloneWatch tells a reclone attempt's outcome apart from an earlier
-// one's. setCondition keeps LastTransitionTime while Status is unchanged,
-// so a Failed → Cloning → Failed attempt keeps the old time (Failed and
-// every in-progress phase are Status=True): the attempt is identified by
-// observing one of its in-progress phases, or by any change of the
-// condition's reason, transition time or message from the pre-request
-// snapshot (F188).
+// one's. Bootstrapping is True only while a clone runs, and both outcomes
+// are False (NotBootstrapping, BootstrapFailed), so an earlier attempt's
+// outcome reads like this one's: the attempt is identified by observing
+// one of its in-progress phases, or by any change of the condition's
+// reason, transition time or message from the pre-request snapshot
+// (F188). setCondition keeps LastTransitionTime while Status is
+// unchanged, so a transition time alone is not enough when the True write
+// of a short attempt was never persisted.
 type pitrRecloneWatch struct {
 	pre        *metav1.Condition
 	sawAttempt bool
@@ -1376,8 +1400,8 @@ func (w *pitrRecloneWatch) observe(boot *metav1.Condition, replicating bool) (bo
 	if boot == nil {
 		return false, "bootstrap not observed", nil
 	}
-	msg := fmt.Sprintf("bootstrap=%s replicating=%v", boot.Reason, replicating)
-	if boot.Status == metav1.ConditionTrue && boot.Reason != "Failed" {
+	msg := fmt.Sprintf("bootstrap=%s replicating=%t", boot.Reason, replicating)
+	if bootstrapRunning(boot) {
 		w.sawAttempt = true
 		return false, msg, nil
 	}
@@ -1386,10 +1410,10 @@ func (w *pitrRecloneWatch) observe(boot *metav1.Condition, replicating bool) (bo
 	if !w.sawAttempt && !changed {
 		return false, msg + " (the condition still shows the state before the request)", nil
 	}
-	switch boot.Reason {
-	case "Failed":
+	switch {
+	case bootstrapFailed(boot):
 		return false, boot.Message, fmt.Errorf("reclone failed: %s", boot.Message)
-	case "Done":
+	case boot.Reason == v1alpha1.ReasonNotBootstrapping:
 		return replicating, msg, nil
 	}
 	return false, msg, nil
@@ -1400,7 +1424,7 @@ func (w *pitrRecloneWatch) observe(boot *metav1.Condition, replicating bool) (bo
 // cleared, so without this the completion wait would only time out (F067).
 func pitrNewRecloneRejection(before map[string]int32, events []corev1.Event, group, site string) (corev1.Event, bool) {
 	for _, ev := range events {
-		if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != group || ev.Reason != "RecloneRejected" {
+		if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != group || ev.Reason != v1alpha1.EventRecloneRejected {
 			continue
 		}
 		if !strings.Contains(ev.Message, `"`+site+`"`) && !strings.Contains(ev.Message, "reclone of "+site+" ") {
@@ -1421,7 +1445,7 @@ func pitrRecloneRejectedSnapshot(ctx context.Context, env *runner.Env) (map[stri
 	}
 	seen := map[string]int32{}
 	for _, ev := range events {
-		if ev.Reason == "RecloneRejected" {
+		if ev.Reason == v1alpha1.EventRecloneRejected {
 			seen[string(ev.UID)] = ev.Count
 		}
 	}
@@ -1437,7 +1461,7 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 	defer cancel()
 	var value string
 	mfg, err := env.Wait.UntilCR(readyCtx, env.Namespace, site+" ready for reclone", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready, v, msg := pitrRecloneRequest(m.Status.Sites, site, env.FG, expectDivergent)
+		ready, v, msg := pitrRecloneRequest(m, site, expectDivergent)
 		value = v
 		return ready, msg, nil
 	})
@@ -1448,8 +1472,8 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 	if err != nil {
 		return fmt.Errorf("list events before the reclone of %s: %w", site, err)
 	}
-	watch := newPitrRecloneWatch(findCondition(mfg.Status.Conditions, "Bootstrapping"))
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+	watch := newPitrRecloneWatch(findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping))
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 		return err
 	}
 	env.Capture.Note("requested reclone-site=" + value)
@@ -1464,10 +1488,10 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 		replicating := false
 		for _, s := range m.Status.Sites {
 			if s.Name == site {
-				replicating = s.Replicating && s.State == "read-only"
+				replicating = s.Replication.Running() && s.State == v1alpha1.SiteStateReadOnly
 			}
 		}
-		done, msg, err := watch.observe(findCondition(m.Status.Conditions, "Bootstrapping"), replicating)
+		done, msg, err := watch.observe(findCondition(m.Status.Conditions, v1alpha1.ConditionBootstrapping), replicating)
 		if err != nil {
 			return false, msg, fmt.Errorf("reclone of %s: %w", site, err)
 		}
@@ -1500,6 +1524,10 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 // taint must never land on a node where the source's MySQL runs, since the
 // source does not tolerate it.
 func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName, stop string) (*v1alpha1.MysqlFailoverGroup, error) {
+	stopTime, err := pitrTargetTime(stop)
+	if err != nil {
+		return nil, err
+	}
 	spec := src.Spec.DeepCopy()
 	untaintedZone := ""
 	for _, s := range spec.Sites {
@@ -1514,7 +1542,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 		if !s.IsPromotable() {
 			continue
 		}
-		s.TaintNodeSelector = map[string]string{"shipstream.io/failover-group." + name: "true"}
+		s.TaintNodeSelector = map[string]string{"bloodraven.shipstream.io/failover-group." + name: "true"}
 		s.LBIP = fmt.Sprintf("192.0.2.%d", len(sites)+1)
 		s.ServiceTemplate = nil
 		if s.Name == src.Status.ActiveSite {
@@ -1532,7 +1560,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 	}
 	spec.Sites = sites
 	spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: priorities}
-	spec.DNS = v1alpha1.DNSSpec{Hostname: name + "-db.example.local", TTL: src.Spec.DNS.TTL}
+	spec.DNS = v1alpha1.DNSSpec{Hostname: name + "-db.example.local", TTLSeconds: src.Spec.DNS.TTLSeconds}
 	spec.Dragonfly = nil
 	spec.EncryptionAtRest = nil
 	spec.RestoreInPlace = nil
@@ -1543,9 +1571,9 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 	spec.Backup.PITR = nil
 	spec.Backup.Schedules = nil
 	spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: backupName}},
+		Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 		PointInTime: &v1alpha1.PointInTimeSpec{
-			StopDatetime:       stop,
+			StopTime:           stopTime,
 			ArchiveProfileName: backupE2EProfile,
 		},
 	}
@@ -1553,7 +1581,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: src.Namespace,
-			Labels:    map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
+			Labels:    map[string]string{"playground.bloodraven.shipstream.io/created-by-e2e": "true"},
 		},
 		Spec: *spec,
 	}, nil
@@ -1693,7 +1721,7 @@ func pitrReadDumpObject(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlB
 	if !found {
 		return nil, fmt.Errorf("dump object s3://%s/%s not found", bucket, key)
 	}
-	if b.Status.Encrypted {
+	if b.Status.Encryption != nil && b.Status.Encryption.Mode == v1alpha1.EncryptionModePassphrase {
 		pass, err := pitrBackupDumpPassphrase(ctx, env, b)
 		if err != nil {
 			return nil, err
@@ -1791,7 +1819,7 @@ func pitrWaitPastBackup(ctx context.Context, env *runner.Env, key string, b *v1a
 // past its backup's clear time: such a target would refuse
 // PITRBackupAfterTarget for a reason the scenario did not mean to test.
 func pitrCheckTargetAfterBackup(env *runner.Env, e pitrExpectation) error {
-	if e.Mode != "timestamp" {
+	if e.Mode != v1alpha1.PointInTimeModeTimestamp {
 		return nil
 	}
 	raw := ctxFetch(env, "backupClear:"+e.Backup)
@@ -1864,22 +1892,18 @@ func refusalNamesExactly(msg, want string) error {
 	return fmt.Errorf("the refusal names the sets %q, none equal to %s: %s", found, want, msg)
 }
 
-// Metadata of the #203 archive bindings (IMPL-203 §3.5). The operator's
-// constants are unexported (internal/controller/pitr_binding_contract.go);
-// these mirror them, and TestPITRPlaygroundContractMirrors pins each mirror
-// to the controller's declaration, so a drifted value fails a unit test
-// rather than turning a scenario assertion vacuous.
+// Metadata of the #203 archive bindings (IMPL-203 §3.5) that api/v1alpha1
+// does not export (label values, the check Job selector, the Secret data
+// key). The operator's constants are unexported
+// (internal/controller/pitr_binding_contract.go); these mirror them, and
+// TestPITRPlaygroundContractMirrors pins each mirror to the controller's
+// declaration, so a drifted value fails a unit test rather than turning a
+// scenario assertion vacuous.
 const (
 	pitrSnapshotAppLabel       = "app.kubernetes.io/name"
 	pitrKeySnapshotApp         = "mysql-pitr-key"
 	pitrDumpKeySnapshotApp     = "mysql-dump-key"
-	pitrGroupUIDLabel          = "bloodraven.shipstream.io/failover-group-uid"
-	pitrBindingIDLabel         = "bloodraven.shipstream.io/pitr-binding-id"
-	pitrDestinationAnnotation  = "bloodraven.shipstream.io/pitr-destination"
-	pitrAcceptedAnnotation     = "bloodraven.shipstream.io/pitr-accepted"
-	pitrRenderAnnotation       = "bloodraven.shipstream.io/pitr-render"
-	pitrCheckJobSelector       = "app.kubernetes.io/name=mysql-backup,shipstream.io/resource=pitr-archive-check"
-	pitrBindingReadyCondition  = "PITRArchiveBindingReady"
+	pitrCheckJobSelector       = "app.kubernetes.io/name=mysql-backup," + v1alpha1.ResourceLabel + "=pitr-archive-check"
 	pitrSnapshotPassphraseKey  = "passphrase"
 	pitrReleaseBindingWaitTime = 2 * time.Minute
 	// pitrSnapshotUnmountWaitTime bounds the wait, before the cleanup's
@@ -1893,13 +1917,13 @@ const (
 // no owner reference (they outlive the group), so the group-UID label is
 // what scopes them.
 func pitrKeySnapshotSelector(groupUID string) string {
-	return pitrSnapshotAppLabel + "=" + pitrKeySnapshotApp + "," + pitrGroupUIDLabel + "=" + groupUID
+	return pitrSnapshotAppLabel + "=" + pitrKeySnapshotApp + "," + v1alpha1.FailoverGroupUIDLabel + "=" + groupUID
 }
 
 // pitrGroupSnapshotSelector lists every key snapshot (archive and dump) a
 // group's operator made.
 func pitrGroupSnapshotSelector(groupUID string) string {
-	return pitrSnapshotAppLabel + " in (" + pitrKeySnapshotApp + "," + pitrDumpKeySnapshotApp + ")," + pitrGroupUIDLabel + "=" + groupUID
+	return pitrSnapshotAppLabel + " in (" + pitrKeySnapshotApp + "," + pitrDumpKeySnapshotApp + ")," + v1alpha1.FailoverGroupUIDLabel + "=" + groupUID
 }
 
 // pitrDestinationUnderPrefixes reports whether a normalized destination is
@@ -1931,7 +1955,7 @@ func pitrBindingIDsUnderPrefixes(mfg *v1alpha1.MysqlFailoverGroup, snapshots []c
 	}
 	for i := range snapshots {
 		s := &snapshots[i]
-		if id := s.Labels[pitrBindingIDLabel]; id != "" && pitrDestinationUnderPrefixes(s.Annotations[pitrDestinationAnnotation], prefixes) {
+		if id := s.Labels[v1alpha1.PITRBindingIDLabel]; id != "" && pitrDestinationUnderPrefixes(s.Annotations[v1alpha1.PITRDestinationAnnotation], prefixes) {
 			seen[id] = true
 		}
 	}
@@ -1958,7 +1982,7 @@ func pitrFindBindingByID(mfg *v1alpha1.MysqlFailoverGroup, id string) *v1alpha1.
 func pitrListKeySnapshots(ctx context.Context, env *runner.Env, groupUID, id string) ([]corev1.Secret, error) {
 	sel := pitrKeySnapshotSelector(groupUID)
 	if id != "" {
-		sel += "," + pitrBindingIDLabel + "=" + id
+		sel += "," + v1alpha1.PITRBindingIDLabel + "=" + id
 	}
 	list, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	if err != nil {
@@ -1967,10 +1991,11 @@ func pitrListKeySnapshots(ctx context.Context, env *runner.Env, groupUID, id str
 	return list.Items, nil
 }
 
-// pitrReleaseValue is the release annotation's value for one binding id
-// (`<id>:confirm=<group>`, one id per annotation).
-func pitrReleaseValue(id, group string) string {
-	return id + ":confirm=" + group
+// pitrReleaseValue is the release annotation's value for one binding id of
+// the group named name with uid (`<id>:confirm=<name>:uid=<uid>`, one id
+// per annotation).
+func pitrReleaseValue(id, name, uid string) string {
+	return actionvalue.Format(id, actionvalue.ConfirmPairs(name, uid)...)
 }
 
 // pitrReleaseBinding asks the operator to release one binding of the
@@ -1979,8 +2004,12 @@ func pitrReleaseValue(id, group string) string {
 // left. On a timeout (or the caller's deadline) it takes its own annotation
 // back (pitrWithdrawRelease), so a refused release does not fire later.
 func pitrReleaseBinding(ctx context.Context, env *runner.Env, id string) error {
-	value := pitrReleaseValue(id, env.FG)
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, brcontroller.ReleasePITRArchiveBindingAnnotation, value); err != nil {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return fmt.Errorf("get MFG for the release of %s: %w", id, err)
+	}
+	value := pitrReleaseValue(id, mfg.Name, string(mfg.UID))
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, value); err != nil {
 		return fmt.Errorf("annotate the release of %s: %w", id, err)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, pitrReleaseBindingWaitTime)
@@ -1993,7 +2022,7 @@ func pitrReleaseBinding(ctx context.Context, env *runner.Env, id string) error {
 		if err != nil {
 			last = err.Error()
 		} else {
-			pending := mfg.Annotations[brcontroller.ReleasePITRArchiveBindingAnnotation] == value
+			pending := mfg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] == value
 			entry := pitrFindBindingByID(mfg, id)
 			snaps, err := pitrListKeySnapshots(waitCtx, env, string(mfg.UID), id)
 			switch {
@@ -2038,16 +2067,16 @@ func pitrWithdrawRelease(ctx context.Context, env *runner.Env, value string) err
 		return nil
 	}
 	mfg, gerr := env.Kube.GetMFGNamed(wctx, env.Namespace, env.FG)
-	if gerr == nil && mfg.Annotations[brcontroller.ReleasePITRArchiveBindingAnnotation] != value {
+	if gerr == nil && mfg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] != value {
 		return nil
 	}
-	return fmt.Errorf("withdraw the release request %s: %w; remove the %s annotation by hand or the operator keeps retrying it", value, errors.Join(err, gerr), brcontroller.ReleasePITRArchiveBindingAnnotation)
+	return fmt.Errorf("withdraw the release request %s: %w; remove the %s annotation by hand or the operator keeps retrying it", value, errors.Join(err, gerr), v1alpha1.ReleasePITRArchiveBindingAnnotation)
 }
 
 // pitrReleaseWithdrawPatch removes the release annotation if, and only if,
 // it still equals value.
 func pitrReleaseWithdrawPatch(value string) []pgkube.JSONPatchOp {
-	p := "/metadata/annotations/" + strings.NewReplacer("~", "~0", "/", "~1").Replace(brcontroller.ReleasePITRArchiveBindingAnnotation)
+	p := "/metadata/annotations/" + strings.NewReplacer("~", "~0", "/", "~1").Replace(v1alpha1.ReleasePITRArchiveBindingAnnotation)
 	return []pgkube.JSONPatchOp{{Op: "test", Path: p, Value: value}, {Op: "remove", Path: p}}
 }
 
@@ -2098,7 +2127,7 @@ func pitrReleaseBindings(ctx context.Context, env *runner.Env, prefixes []string
 		return
 	}
 	if left := pitrSnapshotsUnderPrefixes(snaps, prefixes); len(left) > 0 {
-		env.Capture.Note(fmt.Sprintf("cleanup warning: archive key snapshots %v under this run's prefixes outlived the operator's release and are retained; release them with the %s annotation once nothing uses them", left, brcontroller.ReleasePITRArchiveBindingAnnotation))
+		env.Capture.Note(fmt.Sprintf("cleanup warning: archive key snapshots %v under this run's prefixes outlived the operator's release and are retained; release them with the %s annotation once nothing uses them", left, v1alpha1.ReleasePITRArchiveBindingAnnotation))
 	}
 }
 
@@ -2107,7 +2136,7 @@ func pitrReleaseBindings(ctx context.Context, env *runner.Env, prefixes []string
 func pitrSnapshotsUnderPrefixes(snaps []corev1.Secret, prefixes []string) []string {
 	var out []string
 	for i := range snaps {
-		if pitrDestinationUnderPrefixes(snaps[i].Annotations[pitrDestinationAnnotation], prefixes) {
+		if pitrDestinationUnderPrefixes(snaps[i].Annotations[v1alpha1.PITRDestinationAnnotation], prefixes) {
 			out = append(out, snaps[i].Name)
 		}
 	}

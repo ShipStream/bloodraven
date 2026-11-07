@@ -19,7 +19,7 @@ Two of those need naming. `bloodraven_divergent_transactions{site} > 0` means a 
 
 ## The alert that must not page: reader lag
 
-`playground` has three sites — `iad` and `pdx` as `primary-candidate`, `reader` as `read-only`. Chaos scenario 42 applies `SOURCE_DELAY` to `reader` and soaks the group for three times `maxLagSeconds` — 3 × 30 s = 90 s in the playground config — while writing a row a second to the primary. Both replication threads keep running against the correct source, so the reader is converged-but-slow, not stopped.
+`playground` has three sites — `iad` and `pdx` as `PrimaryCandidate`, `reader` as `ReadOnly`. Chaos scenario 42 applies `SOURCE_DELAY` to `reader` and soaks the group for three times `maxLagSeconds` — 3 × 30 s = 90 s in the playground config — while writing a row a second to the primary. Both replication threads keep running against the correct source, so the reader is converged-but-slow, not stopped.
 
 The scenario asserts on every iteration of that soak: `Ready` stays `True`, `activeSite` never changes, `lastFailover` is unchanged so no anti-flap cooldown is consumed, and `reader` never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`. The only reaction anywhere is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`. That is Unit 1's role model working as designed, not a fault.
 
@@ -92,7 +92,7 @@ Label sets are not uniform, which bites when you templatise. Site metrics carry 
 
 ## Two traps
 
-**A `Failover` condition reason does not exist.** The failover row of the decision matrix sets `Reason = "Degraded"`. The reason is one of exactly five strings: `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`. Any rule or automation matching a reason of `Failover` sits green forever through every promotion you will ever do. Use `bloodraven_failovers_total` for "a failover happened" and the five real reasons from Units 1 and 2 for condition state.
+**A `Failover` condition reason does not exist.** The failover row of the decision matrix sets `Reason = "SiteUnhealthy"`. The reason is one of exactly five strings: `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss`. Any rule or automation matching a reason of `Failover` sits green forever through every promotion you will ever do. Use `bloodraven_failovers_total` for "a failover happened" and the five real reasons from Units 1 and 2 for condition state.
 
 **No shipped alert fires for "the application is still broken after a successful failover."** `BloodravenFailoverOccurred` is informational and operator-scoped: it says the operator finished, not that traffic recovered. Everything from Unit 4 lives in that gap — the pool still handing out a connection to the demoted primary, the driver that needs `rejectReadOnly`, the JVM DNS cache that ignores your 60 s TTL. Bloodraven cannot see any of it, and the docs are explicit that you must alert on application write failures, pool exhaustion and repeated read-only errors yourself. That alert is yours, and it is the only one measuring your actual outage.
 

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // A target with recorded divergence is refused before anything is fenced,
@@ -11,7 +13,7 @@ import (
 func TestValidatePlannedFailover_RefusesDivergentTarget(t *testing.T) {
 	fg := plannedFailoverFG("pdx")
 	count := int64(221)
-	fg.Status.Sites[1].RecoveryState = recoveryStateBlocked
+	fg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateBlocked
 	fg.Status.Sites[1].DivergentGtid = issue202ErrantGTID
 	fg.Status.Sites[1].DivergentTransactionCount = &count
 

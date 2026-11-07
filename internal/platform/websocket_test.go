@@ -60,8 +60,8 @@ func TestHub_BroadcastToClients(t *testing.T) {
 		Group:      "orders",
 		ActiveSite: "iad",
 		Sites: []TopologySite{
-			{Name: "iad", State: "writable"},
-			{Name: "pdx", State: "read-only", Replicating: true},
+			{Name: "iad", State: "Writable"},
+			{Name: "pdx", State: "ReadOnly", Replication: "Healthy"},
 		},
 		PollTime: "2026-04-10T00:00:00Z",
 	})

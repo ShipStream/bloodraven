@@ -29,7 +29,8 @@
 #                                         reads (see restore_script.py)
 #   BLOODRAVEN_VERIFY_SANITY_QUERY        scalar SELECT to run post-load
 #   BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS  sanity client-side timeout (s)
-#   BLOODRAVEN_VERIFY_SANITY_MIN_ROWS     fail if scalar < this value
+#   BLOODRAVEN_VERIFY_SANITY_MIN_ROWS     fail if an integer scalar < this
+#                                         value (spec.sanityCheck.minResult)
 #
 # All other env forwarded to restore.py (BLOODRAVEN_INPUT_URL,
 # BLOODRAVEN_LOAD_OPTIONS, BLOODRAVEN_MYSQL_CREDS_DIR, BLOODRAVEN_S3_*,
@@ -287,14 +288,16 @@ if [[ -n "$SANITY_Q" ]]; then
     SANITY_MAX="${BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS:-60}"
     SANITY_MIN="${BLOODRAVEN_VERIFY_SANITY_MIN_ROWS:-0}"
 
-    log "running sanity query (timeout=${SANITY_MAX}s, minRows=${SANITY_MIN})"
+    log "running sanity query (timeout=${SANITY_MAX}s, minResult=${SANITY_MIN})"
     # mysql -B -N renders tab-separated, no header, no pretty borders —
     # ideal for single-column scalar capture. -e escapes `"` in the query
     # via printf %q to avoid tripping on user-quoted literals. timeout
-    # wraps mysql so a runaway query can't hold the Job forever.
+    # wraps mysql so a runaway query can't hold the Job forever. Without
+    # --preserve-status, timeout exits 124 when the query ran out of time
+    # and mysql's own status otherwise, which is what tells the two apart.
     set +e
     START_NS=$(date +%s%N)
-    SANITY_OUT=$(timeout --preserve-status "${SANITY_MAX}" \
+    SANITY_OUT=$(timeout "${SANITY_MAX}" \
         mysql --socket="$SOCKET" --user=root -B -N -e "$SANITY_Q" 2>&1)
     SANITY_RC=$?
     END_NS=$(date +%s%N)
@@ -321,16 +324,19 @@ if [[ -n "$SANITY_Q" ]]; then
     fi
 
     SCALAR_ESC=$(escape_sentinel_token "$SCALAR")
+
+    # Only apply the minResult floor when the scalar parses as an integer.
+    # Non-integer scalars (strings, decimals) pass through unconditionally.
+    # The sentinel carries the floor failure so status.sanityCheck reports
+    # outcome Failed with the scalar it compared.
+    if [[ "$SANITY_MIN" -gt 0 ]] && [[ "$SCALAR" =~ ^[0-9]+$ ]] && [[ "$SCALAR" -lt "$SANITY_MIN" ]]; then
+        FLOOR_ERR="sanity scalar $SCALAR < minResult $SANITY_MIN"
+        printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s resultRow=%s error=%s\n' \
+            "$DURATION_MS" "$SCALAR_ESC" "$(escape_sentinel_token "$FLOOR_ERR")"
+        fail 1 "SanityCheckFailed: $FLOOR_ERR"
+    fi
     printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s resultRow=%s\n' \
         "$DURATION_MS" "$SCALAR_ESC"
-
-    # Only apply the minRows floor when the scalar parses as an integer.
-    # Non-integer scalars (strings, decimals) pass through unconditionally.
-    if [[ "$SANITY_MIN" -gt 0 ]] && [[ "$SCALAR" =~ ^[0-9]+$ ]]; then
-        if [[ "$SCALAR" -lt "$SANITY_MIN" ]]; then
-            fail 1 "SanityCheckFailed: sanity scalar $SCALAR < minRows $SANITY_MIN"
-        fi
-    fi
 fi
 
 # Publishing the verdict is the last action. restore.py builds it within

@@ -15,6 +15,8 @@ import (
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // AssertHealthyBaseline is the precheck shared by every scenario.
@@ -134,7 +136,7 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		if s.RecoveryState == "RecoveryBlocked" {
 			return fmt.Errorf("baseline unhealthy: site %s has RecoveryBlocked — run ./playground/reset-mysql.sh and retry", s.Name)
 		}
-		if s.State == "" || s.State == "unknown" || s.State == "unreachable" {
+		if s.State == "" || s.State == v1alpha1.SiteStateUnknown || s.State == v1alpha1.SiteStateUnreachable {
 			return fmt.Errorf("baseline unhealthy: site %s state=%q — wait for recovery or run ./playground/reset-mysql.sh", s.Name, s.State)
 		}
 	}
@@ -150,7 +152,7 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		if !isPromotableSite(mfg, s.Name) {
 			continue
 		}
-		if !s.Replicating {
+		if !s.Replication.Running() {
 			return fmt.Errorf("baseline unhealthy: site %s is not replicating from %s — run ./playground/reset-mysql.sh and retry",
 				s.Name, mfg.Status.ActiveSite)
 		}
@@ -206,10 +208,10 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 			if s.LinkStatus != "up" {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has linkStatus=%q (want up)", s.Name, s.LinkStatus)
 			}
-			if s.LastIOSecondsAgo < 0 {
-				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has lastIOSecondsAgo=%d (never synced)", s.Name, s.LastIOSecondsAgo)
+			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo < 0 {
+				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has lastIOSecondsAgo=%s (never synced)", s.Name, lastIOString(s.LastIOSecondsAgo))
 			}
-			if s.SyncInProgress {
+			if dragonflySyncing(s.SyncInProgress) {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has syncInProgress=true", s.Name)
 			}
 		case v1alpha1.DragonflyRoleUnreachable:
@@ -232,7 +234,7 @@ func bothReadOnly(mfg *v1alpha1.MysqlFailoverGroup) bool {
 		return false
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != "read-only" {
+		if s.State != v1alpha1.SiteStateReadOnly {
 			return false
 		}
 	}
@@ -374,4 +376,52 @@ func emptyAsNone(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// lastIOString renders status.dragonfly.sites[].lastIOSecondsAgo; "unset"
+// when Dragonfly did not report it.
+// pitrSpecProfile is spec.backup.pitr.profileName while PITR is enabled,
+// else "". Status no longer echoes either.
+func pitrSpecProfile(mfg *v1alpha1.MysqlFailoverGroup) string {
+	if mfg.Spec.Backup == nil || mfg.Spec.Backup.PITR == nil || !mfg.Spec.Backup.PITR.Enabled {
+		return ""
+	}
+	return mfg.Spec.Backup.PITR.ProfileName
+}
+
+// encryptionAllSitesSealed reports EncryptionAtRestReady=True with reason
+// AllSitesSealed: every site's keyring is sealed.
+func encryptionAllSitesSealed(mfg *v1alpha1.MysqlFailoverGroup) bool {
+	c := apimeta.FindStatusCondition(mfg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == v1alpha1.ReasonAllSitesSealed
+}
+
+// restorePointInTime is status.restore.provenance.pointInTime, nil when
+// the restore recorded none.
+func restorePointInTime(rs *v1alpha1.RestoreStatus) *v1alpha1.PointInTimeResult {
+	if rs == nil || rs.Provenance == nil {
+		return nil
+	}
+	return rs.Provenance.PointInTime
+}
+
+// dragonflySyncing reports a syncInProgress Dragonfly reported as true; an
+// unreported value is not a sync in progress.
+func dragonflySyncing(v *bool) bool {
+	return v != nil && *v
+}
+
+// optionalBoolString formats an optional observation.
+func optionalBoolString(v *bool) string {
+	if v == nil {
+		return "unset"
+	}
+	return fmt.Sprint(*v)
+}
+
+func lastIOString(v *int64) string {
+	if v == nil {
+		return "unset"
+	}
+	return fmt.Sprint(*v)
 }

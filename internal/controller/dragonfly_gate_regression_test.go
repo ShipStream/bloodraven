@@ -39,7 +39,6 @@ func (c *blockingSaveConn) Save(ctx context.Context) error {
 
 func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
-	fg.Annotations = nil
 	start := metav1.Now()
 	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
 		Phase: v1alpha1.DragonflyUpgradePhaseSavingSnapshot, ActiveSite: "dc1", TargetImage: "dragonfly:new", StartTime: &start,
@@ -58,16 +57,19 @@ func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T)
 	})
 	r := &MysqlFailoverGroupReconciler{Client: c, APIReader: c, Scheme: testScheme(), Runner: runner,
 		Recorder: record.NewFakeRecorder(64), dragonflyGateWait: 50 * time.Millisecond}
+	// The run checks its StatefulSets before each step, and one deleted
+	// before the snapshot was saved ends it.
+	seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
 	save := &blockingSaveConn{fakeDragonflyConn: &fakeDragonflyConn{}, entered: make(chan struct{}), release: make(chan struct{})}
 	r.dragonflyConnector = func(context.Context, string, string) (DragonflyConnection, error) { return save, nil }
 
 	upgradeDone := make(chan time.Duration, 1)
 	go func() {
-		d, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, key))
+		step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, key))
 		if err != nil {
 			t.Error(err)
 		}
-		upgradeDone <- d
+		upgradeDone <- step.hold
 	}()
 	<-save.entered // the reconcile now holds the gate inside SAVE
 
@@ -100,15 +102,16 @@ func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T)
 	}
 }
 
-// P2: an upgrade annotation arriving during a planned failover, with the
-// gate busy, neither deadlocks nor stalls the planned Dragonfly phase.
+// P2: spec drift that wants a snapshot upgrade during a planned failover,
+// with the gate busy, neither deadlocks nor stalls the planned Dragonfly
+// phase: the run waits for the planned failover without touching the gate.
 
-func TestDragonflySnapshotUpgrade_AnnotationDuringPlannedFailoverNoDeadlock(t *testing.T) {
+func TestDragonflySnapshotUpgrade_DriftDuringPlannedFailoverNoDeadlock(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
 	fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{Dir: "s3://x/y"}
-	fg.Annotations = map[string]string{DragonflySnapshotUpgradeAnnotation: "dragonfly:new"}
+	fg.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategySnapshotRestore
 	cb, nn := newDragonflyFakeClient(fg)
 	c := cb.Build()
 	runner := &TopologyManagerRunner{}
@@ -117,29 +120,35 @@ func TestDragonflySnapshotUpgrade_AnnotationDuringPlannedFailoverNoDeadlock(t *t
 	r.dragonflyConnector = func(context.Context, string, string) (DragonflyConnection, error) {
 		return &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}, nil
 	}
+	live := map[string]string{}
+	for _, site := range fg.Spec.Sites {
+		live[site.Name] = "dragonfly:old"
+	}
+	seedDragonflyStatefulSets(t, r, c, fg, live)
 	release, ok := runner.DragonflyGate(nn).tryAcquire() // an emergency on the wire
 	if !ok {
 		t.Fatal("gate busy")
 	}
-	d, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, nn))
-	if err != nil || d != dragonflyGateRetry {
-		t.Fatalf("upgrade with gate held = (%s, %v)", d, err)
+	step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, nn))
+	if err != nil || step.hold != 0 || step.wait != dragonflyUpgradeDeferRetry {
+		t.Fatalf("upgrade with gate held = (%+v, %v), want a wait that does not hold the reconcile", step, err)
 	}
 	release()
-	d, err = r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, nn))
-	if err != nil || d != 0 {
-		t.Fatalf("upgrade after release = (%s, %v), want reject and 0", d, err)
+	step, err = r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, nn))
+	if err != nil || step.hold != 0 || step.wait != dragonflyUpgradeDeferRetry {
+		t.Fatalf("upgrade after release = (%+v, %v), want a wait", step, err)
 	}
-	live := getFGByKey(t, c, nn)
-	if _, still := live.Annotations[DragonflySnapshotUpgradeAnnotation]; still {
-		t.Error("annotation not removed")
+	if up := dragonflyUpgradeStatus(getFGByKey(t, c, nn)); up != nil {
+		t.Errorf("upgrade started during planned failover: %+v", up)
 	}
-	if up := dragonflyUpgradeStatus(live); dragonflyUpgradeInFlight(up) {
-		t.Errorf("upgrade accepted during planned failover: %+v", up)
+	if rel, ok := runner.DragonflyGate(nn).tryAcquire(); !ok {
+		t.Fatal("the waiting upgrade left the gate held")
+	} else {
+		rel()
 	}
-	d, err = pfDragonflyTakeoverPass(t, r, context.Background(), nn)
+	d, err := pfDragonflyTakeoverPass(t, r, context.Background(), nn)
 	after := getFGByKey(t, c, nn).Status.PlannedFailover
-	t.Logf("planned phase after upgrade reject: requeue=%s err=%v phase=%s df=%+v", d, err, after.Phase, after.Dragonfly)
+	t.Logf("planned phase while the upgrade waits: requeue=%s err=%v phase=%s df=%+v", d, err, after.Phase, after.Dragonfly)
 	if after.Dragonfly != nil && after.Dragonfly.Message == plannedDragonflyGateWaitMessage {
 		t.Errorf("planned phase still blocked on the gate after the upgrade released it")
 	}
@@ -228,7 +237,7 @@ func TestDragonflyManager_PublishedMySQLFollowSurvivesInFlightTickPromotion(t *t
 	mgr.pollInterval = time.Hour
 	fg := get()
 	fg.Status.ActiveSite = "dc2" // MySQL on dc2; Dragonfly still on dc1 (diverged)
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +254,8 @@ func TestDragonflyManager_PublishedMySQLFollowSurvivesInFlightTickPromotion(t *t
 	// MySQL's dc2 primary dies; MySQL fails back to dc1 and publishes it.
 	live := get()
 	now := metav1.Now()
-	live.Status.ActiveSite, live.Status.LastFailoverTarget, live.Status.LastFailover = "dc1", "dc1", &now
+	live.Status.ActiveSite = "dc1"
+	live.Status.SetLastFailover(&now, "dc1", "")
 	if err := mgr.client.Status().Update(context.Background(), live); err != nil {
 		t.Fatal(err)
 	}

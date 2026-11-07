@@ -4,7 +4,7 @@
 **Objectives (unit-numbered):**
 4. Trace a write from the application through `mysql-playground-primary` to the pod that currently owns it   [obj 4]
 5. Say what the sidecar does that the operator cannot, and why the binlog archiver lives there   [obj 5]
-6. Tell `primary-candidate`, `dr-only` and `read-only` sites apart by what each is allowed to become   [obj 6]
+6. Tell `PrimaryCandidate`, `DisasterRecovery` and `ReadOnly` sites apart by what each is allowed to become   [obj 6]
 
 ## Topic generation prompt
 
@@ -14,7 +14,7 @@ The learner already has a live cluster. Teach the four moving parts in the order
 
 - READ: 900-1100 words. Trace one write. Cover Services, operator, sidecar, roles.
 - FLASHCARDS: Confusable pairs.
-- QUIZ: 5 questions on Services, fencing-by-label, the archiver, and `dr-only`.
+- QUIZ: 5 questions on Services, fencing-by-label, the archiver, and `DisasterRecovery`.
 
 ## Handoff
 

@@ -14,8 +14,10 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -59,8 +61,8 @@ type TopologyConfig struct {
 	PollInterval           int64 // nanoseconds
 	FailureThreshold       int
 	RecoveryThreshold      int
-	FailoverCooldown       int64 // nanoseconds, default 5m
-	ConnectionDrainTimeout int64 // nanoseconds, default 30s
+	FailoverCooldown       int64 // nanoseconds; used as given (CRConfigToTopologyConfig applies the API default)
+	ConnectionDrainTimeout int64 // nanoseconds; CRConfigToTopologyConfig applies the API default, 0 (internal configs only) means 30s
 	MaxLagSeconds          int64
 	ReadOnlyMaxLagSeconds  int64
 
@@ -103,11 +105,13 @@ type BootstrapPhase string
 
 const (
 	BootstrapPhaseNone       BootstrapPhase = ""
-	BootstrapPhaseCloning    BootstrapPhase = "Cloning"
-	BootstrapPhaseRestarting BootstrapPhase = "WaitingForRestart"
-	BootstrapPhaseSetupRepl  BootstrapPhase = "SetupReplication"
-	BootstrapPhaseDone       BootstrapPhase = "Done"
-	BootstrapPhaseFailed     BootstrapPhase = "Failed"
+	BootstrapPhaseCloning    BootstrapPhase = v1alpha1.ReasonCloning
+	BootstrapPhaseRestarting BootstrapPhase = v1alpha1.ReasonWaitingForRestart
+	BootstrapPhaseSetupRepl  BootstrapPhase = v1alpha1.ReasonSetupReplication
+	// Done and Failed are internal: the Bootstrapping condition reports
+	// both as False (NotBootstrapping, BootstrapFailed).
+	BootstrapPhaseDone   BootstrapPhase = "Done"
+	BootstrapPhaseFailed BootstrapPhase = "Failed"
 )
 
 const pendingPromotionActiveSiteTTL = 30 * time.Second
@@ -130,9 +134,15 @@ type SiteSnapshot struct {
 	Replication             *mysql.ReplicaStatus // nil if site is primary or unreachable
 	SourceHost              string
 	SourceConvergenceState  SourceConvergenceState
-	SourceConvergenceReason string
+	SourceConvergenceReason v1alpha1.SourceConvergenceReason
 	ServingHealthy          bool
-	ReplicationHealthy      bool
+	// ReplicationHealthy is the debounced replication health: both
+	// threads running with a source set for consecutive polls.
+	ReplicationHealthy bool
+	// ReplicaStatusRead is true when this snapshot's SHOW REPLICA STATUS
+	// on the site succeeded, so a nil Replication means no source is set
+	// rather than not probed.
+	ReplicaStatusRead bool
 	// PendingWritable mirrors state.SiteObservation.PendingWritable.
 	PendingWritable bool
 	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
@@ -141,34 +151,30 @@ type SiteSnapshot struct {
 	// Per-site old-primary recovery state ("", RecoveryInProgress, or
 	// RecoveryBlocked) with the divergence report when blocked. Multiple
 	// sites can carry recovery state at once.
-	RecoveryState     string
+	RecoveryState     v1alpha1.SiteRecoveryState
 	DivergentGtid     string
 	DivergentTxnCount int64
 	// DivergenceDetectedBy and DivergenceComparedTo describe a
 	// RecoveryBlocked report: which check recorded it and which primary the
 	// set was computed against.
-	DivergenceDetectedBy string
+	DivergenceDetectedBy v1alpha1.DivergenceDetector
 	DivergenceComparedTo string
 }
 
-// SourceConvergenceState is the topology manager's internal representation of
-// the persisted per-follower source state.
-type SourceConvergenceState string
+// SourceConvergenceState is the persisted per-follower source state.
+type SourceConvergenceState = v1alpha1.SourceConvergenceState
 
 const (
-	sourceConvergenceConverged SourceConvergenceState = "Converged"
-	sourceConvergencePending   SourceConvergenceState = "Pending"
-	sourceConvergenceBlocked   SourceConvergenceState = "Blocked"
+	sourceConvergenceConverged = v1alpha1.SourceConvergenceConverged
+	sourceConvergencePending   = v1alpha1.SourceConvergencePending
+	sourceConvergenceBlocked   = v1alpha1.SourceConvergenceBlocked
 
-	sourceReasonDirectSource   = "DirectSource"
-	sourceReasonSourceMismatch = "SourceMismatch"
-	sourceReasonProbeFailed    = "ProbeFailed"
-	sourceReasonMutationFailed = "MutationFailed"
-	sourceReasonGTIDDiverged   = "GTIDDiverged"
-	// sourceReasonRestoreHold: the site awaits its post-restore reclone
-	// (status.restoreReclones.pending) and its replication is held
-	// stopped, so convergence does not touch it.
-	sourceReasonRestoreHold = "RestorePeerHold"
+	sourceReasonDirectSource   = v1alpha1.SourceReasonDirectSource
+	sourceReasonSourceMismatch = v1alpha1.SourceReasonSourceMismatch
+	sourceReasonProbeFailed    = v1alpha1.SourceReasonProbeFailed
+	sourceReasonMutationFailed = v1alpha1.SourceReasonMutationFailed
+	sourceReasonGTIDDiverged   = v1alpha1.SourceReasonGTIDDiverged
+	sourceReasonRestoreHold    = v1alpha1.SourceReasonRestorePeerHold
 )
 
 // TopologySnapshot captures the topology state at a point in time.
@@ -184,15 +190,35 @@ type TopologySnapshot struct {
 	ActiveSite         string
 	LastFailover       time.Time
 	LastFailoverTarget string
-	Alert              string // non-empty if a cross-site alert fired this cycle
-	DegradedReason     string // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
-	UpdatePhase        string // non-empty if an ordered update is in progress
-	UpdateStalled      string // why the ordered update is stopped on a pod that is not Ready (PodNotReadyError), or ""
-	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
-	BootstrapError     string // non-empty if bootstrap failed
-	BootstrapSource    string // "fresh-deploy", "auto-clone", or "reclone"
+	Alert              string               // non-empty if a cross-site alert fired this cycle
+	DegradedReason     string               // one of "Healthy", "SiteUnhealthy", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
+	UpdatePhase        v1alpha1.UpdatePhase // non-empty if an ordered update is in progress
+	UpdateStalled      string               // why the ordered update is stopped on a pod that is not Ready (PodNotReadyError), or ""
+	BootstrapPhase     string               // non-empty if a fresh-deploy bootstrap is in progress or finished
+	BootstrapError     string               // non-empty if bootstrap failed
+	BootstrapSource    string               // "fresh-deploy", "auto-clone", or "reclone"
+	// BootstrapTarget is the site the failed bootstrap was cloning into, or
+	// "" when it failed before choosing one. Set only while BootstrapPhase
+	// is Failed.
+	BootstrapTarget string
+	// BootstrapFailureResolved is set once the failed bootstrap's target
+	// has been seen replicating (Healthy or Lagging) or writable since the
+	// failure. The failure then no longer stands (Degraded leaves
+	// BootstrapFailed for good, whatever the site does later), while
+	// Bootstrapping keeps reporting the last clone's outcome. A new
+	// bootstrap or a new failure resets it.
+	BootstrapFailureResolved bool
+	// AppliedGeneration is the .metadata.generation the manager has
+	// applied: the one its configuration was built from, or a newer one
+	// whose unchanged configuration the runner resynchronised. The status
+	// write stamps it on status.observedGeneration and the topology
+	// conditions.
+	AppliedGeneration int64
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
+	// MaxLagSeconds is spec.replication.maxLagSeconds: above it a healthy
+	// site reports replication Lagging.
+	MaxLagSeconds int64
 	// ObservedAt is the manager's clock when the snapshot was built; the
 	// status merge uses it to recognise a future-dated stored record.
 	ObservedAt time.Time
@@ -206,10 +232,10 @@ type TopologySnapshot struct {
 	// Sites[].RecoveryState/DivergentGtid/DivergentTxnCount — consult those
 	// when more than one site can be in recovery at once.
 	RecoverySite         string
-	RecoveryState        string // "", "RecoveryInProgress", or "RecoveryBlocked"
+	RecoveryState        v1alpha1.SiteRecoveryState // absent, RecoveryInProgress, or RecoveryBlocked
 	DivergentGtid        string
 	DivergentTxnCount    int64
-	DivergenceDetectedBy string
+	DivergenceDetectedBy v1alpha1.DivergenceDetector
 	DivergenceComparedTo string
 
 	// DivergentPromotion is set while a promotion of a divergent site has
@@ -265,11 +291,18 @@ type siteTracker struct {
 	// threads running and a configured source host, observed for replicatingStreak
 	// consecutive poll ticks. Used by checkUpdate to refuse ordered updates against
 	// a stale standby whose super_read_only=ON but replication is not actually running.
-	replicating             bool
-	replicatingStreak       int
+	replicating       bool
+	replicatingStreak int
+	// replicaStatusRead is true when this poll's SHOW REPLICA STATUS on
+	// the site succeeded: a nil result then means no source is set
+	// (replication Broken), not "not probed" (Unknown).
+	replicaStatusRead bool
+	// replicationState is the replication state last published for the
+	// site (status.sites[].replication, /ws/status).
+	replicationState        v1alpha1.SiteReplicationState
 	sourceHost              string
 	sourceConvergenceState  SourceConvergenceState
-	sourceConvergenceReason string
+	sourceConvergenceReason v1alpha1.SourceConvergenceReason
 	servingHealthy          bool
 	// probeFailed is true when this poll's liveness probe of the site
 	// failed. Later steps of the same poll skip the site instead of
@@ -315,7 +348,7 @@ func (tm *TopologyManager) classificationOverdueLocked(site *siteTracker) bool {
 
 // siteMetricLabels returns the identity labels for site-scoped gauges.
 func (tm *TopologyManager) siteMetricLabels(site *siteTracker) (namespace, group, name, role string) {
-	return tm.cfg.Namespace, tm.cfg.Name, site.name, string(site.role)
+	return tm.cfg.Namespace, tm.cfg.Name, site.name, labels.Role(APISiteRole(site.role))
 }
 
 // HaltSiteMetrics prevents further site-gauge emission from this manager.
@@ -471,6 +504,20 @@ type TopologyManager struct {
 	// in the topology moves when only status.restore does. Poll clears it
 	// when it fires the callback. Protected by mu.
 	statusRefreshRequested bool
+
+	// appliedGeneration is the CR generation the manager's configuration
+	// is current for (AppliedGeneration). Protected by mu.
+	appliedGeneration int64
+
+	// bootstrapFailedTarget is the recipient of the bootstrap that last
+	// failed, or "" when it failed before choosing one. Read only while
+	// bootstrapPhase is Failed. Protected by mu.
+	bootstrapFailedTarget string
+	// bootstrapFailureResolved latches that bootstrapFailedTarget has been
+	// seen replicating or writable since the failure
+	// (TopologySnapshot.BootstrapFailureResolved). Cleared whenever
+	// bootstrapPhase leaves Failed or fails again. Protected by mu.
+	bootstrapFailureResolved bool
 
 	// Recovery state for old primaries after failover, per site. More than
 	// one site can need recovery at once (e.g. two former primaries after
@@ -809,20 +856,21 @@ type TopologyManager struct {
 	metricsStopped atomic.Bool
 }
 
-// SiteStatusEntry is a single site's status in the StatusResponse.
+// SiteStatusEntry is a single site's status in the StatusResponse. Its
+// enum fields carry the CR values (status.sites[] and spec.sites[].role).
 type SiteStatusEntry struct {
-	Name                      string `json:"name"`
-	Role                      string `json:"role,omitempty"`
-	State                     string `json:"state"`
-	SourceHost                string `json:"sourceHost,omitempty"`
-	SourceConvergenceState    string `json:"sourceConvergenceState,omitempty"`
-	SourceConvergenceReason   string `json:"sourceConvergenceReason,omitempty"`
-	ServingHealthy            bool   `json:"servingHealthy,omitempty"`
-	RecoveryState             string `json:"recoveryState,omitempty"`
-	DivergentGtid             string `json:"divergentGtid,omitempty"`
-	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
-	DivergenceDetectedBy      string `json:"divergenceDetectedBy,omitempty"`
-	DivergenceComparedTo      string `json:"divergenceComparedTo,omitempty"`
+	Name                      string                           `json:"name"`
+	Role                      v1alpha1.SiteRole                `json:"role,omitempty"`
+	State                     v1alpha1.SiteState               `json:"state"`
+	SourceHost                string                           `json:"sourceHost,omitempty"`
+	SourceConvergenceState    v1alpha1.SourceConvergenceState  `json:"sourceConvergenceState,omitempty"`
+	SourceConvergenceReason   v1alpha1.SourceConvergenceReason `json:"sourceConvergenceReason,omitempty"`
+	ServingHealthy            bool                             `json:"servingHealthy,omitempty"`
+	RecoveryState             v1alpha1.SiteRecoveryState       `json:"recoveryState,omitempty"`
+	DivergentGtid             string                           `json:"divergentGtid,omitempty"`
+	DivergentTransactionCount *int64                           `json:"divergentTransactionCount,omitempty"`
+	DivergenceDetectedBy      v1alpha1.DivergenceDetector      `json:"divergenceDetectedBy,omitempty"`
+	DivergenceComparedTo      string                           `json:"divergenceComparedTo,omitempty"`
 }
 
 // StatusResponse is returned by the /status endpoint.
@@ -834,8 +882,10 @@ type StatusResponse struct {
 }
 
 const (
-	recoveryStateInProgress       = "RecoveryInProgress"
-	recoveryStateBlocked          = "RecoveryBlocked"
+	// defaultFailoverCooldown and defaultConnectionDrainTimeout are the API
+	// defaults of spec.failoverCooldown and spec.connectionDrainTimeout,
+	// applied to an unset field only; admission rejects a zero.
+	defaultFailoverCooldown       = 5 * time.Minute
 	defaultConnectionDrainTimeout = 30 * time.Second
 	// recoveryRetryDelay is the stabilization window after RecoverOldPrimary.
 	// During this window the operator waits for replication to report healthy
@@ -849,16 +899,16 @@ const (
 
 // siteRecovery tracks one site's old-primary recovery lifecycle.
 type siteRecovery struct {
-	state          string // recoveryStateInProgress or recoveryStateBlocked
+	state          v1alpha1.SiteRecoveryState
 	retryAfter     time.Time
 	divergentGtid  string
 	divergentCount int64
 	// detectedBy names the check that recorded the divergence
 	// (divergenceDetectedByRecovery or divergenceDetectedByAudit) and
 	// comparedTo the primary the set was computed against. Both are set
-	// only while state is recoveryStateBlocked; comparedTo may be empty for
+	// only while state is v1alpha1.RecoveryStateBlocked; comparedTo may be empty for
 	// a block restored from a status written before it was recorded.
-	detectedBy     string
+	detectedBy     v1alpha1.DivergenceDetector
 	comparedTo     string
 	drainStartedAt time.Time
 	drainComplete  bool
@@ -873,9 +923,6 @@ func NewTopologyManager(cfg TopologyConfig, siteCheckers []mysql.Checker, failov
 // NewTopologyManagerWithClock creates a TopologyManager with an injectable clock for testing.
 func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
-	if cooldown == 0 {
-		cooldown = 5 * time.Minute
-	}
 	if len(siteCheckers) != len(cfg.Sites) {
 		panic(fmt.Sprintf("topology manager: got %d MySQL checkers for %d configured sites", len(siteCheckers), len(cfg.Sites)))
 	}
@@ -1095,11 +1142,11 @@ func (tm *TopologyManager) SetRecoveryBlocked(site, divergentGtid string, diverg
 // containment check against a confirmed primary clears it, and a site that
 // is itself the primary when the block is restored is recorded as a
 // divergent promotion rather than compared with itself.
-func (tm *TopologyManager) SetRecoveryBlockedFrom(site, divergentGtid string, divergentCount int64, detectedBy, comparedTo string) {
+func (tm *TopologyManager) SetRecoveryBlockedFrom(site, divergentGtid string, divergentCount int64, detectedBy v1alpha1.DivergenceDetector, comparedTo string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.recovery[site] = &siteRecovery{
-		state:          recoveryStateBlocked,
+		state:          v1alpha1.RecoveryStateBlocked,
 		divergentGtid:  divergentGtid,
 		divergentCount: divergentCount,
 		detectedBy:     detectedBy,
@@ -1115,12 +1162,12 @@ func (tm *TopologyManager) SetRecoveryBlockedFrom(site, divergentGtid string, di
 func (tm *TopologyManager) SetRecoveryInProgress(site string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	tm.recovery[site] = &siteRecovery{state: recoveryStateInProgress}
+	tm.recovery[site] = &siteRecovery{state: v1alpha1.RecoveryStateInProgress}
 }
 
 // SetSourceConvergence restores persisted source state across an operator
 // restart. Live polling remains authoritative and will clear or retry it.
-func (tm *TopologyManager) SetSourceConvergence(site, host string, convergence SourceConvergenceState, reason string) {
+func (tm *TopologyManager) SetSourceConvergence(site, host string, convergence SourceConvergenceState, reason v1alpha1.SourceConvergenceReason) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if s := tm.getSite(site); s != nil {
@@ -1173,16 +1220,16 @@ func (tm *TopologyManager) Status() StatusResponse {
 	for i := range tm.sites {
 		sites[i] = SiteStatusEntry{
 			Name:                    tm.sites[i].name,
-			Role:                    string(tm.sites[i].role),
-			State:                   tm.sites[i].state.String(),
+			Role:                    APISiteRole(tm.sites[i].role),
+			State:                   apiSiteState(tm.sites[i].state),
 			SourceHost:              tm.sites[i].sourceHost,
-			SourceConvergenceState:  string(tm.sites[i].sourceConvergenceState),
+			SourceConvergenceState:  tm.sites[i].sourceConvergenceState,
 			SourceConvergenceReason: tm.sites[i].sourceConvergenceReason,
 			ServingHealthy:          tm.sites[i].servingHealthy,
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			sites[i].RecoveryState = rec.state
-			if rec.state == recoveryStateBlocked {
+			if rec.state == v1alpha1.RecoveryStateBlocked {
 				sites[i].DivergentGtid = rec.divergentGtid
 				if rec.divergentCount > 0 {
 					c := rec.divergentCount
@@ -1481,8 +1528,8 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	for i := range tm.sites {
 		if newStates[i] != prevStates[i] {
 			anyTransition = true
-			tm.logger.Info("state transition", "site", tm.sites[i].name, "from", prevStates[i], "to", newStates[i])
-			metrics.StateTransitions.WithLabelValues(tm.sites[i].name, prevStates[i].String(), newStates[i].String()).Inc()
+			tm.logger.Info("state transition", "site", tm.sites[i].name, "from", string(apiSiteState(prevStates[i])), "to", string(apiSiteState(newStates[i])))
+			metrics.StateTransitions.WithLabelValues(tm.sites[i].name, labels.SiteState(apiSiteState(prevStates[i])), labels.SiteState(apiSiteState(newStates[i]))).Inc()
 			tm.applyPerSiteAction(ctx, &tm.sites[i], state.EvalPerSiteTransition(prevStates[i], newStates[i]))
 		}
 	}
@@ -1559,8 +1606,8 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		for i := range tm.sites {
 			ns, group, name, role := tm.siteMetricLabels(&tm.sites[i])
 			metrics.DeleteSiteState(ns, group, name)
-			currentState := tm.sites[i].state.String()
-			for _, s := range metrics.AllStates {
+			currentState := labels.SiteState(apiSiteState(tm.sites[i].state))
+			for _, s := range labels.SiteStates {
 				val := 0.0
 				if s == currentState {
 					val = 1.0
@@ -1577,6 +1624,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	sourceProbeChanged := false
 	const replicatingStreakThreshold = 2
 	for i := range tm.sites {
+		tm.mu.Lock()
+		tm.sites[i].replicaStatusRead = false
+		tm.mu.Unlock()
 		if tm.sites[i].state != state.StateReadOnly {
 			continue
 		}
@@ -1607,8 +1657,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 			continue
 		}
 		siteRepl[i] = rs
-		healthy := rs != nil && rs.IORunning && rs.SQLRunning && rs.SourceHost != ""
+		healthy := replicaThreadsHealthy(rs)
 		tm.mu.Lock()
+		tm.sites[i].replicaStatusRead = true
 		if rs != nil && strings.TrimSpace(rs.ExecutedGtidSet) != "" {
 			tm.groupHasData = true
 		}
@@ -1631,6 +1682,30 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	// Converge every configured follower directly onto the unique confirmed
 	// active primary before old-primary recovery considers source-less sites.
 	handledConvergence, convergenceChanged := tm.checkSourceConvergence(ctx, siteRepl)
+	// The published replication state also distinguishes Broken from
+	// Unknown and Lagging from Healthy; a change in either is a status
+	// change even when the debounced health did not flip. It is taken
+	// after source convergence, which re-reads a follower it repaired,
+	// so the status write reports the same value.
+	tm.mu.Lock()
+	for i := range tm.sites {
+		st := siteReplicationState(tm.sites[i].state, siteRepl[i], tm.sites[i].replicaStatusRead,
+			tm.sites[i].replicating, tm.cfg.MaxLagSeconds)
+		prev := tm.sites[i].replicationState
+		if prev == "" {
+			// Nothing published yet reads as Unknown: a site still
+			// unprobed is no change.
+			prev = v1alpha1.SiteReplicationUnknown
+		}
+		tm.sites[i].replicationState = st
+		if st != prev {
+			replicationChanged = true
+		}
+	}
+	if tm.latchBootstrapFailureResolutionLocked() {
+		replicationChanged = true
+	}
+	tm.mu.Unlock()
 	for site := range replicaProbeFailed {
 		handledConvergence[site] = struct{}{}
 	}
@@ -1754,11 +1829,14 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				// superseded by an asynchronous operation-completion callback.
 				snapshot.UpdatePhase = ""
 				if tm.updater != nil {
-					snapshot.UpdatePhase = string(tm.updater.Phase())
+					snapshot.UpdatePhase = tm.updater.Phase()
 				}
 				snapshot.UpdateStalled = tm.updateStall
 				snapshot.BootstrapPhase = string(tm.bootstrapPhase)
 				snapshot.BootstrapSource = tm.bootstrapSource
+				snapshot.BootstrapTarget = tm.bootstrapTargetLocked()
+				snapshot.BootstrapFailureResolved = tm.bootstrapFailureResolvedLocked()
+				snapshot.AppliedGeneration = tm.appliedGeneration
 				// A note acknowledged since the snapshot was built must not
 				// be written again: an administrator may have removed it.
 				snapshot.DivergentPromotion = nil
@@ -2032,7 +2110,7 @@ func (tm *TopologyManager) dnsHostname() string {
 	return ""
 }
 
-// SetDNSRecordSpec pushes a live spec.dns.hostname / spec.dns.ttl into the
+// SetDNSRecordSpec pushes a live spec.dns.hostname / spec.dns.ttlSeconds into the
 // updater. No-op when the updater does not implement DNSSpecController.
 func (tm *TopologyManager) SetDNSRecordSpec(hostname string, ttl int64, generation int64) {
 	if spec, ok := tm.dns.(platform.DNSSpecController); ok {
@@ -2125,12 +2203,13 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			SourceConvergenceReason: tm.sites[i].sourceConvergenceReason,
 			ServingHealthy:          tm.sites[i].servingHealthy,
 			ReplicationHealthy:      tm.sites[i].replicating,
+			ReplicaStatusRead:       tm.sites[i].replicaStatusRead,
 			PendingWritable:         tm.sites[i].pendingWritable(),
 			ClassificationOverdue:   tm.classificationOverdueLocked(&tm.sites[i]),
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			sites[i].RecoveryState = rec.state
-			if rec.state == recoveryStateBlocked {
+			if rec.state == v1alpha1.RecoveryStateBlocked {
 				sites[i].DivergentGtid = rec.divergentGtid
 				sites[i].DivergentTxnCount = rec.divergentCount
 				sites[i].DivergenceDetectedBy = rec.detectedBy
@@ -2139,9 +2218,9 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		}
 	}
 
-	var updatePhase string
+	var updatePhase v1alpha1.UpdatePhase
 	if tm.updater != nil {
-		updatePhase = string(tm.updater.Phase())
+		updatePhase = tm.updater.Phase()
 	}
 
 	snap := TopologySnapshot{
@@ -2159,12 +2238,16 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		UpdateStalled:           tm.updateStall,
 		BootstrapPhase:          string(tm.bootstrapPhase),
 		BootstrapSource:         tm.bootstrapSource,
+		BootstrapTarget:         tm.bootstrapTargetLocked(),
+		AppliedGeneration:       tm.appliedGeneration,
 		PromotionGtidExecuted:   tm.promotionGtidExecuted,
+		MaxLagSeconds:           tm.cfg.MaxLagSeconds,
 		KeyringPromotionSkipped: append([]string(nil), tm.keyringPromotionSkipped...),
 		KeyringPromotionRefused: append([]string(nil), tm.keyringPromotionRefused...),
 
 		RestoreReclonePromotionRefused: append([]string(nil), tm.restoreReclonePromotionRefused...),
 		BootstrapRefusedRestoreHold:    tm.bootstrapRefusedSite,
+		BootstrapFailureResolved:       tm.bootstrapFailureResolvedLocked(),
 	}
 	if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
 		snap.DeploymentEpoch = 0
@@ -2178,9 +2261,9 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	// that also gates the deployment API, so the condition names it.
 	rank := func(s SiteSnapshot) int {
 		switch {
-		case s.RecoveryState == recoveryStateBlocked && s.DivergenceDetectedBy != divergenceDetectedByAudit:
+		case s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy != divergenceDetectedByAudit:
 			return 3
-		case s.RecoveryState == recoveryStateBlocked:
+		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
 			return 2
 		case s.RecoveryState != "":
 			return 1
@@ -2215,7 +2298,13 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 func (tm *TopologyManager) broadcastTopology(siteRepl []*mysql.ReplicaStatus, alertMsg string) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
+	tm.hub.Broadcast(tm.topologyMessageLocked(siteRepl, alertMsg))
+}
 
+// topologyMessageLocked builds the /ws/status payload. Its role, state,
+// replication and failover record carry the CR values and shapes, as
+// status.sites[] and status.lastFailover do. Caller must hold tm.mu.
+func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus, alertMsg string) platform.TopologyMessage {
 	sites := make([]platform.TopologySite, 0, len(tm.sites))
 	for i := range tm.sites {
 		var repl *mysql.ReplicaStatus
@@ -2223,21 +2312,24 @@ func (tm *TopologyManager) broadcastTopology(siteRepl []*mysql.ReplicaStatus, al
 			repl = siteRepl[i]
 		}
 		s := platform.TopologySite{
-			Name:  tm.sites[i].name,
-			Role:  string(tm.sites[i].role),
-			State: tm.sites[i].state.String(),
+			Name:        tm.sites[i].name,
+			Role:        string(APISiteRole(tm.sites[i].role)),
+			State:       string(apiSiteState(tm.sites[i].state)),
+			Replication: string(v1alpha1.SiteReplicationUnknown),
+		}
+		if rs := tm.sites[i].replicationState; rs != "" {
+			s.Replication = string(rs)
 		}
 		if !tm.sites[i].lastSeen.IsZero() {
-			s.LastSeen = tm.sites[i].lastSeen.Format(time.RFC3339)
+			s.LastSeenTime = tm.sites[i].lastSeen.Format(time.RFC3339)
 		}
 		if repl != nil {
-			s.Replicating = repl.IORunning && repl.SQLRunning
 			s.SecondsBehindSource = repl.SecondsBehindSource
 			s.GtidExecuted = repl.ExecutedGtidSet
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
-			s.RecoveryState = rec.state
-			if rec.state == recoveryStateBlocked {
+			s.RecoveryState = string(rec.state)
+			if rec.state == v1alpha1.RecoveryStateBlocked {
 				s.DivergentGtid = rec.divergentGtid
 				if rec.divergentCount > 0 {
 					c := rec.divergentCount
@@ -2249,19 +2341,49 @@ func (tm *TopologyManager) broadcastTopology(siteRepl []*mysql.ReplicaStatus, al
 	}
 
 	msg := platform.TopologyMessage{
-		Namespace:             tm.cfg.Namespace,
-		Group:                 tm.cfg.Name,
-		ActiveSite:            tm.activeSiteLocked(),
-		Sites:                 sites,
-		LastFailoverTarget:    tm.lastFailoverTarget,
-		Alert:                 alertMsg,
-		PollTime:              tm.lastPollTime.Format(time.RFC3339),
-		PromotionGtidExecuted: tm.promotionGtidExecuted,
+		Namespace:  tm.cfg.Namespace,
+		Group:      tm.cfg.Name,
+		ActiveSite: tm.activeSiteLocked(),
+		Sites:      sites,
+		Alert:      alertMsg,
+		PollTime:   tm.lastPollTime.Format(time.RFC3339),
 	}
-	if !tm.lastFailover.IsZero() {
-		msg.LastFailover = tm.lastFailover.Format(time.RFC3339)
+	if !tm.lastFailover.IsZero() || tm.lastFailoverTarget != "" || tm.promotionGtidExecuted != "" {
+		rec := &platform.FailoverRecord{Target: tm.lastFailoverTarget, PromotionGtidExecuted: tm.promotionGtidExecuted}
+		if !tm.lastFailover.IsZero() {
+			rec.Time = tm.lastFailover.Format(time.RFC3339)
+		}
+		msg.LastFailover = rec
 	}
-	tm.hub.Broadcast(msg)
+	return msg
+}
+
+// replicaThreadsHealthy reports whether a replica status read shows both
+// replication threads running with a source set.
+func replicaThreadsHealthy(rs *mysql.ReplicaStatus) bool {
+	return rs != nil && rs.IORunning && rs.SQLRunning && rs.SourceHost != ""
+}
+
+// siteReplicationState maps one site's observation to
+// status.sites[].replication. repl is this poll's replica status, read
+// whether it was read successfully (a nil repl then means no source is
+// set), healthyStreak the debounced health (threads healthy for
+// consecutive polls). Healthy and Lagging are exactly the observations the
+// boolean replicating reported true for.
+func siteReplicationState(st state.SiteState, repl *mysql.ReplicaStatus, read, healthyStreak bool, maxLagSeconds int64) v1alpha1.SiteReplicationState {
+	switch {
+	case st == state.StateWritable:
+		return v1alpha1.SiteReplicationNotApplicable
+	case repl != nil && healthyStreak:
+		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds {
+			return v1alpha1.SiteReplicationLagging
+		}
+		return v1alpha1.SiteReplicationHealthy
+	case read && !replicaThreadsHealthy(repl):
+		return v1alpha1.SiteReplicationBroken
+	default:
+		return v1alpha1.SiteReplicationUnknown
+	}
 }
 
 // computeState applies debounce logic and returns the new state for a site.
@@ -2306,7 +2428,7 @@ func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTra
 	}
 	if action.Taint != nil {
 		selector := tm.taintSelector(site)
-		if err := tm.tainter.SetTaint(ctx, selector, tm.cfg.Name, *action.Taint); err != nil {
+		if err := tm.tainter.SetTaint(ctx, selector, tm.cfg.Namespace, tm.cfg.Name, *action.Taint); err != nil {
 			tm.logger.Error("taint operation failed", "site", site.name, "apply", *action.Taint, "error", err)
 		} else {
 			op := "remove"
@@ -2330,9 +2452,9 @@ func (tm *TopologyManager) fenceWritableNonPromotableSites(ctx context.Context) 
 			return site.mysql.SetSuperReadOnly(probeCtx, true)
 		})
 		if err != nil {
-			tm.logger.Error("failed to fence writable non-promotable site", "site", site.name, "role", site.role, "error", err)
+			tm.logger.Error("failed to fence writable non-promotable site", "site", site.name, "role", string(APISiteRole(site.role)), "error", err)
 		} else {
-			tm.logger.Warn("fenced writable non-promotable site", "site", site.name, "role", site.role)
+			tm.logger.Warn("fenced writable non-promotable site", "site", site.name, "role", string(APISiteRole(site.role)))
 		}
 	}
 	return attempted
@@ -2554,7 +2676,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 		if !candidate.isPromotable() {
 			tm.logger.Error("promotion target is not a primary-candidate — refusing",
-				"site", candidate.name, "role", candidate.role)
+				"site", candidate.name, "role", string(APISiteRole(candidate.role)))
 			return
 		}
 		tm.mu.RLock()
@@ -2945,7 +3067,7 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 	divergent := make([]*siteRecovery, len(infos))
 	tm.mu.RLock()
 	for i := range infos {
-		if rec := tm.recovery[infos[i].name]; rec != nil && rec.state == recoveryStateBlocked {
+		if rec := tm.recovery[infos[i].name]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
 			copied := *rec
 			divergent[i] = &copied
 		}
@@ -3033,6 +3155,30 @@ func (tm *TopologyManager) SetAutoBootstrapSuppressed(v bool) {
 		tm.initRestoreSeed = ""
 	}
 	tm.mu.Unlock()
+}
+
+// SetAppliedGeneration records that the manager's configuration is current
+// for the CR's metadata.generation gen: the generation it was built from,
+// or a newer one whose configuration equals the running one and has been
+// resynchronised (its setters applied). A newer generation asks the next
+// Poll for a status write, so status.observedGeneration and the conditions
+// reach it although no topology state changed. An older one is ignored.
+func (tm *TopologyManager) SetAppliedGeneration(gen int64) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if gen <= tm.appliedGeneration {
+		return
+	}
+	tm.appliedGeneration = gen
+	tm.statusRefreshRequested = true
+}
+
+// AppliedGeneration returns the generation SetAppliedGeneration last
+// recorded.
+func (tm *TopologyManager) AppliedGeneration() int64 {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.appliedGeneration
 }
 
 // RequestStatusRefresh makes the next Poll write a status snapshot built
@@ -3466,7 +3612,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			Name: site.name, Host: site.host, Checker: site.mysql, Promotable: site.isPromotable(),
 			Drifted: drifted[site.name], ExpectedSource: activeSite.host,
 			RotationBlocked: block.rotation, ReclonePending: block.reclonePending,
-			DivergenceBlocked:     block.divergence.state == recoveryStateBlocked,
+			DivergenceBlocked:     block.divergence.state == v1alpha1.RecoveryStateBlocked,
 			DivergentTransactions: block.divergence.divergentCount, DivergentGtid: block.divergence.divergentGtid,
 			PodReady:       tm.podReadyProbe(site.name),
 			HandoffBlocked: tm.liveHandoffRefusal(site.name),
@@ -3787,15 +3933,25 @@ func (tm *TopologyManager) emitStatusSnapshot() {
 	// Collect replication status for read-only sites.
 	ctx := context.Background()
 	siteRepl := make([]*mysql.ReplicaStatus, len(tm.sites))
+	read := make([]bool, len(tm.sites))
 	for i := range tm.sites {
 		if tm.sites[i].state == state.StateReadOnly {
 			rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
 			if err == nil {
-				siteRepl[i] = rs
+				siteRepl[i], read[i] = rs, true
 			}
 		}
 	}
-	tm.StatusCallback(tm.buildSnapshot(siteRepl))
+	snap := tm.buildSnapshot(siteRepl)
+	// The snapshot carries this read, not the last poll's: a site whose
+	// read failed here has no replica status in it, which is Unknown, not
+	// Broken (a read that found no replication).
+	for i := range snap.Sites {
+		if i < len(read) {
+			snap.Sites[i].ReplicaStatusRead = read[i]
+		}
+	}
+	tm.StatusCallback(snap)
 }
 
 // SpecDriftSites returns the sites whose ordered update is still
@@ -4015,7 +4171,7 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 			// on the same poll that correctly reported the block.
 			tm.mu.RLock()
 			rec := tm.recovery[site.name]
-			inRecovery := rec != nil && (rec.state == recoveryStateBlocked || rec.state == recoveryStateInProgress)
+			inRecovery := rec != nil && (rec.state == v1alpha1.RecoveryStateBlocked || rec.state == v1alpha1.RecoveryStateInProgress)
 			probeFailed := site.probeFailed
 			tm.mu.RUnlock()
 			if inRecovery || probeFailed {
@@ -4193,7 +4349,9 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 		err := fmt.Errorf("no recipient site available for bootstrap")
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapFailureResolved = false
 		tm.bootstrapErr = err
+		tm.bootstrapFailedTarget = ""
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
 		return
@@ -4212,7 +4370,9 @@ func (tm *TopologyManager) seedFreshDeploy(ctx context.Context) string {
 		err := fmt.Errorf("no primary-candidate site available to seed")
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapFailureResolved = false
 		tm.bootstrapErr = err
+		tm.bootstrapFailedTarget = ""
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
 		return ""
@@ -4316,7 +4476,9 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		err := fmt.Errorf("bootstrap: donor host not configured for site %s", donor)
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapFailureResolved = false
 		tm.bootstrapErr = err
+		tm.bootstrapFailedTarget = recipient
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
 		return false
@@ -4421,7 +4583,9 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		}
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
+			tm.bootstrapFailureResolved = false
 			tm.bootstrapErr = err
+			tm.bootstrapFailedTarget = recipient
 			tm.logger.Error("bootstrap failed", "source", source, "error", err)
 		} else {
 			tm.bootstrapPhase = BootstrapPhaseDone
@@ -5033,7 +5197,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		// refuses.
 		tm.mu.RLock()
 		var recorded string
-		if rec := tm.recovery[s.name]; rec != nil && rec.state == recoveryStateBlocked {
+		if rec := tm.recovery[s.name]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
 			recorded = rec.divergentGtid
 		}
 		tm.mu.RUnlock()
@@ -5193,7 +5357,7 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 		name := tm.sites[i].name
 		tm.mu.RLock()
 		rec := tm.recovery[name]
-		var recState string
+		var recState v1alpha1.SiteRecoveryState
 		if rec != nil {
 			recState = rec.state
 		}
@@ -5203,7 +5367,7 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 			continue // probe-backoff marker, not a recovery state
 		}
 		if tm.sites[i].state == state.StateWritable {
-			if recState == recoveryStateBlocked {
+			if recState == v1alpha1.RecoveryStateBlocked {
 				// A remembered target is not authority by itself. Preserve the
 				// divergence report through split-brain and only clear it when
 				// this site is the unique, directly confirmed writable target.
@@ -5239,7 +5403,7 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 		if tm.sites[i].state != state.StateReadOnly {
 			continue
 		}
-		if recState == recoveryStateBlocked {
+		if recState == v1alpha1.RecoveryStateBlocked {
 			// Healthy threads do not prove the site holds nothing the
 			// primary lacks: #202's demoted site replicated normally with
 			// 221 extra transactions. Only a fresh containment proof clears
@@ -5290,6 +5454,8 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 func (tm *TopologyManager) advanceSiteAppConnectionDrain(ctx context.Context, site *siteTracker) bool {
 	timeout := time.Duration(tm.cfg.ConnectionDrainTimeout)
 	if timeout <= 0 {
+		// Only an internally built config leaves it unset; the API path
+		// (CRConfigToTopologyConfig) always supplies the bounded value.
 		timeout = defaultConnectionDrainTimeout
 	}
 
@@ -5529,7 +5695,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 			rec = &siteRecovery{}
 			tm.recovery[oldPrimary.name] = rec
 		}
-		rec.state = recoveryStateInProgress
+		rec.state = v1alpha1.RecoveryStateInProgress
 		rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
 		rec.divergentGtid = ""
 		rec.divergentCount = 0
@@ -5545,12 +5711,13 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	count := divergent.TransactionCount()
 
 	tm.mu.RLock()
-	var prevState, prevDivergentGtid string
+	var prevState v1alpha1.SiteRecoveryState
+	var prevDivergentGtid string
 	if prev := tm.recovery[oldPrimary.name]; prev != nil {
 		prevState, prevDivergentGtid = prev.state, prev.divergentGtid
 	}
 	tm.mu.RUnlock()
-	sameReport := prevState == recoveryStateBlocked && prevDivergentGtid == divergent.String()
+	sameReport := prevState == v1alpha1.RecoveryStateBlocked && prevDivergentGtid == divergent.String()
 	// The periodic re-verification confirms an unchanged report every
 	// recoveryRetryDelay; re-emitting the WARN each time would fill the log
 	// with duplicates of a fact already surfaced. Warn on new or changed
@@ -5575,7 +5742,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		rec = &siteRecovery{}
 		tm.recovery[oldPrimary.name] = rec
 	}
-	rec.state = recoveryStateBlocked
+	rec.state = v1alpha1.RecoveryStateBlocked
 	rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
 	rec.divergentGtid = divergent.String()
 	rec.divergentCount = count
@@ -5769,6 +5936,9 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 // It uses a dedicated BootstrapStatusCallback so that only the Bootstrapping
 // condition is updated on the CR.
 func (tm *TopologyManager) emitBootstrapStatus() {
+	// Degraded=BootstrapFailed is recomputed from the phase on a full
+	// status write, so every phase change asks the next Poll for one.
+	tm.RequestStatusRefresh()
 	if tm.BootstrapStatusCallback == nil {
 		return
 	}
@@ -5781,4 +5951,38 @@ func (tm *TopologyManager) emitBootstrapStatus() {
 	source := tm.bootstrapSource
 	tm.mu.RUnlock()
 	tm.BootstrapStatusCallback(phase, errMsg, source)
+}
+
+// bootstrapTargetLocked is TopologySnapshot.BootstrapTarget. Caller holds
+// mu.
+func (tm *TopologyManager) bootstrapTargetLocked() string {
+	if tm.bootstrapPhase != BootstrapPhaseFailed {
+		return ""
+	}
+	return tm.bootstrapFailedTarget
+}
+
+// bootstrapFailureResolvedLocked is TopologySnapshot.BootstrapFailureResolved.
+// Caller holds mu.
+func (tm *TopologyManager) bootstrapFailureResolvedLocked() bool {
+	return tm.bootstrapPhase == BootstrapPhaseFailed && tm.bootstrapFailureResolved
+}
+
+// latchBootstrapFailureResolutionLocked records that the failed
+// bootstrap's target has recovered by another path: it replicates
+// (Healthy or Lagging) or is the writable site. From then on the failure
+// no longer stands, so a later, unrelated replication error or outage of
+// that site reports its own reason, not the old clone error and its
+// reclone remedy. It reports whether it latched. Caller holds mu, after
+// the poll's replication states are computed.
+func (tm *TopologyManager) latchBootstrapFailureResolutionLocked() bool {
+	if tm.bootstrapPhase != BootstrapPhaseFailed || tm.bootstrapFailureResolved || tm.bootstrapFailedTarget == "" {
+		return false
+	}
+	site := tm.getSite(tm.bootstrapFailedTarget)
+	if site == nil || !(site.state == state.StateWritable || site.replicationState.Running()) {
+		return false
+	}
+	tm.bootstrapFailureResolved = true
+	return true
 }

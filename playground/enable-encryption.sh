@@ -9,11 +9,11 @@
 #   1. Verifies the playground started with the expected MySQL TLS
 #      Secret and waits for a healthy baseline.
 #   2. Enables the operator's keyring escrow TLS listener.
-#   3. Patches the MFG with spec.encryptionAtRest.
-#   4. Stamps the encryption-adopt annotation, because the playground is
-#      already serving and the operator otherwise refuses (existing
-#      tablespaces stay plaintext — see the warning below).
-#   5. Waits for every site to reach phase=Sealed and for the ordered
+#   3. Patches the MFG with spec.encryptionAtRest, including
+#      existingData: LeavePlaintext, because the playground is already
+#      serving and the default (Refuse) refuses (existing tablespaces stay
+#      plaintext — see the warning below).
+#   4. Waits for every site to reach phase=Sealed and for the ordered
 #      rollout's anti-flap cooldown to expire.
 #
 # Usage:
@@ -106,6 +106,9 @@ report_status() {
 	kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
 		-o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name}{"\t"}{.phase}{"\t"}{.keyringSecret}{"\t"}{.message}{"\n"}{end}' \
 		2>/dev/null || warn "no encryption status yet"
+	kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
+		-o jsonpath='{range .status.conditions[?(@.type=="EncryptionAtRestReady")]}EncryptionAtRestReady={.status}/{.reason}: {.message}{"\n"}{end}' \
+		2>/dev/null || true
 	echo
 	info "escrow secrets"
 	kubectl -n "$NAMESPACE" get secrets -l app.kubernetes.io/name=mysql-keyring \
@@ -312,25 +315,25 @@ if [[ "${BLOODRAVEN_PLAYGROUND_MYSQL_UNCONFINED:-0}" == "1" ]]; then
      "seccompProfile": {"type": "Unconfined"}
   }}'
 fi
-kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p '[
-  {"op": "add", "path": "/spec/encryptionAtRest", "value": {
-     "enabled": true
-  }}'"$UNCONFINED_PATCH"'
-]'
-
 # The operator refuses encryption on any group with an ActiveSite unless
-# this annotation is present — including after --fresh, because reset-mysql
-# re-establishes a healthy primary before we get here. --fresh still matters
-# for data coverage (new tablespaces are encrypted from birth); the
-# annotation only acknowledges the timing of the flag flip.
+# existingData is LeavePlaintext — including after --fresh, because
+# reset-mysql re-establishes a healthy primary before we get here. --fresh
+# still matters for data coverage (new tablespaces are encrypted from
+# birth); the policy only accepts the timing of the flag flip. It is set in
+# the same patch as enabled, so the operator never sees one without the
+# other.
 if [[ "$FRESH" == "1" ]]; then
-	ok "acknowledging encryption enable after --fresh wipe (annotation required while ActiveSite is set)"
+	ok "enabling encryption after the --fresh wipe (existingData: LeavePlaintext is still required while ActiveSite is set)"
 else
 	warn "the playground is already serving, so pre-existing tables stay plaintext"
-	warn "acknowledging with the encryption-adopt annotation (use --fresh for full coverage)"
+	warn "accepting that with spec.encryptionAtRest.existingData: LeavePlaintext (use --fresh for full coverage)"
 fi
-kubectl -n "$NAMESPACE" annotate mysqlfailovergroup "$FG" \
-	bloodraven.shipstream.io/encryption-adopt=confirm --overwrite
+kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p '[
+  {"op": "add", "path": "/spec/encryptionAtRest", "value": {
+     "enabled": true,
+     "existingData": "LeavePlaintext"
+  }}'"$UNCONFINED_PATCH"'
+]'
 
 # ---------------------------------------------------------------------
 # 5. Wait for every site to seal
@@ -338,12 +341,16 @@ kubectl -n "$NAMESPACE" annotate mysqlfailovergroup "$FG" \
 # Three-site ordered update + keyring escrow regularly needs more than
 # 10 minutes on kind (CI runners are especially slow around the primary
 # handoff). 15 minutes still fails fast when the keyring never loads.
-info "waiting for every site to reach phase=Sealed (up to 15 minutes)"
+# EncryptionAtRestReady=True with reason AllSitesSealed means every site is
+# sealed. The condition must also be current: observedGeneration is the
+# generation that enabled encryption, not an earlier one.
+info "waiting for every site to reach phase=Sealed (EncryptionAtRestReady=True/AllSitesSealed, up to 15 minutes)"
 deadline=$(( $(date +%s) + 900 ))
 while [[ $(date +%s) -lt $deadline ]]; do
 	sealed=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
-		-o jsonpath='{.status.encryptionAtRest.sealed}' 2>/dev/null || echo "")
-	if [[ "$sealed" == "true" ]]; then
+		-o jsonpath='{.metadata.generation}{" "}{range .status.conditions[?(@.type=="EncryptionAtRestReady")]}{.observedGeneration}{" "}{.status}{" "}{.reason}{end}' 2>/dev/null || echo "")
+	read -r gen observed status reason <<<"$sealed" || true
+	if [[ "${status:-}" == "True" && "${reason:-}" == "AllSitesSealed" && -n "${gen:-}" && "${observed:-}" == "$gen" ]]; then
 		ok "every site is sealed against an escrowed keyring"
 		wait_for_stable_baseline "after the encryption rollout"
 		report_status
@@ -359,7 +366,7 @@ warn "sites did not all seal within 15 minutes"
 report_status
 echo
 info "forensics: keyring component files and status on one MySQL pod"
-pod=$(kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=mysql,shipstream.io/site" \
+pod=$(kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=mysql,bloodraven.shipstream.io/site" \
 	-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [[ -n "$pod" ]]; then
 	kubectl -n "$NAMESPACE" exec "$pod" -c mysql -- sh -c '

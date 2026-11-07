@@ -85,7 +85,7 @@ func TestFixR2_RestartAfterLaterEmergencyFailoverDoesNotHold(t *testing.T) {
 	for range 20 {
 		h.tick()
 		h.pass()
-		if m, ok := controller.ParseTerminalMarker(h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]); ok {
+		if m, ok := controller.ParseTerminalMarker(h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok {
 			if m.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 				t.Fatalf("marker %+v, want Succeeded", m)
 			}

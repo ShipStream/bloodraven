@@ -17,7 +17,7 @@ the bottom for reference.
 `verdict` reads the `Degraded` condition out of `status.conditions` and combines it with
 `status.activeSite` to return exactly `("OK", 0)`, `("DEGRADED", 1)` or `("CRITICAL", 2)`.
 
-Full marks require that no per-site field — lag, `replicating`, `state` — is consulted inside
+Full marks require that no per-site field — lag, `replication`, `state` — is consulted inside
 `verdict`. The operator evaluates its cross-site table on every poll and writes the answer into the
 condition; re-deriving it from the site rows is a second, disagreeing implementation of the same
 decision, and it will disagree first on exactly the fixture that matters.
@@ -32,17 +32,17 @@ decision, and it will disagree first on exactly the fixture that matters.
 
 `is_serving` branches on `site_role(...)`.
 
-The `read-only` branch tests all five conjuncts together: `sourceConvergenceState` is `Converged`,
-`replicating` is true, `secondsBehindSource` is present, `canonical_host(sourceHost)` equals
+The `ReadOnly` branch tests all five conjuncts together: `sourceConvergenceState` is `Converged`,
+`replication` is `Healthy` or `Lagging`, `secondsBehindSource` is present, `canonical_host(sourceHost)` equals
 `expected_source_host(...)` for the active site, and the lag is at or under
 `effective_readonly_max_lag(spec)`.
 
-Every other role is served on `state` alone — `writable` or `read-only` — with no lag gate. A
-`primary-candidate` replica 300 seconds behind stays behind `mysql-playground-replicas` and is still
+Every other role is served on `state` alone — `Writable` or `ReadOnly` — with no lag gate. A
+`PrimaryCandidate` replica 300 seconds behind stays behind `mysql-playground-replicas` and is still
 `SERVING yes`. That is the operator's real behaviour, not a simplification.
 
 - **27** — both branches correct, five conjuncts present, the correct threshold helper called.
-- **14** — the five conjuncts are right but the same gate is wrongly applied to `primary-candidate`
+- **14** — the five conjuncts are right but the same gate is wrongly applied to `PrimaryCandidate`
   sites, or one conjunct is missing.
 - **0** — the reader is gated on `effective_max_lag` instead of `effective_readonly_max_lag`.
 
@@ -59,7 +59,7 @@ Every other role is served on `state` alone — `writable` or `read-only` — wi
 
 `artefacts/playground-live.json` is present, is a single `MysqlFailoverGroup` captured from the running
 playground rather than a copied fixture — its `metadata.creationTimestamp`, `metadata.uid` and
-`status.sites[].lastSeen` are populated — and the submission shows `brstatus` output for it.
+`status.sites[].lastSeenTime` are populated — and the submission shows `brstatus` output for it.
 
 - **10** — captured, distinguishable from the fixtures, and its output shown.
 - **5** — captured but no output shown, or the capture is a trimmed excerpt rather than the whole
@@ -73,7 +73,7 @@ playground rather than a copied fixture — its `metadata.creationTimestamp`, `m
   cell rather than a traceback.
 - Unreadable input exits 3 with a message on stderr, not a stack trace on stdout.
 - The three completed functions carry a comment a colleague could follow: it names the rule
-  (`readOnlyMaxLagSeconds`, `role=replica` + `healthy=yes`, the `Degraded` condition), rather than
+  (`readOnlyMaxLagSeconds`, `role=replica` + `healthy=true`, the `Degraded` condition), rather than
   restating the code in English.
 
 Deduct for debug prints left in the output, for hard-coded thresholds where a helper exists, and for

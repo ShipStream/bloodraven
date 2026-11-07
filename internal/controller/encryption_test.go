@@ -17,7 +17,6 @@ func encTestFG() *v1alpha1.MysqlFailoverGroup {
 	fg := newTestFG()
 	fg.Spec.TLS = &v1alpha1.TLSSpec{
 		SecretName: "mysql-tls",
-		IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
 	}
 	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
 	return fg

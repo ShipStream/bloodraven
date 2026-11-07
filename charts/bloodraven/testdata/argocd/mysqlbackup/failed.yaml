@@ -1,0 +1,12 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackup
+metadata:
+  name: nightly-1
+  namespace: bloodraven
+  generation: 1
+status:
+  observedGeneration: 1
+  phase: Failed
+  message: "pending for 30m0s (BackupJobConflict): Job nightly-1 is not this backup's"
+  conditions:
+  - {type: Ready, status: "False", reason: PendingTimedOut, observedGeneration: 1, message: "pending for 30m0s (BackupJobConflict): Job nightly-1 is not this backup's"}

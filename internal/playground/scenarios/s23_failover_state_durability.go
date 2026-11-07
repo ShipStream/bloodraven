@@ -103,38 +103,38 @@ func s23ObserveFailoverComplete() runner.Step {
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"activeSite flipped AND status/annotation failover records stamped",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					hasTarget := mfg.Status.LastFailoverTarget != ""
-					hasStamp := mfg.Status.LastFailover != nil && !mfg.Status.LastFailover.IsZero()
+					hasTarget := mfg.Status.LastFailoverTarget() != ""
+					hasStamp := mfg.Status.LastFailoverTime() != nil && !mfg.Status.LastFailoverTime().IsZero()
 					oob, oobErr := brcontroller.FailoverRecordFromAnnotations(mfg.GetAnnotations())
 					if oobErr != nil {
 						return false, "annotation record invalid", oobErr
 					}
-					oobMatches := hasStamp && oob.LastFailoverTarget == mfg.Status.LastFailoverTarget &&
-						oob.LastFailover.Equal(mfg.Status.LastFailover.Time)
+					oobMatches := hasStamp && oob.LastFailoverTarget == mfg.Status.LastFailoverTarget() &&
+						oob.LastFailover.Equal(mfg.Status.LastFailoverTime().Time)
 					flipped := mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original
 					msg := fmt.Sprintf("activeSite=%q target=%q stamp=%v annotationsMatch=%v",
-						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, hasStamp, oobMatches)
+						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), hasStamp, oobMatches)
 					return flipped && hasTarget && hasStamp && oobMatches, msg, nil
 				},
 			)
 			if err != nil {
 				return err
 			}
-			if err := ctxStash(ctx, env, "preRestartTarget", mfg.Status.LastFailoverTarget); err != nil {
+			if err := ctxStash(ctx, env, "preRestartTarget", mfg.Status.LastFailoverTarget()); err != nil {
 				return err
 			}
 			if err := ctxStash(ctx, env, "preRestartActive", mfg.Status.ActiveSite); err != nil {
 				return err
 			}
-			if err := ctxStash(ctx, env, "preRestartStamp", mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)); err != nil {
+			if err := ctxStash(ctx, env, "preRestartStamp", mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339Nano)); err != nil {
 				return err
 			}
-			if err := ctxStash(ctx, env, "preRestartStampUnix", fmt.Sprintf("%d", mfg.Status.LastFailover.Time.UTC().UnixNano())); err != nil {
+			if err := ctxStash(ctx, env, "preRestartStampUnix", fmt.Sprintf("%d", mfg.Status.LastFailoverTime().Time.UTC().UnixNano())); err != nil {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("post-failover snapshot: active=%s target=%s stamp=%s",
-				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget,
-				mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)))
+				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(),
+				mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339Nano)))
 			return nil
 		},
 	}
@@ -189,15 +189,15 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 			if err != nil {
 				return err
 			}
-			if mfg.Status.LastFailoverTarget != expectedTarget {
+			if mfg.Status.LastFailoverTarget() != expectedTarget {
 				return fmt.Errorf("lastFailoverTarget changed across operator restart: pre=%q post=%q",
-					expectedTarget, mfg.Status.LastFailoverTarget)
+					expectedTarget, mfg.Status.LastFailoverTarget())
 			}
 			if mfg.Status.ActiveSite != expectedActive {
 				return fmt.Errorf("activeSite changed across operator restart: pre=%q post=%q",
 					expectedActive, mfg.Status.ActiveSite)
 			}
-			if mfg.Status.LastFailover == nil || mfg.Status.LastFailover.IsZero() {
+			if mfg.Status.LastFailoverTime() == nil || mfg.Status.LastFailoverTime().IsZero() {
 				return fmt.Errorf("lastFailover cleared across operator restart: pre=%q post=<nil>", expectedStamp)
 			}
 			oob, err := brcontroller.FailoverRecordFromAnnotations(mfg.GetAnnotations())
@@ -210,13 +210,13 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 			if oob.LastFailover.IsZero() {
 				return fmt.Errorf("annotation last-failover cleared across operator restart: pre=%q post=<nil>", expectedStamp)
 			}
-			if !oob.LastFailover.Equal(mfg.Status.LastFailover.Time) {
+			if !oob.LastFailover.Equal(mfg.Status.LastFailoverTime().Time) {
 				return fmt.Errorf("status and annotation last-failover differ after restart: status=%s annotation=%s",
-					mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano),
+					mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339Nano),
 					oob.LastFailover.Format(time.RFC3339Nano))
 			}
-			postStamp := mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)
-			postStampUnix := mfg.Status.LastFailover.Time.UTC().UnixNano()
+			postStamp := mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339Nano)
+			postStampUnix := mfg.Status.LastFailoverTime().Time.UTC().UnixNano()
 			delta := time.Duration(postStampUnix - expectedStampUnix)
 			if delta < 0 {
 				return fmt.Errorf("lastFailover stamp regressed across operator restart: pre=%s post=%s (delta=%s)",
@@ -231,7 +231,7 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 					expectedStamp, oob.LastFailover.Format(time.RFC3339Nano), annotationDelta)
 			}
 			env.Capture.Note(fmt.Sprintf("post-restart CR matches: active=%s target=%s stamp=%s (drift=%s within %s)",
-				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, postStamp, delta, s23PostRestartStampDrift))
+				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), postStamp, delta, s23PostRestartStampDrift))
 			return nil
 		},
 	}

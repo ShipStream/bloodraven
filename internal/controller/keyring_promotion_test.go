@@ -119,7 +119,7 @@ func TestHandoffBlockErr(t *testing.T) {
 		{"eligible", handoffBlock{}, ""},
 		{"rotation", handoffBlock{rotation: true}, "UnsealReason=Rotation"},
 		{"reclone", handoffBlock{reclonePending: true}, "pending post-restore reclone"},
-		{"divergent", handoffBlock{divergence: siteRecovery{state: recoveryStateBlocked, divergentCount: 3}}, "3 transactions the primary lacks"},
+		{"divergent", handoffBlock{divergence: siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentCount: 3}}, "3 transactions the primary lacks"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.block.err("iad")

@@ -53,7 +53,7 @@ func TestPopulatePITRStatus_DisabledClearsField(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: nn.Namespace, Name: nn.Name},
 	}
-	fg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 10}
+	fg.Status.PITR = &v1alpha1.PITRStatus{ArchivedFileCount: 10}
 
 	r.populatePITRStatus(context.Background(), nn, fg)
 
@@ -70,7 +70,7 @@ func TestPopulatePITRStatus_NoSnapshotsPreservesExisting(t *testing.T) {
 	})
 
 	fg := pitrEnabledFG(nn.Namespace, nn.Name)
-	existing := &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 5}
+	existing := &v1alpha1.PITRStatus{ArchivedFileCount: 5}
 	fg.Status.PITR = existing
 
 	r.populatePITRStatus(context.Background(), nn, fg)
@@ -115,12 +115,6 @@ func TestPopulatePITRStatus_AggregatesAcrossSites(t *testing.T) {
 	if pitr == nil {
 		t.Fatal("expected status.pitr to be populated")
 		return
-	}
-	if !pitr.Enabled {
-		t.Error("expected Enabled=true")
-	}
-	if pitr.ProfileName != "nightly" {
-		t.Errorf("ProfileName = %q, want nightly", pitr.ProfileName)
 	}
 	if pitr.ArchivedFileCount != 8 {
 		t.Errorf("ArchivedFileCount = %d, want 8 (sum across sites: 5+3)", pitr.ArchivedFileCount)
@@ -184,7 +178,7 @@ func TestPopulatePITRStatus_EmptySnapshotsLeaveStale(t *testing.T) {
 	r := newRunnerWithArchiverSnapshots(t, nn, map[string]*internalmysql.ArchiverStatus{})
 
 	fg := pitrEnabledFG(nn.Namespace, nn.Name)
-	existing := &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 1}
+	existing := &v1alpha1.PITRStatus{ArchivedFileCount: 1}
 	fg.Status.PITR = existing
 
 	r.populatePITRStatus(context.Background(), nn, fg)

@@ -108,11 +108,11 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 					_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 						fmt.Sprintf("status.activeSite==%s and lastFailoverTarget==%s", peerSite, peerSite),
 						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-							msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q ready=%s", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, readyOf(mfg))
+							msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q ready=%s", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), readyOf(mfg))
 							if mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != peerSite && mfg.Status.ActiveSite != activeSite {
 								return false, msg, fmt.Errorf("unexpected activeSite %q (want %q)", mfg.Status.ActiveSite, peerSite)
 							}
-							return mfg.Status.ActiveSite == peerSite && mfg.Status.LastFailoverTarget == peerSite, msg, nil
+							return mfg.Status.ActiveSite == peerSite && mfg.Status.LastFailoverTarget() == peerSite, msg, nil
 						})
 					if err != nil {
 						return fmt.Errorf("status did not flip to promoted peer: %w", err)
@@ -163,7 +163,7 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 					if err != nil {
 						return err
 					}
-					lastFailoverBefore := mfg.Status.LastFailover
+					lastFailoverBefore := mfg.Status.LastFailoverTime()
 					if err := restoreRBAC(ctx); err != nil {
 						return fmt.Errorf("restore ClusterRole rules: %w", err)
 					}
@@ -197,12 +197,12 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 					if err != nil {
 						return err
 					}
-					if after.Status.ActiveSite != peerSite || after.Status.LastFailoverTarget != peerSite {
+					if after.Status.ActiveSite != peerSite || after.Status.LastFailoverTarget() != peerSite {
 						return fmt.Errorf("activeSite/lastFailoverTarget changed during DNS heal (active=%q target=%q) — DNS heal must not re-run failover",
-							after.Status.ActiveSite, after.Status.LastFailoverTarget)
+							after.Status.ActiveSite, after.Status.LastFailoverTarget())
 					}
-					if lastFailoverBefore != nil && after.Status.LastFailover != nil && !after.Status.LastFailover.Time.Equal(lastFailoverBefore.Time) {
-						return fmt.Errorf("lastFailover advanced during DNS heal (%v -> %v) — a second failover occurred", lastFailoverBefore.Time, after.Status.LastFailover.Time)
+					if lastFailoverBefore != nil && after.Status.LastFailoverTime() != nil && !after.Status.LastFailoverTime().Time.Equal(lastFailoverBefore.Time) {
+						return fmt.Errorf("lastFailover advanced during DNS heal (%v -> %v) — a second failover occurred", lastFailoverBefore.Time, after.Status.LastFailoverTime().Time)
 					}
 					return nil
 				},
@@ -228,11 +228,11 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 							if old == nil {
 								return false, "old primary not in status yet", nil
 							}
-							msg := fmt.Sprintf("old=%s state=%s replicating=%v recovery=%q ready=%s", old.Name, old.State, old.Replicating, old.RecoveryState, readyOf(mfg))
+							msg := fmt.Sprintf("old=%s state=%s replication=%s recovery=%q ready=%s", old.Name, old.State, old.Replication, old.RecoveryState, readyOf(mfg))
 							if old.RecoveryState == "RecoveryBlocked" {
 								return false, msg, fmt.Errorf("old primary %s RecoveryBlocked", activeSite)
 							}
-							healthyReplica := old.State == "read-only" && old.Replicating && readyOf(mfg) == "True"
+							healthyReplica := old.State == v1alpha1.SiteStateReadOnly && old.Replication.Running() && readyOf(mfg) == "True"
 							return healthyReplica || old.RecoveryState == "RecoveryInProgress", msg, nil
 						})
 					if err != nil {

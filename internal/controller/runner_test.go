@@ -30,7 +30,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: oldTime,
-			Reason:             "TopologyPolled",
+			Reason:             "Healthy",
 			Message:            "At least one site is writable",
 		},
 	}
@@ -40,7 +40,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: newTime,
-		Reason:             "TopologyPolled",
+		Reason:             "Healthy",
 		Message:            "At least one site is writable",
 	})
 
@@ -54,7 +54,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: newTime,
-		Reason:             "TopologyPolled",
+		Reason:             "Healthy",
 		Message:            "No site is writable",
 	})
 
@@ -92,14 +92,14 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 		ActiveSite: "dc1",
 		Sites: []v1alpha1.SiteStatus{
 			{
-				Name:     "dc1",
-				State:    "writable",
-				LastSeen: &lastSeen,
+				Name:         "dc1",
+				State:        v1alpha1.SiteStateWritable,
+				LastSeenTime: &lastSeen,
 			},
 			{
-				Name:     "dc2",
-				State:    "read-only",
-				LastSeen: &lastSeen,
+				Name:         "dc2",
+				State:        v1alpha1.SiteStateReadOnly,
+				LastSeenTime: &lastSeen,
 			},
 		},
 		Conditions: []metav1.Condition{
@@ -107,11 +107,11 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 				Type:               "Ready",
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
-				Reason:             "TopologyPolled",
+				Reason:             "Healthy",
 				Message:            "At least one site is writable",
 			},
 		},
-		LastFailoverTarget: "dc1",
+		LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Target: "dc1"}},
 	}
 
 	existing := status.DeepCopy()
@@ -125,8 +125,8 @@ func TestStatusDeepEqual_DifferentActiveSite(t *testing.T) {
 	status := v1alpha1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
 		Sites: []v1alpha1.SiteStatus{
-			{Name: "dc1", State: "writable"},
-			{Name: "dc2", State: "read-only"},
+			{Name: "dc1", State: v1alpha1.SiteStateWritable},
+			{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
 		},
 	}
 
@@ -142,13 +142,13 @@ func TestStatusDeepEqual_DifferentSiteState(t *testing.T) {
 	status := v1alpha1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
 		Sites: []v1alpha1.SiteStatus{
-			{Name: "dc1", State: "writable"},
-			{Name: "dc2", State: "read-only"},
+			{Name: "dc1", State: v1alpha1.SiteStateWritable},
+			{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
 		},
 	}
 
 	existing := status.DeepCopy()
-	status.Sites[0].State = "unreachable"
+	status.Sites[0].State = v1alpha1.SiteStateUnreachable
 
 	if equality.Semantic.DeepEqual(existing, &status) {
 		t.Error("expected different Sites[0] state to be unequal")
@@ -164,7 +164,7 @@ func TestStatusDeepEqual_DifferentConditionStatus(t *testing.T) {
 				Type:               "Ready",
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
-				Reason:             "TopologyPolled",
+				Reason:             "Healthy",
 			},
 		},
 	}
@@ -184,7 +184,7 @@ func TestStatusDeepEqual_LastFailoverChange(t *testing.T) {
 
 	existing := status.DeepCopy()
 	failoverTime := metav1.NewTime(time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC))
-	status.LastFailover = &failoverTime
+	status.SetLastFailover(&failoverTime, status.LastFailoverTarget(), status.PromotionGtidExecuted())
 
 	if equality.Semantic.DeepEqual(existing, &status) {
 		t.Error("expected status with new LastFailover to be unequal")
@@ -448,7 +448,7 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
 		t.Run(string(role), func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", Role: v1alpha1.SiteRole(role)})
+			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", ServerID: 103, Role: APISiteRole(role)})
 			scheme := testScheme()
 			c := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
@@ -461,7 +461,7 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 					{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 					{Name: "anomaly", Role: role, State: state.StateWritable, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 				},
-				DegradedReason: "Degraded",
+				DegradedReason: v1alpha1.ReasonSiteUnhealthy,
 				Alert:          "writable non-promotable site requires fencing (anomaly)",
 			})
 			var updated v1alpha1.MysqlFailoverGroup
@@ -481,8 +481,8 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 			if ready == nil || ready.Status != metav1.ConditionFalse {
 				t.Fatalf("Ready condition = %+v, want False", ready)
 			}
-			if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != "Degraded" {
-				t.Fatalf("Degraded condition = %+v, want True/Degraded", degraded)
+			if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != v1alpha1.ReasonSiteUnhealthy {
+				t.Fatalf("Degraded condition = %+v, want True/SiteUnhealthy", degraded)
 			}
 		})
 	}
@@ -573,9 +573,7 @@ func TestEmitFailoverEvents_FailoverExecuted(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		LastFailoverTarget: "",
-	}
+	existing := &v1alpha1.MysqlFailoverGroupStatus{}
 	snap := TopologySnapshot{
 		LastFailoverTarget: "dc2",
 	}
@@ -600,7 +598,7 @@ func TestEmitFailoverEvents_NoEventOnSameTarget(t *testing.T) {
 	runner := &TopologyManagerRunner{recorder: rec}
 
 	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		LastFailoverTarget: "dc2",
+		LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Target: "dc2"}},
 	}
 	snap := TopologySnapshot{
 		LastFailoverTarget: "dc2",
@@ -736,7 +734,7 @@ func TestEmitFailoverEvents_DataLossEventWhenDivergenceGrows(t *testing.T) {
 	}
 }
 
-func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
+func TestEmitFailoverEvents_OldPrimaryRecovered(t *testing.T) {
 	rec := record.NewFakeRecorder(10)
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
@@ -760,8 +758,8 @@ func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("want 1 event, got %d: %v", len(events), events)
 	}
-	if !strings.Contains(events[0], "RecoveryComplete") {
-		t.Errorf("want RecoveryComplete event, got %s", events[0])
+	if !strings.Contains(events[0], "OldPrimaryRecovered") {
+		t.Errorf("want OldPrimaryRecovered event, got %s", events[0])
 	}
 	if !strings.Contains(events[0], "dc1") {
 		t.Errorf("want event to mention dc1, got %s", events[0])
@@ -1087,7 +1085,7 @@ func TestSetCloneTimeout_ForwardsToManager(t *testing.T) {
 func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
 	fg := newTestFG()
 	opSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: fg.Spec.SecretName, Namespace: fg.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: fg.Spec.Credentials.OperatorSecretName, Namespace: fg.Namespace},
 		Data:       map[string][]byte{"username": []byte("op"), "password": []byte("p")},
 	}
 	tlsSecret := &corev1.Secret{
@@ -1102,7 +1100,7 @@ func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
 		t.Fatal("plaintext group with operator secret must have a connection hash")
 	}
 
-	fg.Spec.CloneTimeout = 120
+	fg.Spec.CloneTimeout = &metav1.Duration{Duration: 120 * time.Second}
 	if mustConnectionMaterialHash(t, ctx, c, fg) != plain {
 		t.Fatal("cloneTimeout must not change the connection hash (it is live-updated)")
 	}
@@ -1142,7 +1140,7 @@ func TestCloneTimeoutFromSpec(t *testing.T) {
 	if cloneTimeoutFromSpec(fg) != 0 {
 		t.Fatal("unset cloneTimeout should be 0 (bootstrap default)")
 	}
-	fg.Spec.CloneTimeout = 7200
+	fg.Spec.CloneTimeout = &metav1.Duration{Duration: 7200 * time.Second}
 	if got := cloneTimeoutFromSpec(fg); got != 2*time.Hour {
 		t.Fatalf("got %s, want 2h", got)
 	}

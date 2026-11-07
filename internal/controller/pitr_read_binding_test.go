@@ -31,14 +31,14 @@ func readBindingVerification(t *testing.T, state v1alpha1.PITRArchiveBindingStat
 	backup.Status.FailoverGroupUID = "lion-uid"
 	v := verifyCR("verify-binding", "lion", "nightly-s3")
 	v.UID = "verify-binding-uid"
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: outcomeStop}
-	r, c := newVerificationReconciler(t, append([]client.Object{fg, backup, v, dsnSecret()}, extra...)...)
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr(outcomeStop)}
+	r, c := newVerificationReconciler(t, append([]client.Object{fg, backup, v, operatorCredsSecret()}, extra...)...)
 	return r, c, v
 }
 
 func archiveSnapshot(fgUID string) *corev1.Secret {
 	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: testArchiveSnapshot,
-		Labels: map[string]string{labelAppName: appNamePITRKeySnapshot, labelFailoverGroupUID: fgUID, labelFailoverGroup: "lion"}},
+		Labels: map[string]string{labelAppName: appNamePITRKeySnapshot, v1alpha1.FailoverGroupUIDLabel: fgUID, v1alpha1.FailoverGroupLabel: "lion"}},
 		Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("k")}}
 }
 
@@ -60,12 +60,12 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		reason v1alpha1.PITRArchiveBindingReason
 		fail   bool
 	}{
-		{v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingKeyMismatch, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveListFailed, false},
-		{v1alpha1.PITRArchiveBindingBound, pitrBindingKeyMaterialLost, false},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveNotFound, true},
-		{v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveLegacy, true},
+		{v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveListFailed, false},
+		{v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost, false},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveNotFound, true},
+		{v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveLegacy, true},
 	} {
 		t.Run(string(tc.state)+"/"+string(tc.reason), func(t *testing.T) {
 			SetOperatorImageDefaults("bloodraven:test", "bloodraven")
@@ -78,12 +78,12 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 				t.Fatal("a Job was created on a binding that is not ready")
 			}
 			if tc.fail {
-				if got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != reasonPITRArchiveBindingNotReady {
-					t.Fatalf("phase %s reason %q, want Failed/%s", got.Status.Phase, verifiedReason(got), reasonPITRArchiveBindingNotReady)
+				if got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
+					t.Fatalf("phase %s reason %q, want Failed/%s", got.Status.Phase, verifiedReason(got), string(v1alpha1.PITRTokenArchiveBindingNotReady))
 				}
 				return
 			}
-			if verificationTerminal(got.Status.Phase) || !strings.HasPrefix(got.Status.Message, reasonPITRArchiveBindingNotReady) {
+			if verificationTerminal(got.Status.Phase) || !strings.HasPrefix(got.Status.Message, string(v1alpha1.PITRTokenArchiveBindingNotReady)) {
 				t.Fatalf("phase %s message %q, want a wait naming the binding", got.Status.Phase, got.Status.Message)
 			}
 		})
@@ -96,14 +96,14 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		for i := 0; i < pitrArchiveBindingsMax; i++ {
 			fg.Status.PITRArchiveBindings = append(fg.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "pab-000000000000000" + string(rune('a'+i%6)),
-				State: v1alpha1.PITRArchiveBindingBound, Reason: pitrBindingBound})
+				State: v1alpha1.PITRArchiveBindingBound, Reason: v1alpha1.PITRArchiveBindingReasonBound})
 		}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
-		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
-		r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest}
+		r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 		reconcileVerifUntilStable(t, r, v.Name)
-		if got := getVerification(t, c, v); got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != reasonPITRArchiveBindingNotReady {
+		if got := getVerification(t, c, v); got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(v1alpha1.PITRTokenArchiveBindingNotReady) {
 			t.Fatalf("phase %s reason %q", got.Status.Phase, verifiedReason(got))
 		}
 	})
@@ -117,17 +117,17 @@ func TestVerificationReadBindingWaitOrFail(t *testing.T) {
 		fg := fgWithEncryptedBackup()
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		for i := 0; i < pitrArchiveBindingsMax; i++ {
-			state, reason := v1alpha1.PITRArchiveBindingBound, pitrBindingBound
+			state, reason := v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound
 			if i == 0 {
-				state, reason = v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating
+				state, reason = v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating
 			}
 			fg.Status.PITRArchiveBindings = append(fg.Status.PITRArchiveBindings, v1alpha1.PITRArchiveBinding{ID: "pab-000000000000000" + string(rune('a'+i%6)),
 				State: state, Reason: reason})
 		}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
 		v := verifyCR("verify-limit", "lion", "nightly-s3")
-		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}
-		r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest}
+		r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 		reconcileVerifUntilStable(t, r, v.Name)
 		got := getVerification(t, c, v)
 		if verificationTerminal(got.Status.Phase) || !strings.Contains(got.Status.Message, "make room") {
@@ -146,14 +146,14 @@ func TestVerificationHoldsArchiveKeySnapshot(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("stamped, labelled, released", func(t *testing.T) {
-		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, pitrBindingBound, archiveSnapshot("lion-uid"))
+		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, archiveSnapshot("lion-uid"))
 		reconcileVerifUntilStable(t, r, v.Name)
 		var job batchv1.Job
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: verificationJobName(v.Name)}, &job); err != nil {
 			t.Fatal(err)
 		}
-		if job.Labels[labelPITRKeySecret] != testArchiveSnapshot {
-			t.Fatalf("Job label %s = %q", labelPITRKeySecret, job.Labels[labelPITRKeySecret])
+		if job.Labels[v1alpha1.PITRKeySecretLabel] != testArchiveSnapshot {
+			t.Fatalf("Job label %s = %q", v1alpha1.PITRKeySecretLabel, job.Labels[v1alpha1.PITRKeySecretLabel])
 		}
 		if vol := findVolume(job.Spec.Template.Spec.Volumes, "pitr-passphrase"); vol == nil || vol.Secret.SecretName != testArchiveSnapshot ||
 			vol.Secret.Optional != nil || vol.Secret.Items[0].Key != pitrKeySnapshotDataKey {
@@ -184,7 +184,7 @@ func TestVerificationHoldsArchiveKeySnapshot(t *testing.T) {
 	})
 
 	t.Run("row 28a: snapshot released first, verification waits", func(t *testing.T) {
-		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, pitrBindingBound)
+		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
 		reconcileVerifUntilStable(t, r, v.Name)
 		var job batchv1.Job
 		if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: verificationJobName(v.Name)}, &job); err == nil {
@@ -197,7 +197,7 @@ func TestVerificationHoldsArchiveKeySnapshot(t *testing.T) {
 	})
 
 	t.Run("another group's Secret of that name is not stamped", func(t *testing.T) {
-		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, pitrBindingBound, archiveSnapshot("other-uid"))
+		r, c, v := readBindingVerification(t, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, archiveSnapshot("other-uid"))
 		for i := 0; i < 6; i++ {
 			_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(v)})
 		}
@@ -220,12 +220,12 @@ func TestVerificationArchiveProfileName(t *testing.T) {
 	retained := *fg.Spec.Backup.Profiles[0].DeepCopy()
 	retained.Name = "retained"
 	retained.Storage.S3.Prefix = "old-prefix"
-	retained.Encryption.PassphraseSecret.Name = "deleted-secret"
+	retained.Encryption.PassphraseSecretKeyRef.Name = "deleted-secret"
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, retained)
 	e := bindTestPITRArchive(t, fg, "retained")
 	e.Encryption.KeySecretName = "mysql-lion-pitr-key-retained00"
 	v := verifyCR("verify-retained", "lion", "nightly-s3")
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ArchiveProfileName: "retained"}
+	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: "retained"}
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 	if err != nil {
@@ -247,12 +247,12 @@ func TestVerificationDumpKeyIsRecorded(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 	fg := fgWithEncryptedBackup()
-	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecret.Name = "edited-since"
+	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "edited-since"
 	backup := successfulBackup("seed", "lion", "nightly-s3")
-	backup.Status.Location = "s3://bloodraven-backups/lion/seed/"
-	backup.Status.StorageType = v1alpha1.BackupStorageS3
-	backup.Status.Encrypted = true
-	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "mysqlbackup-seed-dump-key-uid-seed", Key: pitrKeySnapshotDataKey}}
+	setTestArtifactLocation(backup, "s3://bloodraven-backups/lion/seed/")
+	setTestArtifactType(backup, v1alpha1.BackupStorageS3)
+	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	ensureTestArtifact(backup).PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-uid-seed", Key: pitrKeySnapshotDataKey}
 	v := verifyCR("verify-dump", "lion", "nightly-s3")
 	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 	if err != nil {
@@ -261,7 +261,7 @@ func TestVerificationDumpKeyIsRecorded(t *testing.T) {
 	if vol := findVolume(job.Spec.Template.Spec.Volumes, "backup-passphrase"); vol == nil || vol.Secret.SecretName != "mysqlbackup-seed-dump-key-uid-seed" || vol.Secret.Items[0].Key != pitrKeySnapshotDataKey {
 		t.Fatalf("decrypt mounts %+v, want the recorded snapshot", vol)
 	}
-	backup.Status.ArtifactStorage = nil
+	backup.Status.ArtifactStorage.PassphraseSecretKeyRef = nil
 	if _, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"}); err == nil ||
 		!strings.Contains(err.Error(), string(pitrarchive.TokenBackupDumpKeyMissing)) {
 		t.Fatalf("no recorded key: %v", err)
@@ -280,11 +280,11 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 		fail   bool
 		bound  bool
 	}{
-		{state: v1alpha1.PITRArchiveBindingPending, reason: pitrBindingAuthenticating},
-		{state: v1alpha1.PITRArchiveBindingRefused, reason: pitrBindingKeyMismatch},
-		{state: v1alpha1.PITRArchiveBindingRefused, reason: pitrBindingArchiveDescriptorMissing, fail: true},
-		{state: v1alpha1.PITRArchiveBindingRefused, reason: pitrBindingArchiveVersionUnsupported, fail: true},
-		{state: v1alpha1.PITRArchiveBindingBound, reason: pitrBindingBound, bound: true},
+		{state: v1alpha1.PITRArchiveBindingPending, reason: v1alpha1.PITRArchiveBindingReasonAuthenticating},
+		{state: v1alpha1.PITRArchiveBindingRefused, reason: v1alpha1.PITRArchiveBindingReasonKeyMismatch},
+		{state: v1alpha1.PITRArchiveBindingRefused, reason: v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing, fail: true},
+		{state: v1alpha1.PITRArchiveBindingRefused, reason: v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported, fail: true},
+		{state: v1alpha1.PITRArchiveBindingBound, reason: v1alpha1.PITRArchiveBindingReasonBound, bound: true},
 	} {
 		t.Run(string(tc.state)+"/"+string(tc.reason), func(t *testing.T) {
 			fg := fgInitFromMysqlBackup()
@@ -294,12 +294,12 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
 			name := addSourceArchiveProfile(fg)
 			src := findProfile(fg, name)
-			src.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "source-key"}}
+			src.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "source-key"}}
 			fg.Status.PITRArchiveBindings = nil
 			e := bindTestPITRArchive(t, fg, name)
 			e.State, e.Reason = tc.state, tc.reason
-			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: outcomeStop, ArchiveProfileName: name}
-			r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), dsnSecret())
+			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt(outcomeStop), ArchiveProfileName: name}
+			r, c := newReconciler(fg, seed, primaryReadyDeployment("lion", fg.Spec.Sites[0].Name), operatorCredsSecret())
 			if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 				t.Fatal(err)
 			}
@@ -314,22 +314,22 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 				if jobErr != nil {
 					t.Fatal(jobErr)
 				}
-				if job.Labels[labelPITRKeySecret] != e.Encryption.KeySecretName {
-					t.Fatalf("restore Job label %q, want %q", job.Labels[labelPITRKeySecret], e.Encryption.KeySecretName)
+				if job.Labels[v1alpha1.PITRKeySecretLabel] != e.Encryption.KeySecretName {
+					t.Fatalf("restore Job label %q, want %q", job.Labels[v1alpha1.PITRKeySecretLabel], e.Encryption.KeySecretName)
 				}
 				if vol := findVolume(job.Spec.Template.Spec.Volumes, "pitr-passphrase"); vol == nil || vol.Secret.SecretName != e.Encryption.KeySecretName || vol.Secret.Optional != nil {
 					t.Fatalf("restore mounts %+v, want the required snapshot", vol)
 				}
 			case tc.fail:
-				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhaseFailed || got.Status.Restore.Reason != reasonPITRArchiveBindingNotReady {
-					t.Fatalf("restore %+v, want Failed/%s", got.Status.Restore, reasonPITRArchiveBindingNotReady)
+				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhaseFailed || got.Status.Restore.Reason != v1alpha1.PITRTokenArchiveBindingNotReady {
+					t.Fatalf("restore %+v, want Failed/%s", got.Status.Restore, string(v1alpha1.PITRTokenArchiveBindingNotReady))
 				}
 			default:
 				if jobErr == nil {
 					t.Fatal("a restore Job was created on a binding that is not ready")
 				}
 				if got.Status.Restore == nil || got.Status.Restore.Phase != v1alpha1.BackupPhasePending ||
-					!strings.HasPrefix(got.Status.Restore.Message, reasonPITRArchiveBindingNotReady) {
+					!strings.HasPrefix(got.Status.Restore.Message, string(v1alpha1.PITRTokenArchiveBindingNotReady)) {
 					t.Fatalf("restore %+v, want Pending naming the binding", got.Status.Restore)
 				}
 			}
@@ -337,7 +337,7 @@ func TestRestoreReadBindingWaitOrFail(t *testing.T) {
 	}
 }
 
-// Δ17: an encrypted mysqlBackupRef restore decrypts with the explicit
+// Δ17: an encrypted backupRef restore decrypts with the explicit
 // decryption Secret, else the recorded key (which must exist), and never
 // with the profile's live Secret.
 func TestRestoreDumpKeyOrder(t *testing.T) {
@@ -345,9 +345,9 @@ func TestRestoreDumpKeyOrder(t *testing.T) {
 	defer SetOperatorImageDefaults("", "")
 	ctx := context.Background()
 	fg := fgWithEncryptedBackup()
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}}
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}}
 	seed := encryptedRefSeed("nightly-s3", v1alpha1.BackupStorageS3)
-	seed.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: "seed-dump-key", Key: pitrKeySnapshotDataKey}
+	seed.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "seed-dump-key", Key: pitrKeySnapshotDataKey}
 	dumpKey := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "seed-dump-key"}, Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("k")}}
 
 	decryptSecret := func(job *batchv1.Job) string {
@@ -371,7 +371,7 @@ func TestRestoreDumpKeyOrder(t *testing.T) {
 	}
 
 	explicit := fg.DeepCopy()
-	explicit.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "restore-pass", Key: "passphrase"}}
+	explicit.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "restore-pass", Key: "passphrase"}}
 	r, _ = newReconciler(explicit, seed)
 	job, err = r.buildRestoreJob(ctx, explicit, explicit.Spec.Sites[0].Name, "creds")
 	if err != nil {

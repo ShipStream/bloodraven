@@ -71,13 +71,14 @@ type KeyringComponentStatus struct {
 	ReadOnly bool   `json:"readOnly"`
 }
 
-// KeyringCoverage mirrors the sidecar's observed encryption coverage.
+// KeyringCoverage mirrors the sidecar's observed encryption coverage. A
+// flag is nil when the sidecar did not report it.
 type KeyringCoverage struct {
-	SystemTablespaceEncrypted bool  `json:"systemTablespaceEncrypted"`
+	SystemTablespaceEncrypted *bool `json:"systemTablespaceEncrypted,omitempty"`
 	UnencryptedTablespaces    int64 `json:"unencryptedTablespaces"`
-	RedoLogEncrypted          bool  `json:"redoLogEncrypted"`
-	UndoLogEncrypted          bool  `json:"undoLogEncrypted"`
-	BinlogEncrypted           bool  `json:"binlogEncrypted"`
+	RedoLogEncrypted          *bool `json:"redoLogEncrypted,omitempty"`
+	UndoLogEncrypted          *bool `json:"undoLogEncrypted,omitempty"`
+	BinlogEncrypted           *bool `json:"binlogEncrypted,omitempty"`
 }
 
 // KeyringStatus mirrors the sidecar's /keyring/status JSON response.

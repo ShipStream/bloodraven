@@ -49,11 +49,12 @@ kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jso
 }'
 
 echo "Degraded reason RestoreReclonePending (restoreReclones.pending non-empty) keeps the deployment API unstable until the post-restore reclones finish or a Held queue is resolved (playbook 20)."
-echo "A non-terminal plannedFailover phase, a planned-failover claim, or a hold (plannedHold non-null: automaticFailoverHeld status=True, status.plannedFailoverHold, or a ManualRecoveryRequired terminal marker) keeps it unstable (unstableReason PlannedFailover); a hold needs a human acknowledgement (playbook 38)."
+echo "A non-terminal plannedFailover phase, a planned-failover claim, or a hold (plannedHold non-null: automaticFailoverHeld status=True, status.plannedFailoverHold, or a ManualRecoveryRequired terminal marker) keeps it unstable: unstableReason PlannedFailover for a run in flight or its claim, AutomaticFailoverHeld for a hold; a hold needs a human acknowledgement (playbook 38)."
+echo "Degraded reason BootstrapFailed (a failed clone whose target does not replicate yet) keeps it unstable (unstableReason BootstrapFailed) until the site replicates or a new clone starts."
 
 echo "--- Declared deployment callers ---"
 kubectl get mysqldatabases.shipstream.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" '
-    [.items[] | select(.spec.groupRef.name == $group) |
+    [.items[] | select(.spec.failoverGroupRef.name == $group) |
     {instance: .metadata.name, deploymentClients: (.spec.deploymentClients // [])}]'
 
 echo "--- Durable deployment Lease records (not leader election) ---"

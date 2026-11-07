@@ -1,0 +1,12 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackup
+metadata:
+  name: nightly-1
+  namespace: bloodraven
+  generation: 1
+status:
+  observedGeneration: 1
+  phase: Succeeded
+  message: "backup completed"
+  conditions:
+  - {type: Ready, status: "True", reason: Succeeded, observedGeneration: 1, message: "backup completed"}

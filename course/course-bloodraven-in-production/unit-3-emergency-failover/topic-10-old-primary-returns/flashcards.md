@@ -47,7 +47,7 @@
 
 **Front:** The reclone annotation key, and its two accepted value forms
 
-**Back:** bloodraven.shipstream.io/reclone-site, valued either <siteName> or <siteName>:<divergentGtidPrefix>.
+**Back:** bloodraven.shipstream.io/reclone-site, valued <siteName>:confirm=<groupName>:uid=<groupUID> (cold) or <siteName>:confirm=<groupName>:uid=<groupUID>:gtidPrefix=<divergentGtid UUID prefix> (divergent).
 
 ---
 

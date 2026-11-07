@@ -157,7 +157,7 @@ func TestMysqlDatabasePartialRevokesConnectionFailureIsPrimaryUnavailable(t *tes
 
 func TestMysqlDatabaseDeleteDoesNotRequirePartialRevokes(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "shared", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())

@@ -38,7 +38,7 @@ func TestScheduleOfReadOnlyProfileRefused(t *testing.T) {
 	}
 
 	e := bindTestPITRArchive(t, fg, "nightly-s3")
-	e.State, e.Reason = v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveForeign
+	e.State, e.Reason = v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveForeign
 	for i := 0; i < 3; i++ {
 		if err := r.reconcileBackupSchedules(ctx, fg); err != nil {
 			t.Fatal(err)
@@ -47,8 +47,8 @@ func TestScheduleOfReadOnlyProfileRefused(t *testing.T) {
 	if cronJob() {
 		t.Fatal("read-only profile: CronJob kept")
 	}
-	if n := countEvents(rec, "Warning "+eventReasonBackupScheduleRefused); n != 1 {
-		t.Fatalf("%d %s Events, want one per change", n, eventReasonBackupScheduleRefused)
+	if n := countEvents(rec, "Warning "+v1alpha1.EventBackupScheduleRefused); n != 1 {
+		t.Fatalf("%d %s Events, want one per change", n, v1alpha1.EventBackupScheduleRefused)
 	}
 
 	fg.Status.PITRArchiveBindings = nil

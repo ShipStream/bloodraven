@@ -3,12 +3,14 @@ package v1alpha1
 import (
 	"testing"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func encFG(spec *EncryptionAtRestSpec) *MysqlFailoverGroup {
 	return &MysqlFailoverGroup{
 		Spec: MysqlFailoverGroupSpec{
-			Sites: []SiteSpec{{Name: "iad"}, {Name: "pdx"}},
+			Sites: []SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
 
 			EncryptionAtRest: spec,
 		},
@@ -51,8 +53,8 @@ func TestEffectiveKeyringDefaults(t *testing.T) {
 	if got.RetainVersions != DefaultKeyringRetainVersions {
 		t.Errorf("RetainVersions = %d, want %d", got.RetainVersions, DefaultKeyringRetainVersions)
 	}
-	if got.EscrowTimeoutSeconds != DefaultKeyringEscrowTimeoutSec {
-		t.Errorf("EscrowTimeoutSeconds = %d, want %d", got.EscrowTimeoutSeconds, DefaultKeyringEscrowTimeoutSec)
+	if got.EscrowTimeout == nil || got.EscrowTimeout.Duration != DefaultKeyringEscrowTimeout {
+		t.Errorf("EscrowTimeout = %v, want %v", got.EscrowTimeout, DefaultKeyringEscrowTimeout)
 	}
 }
 
@@ -60,10 +62,10 @@ func TestEffectiveKeyringOverrides(t *testing.T) {
 	fg := encFG(&EncryptionAtRestSpec{
 		Enabled: true,
 		Keyring: &KeyringSpec{
-			DataFileDir:          "/run/keys",
-			PluginDir:            "/usr/lib/mysql/plugin",
-			RetainVersions:       9,
-			EscrowTimeoutSeconds: 45,
+			DataFileDir:    "/run/keys",
+			PluginDir:      "/usr/lib/mysql/plugin",
+			RetainVersions: 9,
+			EscrowTimeout:  &metav1.Duration{Duration: 45 * time.Second},
 		},
 	})
 	got := fg.Spec.EffectiveKeyring()

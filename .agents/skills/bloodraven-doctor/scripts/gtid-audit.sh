@@ -125,7 +125,7 @@ site_pod() {
     local site="$1" pods
     # name<TAB>deletionTimestamp; a terminating pod still reports Running.
     pods=$(kubectl get pods -n "$NAMESPACE" \
-        -l "app.kubernetes.io/name=mysql,app.kubernetes.io/instance=$MFG_NAME,shipstream.io/site=$site" \
+        -l "app.kubernetes.io/name=mysql,app.kubernetes.io/instance=$MFG_NAME,bloodraven.shipstream.io/site=$site" \
         --field-selector=status.phase=Running \
         -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null \
         | awk -F'\t' 'NF && $2 == "" {print $1}' || true)
@@ -266,11 +266,11 @@ fi
 # Operator-side failover evidence: the set the last promoted candidate had
 # when it began accepting writes. Archived transactions outside it that were
 # committed before that promotion were lost at it.
-LAST_TARGET=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailoverTarget}' 2>/dev/null || true)
-PROMOTION_GTID=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.promotionGtidExecuted}' 2>/dev/null || true)
+LAST_TARGET=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover.target}' 2>/dev/null || true)
+PROMOTION_GTID=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover.promotionGtidExecuted}' 2>/dev/null || true)
 if [[ -n "$LAST_TARGET" ]]; then
     echo ""
-    echo "Last promotion: $LAST_TARGET at $(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || true) with gtid_executed=${PROMOTION_GTID:-unknown}"
+    echo "Last promotion: $LAST_TARGET at $(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover.time}' 2>/dev/null || true) with gtid_executed=${PROMOTION_GTID:-unknown}"
 fi
 
 if [[ ${#MANIFESTS[@]} -gt 0 ]]; then

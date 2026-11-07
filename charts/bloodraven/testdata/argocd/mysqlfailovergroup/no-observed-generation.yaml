@@ -1,0 +1,14 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: bloodraven
+  generation: 5
+status:
+  activeSite: iad
+  conditions:
+  - {type: Ready, status: "True", reason: Healthy, observedGeneration: 5, message: At least one site is writable and replication is healthy}
+  - {type: Degraded, status: "False", reason: Healthy, observedGeneration: 5, message: No cross-site alerts}
+  - {type: Bootstrapping, status: "False", reason: NotBootstrapping, observedGeneration: 5, message: No bootstrap in progress}
+  - {type: Updating, status: "False", reason: NotUpdating, observedGeneration: 5, message: No update in progress}
+  - {type: RecoveryPending, status: "False", reason: NoRecoveryPending, observedGeneration: 5, message: No old primary recovery pending}

@@ -109,9 +109,9 @@ Bloodraven releases are built from a semantic-version tag. Before creating the t
 For a future release, replace `<VERSION>` with a bare version such as `0.9.2`, then copy and paste this prompt:
 
 ```text
-Prepare and publish Bloodraven <VERSION> from main. Update the SidecarImage
-kubebuilder default in api/v1alpha1/types.go, the version and appVersion in
-charts/bloodraven/Chart.yaml, and current-release pins in user-facing docs,
+Prepare and publish Bloodraven <VERSION> from main. Update the version and
+appVersion in charts/bloodraven/Chart.yaml (the default sidecar image tag
+follows appVersion), and current-release pins in user-facing docs,
 examples, and fixtures. Do not blindly replace historical references or
 version-parsing test data.
 
@@ -150,7 +150,7 @@ graph TB
             PVC1["PVC<br/>mysql-main-iad-data"]
             SVC1["Service<br/>mysql-main-iad:3306"]
             DFST1["StatefulSet<br/>mysql-main-dragonfly-iad"]
-            DF1[("Dragonfly Master<br/>role=master<br/>traffic=enabled")]
+            DF1[("Dragonfly Master<br/>role=master<br/>traffic=true")]
             DFSVC1["Service<br/>mysql-main-dragonfly-iad:6379"]
         end
 
@@ -166,8 +166,8 @@ graph TB
         end
 
         PSVC["Service: mysql-main-primary<br/>selector: role=primary"]
-        RSVC["Service: mysql-main-replicas<br/>selector: role=replica, healthy=yes"]
-        DFSVC["Service: mysql-main-dragonfly<br/>selector: dragonfly-role=master<br/>+ dragonfly-traffic=enabled"]
+        RSVC["Service: mysql-main-replicas<br/>selector: role=replica, healthy=true"]
+        DFSVC["Service: mysql-main-dragonfly<br/>selector: dragonfly-role=master<br/>+ dragonfly-traffic=true"]
         DFPDB["PodDisruptionBudgets<br/>one per Dragonfly site"]
         CM["ConfigMap: mysql-main-config<br/>my.cnf (GTID, binlog, clone plugin)"]
     end

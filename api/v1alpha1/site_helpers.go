@@ -1,5 +1,7 @@
 package v1alpha1
 
+import "fmt"
+
 // SiteByName returns a pointer to the SiteSpec with the given name, or
 // nil if no such site exists.
 func (s *MysqlFailoverGroupSpec) SiteByName(name string) *SiteSpec {
@@ -9,6 +11,23 @@ func (s *MysqlFailoverGroupSpec) SiteByName(name string) *SiteSpec {
 		}
 	}
 	return nil
+}
+
+// MaxServerID is the largest MySQL server_id (an unsigned 32-bit value),
+// the upper bound of spec.sites[].serverID.
+const MaxServerID = 1<<32 - 1
+
+// MySQLServerID returns the site's server_id as MySQL holds it. It is the
+// one resolver every server_id consumer uses (the mysqld render and the
+// backup stamp's expected server), so none of them can narrow or wrap
+// it. It refuses a value outside 1..MaxServerID, which admission already
+// rejects, so an object that bypassed validation fails instead of
+// rendering a wrong id.
+func (s SiteSpec) MySQLServerID() (uint32, error) {
+	if s.ServerID < 1 || s.ServerID > MaxServerID {
+		return 0, fmt.Errorf("site %q: serverID %d is outside 1..%d", s.Name, s.ServerID, uint64(MaxServerID))
+	}
+	return uint32(s.ServerID), nil
 }
 
 // SiteNames returns the names of every site in spec.sites, in declared
@@ -22,7 +41,7 @@ func (s *MysqlFailoverGroupSpec) SiteNames() []string {
 }
 
 // PrimaryCandidates returns pointers to every site whose effective role
-// is primary-candidate, preserving declared order. These are the sites
+// is PrimaryCandidate, preserving declared order. These are the sites
 // eligible for auto-promotion.
 func (s *MysqlFailoverGroupSpec) PrimaryCandidates() []*SiteSpec {
 	out := make([]*SiteSpec, 0, len(s.Sites))
@@ -36,10 +55,10 @@ func (s *MysqlFailoverGroupSpec) PrimaryCandidates() []*SiteSpec {
 
 // DefaultSeedSite returns the site that should be seeded with the
 // initial primary during fresh-deploy bootstrap. When
-// spec.splitBrainPolicy.sitePriorities is set, the first primary-
-// candidate that appears in the priority list wins; otherwise the first
-// primary-candidate in declared order wins. Returns nil when there is
-// no primary-candidate — callers must guard against that (it is a CRD
+// spec.splitBrainPolicy.sitePriorities is set, the first PrimaryCandidate
+// that appears in the priority list wins; otherwise the first
+// PrimaryCandidate in declared order wins. Returns nil when there is
+// no PrimaryCandidate — callers must guard against that (it is a CRD
 // validation error in a valid spec).
 func (s *MysqlFailoverGroupSpec) DefaultSeedSite() *SiteSpec {
 	if s.SplitBrainPolicy != nil {
@@ -74,13 +93,17 @@ func (s SiteSpec) IsReadOnlyReader() bool {
 	return s.EffectiveRole() == SiteRoleReadOnly
 }
 
+// DefaultMaxLagSeconds is spec.replication.maxLagSeconds' API default.
+const DefaultMaxLagSeconds = int64(300)
+
 // EffectiveMaxLagSeconds returns the group replication threshold, including
-// the API default for objects constructed outside admission.
+// the API default for objects constructed outside admission. An explicit
+// zero is meaningful (the replica must be caught up); only nil defaults.
 func (s *MysqlFailoverGroupSpec) EffectiveMaxLagSeconds() int64 {
-	if s.Replication == nil || s.Replication.MaxLagSeconds == 0 {
-		return 300
+	if s.Replication == nil || s.Replication.MaxLagSeconds == nil {
+		return DefaultMaxLagSeconds
 	}
-	return s.Replication.MaxLagSeconds
+	return *s.Replication.MaxLagSeconds
 }
 
 // EffectiveReadOnlyMaxLagSeconds returns the reader endpoint threshold. An

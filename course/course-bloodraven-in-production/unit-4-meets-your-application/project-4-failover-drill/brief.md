@@ -23,7 +23,7 @@ You are handed four captures from `bloodraven-playground`, each a pair:
 - a **probe log** (`*.jsonl`), one line per write or read the writer attempted, with `ts`, `op`,
   `ok`, `site`, `dbHost`, `readOnly` and `error`;
 - a **drill capture** (`*-drill.json`), holding what was triggered plus the group status afterwards:
-  `activeSite`, `lastFailover`, `lastFailoverTarget`, and for a planned move
+  `activeSite`, `lastFailover` (`time`, `target`, `promotionGtidExecuted`), and for a planned move
   `status.plannedFailover`.
 
 | Capture | What happened |
@@ -61,7 +61,7 @@ same as stale; and a clean kill produces zero stale reads, because the host is g
 **TODO D — `verdict(drill)`.** Return the RPO verdict, in exactly the wording given in the
 docstring. A planned failover that reached `Succeeded` with `result.outcome: Succeeded` may claim RPO 0 by
 construction — the operator fenced the source, snapshotted its `GTID_EXECUTED` into `fence.gtidSet`, and
-promoted only once the target's set *contained* that snapshot (`status.promotionGtidExecuted` is that set). An emergency failover may claim nothing of the
+promoted only once the target's set *contained* that snapshot (`status.lastFailover.promotionGtidExecuted` is that set). An emergency failover may claim nothing of the
 kind; its RPO comes from `divergentGtid` on the old primary, which this drill did not look at.
 
 Then run the comparison, and write `starter/drill-record.md`.
@@ -118,7 +118,7 @@ DRILL RECORD — playground / emergency / iad -> pdx
 - [ ] **TODO B — split the errors your writer actually saw** — Implement `error_classes`. Codes 1290 and 1792 are read-only refusals — the write that finally fails against a demoted primary. A null code is a transport failure. Everything else is `other`, and blanket retry-everything would replay it.
   *Done when:* `brdrill.py --probe tests/fixtures/planned-probe.jsonl --drill tests/fixtures/planned-drill.json` prints the `errors` line as `readOnlyRefusal=2 connection=6 other=2`.
 
-- [ ] **TODO C — find the stale-read window** — Implement `stale_read_window`. Successful reads served by the demoted site at or after `status.lastFailover`. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the `shipstream.io/db-readonly-playground:NoExecute` taint's `tolerationSeconds` expires and the pod is evicted.
+- [ ] **TODO C — find the stale-read window** — Implement `stale_read_window`. Successful reads served by the demoted site at or after `status.lastFailover.time`. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground:NoExecute` taint's `tolerationSeconds` expires and the pod is evicted.
   *Done when:* `brdrill.py --probe tests/fixtures/planned-probe-unbounded.jsonl --drill tests/fixtures/planned-drill-unbounded.json` prints `staleReads` as `56` and `staleReadSeconds` as `27.5`, while the emergency capture prints `staleReads` as `0`.
 
 - [ ] **TODO D — say what the drill did and did not prove** — Implement `verdict`, in the exact wording from the docstring. Planned reaching `Succeeded` with `result.outcome: Succeeded` claims RPO 0 by construction — fence, snapshot `GTID_EXECUTED`, promote only on a superset. Emergency claims nothing; its RPO is a `divergentGtid` audit, which this capture does not contain.

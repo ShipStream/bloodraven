@@ -93,7 +93,7 @@ func newSimTainter(c *Cluster) *simTainter {
 	return &simTainter{c: c, taints: make(map[string]bool)}
 }
 
-func (t *simTainter) SetTaint(_ context.Context, selector, _ string, taint bool) error {
+func (t *simTainter) SetTaint(_ context.Context, selector, _, _ string, taint bool) error {
 	if t.c.OperatorDead() {
 		return errOperatorDead
 	}

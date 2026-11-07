@@ -29,10 +29,10 @@ func midEmergencyFailover(at time.Time) func(*v1alpha1.MysqlFailoverGroupStatus)
 	return func(st *v1alpha1.MysqlFailoverGroupStatus) {
 		rec := metav1.NewTime(at)
 		st.ActiveSite = ""
-		st.LastFailover, st.LastFailoverTarget = &rec, "pdx"
+		st.SetLastFailover(&rec, "pdx", st.PromotionGtidExecuted())
 		st.Sites = []v1alpha1.SiteStatus{
-			{Name: "iad", State: "unreachable"},
-			{Name: "pdx", State: "read-only", Replicating: false},
+			{Name: "iad", State: v1alpha1.SiteStateUnreachable},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationBroken},
 		}
 	}
 }
@@ -40,8 +40,8 @@ func midEmergencyFailover(at time.Time) func(*v1alpha1.MysqlFailoverGroupStatus)
 func publishedPDX(st *v1alpha1.MysqlFailoverGroupStatus) {
 	st.ActiveSite = "pdx"
 	st.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: "unreachable"},
-		{Name: "pdx", State: "writable"},
+		{Name: "iad", State: v1alpha1.SiteStateUnreachable},
+		{Name: "pdx", State: v1alpha1.SiteStateWritable},
 	}
 }
 
@@ -111,13 +111,13 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 		assertWaiting(t, h, "")
 		// The request stays until the Admitting run's validation decides
 		// it, so a cooldown deferral can still retain it (ultra K050).
-		if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; !ok {
+		if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; !ok {
 			t.Error("request annotation consumed before the Admitting run validated it")
 		}
 		h.setStatus(publishedPDX)
 		h.step()
 		assertAlreadyActive(t, h)
-		if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
+		if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 			t.Error("request annotation kept after the run ended")
 		}
 	})
@@ -162,7 +162,7 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseAdmitting)
 		h.setStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
 			rec := metav1.NewTime(h.clk.Now().Add(-time.Hour))
-			st.LastFailover, st.LastFailoverTarget = &rec, "pdx"
+			st.SetLastFailover(&rec, "pdx", st.PromotionGtidExecuted())
 		})
 		h.step()
 		if pf := h.pf(); pf.Admission != nil && pf.Admission.WaitReason == v1alpha1.PlannedFailoverWaitAuthorityUnsettled {

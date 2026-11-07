@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -68,13 +69,13 @@ func succeededBackup(name string, ns string, fgName, profile string, completed m
 			Name:      name,
 			Namespace: ns,
 			Labels: map[string]string{
-				labelFailoverGroup: fgName,
-				labelBackupProfile: profile,
-				labelManagedBy:     managerName,
+				v1alpha1.FailoverGroupLabel: fgName,
+				v1alpha1.BackupProfileLabel: profile,
+				labelManagedBy:              managerName,
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fgName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -178,15 +179,15 @@ func TestEnsureBackupLabels_StampsMissing(t *testing.T) {
 	b := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "bare"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly",
 		},
 	}
 	if !ensureBackupLabels(b) {
 		t.Error("first call should report changes")
 	}
-	if b.Labels[labelFailoverGroup] != "lion" ||
-		b.Labels[labelBackupProfile] != "nightly" ||
+	if b.Labels[v1alpha1.FailoverGroupLabel] != "lion" ||
+		b.Labels[v1alpha1.BackupProfileLabel] != "nightly" ||
 		b.Labels[labelManagedBy] != managerName {
 		t.Errorf("labels not stamped: %+v", b.Labels)
 	}
@@ -195,37 +196,122 @@ func TestEnsureBackupLabels_StampsMissing(t *testing.T) {
 	}
 }
 
-// --- resolveRetention -------------------------------------------------------
+// --- resolveRetention / pruneRetention -------------------------------------
 
-func TestResolveRetention_ShorthandKeepsCountPlusFloor(t *testing.T) {
-	p := &v1alpha1.BackupProfile{Retention: 5}
-	count, age, min, maxFail := resolveRetention(p)
-	if count != 5 || age != 0 || min != 1 || maxFail != int32(maxFailedRetention) {
-		t.Errorf("got (%d, %v, %d, %d)", count, age, min, maxFail)
+func TestResolveRetention(t *testing.T) {
+	day := 24 * time.Hour
+	for _, tc := range []struct {
+		name    string
+		profile *v1alpha1.BackupProfile
+		want    backupRetentionPolicy
+	}{
+		{name: "missing profile prunes no success", profile: nil,
+			want: backupRetentionPolicy{keepFailed: defaultBackupKeepFailed}},
+		{name: "omitted fields take the defaults", profile: &v1alpha1.BackupProfile{},
+			want: backupRetentionPolicy{pruneSucceeded: true, keepLast: defaultBackupKeepLast, keepFailed: defaultBackupKeepFailed}},
+		{name: "every field set", profile: &v1alpha1.BackupProfile{Retention: v1alpha1.BackupRetention{
+			KeepLast: 3, KeepWithinDays: new(int32(7)), KeepFailed: new(int32(4))}},
+			want: backupRetentionPolicy{pruneSucceeded: true, keepLast: 3, keepWithin: 7 * day, keepFailed: 4}},
+		// An explicit 0 is kept, never rewritten to the default (A-37, F-26).
+		{name: "explicit keepFailed 0 keeps none", profile: &v1alpha1.BackupProfile{Retention: v1alpha1.BackupRetention{
+			KeepLast: 1, KeepFailed: new(int32(0))}},
+			want: backupRetentionPolicy{pruneSucceeded: true, keepLast: 1, keepFailed: 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveRetention(tc.profile); got != tc.want {
+				t.Fatalf("resolveRetention = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestResolveRetention_PolicyOverridesShorthand(t *testing.T) {
-	p := &v1alpha1.BackupProfile{
-		Retention: 99,
-		RetentionPolicy: &v1alpha1.RetentionPolicy{
-			Count: 3, MaxAgeDays: 7, MinKeep: 2, MaxFailedKeep: 4,
-		},
-	}
-	count, age, min, maxFail := resolveRetention(p)
-	if count != 3 || age != 7*24*time.Hour || min != 2 || maxFail != 4 {
-		t.Errorf("got (%d, %v, %d, %d)", count, age, min, maxFail)
-	}
+// failedBackup is a Failed MysqlBackup of fgName/profile that completed at
+// completed.
+func failedBackup(name, fgName, profile string, completed metav1.Time) v1alpha1.MysqlBackup {
+	b := succeededBackup(name, "ns", fgName, profile, completed)
+	b.Status.Phase = v1alpha1.BackupPhaseFailed
+	return b
 }
 
-func TestResolveRetention_NilProfile(t *testing.T) {
-	count, age, min, maxFail := resolveRetention(nil)
-	if count != 0 || age != 0 || min != 0 || maxFail != int32(maxFailedRetention) {
-		t.Errorf("got (%d, %v, %d, %d)", count, age, min, maxFail)
+// TestPruneRetention_KeepIfAny is the A-55 table: a successful backup is
+// deleted only when it is outside keepLast and older than keepWithinDays;
+// failed backups are capped by keepFailed, where an explicit 0 keeps none
+// and an omitted field means the default.
+func TestPruneRetention_KeepIfAny(t *testing.T) {
+	h, d := time.Hour, 24*time.Hour
+	ages := func(n int, step time.Duration) []time.Duration {
+		// Starts one step back: a backup that completed within
+		// terminalRetentionGrace is kept whatever the counts say.
+		out := make([]time.Duration, n)
+		for i := range out {
+			out[i] = time.Duration(i+1) * step
+		}
+		return out
+	}
+	names := func(prefix string, n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("%s-%02d", prefix, i)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name          string
+		retention     *v1alpha1.BackupRetention // nil: the profile is gone
+		succeeded     []time.Duration
+		failed        []time.Duration
+		wantSucceeded int // how many of the newest are kept
+		wantFailed    int
+	}{
+		{name: "omitted: keepLast 7, keepFailed 10", retention: &v1alpha1.BackupRetention{},
+			succeeded: ages(9, h), failed: ages(12, h), wantSucceeded: 7, wantFailed: 10},
+		{name: "keepLast only", retention: &v1alpha1.BackupRetention{KeepLast: 2},
+			succeeded: ages(5, h), wantSucceeded: 2},
+		{name: "age keeps beyond the count", retention: &v1alpha1.BackupRetention{KeepLast: 1, KeepWithinDays: new(int32(7))},
+			succeeded: []time.Duration{h, 2 * d, 10 * d, 20 * d}, wantSucceeded: 2},
+		{name: "count keeps beyond the age", retention: &v1alpha1.BackupRetention{KeepLast: 3, KeepWithinDays: new(int32(1))},
+			succeeded: []time.Duration{2 * d, 3 * d, 4 * d, 5 * d}, wantSucceeded: 3},
+		{name: "keepLast 0 from Go means the default", retention: &v1alpha1.BackupRetention{KeepLast: 0},
+			succeeded: ages(8, h), wantSucceeded: 7},
+		{name: "explicit keepFailed 0 keeps none", retention: &v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))},
+			succeeded: ages(2, h), failed: ages(3, h), wantSucceeded: 2, wantFailed: 0},
+		{name: "keepFailed 2", retention: &v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(2))},
+			failed: ages(5, h), wantFailed: 2},
+		{name: "missing profile keeps every success", retention: nil,
+			succeeded: ages(9, d), failed: ages(12, h), wantSucceeded: 9, wantFailed: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			fg := fgWithBackup()
+			profile := "nightly-s3"
+			if tc.retention != nil {
+				fg.Spec.Backup.Profiles[0].Retention = *tc.retention
+			} else {
+				profile = "removed"
+			}
+			var objs []client.Object
+			objs = append(objs, fg)
+			sNames, fNames := names("s", len(tc.succeeded)), names("f", len(tc.failed))
+			for i, age := range tc.succeeded {
+				b := succeededBackup(sNames[i], "ns", fg.Name, profile, metav1.NewTime(now.Add(-age)))
+				objs = append(objs, &b)
+			}
+			for i, age := range tc.failed {
+				b := failedBackup(fNames[i], fg.Name, profile, metav1.NewTime(now.Add(-age)))
+				objs = append(objs, &b)
+			}
+			r, _ := newBackupReconciler(t, objs...)
+			trigger := v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: "trigger", Namespace: "ns"},
+				Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: profile}}
+			if _, err := r.pruneRetention(context.Background(), &trigger); err != nil {
+				t.Fatalf("pruneRetention: %v", err)
+			}
+			// Both buckets are named in age order, newest first.
+			want := append(append([]string(nil), sNames[:tc.wantSucceeded]...), fNames[:tc.wantFailed]...)
+			assertEqualSet(t, listBackupNames(t, r), want)
+		})
 	}
 }
-
-// --- pruneSuccessful --------------------------------------------------------
 
 func makeBackups(t *testing.T, now time.Time, ages ...time.Duration) []v1alpha1.MysqlBackup {
 	t.Helper()
@@ -240,48 +326,6 @@ func makeBackups(t *testing.T, now time.Time, ages ...time.Duration) []v1alpha1.
 	return out
 }
 
-func TestPruneSuccessful_CountWindow(t *testing.T) {
-	now := time.Now()
-	backups := makeBackups(t, now, 0, time.Hour, 2*time.Hour, 3*time.Hour, 4*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 2, 0, 0); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b"})
-}
-
-func TestPruneSuccessful_AgeWindow(t *testing.T) {
-	now := time.Now()
-	// b-a: 1h old, b-b: 2d old, b-c: 10d old
-	backups := makeBackups(t, now, time.Hour, 48*time.Hour, 240*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 0, 7*24*time.Hour, 0); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b"})
-}
-
-func TestPruneSuccessful_MinKeepFloor(t *testing.T) {
-	now := time.Now()
-	// All older than 1-day window, but minKeep=2 protects the two newest.
-	backups := makeBackups(t, now, 48*time.Hour, 72*time.Hour, 96*time.Hour, 120*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 0, 24*time.Hour, 2); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b"})
-}
-
-func TestPruneSuccessful_DisabledWhenBothZero(t *testing.T) {
-	now := time.Now()
-	backups := makeBackups(t, now, time.Hour, 2*time.Hour, 3*time.Hour)
-	r, _ := newBackupReconciler(t, asClientObjects(backups)...)
-	if err := r.pruneSuccessful(context.Background(), backups, 0, 0, 0); err != nil {
-		t.Fatalf("pruneSuccessful: %v", err)
-	}
-	assertEqualSet(t, listBackupNames(t, r), []string{"b-a", "b-b", "b-c"})
-}
-
 // --- pruneRetention on unlabelled CRs ---------------------------------------
 
 func TestPruneRetention_WorksForUnlabelledAdHocBackups(t *testing.T) {
@@ -291,7 +335,7 @@ func TestPruneRetention_WorksForUnlabelledAdHocBackups(t *testing.T) {
 		return &v1alpha1.MysqlBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
 			Spec: v1alpha1.MysqlBackupSpec{
-				FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 				ProfileName:      "nightly-s3",
 			},
 			Status: v1alpha1.MysqlBackupStatus{
@@ -303,12 +347,12 @@ func TestPruneRetention_WorksForUnlabelledAdHocBackups(t *testing.T) {
 	b1 := mk("adhoc-1", 0)
 	b2 := mk("adhoc-2", time.Hour)
 	b3 := mk("adhoc-3", 2*time.Hour)
-	fg := fgWithBackup() // profile "nightly-s3" has Retention=5 by default in fixture
-	fg.Spec.Backup.Profiles[0].Retention = 2
+	fg := fgWithBackup() // profile "nightly-s3" keeps 5 in the fixture
+	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 2}
 	r, _ := newBackupReconciler(t, fg, b1, b2, b3)
 
 	trigger := *b1
-	if err := r.pruneRetention(context.Background(), &trigger); err != nil {
+	if _, err := r.pruneRetention(context.Background(), &trigger); err != nil {
 		t.Fatalf("pruneRetention: %v", err)
 	}
 	assertEqualSet(t, listBackupNames(t, r), []string{"adhoc-1", "adhoc-2"})
@@ -378,21 +422,21 @@ func TestRestoreTargetSite(t *testing.T) {
 		{
 			name: "fresh deploy waits even when the seed is observed",
 			status: v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "read-only"},
+				{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly},
 			}},
 			wantSite: "iad",
 		},
 		{
 			name: "writable active site is ready",
 			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "writable"},
+				{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateWritable},
 			}},
 			wantSite: "pdx", wantReady: true,
 		},
 		{
 			name: "seed published but not yet observed writable waits",
 			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"}, {Name: "pdx", State: "read-only"},
+				{Name: "iad", State: v1alpha1.SiteStateWritable}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly},
 			}},
 			wantSite: "pdx",
 		},
@@ -404,7 +448,7 @@ func TestRestoreTargetSite(t *testing.T) {
 		{
 			name: "unreachable active site refuses",
 			status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "read-only"}, {Name: "pdx", State: "unreachable"},
+				{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateUnreachable},
 			}},
 			wantSite: "pdx", wantRefuse: true,
 		},
@@ -554,9 +598,9 @@ func TestReconcileBackupAssets_PITREnabledWithValidProfile(t *testing.T) {
 func fgWithRetrySpec(maxAttempts, initial int32) *v1alpha1.MysqlFailoverGroup {
 	fg := fgWithBackup()
 	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{
-		MaxAttempts:           maxAttempts,
-		InitialBackoffSeconds: initial,
-		MaxBackoffSeconds:     1800,
+		MaxAttempts:    maxAttempts,
+		InitialBackoff: &metav1.Duration{Duration: time.Duration(initial) * time.Second},
+		MaxBackoff:     &metav1.Duration{Duration: 30 * time.Minute},
 	}
 	return fg
 }
@@ -569,12 +613,12 @@ func TestMaybeScheduleRetry_CreatesRetryCRWhenBackoffElapsed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "lion-nightly-r1", Namespace: "ns", UID: "failed-backup-uid",
 			Labels: map[string]string{
-				labelFailoverGroup:  "lion",
-				labelBackupSchedule: sched.Name,
+				v1alpha1.FailoverGroupLabel:  "lion",
+				v1alpha1.BackupScheduleLabel: sched.Name,
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      sched.ProfileName,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -605,10 +649,10 @@ func TestMaybeScheduleRetry_NoRetryWhenMaxAttemptsReached(t *testing.T) {
 	failed := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "lion-nightly-r2", Namespace: "ns",
-			Labels: map[string]string{labelBackupSchedule: sched.Name, labelFailoverGroup: "lion"},
+			Labels: map[string]string{v1alpha1.BackupScheduleLabel: sched.Name, v1alpha1.FailoverGroupLabel: "lion"},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      sched.ProfileName,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -639,10 +683,10 @@ func TestMaybeScheduleRetry_ReturnsWaitWhenBackoffPending(t *testing.T) {
 	failed := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "lion-nightly-r1", Namespace: "ns",
-			Labels: map[string]string{labelBackupSchedule: sched.Name, labelFailoverGroup: "lion"},
+			Labels: map[string]string{v1alpha1.BackupScheduleLabel: sched.Name, v1alpha1.FailoverGroupLabel: "lion"},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      sched.ProfileName,
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -671,23 +715,23 @@ func TestMysqlBackupReconciler_StampsLabels(t *testing.T) {
 	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
 		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: "writable"},
-			{Name: "pdx", State: "read-only", Replicating: true},
+			{Name: "iad", State: v1alpha1.SiteStateWritable},
+			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 		},
 	}
 	mb := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "bare-adhoc", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "bare-adhoc")
 	var got v1alpha1.MysqlBackup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "bare-adhoc", Namespace: "ns"}, &got)
-	if got.Labels[labelFailoverGroup] != "lion" ||
-		got.Labels[labelBackupProfile] != "nightly-s3" ||
+	if got.Labels[v1alpha1.FailoverGroupLabel] != "lion" ||
+		got.Labels[v1alpha1.BackupProfileLabel] != "nightly-s3" ||
 		got.Labels[labelManagedBy] != managerName {
 		t.Errorf("labels not stamped: %+v", got.Labels)
 	}
@@ -701,7 +745,7 @@ func TestEmitTerminalMetrics_SuccessUpdatesGauges(t *testing.T) {
 	end := metav1.NewTime(time.Now())
 	b := &v1alpha1.MysqlBackup{
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -722,7 +766,7 @@ func TestEmitTerminalMetrics_FailureDoesNotSetSuccessGauge(t *testing.T) {
 	end := metav1.NewTime(time.Now())
 	b := &v1alpha1.MysqlBackup{
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
@@ -742,12 +786,11 @@ func TestBuildCleanupJob_S3_SetsStorageTypeEnvAndMountsAWSCreds(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-done", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Location:    "lion/lion-done/",
-			StorageType: v1alpha1.BackupStorageS3,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/lion-done/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -791,12 +834,11 @@ func TestBuildCleanupJob_PVC_AttachesVolumeAndSetsMountPath(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-local", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "daily-local",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
-			Location:    "/backups/lion-local",
-			StorageType: v1alpha1.BackupStoragePVC,
+			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStoragePVC, "/backups/lion-local"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -828,7 +870,7 @@ func TestBuildCleanupJob_NoLocation_Errors(t *testing.T) {
 	backup := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-none", Namespace: "ns"},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -850,7 +892,8 @@ func TestFinalize_NoLocationIsImmediatelyDone(t *testing.T) {
 
 func TestFinalize_MissingFailoverGroup_ReleasesWithWarning(t *testing.T) {
 	b := backupCR("orphan", "ghost", "nightly-s3")
-	b.Status.Location = "ghost/orphan/"
+	b.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	setTestArtifactLocation(b, "ghost/orphan/")
 	r, _ := newBackupReconciler(t, b)
 	done, _, err := r.finalize(context.Background(), b)
 	if err != nil || !done {
@@ -873,9 +916,8 @@ func TestFinalize_CreatesCleanupJobAndWaits(t *testing.T) {
 	t.Cleanup(func() { SetOperatorImageDefaults("", "") })
 	fg := fgWithBackup()
 	b := backupCR("done", "lion", "nightly-s3")
-	b.Status.Location = "lion/done/"
-	b.Status.StorageType = v1alpha1.BackupStorageS3
-	b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{Location: "lion/done/", Bucket: "bloodraven-backups"}
+	b.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "lion/done/", Bucket: "bloodraven-backups"}
 	// No MySQL credentials Secret: cleanup only talks to storage.
 	r, c := newBackupReconciler(t, fg, b)
 
@@ -905,5 +947,89 @@ func TestFinalize_CreatesCleanupJobAndWaits(t *testing.T) {
 	done, _, err = r.finalize(context.Background(), b)
 	if err != nil || !done {
 		t.Errorf("second pass: want (true, nil), got (%v, %v)", done, err)
+	}
+}
+
+// TestPruneRetention_KeepsScheduleLatestFailed (O-05): keepFailed 0 deletes
+// failed backups, but never one that is still its schedule's latest: the
+// operator retry (spec.backup.retry) is created from it, and the schedule
+// status reports it. Once a newer backup of the schedule exists (its retry,
+// or the next run), it is pruned like any other.
+func TestPruneRetention_KeepsScheduleLatestFailed(t *testing.T) {
+	now := time.Now()
+	fg := fgWithBackup()
+	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))}
+	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{
+		{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"},
+		{Name: "hourly", ProfileName: "nightly-s3", Schedule: "0 * * * *"},
+	}
+	scheduled := func(b v1alpha1.MysqlBackup, sched string, created time.Duration) *v1alpha1.MysqlBackup {
+		b.Labels[v1alpha1.BackupScheduleLabel] = sched
+		b.CreationTimestamp = metav1.NewTime(now.Add(-created).Truncate(time.Second))
+		return &b
+	}
+	objs := []client.Object{fg,
+		// nightly: an old failure, then a success, then the failure a
+		// retry is due for.
+		scheduled(failedBackup("nightly-old-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-47*time.Hour))), "nightly", 48*time.Hour),
+		scheduled(succeededBackup("nightly-ok", "ns", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-23*time.Hour))), "nightly", 24*time.Hour),
+		scheduled(failedBackup("nightly-latest-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Minute))), "nightly", time.Hour),
+		// hourly: its failure already has a newer attempt (the retry).
+		scheduled(failedBackup("hourly-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-50*time.Minute))), "hourly", time.Hour),
+		scheduled(succeededBackup("hourly-retry", "ns", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-10*time.Minute))), "hourly", 30*time.Minute),
+	}
+	adhoc := failedBackup("adhoc-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Hour)))
+	// N-09: the latest backup of a schedule the group no longer names has
+	// no retry and no rollup entry, so it is pruned like any other.
+	retired := scheduled(failedBackup("retired-latest-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-2*time.Hour))), "weekly", 3*time.Hour)
+	objs = append(objs, &adhoc, retired)
+	r, _ := newBackupReconciler(t, objs...)
+	trigger := v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: "trigger", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"}}
+	if _, err := r.pruneRetention(context.Background(), &trigger); err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	assertEqualSet(t, listBackupNames(t, r), []string{"nightly-ok", "nightly-latest-failed", "hourly-retry"})
+}
+
+// N-08: keep-none (keepFailed: 0) must not delete a backup in its own
+// terminal pass, before `kubectl bloodraven backup --wait` reads the
+// verdict. A Failed backup is kept for terminalRetentionGrace after it
+// completed; the pass asks to be requeued when the grace ends, and the
+// pass after it prunes the backup.
+func TestPruneRetention_KeepNoneWaitsOutTerminalGrace(t *testing.T) {
+	now := time.Now()
+	fg := fgWithBackup()
+	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))}
+	justFailed := failedBackup("adhoc-just-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-10*time.Second)))
+	oldFailed := failedBackup("adhoc-old-failed", fg.Name, "nightly-s3", metav1.NewTime(now.Add(-time.Hour)))
+	r, c := newBackupReconciler(t, fg, &justFailed, &oldFailed)
+
+	requeue, err := r.pruneRetention(context.Background(), &justFailed)
+	if err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	assertEqualSet(t, listBackupNames(t, r), []string{"adhoc-just-failed"})
+	if requeue <= 0 || requeue > terminalRetentionGrace {
+		t.Fatalf("requeue = %s, want the rest of the %s grace", requeue, terminalRetentionGrace)
+	}
+
+	// The grace has ended: the requeued pass prunes it.
+	var b v1alpha1.MysqlBackup
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(&justFailed), &b); err != nil {
+		t.Fatal(err)
+	}
+	ended := metav1.NewTime(now.Add(-terminalRetentionGrace - time.Second))
+	b.Status.CompletionTime = &ended
+	if err := c.Status().Update(context.Background(), &b); err != nil {
+		t.Fatal(err)
+	}
+	requeue, err = r.pruneRetention(context.Background(), &b)
+	if err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	assertEqualSet(t, listBackupNames(t, r), nil)
+	if requeue != 0 {
+		t.Fatalf("requeue = %s after the grace, want 0", requeue)
 	}
 }

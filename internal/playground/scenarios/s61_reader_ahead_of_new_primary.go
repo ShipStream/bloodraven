@@ -104,7 +104,7 @@ func scenario61ReaderAheadOfNewPrimary() runner.Scenario {
 							PodSelector: mysqlPodSelector(env.FG, st.topo.standby),
 							PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
 							Egress: []networkingv1.NetworkPolicyEgressRule{{
-								To: peersExcept("shipstream.io/site", []string{st.topo.active}, cidrs),
+								To: peersExcept(v1alpha1.SiteLabel, []string{st.topo.active}, cidrs),
 							}},
 						},
 					}

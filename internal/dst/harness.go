@@ -695,10 +695,10 @@ func (r *trialRunner) checkBaseline(poll int, st controller.StatusResponse) {
 	ok := st.ActiveSite == r.trial.SiteNames[0]
 	for _, s := range st.Sites {
 		if s.Name == r.trial.SiteNames[0] {
-			if s.State != "writable" {
+			if s.State != v1alpha1.SiteStateWritable {
 				ok = false
 			}
-		} else if s.State != "read-only" {
+		} else if s.State != v1alpha1.SiteStateReadOnly {
 			ok = false
 		}
 	}
@@ -793,7 +793,7 @@ func (r *trialRunner) signature(res TrialResult) string {
 
 	endActive := ""
 	if res.FinalSnapshot != nil {
-		endActive = res.FinalSnapshot.RecoveryState
+		endActive = string(res.FinalSnapshot.RecoveryState)
 	}
 	b = append(b, fmt.Sprintf("endRecovery=%s;endActive=%v;", endActive, res.FinalStatus.ActiveSite != "")...)
 	if r.pl != nil {

@@ -79,7 +79,7 @@ else:
             record("renew", kind, status, body)
             if status == 409:
                 if (body.get("error") != "revoked"
-                        or body.get("reason") not in ("topology_changed", "operator_revoked")
+                        or body.get("reason") not in ("TopologyChanged", "OperatorRevoked")
                         or body.get("topologyGeneration", -1) <= generation):
                     raise SystemExit(1)
                 fenced.add(kind)

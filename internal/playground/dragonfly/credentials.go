@@ -22,14 +22,11 @@ func LoadPassword(ctx context.Context, k *pgkube.Client, namespace string) (stri
 	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled || mfg.Spec.Dragonfly.Auth == nil {
 		return "", nil
 	}
-	auth := mfg.Spec.Dragonfly.Auth
-	key := auth.PasswordKey
-	if key == "" {
-		key = "password"
-	}
-	secret, err := k.Kubernetes.CoreV1().Secrets(namespace).Get(ctx, auth.SecretName, metav1.GetOptions{})
+	ref := mfg.Spec.Dragonfly.Auth.PasswordSecretKeyRef
+	key := ref.KeyOrDefault()
+	secret, err := k.Kubernetes.CoreV1().Secrets(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("get dragonfly auth secret %s: %w", auth.SecretName, err)
+		return "", fmt.Errorf("get dragonfly auth secret %s: %w", ref.Name, err)
 	}
 	if v, ok := secret.Data[key]; ok {
 		return string(v), nil
@@ -37,5 +34,5 @@ func LoadPassword(ctx context.Context, k *pgkube.Client, namespace string) (stri
 	if v, ok := secret.StringData[key]; ok {
 		return v, nil
 	}
-	return "", fmt.Errorf("key %s not found in dragonfly auth secret %s", key, auth.SecretName)
+	return "", fmt.Errorf("key %s not found in dragonfly auth secret %s", key, ref.Name)
 }

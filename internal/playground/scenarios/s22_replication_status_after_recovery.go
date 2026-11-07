@@ -18,7 +18,7 @@ func init() {
 // project wishlist asks for in WISHLIST.md item #36. The bug: after
 // any operator-driven recovery (emergency failover + auto-recover,
 // auto-fail-back, "no GTID divergence" rejoin), the CR's
-// status.sites[].replicating field for the post-recovery read-only
+// status.sites[].replication field for the post-recovery read-only
 // site stops being populated and stays at its zero value for the rest
 // of the operator lifecycle, even though the sidecar /status endpoint
 // correctly reports replica_io_running && replica_sql_running. Only
@@ -26,14 +26,14 @@ func init() {
 //
 // This regression matters operationally because
 // internal/controller/planned_failover.go reads
-// `targetStatus.Replicating` directly as a safety check, so any
+// `targetStatus.Replication.Running()` directly as a safety check, so any
 // planned switchover after the first chaos event in the same operator
 // lifecycle is rejected as TargetUnhealthy even though replication is
 // fine on the wire.
 //
 // The scenario asserts the contract the wishlist ratifies: within 30s
 // of the cluster reconverging after a clean primary kill, the read-
-// only site's status.sites[].replicating MUST be true. The 30s window
+// only site's status.sites[].replication MUST be Healthy or Lagging. The 30s window
 // is chosen to be more generous than the topology-poll cadence
 // (~2s × failureThreshold + the enrichment loop's tick) so any
 // genuine "field will populate, just slowly" recovery still passes.
@@ -43,9 +43,9 @@ func init() {
 func scenario22ReplicationStatusAfterRecovery() runner.Scenario {
 	return runner.Scenario{
 		ID:    "22-replication-status-after-recovery",
-		Title: "CR status.sites[].replicating populates within 30s after recovery",
+		Title: "CR status.sites[].replication populates within 30s after recovery",
 		Hypothesis: "After a clean primary kill and old-primary auto-recovery, the read-only site's " +
-			"status.sites[].replicating becomes true within 30s — without requiring an operator restart. " +
+			"status.sites[].replication becomes Healthy or Lagging within 30s — without requiring an operator restart. " +
 			"This is the contract that planned_failover.go's TargetUnhealthy check depends on.",
 		Risk:     "low",
 		DocLink:  "playground/chaos-scenarios.md#22-replication-status-after-recovery",
@@ -103,7 +103,7 @@ func s22ObserveFailoverFlip() runner.Step {
 // s22ObserveRecovery scales the original primary back up and waits
 // for the cluster to reach a healthy N-site state — exactly one
 // writable, every follower read-only, no RecoveryBlocked. We do not
-// inspect the .replicating field here; that's the next step's job.
+// inspect the .replication field here; that's the next step's job.
 // The point of this step is to land at the moment the operator
 // considers the recovery finished, so we can time the 30s window
 // from a stable reference.
@@ -124,9 +124,9 @@ func s22ObserveRecovery() runner.Step {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
@@ -155,23 +155,23 @@ func s22ObserveRecovery() runner.Step {
 
 // s22VerifyCRReplicatingTrue is the regression assertion: within 30s
 // of the post-recovery convergence stamp, the read-only site's
-// status.sites[].replicating field MUST become true. We poll the CR
+// status.sites[].replication field MUST become Healthy or Lagging. We poll the CR
 // rather than relying on a single snapshot because the operator's
 // status enrichment runs on a cadence; the wishlist's 30s window is
 // what we promise users.
 func s22VerifyCRReplicatingTrue() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "status.sites[read-only].replicating == true within 30s of recovery",
+		Name:  "status.sites[read-only].replication is Healthy or Lagging within 30s of recovery",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"read-only site status.replicating becomes true",
+				"read-only site status.replication becomes Healthy or Lagging",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var replica *v1alpha1.SiteStatus
 					for i := range mfg.Status.Sites {
-						if mfg.Status.Sites[i].State == "read-only" {
+						if mfg.Status.Sites[i].State == v1alpha1.SiteStateReadOnly {
 							replica = &mfg.Status.Sites[i]
 							break
 						}
@@ -179,9 +179,9 @@ func s22VerifyCRReplicatingTrue() runner.Step {
 					if replica == nil {
 						return false, "no read-only site present", nil
 					}
-					msg := fmt.Sprintf("site=%s state=%s replicating=%v gtidExecuted=%q",
-						replica.Name, replica.State, replica.Replicating, replica.GtidExecuted)
-					return replica.Replicating, msg, nil
+					msg := fmt.Sprintf("site=%s state=%s replication=%s gtidExecuted=%q",
+						replica.Name, replica.State, replica.Replication, replica.GtidExecuted)
+					return replica.Replication.Running(), msg, nil
 				},
 			)
 			return err
@@ -207,7 +207,7 @@ func s22VerifySidecarReplicatingTrue() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "read-only" {
+				if s.State == v1alpha1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}

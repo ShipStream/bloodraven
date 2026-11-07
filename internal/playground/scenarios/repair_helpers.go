@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -44,7 +44,7 @@ func mysqlPodSelector(fg, site string) metav1.LabelSelector {
 	return metav1.LabelSelector{MatchLabels: map[string]string{
 		"app.kubernetes.io/name":     "mysql",
 		"app.kubernetes.io/instance": fg,
-		"shipstream.io/site":         site,
+		v1alpha1.SiteLabel:           site,
 	}}
 }
 
@@ -84,14 +84,14 @@ func repairDivergentSites(ctx context.Context, env *runner.Env, timeout time.Dur
 		if err != nil {
 			return err
 		}
-		boot := findCondition(mfg.Status.Conditions, "Bootstrapping")
-		// A failed bootstrap also reports Status=True (Reason=Failed).
-		cloning := boot != nil && boot.Status == metav1.ConditionTrue && boot.Reason != "Failed"
-		_, pending := mfg.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]
+		// Bootstrapping is True only while a clone runs; a failed one is
+		// False/BootstrapFailed and does not block the next request.
+		cloning := bootstrapRunning(findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping))
+		_, pending := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]
 		if !cloning && !pending && mfg.Status.ActiveSite != "" {
 			if site, value := nextBlockedSite(mfg, requested); site != "" {
 				if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-					"bloodraven.shipstream.io/reclone-site", value); err != nil {
+					v1alpha1.RecloneAnnotation, value); err != nil {
 					return fmt.Errorf("annotate repair reclone %s: %w", value, err)
 				}
 				requested[site] = true
@@ -119,10 +119,20 @@ func nextBlockedSite(mfg *v1alpha1.MysqlFailoverGroup, requested map[string]bool
 		if !blocked {
 			continue
 		}
-		if gtid := strings.TrimSpace(s.DivergentGtid); len(gtid) >= 8 {
-			return s.Name, s.Name + ":" + gtid[:8]
-		}
-		return s.Name, s.Name + ":confirm=" + mfg.Name
+		// The operator's own form (confirm=, uid= and, for a divergent
+		// site, gtidPrefix= with the source UUID).
+		return s.Name, controller.RecloneAnnotationValue(mfg, s.Name)
 	}
 	return "", ""
+}
+
+// recloneValueFor reads the group and returns the operator's reclone-site
+// value for site (controller.RecloneAnnotationValue): confirm= and uid=,
+// plus gtidPrefix= when the site has diverged.
+func recloneValueFor(ctx context.Context, env *runner.Env, site string) (string, error) {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return "", fmt.Errorf("get MFG for the reclone value: %w", err)
+	}
+	return controller.RecloneAnnotationValue(mfg, site), nil
 }

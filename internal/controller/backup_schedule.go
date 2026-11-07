@@ -67,10 +67,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
 		pitr := fg.Spec.Backup.PITR
 		if pitr.ProfileName == "" {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupPITRInvalid",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBackupPITRInvalid,
 				"spec.backup.pitr.enabled=true but profileName is empty; binlog archival disabled")
 		} else if findProfile(fg, pitr.ProfileName) == nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupPITRInvalid",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBackupPITRInvalid,
 				"spec.backup.pitr.profileName=%q does not match any entry in spec.backup.profiles[]; "+
 					"binlog archival disabled", pitr.ProfileName)
 		}
@@ -89,7 +89,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 				continue
 			}
 			if err := r.validateEncryptionSecret(ctx, fg, p); err != nil {
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupEncryptionInvalid",
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBackupEncryptionInvalid,
 					"profile %q: %s", p.Name, err.Error())
 			}
 		}
@@ -128,12 +128,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 // surfaces them as BackupEncryptionInvalid events rather than blocking
 // reconciliation.
 func (r *MysqlFailoverGroupReconciler) validateEncryptionSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.BackupProfile) error {
-	ref := profile.Encryption.PassphraseSecret
+	ref := profile.Encryption.PassphraseSecretKeyRef
 	key := ref.PassphraseSecretKeyOrDefault()
 	var s corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: ref.Name}, &s); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("encryption.passphraseSecret Secret %q not found in namespace %q",
+			return fmt.Errorf("encryption.passphraseSecretKeyRef Secret %q not found in namespace %q",
 				ref.Name, fg.Namespace)
 		}
 		return fmt.Errorf("get encryption Secret: %w", err)
@@ -176,7 +176,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupScriptsConfigMap(ctx conte
 		}
 		cm.Labels[labelAppName] = "mysql-backup"
 		cm.Labels[labelInstance] = fg.Name
-		cm.Labels[labelFailoverGroup] = fg.Name
+		cm.Labels[v1alpha1.FailoverGroupLabel] = fg.Name
 		cm.Labels[labelManagedBy] = managerName
 		cm.Data = map[string]string{
 			"dump.py":    BackupDumpScript(),
@@ -210,8 +210,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileOwnedBackupPVC(ctx context.Conte
 		}
 		pvc.Labels[labelAppName] = "mysql-backup"
 		pvc.Labels[labelInstance] = fg.Name
-		pvc.Labels[labelFailoverGroup] = fg.Name
-		pvc.Labels[labelBackupProfile] = profile.Name
+		pvc.Labels[v1alpha1.FailoverGroupLabel] = fg.Name
+		pvc.Labels[v1alpha1.BackupProfileLabel] = profile.Name
 		pvc.Labels[labelManagedBy] = managerName
 
 		// PVC spec is largely immutable — only set on creation.
@@ -277,8 +277,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupSchedules(ctx context.Cont
 	if err := r.List(ctx, &existing,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			labelFailoverGroup: fg.Name,
-			labelResourceKind:  "backup-schedule",
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			v1alpha1.ResourceLabel:      "backup-schedule",
 		},
 	); err != nil {
 		return fmt.Errorf("list cronjobs: %w", err)
@@ -305,7 +305,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 	// CronJob but emit a warning — the scheduled pod will fail fast
 	// and make the misconfiguration visible via MysqlBackup phase.
 	if findProfile(fg, sched.ProfileName) == nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupScheduleInvalid",
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBackupScheduleInvalid,
 			"schedule %q references unknown profile %q", sched.Name, sched.ProfileName)
 	}
 
@@ -332,24 +332,22 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 		}
 
 		labels := map[string]string{
-			labelAppName:        "mysql-backup",
-			labelInstance:       fg.Name,
-			labelFailoverGroup:  fg.Name,
-			labelBackupProfile:  sched.ProfileName,
-			labelBackupSchedule: sched.Name,
-			labelResourceKind:   "backup-schedule",
-			labelManagedBy:      managerName,
+			labelAppName:                 "mysql-backup",
+			labelInstance:                fg.Name,
+			v1alpha1.FailoverGroupLabel:  fg.Name,
+			v1alpha1.BackupProfileLabel:  sched.ProfileName,
+			v1alpha1.BackupScheduleLabel: sched.Name,
+			v1alpha1.ResourceLabel:       "backup-schedule",
+			labelManagedBy:               managerName,
 		}
 		cj.Labels = labels
 
 		concurrency := batchv1.ForbidConcurrent
 		switch sched.ConcurrencyPolicy {
-		case "Allow":
+		case batchv1.AllowConcurrent:
 			concurrency = batchv1.AllowConcurrent
-		case "Replace":
+		case batchv1.ReplaceConcurrent:
 			concurrency = batchv1.ReplaceConcurrent
-		case "Forbid", "":
-			concurrency = batchv1.ForbidConcurrent
 		}
 
 		cj.Spec.Schedule = sched.Schedule
@@ -374,7 +372,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyOnFailure,
 						ServiceAccountName: scheduleTriggerName(fg.Name),
-						Tolerations:        groupReadOnlyTolerations(fg.Name),
+						Tolerations:        groupReadOnlyTolerations(fg),
 						Containers: []corev1.Container{
 							{
 								Name:  "trigger",
@@ -413,7 +411,7 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 	var list v1alpha1.MysqlBackupList
 	if err := r.List(ctx, &list,
 		client.InNamespace(fg.Namespace),
-		client.MatchingLabels{labelFailoverGroup: fg.Name},
+		client.MatchingLabels{v1alpha1.FailoverGroupLabel: fg.Name},
 	); err != nil {
 		return 0, fmt.Errorf("list backups: %w", err)
 	}
@@ -429,7 +427,7 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 
 	for i := range list.Items {
 		b := &list.Items[i]
-		sched := b.Labels[labelBackupSchedule]
+		sched := b.Labels[v1alpha1.BackupScheduleLabel]
 		if sched == "" {
 			continue
 		}
@@ -465,7 +463,7 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 				created := ru.latest.CreationTimestamp
 				entry.LastScheduleTime = &created
 				entry.LastBackupName = ru.latest.Name
-				entry.LastBackupPhase = string(ru.latest.Status.Phase)
+				entry.LastBackupPhase = ru.latest.Status.Phase
 				entry.LastSuccessfulTime = ru.lastOK
 				entry.LastSuccessfulBackupName = ru.lastOKName
 				entry.LastRetryAttempt = effectiveBackupAttempt(&ru.latest)
@@ -549,13 +547,34 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 		if entry.RetryConflict == "" || entry.RetryConflict == previousConflicts[entry.Name] {
 			continue
 		}
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupRetryConflict",
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBackupRetryConflict,
 			"retry backup %q already exists with different lineage (failed backup=%s, schedule=%s); skipping this retry",
 			entry.RetryConflict, entry.LastBackupName, entry.Name)
 		log.FromContext(ctx).Info("backup retry lineage conflict",
 			"group", fg.Name, "schedule", entry.Name, "backup", entry.LastBackupName, "retryBackup", entry.RetryConflict)
 	}
 	return minRequeue, nil
+}
+
+// Defaults of spec.backup.retry.{initialBackoff,maxBackoff} for objects
+// built outside admission.
+const (
+	defaultBackupRetryInitialBackoff = time.Minute
+	defaultBackupRetryMaxBackoff     = 30 * time.Minute
+)
+
+// backupRetryBackoffBounds returns the effective initial and maximum retry
+// backoff. Admission bounds both (1s..1h, 1s..24h, max >= initial); only
+// nil takes the default.
+func backupRetryBackoffBounds(retry *v1alpha1.BackupRetrySpec) (initial, maxBackoff time.Duration) {
+	initial, maxBackoff = defaultBackupRetryInitialBackoff, defaultBackupRetryMaxBackoff
+	if retry.InitialBackoff != nil {
+		initial = retry.InitialBackoff.Duration
+	}
+	if retry.MaxBackoff != nil {
+		maxBackoff = retry.MaxBackoff.Duration
+	}
+	return initial, maxBackoff
 }
 
 // maybeScheduleRetry considers materializing a retry MysqlBackup for a
@@ -581,25 +600,17 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 		return nil, 0, "", nil
 	}
 
-	initial := retry.InitialBackoffSeconds
-	if initial <= 0 {
-		initial = 60
-	}
-	maxBackoff := retry.MaxBackoffSeconds
-	if maxBackoff <= 0 {
-		maxBackoff = 1800
-	}
+	initial, maxBackoff := backupRetryBackoffBounds(retry)
 
 	// Exponential backoff starting at initial, doubling each step,
 	// capped at maxBackoff. For the Nth retry (1-indexed), wait
-	// initial * 2^(N-1) seconds.
-	step := int32(1)
-	for i := int32(1); i < current; i++ {
-		step *= 2
+	// initial * 2^(N-1).
+	backoff := initial
+	for i := int32(1); i < current && backoff < maxBackoff; i++ {
+		backoff *= 2
 	}
-	backoffSeconds := initial * step
-	if backoffSeconds > maxBackoff {
-		backoffSeconds = maxBackoff
+	if backoff > maxBackoff {
+		backoff = maxBackoff
 	}
 
 	var base time.Time
@@ -608,7 +619,7 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 	} else {
 		base = time.Now()
 	}
-	when := base.Add(time.Duration(backoffSeconds) * time.Second)
+	when := base.Add(backoff)
 	now := time.Now()
 	if when.After(now) {
 		wait := when.Sub(now)
@@ -621,7 +632,7 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 		return nil, 0, "", fmt.Errorf("cannot retry backup %q without its UID", failed.Name)
 	}
 	nextAttempt := current + 1
-	rootUID, rootName := failed.Annotations[annotationBackupRetryRootUID], failed.Annotations[annotationBackupRetryRoot]
+	rootUID, rootName := failed.Annotations[v1alpha1.BackupRetryRootUIDAnnotation], failed.Annotations[v1alpha1.BackupRetryRootAnnotation]
 	if rootUID == "" {
 		rootUID, rootName = string(failed.UID), failed.Name
 	}
@@ -630,22 +641,22 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 			Name:      retryBackupName(failed, nextAttempt),
 			Namespace: fg.Namespace,
 			Annotations: map[string]string{
-				annotationBackupRetryRoot:    rootName,
-				annotationBackupRetryRootUID: rootUID,
-				annotationBackupAttempt:      strconv.FormatInt(int64(nextAttempt), 10),
+				v1alpha1.BackupRetryRootAnnotation:    rootName,
+				v1alpha1.BackupRetryRootUIDAnnotation: rootUID,
+				v1alpha1.BackupAttemptAnnotation:      strconv.FormatInt(int64(nextAttempt), 10),
+				v1alpha1.TriggeredByAnnotation:        fmt.Sprintf("retry/%s/attempt-%d", sched.Name, nextAttempt),
 			},
 			Labels: map[string]string{
-				labelBackupRetryOf:  string(failed.UID),
-				labelFailoverGroup:  fg.Name,
-				labelBackupProfile:  sched.ProfileName,
-				labelBackupSchedule: sched.Name,
-				labelManagedBy:      managerName,
+				v1alpha1.BackupRetryOfLabel:  string(failed.UID),
+				v1alpha1.FailoverGroupLabel:  fg.Name,
+				v1alpha1.BackupProfileLabel:  sched.ProfileName,
+				v1alpha1.BackupScheduleLabel: sched.Name,
+				labelManagedBy:               managerName,
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      sched.ProfileName,
-			TriggeredBy:      fmt.Sprintf("retry/%s/attempt-%d", sched.Name, nextAttempt),
 		},
 	}
 	if err := r.Create(ctx, retryCR); err != nil {
@@ -672,7 +683,7 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 	retryCR.Status.Attempt = nextAttempt
 	_ = r.Status().Patch(ctx, retryCR, freshPatch)
 
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "BackupRetryScheduled",
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventBackupRetryScheduled,
 		"scheduled retry #%d for failed backup %s (schedule=%s)",
 		nextAttempt, failed.Name, sched.Name)
 
@@ -731,7 +742,7 @@ func (r *MysqlFailoverGroupReconciler) noteScheduleRefused(fg *v1alpha1.MysqlFai
 	}
 	r.scheduleRefused[key] = why
 	if r.Recorder != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonBackupScheduleRefused,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBackupScheduleRefused,
 			"schedule %q is not run: %s", schedule, why)
 	}
 }

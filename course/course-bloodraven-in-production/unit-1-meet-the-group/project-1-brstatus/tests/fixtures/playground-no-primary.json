@@ -8,14 +8,16 @@
   },
   "spec": {
     "image": "mysql:9.7",
-    "secretName": "mysql-credentials",
+    "credentials": {
+      "operatorSecretName": "mysql-credentials"
+    },
     "pollInterval": "2s",
     "failureThreshold": 3,
     "recoveryThreshold": 2,
     "failoverCooldown": "30s",
     "dns": {
       "hostname": "playground-db.example.local",
-      "ttl": 10
+      "ttlSeconds": 10
     },
     "replication": {
       "maxLagSeconds": 30
@@ -23,30 +25,31 @@
     "sites": [
       {
         "name": "iad",
-        "role": "primary-candidate",
+        "role": "PrimaryCandidate",
         "zone": "zone-iad"
       },
       {
         "name": "pdx",
-        "role": "primary-candidate",
+        "role": "PrimaryCandidate",
         "zone": "zone-pdx"
       },
       {
         "name": "reader",
-        "role": "read-only",
+        "role": "ReadOnly",
         "zone": "zone-reader"
       }
     ]
   },
   "status": {
+    "observedGeneration": 4,
     "activeSite": "",
     "sites": [
       {
         "name": "iad",
-        "state": "read-only",
-        "lastSeen": "2026-08-12T09:14:32Z",
+        "state": "ReadOnly",
+        "lastSeenTime": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
-        "replicating": false,
+        "replication": "Broken",
         "sourceHost": "mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Pending",
         "sourceConvergenceReason": "SourceMismatch",
@@ -54,10 +57,10 @@
       },
       {
         "name": "pdx",
-        "state": "read-only",
-        "lastSeen": "2026-08-12T09:14:32Z",
+        "state": "ReadOnly",
+        "lastSeenTime": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
-        "replicating": true,
+        "replication": "Healthy",
         "sourceHost": "mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged",
         "sourceConvergenceReason": "DirectSource",
@@ -65,10 +68,10 @@
       },
       {
         "name": "reader",
-        "state": "read-only",
-        "lastSeen": "2026-08-12T09:14:32Z",
+        "state": "ReadOnly",
+        "lastSeenTime": "2026-08-12T09:14:32Z",
         "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
-        "replicating": true,
+        "replication": "Healthy",
         "sourceHost": "mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged",
         "sourceConvergenceReason": "DirectSource",
@@ -81,7 +84,7 @@
         "status": "False",
         "observedGeneration": 4,
         "lastTransitionTime": "2026-08-12T09:14:32Z",
-        "reason": "TopologyPolled",
+        "reason": "NoWritablePrimary",
         "message": "No site is writable"
       },
       {

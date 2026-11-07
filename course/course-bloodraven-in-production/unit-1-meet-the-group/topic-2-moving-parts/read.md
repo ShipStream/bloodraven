@@ -25,7 +25,7 @@ The counter does not connect to a pod. It connects to `mysql-playground-primary`
 {"type":"anatomy","title":"mysql-playground-primary","parts":[
  {"text":"mysql-","label":"prefix","note":"Fixed. Every Service the operator creates for a group starts here."},
  {"text":"playground","label":"group name","note":"The metadata.name of the MysqlFailoverGroup."},
- {"text":"-primary","label":"role suffix","note":"One of four suffix shapes: -primary, -replicas, -<site>, and -<site>-internal. This one selects whichever pod currently carries shipstream.io/role=primary."}]}
+ {"text":"-primary","label":"role suffix","note":"One of four suffix shapes: -primary, -replicas, -<site>, and -<site>-internal. This one selects whichever pod currently carries bloodraven.shipstream.io/role=primary."}]}
 ```
 
 Bloodraven creates **four kinds** of Service per group. Four *kinds*, not four objects. Two kinds
@@ -40,20 +40,20 @@ are per-site, two are group-wide, so the count is `2 × len(sites) + 2`. For `pl
 | `mysql-playground-<site>-internal` | per site | The stable in-cluster address replication and the sidecars point at. |
 
 `-primary` selects on **two** labels: `app.kubernetes.io/instance=playground` and
-`shipstream.io/role=primary`. `-replicas` selects on **three**: instance,
-`shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.
+`bloodraven.shipstream.io/role=primary`. `-replicas` selects on **three**: instance,
+`bloodraven.shipstream.io/role=replica`, and `bloodraven.shipstream.io/healthy=true`.
 
-That third label is not decoration. For a `read-only` reader the operator stamps `healthy=yes`
+That third label is not decoration. For a `ReadOnly` reader the operator stamps `healthy=true`
 only when the site is actually replicating from the active primary and is not too far behind.
 Fail the check and the pod silently leaves the read endpoint.
 
 The per-site Services do not look at `role`. `mysql-playground-<site>` selects on name, instance
-and site — plus `healthy=yes`, but only when that site's role is `read-only`. The `-internal`
+and site — plus `healthy=true`, but only when that site's role is `ReadOnly`. The `-internal`
 Service has no health gate on any site, which is the point of it: peers and sidecars must reach
 a pod that is not serving yet.
 
 During an in-place restore or the draining phase of a planned failover the operator stamps the
-affected pod `shipstream.io/role=fenced`. That value matches neither shared selector. The pod
+affected pod `bloodraven.shipstream.io/role=fenced`. That value matches neither shared selector. The pod
 keeps running, keeps its disk, keeps its IP, and appears behind neither endpoint. Fencing at
 the Service layer is one label write.
 
@@ -133,17 +133,17 @@ it. The archiver has to run where the data is.
 
 ## Fourth: the roles
 
-Each site declares a role. The enum has three values. It defaults to `primary-candidate`. One
-rule separates them: **promotability is exactly `role == primary-candidate`.**
+Each site declares a role. The enum has three values. It defaults to `PrimaryCandidate`. One
+rule separates them: **promotability is exactly `role == PrimaryCandidate`.**
 
 | Role | May be promoted? | Counted in the topology tallies? | In `playground` |
 | --- | --- | --- | --- |
-| `primary-candidate` | Yes — the only role that may | Yes | `iad`, `pdx` |
-| `dr-only` | Never | **Yes** — it counts, it just cannot win | none |
-| `read-only` | Never | No — excluded from the tallies | `reader` |
+| `PrimaryCandidate` | Yes — the only role that may | Yes | `iad`, `pdx` |
+| `DisasterRecovery` | Never | **Yes** — it counts, it just cannot win | none |
+| `ReadOnly` | Never | No — excluded from the tallies | `reader` |
 
-`dr-only` is the one people get wrong. It is a full participant in the topology view. It simply
-cannot win a promotion. `read-only` goes further: invisible to the decision, never a backup
+`DisasterRecovery` is the one people get wrong. It is a full participant in the topology view. It simply
+cannot win a promotion. `ReadOnly` goes further: invisible to the decision, never a backup
 source. Any non-candidate found *writable* is routed straight to fencing.
 
 ## Where you now stand

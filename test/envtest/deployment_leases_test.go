@@ -19,8 +19,8 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 	for _, tc := range []struct{ state, reason string }{
 		{"expired", ""},
 		{"released", ""},
-		{"revoked", "operator_revoked"},
-		{"revoked", "topology_changed"},
+		{"revoked", "OperatorRevoked"},
+		{"revoked", "TopologyChanged"},
 	} {
 		t.Run(tc.state+"/"+tc.reason, func(t *testing.T) {
 			ns := createNamespace(t, "deploy-terminal")
@@ -33,8 +33,8 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.Now()}}
 			fg.Status.Sites = []v1alpha1.SiteStatus{
-				{Name: "dc1", State: "writable"},
-				{Name: "dc2", State: "read-only", Replicating: true},
+				{Name: "dc1", State: v1alpha1.SiteStateWritable},
+				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 			}
 			if err := k8sClient.Status().Update(ctx, fg); err != nil {
 				t.Fatal(err)
@@ -74,7 +74,7 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 					}
 				}
 			case "revoked":
-				if tc.reason == "topology_changed" {
+				if tc.reason == "TopologyChanged" {
 					fg.Status.TopologyGeneration++
 					if err := k8sClient.Status().Update(ctx, fg); err != nil {
 						t.Fatal(err)
@@ -105,7 +105,7 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 				if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds != 1 {
 					t.Fatalf("%s: terminal duration must be 1", lease.Name)
 				}
-				if record.State != tc.state || record.Reason != tc.reason || !record.ExpiresAt.Equal(expiresAt) || record.TopologyGeneration != 7 || lease.Labels["bloodraven.shipstream.io/deployment-state"] != tc.state {
+				if record.State != tc.state || record.Reason != tc.reason || !record.ExpiresAt.Equal(expiresAt) || record.TopologyGeneration != 7 || lease.Labels[v1alpha1.DeploymentStateLabel] != tc.state {
 					t.Fatalf("%s: terminal record = %+v", lease.Name, record)
 				}
 			}

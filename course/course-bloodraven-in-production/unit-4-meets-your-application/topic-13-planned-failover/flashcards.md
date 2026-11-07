@@ -29,13 +29,13 @@
 
 **Front:** After a successful planned switchover, what shows that nothing acknowledged was lost?
 
-**Back:** `result.outcome: Succeeded`, and `status.promotionGtidExecuted` equal to `status.plannedFailover.fence.gtidSet`. There is no lost-transaction counter on this path: the gate makes the number zero by construction.
+**Back:** `result.outcome: Succeeded`, and `status.lastFailover.promotionGtidExecuted` equal to `status.plannedFailover.fence.gtidSet`. There is no lost-transaction counter on this path: the gate makes the number zero by construction.
 
 ---
 
 **Front:** `spec.plannedFailover.maxLagWait` — default value and what it bounds.
 
-**Back:** 5m. It bounds time spent in `WaitingForLag` before the state machine rolls back to the source.
+**Back:** 5m. It bounds time spent in `WaitingForLag` before the state machine rolls back to the source. Admission accepts 1s to 1h, for the field and for the annotation's `maxLagWait=` override alike.
 
 ---
 
@@ -57,9 +57,9 @@
 
 ---
 
-**Front:** Verbatim refusal when a planned failover targets a `role: read-only` site.
+**Front:** Verbatim refusal when a planned failover targets a `role: ReadOnly` site.
 
-**Back:** `only primary-candidate sites may be promoted`.
+**Back:** `only PrimaryCandidate sites may be promoted`.
 
 ---
 

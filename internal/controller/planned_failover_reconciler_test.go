@@ -25,12 +25,12 @@ func plannedFailoverFG(annotationValue string) *v1alpha1.MysqlFailoverGroup {
 	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: 5 * time.Minute}
 	fg.Status.ActiveSite = "iad"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: "writable", Replicating: false},
-		{Name: "pdx", State: "read-only", Replicating: true},
+		{Name: "iad", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
+		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 	}
 	if annotationValue != "" {
 		fg.SetAnnotations(map[string]string{
-			PlannedFailoverAnnotation: annotationValue,
+			v1alpha1.PlannedFailoverAnnotation: annotationValue,
 		})
 	}
 	return fg
@@ -110,7 +110,7 @@ func TestReconcilePlannedFailover_AcceptStampsAdmitting(t *testing.T) {
 		pf.Settings.DrainTimeout.Duration != defaultPlannedFailoverDrainTimeout || pf.Admission == nil || pf.Admission.DeadlineTime == nil {
 		t.Fatalf("admitting record = %+v", pf)
 	}
-	if _, ok := got.Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation not removed after the Admitting write")
 	}
 	select {
@@ -157,7 +157,7 @@ func TestReconcilePlannedFailover_RejectUnknownSite(t *testing.T) {
 		pf.Result.Reason != v1alpha1.PlannedFailoverReasonUnknownSite {
 		t.Fatalf("block = %+v", pf)
 	}
-	if _, ok := got.Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("rejected annotation not removed")
 	}
 }
@@ -165,7 +165,7 @@ func TestReconcilePlannedFailover_RejectUnknownSite(t *testing.T) {
 func TestReconcilePlannedFailover_CooldownRejectDefault(t *testing.T) {
 	fg := plannedFailoverFG("pdx")
 	last := metav1.NewTime(time.Now().Add(-time.Minute))
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &last, "iad"
+	fg.Status.SetLastFailover(&last, "iad", "")
 	r, _ := pfReconciler(t, fg)
 	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestReconcilePlannedFailover_StaleAnnotationDuringRunCleared(t *testing.T) 
 	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := fetchFG(t, r, fgNN(fg)).Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := fetchFG(t, r, fgNN(fg)).Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("stale annotation kept during a run")
 	}
 	ev := <-r.Recorder.(*record.FakeRecorder).Events
@@ -209,7 +209,7 @@ func TestReconcilePlannedFailover_DeferredAnnotationEditedToActiveIsSkipped(t *t
 	if pf := got.Status.PlannedFailover; pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonAlreadyActive {
 		t.Fatalf("block = %+v", pf)
 	}
-	if _, ok := got.Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation kept")
 	}
 }
@@ -257,16 +257,9 @@ func TestEffectiveOnCooldown(t *testing.T) {
 	if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
 		t.Errorf("Defer: got %q, want Defer", got)
 	}
-	// The released lower-case spelling, which CRD ratcheting keeps on a
-	// stored object, keeps its meaning (G-M1).
-	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"defer", "DEFER"} {
-		fg.Spec.PlannedFailover.OnCooldown = v
-		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
-			t.Errorf("%q: got %q, want Defer", v, got)
-		}
-	}
-	// Malformed values fall back to Reject (defence against typos).
-	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"skip", "reject", "Reject", ""} {
+	// Malformed values, including the pre-v1beta1 lower-case spelling
+	// (no longer read), fall back to Reject.
+	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"defer", "DEFER", "skip", "reject", "Reject", ""} {
 		fg.Spec.PlannedFailover.OnCooldown = v
 		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownReject {
 			t.Errorf("%q: got %q, want Reject fallback", v, got)
@@ -274,16 +267,17 @@ func TestEffectiveOnCooldown(t *testing.T) {
 	}
 }
 
-// The released lower-case onSyncTimeout values keep their meaning, both in
-// the spec and in a run's frozen settings (G-M1).
-func TestDragonflyOnSyncTimeoutIgnoresCase(t *testing.T) {
+// onSyncTimeout reads only the CamelCase values, in the spec and in a
+// run's frozen settings: anything but Fail, including the pre-v1beta1
+// lower-case spelling, is the Proceed default.
+func TestDragonflyOnSyncTimeoutExactValues(t *testing.T) {
 	for _, tc := range []struct {
 		in   v1alpha1.DragonflySyncTimeoutPolicy
 		want v1alpha1.DragonflySyncTimeoutPolicy
 	}{
 		{"Fail", v1alpha1.DragonflySyncTimeoutFail},
-		{"fail", v1alpha1.DragonflySyncTimeoutFail},
-		{"FAIL", v1alpha1.DragonflySyncTimeoutFail},
+		{"fail", v1alpha1.DragonflySyncTimeoutProceed},
+		{"FAIL", v1alpha1.DragonflySyncTimeoutProceed},
 		{"Proceed", v1alpha1.DragonflySyncTimeoutProceed},
 		{"proceed", v1alpha1.DragonflySyncTimeoutProceed},
 		{"", v1alpha1.DragonflySyncTimeoutProceed},
@@ -306,7 +300,7 @@ func TestCooldownRetryAfter(t *testing.T) {
 		t.Error("no lastFailover: want zero time")
 	}
 	last := metav1.NewTime(time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC))
-	fg.Status.LastFailover = &last
+	fg.Status.SetLastFailover(&last, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
 	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: 10 * time.Minute}
 	want := last.Time.Add(10 * time.Minute)
 	if got := cooldownRetryAfter(fg, last.Time); !got.Equal(want) {

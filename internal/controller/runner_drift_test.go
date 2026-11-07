@@ -31,9 +31,9 @@ func driftFixture(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, annotate bool) 
 	}
 	render := testPITRRender(fg)
 	for _, site := range fg.Spec.Sites {
-		ann := map[string]string{specHashAnnotation: ComputeSpecHash(fg, site, secretContentDigest(key, map[string]map[string][]byte{}), render)}
+		ann := map[string]string{v1alpha1.SpecHashAnnotation: ComputeSpecHash(fg, site, secretContentDigest(key, map[string]map[string][]byte{}), render)}
 		if annotate {
-			ann[annotationPITRRender] = render.Canonical()
+			ann[v1alpha1.PITRRenderAnnotation] = render.Canonical()
 		}
 		objs = append(objs, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 			Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace,
@@ -111,7 +111,7 @@ func TestCheckSpecDriftSkipsDeferredSites(t *testing.T) {
 	ctx := context.Background()
 	fg := pitrRolloutFG(false)
 	fg.Status.PITRArchiveBindings[0].State = v1alpha1.PITRArchiveBindingPending
-	fg.Status.PITRArchiveBindings[0].Reason = pitrBindingAuthenticating
+	fg.Status.PITRArchiveBindings[0].Reason = v1alpha1.PITRArchiveBindingReasonAuthenticating
 	objs := driftFixture(t, fg, false)
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).Build()
 	if _, action := resolvePITRRender(fg, deploymentsOf(objs)); action != pitrRenderDefer {
@@ -144,7 +144,7 @@ func TestRunnerStatusPreservesPITRBindings(t *testing.T) {
 	ctx := context.Background()
 	fg := pitrRolloutFG(false)
 	fg.Status.ActiveSite = "dc1"
-	setCondition(&fg.Status.Conditions, metav1.Condition{Type: conditionPITRArchiveBindingReady, Status: metav1.ConditionTrue, Reason: string(pitrBindingBound), Message: "bound"})
+	setCondition(&fg.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionPITRArchiveBindingReady, Status: metav1.ConditionTrue, Reason: string(v1alpha1.PITRArchiveBindingReasonBound), Message: "bound"})
 	want := fg.Status.PITRArchiveBindings[0]
 	gets := 0
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg.DeepCopy()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
@@ -158,7 +158,7 @@ func TestRunnerStatusPreservesPITRBindings(t *testing.T) {
 					if gets == 1 {
 						// The first read is the stale copy: no binding, no condition.
 						g.Status.PITRArchiveBindings = nil
-						removeCondition(&g.Status.Conditions, conditionPITRArchiveBindingReady)
+						removeCondition(&g.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady)
 					}
 				}
 				return nil
@@ -177,7 +177,7 @@ func TestRunnerStatusPreservesPITRBindings(t *testing.T) {
 	if len(got.Status.PITRArchiveBindings) != 1 || got.Status.PITRArchiveBindings[0].ID != want.ID || got.Status.PITRArchiveBindings[0].State != want.State {
 		t.Fatalf("bindings after the runner's write = %+v, want %+v", got.Status.PITRArchiveBindings, want)
 	}
-	if c := apimeta.FindStatusCondition(got.Status.Conditions, conditionPITRArchiveBindingReady); c == nil || c.Message != "bound" {
+	if c := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady); c == nil || c.Message != "bound" {
 		t.Fatalf("binding condition after the runner's write = %+v", c)
 	}
 }

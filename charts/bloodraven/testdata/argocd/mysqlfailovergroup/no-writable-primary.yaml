@@ -1,0 +1,12 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: bloodraven
+  generation: 5
+status:
+  observedGeneration: 5
+  activeSite: iad
+  conditions:
+  - {type: Ready, status: "False", reason: NoWritablePrimary, observedGeneration: 5, message: No site is writable}
+  - {type: Degraded, status: "True", reason: NoPrimary, observedGeneration: 5, message: both sites are read-only}

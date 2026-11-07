@@ -25,9 +25,8 @@ spec:
           pvc:
             claimName: orders-backup-store
             subPath: orders
-        retentionPolicy:
-          count: 7
-          minKeep: 2
+        retention:
+          keepLast: 7
     schedules:
       - name: nightly
         profileName: pvc-local

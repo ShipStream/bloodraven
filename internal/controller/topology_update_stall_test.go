@@ -377,7 +377,7 @@ func TestUpdateStall_CrashLoopKeepsOneStallAcrossLoopPhases(t *testing.T) {
 		t.Fatalf("stall = %q\nwant    %q", got, want)
 	}
 	cond := writeStatus()
-	if cond == nil || cond.Reason != ReasonOrderedUpdateStalled || len(events) != 1 {
+	if cond == nil || cond.Reason != v1alpha1.ReasonOrderedUpdateStalled || len(events) != 1 {
 		t.Fatalf("Updating = %+v events %q, want the stall and one Event", cond, events)
 	}
 	message, snaps := cond.Message, h.snapshots()

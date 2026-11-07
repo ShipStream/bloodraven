@@ -59,10 +59,10 @@ func fencingRestore(t *testing.T) (*MysqlFailoverGroupReconciler, client.Client,
 	fg := fgInPlaceRestore("")
 	site := fg.Spec.Sites[0].Name
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: "full", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 	}
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: fg.Spec.RestoreInPlace.Confirm}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret(), primaryFencedPod(fg.Name, site))
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 	_, mocks := withFenceRunner(r, c, fg)
 	return r, c, fg, mocks[site]
 }
@@ -153,9 +153,9 @@ func TestReconcileInPlaceRestore_RejectsOperatorWithoutConnectionAdmin(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInPlaceRestore("")
 			if tc.phase != "" {
-				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, Scope: "full", StartTime: ptrTime(time.Now())}
+				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now())}
 			}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			_, mocks := withFenceRunner(r, c, fg)
 			mocks[fg.Spec.Sites[0].Name].noConnectionAdmin = true
 
@@ -187,8 +187,8 @@ func TestReconcileInPlaceRestore_RejectsOperatorWithoutConnectionAdmin(t *testin
 // fenced, so they do not need the privilege.
 func TestReconcileInPlaceRestore_PerSchemaNeedsNoConnectionAdmin(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: "schema:orders", StartTime: ptrTime(time.Now())}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}, StartTime: ptrTime(time.Now())}
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks[fg.Spec.Sites[0].Name].noConnectionAdmin = true
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -202,8 +202,8 @@ func TestReconcileInPlaceRestore_PerSchemaNeedsNoConnectionAdmin(t *testing.T) {
 
 func TestReconcileInPlaceRestore_PreflightWaitsWhenPrivilegeCannotBeChecked(t *testing.T) {
 	fg := fgInPlaceRestore("")
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now())}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now())}
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks[fg.Spec.Sites[0].Name].fenceErr = errors.New("i/o timeout")
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
@@ -238,11 +238,11 @@ func TestRestoreOfflineFence_ReleasedAfterRestoreEnds(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInPlaceRestore("")
 			site := fg.Spec.Sites[0].Name
-			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: site, Scope: "full"}
+			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 			fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{
 				Site: site, ConfirmToken: testRestoreConfirm, PriorOfflineMode: tc.prior, SessionsEvicted: tc.prior != nil,
 			}
-			r, c := newReconciler(fg, dsnSecret())
+			r, c := newReconciler(fg, operatorCredsSecret())
 			tm, mocks := withFenceRunner(r, c, fg)
 			mocks[site].offlineMode = true
 			mocks[site].fenceErr = tc.releaseErr
@@ -305,15 +305,15 @@ func TestRestoreOfflineFenceSite_FromStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		phase v1alpha1.RestoreInPlacePhase
-		scope string
+		scope *v1alpha1.RestoreScope
 		prior *bool
 		want  string
 	}{
-		{name: "restoring", phase: v1alpha1.RestoreInPlaceRestoring, scope: "full", prior: &no, want: "iad"},
-		{name: "fencing", phase: v1alpha1.RestoreInPlaceFencing, scope: "full", prior: &no, want: "iad"},
-		{name: "prior not recorded", phase: v1alpha1.RestoreInPlaceRestoring, scope: "full"},
-		{name: "per-schema", phase: v1alpha1.RestoreInPlaceRestoring, scope: "schema:orders", prior: &no},
-		{name: "finished", phase: v1alpha1.RestoreInPlaceSucceeded, scope: "full", prior: &no},
+		{name: "restoring", phase: v1alpha1.RestoreInPlaceRestoring, scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, prior: &no, want: "iad"},
+		{name: "fencing", phase: v1alpha1.RestoreInPlaceFencing, scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, prior: &no, want: "iad"},
+		{name: "prior not recorded", phase: v1alpha1.RestoreInPlaceRestoring, scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}},
+		{name: "per-schema", phase: v1alpha1.RestoreInPlaceRestoring, scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}, prior: &no},
+		{name: "finished", phase: v1alpha1.RestoreInPlaceSucceeded, scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, prior: &no},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := &v1alpha1.MysqlFailoverGroup{}
@@ -330,8 +330,7 @@ func TestRestoreOfflineFenceSite_FromStatus(t *testing.T) {
 // CREATE or SET GLOBAL, and would be locked out by offline_mode.
 func TestEnsureRestoreCredsSecret_UsesOperatorAccount(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Spec.SecretName = ""
-	fg.Spec.Credentials = &v1alpha1.CredentialsSpec{OperatorSecret: "op-creds", BackupSecret: "backup-creds"}
+	fg.Spec.Credentials = v1alpha1.CredentialsSpec{OperatorSecretName: "op-creds", BackupSecretName: "backup-creds"}
 	op := &corev1.Secret{}
 	op.Name, op.Namespace = "op-creds", fg.Namespace
 	op.Data = map[string][]byte{"username": []byte("operator"), "password": []byte("op-pass")}
@@ -359,8 +358,8 @@ func TestFullInstanceRestore_OfflineFenceLifecycle(t *testing.T) {
 	defer SetOperatorImageDefaults("", "")
 	fg := fgInPlaceRestore("")
 	site := fg.Spec.Sites[0].Name
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now())}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret(), primaryFencedPod(fg.Name, site))
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now())}
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 	tm, mocks := withFenceRunner(r, c, fg)
 	primary := mocks[site]
 	step := func() {
@@ -457,7 +456,7 @@ func TestFullRestore_ReappliedAfterCancelGetsItsOwnFence(t *testing.T) {
 			fg := fgInPlaceRestore("")
 			site := fg.Spec.Sites[0].Name
 			manifest := fg.Spec.RestoreInPlace.DeepCopy()
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret(), primaryFencedPod(fg.Name, site))
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 			_, mocks := withFenceRunner(r, c, fg)
 			primary := mocks[site]
 
@@ -522,11 +521,11 @@ func TestRestoreOfflineFence_ReleaseRestoresPriorOnAfterRestart(t *testing.T) {
 	yes := true
 	fg := fgInPlaceRestore("")
 	site := fg.Spec.Sites[0].Name
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: site, Scope: "full"}
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{
 		Site: site, ConfirmToken: testRestoreConfirm, PriorOfflineMode: &yes, SessionsEvicted: true,
 	}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	primary := mocks[site]
 	primary.offlineMode = false // restarted
@@ -556,7 +555,7 @@ func TestRestoreOfflineFence_ReleaseRestoresPriorOnAfterRestart(t *testing.T) {
 // need, not just CONNECTION_ADMIN, and names the missing ones.
 func TestReconcileInPlaceRestore_RejectionNamesMissingFencePrivileges(t *testing.T) {
 	fg := fgInPlaceRestore("")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks[fg.Spec.Sites[0].Name].missingFencePrivs = []string{"PROCESS", "REPLICATION_SLAVE_ADMIN"}
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -586,7 +585,7 @@ func (m *countingPrivMock) MissingRestoreFencePrivileges(ctx context.Context) ([
 func TestReconcileInPlaceRestore_PrivilegeRejectionIsRateLimited(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	site := fg.Spec.Sites[0].Name
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	tm, mocks := withFenceRunner(r, c, fg)
 	counting := &countingPrivMock{mockMySQL: mocks[site]}
 	counting.noConnectionAdmin = true
@@ -664,11 +663,11 @@ func TestRestoreReclone_WaitsForOfflineFenceRelease(t *testing.T) {
 	no := false
 	fg := fgDrainingRestore("pdx")
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: &no}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if d, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil || d <= 0 {
 		t.Fatalf("requeue %s err %v, want a wait", d, err)
 	}
-	if got := getFG(t, c, fg).GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := getFG(t, c, fg).GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("a reclone was requested under the fence: %q", got)
 	}
 }
@@ -681,7 +680,7 @@ func TestReconcile_ReleasesRestoreFenceBeforeReclones(t *testing.T) {
 	fg := newTestFG()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceSucceeded, TargetSite: "dc1", Scope: "full", ConfirmTokenUsed: testRestoreConfirm,
+		Phase: v1alpha1.RestoreInPlaceSucceeded, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: testRestoreConfirm,
 	}
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{
 		Site: "dc1", ConfirmToken: testRestoreConfirm, PriorOfflineMode: &no, SessionsEvicted: true,
@@ -700,7 +699,7 @@ func TestReconcile_ReleasesRestoreFenceBeforeReclones(t *testing.T) {
 	if mocks["dc1"].offlineMode || fresh.Status.RestoreOfflineFence != nil {
 		t.Fatalf("offline_mode=%v fence %+v, want released by Reconcile", mocks["dc1"].offlineMode, fresh.Status.RestoreOfflineFence)
 	}
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; !strings.HasPrefix(got, "dc2") {
+	if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; !strings.HasPrefix(got, "dc2") {
 		t.Fatalf("reclone annotation = %q, want dc2 requested in the same pass, after the release", got)
 	}
 }
@@ -710,7 +709,7 @@ func TestReconcile_ReleasesRestoreFenceBeforeReclones(t *testing.T) {
 // place, and the docs promise the restore then starts by itself.
 func TestReconcile_PrivilegeRejectionSchedulesRecheck(t *testing.T) {
 	fg := fgInPlaceRestore("")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	primary := mocks[fg.Spec.Sites[0].Name]
 	primary.noConnectionAdmin = true
@@ -831,8 +830,8 @@ func TestFullInstanceRestore_StalePollDoesNotLeaveOfflineModeOn(t *testing.T) {
 	defer SetOperatorImageDefaults("", "")
 	fg := fgInPlaceRestore("")
 	site := fg.Spec.Sites[0].Name
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now())}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret(), primaryFencedPod(fg.Name, site))
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now())}
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 	_, mocks := withFenceRunner(r, c, fg)
 	primary := mocks[site]
 
@@ -899,10 +898,10 @@ func TestFullRestore_RevertedManifestBeforeJobCancels(t *testing.T) {
 	site := fg.Spec.Sites[0].Name
 	executed := fg.Spec.RestoreInPlace.Confirm
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 		ConfirmTokenUsed: executed, RunConfirm: "2026-04-18T09:00:00Z", RunID: "run-c3",
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret(), primaryFencedPod(fg.Name, site))
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 	_, mocks := withFenceRunner(r, c, fg)
 	for i := 0; i < 6; i++ {
 		stepFullRestore(t, r, c, fg)

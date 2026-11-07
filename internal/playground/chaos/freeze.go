@@ -8,6 +8,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // FreezerLabelValue is the app label on every mysqld freezer pod, so
@@ -73,7 +75,7 @@ func (a *Actions) FreezeSiteMysqld(ctx context.Context, site string, hold time.D
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: a.Namespace,
-			Labels:    map[string]string{"app": FreezerLabelValue, "shipstream.io/site": site},
+			Labels:    map[string]string{"app": FreezerLabelValue, v1alpha1.SiteLabel: site},
 		},
 		Spec: corev1.PodSpec{
 			NodeName:                      target.Spec.NodeName,

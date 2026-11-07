@@ -3,9 +3,9 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Front:** `spec.tls` — the two fields, and what the operator does with them
+**Front:** `spec.tls` — its one field, and what the operator does with it
 
-**Back:** `secretName` (a Secret with `ca.crt`, `tls.crt`, `tls.key`) and `issuerRef` (`name` plus `kind`, enum `Issuer` or `ClusterIssuer`). The operator records the issuer and reads the Secret. It does **not** create the `Certificate` — that is cert-manager's job and yours to declare.
+**Back:** `secretName`, a Secret with `ca.crt`, `tls.crt` and `tls.key`. The operator only reads the Secret. It does **not** issue the certificate or create the `Certificate` — that is cert-manager's job and yours to declare. (Releases before v1.7.0 also required an `issuerRef` that nothing read.)
 
 ---
 
@@ -63,6 +63,6 @@
 
 ---
 
-**Front:** Legacy `secretName` mode with TLS on
+**Front:** Your own application once `spec.tls` is on
 
-**Back:** The DSN is used verbatim, so you add `?tls=true` to it yourself. The sidecar is the exception: it gets verified TLS automatically unless your DSN already sets `tls=`, in which case your choice wins.
+**Back:** `spec.tls` sets `require_secure_transport=ON`, so a plaintext client is refused. Configure TLS in the application yourself; with Go's `go-sql-driver/mysql`, register a TLS config holding the CA and put `tls=<name>` in the DSN. The operator, sidecar and Jobs are given TLS automatically.

@@ -14,33 +14,9 @@ import (
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
-// ConditionArtifactCleanup reports why a deleted MysqlBackup's artifact has
-// not been removed yet. It is only written while the CR is Terminating.
-const ConditionArtifactCleanup = "ArtifactCleanup"
-
-// ArtifactCleanup condition reasons.
-const (
-	cleanupReasonFailed                = "CleanupFailed"
-	cleanupReasonRejected              = "CleanupRejected"
-	cleanupReasonDestinationUnverified = "DestinationUnverified"
-	cleanupReasonDestinationMismatch   = "DestinationMismatch"
-	cleanupReasonCredentialsMissing    = "CredentialsUnavailable"
-	cleanupReasonOperatorImageUnset    = "OperatorImageUnset"
-	cleanupReasonJobConflict           = "CleanupJobConflict"
-	cleanupReasonHeldByVerification    = "HeldByVerification"
-	cleanupReasonPending               = "CleanupPending"
-	cleanupReasonForegroundDeletion    = "ForegroundDeletion"
-	cleanupReasonOrphanDeletion        = "OrphanDeletion"
-	cleanupReasonJobInvalid            = "CleanupJobInvalid"
-	cleanupReasonProducerStopStuck     = "ProducerStopStuck"
-)
-
 const (
 	// cleanupContainerName is the cleanup Job's only container.
 	cleanupContainerName = "artifact-cleanup"
-	// annotationCleanupFailureRecorded marks a failed cleanup Job whose
-	// failure event and metric have been emitted, so each Job counts once.
-	annotationCleanupFailureRecorded = "shipstream.io/cleanup-failure-recorded"
 	// cleanupRetryAfterFailure and cleanupRetryAfterRejection delay a fresh
 	// cleanup Job after a failed one, measured from the Job's failure time.
 	// Retries never stop: credentials rotated inside the same Secret, IAM
@@ -51,7 +27,7 @@ const (
 
 var (
 	errOperatorImageUnset          = errors.New("operator image is not configured (SetOperatorImageDefaults); artifact cleanup runs it")
-	errCleanupCredentialsMissing   = errors.New("profile has no S3 credentialsSecret for the artifact's storage")
+	errCleanupCredentialsMissing   = errors.New("profile has no S3 credentialsSecretName for the artifact's storage")
 	errCleanupDestinationNotStored = errors.New("artifact has no recorded storage destination")
 )
 
@@ -90,47 +66,37 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 	if storage == nil {
 		storage = backup.Status.ArtifactStorage
 	}
-	location := backup.Status.Location
+	if storage == nil || storage.Location == "" {
+		return nil, fmt.Errorf("cleanup job: %w", errCleanupDestinationNotStored)
+	}
+	location := storage.Location
 	if in.Abandoned {
-		if storage == nil || storage.Location == "" {
-			return nil, fmt.Errorf("cleanup job: %w: no planned location", errCleanupDestinationNotStored)
-		}
 		if backup.UID == "" {
 			return nil, fmt.Errorf("cleanup job: backup %s has no UID", backup.Name)
 		}
 		if in.Passphrase != nil && in.Passphrase.SecretName == "" {
 			return nil, fmt.Errorf("cleanup job: encrypted backup %s has no passphrase Secret to read its backup stamp", backup.Name)
 		}
-		location = storage.Location
-	}
-	if location == "" {
-		return nil, fmt.Errorf("cleanup job: backup has no status.location")
-	}
-	if storage == nil {
-		return nil, fmt.Errorf("cleanup job: %w", errCleanupDestinationNotStored)
 	}
 	if operatorImageFromEnv == "" {
 		return nil, fmt.Errorf("cleanup job: %w", errOperatorImageUnset)
 	}
 
-	storageType := backup.Status.StorageType
-	if storageType == "" && profile != nil {
-		storageType = profile.Storage.Type
-	}
+	storageType := storage.Type
 	if storageType == "" {
-		return nil, fmt.Errorf("cleanup job: cannot determine storage type for backup %s", backup.Name)
+		return nil, fmt.Errorf("cleanup job: no recorded storage type for backup %s", backup.Name)
 	}
 
 	labels := map[string]string{
-		labelAppName:       "mysql-backup",
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelMysqlBackup:   backup.Name,
-		labelManagedBy:     managerName,
-		labelResourceKind:  "backup-cleanup",
+		labelAppName:                "mysql-backup",
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		v1alpha1.MysqlBackupLabel:   backup.Name,
+		labelManagedBy:              managerName,
+		v1alpha1.ResourceLabel:      "backup-cleanup",
 	}
 	if profile != nil {
-		labels[labelBackupProfile] = profile.Name
+		labels[v1alpha1.BackupProfileLabel] = profile.Name
 	}
 
 	// Recorded values are already resolved paths; escape them so kubelet's
@@ -161,7 +127,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 		if storage.Bucket == "" {
 			return nil, fmt.Errorf("cleanup job: %w: no bucket", errCleanupDestinationNotStored)
 		}
-		if profile == nil || profile.Storage.S3 == nil || profile.Storage.S3.CredentialsSecret == "" {
+		if profile == nil || profile.Storage.S3 == nil || profile.Storage.S3.CredentialsSecretName == "" {
 			return nil, fmt.Errorf("cleanup job: %w", errCleanupCredentialsMissing)
 		}
 		envVars = append(envVars, corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(storage.Bucket)})
@@ -176,7 +142,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 			Name: "aws-creds",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  profile.Storage.S3.CredentialsSecret,
+					SecretName:  profile.Storage.S3.CredentialsSecretName,
 					DefaultMode: ptr32(0o400),
 				},
 			},
@@ -279,7 +245,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 					// Cleanup only talks to storage, never to the
 					// Kubernetes API.
 					AutomountServiceAccountToken: boolPtr(false),
-					Tolerations:                  groupReadOnlyTolerations(fg.Name),
+					Tolerations:                  groupReadOnlyTolerations(fg),
 					Containers: []corev1.Container{
 						{
 							Name:                     cleanupContainerName,
@@ -334,8 +300,8 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 	if err != nil {
 		return nil, fmt.Errorf("artifact location: %w", err)
 	}
-	storage := &v1alpha1.BackupArtifactStorage{Location: location}
-	switch v1alpha1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value) {
+	storage := &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value), Location: location}
+	switch storage.Type {
 	case v1alpha1.BackupStorageS3:
 		var err error
 		if storage.Bucket, err = value("BLOODRAVEN_S3_BUCKET", true); err != nil {
@@ -362,42 +328,40 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 	default:
 		return nil, fmt.Errorf("backup Job has unknown storage type %q", env["BLOODRAVEN_STORAGE_TYPE"].value)
 	}
-	storage.PassphraseSecret = backupJobPassphrase(job)
+	storage.PassphraseSecretKeyRef = backupJobPassphrase(job)
 	return storage, nil
 }
 
 // backupJobPassphrase returns the passphrase Secret key a backup Job
 // mounts, or nil for a plaintext Job.
-func backupJobPassphrase(job *batchv1.Job) *v1alpha1.BackupArtifactPassphrase {
+func backupJobPassphrase(job *batchv1.Job) *v1alpha1.SecretKeyRef {
 	for _, vol := range job.Spec.Template.Spec.Volumes {
 		if vol.Name != "backup-passphrase" || vol.Secret == nil || vol.Secret.SecretName == "" {
 			continue
 		}
 		for _, item := range vol.Secret.Items {
 			if item.Path == backupPassphraseFileName && item.Key != "" {
-				return &v1alpha1.BackupArtifactPassphrase{Name: vol.Secret.SecretName, Key: item.Key}
+				return &v1alpha1.SecretKeyRef{Name: vol.Secret.SecretName, Key: item.Key}
 			}
 		}
 	}
 	return nil
 }
 
-// artifactIdentityProblem returns a non-empty reason when location (the
-// backup's status.location, or for an abandoned cleanup its planned
-// location) is not exactly the location the producing Job wrote, as recorded in
-// status.artifactStorage. Name, bucket and mount checks are kept as a second
-// line of defence. producer is the backup's own Job, or nil when it is gone.
-func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, location string, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
-	if storage.Location == "" {
+// artifactIdentityProblem returns a non-empty reason when the artifact
+// location recorded in status.artifactStorage does not belong to the backup:
+// it must end in the backup's name, lie in the recorded bucket or under the
+// PVC mount, and equal the producing Job's destination. producer is the
+// backup's own Job, or nil when it is gone.
+func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
+	location := storage.Location
+	if location == "" {
 		return "no recorded artifact location"
-	}
-	if location != storage.Location {
-		return fmt.Sprintf("location %q differs from the recorded artifact location %q", location, storage.Location)
 	}
 	if name := backupmeta.CleanupArtifactName(location); name != backup.Name {
 		return fmt.Sprintf("location %q does not end in the backup name %q", location, backup.Name)
 	}
-	switch backup.Status.StorageType {
+	switch storage.Type {
 	case v1alpha1.BackupStorageS3:
 		if bucket, _, inBucket := backupmeta.SplitS3Location(location); inBucket && bucket != storage.Bucket {
 			return fmt.Sprintf("location bucket %q differs from the recorded bucket %q", bucket, storage.Bucket)
@@ -484,4 +448,21 @@ func cleanupPodVerdict(pod *corev1.Pod) (exitCode int32, message string, termina
 		return term.ExitCode, strings.TrimSpace(term.Message), true
 	}
 	return 0, "", false
+}
+
+// recordedArtifactStorage is the destination a backup's producing Job
+// recorded in status.artifactStorage. Restores, verifications, dump-meta
+// and cleanup read the artifact there, never at the live profile's
+// destination; only credentials come from the profile.
+func recordedArtifactStorage(backup *v1alpha1.MysqlBackup) (*v1alpha1.BackupArtifactStorage, error) {
+	storage := backup.Status.ArtifactStorage
+	if storage == nil || storage.Location == "" {
+		return nil, fmt.Errorf("backup %q records no artifact destination (status.artifactStorage.location)", backup.Name)
+	}
+	switch storage.Type {
+	case v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC:
+		return storage, nil
+	default:
+		return nil, fmt.Errorf("backup %q records an unknown storage type %q", backup.Name, storage.Type)
+	}
 }

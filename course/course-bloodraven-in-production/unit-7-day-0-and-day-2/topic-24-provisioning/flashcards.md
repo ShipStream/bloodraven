@@ -15,9 +15,9 @@
 
 ---
 
-**Front:** `spec.secretName` versus `spec.credentials`
+**Front:** What `spec.credentials` requires
 
-**Back:** Mutually exclusive, enforced by CEL: *exactly one of secretName or credentials must be set*. `secretName` is the legacy single-Secret mode and the operator reads a `dsn` key from it; `credentials` names up to five per-role Secrets and the operator creates a user per role with a fixed grant set.
+**Back:** `spec.credentials` is required, and so is its `operatorSecretName` (keys `username`, `password`, `MYSQL_ROOT_PASSWORD`). The other four role Secrets are optional; the operator creates a user per role with a fixed grant set. The single-Secret `spec.secretName` DSN mode was removed in v1.7.0.
 
 ---
 
@@ -27,7 +27,7 @@
 
 ---
 
-**Front:** Grants the `app` user receives in credentials mode
+**Front:** Grants the `app` user receives
 
 **Back:** DML and DDL on `*.*` — **without** `GRANT OPTION`, `SUPER` or any other administrative privilege. It cannot grant privileges to anyone. The grant sets are fixed and not configurable, which is what makes them an answer you can give a security review.
 
@@ -53,13 +53,13 @@
 
 **Front:** Does rotating a password in the credential Secret change MySQL?
 
-**Back:** No. The `ALTER USER` line only runs on a fresh datadir. Changing the Secret changes what the operator *presents*, not what MySQL *accepts* — and the site goes `unreachable` for no visible reason. It does roll the pods, because the spec hash includes credential Secret data.
+**Back:** No. The `ALTER USER` line only runs on a fresh datadir. Changing the Secret changes what the operator *presents*, not what MySQL *accepts* — and the site goes `Unreachable` for no visible reason. It does roll the pods, because the spec hash includes credential Secret data.
 
 ---
 
 **Front:** `lbIP` and `taintNodeSelector`
 
-**Back:** Required by a CEL rule unless the site's role is `read-only`: *taintNodeSelector and lbIP are required unless role is read-only*. A reader is never promoted and never tainted, so it needs neither.
+**Back:** Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and lbIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.
 
 ---
 
@@ -71,7 +71,7 @@
 
 **Front:** `isFreshDeploy` — the three conditions, all required
 
-**Back:** Every site is reachable (`read-only` or `writable`), no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.
+**Back:** Every site is reachable (`ReadOnly` or `Writable`), no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.
 
 ---
 

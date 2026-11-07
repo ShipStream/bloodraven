@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -20,8 +19,7 @@ import (
 )
 
 const (
-	ConditionBackupMetadataComplete = "MetadataComplete"
-	maxCompletionMetadataWait       = 10 * time.Minute
+	maxCompletionMetadataWait = 10 * time.Minute
 )
 
 var errBackupDestinationUnavailable = errors.New("backup completed without a recoverable destination")
@@ -44,44 +42,26 @@ func backupJobMainContainer(job *batchv1.Job) *corev1.Container {
 }
 
 func completionMetadataRetryable(status *v1alpha1.MysqlBackupStatus) bool {
-	c := apiMeta.FindStatusCondition(status.Conditions, ConditionBackupMetadataComplete)
-	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == "SentinelUnavailable" &&
+	c := apiMeta.FindStatusCondition(status.Conditions, v1alpha1.ConditionMetadataComplete)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonSentinelUnavailable &&
 		status.CompletionTime != nil && time.Now().Before(status.CompletionTime.Add(maxCompletionMetadataWait))
-}
-
-// Legacy records without this condition obtained their location from the
-// producer. Only these fallback outcomes identify a Job-derived template.
-func backupLocationFromJobFallback(status *v1alpha1.MysqlBackupStatus) bool {
-	c := apiMeta.FindStatusCondition(status.Conditions, ConditionBackupMetadataComplete)
-	if c == nil || c.Status != metav1.ConditionFalse {
-		return false
-	}
-	return c.Reason == "SentinelUnavailable" || c.Reason == "SentinelMissing" || c.Reason == "LocationMismatch"
 }
 
 // collectBackupCompletion always obtains the required destination before
 // success is persisted. Optional observations can be repaired independently.
 func (r *MysqlBackupReconciler) collectBackupCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job, next *v1alpha1.MysqlBackupStatus) (ctrl.Result, error) {
-	storage, location, destinationErr := backupJobDestination(job)
+	// The destination is the one recorded when the Job was created, or,
+	// when that status write was lost, the one the Job names. The Job's
+	// completion log never supplies it: it is cross-checked below.
+	if next.ArtifactStorage == nil || next.ArtifactStorage.Location == "" {
+		storage, err := artifactStorageFromJob(job)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("%w: %v", errBackupDestinationUnavailable, err)
+		}
+		next.ArtifactStorage = storage
+	}
+	location := next.ArtifactStorage.Location
 	meta, found, logErr := r.tailJobCompletion(ctx, backup, job)
-	if destinationErr == nil {
-		next.Location = location
-		next.StorageType = storage
-	} else {
-		_, raw, _ := backupJobRawDestination(job)
-		if next.Location == raw && backupLocationFromJobFallback(next) {
-			next.Location = ""
-		}
-		if found && meta.Location != "" {
-			next.Location = meta.Location
-			if storage == v1alpha1.BackupStorageS3 || storage == v1alpha1.BackupStoragePVC {
-				next.StorageType = storage
-			}
-		}
-	}
-	if next.Location == "" {
-		return ctrl.Result{}, fmt.Errorf("%w: %v", errBackupDestinationUnavailable, destinationErr)
-	}
 	if found {
 		if meta.Size != "" {
 			next.Size = meta.Size
@@ -93,37 +73,29 @@ func (r *MysqlBackupReconciler) collectBackupCompletion(ctx context.Context, bac
 			next.GtidExecuted = meta.GtidExecuted
 		}
 		if meta.BinlogFile != "" {
-			next.BinlogFile = meta.BinlogFile
-		}
-		if meta.BinlogPos > 0 {
-			next.BinlogPos = meta.BinlogPos
+			next.BinlogPosition = &v1alpha1.BinlogCoordinate{File: meta.BinlogFile, Position: meta.BinlogPos}
 		}
 	}
 	if next.Size == "" && next.SizeBytes > 0 {
 		next.Size = humanBytes(next.SizeBytes)
 	}
-	if destinationErr != nil && (!found || meta.Location == "") {
-		// A retained producer location is not a Job fallback. Preserve its
-		// provenance when neither the environment nor logs establish a path.
-		return ctrl.Result{}, nil
-	}
 	condition := metav1.Condition{
-		Type: ConditionBackupMetadataComplete, Status: metav1.ConditionTrue,
+		Type: v1alpha1.ConditionMetadataComplete, Status: metav1.ConditionTrue,
 		ObservedGeneration: backup.Generation, LastTransitionTime: metav1.Now(),
-		Reason: "Collected", Message: "completion metadata collected from Job logs",
+		Reason: v1alpha1.ReasonCollected, Message: "completion metadata collected from Job logs",
 	}
 	switch {
 	case logErr != nil:
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "SentinelUnavailable"
+		condition.Reason = v1alpha1.ReasonSentinelUnavailable
 		condition.Message = "completion logs unavailable; artifact destination recovered from Job inputs"
 	case !found || meta.Location == "":
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "SentinelMissing"
+		condition.Reason = v1alpha1.ReasonSentinelMissing
 		condition.Message = "completion sentinel missing or incomplete; artifact destination recovered from Job inputs"
-	case destinationErr == nil && meta.Location != location:
+	case meta.Location != location:
 		condition.Status = metav1.ConditionFalse
-		condition.Reason = "LocationMismatch"
+		condition.Reason = v1alpha1.ReasonLocationMismatch
 		condition.Message = "completion location differs from producing Job; using the Job destination"
 	}
 	setCondition(&next.Conditions, condition)
@@ -131,11 +103,6 @@ func (r *MysqlBackupReconciler) collectBackupCompletion(ctx context.Context, bac
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
-}
-
-func metadataLocationNeedsRepair(current, expected string) bool {
-	return current == "" || current != expected && expected != "" &&
-		strings.ReplaceAll(current, " ", "_") == strings.ReplaceAll(expected, " ", "_")
 }
 
 func (r *MysqlBackupReconciler) persistBackupMetadataFailure(ctx context.Context, backup *v1alpha1.MysqlBackup, next *v1alpha1.MysqlBackupStatus, cause error) error {
@@ -146,10 +113,10 @@ func (r *MysqlBackupReconciler) persistBackupMetadataFailure(ctx context.Context
 }
 
 func (r *MysqlBackupReconciler) persistBackupMetadataStatus(ctx context.Context, backup *v1alpha1.MysqlBackup, next *v1alpha1.MysqlBackupStatus, cause error) error {
-	for _, kind := range []string{ConditionBackupReady, ConditionBackupMetadataComplete} {
+	for _, kind := range []string{v1alpha1.ConditionReady, v1alpha1.ConditionMetadataComplete} {
 		setCondition(&next.Conditions, metav1.Condition{
 			Type: kind, Status: metav1.ConditionFalse, ObservedGeneration: backup.Generation,
-			LastTransitionTime: metav1.Now(), Reason: "DestinationUnavailable", Message: cause.Error(),
+			LastTransitionTime: metav1.Now(), Reason: v1alpha1.ReasonDestinationUnavailable, Message: cause.Error(),
 		})
 	}
 	if equality.Semantic.DeepEqual(&backup.Status, next) {
@@ -166,15 +133,15 @@ func (r *MysqlBackupReconciler) persistBackupMetadataStatus(ctx context.Context,
 }
 
 func (r *MysqlBackupReconciler) recordIncompleteBackupMetadata(backup *v1alpha1.MysqlBackup, previous *v1alpha1.MysqlBackupStatus) {
-	next := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionBackupMetadataComplete)
+	next := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
 	if next == nil || next.Status != metav1.ConditionFalse {
 		return
 	}
-	old := apiMeta.FindStatusCondition(previous.Conditions, ConditionBackupMetadataComplete)
+	old := apiMeta.FindStatusCondition(previous.Conditions, v1alpha1.ConditionMetadataComplete)
 	if old != nil && old.Status == next.Status && old.Reason == next.Reason && old.Message == next.Message {
 		return
 	}
-	r.Recorder.Event(backup, corev1.EventTypeWarning, "BackupMetadataIncomplete", next.Message)
+	r.Recorder.Event(backup, corev1.EventTypeWarning, v1alpha1.EventBackupMetadataIncomplete, next.Message)
 }
 
 // Deferred size observations may refresh the size gauge, but must not move

@@ -3,9 +3,9 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Front:** The six ordered-update phases, in order
+**Front:** The five ordered-update phases, in order
 
-**Back:** `UpdateReplica`, `WaitReplica`, `Failover`, `UpdateOldPrimary`, `WaitOldPrimary`, `Complete`. They appear verbatim in `status.updatePhase`, which is empty whenever no rollout is running.
+**Back:** `UpdateReplica`, `WaitReplica`, `Failover`, `UpdateOldPrimary`, `WaitOldPrimary`. They appear verbatim in `status.updatePhase`, which is empty whenever no rollout is running: a finished rollout clears it, and there is no `Complete` value.
 
 ---
 
@@ -39,7 +39,7 @@
 
 ---
 
-**Front:** `updateStrategy: Recreate`
+**Front:** `updateStrategy.type: Recreate`
 
 **Back:** Clears the drift list and patches every site Deployment in one pass, so pod restarts may overlap and both sites can be down at once. Never use it for a MySQL version bump: a stalled in-place upgrade leaves no healthy primary and no rollback.
 
@@ -63,9 +63,9 @@
 
 ---
 
-**Front:** `spec.sidecarImage`
+**Front:** `spec.sidecar.image`
 
-**Back:** Ships as its own image and is referenced by the group, not the chart. Moving it restarts every site's pod, so it goes through the same ordered update — with the same failover. Bloodraven tolerates one minor of operator/sidecar skew in either direction while pods roll.
+**Back:** Optional, with no stored default. Unset, the group runs the sidecar its operator release ships with (the chart's `sidecar.image.repository` and `sidecar.image.tag`), so a `helm upgrade` that ships a new sidecar changes the group's pod spec and runs an ordered update — with the same failover. Set it only to pin a build: a pin stays put, and a pin from another release gets a `SidecarVersionSkew` Warning. Bloodraven tolerates one minor of operator/sidecar skew in either direction while pods roll.
 
 ---
 

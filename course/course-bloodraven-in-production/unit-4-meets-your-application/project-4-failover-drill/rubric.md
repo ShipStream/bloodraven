@@ -20,7 +20,7 @@ Five criteria, integer weights summing to 100. Graded against the learner's `brd
 
 ### Stale reads and error classes are counted on the right signal — 20
 
-`stale_read_window` counts successful reads served by the demoted site at or after `status.lastFailover`, and returns a real zero for the emergency capture rather than a crash or a `None`. It does not use `readOnly` as the test, which would sweep in the `reader` site, which reports read_only=1 by design. `error_classes` returns all three keys always, puts both 1290 and 1792 in `readOnlyRefusal`, and puts a null error code in `connection` rather than `other`.
+`stale_read_window` counts successful reads served by the demoted site at or after `status.lastFailover.time`, and returns a real zero for the emergency capture rather than a crash or a `None`. It does not use `readOnly` as the test, which would sweep in the `reader` site, which reports read_only=1 by design. `error_classes` returns all three keys always, puts both 1290 and 1792 in `readOnlyRefusal`, and puts a null error code in `connection` rather than `other`.
 
 ### The verdict separates what the drill proved from what it did not — 20
 

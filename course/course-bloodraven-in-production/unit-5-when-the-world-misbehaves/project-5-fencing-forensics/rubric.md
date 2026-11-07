@@ -46,7 +46,7 @@ Correctness on the canonical input. Runs the tool against `tests/fixtures/partit
 
 ### `awkward_bundle_generality` — 25 marks
 
-Generality on an awkward bundle. `tests/fixtures/split-brain-tier3` has no `sidecar-pdx.jsonl` at all, two fence records that carry no `site` key, a repeated `SPLIT BRAIN` alert, an operator fence of a `read-only` reader, and a rule-2 fence whose own `latestPeerOk` sits four seconds inside the twenty-second lease window. Asserts the rule-2 line is `premature`, that `pdx` and only `pdx` is reported unfenced, and that the tool exits 1.
+Generality on an awkward bundle. `tests/fixtures/split-brain-tier3` has no `sidecar-pdx.jsonl` at all, two fence records that carry no `site` key, a repeated `SPLIT BRAIN` alert, an operator fence of a `ReadOnly` reader, and a rule-2 fence whose own `latestPeerOk` sits four seconds inside the twenty-second lease window. Asserts the rule-2 line is `premature`, that `pdx` and only `pdx` is reported unfenced, and that the tool exits 1.
 
 ### `decoy_lines_are_not_fences` — 20 marks
 

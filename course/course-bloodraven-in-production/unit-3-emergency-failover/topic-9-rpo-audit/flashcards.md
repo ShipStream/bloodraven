@@ -45,7 +45,7 @@
 
 ---
 
-**Front:** status.promotionGtidExecuted — where does its value come from?
+**Front:** status.lastFailover.promotionGtidExecuted — where does its value come from?
 
 **Back:** SELECT @@global.gtid_executed run on the candidate at promotion, before it accepts any write.
 

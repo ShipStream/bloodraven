@@ -78,8 +78,8 @@ func s44InjectWrongSource(state *s44RunState) runner.Step {
 			if err != nil {
 				return err
 			}
-			if mfg.Status.LastFailover != nil {
-				state.lastFailoverBefore = mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339)
+			if mfg.Status.LastFailoverTime() != nil {
+				state.lastFailoverBefore = mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339)
 			}
 			reader, err := env.MySQL(state.topo.reader)
 			if err != nil {
@@ -164,8 +164,8 @@ func s44VerifyDirectSourceRestored(state *s44RunState) runner.Step {
 				return fmt.Errorf("active site changed during convergence repair: %q -> %q", state.topo.active, mfg.Status.ActiveSite)
 			}
 			lastFailover := ""
-			if mfg.Status.LastFailover != nil {
-				lastFailover = mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339)
+			if mfg.Status.LastFailoverTime() != nil {
+				lastFailover = mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339)
 			}
 			if lastFailover != state.lastFailoverBefore {
 				return fmt.Errorf("convergence repair consumed a failover: lastFailover %q -> %q", state.lastFailoverBefore, lastFailover)

@@ -110,7 +110,7 @@ FENCE TIMELINE — playground (bundle: split-brain-tier3)
   11 records scanned, 3 fence events
 
   2026-08-12T14:01:03.505Z  reader   safety-net     correct    error=Get "http://…/active-site": context deadline exceeded
-  2026-08-12T14:02:15.130Z  reader   non-promotable correct    site=reader role=read-only
+  2026-08-12T14:02:15.130Z  reader   non-promotable correct    site=reader role=ReadOnly
   2026-08-12T14:04:20.880Z  iad      rule-2         premature  bloodravenLastOk=… latestPeerOk=… leaseTimeout=20s
 
 UNFENCED WRITABLE SITES
@@ -205,7 +205,7 @@ the evidence it logged actually meets the condition it claims to have met.
 | `safety-net` | always | The safety net fails closed by *staying* fenced. It never takes writability away from a site that had it, so it cannot fire too early. |
 | `split-brain` | `winner` is non-empty and is not the fenced site | Tier 2 fences the losers and re-promotes the winner. A record that fences its own winner is broken. |
 | `old-primary` | always | The operator fences every writable site except the one holding live primary authority. The record carries nothing that could contradict it; read the timeline around it. |
-| `non-promotable` | `role` is not `primary-candidate` | Promotability is exactly `role == primary-candidate`. A writable `dr-only` or `read-only` site is never authoritative and is fenced on every poll. Anything else in `role` means the wrong site was fenced. |
+| `non-promotable` | `role` is not `PrimaryCandidate` | Promotability is exactly `role == PrimaryCandidate`. A writable `DisasterRecovery` or `ReadOnly` site is never authoritative and is fenced on every poll. Anything else in `role` means the wrong site was fenced. |
 
 `leaseTimeout` arrives as `slog`'s duration rendering — the string `"20s"`. `parse_duration()`
 handles it. The shipped defaults are `leaseTimeout: 20s` and `peerCheckInterval: 5s`, so a lease

@@ -1,6 +1,6 @@
-# Three-site playground variant: two primary-candidate sites (iad, pdx)
-# plus a cross-region dr-only follower (fra). Useful for exercising the
-# "primary-candidate only can be promoted" and "sitePriorities picks the
+# Three-site playground variant: two PrimaryCandidate sites (iad, pdx)
+# plus a cross-region DisasterRecovery follower (fra). Useful for exercising the
+# "only PrimaryCandidate can be promoted" and "sitePriorities picks the
 # split-brain winner" behaviours without touching the default 2-site
 # manifest.
 #
@@ -12,24 +12,25 @@ metadata:
   namespace: bloodraven-playground
 spec:
   image: mysql:9.7
-  sidecarImage: bloodraven-sidecar:playground
-  secretName: mysql-credentials
+  credentials:
+    operatorSecretName: mysql-credentials
   pollInterval: 2s
   failureThreshold: 3
   recoveryThreshold: 2
   failoverCooldown: 30s
   dns:
     hostname: playground-db.example.local
-    ttl: 10
+    ttlSeconds: 10
   splitBrainPolicy:
     sitePriorities: [iad, pdx]
   sites:
     - name: iad
-      role: primary-candidate
+      serverID: 101
+      role: PrimaryCandidate
       zone: zone-iad
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: iad
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: iad
       lbIP: "10.96.100.10"
       storage:
         storageClassName: playground-fast
@@ -38,11 +39,12 @@ spec:
         requests: { cpu: 100m, memory: 256Mi }
         limits:   { cpu: 500m, memory: 512Mi }
     - name: pdx
-      role: primary-candidate
+      serverID: 102
+      role: PrimaryCandidate
       zone: zone-pdx
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: pdx
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: pdx
       lbIP: "10.96.100.20"
       storage:
         storageClassName: playground-fast
@@ -51,11 +53,12 @@ spec:
         requests: { cpu: 100m, memory: 256Mi }
         limits:   { cpu: 500m, memory: 512Mi }
     - name: fra
-      role: dr-only
+      serverID: 103
+      role: DisasterRecovery
       zone: zone-fra
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: fra
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: fra
       lbIP: "10.96.100.30"
       storage:
         storageClassName: playground-fast

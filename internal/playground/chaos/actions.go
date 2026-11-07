@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgrustfs "github.com/shipstream/bloodraven/internal/playground/rustfs"
@@ -209,7 +210,7 @@ func (a *Actions) PartitionSite(ctx context.Context, site string) error {
 // The annotation is the public CR-driven trigger documented on
 // PlannedFailoverSpec.OnCooldown.
 func (a *Actions) AnnotatePlannedFailover(ctx context.Context, target string) error {
-	const key = "bloodraven.shipstream.io/planned-failover"
+	key := v1alpha1.PlannedFailoverAnnotation
 	if err := a.K.AnnotateMFGNamed(ctx, a.Namespace, a.FG, key, target); err != nil {
 		return fmt.Errorf("set planned-failover annotation: %w", err)
 	}
@@ -227,7 +228,7 @@ func (a *Actions) AnnotatePlannedFailover(ctx context.Context, target string) er
 // scenario needs a per-request knob such as a short maxLagWait to force the
 // WaitingForLag → Failed{LagTimeout} rollback.
 func (a *Actions) AnnotatePlannedFailoverRaw(ctx context.Context, rawValue string) error {
-	const key = "bloodraven.shipstream.io/planned-failover"
+	key := v1alpha1.PlannedFailoverAnnotation
 	if rawValue == "" {
 		return fmt.Errorf("planned-failover raw annotation value must not be empty")
 	}
@@ -295,7 +296,7 @@ func (a *Actions) LabelNode(ctx context.Context, name string, labels map[string]
 }
 
 // WipeSiteData scales the named site's MySQL deployment to 0, clears
-// the operator-applied `db-readonly-<fg>` taint from every node so the
+// the operator-applied `<namespace>.db-readonly.bloodraven.shipstream.io/<fg>` taint from every node so the
 // local-path-provisioner helper pod can run, deletes the site's data
 // PVC, and waits for the PVC to actually disappear. The reverter scales
 // the site back to 1 — at which point the operator's reconciler creates
@@ -350,7 +351,7 @@ func (a *Actions) WipeSiteData(ctx context.Context, site, fgGroup string) error 
 	}
 	// Clear the readonly taint from every node so the local-path-
 	// provisioner helper pod can run when the new PVC is created.
-	taintKey := "shipstream.io/db-readonly-" + fgGroup
+	taintKey := v1alpha1.ReadOnlyTaintKey(a.Namespace, fgGroup)
 	nodes, err := a.K.ListNodes(ctx)
 	if err != nil {
 		return fmt.Errorf("list nodes: %w", err)
@@ -562,13 +563,13 @@ func (a *Actions) ScaleAllDragonflyToZero(ctx context.Context) error {
 // onSyncTimeout skip patching that field.
 //
 // Used by scenario D4 to drive the planned-failover state machine into
-// the WaitingForDragonflySync timeout branch deterministically: a 1ms
-// budget plus a target Dragonfly that has been scaled to 0 forces both
+// the WaitingForDragonflySync timeout branch deterministically: a 1s
+// budget (the admission minimum) plus a target Dragonfly that has been scaled to 0 forces both
 // the offset-poll-against-target and the REPLTAKEOVER step to fail,
 // independently of master/replica replication latency in the cluster.
 //
 // The values pass through metav1.Duration's JSON UnmarshalJSON, so
-// maxSyncWait must be a Go duration string ("1ms", "30s"). Empty
+// maxSyncWait must be a Go duration string ("1s", "30s"). Empty
 // onSyncTimeout means "leave as-is, do not patch".
 func (a *Actions) PatchDragonflySyncBudget(ctx context.Context, maxSyncWait, onSyncTimeout string) error {
 	if maxSyncWait == "" && onSyncTimeout == "" {
@@ -686,6 +687,45 @@ func (a *Actions) PatchDragonflyImage(ctx context.Context, image string) error {
 			Path:  "/spec/dragonfly/image",
 			Value: original,
 		}})
+	})
+	return nil
+}
+
+// PatchDragonflySnapshotUpgrade requests a snapshot-restore upgrade the way
+// a user does: one patch sets spec.dragonfly.upgradeStrategy to
+// SnapshotRestore and spec.dragonfly.image to image, so the Rolling render
+// never sees the new image. The reverter restores both in one patch; with
+// the original strategy back, the original image rolls the ordinary way.
+func (a *Actions) PatchDragonflySnapshotUpgrade(ctx context.Context, image string) error {
+	if image == "" {
+		return fmt.Errorf("dragonfly image must not be empty")
+	}
+	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	if err != nil {
+		return fmt.Errorf("read MFG for dragonfly snapshot upgrade: %w", err)
+	}
+	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
+		return fmt.Errorf("spec.dragonfly.enabled must be true")
+	}
+	originalImage := mfg.Spec.Dragonfly.Image
+	if originalImage == image {
+		return fmt.Errorf("dragonfly snapshot upgrade target equals current image %q", image)
+	}
+	originalStrategy := mfg.Spec.Dragonfly.UpgradeStrategy
+	if originalStrategy == "" {
+		originalStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+	}
+	if err := a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{
+		{Op: "add", Path: "/spec/dragonfly/upgradeStrategy", Value: string(v1alpha1.DragonflyUpgradeStrategySnapshotRestore)},
+		{Op: "replace", Path: "/spec/dragonfly/image", Value: image},
+	}); err != nil {
+		return fmt.Errorf("patch dragonfly snapshot upgrade: %w", err)
+	}
+	a.push("restore dragonfly image and upgrade strategy", func(ctx context.Context) error {
+		return a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{
+			{Op: "add", Path: "/spec/dragonfly/upgradeStrategy", Value: string(originalStrategy)},
+			{Op: "replace", Path: "/spec/dragonfly/image", Value: originalImage},
+		})
 	})
 	return nil
 }
@@ -829,8 +869,7 @@ func (a *Actions) PatchDragonflySnapshot(ctx context.Context) error {
 	snapshot := map[string]any{
 		"dir":                   "s3://dragonfly/playground",
 		"credentialsSecretName": "dragonfly-s3-credentials",
-		"s3Endpoint":            "rustfs.bloodraven-playground.svc.cluster.local:9000",
-		"s3UseHTTPS":            false,
+		"s3EndpointURL":         "http://rustfs.bloodraven-playground.svc.cluster.local:9000",
 		"s3SignPayload":         false,
 	}
 	if err := a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{{

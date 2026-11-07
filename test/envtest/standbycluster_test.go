@@ -12,8 +12,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -91,13 +92,6 @@ func newStandbyReconciler(store sidecar.ArchiveStore) *controller.MysqlStandbyCl
 }
 
 // minimalEnvtestStandby returns a MysqlStandbyCluster suitable for envtest.
-//
-// The embedded template.spec MUST be a fully-valid MysqlFailoverGroupSpec
-// because the CRD's deferred-validation embeds the parent spec — admission
-// validates the template at standby-cluster create time, not only when the
-// MFG is materialized at Phase 3 activation. The fixture below mirrors
-// examples/minimal-failovergroup.yaml plus a credentialsSecret for the
-// archive S3 backend (required by MinLength=1 on S3Storage).
 func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 	return &v1alpha1.MysqlStandbyCluster{
 		ObjectMeta: metav1.ObjectMeta{
@@ -107,60 +101,14 @@ func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 		Spec: v1alpha1.MysqlStandbyClusterSpec{
 			Transport: v1alpha1.StandbyTransportObjectStore,
 			Source: v1alpha1.StandbySource{
-				FailoverGroupName: "orders",
-				ProfileName:       "nightly",
-				Storage: v1alpha1.BackupStorage{
-					Type: v1alpha1.BackupStorageS3,
-					S3: &v1alpha1.S3Storage{
-						Bucket: "my-bucket",
-						Prefix: "orders",
-						// CredentialsSecret is required by the CRD schema (MinLength=1
-						// in BackupStorage's S3 stanza). The reconciler's S3-cred
-						// resolution path is bypassed in envtest because the
-						// SetNewStoreFunc injection returns the fake store before
-						// resolveS3CredsToDir is reached, but admission still
-						// requires the field to be set.
-						CredentialsSecret: "envtest-s3-creds",
-					},
-				},
-			},
-			Template: v1alpha1.StandbyFailoverGroupTemplate{
-				Name: name + "-dr",
-				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Image:      "mysql:9.7",
-					SecretName: "mysql-creds",
-					DNS: v1alpha1.DNSSpec{
-						Hostname: name + "-dr.az.example.com",
-						TTL:      60,
-					},
-					Sites: []v1alpha1.SiteSpec{
-						{
-							Name: "iad",
-							Zone: "us-east-1a",
-							TaintNodeSelector: map[string]string{
-								"shipstream.io/failover-group.orders": "true",
-								"shipstream.io/site.orders":           "iad",
-							},
-							LBIP: "10.0.1.1",
-							Storage: v1alpha1.StorageSpec{
-								StorageClassName: "fast-ssd",
-								Size:             resource.MustParse("100Gi"),
-							},
-						},
-						{
-							Name: "pdx",
-							Zone: "us-west-2a",
-							TaintNodeSelector: map[string]string{
-								"shipstream.io/failover-group.orders": "true",
-								"shipstream.io/site.orders":           "pdx",
-							},
-							LBIP: "10.0.2.1",
-							Storage: v1alpha1.StorageSpec{
-								StorageClassName: "fast-ssd",
-								Size:             resource.MustParse("100Gi"),
-							},
-						},
-					},
+				S3: v1alpha1.StandbyS3Source{
+					Bucket: "my-bucket",
+					Prefix: "orders",
+					// CredentialsSecret is required by the CRD schema. The
+					// reconciler reads the Secret before the SetNewStoreFunc
+					// injection returns the fake store, so the tests create
+					// it with ensureEnvtestS3CredsSecret.
+					CredentialsSecretName: "envtest-s3-creds",
 				},
 			},
 		},
@@ -168,7 +116,7 @@ func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 }
 
 // ensureEnvtestS3CredsSecret creates the dummy AWS-credentials Secret that
-// the standby fixture references in spec.source.storage.s3.credentialsSecret.
+// the standby fixture references in spec.source.s3.credentialsSecretName.
 // The reconciler's resolveS3CredsToDir path always reads the Secret before
 // the SetNewStoreFunc-injected fake store is dispatched, so admission +
 // reconcile both require the Secret to exist. Idempotent across tests in
@@ -268,19 +216,26 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 	if d == nil {
 		t.Fatal("status.discovered is nil")
 	}
-	if d.DumpName != "orders-nightly-20260520" {
-		t.Errorf("DumpName: want orders-nightly-20260520, got %q", d.DumpName)
+	if d.LastScanTime == nil {
+		t.Error("lastScanTime is nil")
 	}
-	if d.ManifestCount != 1 {
-		t.Errorf("ManifestCount: want 1, got %d", d.ManifestCount)
+	// latestDump and binlogArchive round-trip through the CRD schema.
+	if dump := d.LatestDump; dump == nil || dump.Name != "orders-nightly-20260520" ||
+		dump.Location != "orders/orders-nightly-20260520/" || dump.GtidExecuted != "abc:1-100" ||
+		dump.SizeBytes == nil || *dump.SizeBytes != 512000 || dump.CompletionTime == nil {
+		t.Errorf("discovered.latestDump: %+v", d.LatestDump)
 	}
-	if d.LastScanAt == nil {
-		t.Error("LastScanAt is nil")
+	a := d.BinlogArchive
+	if a == nil {
+		t.Fatal("discovered.binlogArchive is nil")
 	}
-	// discovered.archive round-trips through the CRD schema.
-	if d.Archive == nil || d.Archive.ArchiveID != "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa" ||
-		d.Archive.Source.UID != "orders-uid" || d.Archive.EncryptionMode != v1alpha1.PITRArchiveEncryptionNone {
-		t.Errorf("discovered.archive: %+v", d.Archive)
+	if a.Identity.ArchiveID != "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+		a.Identity.Source.UID != "orders-uid" || a.Identity.EncryptionMode != v1alpha1.EncryptionModeNone {
+		t.Errorf("discovered.binlogArchive.identity: %+v", a.Identity)
+	}
+	if a.ManifestCount != 1 || a.FileCount != 1 || a.SizeBytes != 1024 ||
+		a.OldestEventTime == nil || a.NewestEventTime == nil {
+		t.Errorf("discovered.binlogArchive window: %+v", a)
 	}
 }
 
@@ -377,60 +332,119 @@ func TestMysqlStandbyCluster_EnvtestCreate_DiscoveryIntervalOverride(t *testing.
 	}
 }
 
-// TestMysqlStandbyCluster_EnvtestCreate_RejectsPVCSource verifies that the
-// spec-level XValidation rule (D1) rejects a PVC-backed source at admission.
-// Cross-cluster DR requires S3-compatible storage because the operator pod
-// does not mount the source cluster's backup PVC; the CEL rule fails fast at
-// create time instead of letting a doomed CR error only at reconcile time
-// (the runtime ConfigError in buildStoreCfg remains as defense-in-depth).
-func TestMysqlStandbyCluster_EnvtestCreate_RejectsPVCSource(t *testing.T) {
+// TestMysqlStandbyCluster_EnvtestCreate_PVCSourceUnrepresentable verifies
+// that the schema has no way to name a PVC source: a source without s3 is
+// refused, and a leftover source.storage block is pruned rather than stored.
+// Cross-cluster DR reads the source's object store; the operator pod cannot
+// mount the source cluster's backup PVC.
+func TestMysqlStandbyCluster_EnvtestCreate_PVCSourceUnrepresentable(t *testing.T) {
 	ns := "default"
-	scName := "envtest-standby-pvc"
-
 	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
-	cr := minimalEnvtestStandby(scName, ns)
-	// Swap the S3 source for a PVC source. The BackupStorage union rule
-	// requires exactly one of s3/pvc matching the type discriminator, so we
-	// must clear S3 and set PVC.
-	cr.Spec.Source.Storage = v1alpha1.BackupStorage{
-		Type: v1alpha1.BackupStoragePVC,
-		PVC: &v1alpha1.PVCStorage{
-			ClaimName: "source-backup-pvc",
-		},
+
+	newUnstructured := func(name string, source map[string]any) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": v1alpha1.GroupVersion.String(),
+			"kind":       "MysqlStandbyCluster",
+			"metadata":   map[string]any{"name": name, "namespace": ns},
+			"spec":       map[string]any{"source": source},
+		}}
+		return u
+	}
+	pvc := map[string]any{"type": "PVC", "pvc": map[string]any{"claimName": "source-backup-pvc"}}
+
+	onlyPVC := newUnstructured("envtest-standby-pvc", map[string]any{"storage": pvc})
+	err := k8sClient.Create(ctx, onlyPVC)
+	if err == nil {
+		_ = k8sClient.Delete(ctx, onlyPVC)
+		t.Fatal("expected admission to reject a source without s3, but Create succeeded")
+	}
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.source.s3") {
+		t.Errorf("want a required spec.source.s3 refusal, got: %v", err)
 	}
 
-	err := k8sClient.Create(ctx, cr)
-	if err == nil {
-		_ = k8sClient.Delete(ctx, cr) // clean up if it unexpectedly admitted
-		t.Fatal("expected admission to reject PVC-backed source, but Create succeeded")
+	withS3 := newUnstructured("envtest-standby-pvc-pruned", map[string]any{
+		"storage": pvc,
+		"s3":      map[string]any{"bucket": "my-bucket", "prefix": "orders", "credentialsSecretName": "envtest-s3-creds"},
+	})
+	if err := k8sClient.Create(ctx, withS3); err != nil {
+		t.Fatalf("create with s3 and a leftover storage block: %v", err)
 	}
-	if !strings.Contains(err.Error(), "source.storage.type must be S3") {
-		t.Errorf("want S3-only CEL rule violation, got: %v", err)
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, withS3) })
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlStandbyCluster"))
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: withS3.GetName()}, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := unstructured.NestedFieldNoCopy(got.Object, "spec", "source", "storage"); found {
+		t.Error("spec.source.storage survived admission; it must be pruned")
 	}
 }
 
-// TestMysqlStandbyCluster_EnvtestCreate_RejectsEmptyPrefix verifies that the
-// spec-level XValidation rule rejects an ObjectStore+S3 source with an empty
-// prefix at admission. S3Storage.Prefix has no MinLength of its own, so this
-// CEL rule is the sole guard. The rule uses size(prefix) > 0 rather than a
-// CEL empty-string-literal comparison, because gofmt rewrites that literal
-// into a curly quote (U+201D) that silently corrupts admission; this test
-// locks the rejection behavior in regardless of how the marker is formatted.
-func TestMysqlStandbyCluster_EnvtestCreate_RejectsEmptyPrefix(t *testing.T) {
+// TestMysqlStandbyCluster_EnvtestCreate_RejectsNetworkTransport verifies that
+// the transport enum admits only ObjectStore: Network was never implemented.
+func TestMysqlStandbyCluster_EnvtestCreate_RejectsNetworkTransport(t *testing.T) {
 	ns := "default"
-	scName := "envtest-standby-emptyprefix"
-
 	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
-	cr := minimalEnvtestStandby(scName, ns)
-	cr.Spec.Source.Storage.S3.Prefix = "" // violates the non-empty-prefix rule
-
+	cr := minimalEnvtestStandby("envtest-standby-network", ns)
+	cr.Spec.Transport = v1alpha1.StandbyTransport("Network")
 	err := k8sClient.Create(ctx, cr)
 	if err == nil {
-		_ = k8sClient.Delete(ctx, cr) // clean up if it unexpectedly admitted
-		t.Fatal("expected admission to reject empty source.storage.s3.prefix, but Create succeeded")
+		_ = k8sClient.Delete(ctx, cr)
+		t.Fatal("expected admission to reject transport Network, but Create succeeded")
 	}
-	if !strings.Contains(err.Error(), "prefix must be non-empty") {
-		t.Errorf("want non-empty-prefix CEL rule violation, got: %v", err)
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.transport") {
+		t.Errorf("want a spec.transport enum refusal, got: %v", err)
+	}
+
+	defaulted := minimalEnvtestStandby("envtest-standby-transport-default", ns)
+	defaulted.Spec.Transport = ""
+	if err := k8sClient.Create(ctx, defaulted); err != nil {
+		t.Fatalf("create without transport: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, defaulted) })
+	if defaulted.Spec.Transport != v1alpha1.StandbyTransportObjectStore {
+		t.Errorf("transport: want the ObjectStore default, got %q", defaulted.Spec.Transport)
+	}
+}
+
+// TestMysqlStandbyCluster_EnvtestCreate_RejectsBucketRootPrefix verifies that
+// source.s3.prefix must name at least one segment: an empty prefix, or one
+// that normalizes to the bucket root, is refused at admission.
+func TestMysqlStandbyCluster_EnvtestCreate_RejectsBucketRootPrefix(t *testing.T) {
+	ns := "default"
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
+
+	for i, tc := range []struct {
+		prefix string
+		ok     bool
+	}{
+		{"", false},
+		{"/", false},
+		{"//", false},
+		{"a//b", false},
+		{"orders/..", false},
+		{"orders", true},
+		{"/orders/west/", true},
+	} {
+		cr := minimalEnvtestStandby(fmt.Sprintf("envtest-standby-prefix-%d", i), ns)
+		cr.Spec.Source.S3.Prefix = tc.prefix
+		err := k8sClient.Create(ctx, cr)
+		if tc.ok {
+			if err != nil {
+				t.Errorf("prefix %q refused: %v", tc.prefix, err)
+				continue
+			}
+			_ = k8sClient.Delete(ctx, cr)
+			continue
+		}
+		if err == nil {
+			_ = k8sClient.Delete(ctx, cr)
+			t.Errorf("expected admission to reject prefix %q, but Create succeeded", tc.prefix)
+			continue
+		}
+		if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.source.s3.prefix") {
+			t.Errorf("prefix %q rejected for the wrong reason: %v", tc.prefix, err)
+		}
 	}
 }
 
@@ -443,7 +457,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_RejectsNonHTTPEndpoint(t *testing.T) 
 
 	for i, bad := range []string{"minio:9000", "file:///etc/passwd", "http://host/?x=1", "https://user:pw@minio:9000"} {
 		cr := minimalEnvtestStandby("envtest-standby-endpoint-"+string(rune('a'+i)), ns)
-		cr.Spec.Source.Storage.S3.EndpointURL = bad
+		cr.Spec.Source.S3.EndpointURL = bad
 		err := k8sClient.Create(ctx, cr)
 		if err == nil {
 			_ = k8sClient.Delete(ctx, cr)

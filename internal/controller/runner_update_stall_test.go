@@ -15,7 +15,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
-// A pod stall reads as Updating=False/OrderedUpdateStalled with the cause,
+// A pod stall reads as Updating=True/OrderedUpdateStalled with the cause,
 // and fires one Warning Event per new stall: not on every retry that finds
 // the same cause, and again only after an attempt got past it.
 func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
@@ -32,7 +32,7 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	stalled := base
 	stalled.UpdateStalled = "site dc2 was updated but its pod mysql-lion-dc2-1 is not Ready (" + sidecarCrashLoop + ")"
 	running := base
-	running.UpdatePhase = string(UpdatePhaseWaitReplica)
+	running.UpdatePhase = v1alpha1.UpdatePhaseWaitReplica
 
 	write := func(snap TopologySnapshot) (*metav1.Condition, []string) {
 		t.Helper()
@@ -49,8 +49,8 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	cond, events := write(stalled)
 	wantMsg := "Ordered update stalled: " + stalled.UpdateStalled +
 		". No other site is rolled and the active site is not handed off until that pod has been Ready for 30s; the update retries every 30s"
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonOrderedUpdateStalled || cond.Message != wantMsg {
-		t.Fatalf("Updating = %+v, want False/%s %q", cond, ReasonOrderedUpdateStalled, wantMsg)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != v1alpha1.ReasonOrderedUpdateStalled || cond.Message != wantMsg {
+		t.Fatalf("Updating = %+v, want True/%s %q", cond, v1alpha1.ReasonOrderedUpdateStalled, wantMsg)
 	}
 	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning OrderedUpdateStalled "+wantMsg) {
 		t.Fatalf("events = %q, want one OrderedUpdateStalled Warning", events)
@@ -61,7 +61,7 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	}
 
 	cond, events = write(running)
-	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(UpdatePhaseWaitReplica) || len(events) != 0 {
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(v1alpha1.UpdatePhaseWaitReplica) || len(events) != 0 {
 		t.Fatalf("Updating = %+v events %q while an attempt runs", cond, events)
 	}
 	if _, events = write(stalled); len(events) != 1 {

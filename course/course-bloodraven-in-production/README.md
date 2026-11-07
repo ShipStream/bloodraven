@@ -34,7 +34,7 @@ You are on call for a MySQL that has to survive losing an entire site. This unit
 
   4. Trace a write from the application through `mysql-playground-primary` to the pod that currently owns it
   5. Say what the sidecar does that the operator cannot, and why the binlog archiver lives there
-  6. Tell `primary-candidate`, `dr-only` and `read-only` sites apart by what each is allowed to become
+  6. Tell `PrimaryCandidate`, `DisasterRecovery` and `ReadOnly` sites apart by what each is allowed to become
 
 **The bet Bloodraven makes** — Two sites, asynchronous replication, and an RPO that is deliberately not zero. What that buys, what it costs, and the six things Bloodraven refuses to do.
 
@@ -42,7 +42,7 @@ You are on call for a MySQL that has to survive losing an entire site. This unit
   2. Name three things Bloodraven refuses to do, from its own non-goals list
   3. Explain why asynchronous replication with automatic promotion was chosen over Group Replication
 
-*Unit test — Reading a failover group* (10 questions, pass at 70%). Quick check: can you name the active site from a status dump, say which pod the `-primary` Service selects, and explain why a `read-only` site can never be promoted?
+*Unit test — Reading a failover group* (10 questions, pass at 70%). Quick check: can you name the active site from a status dump, say which pod the `-primary` Service selects, and explain why a `ReadOnly` site can never be promoted?
 
 *Project — brstatus — the one-screen status reader.* Write a tool that turns a MysqlFailoverGroup status into a one-screen summary and a meaningful exit code, so that from Unit 2 onward you can tell at a glance whether `playground` is healthy — and so you learn, the hard way, that a lagging reader is not an unhealthy group.
 
@@ -52,9 +52,9 @@ Under the failover machinery there is a two-second poll loop and a small table. 
 
 **The poll loop and per-site state** — Every two seconds, one `SELECT @@read_only` per site. Four states, two debounce counters that behave asymmetrically on purpose, and a per-site backoff that slows only the site that stays down.
 
-  1. Walk a site from `unknown` to `writable`, `read-only` or `unreachable` and say what each transition needs
+  1. Walk a site from `Unknown` to `Writable`, `ReadOnly` or `Unreachable` and say what each transition needs
   2. Work out the detection delay from `pollInterval` and `failureThreshold` (2s × 3 = 6s by default)
-  3. Explain why `read-only` is entered on a single poll while `writable` needs `recoveryThreshold` successes
+  3. Explain why `ReadOnly` is entered on a single poll while `Writable` needs `recoveryThreshold` successes
 
 **The six-row table that decides everything** — Turn a set of site states into exactly one action. Evaluation order matters, the fence-first return preempts every row below it, and the published table is missing a row you will meet in production.
 
@@ -68,7 +68,7 @@ Under the failover machinery there is a two-second poll loop and a small table. 
   8. Find `lastFailover` in both places the operator writes it and say why there are two
   9. Name the conditions that let the operator re-assert a fenced promoted primary instead of alerting
 
-**Reading the operator's mind from logs and metrics** — Follow one poll cycle through the structured log, read the three gauges that describe a group, and work a real incident where the dashboard said `writable` for two minutes after the site had already been fenced.
+**Reading the operator's mind from logs and metrics** — Follow one poll cycle through the structured log, read the three gauges that describe a group, and work a real incident where the dashboard said `Writable` for two minutes after the site had already been fenced.
 
   10. Follow one poll cycle through the structured log using the documented `msg` strings
   11. Read `bloodraven_site_state`, `bloodraven_replication_lag_seconds` and `bloodraven_state_transitions_total` and say what the group is doing
@@ -181,14 +181,14 @@ A failover group protects you from losing a site. It does not protect you from l
 **Backups and the binlog archiver** — Where the dump comes from, why a reader can never supply it, and how a sealed binlog gets from a rotate on the primary into object storage — plus the tail that is gone forever.
 
   1. Choose S3 or PVC storage for `playground` and say what PVC-local costs you
-  2. Say which site a backup runs from and why a `read-only` reader is never eligible
+  2. Say which site a backup runs from and why a `ReadOnly` reader is never eligible
   3. Trace a sealed binlog from rotation to object storage, and name what can never be archived
 
 **Verify, and restore** — An unverified backup is a schrödinger backup. Prove it loads, then restore `playground` in place behind a confirmation token that has to be a timestamp.
 
   4. Run a backup verification and say precisely what a `Succeeded` result proved
   5. Restore `playground` in place using the RFC 3339 confirmation token
-  6. Explain why a `pointInTime` request is rejected: on `initFromBackup` when PITR is disabled, and always on `restoreInPlace`
+  6. Explain why a `pointInTime` request is rejected on `initFromBackup` when PITR is disabled, and why `restoreInPlace` has none
 
 **Encryption at rest and the keyring lifecycle** — Five phases, one steady state, and the moment etcd becomes part of your key custody. Plus the one site you must never rotate.
 
@@ -219,7 +219,7 @@ Six units started from a group somebody else's script created. This one builds o
 **Building a group from nothing** — An empty namespace, and every line of the manifest a decision you already know how to defend. Credentials, storage, node labels — and which of your mistakes admission catches.
 
   1. Write a `MysqlFailoverGroup` into an empty namespace and say, line by line, which earlier unit decided it
-  2. Choose between `secretName` and `credentials` and name the users and grants each one produces
+  2. Write `spec.credentials` and name the users and grants each role produces
   3. Separate the mistakes admission rejects from the ones you discover during an incident
 
 **TLS, and what it unlocks** — The field the CRD demanded in Unit 6 and nobody taught. A SAN list that keeps the sidecar able to fence, a renewal that moves your primary, and the door it opens to encryption at rest.

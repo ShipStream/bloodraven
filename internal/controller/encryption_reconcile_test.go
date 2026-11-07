@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -44,10 +45,10 @@ func liveKeyring(digest string, readOnly bool) *internalmysql.KeyringStatus {
 			Name: "component_keyring_file", Status: "Active", ReadOnly: readOnly,
 		},
 		Coverage: &internalmysql.KeyringCoverage{
-			SystemTablespaceEncrypted: true,
-			RedoLogEncrypted:          true,
-			UndoLogEncrypted:          true,
-			BinlogEncrypted:           true,
+			SystemTablespaceEncrypted: new(true),
+			RedoLogEncrypted:          new(true),
+			UndoLogEncrypted:          new(true),
+			BinlogEncrypted:           new(true),
 		},
 	}
 }
@@ -83,7 +84,7 @@ func TestReconcileEncryption_DisabledIsNoop(t *testing.T) {
 
 func TestReconcileEncryption_DisablingClearsStatus(t *testing.T) {
 	fg := newTestFG()
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{Sealed: true}
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{}
 	r, _ := encReconciler(t, nil, fg)
 	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -119,7 +120,7 @@ func TestReconcileEncryption_FreshSitesStartPending(t *testing.T) {
 			t.Errorf("%s must not render sealed before anything is escrowed", name)
 		}
 	}
-	if fg.Status.EncryptionAtRest.Sealed {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady); c != nil && c.Reason == v1alpha1.ReasonAllSitesSealed {
 		t.Error("group must not report sealed while sites are bootstrapping")
 	}
 }
@@ -293,12 +294,12 @@ func TestReconcileEncryption_SealsOnceDeploymentRolled(t *testing.T) {
 		if s.Phase != v1alpha1.KeyringPhaseSealed {
 			t.Errorf("%s phase = %q (%s), want Sealed", name, s.Phase, s.Message)
 		}
-		if s.Coverage == nil || !s.Coverage.KeyringReadOnly {
+		if s.Coverage == nil || s.Coverage.KeyringReadOnly == nil || !*s.Coverage.KeyringReadOnly {
 			t.Errorf("%s coverage should record a read-only keyring: %+v", name, s.Coverage)
 		}
 	}
-	if !fg.Status.EncryptionAtRest.Sealed {
-		t.Error("group should report sealed once every site is sealed")
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady); c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonAllSitesSealed {
+		t.Errorf("group should report EncryptionAtRestReady=True/AllSitesSealed once every site is sealed: %+v", c)
 	}
 }
 
@@ -370,7 +371,7 @@ func TestReconcileEncryption_FailsWhenEscrowSecretDisappears(t *testing.T) {
 	if s.Phase != v1alpha1.KeyringPhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
 	}
-	cond := findCondition(fg.Status.Conditions, conditionEncryptionReady)
+	cond := findCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Errorf("EncryptionAtRestReady should be False: %+v", cond)
 	}
@@ -431,7 +432,6 @@ func sealedGroupWithActive(active string) *v1alpha1.MysqlFailoverGroup {
 	fg.Status.ActiveSite = active
 	digest := keyringDigest([]byte("k"))
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringDigest: digest},
@@ -449,7 +449,7 @@ func sealedGroupWithActive(active string) *v1alpha1.MysqlFailoverGroup {
 // not, so the operator refuses.
 func TestReconcileEncryption_RefusesRotationOnActivePrimary(t *testing.T) {
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc1"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc1"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
 	for _, s := range []string{"dc1", "dc2"} {
@@ -472,7 +472,7 @@ func TestReconcileEncryption_RefusesRotationOnActivePrimary(t *testing.T) {
 
 func TestReconcileEncryption_RotatesReplica(t *testing.T) {
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
 	for _, s := range []string{"dc1", "dc2"} {
@@ -533,7 +533,7 @@ func TestReconcileEncryption_RotatesReplica(t *testing.T) {
 func TestReconcileEncryption_RefusesRotationDuringOrderedUpdate(t *testing.T) {
 	fg := sealedGroupWithActive("dc1")
 	fg.Status.UpdatePhase = "UpdatingReplica"
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
 	for _, s := range []string{"dc1", "dc2"} {
@@ -574,7 +574,7 @@ func seedEscrow(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) 
 // live reservation must refuse the rotation.
 func TestReconcileEncryption_RefusesRotationWhileUpdatePendingLive(t *testing.T) {
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	seedEscrow(t, c, fg)
 	tm := rotationRunner(r, c)
@@ -603,7 +603,7 @@ func TestReconcileEncryption_RefusesRotationWhileUpdatePendingLive(t *testing.T)
 func TestReconcileEncryption_RotationReservationFollowsStatusWrite(t *testing.T) {
 	t.Run("persisted stamp keeps the reservation until the rotation ends", func(t *testing.T) {
 		fg := sealedGroupWithActive("dc1")
-		fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+		fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 		r, c := encReconciler(t, scriptedKeyring(nil), fg)
 		seedEscrow(t, c, fg)
 		tm := rotationRunner(r, c)
@@ -624,7 +624,7 @@ func TestReconcileEncryption_RotationReservationFollowsStatusWrite(t *testing.T)
 	})
 	t.Run("failed status write releases the reservation", func(t *testing.T) {
 		fg := sealedGroupWithActive("dc1")
-		fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+		fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 		r, c := encReconciler(t, scriptedKeyring(nil), fg)
 		seedEscrow(t, c, fg)
 		r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
@@ -668,7 +668,7 @@ func TestReconcileEncryption_AmbiguousStatusWriteSettlesReservation(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := sealedGroupWithActive("dc1")
-			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 			r, c := encReconciler(t, scriptedKeyring(nil), fg)
 			seedEscrow(t, c, fg)
 			r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
@@ -708,7 +708,7 @@ func TestReconcileEncryption_AmbiguousStatusWriteSettlesReservation(t *testing.T
 // reservation the runner holds for the group.
 func TestReconcileEncryption_EarlyFailingPassSettlesHeldReservations(t *testing.T) {
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	seedEscrow(t, c, fg)
 	base := c.(client.WithWatch)
@@ -925,13 +925,13 @@ func TestReconcileEncryption_CloneHoldDoesNotAdvanceToEscrowed(t *testing.T) {
 
 func TestReconcileEncryption_CloneHoldIgnoresEscrowDeadline(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeoutSeconds: 1}
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 1 * time.Second}}
 	stale := metav1.NewTime(time.Now().Add(-time.Hour))
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed},
 			{Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
-				UnsealReason: v1alpha1.UnsealReasonClone, UnsealedSince: &stale},
+				UnsealReason: v1alpha1.UnsealReasonClone, UnsealTime: &stale},
 		},
 	}
 	r, _ := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
@@ -1104,7 +1104,7 @@ func TestReconcileEncryption_RefusesAdoptionOnLiveGroup(t *testing.T) {
 	if fg.Status.EncryptionAtRest != nil {
 		t.Fatal("refused adoption must not start the keyring lifecycle")
 	}
-	cond := findCondition(fg.Status.Conditions, conditionEncryptionReady)
+	cond := findCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Reason != "AdoptionRefused" {
 		t.Fatalf("condition = %+v, want AdoptionRefused", cond)
 	}
@@ -1115,10 +1115,32 @@ func TestReconcileEncryption_RefusesAdoptionOnLiveGroup(t *testing.T) {
 	}
 }
 
-func TestReconcileEncryption_AdoptionProceedsWithConfirmation(t *testing.T) {
+// TestReconcileEncryption_RefuseIgnoresRetiredAnnotation: the policy is
+// spec.encryptionAtRest.existingData only (A-51); the retired
+// encryption-adopt annotation is not read.
+func TestReconcileEncryption_RefuseIgnoresRetiredAnnotation(t *testing.T) {
 	fg := encTestFG()
 	fg.Status.ActiveSite = "dc1"
-	fg.Annotations = map[string]string{AdoptEncryptionAnnotation: "confirm"}
+	fg.Spec.EncryptionAtRest.ExistingData = v1alpha1.EncryptionExistingDataRefuse
+	fg.Annotations = map[string]string{"bloodraven.shipstream.io/encryption-adopt": "confirm"}
+	r, _ := encReconciler(t, scriptedKeyring(nil), fg)
+
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if fg.Status.EncryptionAtRest != nil {
+		t.Fatal("the retired annotation must not adopt encryption")
+	}
+	cond := findCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
+	if cond == nil || cond.Reason != v1alpha1.ReasonAdoptionRefused || !strings.Contains(cond.Message, "existingData") {
+		t.Fatalf("condition = %+v, want AdoptionRefused naming existingData", cond)
+	}
+}
+
+func TestReconcileEncryption_AdoptionProceedsWithLeavePlaintext(t *testing.T) {
+	fg := encTestFG()
+	fg.Status.ActiveSite = "dc1"
+	fg.Spec.EncryptionAtRest.ExistingData = v1alpha1.EncryptionExistingDataLeavePlaintext
 	r, _ := encReconciler(t, scriptedKeyring(nil), fg)
 
 	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
@@ -1153,12 +1175,12 @@ func TestAlignSiteEncryptionStatus(t *testing.T) {
 
 func TestCheckEscrowDeadline(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeoutSeconds: 60}
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
 
 	t.Run("within the window stays unsealed", func(t *testing.T) {
 		recent := metav1.NewTime(time.Now().Add(-10 * time.Second))
 		s := &v1alpha1.SiteEncryptionStatus{
-			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealedSince: &recent,
+			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealTime: &recent,
 		}
 		checkEscrowDeadline(fg, s)
 		if s.Phase != v1alpha1.KeyringPhaseUnsealed {
@@ -1169,7 +1191,7 @@ func TestCheckEscrowDeadline(t *testing.T) {
 	t.Run("past the window fails loudly", func(t *testing.T) {
 		old := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 		s := &v1alpha1.SiteEncryptionStatus{
-			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealedSince: &old,
+			Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealTime: &old,
 			Message: "waiting for the sidecar to escrow the keyring",
 		}
 		checkEscrowDeadline(fg, s)
@@ -1177,6 +1199,35 @@ func TestCheckEscrowDeadline(t *testing.T) {
 			t.Errorf("phase = %q, want Failed", s.Phase)
 		}
 	})
+}
+
+// TestEscrowDeadline_WarnsOnceWhenTheSiteFails pins A-75 for the keyring:
+// KeyringPhaseChanged is always Normal, so the escrow timeout's move to
+// Failed carries its own Warning, recorded once, on the transition.
+func TestEscrowDeadline_WarnsOnceWhenTheSiteFails(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
+	rec := record.NewFakeRecorder(10)
+	r := &MysqlFailoverGroupReconciler{Recorder: rec}
+	old := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	s := &v1alpha1.SiteEncryptionStatus{
+		Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealTime: &old,
+		Message: "waiting for the sidecar to escrow the keyring",
+	}
+	r.escrowDeadline(fg, s)
+	if s.Phase != v1alpha1.KeyringPhaseFailed {
+		t.Fatalf("phase = %q, want Failed", s.Phase)
+	}
+	events := drainEvents(rec)
+	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning "+v1alpha1.EventKeyringEscrowTimedOut+" ") ||
+		!strings.Contains(events[0], "dc1") {
+		t.Fatalf("events = %q, want one Warning %s naming dc1", events, v1alpha1.EventKeyringEscrowTimedOut)
+	}
+	// Already Failed: no second Warning.
+	r.escrowDeadline(fg, s)
+	if events := drainEvents(rec); len(events) != 0 {
+		t.Fatalf("events after the site is already Failed = %q, want none", events)
+	}
 }
 
 func findCondition(conds []metav1.Condition, t string) *metav1.Condition {
@@ -1206,7 +1257,7 @@ func TestReconcileEncryption_RetryableRefusalKeepsRotationRequest(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			fg := sealedGroupWithActive("dc1")
-			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 			r, c := encReconciler(t, scriptedKeyring(nil), fg)
 			seedEscrow(t, c, fg)
 			tm := rotationRunner(r, c)
@@ -1226,7 +1277,7 @@ func TestReconcileEncryption_RetryableRefusalKeepsRotationRequest(t *testing.T) 
 			if err := c.Get(ctx, nn, &latest); err != nil {
 				t.Fatal(err)
 			}
-			if latest.Annotations[RotateKeyringAnnotation] != "dc2" {
+			if latest.Annotations[v1alpha1.RotateKeyringAnnotation] != "dc2" {
 				t.Fatal("a retryable refusal consumed the rotate-keyring request")
 			}
 
@@ -1251,7 +1302,7 @@ func TestReconcileEncryption_RetryableRefusalKeepsRotationRequest(t *testing.T) 
 func TestReconcileEncryption_StaleRejectedPassKeepsEarlierPersistedHold(t *testing.T) {
 	ctx := context.Background()
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	stale := fg.DeepCopy()
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	seedEscrow(t, c, fg)
@@ -1308,7 +1359,7 @@ func TestReconcileEncryption_StaleRejectedPassKeepsEarlierPersistedHold(t *testi
 func TestReconcileEncryption_DeferredRotationStillVerifiesSealedSite(t *testing.T) {
 	ctx := context.Background()
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	seedEscrow(t, c, fg)
 	tm := rotationRunner(r, c)
@@ -1342,7 +1393,7 @@ func TestReconcileEncryption_DeferredRotationStillVerifiesSealedSite(t *testing.
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &latest); err != nil {
 		t.Fatal(err)
 	}
-	if latest.Annotations[RotateKeyringAnnotation] != "dc2" {
+	if latest.Annotations[v1alpha1.RotateKeyringAnnotation] != "dc2" {
 		t.Error("the deferred rotation request was consumed")
 	}
 }
@@ -1353,7 +1404,7 @@ func TestReconcileEncryption_DeferredRotationStillVerifiesSealedSite(t *testing.
 func TestReconcileEncryption_LiveActivePrimaryRefusalConsumesRequest(t *testing.T) {
 	ctx := context.Background()
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	seedEscrow(t, c, fg)
 	tm := rotationRunner(r, c)
@@ -1375,7 +1426,7 @@ func TestReconcileEncryption_LiveActivePrimaryRefusalConsumesRequest(t *testing.
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &latest); err != nil {
 		t.Fatal(err)
 	}
-	if _, kept := latest.Annotations[RotateKeyringAnnotation]; kept {
+	if _, kept := latest.Annotations[v1alpha1.RotateKeyringAnnotation]; kept {
 		t.Error("an active-primary request was kept for retry")
 	}
 }
@@ -1389,7 +1440,7 @@ func TestReconcileEncryption_LiveActivePrimaryRefusalConsumesRequest(t *testing.
 func TestReconcileEncryption_StaleSuccessfulPassKeepsPersistedRotation(t *testing.T) {
 	ctx := context.Background()
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	stale := fg.DeepCopy()
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	seedEscrow(t, c, fg)
@@ -1429,7 +1480,7 @@ func TestReconcileEncryption_StaleSuccessfulPassKeepsPersistedRotation(t *testin
 	if !blocked {
 		t.Fatal("stale pass dropped the promotion block on a persisted rotation")
 	}
-	if _, kept := after.Annotations[RotateKeyringAnnotation]; !kept {
+	if _, kept := after.Annotations[v1alpha1.RotateKeyringAnnotation]; !kept {
 		t.Error("stale pass consumed the rotation request")
 	}
 }
@@ -1479,7 +1530,7 @@ func TestEncryptionStatusMoved(t *testing.T) {
 func TestReconcileEncryption_DeferralNoteClearsWithRequest(t *testing.T) {
 	ctx := context.Background()
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	r, c := encReconciler(t, scriptedKeyring(nil), fg)
 	seedEscrow(t, c, fg)
 	tm := rotationRunner(r, c)
@@ -1492,7 +1543,7 @@ func TestReconcileEncryption_DeferralNoteClearsWithRequest(t *testing.T) {
 		for {
 			select {
 			case e := <-rec.Events:
-				if strings.Contains(e, "KeyringRotationRefused") {
+				if strings.Contains(e, "KeyringRotationRejected") {
 					n++
 				}
 			default:
@@ -1507,9 +1558,9 @@ func TestReconcileEncryption_DeferralNoteClearsWithRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 		if annotated {
-			latest.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			latest.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 		} else {
-			delete(latest.Annotations, RotateKeyringAnnotation)
+			delete(latest.Annotations, v1alpha1.RotateKeyringAnnotation)
 		}
 		if err := c.Update(ctx, &latest); err != nil {
 			t.Fatal(err)
@@ -1541,7 +1592,7 @@ func TestReconcileEncryption_DeferralNoteClearsWithRequest(t *testing.T) {
 func TestReconcileEncryption_DeferredRotationSurvivesEscrowRepair(t *testing.T) {
 	ctx := context.Background()
 	fg := sealedGroupWithActive("dc1")
-	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 	digest := siteStatus(fg, "dc2").KeyringDigest
 	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
 		"dc1": liveKeyring(digest, true), "dc2": liveKeyring(digest, true),
@@ -1564,7 +1615,7 @@ func TestReconcileEncryption_DeferredRotationSurvivesEscrowRepair(t *testing.T) 
 		if err := c.Get(ctx, nn, &latest); err != nil {
 			t.Fatal(err)
 		}
-		if latest.Annotations[RotateKeyringAnnotation] != "dc2" {
+		if latest.Annotations[v1alpha1.RotateKeyringAnnotation] != "dc2" {
 			t.Fatalf("rotation request consumed; dc2 = %+v", siteStatus(&latest, "dc2"))
 		}
 		return &latest
@@ -1612,7 +1663,7 @@ func TestReconcileEncryption_LateCommittingStampCannotOutliveItsHold(t *testing.
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			fg := sealedGroupWithActive("dc1")
-			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 			r, c := encReconciler(t, scriptedKeyring(nil), fg)
 			seedEscrow(t, c, fg)
 			base := c.(client.WithWatch)
@@ -1682,7 +1733,7 @@ func TestReconcileEncryption_NoOpStatusWriteDoesNotEndHoldBesideLostWrite(t *tes
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			fg := sealedGroupWithActive("dc1")
-			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 			digest := siteStatus(fg, "dc2").KeyringDigest
 			r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
 				"dc1": liveKeyring(digest, true), "dc2": liveKeyring(digest, true),

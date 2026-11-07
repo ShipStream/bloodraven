@@ -10,19 +10,19 @@
     "sites": [
       {
         "name": "iad",
-        "role": "primary-candidate"
+        "role": "PrimaryCandidate"
       },
       {
         "name": "pdx",
-        "role": "primary-candidate"
+        "role": "PrimaryCandidate"
       },
       {
         "name": "sfo",
-        "role": "primary-candidate"
+        "role": "PrimaryCandidate"
       },
       {
         "name": "reader",
-        "role": "read-only"
+        "role": "ReadOnly"
       }
     ],
     "failoverCooldown": "5m",
@@ -37,30 +37,30 @@
     "sites": [
       {
         "name": "iad",
-        "state": "unreachable",
-        "role": "primary-candidate",
-        "replicating": false,
+        "state": "Unreachable",
+        "role": "PrimaryCandidate",
+        "replication": "Unknown",
         "secondsBehindSource": null
       },
       {
         "name": "pdx",
-        "state": "read-only",
-        "role": "primary-candidate",
-        "replicating": true,
+        "state": "ReadOnly",
+        "role": "PrimaryCandidate",
+        "replication": "Healthy",
         "secondsBehindSource": 0
       },
       {
         "name": "sfo",
-        "state": "read-only",
-        "role": "primary-candidate",
-        "replicating": true,
+        "state": "ReadOnly",
+        "role": "PrimaryCandidate",
+        "replication": "Healthy",
         "secondsBehindSource": 0
       },
       {
         "name": "reader",
-        "state": "read-only",
-        "role": "read-only",
-        "replicating": true,
+        "state": "ReadOnly",
+        "role": "ReadOnly",
+        "replication": "Healthy",
         "secondsBehindSource": 3
       }
     ]

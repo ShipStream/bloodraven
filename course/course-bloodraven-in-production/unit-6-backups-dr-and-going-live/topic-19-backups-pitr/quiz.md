@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A scheduled backup of `playground` fires. `iad` is the active site and is `writable`; `pdx` is `read-only` and replicating but reports `secondsBehindSource` of 900, well past the 300-second default; `reader` is idle with `role: read-only`. Which site runs the dump, and what reason string lands in status?
+A scheduled backup of `playground` fires. `iad` is the active site and is `Writable`; `pdx` is `ReadOnly` and replicating but reports `secondsBehindSource` of 900, well past the 300-second default; `reader` is idle with `role: ReadOnly`. Which site runs the dump, and what reason string lands in status?
 
 - `pdx`, reason `"replica-preferred"` — replica-first is the whole point of the setting
 - `iad`, reason `"primary-fallback"`
@@ -18,13 +18,13 @@ A scheduled backup of `playground` fires. `iad` is the active site and is `writa
 
 **Explanation:**
 
-Replica-first is conditional, not unconditional: a replica qualifies only while `secondsBehindSource` is at or below `maxLagSecondsForSource` (default 300). At 900 seconds `pdx` fails the gate, so option 1 is wrong. `reader` carries `role: read-only` and is excluded from the replica pool outright — the tempting 'spare site' is the one site that can never source a backup, so option 3 is wrong. Option 4 inverts the design: the fallback exists precisely so a stale replica does not block the backup, and `iad` is `writable` and promotable, so it takes the job and status records `"primary-fallback"` (objective 2).
+Replica-first is conditional, not unconditional: a replica qualifies only while `secondsBehindSource` is at or below `maxLagSecondsForSource` (default 300). At 900 seconds `pdx` fails the gate, so option 1 is wrong. `reader` carries `role: ReadOnly` and is excluded from the replica pool outright — the tempting 'spare site' is the one site that can never source a backup, so option 3 is wrong. Option 4 inverts the design: the fallback exists precisely so a stale replica does not block the backup, and `iad` is `Writable` and promotable, so it takes the job and status records `"primary-fallback"` (objective 2).
 
 ## Question 2
 
 **Type:** MULTIPLE_CHOICE
 
-To keep dump load off both primary candidates, you set `sourceSiteOverride: reader` on a MysqlBackup for `playground`. What happens?
+To keep dump load off both primary candidates, you set `sourceSite: reader` on a MysqlBackup for `playground`. What happens?
 
 - The dump runs on `reader` and status records `"override"` — an explicit override outranks the role check
 - The dump runs on `reader` but status records `"replica-preferred"`, since the reader is a replica
@@ -35,7 +35,7 @@ To keep dump load off both primary candidates, you set `sourceSiteOverride: read
 
 **Explanation:**
 
-Options 1 and 2 assume the override is a trump card over the role; it is not. Role is checked *first*, and a `read-only` reader is rejected with an explicit error rather than being dumped from — the same non-promotable-therefore-not-authoritative logic from Unit 1, showing up here as non-sourceable. Option 4 is the quieter and more dangerous misconception: rejection is loud and no Job is created, so you find out immediately instead of silently getting a source you did not ask for. A reader is a legitimate site to read from with a client, but never a site Bloodraven will hand a backup job to (objective 2).
+Options 1 and 2 assume the override is a trump card over the role; it is not. Role is checked *first*, and a `ReadOnly` reader is rejected with an explicit error rather than being dumped from — the same non-promotable-therefore-not-authoritative logic from Unit 1, showing up here as non-sourceable. Option 4 is the quieter and more dangerous misconception: rejection is loud and no Job is created, so you find out immediately instead of silently getting a source you did not ask for. A reader is a legitimate site to read from with a client, but never a site Bloodraven will hand a backup job to (objective 2).
 
 ## Question 3
 

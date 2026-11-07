@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -137,26 +136,32 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: generateNameWithInfix(group, profile, "verify"),
 			Namespace:    ns,
+			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: triggeredBy},
 			Labels: map[string]string{
-				"shipstream.io/failover-group": group,
-				"shipstream.io/backup-profile": profile,
+				v1alpha1.FailoverGroupLabel:    group,
+				v1alpha1.BackupProfileLabel:    profile,
 				"app.kubernetes.io/managed-by": "bloodraven",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: group},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
 			ProfileName:      profile,
-			TriggeredBy:      triggeredBy,
 		},
 	}
 	if backupName != "" {
-		cr.Spec.BackupRef = &corev1.LocalObjectReference{Name: backupName}
+		cr.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: backupName}
 	}
 	if vs := profileVerificationSpec(fg, profile); vs != nil {
-		cr.Spec.KeepOnFailure = vs.KeepOnFailure
-		cr.Spec.TTLSecondsAfterFinished = vs.TTLSecondsAfterFinished
-		if vs.Storage != nil {
-			cr.Spec.Storage = vs.Storage.DeepCopy()
+		// Copy the pointers so an unset field stays unset on the CR
+		// (ttlSecondsAfterFinished: unset keeps resources until
+		// retention, 0 cleans up at once).
+		if vs.KeepOnFailure != nil {
+			keep := *vs.KeepOnFailure
+			cr.Spec.KeepOnFailure = &keep
+		}
+		if vs.TTLSecondsAfterFinished != nil {
+			ttl := *vs.TTLSecondsAfterFinished
+			cr.Spec.TTLSecondsAfterFinished = &ttl
 		}
 		if vs.PointInTime != nil {
 			cr.Spec.PointInTime = vs.PointInTime.DeepCopy()

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -170,8 +171,11 @@ func s59KillReclone(st *s59State) runner.Step {
 				return fmt.Errorf("open operator tailer: %w", err)
 			}
 			st.recloneAt = time.Now()
-			value := fmt.Sprintf("%s:confirm=%s", st.candidate, env.FG)
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+			value, err := recloneValueFor(ctx, env, st.candidate)
+			if err != nil {
+				return err
+			}
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("annotate reclone: %w", err)
 			}
 			env.Capture.Note("requested reclone-site=" + value)
@@ -336,11 +340,11 @@ func s59RestorePrimary(st *s59State) runner.Step {
 			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "original primary active again",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					s := statusSiteByName(mfg, st.primary)
-					state := ""
+					var state v1alpha1.SiteState
 					if s != nil {
 						state = s.State
 					}
-					return mfg.Status.ActiveSite == st.primary && state == "writable",
+					return mfg.Status.ActiveSite == st.primary && state == v1alpha1.SiteStateWritable,
 						fmt.Sprintf("activeSite=%q %s=%q", mfg.Status.ActiveSite, st.primary, state), nil
 				}); err != nil {
 				return err
@@ -365,8 +369,9 @@ func s59RestorePrimary(st *s59State) runner.Step {
 // s59RepairCandidate waits for the empty candidate to be cloned again.
 // The operator does not retry a failed reclone on its own today: the
 // recipient keeps its replication metadata, so empty-site auto-bootstrap
-// skips it. If the Bootstrapping condition is still Failed a minute after
-// the primary returned, the scenario requests the reclone itself.
+// skips it. If the Bootstrapping condition is still BootstrapFailed a
+// minute after the primary returned, the scenario requests the reclone
+// itself.
 func s59RepairCandidate(st *s59State) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseSettle,
@@ -378,16 +383,17 @@ func s59RepairCandidate(st *s59State) runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "candidate re-cloned, group healthy",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					boot := findCondition(mfg.Status.Conditions, "Bootstrapping")
+					boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
 					bootState := "<missing>"
 					if boot != nil {
 						bootState = boot.Reason
 					}
-					// A failed bootstrap reports Status=True, Reason=Failed.
-					if !requested && time.Since(start) > time.Minute && boot != nil && boot.Reason == "Failed" {
-						value := fmt.Sprintf("%s:confirm=%s", st.candidate, env.FG)
+					// A failed bootstrap reports Status=False,
+					// Reason=BootstrapFailed (and Degraded=BootstrapFailed).
+					if !requested && time.Since(start) > time.Minute && bootstrapFailed(boot) {
+						value := controller.RecloneAnnotationValue(mfg, st.candidate)
 						if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-							"bloodraven.shipstream.io/reclone-site", value); err != nil {
+							v1alpha1.RecloneAnnotation, value); err != nil {
 							return false, "", fmt.Errorf("annotate repair reclone: %w", err)
 						}
 						requested = true
@@ -396,7 +402,7 @@ func s59RepairCandidate(st *s59State) runner.Step {
 					if err := AssertHealthyBaseline(ctx, env); err != nil {
 						return false, "boot=" + bootState + " " + err.Error(), nil
 					}
-					return boot == nil || boot.Reason != "Failed", "boot=" + bootState, nil
+					return !bootstrapFailed(boot), "boot=" + bootState, nil
 				})
 			if err != nil {
 				return err

@@ -21,36 +21,34 @@ metadata:
   namespace: orders
 spec:
   image: mysql:9.7
-  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:1.3.2
   credentials:
-    operatorSecret: orders-mysql-operator
-    appSecret: orders-mysql-app
-    readOnlySecret: orders-mysql-readonly
-    monitorSecret: orders-mysql-monitor
-    backupSecret: orders-mysql-backup
+    operatorSecretName: orders-mysql-operator
+    appSecretName: orders-mysql-app
+    readOnlySecretName: orders-mysql-readonly
+    monitorSecretName: orders-mysql-monitor
+    backupSecretName: orders-mysql-backup
   tls:
-    issuerRef:
-      name: mysql-ca
-      kind: ClusterIssuer
     secretName: orders-mysql-tls
   dns:
     hostname: orders.az.example.com
-    ttl: 60
+    ttlSeconds: 60
   sites:
     - name: iad
+      serverID: 101
       zone: us-east-1a
       taintNodeSelector:
-        shipstream.io/failover-group.orders: "true"
-        shipstream.io/site.orders: iad
+        bloodraven.shipstream.io/failover-group.orders: "true"
+        bloodraven.shipstream.io/site.orders: iad
       lbIP: 10.0.1.1
       storage:
         storageClassName: fast-ssd
         size: 100Gi
     - name: pdx
+      serverID: 102
       zone: us-west-2a
       taintNodeSelector:
-        shipstream.io/failover-group.orders: "true"
-        shipstream.io/site.orders: pdx
+        bloodraven.shipstream.io/failover-group.orders: "true"
+        bloodraven.shipstream.io/site.orders: pdx
       lbIP: 10.0.2.1
       storage:
         storageClassName: fast-ssd

@@ -2,7 +2,7 @@
   "flashcards": [
     {
       "front": "`spec.failoverCooldown` — default, and what the playground uses",
-      "back": "`5m` by default (CRD default and the operator's own fallback when the field is nil). The playground manifest overrides it to `30s` for fast experimentation.",
+      "back": "`5m` by default (CRD default and the operator's own fallback when the field is nil). The playground manifest overrides it to `30s` for fast experimentation. It cannot be disabled: admission accepts 30s to 24h and refuses `0`.",
       "orderIndex": 0
     },
     {
@@ -46,7 +46,7 @@
       "orderIndex": 8
     },
     {
-      "front": "`spec.updateStrategy`",
+      "front": "`spec.updateStrategy.type`",
       "back": "`OrderedUpdate` (default) leaves existing site Deployments untouched so the runner sees spec drift and rolls one site at a time; `Recreate` clears the drift list and patches every site Deployment in one pass, so pod restarts may overlap.",
       "orderIndex": 9
     }
@@ -68,14 +68,14 @@
         "The ordered-update handoff promoted `pdx`; that path calls `recordFailover` and increments the counter but is never cooldown-gated, so the guard was never reached",
         "The operator restarted during the update and rehydrated an empty `lastFailover`, so the cooldown evaluated as expired",
         "The counter increments on promotion attempts rather than completed promotions, and attempts are not gated",
-        "`spec.updateStrategy: Recreate` was set, which disables anti-flap for the duration of the rollout"
+        "`spec.updateStrategy.type: Recreate` was set, which disables anti-flap for the duration of the rollout"
       ],
       "correctOptionIndex": 0,
       "explanation": "The ordered-update handoff is a separate promotion path with no cooldown check anywhere in it, yet its completion callback stamps the durable failover record and increments `bloodraven_failovers_total` — so the counter moves without the guard ever being consulted, which is also why there is no log line. Option 2 would produce a rehydration warning and requires a restart you did not observe; rehydration also prefers the later of the two durable copies rather than emptying them. Option 3 is wrong: the counter is incremented after a successful promotion, not on attempts. Option 4 invents a coupling that does not exist: `spec.updateStrategy` decides whether a spec change rolls one site at a time or all at once, and touches nothing about anti-flap. (objective 7)",
       "difficulty": "hard"
     },
     {
-      "question": "The operator restarts. `status.lastFailover` reads `10:04:00Z`, the `bloodraven.shipstream.io/last-failover` annotation reads `10:06:00Z`, and the local clock is `10:07:00Z`. Which record does the restarted operator install as its cooldown baseline?",
+      "question": "The operator restarts. `status.lastFailover.time` reads `10:04:00Z`, the `bloodraven.shipstream.io/last-failover` annotation reads `10:06:00Z`, and the local clock is `10:07:00Z`. Which record does the restarted operator install as its cooldown baseline?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -89,7 +89,7 @@
       "difficulty": "medium"
     },
     {
-      "question": "Every site in `playground` is read-only, no site is unreachable, and `lastFailoverTarget` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?",
+      "question": "Every site in `playground` is read-only, no site is unreachable, and `status.lastFailover.target` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?",
       "type": "SHORT_ANSWER",
       "orderIndex": 3,
       "sampleAnswer": "It refuses the re-assert. It logs `primary re-assert refused: recorded promotion GTID set failed to parse — status corrupted or manually edited?` at WARN and returns without touching MySQL, leaving the group on its NoPrimary alert for a human. It does not treat the unparseable value as absent and skip the GTID gate. The whole safety argument for re-asserting a fenced primary is that the target's GTID_EXECUTED provably contains the recorded promotion GTID set and every peer's set; if the recorded invariant cannot be read, it cannot have been verified, so proceeding would restore writability on a site that might be missing transactions.",

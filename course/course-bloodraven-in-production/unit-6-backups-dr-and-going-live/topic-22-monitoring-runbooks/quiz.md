@@ -24,11 +24,11 @@ The operator is on the failure-detection and promotion path, not the request pat
 
 **Type:** SHORT_ANSWER
 
-Chaos scenario 42 applies `SOURCE_DELAY` to the `read-only` site `reader` and soaks `playground` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?
+Chaos scenario 42 applies `SOURCE_DELAY` to the `ReadOnly` site `reader` and soaks `playground` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?
 
 **Sample answer:**
 
-`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!="reader"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the read-only role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.
+`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!="reader"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the `ReadOnly` role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.
 
 **A full-credit answer shows:**
 
@@ -36,7 +36,7 @@ A strong answer names `BloodravenReplicationLagging` (or an equivalent rule on `
 
 **Explanation:**
 
-The reader shedding its endpoint is the read-only role working as designed, so an alert on it is a page for a non-event the system already handled. Raising the threshold or extending `for:` would also mute a genuinely lagging `pdx`; the exclusion is surgical because it removes exactly the one site whose lag has no bearing on RPO. (objectives 10, 12)
+The reader shedding its endpoint is the `ReadOnly` role working as designed, so an alert on it is a page for a non-event the system already handled. Raising the threshold or extending `for:` would also mute a genuinely lagging `pdx`; the exclusion is surgical because it removes exactly the one site whose lag has no bearing on RPO. (objectives 10, 12)
 
 ## Question 3
 
@@ -45,7 +45,7 @@ The reader shedding its endpoint is the read-only role working as designed, so a
 You wrote automation that watches the failover group's condition and acts when the reason equals `Failover`. It has never fired, through several confirmed promotions. Why?
 
 - The condition reason is only written on state transitions, and a 12 s promotion is too fast for a scrape to observe
-- The failover row of the decision matrix sets `Reason = "Degraded"`; `Failover` is not one of the five reasons the code can emit
+- The failover row of the decision matrix sets `Reason = "SiteUnhealthy"`; `Failover` is not one of the five reasons the code can emit
 - Condition reasons are only populated when `spec.splitBrainPolicy.sitePriorities` is set, and yours is empty
 - A promotion sets the reason to `SplitBrain` until the old primary rejoins as a replica
 
@@ -53,7 +53,7 @@ You wrote automation that watches the failover group's condition and acts when t
 
 **Explanation:**
 
-The matrix emits exactly five reasons — `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `Degraded`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)
+The matrix emits exactly five reasons — `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `SiteUnhealthy`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)
 
 ## Question 4
 

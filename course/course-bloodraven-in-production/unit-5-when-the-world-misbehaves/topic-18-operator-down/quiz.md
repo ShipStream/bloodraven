@@ -9,7 +9,7 @@
 
 The operator for `playground` has been at zero replicas for ten minutes. Which observation is genuinely caused by the operator's absence?
 
-- `status.sites[].lastSeen` on the `playground` CR is ten minutes stale
+- `status.sites[].lastSeenTime` on the `playground` CR is ten minutes stale
 - `pdx` has stopped replicating from `iad`
 - Reads through the `-replicas` Service have started failing
 - The sidecar on `iad` has stopped enforcing its fencing rules
@@ -18,7 +18,7 @@ The operator for `playground` has been at zero replicas for ten minutes. Which o
 
 **Explanation:**
 
-Status is written only by the operator, so stale `lastSeen` is the signature of operator absence and of nothing else. Replication is MySQL-to-MySQL — the operator never carries the data, so a stopped replica is a real replication fault you must diagnose on its own merits. Reads are served by MySQL through a Service whose endpoints already exist; a read outage during operator downtime means the replica itself is unwell. And sidecars are separate processes with their own timers: a dead operator is precisely the condition their lease rule exists for, so fencing is the one thing that does not stop. Attributing any of the last three to the operator sends you to the wrong pod (objective 10).
+Status is written only by the operator, so stale `lastSeenTime` is the signature of operator absence and of nothing else. Replication is MySQL-to-MySQL — the operator never carries the data, so a stopped replica is a real replication fault you must diagnose on its own merits. Reads are served by MySQL through a Service whose endpoints already exist; a read outage during operator downtime means the replica itself is unwell. And sidecars are separate processes with their own timers: a dead operator is precisely the condition their lease rule exists for, so fencing is the one thing that does not stop. Attributing any of the last three to the operator sends you to the wrong pod (objective 10).
 
 ## Question 2
 

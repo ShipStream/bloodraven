@@ -7,7 +7,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=mydb;mydbs,categories=bloodraven;mysql
-// +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.groupRef.name`
+// +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.failoverGroupRef.name`
 // +kubebuilder:printcolumn:name="Database",type=string,JSONPath=`.spec.databaseName`
 // +kubebuilder:printcolumn:name="Owner",type=string,JSONPath=`.status.ownerUser`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -50,7 +50,9 @@ type MysqlDatabase struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   MysqlDatabaseSpec   `json:"spec,omitempty"`
+	// +required
+	Spec MysqlDatabaseSpec `json:"spec"`
+	// +optional
 	Status MysqlDatabaseStatus `json:"status,omitempty"`
 }
 
@@ -132,6 +134,7 @@ type DeploymentClient struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	Namespace string `json:"namespace"`
 
 	// ServiceAccount is a Kubernetes ServiceAccount name (a DNS subdomain).
@@ -139,27 +142,9 @@ type DeploymentClient struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
 	ServiceAccount string `json:"serviceAccount"`
 }
-
-// MysqlDatabaseDeletionPolicy controls what happens in MySQL when the CR is
-// deleted.
-// +kubebuilder:validation:Enum=Retain;Delete
-type MysqlDatabaseDeletionPolicy string
-
-const (
-	// MysqlDatabaseRetain leaves MySQL untouched when the CR is deleted.
-	// This is the default, because the alternative failure mode —
-	// dropping a live tenant database because a CR was garbage-collected
-	// by a GitOps prune or a namespace delete — is unrecoverable.
-	MysqlDatabaseRetain MysqlDatabaseDeletionPolicy = "Retain"
-	// MysqlDatabaseDelete drops the database, the owner user and the
-	// spec.users[] principals this CR created (per the status.appliedUsers
-	// ledger), and revokes the spec.grants[] entries on that database. It
-	// never drops a spec.grants[] user; those are shared principals this
-	// CRD did not create.
-	MysqlDatabaseDelete MysqlDatabaseDeletionPolicy = "Delete"
-)
 
 // MysqlDatabaseSpec is the desired state of one tenant database.
 //
@@ -179,7 +164,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(self.users) || self.users.all(u, !('ALL PRIVILEGES' in u.privileges))",message="spec.users[].privileges must not include 'ALL PRIVILEGES'; an all-privileges principal is the owner's shape, declare it via spec.owner"
 // +kubebuilder:validation:XValidation:rule="!has(self.users) || self.users.all(u, u.secretName != self.owner.secretName)",message="spec.users[].secretName must not reuse spec.owner.secretName; the owner already manages that principal"
 type MysqlDatabaseSpec struct {
-	// GroupRef identifies the MysqlFailoverGroup in the same namespace
+	// FailoverGroupRef identifies the MysqlFailoverGroup in the same namespace
 	// that owns the MySQL instance this database lives on. Cross-namespace
 	// and cross-group references are deliberately not expressible.
 	//
@@ -188,14 +173,18 @@ type MysqlDatabaseSpec struct {
 	// would apply the database and owner to the new group, orphan them on
 	// the old one, and aim any later deletionPolicy: Delete cleanup at the
 	// wrong MySQL. Changing groups is a migration, not a spec edit.
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.groupRef is immutable; moving a database between groups is a migration, not a spec edit"
-	GroupRef LocalGroupRef `json:"groupRef"`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.failoverGroupRef is immutable; moving a database between groups is a migration, not a spec edit"
+	// +required
+	FailoverGroupRef LocalFailoverGroupRef `json:"failoverGroupRef"`
 
 	// DeploymentClients authorizes ServiceAccounts to use the deployment
-	// companion API for this database. Each namespace has one client.
+	// companion API for this database, keyed by (namespace,
+	// serviceAccount). A namespace may list several ServiceAccounts.
 	// +optional
 	// +listType=map
 	// +listMapKey=namespace
+	// +listMapKey=serviceAccount
+	// +kubebuilder:validation:MaxItems=16
 	DeploymentClients []DeploymentClient `json:"deploymentClients,omitempty"`
 
 	// DatabaseName is the MySQL schema name to create.
@@ -218,6 +207,7 @@ type MysqlDatabaseSpec struct {
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.databaseName is immutable; renaming would orphan the existing database"
 	// +kubebuilder:validation:XValidation:rule="!(self.lowerAscii() in ['mysql', 'sys', 'information_schema', 'performance_schema'])",message="spec.databaseName must not name a MySQL system schema"
+	// +required
 	DatabaseName string `json:"databaseName"`
 
 	// CharacterSet is the database default character set. Defaults to
@@ -228,17 +218,19 @@ type MysqlDatabaseSpec struct {
 	// +optional
 	CharacterSet string `json:"characterSet,omitempty"`
 
-	// Collation is the database default collation. Defaults to
-	// utf8mb4_unicode_ci when empty.
+	// Collation is the database default collation. Unset means the
+	// character set's default collation (utf8mb4_0900_ai_ci for utf8mb4 on
+	// MySQL 8.0 and later): the operator renders no COLLATE clause. Set
+	// utf8mb4_unicode_ci explicitly to keep the older UCA 4.0 ordering.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_]{1,64}$`
 	// +kubebuilder:validation:MaxLength=64
-	// +kubebuilder:default=utf8mb4_unicode_ci
 	// +optional
 	Collation string `json:"collation,omitempty"`
 
 	// Owner is the user that owns this database. It is the only principal
 	// a MysqlDatabase may bring into existence, and only because the
 	// caller supplied its password in a Secret first.
+	// +required
 	Owner MysqlDatabaseOwner `json:"owner"`
 
 	// Grants are additional, already-existing principals to grant on this
@@ -275,17 +267,26 @@ type MysqlDatabaseSpec struct {
 	Users []MysqlDatabaseUser `json:"users,omitempty"`
 
 	// DeletionPolicy controls what happens in MySQL when this CR is
-	// deleted. Defaults to Retain.
+	// deleted:
+	//   - Retain (default) leaves MySQL untouched. The alternative failure
+	//     mode, dropping a live tenant database because a CR was
+	//     garbage-collected by a GitOps prune or a namespace delete, is
+	//     unrecoverable.
+	//   - Delete drops the database, the owner user and the spec.users[]
+	//     principals this CR created (per the status.appliedUsers ledger),
+	//     and revokes the spec.grants[] entries on that database. It never
+	//     drops a spec.grants[] user; those are shared principals this CRD
+	//     did not create.
 	// +kubebuilder:default=Retain
 	// +optional
-	DeletionPolicy MysqlDatabaseDeletionPolicy `json:"deletionPolicy,omitempty"`
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
 // MysqlDatabaseOwner declares the owning user of a tenant database.
 type MysqlDatabaseOwner struct {
 	// SecretName references a Secret in the same namespace with keys
 	// `username` and `password` — the same contract as
-	// spec.credentials.*Secret on MysqlFailoverGroup. The Secret is
+	// spec.credentials.*SecretName on MysqlFailoverGroup. The Secret is
 	// desired state for the MySQL user, not a credential to a user that
 	// already exists: Bloodraven runs CREATE USER IF NOT EXISTS followed
 	// by ALTER USER, so rotating the password is a Secret write and
@@ -294,6 +295,8 @@ type MysqlDatabaseOwner struct {
 	// Bloodraven never generates, returns, or stores a password.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
 	SecretName string `json:"secretName"`
 
 	// Privileges granted to the owner ON <databaseName>.*. Defaults to
@@ -346,6 +349,8 @@ type MysqlDatabaseUser struct {
 	// USER, so rotating the password is a Secret write and nothing else.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
 	SecretName string `json:"secretName"`
 
 	// Privileges granted to this user ON <databaseName>.*. Required, no
@@ -356,6 +361,7 @@ type MysqlDatabaseUser struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=19
 	// +listType=atomic
+	// +required
 	Privileges []MysqlPrivilege `json:"privileges"`
 
 	// ResourceLimits caps this account's server-side resource usage.
@@ -413,12 +419,14 @@ type MysqlDatabaseGrant struct {
 	// contract, not a formatting preference.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_][A-Za-z0-9_.$-]{0,31}$`
 	// +kubebuilder:validation:MaxLength=32
+	// +required
 	Username string `json:"username"`
 
 	// Privileges granted to this user ON <databaseName>.*.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=19
 	// +listType=atomic
+	// +required
 	Privileges []MysqlPrivilege `json:"privileges"`
 }
 
@@ -429,6 +437,7 @@ type MysqlDatabaseUserState struct {
 	// SecretName is the spec.users[] entry this record belongs to. It
 	// outlives the spec entry: removal-driven cleanup runs off this
 	// record, then deletes it.
+	// +required
 	SecretName string `json:"secretName"`
 
 	// Username is the account name echoed from the Secret, recorded
@@ -470,7 +479,7 @@ type MysqlDatabaseUserState struct {
 }
 
 // MysqlDatabasePhase is the lifecycle phase of a MysqlDatabase.
-// +kubebuilder:validation:Enum=Pending;Creating;Ready;Failed;Deleting
+// +kubebuilder:validation:Enum=Pending;Applying;Ready;Failed;Deleting
 type MysqlDatabasePhase string
 
 const (
@@ -481,8 +490,9 @@ const (
 	// an error — a MysqlDatabase applied before its group is normal
 	// ordering.
 	MysqlDatabasePhasePending MysqlDatabasePhase = "Pending"
-	// MysqlDatabasePhaseCreating means the reconciler is applying DDL.
-	MysqlDatabasePhaseCreating MysqlDatabasePhase = "Creating"
+	// MysqlDatabasePhaseApplying means the reconciler is applying DDL: the
+	// first creation, and every later change or credential rotation.
+	MysqlDatabasePhaseApplying MysqlDatabasePhase = "Applying"
 	// MysqlDatabasePhaseReady means the database, owner and grants are
 	// applied on the current active primary.
 	MysqlDatabasePhaseReady MysqlDatabasePhase = "Ready"
@@ -518,6 +528,7 @@ type MysqlDatabaseStatus struct {
 	// CR that failed before any SQL (invalid spec, reserved owner,
 	// ownership conflict, unreachable primary) must not drop a database
 	// something else created under the same name.
+	// Durable: a lost record makes deletion leave the database behind.
 	// +optional
 	DatabaseCreated bool `json:"databaseCreated,omitempty"`
 
@@ -526,6 +537,8 @@ type MysqlDatabaseStatus struct {
 	// applies. During a username rotation it keeps the previous name until
 	// the old account has actually been dropped. The password is never
 	// echoed anywhere.
+	// Durable: it is the only attribution of the owner account; a lost
+	// record leaves the account behind at deletion.
 	// +optional
 	OwnerUser string `json:"ownerUser,omitempty"`
 
@@ -539,6 +552,7 @@ type MysqlDatabaseStatus struct {
 	// gate would see an account it cannot attribute and wedge the CR on
 	// PreExistingOwnerUser for a user it created itself. Deletion treats
 	// it as an owner candidate for the same reason.
+	// Durable: see OwnerUser.
 	// +optional
 	PendingOwnerUser string `json:"pendingOwnerUser,omitempty"`
 
@@ -551,6 +565,8 @@ type MysqlDatabaseStatus struct {
 	// its hosts) — and settled to the current list by the Ready stamp. Host
 	// removal and deletion drop OwnerUser off exactly these hosts. Empty
 	// means the pre-hosts default, ["%"].
+	// Durable: host removal and deletion drop the owner only on these
+	// hosts.
 	// +optional
 	// +listType=atomic
 	OwnerHosts []string `json:"ownerHosts,omitempty"`
@@ -562,6 +578,7 @@ type MysqlDatabaseStatus struct {
 	// drop an unrelated same-named account. Non-empty only while
 	// PendingOwnerUser is set; empty with PendingOwnerUser set is the
 	// shape an older operator wrote, and falls back to OwnerHosts.
+	// Durable: see OwnerHosts.
 	// +optional
 	// +listType=atomic
 	PendingOwnerHosts []string `json:"pendingOwnerHosts,omitempty"`
@@ -572,6 +589,7 @@ type MysqlDatabaseStatus struct {
 	// next apply, and deletion revokes the union of the current list and
 	// this record. spec.users[] principals are tracked separately in
 	// AppliedUsers, which pairs each username with its Secret.
+	// Durable: a grant missing from it is never revoked.
 	// +optional
 	// +listType=atomic
 	AppliedGrants []string `json:"appliedGrants,omitempty"`
@@ -586,6 +604,7 @@ type MysqlDatabaseStatus struct {
 	// created. Entries whose secretName has left the spec are dropped from
 	// MySQL and then removed here. Usernames only; never any credential
 	// material.
+	// Durable: it is what authorizes DROP USER for spec.users[] accounts.
 	// +optional
 	// +listType=map
 	// +listMapKey=secretName

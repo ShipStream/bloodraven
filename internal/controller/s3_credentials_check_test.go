@@ -21,7 +21,7 @@ func s3CredsTestFG() *v1alpha1.MysqlFailoverGroup {
 		Name: "nightly",
 		Storage: v1alpha1.BackupStorage{
 			Type: v1alpha1.BackupStorageS3,
-			S3:   &v1alpha1.S3Storage{Bucket: "b", CredentialsSecret: "s3-creds"},
+			S3:   &v1alpha1.S3Storage{Bucket: "b", CredentialsSecretName: "s3-creds"},
 		},
 	}}}
 	return fg
@@ -33,7 +33,7 @@ func s3CredsCondition(t *testing.T, r *MysqlFailoverGroupReconciler, fg *v1alpha
 	if err := r.Get(context.Background(), types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &got); err != nil {
 		t.Fatal(err)
 	}
-	return apimeta.FindStatusCondition(got.Status.Conditions, conditionS3CredentialsReady)
+	return apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionS3CredentialsReady)
 }
 
 func TestReconcileS3CredentialsCondition(t *testing.T) {
@@ -61,7 +61,7 @@ func TestReconcileS3CredentialsCondition(t *testing.T) {
 		{
 			name:       "missing secret",
 			wantStatus: metav1.ConditionFalse,
-			wantInMsg:  `spec.backup.profiles[nightly].storage.s3.credentialsSecret: Secret "s3-creds" not found`,
+			wantInMsg:  `spec.backup.profiles[nightly].storage.s3.credentialsSecretName: Secret "s3-creds" not found`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,7 +94,7 @@ func TestReconcileS3CredentialsCondition(t *testing.T) {
 
 func TestReconcileS3CredentialsCondition_RemovedWithoutS3Storage(t *testing.T) {
 	fg := newTestFG()
-	fg.Status.Conditions = []metav1.Condition{{Type: conditionS3CredentialsReady, Status: metav1.ConditionFalse, Reason: "CredentialsIncomplete", LastTransitionTime: metav1.Now()}}
+	fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionS3CredentialsReady, Status: metav1.ConditionFalse, Reason: "CredentialsIncomplete", LastTransitionTime: metav1.Now()}}
 	r, _ := newReconciler(fg)
 	if s3CredsCondition(t, r, fg) == nil {
 		t.Fatal("test setup: seeded condition missing")

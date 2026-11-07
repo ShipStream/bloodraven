@@ -1,0 +1,12 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackup
+metadata:
+  name: nightly-1
+  namespace: bloodraven
+  generation: 2
+status:
+  observedGeneration: 1
+  phase: Running
+  message: "running (source=pdx, reason=replica)"
+  conditions:
+  - {type: Ready, status: "False", reason: Running, observedGeneration: 1, message: "running (source=pdx, reason=replica)"}

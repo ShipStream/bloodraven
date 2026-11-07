@@ -29,7 +29,7 @@ spec:
         # Both selectors must match the same source, not two alternative peers.
         - namespaceSelector:
             matchLabels:
-              shipstream.io/mysql-client: "true"
+              bloodraven.shipstream.io/mysql-client: "true"
           podSelector:
             matchLabels:
               bloodraven.shipstream.io/deploy-client: "true"

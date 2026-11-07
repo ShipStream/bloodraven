@@ -2,7 +2,6 @@ package scenarios
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -113,8 +112,8 @@ func prepareSplitBrainAutoResolvePolicyPath() runner.Step {
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					ready := pgkube.ReadyCondition(mfg)
 					msg := fmt.Sprintf("ready=%s active=%q lastFailoverTarget=%q",
-						ready, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
-					done := ready == "True" && mfg.Status.ActiveSite != "" && mfg.Status.LastFailoverTarget == ""
+						ready, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
+					done := ready == "True" && mfg.Status.ActiveSite != "" && mfg.Status.LastFailoverTarget() == ""
 					return done, msg, nil
 				},
 			)
@@ -131,24 +130,13 @@ func clearFailoverHistoryStatus(ctx context.Context, env *runner.Env) error {
 	if err := brcontroller.ClearFailoverState(ctx, env.Kube.Controller, types.NamespacedName{Namespace: env.Namespace, Name: env.FG}); err != nil {
 		return fmt.Errorf("clear out-of-band failover history: %w", err)
 	}
-	status, err := json.Marshal(mfg.Status)
-	if err != nil {
-		return err
-	}
-	var fields map[string]any
-	if err := json.Unmarshal(status, &fields); err != nil {
-		return err
-	}
-	var ops []pgkube.JSONPatchOp
-	for _, field := range []string{"lastFailover", "lastFailoverTarget", "promotionGtidExecuted"} {
-		if _, ok := fields[field]; ok {
-			ops = append(ops, pgkube.JSONPatchOp{Op: "remove", Path: "/status/" + field})
-		}
-	}
-	if len(ops) == 0 {
+	// The failover record is one status field, status.lastFailover
+	// {time, target, promotionGtidExecuted}.
+	if mfg.Status.LastFailover == nil {
 		return nil
 	}
-	return env.Kube.PatchMFGStatusNamed(ctx, env.Namespace, env.FG, ops)
+	return env.Kube.PatchMFGStatusNamed(ctx, env.Namespace, env.FG,
+		[]pgkube.JSONPatchOp{{Op: "remove", Path: "/status/lastFailover"}})
 }
 
 func injectForceBothWritable() runner.Step {
@@ -286,7 +274,7 @@ func writableSitesExcept(mfg *v1alpha1.MysqlFailoverGroup, prefer string) []stri
 		if s.Name == prefer {
 			continue
 		}
-		if s.State == "writable" {
+		if s.State == v1alpha1.SiteStateWritable {
 			out = append(out, s.Name)
 		}
 	}

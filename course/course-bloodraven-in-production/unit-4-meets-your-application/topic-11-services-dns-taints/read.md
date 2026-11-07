@@ -15,10 +15,10 @@ count is `2 × len(sites) + 2` — for three-site `playground` (iad, pdx, reader
 
 | Service | Selector | Who may use it |
 | --- | --- | --- |
-| `mysql-playground-<site>` | name + instance + site (plus `healthy=yes` on a `read-only` site) | site-pinned tooling, debugging |
+| `mysql-playground-<site>` | name + instance + site (plus `healthy=true` on a `ReadOnly` site) | site-pinned tooling, debugging |
 | `mysql-playground-<site>-internal` | name + instance + site | sidecar and peer traffic only |
-| `mysql-playground-primary` | instance + `shipstream.io/role=primary` | writes |
-| `mysql-playground-replicas` | instance + `role=replica` + `healthy=yes` | reads |
+| `mysql-playground-primary` | instance + `bloodraven.shipstream.io/role=primary` | writes |
+| `mysql-playground-replicas` | instance + `role=replica` + `healthy=true` | reads |
 
 Applications get two of those four: `-primary` for writes, `-replicas` for reads (objective 1). The
 internal per-site Service is never yours. It publishes the sidecar port alongside MySQL, sets
@@ -27,18 +27,18 @@ canonical replication source host name. Point an application at it and you have 
 guarantee below.
 
 Count the labels on the two shared Services; the counts are the lesson. `-primary` is **two**:
-`app.kubernetes.io/instance=playground` and `shipstream.io/role=primary`. There is no `healthy` key on it,
+`app.kubernetes.io/instance=playground` and `bloodraven.shipstream.io/role=primary`. There is no `healthy` key on it,
 and `publishNotReadyAddresses` is `false`. `-replicas` is **three**: instance, `role=replica`,
-and `shipstream.io/healthy=yes`. The operator stamps `role` and `healthy` onto the pods on each
+and `bloodraven.shipstream.io/healthy=true`. The operator stamps `role` and `healthy` onto the pods on each
 reconcile; the Services never change, only the labels underneath them.
 
-For a `role: read-only` reader site, that `healthy=yes` stamp is expensive. Five conjuncts must **all**
-hold: source convergence is `converged`; `replicating` is true; `secondsBehindSource` is non-nil; the
+For a `role: ReadOnly` reader site, that `healthy=true` stamp is expensive. Five conjuncts must **all**
+hold: source convergence is `converged`; `replication` is `Healthy` or `Lagging`; `secondsBehindSource` is non-nil; the
 reported source host canonically matches the active site's internal per-site Service — a *direct*
 source, so a replication chain does not count; and the lag is within
 `EffectiveReadOnlyMaxLagSeconds()`. That last one has no default: nil inherits `maxLagSeconds`
 (300 shipped, 30 in the playground); an explicit `0` demands zero reported lag. Four out of five is
-`healthy=no`, and the reader leaves `-replicas` without a word.
+`healthy=false`, and the reader leaves `-replicas` without a word.
 
 Two consequences fall out of the selectors.
 
@@ -57,7 +57,7 @@ retry logic can see. A successful read of yesterday's data is not.
 
 Outside the cluster, Bloodraven writes one object: a `DNSEndpoint` on
 `externaldns.k8s.io/v1alpha1`, named `bloodraven-<group>`, always an `A` record, with `recordTTL`
-taken from `spec.dns.ttl` (default 60; the playground overrides it to 10).
+taken from `spec.dns.ttlSeconds` (default 60; the playground overrides it to 10).
 
 ```widget
 {
@@ -66,7 +66,7 @@ taken from `spec.dns.ttl` (default 60; the playground overrides it to 10).
   "lines": [
     {
       "cmd": "kubectl -n bloodraven-playground get dnsendpoint bloodraven-playground -o yaml",
-      "out": "apiVersion: externaldns.k8s.io/v1alpha1\nkind: DNSEndpoint\nmetadata:\n  name: bloodraven-playground\nspec:\n  endpoints:\n  - dnsName: playground-db.example.local   # spec.dns.hostname\n    recordType: A\n    recordTTL: 10                       # spec.dns.ttl (default 60)\n    targets:\n    - 10.96.100.20                        # CHANGED: was 10.96.100.10"
+      "out": "apiVersion: externaldns.k8s.io/v1alpha1\nkind: DNSEndpoint\nmetadata:\n  name: bloodraven-playground\nspec:\n  endpoints:\n  - dnsName: playground-db.example.local   # spec.dns.hostname\n    recordType: A\n    recordTTL: 10                       # spec.dns.ttlSeconds (default 60)\n    targets:\n    - 10.96.100.20                        # CHANGED: was 10.96.100.10"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
@@ -95,12 +95,12 @@ the DNS target stays stale — a perfect failover and an unreachable database at
 ## The taint
 
 ```widget
-{"type":"anatomy","title":"The taint Bloodraven applies to a demoted site's nodes","parts":[{"text":"shipstream.io/db-readonly-","label":"key prefix","note":"Fixed constant TaintKeyPrefix. Namespaced to ShipStream so it cannot collide with your own taints."},{"text":"playground","label":"group suffix","note":"The failover group name. Two groups on one node taint independently — this is why the key is per-group."},{"text":"=true","label":"value","note":"Constant TaintValue. It never varies, so a toleration on the key alone with operator Exists is the normal way to tolerate it."},{"text":":NoExecute","label":"effect","note":"Not NoSchedule. This one reaches pods that are already running on the node."}]}
+{"type":"anatomy","title":"The taint Bloodraven applies to a demoted site's nodes","parts":[{"text":"bloodraven-playground","label":"namespace","note":"The group's namespace. Two groups with the same name in different namespaces never share a taint, or each other's tolerations."},{"text":".db-readonly.bloodraven.shipstream.io/","label":"fixed part","note":"Fixed suffix of ReadOnlyTaintKey's prefix, under Bloodraven's own bloodraven.shipstream.io domain, so it cannot collide with your own taints."},{"text":"playground","label":"group name","note":"The failover group name. Two groups on one node taint independently — this is why the key is per-group."},{"text":"=true","label":"value","note":"Constant ReadOnlyTaintValue. It never varies, so a toleration on the key alone with operator Exists is the normal way to tolerate it."},{"text":":NoExecute","label":"effect","note":"Not NoSchedule. This one reaches pods that are already running on the node."}]}
 ```
 
 Recall from Unit 2: the taint is a pure function of a per-site state transition,
 applied earlier in the same poll than any cross-site action. It is **not** a step in the failover
-sequence, and `role: read-only` sites are never tainted at all — a reader is already read-only, so
+sequence, and `role: ReadOnly` sites are never tainted at all — a reader is already read-only, so
 there is nothing to demote.
 
 `NoExecute` is upstream Kubernetes behaviour, and stronger than people expect. Pods that do

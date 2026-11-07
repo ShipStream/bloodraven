@@ -141,9 +141,9 @@ func s49CreateTenantDatabase() runner.Step {
 			mdb := &v1alpha1.MysqlDatabase{
 				ObjectMeta: metav1.ObjectMeta{Name: s49CRName, Namespace: env.Namespace},
 				Spec: v1alpha1.MysqlDatabaseSpec{
-					GroupRef:     v1alpha1.LocalGroupRef{Name: env.FG},
-					DatabaseName: s49DatabaseName,
-					Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: s49SecretName},
+					FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG},
+					DatabaseName:     s49DatabaseName,
+					Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: s49SecretName},
 					Users: []v1alpha1.MysqlDatabaseUser{{
 						SecretName: s49UserSecretName,
 						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
@@ -159,7 +159,7 @@ func s49CreateTenantDatabase() runner.Step {
 					}},
 					// Explicit, even though it is the default: this scenario
 					// creates a real database and must clean it up.
-					DeletionPolicy: v1alpha1.MysqlDatabaseDelete,
+					DeletionPolicy: v1alpha1.DeletionPolicyDelete,
 				},
 			}
 			if err := env.Kube.Controller.Create(ctx, mdb); err != nil && !apierrors.IsAlreadyExists(err) {

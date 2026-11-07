@@ -7,6 +7,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // scenariosPITR206 are the #206 cross-site PITR scenarios (DESIGN §9.4).
@@ -131,11 +132,11 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 	src := &v1alpha1.MysqlFailoverGroup{}
 	src.Namespace = "ns"
 	src.Status.ActiveSite = "pdx"
-	src.Spec.DNS = v1alpha1.DNSSpec{Hostname: "playground-db.example.local", TTL: 10}
+	src.Spec.DNS = v1alpha1.DNSSpec{Hostname: "playground-db.example.local", TTLSeconds: 10}
 	src.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-iad", LBIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
-		{Name: "pdx", Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LBIP: "10.0.0.2"},
-		{Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "zone-reader"},
+		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-iad", LBIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
+		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LBIP: "10.0.0.2"},
+		{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "zone-reader"},
 	}
 	src.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true}
 	src.Spec.Backup = &v1alpha1.BackupSpec{
@@ -156,7 +157,7 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 		if s.LBIP == "" || s.LBIP == "10.0.0.1" || s.LBIP == "10.0.0.2" {
 			t.Errorf("site %s lbIP %q, want its own placeholder", s.Name, s.LBIP)
 		}
-		if len(s.TaintNodeSelector) != 1 || s.TaintNodeSelector["shipstream.io/failover-group.s37-restored"] != "true" {
+		if len(s.TaintNodeSelector) != 1 || s.TaintNodeSelector["bloodraven.shipstream.io/failover-group.s37-restored"] != "true" {
 			t.Errorf("site %s taintNodeSelector %v must name only the restored group's own label", s.Name, s.TaintNodeSelector)
 		}
 	}
@@ -172,7 +173,7 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 		t.Errorf("restored spec must drop dragonfly and PITR and use its own DNS name: %+v", got.Spec)
 	}
 	pit := got.Spec.InitFromBackup.PointInTime
-	if pit.ArchiveProfileName != backupE2EProfile || pit.StopDatetime != "2026-11-05T10:00:01Z" || got.Spec.InitFromBackup.Source.MysqlBackupRef.Name != "bk" {
+	if pit.ArchiveProfileName != backupE2EProfile || !pit.StopTime.Equal(&metav1.Time{Time: time.Date(2026, 11, 5, 10, 0, 1, 0, time.UTC)}) || got.Spec.InitFromBackup.Source.BackupRef.Name != "bk" {
 		t.Errorf("initFromBackup = %+v", got.Spec.InitFromBackup)
 	}
 	if src.Spec.Backup.PITR == nil || src.Spec.Sites[0].LBIP != "10.0.0.1" || src.Spec.Sites[0].Zone != "zone-iad" || src.Spec.Sites[0].TaintNodeSelector["a"] != "b" {

@@ -22,37 +22,39 @@
       "maxLagSeconds": 30
     },
     "sites": [
-      {"name": "iad", "role": "primary-candidate", "zone": "zone-iad"},
-      {"name": "pdx", "role": "primary-candidate", "zone": "zone-pdx"},
-      {"name": "reader", "role": "read-only", "zone": "zone-reader"}
+      {"name": "iad", "role": "PrimaryCandidate", "zone": "zone-iad"},
+      {"name": "pdx", "role": "PrimaryCandidate", "zone": "zone-pdx"},
+      {"name": "reader", "role": "ReadOnly", "zone": "zone-reader"}
     ]
   },
   "status": {
     "activeSite": "pdx",
-    "lastFailover": "2026-05-02T05:17:03Z",
-    "lastFailoverTarget": "pdx",
+    "lastFailover": {
+      "time": "2026-05-02T05:17:03Z",
+      "target": "pdx"
+    },
     "sites": [
       {
         "name": "iad",
-        "state": "unreachable",
-        "lastSeen": "2026-05-02T05:16:57Z",
+        "state": "Unreachable",
+        "lastSeenTime": "2026-05-02T05:16:57Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-23,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7",
-        "replicating": false
+        "replication": "Unknown"
       },
       {
         "name": "pdx",
-        "state": "writable",
-        "lastSeen": "2026-05-02T05:19:52Z",
+        "state": "Writable",
+        "lastSeenTime": "2026-05-02T05:19:52Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-9",
-        "replicating": false,
+        "replication": "NotApplicable",
         "sourceConvergenceState": "Converged"
       },
       {
         "name": "reader",
-        "state": "read-only",
-        "lastSeen": "2026-05-02T05:19:52Z",
+        "state": "ReadOnly",
+        "lastSeenTime": "2026-05-02T05:19:52Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-9",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0,
         "sourceHost": "mysql-playground-pdx-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged"
@@ -62,7 +64,7 @@
       {
         "type": "Degraded",
         "status": "True",
-        "reason": "Degraded",
+        "reason": "SiteUnhealthy",
         "message": "iad unreachable while pdx is primary",
         "lastTransitionTime": "2026-05-02T05:17:03Z"
       }

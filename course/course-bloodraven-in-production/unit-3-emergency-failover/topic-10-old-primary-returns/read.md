@@ -39,7 +39,7 @@ describes a moment already gone. The fence turns a moving target into a fact.
 
 ## What the gate is not
 
-Recovery is deliberately **not** gated on `lastFailoverTarget`, because a primary can change hands with
+Recovery is deliberately **not** gated on the recorded failover target (`lastFailover.target`), because a primary can change hands with
 no failover recorded at all: a replica may be made writable by hand (or respawn writable on a pod that
 predates the `--read-only=ON` boot flag) and be adopted as the de-facto primary while
 the old primary comes back fenced, or the record may be lost to a status-write outage plus an operator
@@ -104,38 +104,43 @@ returned — so read `site` as `iad`. `fg` and `time` elided:
  "newPrimaryGtid":"f4d07a53-45e5-11f1-8706-dabe2399558e:1-15"}
 ```
 
-Three transactions under the returning site's own UUID that `pdx` never saw. Read the set off the CR and
-copy a prefix:
+Three transactions under the returning site's own UUID that `pdx` never saw. Read the set and the
+group's uid off the CR, and copy a prefix of the UUID (`kubectl bloodraven reclone playground iad` does all
+of this for you):
 
 ```bash
 NS=bloodraven-playground; FG=playground; SITE=iad
 DG=$(kubectl -n $NS get mfg $FG -o jsonpath="{.status.sites[?(@.name==\"$SITE\")].divergentGtid}")
-kubectl -n $NS annotate mfg $FG bloodraven.shipstream.io/reclone-site="$SITE:${DG:0:8}" --overwrite
+UID=$(kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.uid}')
+kubectl -n $NS annotate mfg $FG \
+  bloodraven.shipstream.io/reclone-site="$SITE:confirm=$FG:uid=$UID:gtidPrefix=${DG:0:8}" --overwrite
 ```
 
 ```widget
-{"type":"anatomy","title":"bloodraven.shipstream.io/reclone-site=iad:3E11FA47","parts":[
+{"type":"anatomy","title":"bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=<uid>:gtidPrefix=3e11fa47","parts":[
  {"text":"bloodraven.shipstream.io/reclone-site","label":"annotation key","note":"Applied to the MysqlFailoverGroup, not to a site object. Rejected values are deleted from the CR."},
  {"text":"=","label":"","note":"kubectl annotate syntax."},
- {"text":"iad","label":"site name","note":"Must match an entry in spec.sites[].name. Bare, with no ':' suffix, this is the cold form — accepted only when no divergentGtid is recorded."},
- {"text":":","label":"separator","note":"Everything after the first colon is the confirmation token."},
- {"text":"3E11FA47","label":"divergentGtid prefix","note":"Hot reclone: at least 8 characters, and a true prefix of the observed status.sites[].divergentGtid. The cold form puts confirm=playground here instead."}]}
+ {"text":"iad","label":"subject: the site","note":"Must match an entry in spec.sites[].name. A site on its own is always rejected: a reclone wipes the datadir."},
+ {"text":":confirm=playground","label":"confirm pair","note":"The failover group's name. Every reclone carries it, cold or divergent."},
+ {"text":":uid=<uid>","label":"uid pair","note":"The group's metadata.uid, so a request left over for an earlier group of the same name cannot apply."},
+ {"text":":gtidPrefix=3e11fa47","label":"divergentGtid prefix","note":"Divergent form only: at least 8 hex characters of the source UUID of status.sites[].divergentGtid, never its :interval. The cold form ends at the uid pair."}]}
 ```
 
-Four teeth. A hot reclone — the site has a recorded `divergentGtid` — needs a prefix of at least 8
-characters matching that set; a mismatch is rejected. A cold reclone, where nothing is recorded, still
-wipes the datadir, so it demands a literal confirm token equal to the failover-group name:
-`iad:confirm=playground`. The interlock keys on **`divergentGtid` presence only**, never on `RecoveryState` —
+Four teeth. Every reclone wipes the datadir, so every value names the group and its incarnation:
+`confirm=playground` and `uid=<the group's metadata.uid>`. A divergent reclone — the site has a recorded
+`divergentGtid` — also needs `gtidPrefix=` with at least 8 characters of that set's source UUID; a
+mismatch is rejected. A cold reclone, where nothing is recorded, is the same value without
+`gtidPrefix=`: `iad:confirm=playground:uid=<uid>`. The interlock keys on **`divergentGtid` presence only**, never on `RecoveryState` —
 `RecoveryBlocked` is a downstream UX field that can be transiently unset during a reconcile, so clearing
 it by hand changes nothing. And a rejected annotation emits a `RecloneRejected` warning event and is
-then **deleted**, so it cannot spam the reconciler. Two real rejections, verbatim:
+then **deleted**, so it cannot spam the reconciler. Two real rejections (the uid is this cluster's):
 
 ```text
 reclone of "pdx" rejected: site has divergent transactions (gtid "589f4b67-4d00-11f1-9df5-7e14c29a8121:104-106");
-  annotation value must include the divergent-GTID prefix to confirm intent — set annotation
-  bloodraven.shipstream.io/reclone-site=pdx:589f4b67
+  the value must include gtidPrefix=, a prefix of the divergent GTID's source UUID, to confirm intent — set annotation
+  bloodraven.shipstream.io/reclone-site=pdx:confirm=playground:uid=0b7e2a54-6c1d-4f3e-9a8b-2c5d7e9f1a3b:gtidPrefix=589f4b67
 
-reclone of "pdx" rejected: divergent-GTID prefix "deadbeef" does not match the observed divergentGtid
+reclone of "pdx" rejected: gtidPrefix "deadbeef" does not match the observed divergentGtid
   "589f4b67-4d00-11f1-9df5-7e14c29a8121:104-106" — double-check the site name and re-read
   status.sites[].divergentGtid
 ```

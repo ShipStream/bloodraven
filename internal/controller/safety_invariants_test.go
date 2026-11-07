@@ -308,12 +308,12 @@ func TestInvariant_CooldownSurvivesOperatorRestart(t *testing.T) {
 	// does and verify that the out-of-band winner enforces the cooldown.
 	statusStamp := metav1.NewTime(start.Add(-2 * time.Hour))
 	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1"}, {Name: "dc2"}}},
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
-			LastFailoverTargetAnnotation: "dc2",
+			v1alpha1.LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
+			v1alpha1.LastFailoverTargetAnnotation: "dc2",
 		}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{LastFailover: &statusStamp, LastFailoverTarget: "dc1"},
+		Status: v1alpha1.MysqlFailoverGroupStatus{LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &statusStamp, Target: "dc1"}}},
 	}
 	record, fromAnnotations, err := EffectiveFailoverRecord(fg, start)
 	if err != nil {

@@ -169,11 +169,11 @@ func s15VerifyActiveSiteUnchanged() runner.Step {
 			}
 			if mfg.Status.ActiveSite != original {
 				return fmt.Errorf("activeSite changed during sidecar restart: was %q, now %q (lastFailoverTarget=%q)",
-					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 			}
-			if mfg.Status.LastFailoverTarget != "" && mfg.Status.LastFailoverTarget != original {
+			if mfg.Status.LastFailoverTarget() != "" && mfg.Status.LastFailoverTarget() != original {
 				return fmt.Errorf("operator set lastFailoverTarget=%q during sidecar restart — implies an attempted promotion",
-					mfg.Status.LastFailoverTarget)
+					mfg.Status.LastFailoverTarget())
 			}
 			env.Capture.Note(fmt.Sprintf("activeSite=%q (unchanged)", mfg.Status.ActiveSite))
 			return nil

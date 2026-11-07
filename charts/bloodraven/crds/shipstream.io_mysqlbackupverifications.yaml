@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     - jsonPath: .status.backupRef.name
       name: Backup
       priority: 1
@@ -48,13 +51,13 @@ spec:
           bloodraven_backup_verified_timestamp_seconds gauge give operators a
           concrete signal that recent backups are restorable.
 
-          Phase 1 implementation runs the ephemeral mysqld inside the
-          verification Job's Pod on a dedicated PVC, with a derived
-          credentials Secret for the restore script. No Service is created;
-          the Pod binds 127.0.0.1 only and is not reachable from outside its
-          own network namespace. On success all artifacts are cleaned up; on
-          failure KeepOnFailure (default true) leaves the Job Pod and PVC in
-          place for inspection until the retention sweep reclaims them.
+          The ephemeral mysqld runs inside the verification Job's Pod on an
+          emptyDir datadir, with a derived credentials Secret for the restore
+          script. No Service or PersistentVolumeClaim is created; the Pod binds
+          127.0.0.1 only and is not reachable from outside its own network
+          namespace. On success all artifacts are cleaned up; on failure
+          KeepOnFailure (default true) leaves the Job and its Pod in place for
+          inspection until the retention sweep reclaims them.
         properties:
           apiVersion:
             description: |-
@@ -80,20 +83,18 @@ spec:
               backupRef:
                 description: |-
                   BackupRef optionally pins the verification to a specific
-                  MysqlBackup in the same namespace. When empty, the reconciler
+                  MysqlBackup in the same namespace. When omitted, the reconciler
                   resolves the latest Succeeded MysqlBackup for (group, profile).
                 properties:
                   name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    description: Name of the MysqlBackup.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
+                required:
+                - name
                 type: object
-                x-kubernetes-map-type: atomic
               failoverGroupRef:
                 description: |-
                   FailoverGroupRef identifies the MysqlFailoverGroup in the same
@@ -101,7 +102,9 @@ spec:
                 properties:
                   name:
                     description: Name of the MysqlFailoverGroup.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
                 required:
                 - name
@@ -109,7 +112,7 @@ spec:
               keepOnFailure:
                 default: true
                 description: |-
-                  KeepOnFailure leaves the ephemeral Pod and PVC in place when the
+                  KeepOnFailure leaves the verification Job and its Pod in place when the
                   verification terminates in Failed, so operators can kubectl exec
                   into the verification instance to inspect why the load failed.
                   On success all artifacts are always cleaned up regardless of
@@ -121,9 +124,9 @@ spec:
               pointInTime:
                 description: |-
                   PointInTime configures whether the verification replays archived
-                  binlogs on top of the restored dump. Leave nil or set mode=none to
-                  skip replay. mode=latest replays to the unique archive head;
-                  mode=timestamp restores the history of the first archived
+                  binlogs on top of the restored dump. Leave it unset to skip replay.
+                  mode=Latest replays to the unique archive head; mode=Timestamp
+                  restores the history of the first archived
                   transaction at or after a caller-supplied instant, cut just before
                   it. Either way the replay may span every site's archive. Requires
                   spec.backup.pitr.enabled=true on the referenced failover group.
@@ -142,35 +145,41 @@ spec:
                       ExcludeGtids are never replayed and must not intersect the backup,
                       with the same meaning as PointInTimeSpec.ExcludeGtids: every archived
                       transaction committed between the backup's newest transaction and the
-                      target (or the archive head in latest mode) that is outside the
+                      target (or the archive head in Latest mode) that is outside the
                       target history must be listed.
                     maxLength: 131072
                     type: string
                   mode:
-                    default: none
-                    description: Mode selects the replay behavior.
+                    description: 'Mode selects the replay end point: Latest or Timestamp.'
                     enum:
-                    - none
-                    - latest
-                    - timestamp
+                    - Timestamp
+                    - Latest
                     type: string
-                  timestamp:
+                  stopTime:
                     description: |-
-                      Timestamp is the target instant, a whole second in the same forms as
-                      PointInTimeSpec.StopDatetime (fractional seconds are refused; a
-                      stored fractional value must be corrected in the same update, as for
-                      StopDatetime). Replay restores the history of the first archived
-                      transaction committed at or after it, cut just before that
-                      transaction. Required when Mode=timestamp; ignored otherwise.
+                      StopTime is the target instant, in the same form as
+                      PointInTimeSpec.StopTime (RFC 3339, an explicit zone, whole seconds).
+                      Replay restores the history of the first archived transaction
+                      committed at or after it, cut just before that transaction. Required
+                      when Mode=Timestamp; forbidden when Mode=Latest.
+                    format: date-time
                     maxLength: 40
-                    pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$
+                    pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$
                     type: string
+                required:
+                - mode
                 type: object
+                x-kubernetes-validations:
+                - message: pointInTime.stopTime is required when mode is Timestamp
+                    and forbidden when mode is Latest
+                  rule: 'self.mode == ''Timestamp'' ? has(self.stopTime) : !has(self.stopTime)'
               profileName:
                 description: |-
                   ProfileName is the name of a spec.backup.profiles[] entry on the
                   referenced failover group.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               resources:
                 description: |-
@@ -178,7 +187,8 @@ spec:
                   container. Forwarded to the Job pod verbatim; when unset, no
                   verification-specific resource requests or limits are
                   configured (the container inherits cluster / namespace default
-                  limits if any).
+                  limits if any). The datadir is an emptyDir on the node's disk, so
+                  bound it with limits.ephemeral-storage.
                 properties:
                   claims:
                     description: |-
@@ -240,35 +250,19 @@ spec:
                 description: |-
                   SanityCheck runs a single scalar-returning SELECT against the
                   ephemeral mysqld after the dump load (and optional PITR replay)
-                  succeeds. Failures (errors, timeouts, or minRows mismatch) flip
+                  succeeds. Failures (errors, timeouts, or a result below minResult) flip
                   the verification to Failed with a SanityCheckFailed /
                   SanityCheckTimeout reason so an otherwise-loadable but obviously
                   corrupt dump does not quietly pass the freshness gauge.
                 properties:
-                  expect:
+                  minResult:
                     description: |-
-                      Expect configures the pass/fail thresholds applied to the query
-                      result. When nil, a non-error return with any scalar result
-                      passes.
-                    properties:
-                      maxDurationSeconds:
-                        default: 60
-                        description: |-
-                          MaxDurationSeconds is the client-side timeout for the sanity
-                          query. Exceeding it fails the verification with
-                          reason=SanityCheckTimeout. Default: 60.
-                        format: int32
-                        minimum: 1
-                        type: integer
-                      minRows:
-                        description: |-
-                          MinRows is the floor applied to the scalar result. When >0 and
-                          the scalar result is less than MinRows, the verification fails
-                          with reason=SanityCheckFailed. Default: 0 (disabled).
-                        format: int64
-                        minimum: 0
-                        type: integer
-                    type: object
+                      MinResult is the floor applied to an integer scalar result: a
+                      smaller result fails the verification with reason=SanityCheckFailed.
+                      A non-integer result is not compared. Unset applies no floor.
+                    format: int64
+                    minimum: 0
+                    type: integer
                   query:
                     description: |-
                       Query is a single SQL statement. Must return a scalar
@@ -276,42 +270,28 @@ spec:
                       rejected to keep the timeout budget predictable.
                     minLength: 1
                     type: string
+                  timeout:
+                    default: 1m0s
+                    description: |-
+                      Timeout is the client-side timeout for the sanity query, applied in
+                      whole seconds (rounded up). Exceeding it fails the verification with
+                      reason=SanityCheckTimeout. Default: 60s. Bounds: 1s to 1h.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: sanityCheck.timeout must be between 1s and 1h
+                      rule: duration(self) >= duration('1s') && duration(self) <=
+                        duration('1h')
                 required:
                 - query
                 type: object
-              storage:
-                description: |-
-                  Storage is accepted for compatibility but is not applied: the
-                  verification Job keeps its datadir on an emptyDir and no longer
-                  creates a PersistentVolumeClaim.
-                properties:
-                  size:
-                    anyOf:
-                    - type: integer
-                    - type: string
-                    description: |-
-                      Size is accepted but not applied; the verification Job creates no
-                      PersistentVolumeClaim.
-                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                    x-kubernetes-int-or-string: true
-                  storageClassName:
-                    description: |-
-                      StorageClassName is accepted but not applied; the verification Job
-                      creates no PersistentVolumeClaim.
-                    type: string
-                type: object
-              triggeredBy:
-                description: |-
-                  TriggeredBy records what created this CR ("manual",
-                  "schedule/<schedule-name>"). Informational only.
-                type: string
               ttlSecondsAfterFinished:
-                default: 0
                 description: |-
-                  TTLSecondsAfterFinished controls how long the verification Pod +
-                  Service + PVC persist after a successful verification before the
-                  reconciler cleans them up. Default: 0 (clean up immediately).
-                  Failed verifications with KeepOnFailure=true ignore this value.
+                  TTLSecondsAfterFinished controls how long the verification Job and
+                  its Pod persist after a successful verification before the
+                  reconciler cleans them up. 0 cleans them up as soon as the
+                  verification finishes; unset keeps them until retention deletes the
+                  verification. Failed verifications with KeepOnFailure=true ignore
+                  this value.
                 format: int32
                 minimum: 0
                 type: integer
@@ -329,17 +309,73 @@ spec:
                   verified. Populated once the reconciler resolves spec.backupRef
                   (or the latest-Succeeded default).
                 properties:
-                  location:
-                    description: Location copied from MysqlBackup.status.location.
-                    type: string
+                  artifactStorage:
+                    description: |-
+                      ArtifactStorage is the backup's status.artifactStorage at
+                      resolution time: the destination the verification read the artifact
+                      from, and the key it decrypted with.
+                    properties:
+                      bucket:
+                        description: Bucket is the S3 bucket the artifact was written
+                          to.
+                        type: string
+                      claimName:
+                        description: ClaimName is the PersistentVolumeClaim the artifact
+                          was written to.
+                        type: string
+                      endpointURL:
+                        description: |-
+                          EndpointURL is the S3 endpoint override in effect for the producing
+                          Job, empty for the AWS default endpoint.
+                        type: string
+                      location:
+                        description: |-
+                          Location is the artifact location the producing Job wrote, e.g.
+                          "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
+                        type: string
+                      passphraseSecretKeyRef:
+                        description: |-
+                          PassphraseSecretKeyRef is the passphrase Secret and key the producing Job
+                          mounted, for an encrypted backup: the backup's own immutable dump-key
+                          snapshot (mysqlbackup-<name>-dump-key-<uid8>, key passphrase), which
+                          the operator made from the profile's passphrase before the Job and
+                          deletes only after the backup's artifacts are deleted. Restores,
+                          verifications and cleanup of a backup that never succeeded decrypt
+                          with it, so a profile edited since the launch does not decide which
+                          passphrase is used.
+                        properties:
+                          key:
+                            description: Key is the data key within the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: Name is the Secret name.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      region:
+                        description: Region is the S3 region in effect for the producing
+                          Job.
+                        type: string
+                      type:
+                        description: Type is the storage backend the producing Job
+                          wrote to.
+                        enum:
+                        - S3
+                        - PVC
+                        type: string
+                    required:
+                    - type
+                    type: object
                   name:
                     description: Name of the verified MysqlBackup.
-                    type: string
-                  storageType:
-                    description: StorageType copied from MysqlBackup.status.storageType.
-                    enum:
-                    - S3
-                    - PVC
                     type: string
                   uid:
                     description: UID of the verified MysqlBackup at resolution time.
@@ -412,6 +448,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               durationSeconds:
                 description: |-
                   DurationSeconds is the wall-clock duration from StartTime to
@@ -438,19 +477,15 @@ spec:
                 - Pending
                 - Provisioning
                 - Restoring
-                - Checking
-                - Cleaning
                 - Succeeded
                 - Failed
-                type: string
-              podName:
-                description: PodName is the name of the ephemeral MySQL Pod.
                 type: string
               pointInTime:
                 description: |-
                   PointInTime is the certified outcome of the point-in-time replay,
-                  read from the replay's verdict. Set on Succeeded verifications whose
-                  spec.pointInTime.mode is not none.
+                  read from the replay's verdict. Set on Succeeded verifications with
+                  spec.pointInTime. Its newestReplayedCommitTime feeds
+                  bloodraven_backup_verification_replay_lag_seconds.
                 properties:
                   archive:
                     description: Archive identifies the archive the replay read.
@@ -615,44 +650,17 @@ spec:
                 - mode
                 - outcome
                 type: object
-              pvcName:
-                description: PVCName is the name of the ephemeral MySQL PVC.
-                type: string
-              replayedThroughBinlog:
-                description: |-
-                  ReplayedThroughBinlog is populated on Succeeded verifications
-                  whose spec.pointInTime.mode was not "none". Captures the last
-                  binlog event that was applied so operators can correlate the
-                  verified coverage window against their RPO target.
-                properties:
-                  file:
-                    description: |-
-                      File is the last binlog file the replay applied, e.g.
-                      "mysql-bin.000412".
-                    type: string
-                  position:
-                    description: Position is not reported by current releases and
-                      stays unset.
-                    format: int64
-                    type: integer
-                  timestamp:
-                    description: |-
-                      Timestamp is the newest original commit time among the replayed
-                      transactions. Used to compute
-                      bloodraven_backup_verification_replay_lag_seconds.
-                    format: date-time
-                    type: string
-                type: object
               sanityCheck:
                 description: |-
                   SanityCheck is populated when spec.sanityCheck is set. Records
-                  whether the query ran, its duration, and the scalar result so
+                  the check's outcome, its duration, and the scalar result so
                   operators can look at `kubectl describe` and tell what the
                   verification actually asserted.
                 properties:
-                  durationMs:
-                    description: DurationMs is the client-side wall-clock duration
-                      of the query.
+                  durationMilliseconds:
+                    description: |-
+                      DurationMilliseconds is the client-side wall-clock duration of the
+                      query. Unset when the query did not run.
                     format: int64
                     type: integer
                   error:
@@ -660,28 +668,29 @@ spec:
                       Error is the error message from a failed sanity query. Set on
                       SanityCheckFailed or SanityCheckTimeout terminal transitions.
                     type: string
-                  ran:
-                    description: |-
-                      Ran is true when the verification Job actually executed the
-                      sanity query. Useful for distinguishing "skipped because upstream
-                      phase failed" from "ran but returned 0 rows".
-                    type: boolean
-                  resultRow:
-                    description: |-
-                      ResultRow is the scalar result rendered as a string. Empty when
-                      the query returned zero rows.
+                  outcome:
+                    description: Outcome is the sanity check's result.
+                    enum:
+                    - Passed
+                    - Failed
+                    - TimedOut
+                    - Skipped
                     type: string
+                  result:
+                    description: |-
+                      Result is the scalar result rendered as a string ("0" when the
+                      query returned zero rows). Empty when the query did not return.
+                    type: string
+                required:
+                - outcome
                 type: object
-              serviceName:
-                description: |-
-                  ServiceName is the name of the headless Service routing the
-                  restore Job to the ephemeral MySQL Pod.
-                type: string
               startTime:
                 description: StartTime is when the verification entered Provisioning.
                 format: date-time
                 type: string
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

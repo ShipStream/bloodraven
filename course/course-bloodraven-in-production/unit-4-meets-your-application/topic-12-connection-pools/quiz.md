@@ -59,7 +59,7 @@ You want to shorten the window in which your application can read stale data fro
 - Raise the pool size so more connections are available after the promotion
 - Set `reconnect=true` so the driver re-establishes broken connections
 - Bound the connection lifetime so every socket is retired and reopened
-- Shorten `spec.dns.ttl` from 60 to 10 so the record is re-resolved sooner
+- Shorten `spec.dns.ttlSeconds` from 60 to 10 so the record is re-resolved sooner
 
 **Correct option index:** 2
 
@@ -82,4 +82,4 @@ A batch worker runs in the same site as MySQL, is stateless, and restarts in und
 
 **Explanation:**
 
-Co-located plus cheap to restart is the exact case the taint is for: the `shipstream.io/db-readonly-<group>` `NoExecute` taint evicts a non-tolerating pod from the demoted site, and the restart guarantees a fresh pool with no configuration to get wrong. Service-based is the right answer for the opposite application — long-running or expensive to restart — and here it buys complexity for nothing. Warm standby addresses cross-site write latency, which a co-located worker does not have. Sending it to `-replicas` is not a strategy but a category error: `-replicas` never serves writes, so a worker that writes cannot use it. (objective 5)
+Co-located plus cheap to restart is the exact case the taint is for: the `<namespace>.db-readonly.bloodraven.shipstream.io/<group>` `NoExecute` taint evicts a non-tolerating pod from the demoted site, and the restart guarantees a fresh pool with no configuration to get wrong. Service-based is the right answer for the opposite application — long-running or expensive to restart — and here it buys complexity for nothing. Warm standby addresses cross-site write latency, which a co-located worker does not have. Sending it to `-replicas` is not a strategy but a category error: `-replicas` never serves writes, so a worker that writes cannot use it. (objective 5)

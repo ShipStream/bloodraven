@@ -25,7 +25,7 @@ type pitrDumpSource struct {
 	PVCClaim                                          string
 
 	// Passphrase is the dump key; nil for a plaintext dump.
-	Passphrase *v1alpha1.PassphraseSecretRef
+	Passphrase *v1alpha1.PassphraseSecretKeyRef
 
 	// Expected identity, from the referenced MysqlBackup. All empty for a
 	// direct S3 or PVC source, whose stamp is still required.
@@ -34,9 +34,11 @@ type pitrDumpSource struct {
 	ExpectedGtidExecuted string
 }
 
-// pitrDumpSourceForBackup describes a MysqlBackup's dump for dump-meta.
-// profile must store to the backup's backend (callers check this first).
-func pitrDumpSourceForBackup(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, passphrase *v1alpha1.PassphraseSecretRef) (pitrDumpSource, error) {
+// pitrDumpSourceForBackup describes a MysqlBackup's dump for dump-meta, at
+// the destination its status.artifactStorage records. profile supplies the
+// storage credentials and must store to the backup's backend (callers
+// check this first).
+func pitrDumpSourceForBackup(backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, passphrase *v1alpha1.PassphraseSecretKeyRef) (pitrDumpSource, error) {
 	// §7.1: a backup with no recorded source identity was taken by a
 	// release without dump identity (no stamp), so dump-meta would refuse
 	// it anyway after scheduling and image pulls. Refuse at reconcile.
@@ -45,42 +47,33 @@ func pitrDumpSourceForBackup(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.M
 			"or its status lost the UID and the backup's Job, which the backup reconciler restores it from, is gone); take a new backup",
 			pitrarchive.TokenBackupIdentityUnknown, backup.Name)
 	}
+	storage, err := recordedArtifactStorage(backup)
+	if err != nil {
+		return pitrDumpSource{}, err
+	}
 	src := pitrDumpSource{
-		StorageType:          backup.Status.StorageType,
+		StorageType:          storage.Type,
 		Passphrase:           passphrase,
 		ExpectedBackupUID:    backup.UID,
 		ExpectedSourceUID:    backup.Status.FailoverGroupUID,
 		ExpectedGtidExecuted: backup.Status.GtidExecuted,
 	}
-	if src.StorageType == "" {
-		src.StorageType = v1alpha1.BackupStoragePVC
-		if isS3Location(backup.Status.Location) {
-			src.StorageType = v1alpha1.BackupStorageS3
-		}
-	}
+	// The destination is the one the producing Job recorded; only the
+	// credentials come from the profile.
 	switch src.StorageType {
 	case v1alpha1.BackupStorageS3:
 		if profile == nil || profile.Storage.S3 == nil {
 			return src, fmt.Errorf("backup %q is on S3 but its profile has no s3 storage", backup.Name)
 		}
-		s3 := profile.Storage.S3
-		bucket, prefix := splitS3Location(backup.Status.Location)
-		if bucket == "" {
-			bucket = s3.Bucket
-		}
-		src.S3Bucket, src.S3EndpointURL, src.S3Region, src.AWSCredsSecret = bucket, s3.EndpointURL, s3.Region, s3.CredentialsSecret
+		_, prefix := splitS3Location(storage.Location)
+		src.S3Bucket, src.S3EndpointURL, src.S3Region = storage.Bucket, storage.EndpointURL, storage.Region
+		src.AWSCredsSecret = profile.Storage.S3.CredentialsSecretName
 		src.Prefix = strings.Trim(prefix, "/")
 	case v1alpha1.BackupStoragePVC:
-		if profile == nil || profile.Storage.PVC == nil {
-			return src, fmt.Errorf("backup %q is on a PVC but its profile has no pvc storage", backup.Name)
-		}
-		src.PVCClaim = profile.Storage.PVC.ClaimName
-		if src.PVCClaim == "" {
-			src.PVCClaim = ownedBackupPVCName(fg.Name, profile.Name)
-		}
-		// status.location is the in-pod path the backup Job wrote under
+		src.PVCClaim = storage.ClaimName
+		// The location is the in-pod path the backup Job wrote under
 		// backupPVCMountPath; the stamp is relative to the claim's root.
-		src.Prefix = strings.Trim(strings.TrimPrefix(backup.Status.Location, backupPVCMountPath), "/")
+		src.Prefix = strings.Trim(strings.TrimPrefix(storage.Location, backupPVCMountPath), "/")
 	default:
 		return src, fmt.Errorf("backup %q has unknown storage type %q", backup.Name, src.StorageType)
 	}
@@ -102,7 +95,7 @@ func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSou
 		// no S3 prefix or PVC subPath) has no directory a backup stamp
 		// could sit beside, so nothing can identify it.
 		return corev1.Container{}, nil, fmt.Errorf("%s: point-in-time replay needs the dump's own directory, where its backup stamp identifies it, but the dump is at the root of its store (no S3 prefix or PVC subPath); "+
-			"name the dump's directory in source.s3.prefix or source.pvc.subPath, or restore from the MysqlBackup with source.mysqlBackupRef",
+			"name the dump's directory in source.s3.prefix or source.pvc.subPath, or restore from the MysqlBackup with source.backupRef",
 			pitrarchive.TokenBackupIdentityUnknown)
 	}
 	env := []corev1.EnvVar{

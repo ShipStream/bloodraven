@@ -22,6 +22,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 )
 
 // plannedFailoverTerminal reports whether the given status is in a
@@ -161,7 +162,7 @@ func (r *MysqlFailoverGroupReconciler) StepPlannedFailoverForTest(ctx context.Co
 // annotation, or an automation hold. The engine re-reads uncached; the cache
 // only lets a quiet group skip the read.
 func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
-	if _, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		return true
 	}
 	return plannedFailoverInFlightDue(fg)
@@ -172,8 +173,8 @@ func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 // durable deadline annotation, or an automation hold.
 func plannedFailoverInFlightDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 	a := fg.GetAnnotations()
-	for _, k := range []string{AcknowledgePlannedFailoverHoldAnnotation, PlannedFailoverTerminalAnnotation,
-		PlannedFailoverStallSinceAnnotation, PlannedFailoverManagerAbsentSinceAnnotation, PlannedFailoverConfirmedAnnotation} {
+	for _, k := range []string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation,
+		v1alpha1.PlannedFailoverStallSinceAnnotation, v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation, v1alpha1.PlannedFailoverConfirmedAnnotation} {
 		if _, ok := a[k]; ok {
 			return true
 		}
@@ -273,7 +274,9 @@ func (s reconcilerPlannedSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.
 	if pf == nil {
 		return
 	}
-	metrics.PlannedFailoversTotal.WithLabelValues(pf.TargetSite, mapOutcomeToMetricResult(pf.Result)).Inc()
+	if pf.Result != nil {
+		metrics.PlannedFailoversTotal.WithLabelValues(pf.TargetSite, labels.PlannedFailoverResult(pf.Result.Outcome)).Inc()
+	}
 	if !pf.StartTime.IsZero() && pf.Result != nil {
 		if d := pf.Result.CompletionTime.Sub(pf.StartTime.Time); d > 0 {
 			metrics.PlannedFailoverDurationSeconds.WithLabelValues(pf.TargetSite).Observe(d.Seconds())
@@ -287,27 +290,6 @@ func (s reconcilerPlannedSink) LagWaitObserved(_ types.NamespacedName, target st
 
 func (s reconcilerPlannedSink) Deferred(nn types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason) {
 	metrics.PlannedFailoversDeferredTotal.WithLabelValues(nn.Name, string(reason)).Inc()
-}
-
-// mapOutcomeToMetricResult maps a run's result to the existing values of
-// bloodraven_planned_failovers_total{result}: success, rejected,
-// failed_timeout and failed_other.
-func mapOutcomeToMetricResult(r *v1alpha1.PlannedFailoverResult) string {
-	if r == nil {
-		return "failed_other"
-	}
-	switch r.Reason {
-	case v1alpha1.PlannedFailoverReasonLagTimeout, v1alpha1.PlannedFailoverReasonAdmissionTimeout,
-		v1alpha1.PlannedFailoverReasonDragonflySyncTimeout:
-		return "failed_timeout"
-	}
-	switch r.Outcome {
-	case v1alpha1.PlannedFailoverOutcomeSucceeded:
-		return "success"
-	case v1alpha1.PlannedFailoverOutcomeNotStarted:
-		return "rejected"
-	}
-	return "failed_other"
 }
 
 // productionPlannedTopology is the facade the reconciler's engine uses

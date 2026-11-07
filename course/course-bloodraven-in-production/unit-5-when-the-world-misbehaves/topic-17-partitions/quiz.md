@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` pages you. `iad` is still writable and the counter app is still committing, but `pdx` has stopped answering the operator's polls entirely and its site state has gone to `unreachable`. Which documented partition scenario is this?
+`playground` pages you. `iad` is still writable and the counter app is still committing, but `pdx` has stopped answering the operator's polls entirely and its site state has gone to `Unreachable`. Which documented partition scenario is this?
 
 - Scenario A — the operator cannot reach one site while the other is reachable
 - Scenario B — the replica site is isolated while the primary stays reachable
@@ -35,7 +35,7 @@ Different page, same group. Both `iad` and `pdx` answer the operator's polls on 
 
 **Explanation:**
 
-B and C share the visible replication symptom, so the discriminator is the operator's own reachability: in C the operator polls both sites cleanly and only the binlog stream is severed, which is exactly what is described. Scenario B is the near-miss — it looks identical from the replication metrics alone, but B means the replica site is isolated, and a site that answers `SELECT @@read_only` every two seconds is not isolated. Scenario D is about one-way *peer* reachability between sidecars and would not stop the replication stream on its own. Scenario A requires a site to be `unreachable` to the operator, and neither is. (objectives 7, 9)
+B and C share the visible replication symptom, so the discriminator is the operator's own reachability: in C the operator polls both sites cleanly and only the binlog stream is severed, which is exactly what is described. Scenario B is the near-miss — it looks identical from the replication metrics alone, but B means the replica site is isolated, and a site that answers `SELECT @@read_only` every two seconds is not isolated. Scenario D is about one-way *peer* reachability between sidecars and would not stop the replication stream on its own. Scenario A requires a site to be `Unreachable` to the operator, and neither is. (objectives 7, 9)
 
 ## Question 3
 
@@ -53,7 +53,7 @@ The reversal: crossing the lag threshold moves a condition, never a primary. `sp
 
 **Type:** MULTIPLE_CHOICE
 
-To test scenario A you SSH to the k3d node hosting `iad` and add an iptables DROP rule for port 3306 in the host network namespace. You then watch the operator report `iad` as `writable` and `Ready=True` for the whole test window. What have you actually learned?
+To test scenario A you SSH to the k3d node hosting `iad` and add an iptables DROP rule for port 3306 in the host network namespace. You then watch the operator report `iad` as `Writable` and `Ready=True` for the whole test window. What have you actually learned?
 
 - That the operator correctly declined to act on a replica-side problem, which is the documented scenario B response
 - That this is scenario D: the operator can still read from `iad` even though `iad` can no longer be written to

@@ -10,16 +10,16 @@ you learn, the hard way, that a lagging reader is not an unhealthy group.
 
 ## How this works
 
-`playground` is your three-site failover group: `iad` and `pdx` are `primary-candidate`, `reader` is
-`read-only`. From Unit 2 onward you will look at its status constantly, and
+`playground` is your three-site failover group: `iad` and `pdx` are `PrimaryCandidate`, `reader` is
+`ReadOnly`. From Unit 2 onward you will look at its status constantly, and
 `kubectl get mysqlfailovergroup playground -o json` is 400 lines. `brstatus` squeezes it to one screen:
 
 ```
 playground/bloodraven-playground  active=iad  ready=True  degraded=False(Healthy)
-SITE    ROLE               STATE      REPL  LAG      SERVING
-iad     primary-candidate  writable   no    unknown  no
-pdx     primary-candidate  read-only  yes   0s       yes
-reader  read-only          read-only  yes   0s       yes
+SITE    ROLE              STATE     REPL           LAG      SERVING
+iad     PrimaryCandidate  Writable  NotApplicable  unknown  no
+pdx     PrimaryCandidate  ReadOnly  Healthy        0s       yes
+reader  ReadOnly          ReadOnly  Healthy        0s       yes
 VERDICT: OK
 ```
 
@@ -55,22 +55,22 @@ looking perfectly caught up.
 
 **TODO B — `is_serving`.** Decide whether a site is currently behind `mysql-playground-replicas`, the
 group read endpoint. That Service selects on three labels — instance, `role=replica`, and
-`healthy=yes` — and the operator's rule for stamping `healthy` depends on the site's role.
+`healthy=true` — and the operator's rule for stamping `healthy` depends on the site's role.
 
-For a site whose role is `read-only`, all five must hold together:
+For a site whose role is `ReadOnly`, all five must hold together:
 
 1. `sourceConvergenceState` is `Converged`
-2. `replicating` is true
+2. `replication` is `Healthy` or `Lagging`
 3. `secondsBehindSource` is present (not null)
 4. `canonical_host(sourceHost)` equals `expected_source_host(...)` for the active site — a replica
    chained off another replica does not count
 5. `secondsBehindSource` is at or under `effective_readonly_max_lag(spec)`
 
-For **every other role**, `healthy=yes` as soon as `state` is `writable` or `read-only`. There is no
+For **every other role**, `healthy=true` as soon as `state` is `Writable` or `ReadOnly`. There is no
 lag gate on those sites at all. That asymmetry is real and it is the point of this project.
 
 **TODO C — `verdict`.** Return `(word, exit_code)` from the table above. Read the `Degraded`
-condition the operator already wrote — its `reason` is one of `Healthy`, `Degraded`, `SplitBrain`,
+condition the operator already wrote — its `reason` is one of `Healthy`, `SiteUnhealthy`, `SplitBrain`,
 `NoPrimary`, `TotalLoss`, or a replication reason such as `ReplicationLagging`. Do not re-derive
 group health from the site rows.
 
@@ -87,8 +87,9 @@ python starter/brstatus.py artefacts/playground-live.json
 You do not have to write any of this, but you do have to call it:
 
 - `site_role(site_spec)` applies the CRD default — `spec.sites[].role` is optional and defaults to
-  `primary-candidate`.
-- `effective_max_lag(spec)` is `spec.replication.maxLagSeconds`, defaulting to 300.
+  `PrimaryCandidate`.
+- `effective_max_lag(spec)` is `spec.replication.maxLagSeconds`, defaulting to 300 when absent. An
+  explicit `0` is kept, and means the replica must be fully caught up.
 - `effective_readonly_max_lag(spec)` is `spec.replication.readOnlyMaxLagSeconds`. It has **no
   default of its own**: absent inherits `maxLagSeconds`, but an explicit `0` is meaningful and means
   the reader must report zero lag. `.get("readOnlyMaxLagSeconds") or ...` gets that wrong.
@@ -107,10 +108,10 @@ seconds behind a 30 second threshold — must produce this, and exit **0**:
 
 ```
 playground/bloodraven-playground  active=iad  ready=True  degraded=False(Healthy)
-SITE    ROLE               STATE      REPL  LAG      SERVING
-iad     primary-candidate  writable   no    unknown  no
-pdx     primary-candidate  read-only  yes   0s       yes
-reader  read-only          read-only  yes   300s     no
+SITE    ROLE              STATE     REPL           LAG      SERVING
+iad     PrimaryCandidate  Writable  NotApplicable  unknown  no
+pdx     PrimaryCandidate  ReadOnly  Healthy        0s       yes
+reader  ReadOnly          ReadOnly  Lagging        300s     no
 VERDICT: OK
 ```
 
@@ -186,9 +187,9 @@ kubectl -n bloodraven-playground get mysqlfailovergroup playground -o json | jq 
   "degraded=\($deg.status // "-")(\($deg.reason // "-"))",
   (["SITE","ROLE","STATE","REPL","LAG"] | @tsv),
   ( $st.sites[]? as $s
-    | ([$spec.sites[] | select(.name == $s.name)][0].role // "primary-candidate") as $role
+    | ([$spec.sites[] | select(.name == $s.name)][0].role // "PrimaryCandidate") as $role
     | [ $s.name, $role, ($s.state // "-"),
-        (if $s.replicating == null then "-" else ($s.replicating|tostring) end),
+        ($s.replication // "-"),
         (if $s.secondsBehindSource == null then "unknown"
          else "\($s.secondsBehindSource)s" end) ] | @tsv )
 ' | column -t
@@ -199,7 +200,7 @@ worth reading rather than pasting.
 
 **`// 300` on `maxLagSeconds`, and `// $maxlag` on `readOnlyMaxLagSeconds`.** The first is the CRD
 default. The second is *inheritance*, not a default — and note that `//` in `jq` treats `false` and
-`null` as absent but **not** `0`, which is exactly the behaviour this field needs: an explicit `0` is
+`null` as absent but **not** `0`, which is exactly the behaviour both fields need: an explicit `0` is
 meaningful and must survive.
 
 **`if $s.secondsBehindSource == null then "unknown"`.** Never `// 0`. Absent and zero are different

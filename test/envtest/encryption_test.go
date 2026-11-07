@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	equality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,25 +24,24 @@ func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Image:        "mysql:9.7",
-			SidecarImage: "ghcr.io/shipstream/bloodraven-sidecar:1.3.2",
-			SecretName:   "mysql-credentials",
+			Image:       "mysql:9.7",
+			Sidecar:     v1alpha1.SidecarSpec{Image: "ghcr.io/shipstream/bloodraven-sidecar:1.3.2"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
 				{
-					Name: "dc1", Zone: "lion-dc1", LBIP: "203.0.113.1",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.lion": "dc1"},
+					Name: "dc1", ServerID: 101, Zone: "lion-dc1", LBIP: "203.0.113.1",
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 				},
 				{
-					Name: "dc2", Zone: "lion-dc2", LBIP: "203.0.113.2",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.lion": "dc2"},
+					Name: "dc2", ServerID: 102, Zone: "lion-dc2", LBIP: "203.0.113.2",
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 				},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
 			TLS: &v1alpha1.TLSSpec{
 				SecretName: "mysql-tls",
-				IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
 			},
 		},
 	}
@@ -169,7 +169,10 @@ func TestKeyringDefaultsAppliedByAPIServer(t *testing.T) {
 	}
 	// The Go-side helper must agree with what admission produced,
 	// otherwise the operator would render one path and validate another.
-	if eff := got.Spec.EffectiveKeyring(); eff != *kr {
+	if kr.EscrowTimeout == nil || kr.EscrowTimeout.Duration != v1alpha1.DefaultKeyringEscrowTimeout {
+		t.Errorf("escrowTimeout = %v, want the CRD default %v", kr.EscrowTimeout, v1alpha1.DefaultKeyringEscrowTimeout)
+	}
+	if eff := got.Spec.EffectiveKeyring(); !equality.Semantic.DeepEqual(eff, *kr) {
 		t.Errorf("EffectiveKeyring() = %+v, admission produced %+v", eff, *kr)
 	}
 }
@@ -213,7 +216,6 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 
 	now := metav1.Now()
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{{
 			Name:           "dc1",
 			Phase:          v1alpha1.KeyringPhaseSealed,
@@ -223,12 +225,12 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 			LastEscrowTime: &now,
 			Coverage: &v1alpha1.SiteEncryptionCoverage{
 				KeyringComponent:          "component_keyring_file",
-				KeyringReadOnly:           true,
-				SystemTablespaceEncrypted: true,
+				KeyringReadOnly:           new(true),
+				SystemTablespaceEncrypted: new(true),
 				UnencryptedTablespaces:    7,
-				RedoLogEncrypted:          true,
-				UndoLogEncrypted:          true,
-				BinlogEncrypted:           true,
+				RedoLogEncrypted:          new(true),
+				UndoLogEncrypted:          new(true),
+				BinlogEncrypted:           nil, // not reported: stays unset, never false
 				LastCheckTime:             &now,
 			},
 		}},
@@ -242,14 +244,14 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	st := got.Status.EncryptionAtRest
-	if st == nil || !st.Sealed || len(st.Sites) != 1 {
+	if st == nil || len(st.Sites) != 1 {
 		t.Fatalf("status did not round-trip: %+v", st)
 	}
 	s := st.Sites[0]
 	if s.Phase != v1alpha1.KeyringPhaseSealed || s.KeyringVersion != 3 || s.KeyringDigest != "sha256:abc123" {
 		t.Errorf("site status = %+v", s)
 	}
-	if s.Coverage == nil || s.Coverage.UnencryptedTablespaces != 7 || !s.Coverage.KeyringReadOnly {
+	if c := s.Coverage; c == nil || c.UnencryptedTablespaces != 7 || c.KeyringReadOnly == nil || !*c.KeyringReadOnly || c.BinlogEncrypted != nil {
 		t.Errorf("coverage = %+v", s.Coverage)
 	}
 	if !got.SiteKeyringSealed("dc1") {
@@ -293,7 +295,7 @@ func createNamespace(t *testing.T, prefix string) string {
 // rotation-stamp PUT conditioned on that version (one whose response was
 // lost) still commits afterwards: a successful no-op write is no proof the
 // stamp cannot land. The conditional metadata write settlement uses
-// (the shipstream.io/encryption-status-fence annotation, optimistic lock)
+// (the bloodraven.shipstream.io/encryption-status-fence annotation, optimistic lock)
 // does move the version, and the stale PUT is then rejected.
 func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 	ns := createNamespace(t, "enc-noop")
@@ -304,7 +306,6 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 			t.Fatalf("create: %v", err)
 		}
 		fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-			Sealed: true,
 			Sites: []v1alpha1.SiteEncryptionStatus{
 				{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed, Message: "rotation deferred: an ordered update is in flight"},
 				{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed},
@@ -318,7 +319,6 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 		stale = fg.DeepCopy()
 		stale.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseUnsealed
 		stale.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonRotation
-		stale.Status.EncryptionAtRest.Sealed = false
 
 		// A later pass reproduces the persisted status: success, same
 		// resourceVersion.
@@ -354,7 +354,7 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 	if fence.Annotations == nil {
 		fence.Annotations = map[string]string{}
 	}
-	fence.Annotations["shipstream.io/encryption-status-fence"] = "1"
+	fence.Annotations["bloodraven.shipstream.io/encryption-status-fence"] = "1"
 	if err := k8sClient.Patch(ctx, fence, client.MergeFromWithOptions(read.DeepCopy(), client.MergeFromWithOptimisticLock{})); err != nil {
 		t.Fatalf("fence: %v", err)
 	}

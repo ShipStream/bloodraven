@@ -23,60 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 )
 
 // ---------- annotations ----------
-
-const (
-	// PlannedFailoverStatusFenceAnnotation is bumped (an ISO 8601 basic UTC
-	// instant with nanoseconds, FormatStatusFenceValue) with a write
-	// conditioned on the resourceVersion an ambiguous status write was made
-	// against. Its success proves that write can never commit. Internal.
-	PlannedFailoverStatusFenceAnnotation = "bloodraven.shipstream.io/planned-failover-status-fence"
-
-	// PlannedFailoverTerminalAnnotation ends a run outside /status when its
-	// status writes stall. Its value is a versioned JSON TerminalMarker
-	// ({"schemaVersion":1,"runID":…,"outcome":…,"reason":…}). Every
-	// planned-failover predicate treats the run it names as terminal.
-	// Internal.
-	PlannedFailoverTerminalAnnotation = "bloodraven.shipstream.io/planned-failover-terminal"
-
-	// AcknowledgePlannedFailoverHoldAnnotation acknowledges an automation
-	// hold. Its value is the held run's runID
-	// (status.plannedFailoverHold.runID). Public; wrapped by kubectl
-	// bloodraven ack-planned-failover-hold.
-	AcknowledgePlannedFailoverHoldAnnotation = "bloodraven.shipstream.io/acknowledge-planned-failover-hold"
-
-	// PromotionGtidExecutedAnnotation is the out-of-band copy of the
-	// promotion watermark, beside LastFailoverAnnotation and
-	// LastFailoverTargetAnnotation. Operator-owned read-only.
-	PromotionGtidExecutedAnnotation = "bloodraven.shipstream.io/promotion-gtid-executed"
-	// PromotionGtidExecutedForAnnotation binds the watermark to its
-	// failover event: "<last-failover> <last-failover-target>", written in
-	// the same patch. A watermark whose binding does not name the event the
-	// other two keys record (a writer that knows only those two advanced
-	// them) is no watermark. Operator-owned read-only.
-	PromotionGtidExecutedForAnnotation = "bloodraven.shipstream.io/promotion-gtid-executed-for"
-
-	// PlannedFailoverStallSinceAnnotation is the durable start of the
-	// status-stall deadline: "<runID>:since=<YYYYMMDDThhmmssZ>"
-	// (FormatDeadlineStart). Internal.
-	PlannedFailoverStallSinceAnnotation = "bloodraven.shipstream.io/planned-failover-stall-since"
-
-	// PlannedFailoverManagerAbsentSinceAnnotation is the durable start of
-	// the manager-absence deadline, in the same form as
-	// PlannedFailoverStallSinceAnnotation. Internal.
-	PlannedFailoverManagerAbsentSinceAnnotation = "bloodraven.shipstream.io/planned-failover-manager-absent-since"
-
-	// PlannedFailoverConfirmedAnnotation records, before the confirmed
-	// tail releases the claim, that the run's promotion was confirmed,
-	// recorded and published: "<runID>:since=<confirmedAt>", in the same
-	// form as PlannedFailoverStallSinceAnnotation. It is the run's own
-	// durable evidence, so a restart before the Publishing write commits
-	// does not hydrate the released claim back even after a later
-	// failover replaced the run's failover record. Internal.
-	PlannedFailoverConfirmedAnnotation = "bloodraven.shipstream.io/planned-failover-confirmed"
-)
 
 // ---------- identity, records, markers ----------
 
@@ -318,7 +268,7 @@ func plannedHoldConditionMessage(h *v1alpha1.PlannedFailoverHold) string {
 	}
 	return fmt.Sprintf("planned failover run %s ended ManualRecoveryRequired (%s); writable or ambiguous sites: %s. "+
 		"Automatic failover is held: resolve the split brain by hand, then annotate %s=%s",
-		h.RunID, h.Reason, named, AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
+		h.RunID, h.Reason, named, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
 }
 
 // setPlannedHold records the automation hold h in status and sets the True
@@ -361,32 +311,30 @@ func statusHoldNames(st *v1alpha1.MysqlFailoverGroupStatus, runID string) bool {
 	return st.PlannedFailoverHold != nil && st.PlannedFailoverHold.RunID == runID
 }
 
-// deadlineStartLayout is the ISO 8601 basic UTC form of a deadline start
-// (A-78: an instant inside an annotation value has no colons).
-const deadlineStartLayout = "20060102T150405Z"
+// deadlineStartGrammar is the A-78 grammar of a durable deadline start:
+// the run id, then since=<instant> in the ISO 8601 basic UTC form (an
+// instant inside an annotation value has no colons).
+var deadlineStartGrammar = actionvalue.Grammar{Keys: []string{"since"}, Required: []string{"since"}}
 
 // FormatDeadlineStart renders a durable deadline start:
 // "<runID>:since=<YYYYMMDDThhmmssZ>", at second precision.
 func FormatDeadlineStart(runID string, start time.Time) string {
-	return runID + ":since=" + start.UTC().Truncate(time.Second).Format(deadlineStartLayout)
+	return actionvalue.Format(runID, actionvalue.Pair{Key: "since", Value: actionvalue.FormatInstant(start)})
 }
 
 // ParseDeadlineStart reads a FormatDeadlineStart value; false when it is
 // absent or malformed.
 func ParseDeadlineStart(v string) (runID string, start time.Time, ok bool) {
-	id, pair, found := strings.Cut(v, ":")
-	if !found || id == "" {
-		return "", time.Time{}, false
-	}
-	key, ts, found := strings.Cut(pair, "=")
-	if !found || key != "since" {
-		return "", time.Time{}, false
-	}
-	t, err := time.Parse(deadlineStartLayout, ts)
+	parsed, err := actionvalue.Parse(v, deadlineStartGrammar)
 	if err != nil {
 		return "", time.Time{}, false
 	}
-	return id, t.UTC(), true
+	since, _ := parsed.Get("since")
+	t, err := actionvalue.ParseInstant(since)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	return parsed.Subject(), t.UTC(), true
 }
 
 // statusFenceLayout is the ISO 8601 basic UTC form with nanoseconds, so
@@ -411,7 +359,7 @@ func plannedFailoverRun(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFa
 	if pf.RunID == "" {
 		return pf, false
 	}
-	m, ok := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
 	return pf, ok && m.RunID == pf.RunID
 }
 
@@ -511,7 +459,7 @@ func PlannedHoldFrom(fg *v1alpha1.MysqlFailoverGroup) *PlannedHold {
 	} else if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
 		hold = &PlannedHold{FromStatus: true}
 	}
-	m, ok := parseHoldMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	m, ok := parseHoldMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
 	if !ok {
 		return hold
 	}
@@ -583,11 +531,11 @@ const (
 func (k DeadlineKind) Annotation() string {
 	switch k {
 	case DeadlineStatusStall:
-		return PlannedFailoverStallSinceAnnotation
+		return v1alpha1.PlannedFailoverStallSinceAnnotation
 	case DeadlineManagerAbsent:
-		return PlannedFailoverManagerAbsentSinceAnnotation
+		return v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation
 	case DeadlinePromotionConfirmed:
-		return PlannedFailoverConfirmedAnnotation
+		return v1alpha1.PlannedFailoverConfirmedAnnotation
 	}
 	return ""
 }
@@ -887,7 +835,7 @@ type RegistrySnapshot struct {
 type PlannedFailoverSink interface {
 	Event(fg *v1alpha1.MysqlFailoverGroup, eventType, reason, message string)
 	// RunTerminal records bloodraven_planned_failovers_total{target_site,
-	// result=mapOutcomeToMetricResult(pf.Result)} and the duration histogram.
+	// result=labels.PlannedFailoverResult(pf.Result.Outcome)} and the duration histogram.
 	RunTerminal(nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus)
 	LagWaitObserved(nn types.NamespacedName, target string, d time.Duration)
 	Deferred(nn types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason)

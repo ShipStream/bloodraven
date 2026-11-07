@@ -8,6 +8,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // DragonflyStatefulSetName mirrors internal/controller's
@@ -24,7 +26,7 @@ func DragonflySiteServiceName(fg, site string) string {
 }
 
 // DragonflyActiveServiceName is the cross-site write Service whose
-// selector tracks (role=master AND traffic=enabled). Application
+// selector tracks (role=master AND traffic=true). Application
 // clients connect through this.
 func DragonflyActiveServiceName(fg string) string {
 	return fmt.Sprintf("%s-dragonfly", fg)
@@ -33,7 +35,7 @@ func DragonflyActiveServiceName(fg string) string {
 // DragonflyPodSelector builds a label selector that targets a single
 // site's Dragonfly pod. Mirrors the StatefulSet pod template labels.
 func DragonflyPodSelector(fg, site string) string {
-	return fmt.Sprintf("app.kubernetes.io/name=dragonfly,app.kubernetes.io/instance=%s,shipstream.io/site=%s", fg, site)
+	return fmt.Sprintf("app.kubernetes.io/name=dragonfly,app.kubernetes.io/instance=%s,%s=%s", fg, v1alpha1.SiteLabel, site)
 }
 
 // ListDragonflyPods returns Dragonfly pods for one site.

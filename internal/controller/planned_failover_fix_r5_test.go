@@ -44,7 +44,7 @@ func TestFixR5_DragonflyTakeoverFinishesOnlyOnInProcessSuccessReply(t *testing.T
 			t.Errorf("REPLTAKEOVER %d, CLIENT KILL %v, source deleted %v; want the takeover finished once",
 				target.takeovers, source.clientKillTypes, pfDFPodGone(t, c, sourcePod))
 		}
-		if l := pfDFPodLabels(t, c, targetPod); l[labelDragonflyRole] != "master" || l[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+		if l := pfDFPodLabels(t, c, targetPod); l[v1alpha1.DragonflyRoleLabel] != "master" || l[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 			t.Errorf("target labels = %v, want the serving master", l)
 		}
 	})
@@ -114,7 +114,7 @@ func TestFixR5_DragonflyTakeoverFinishesOnlyOnInProcessSuccessReply(t *testing.T
 			}
 			// The source's traffic label is put back; nothing else moves.
 			pfDFAssertSourceKept(t, c, source, sourcePod, targetPod)
-			if l := pfDFPodLabels(t, c, targetPod); l[labelDragonflyRole] != "replica" {
+			if l := pfDFPodLabels(t, c, targetPod); l[v1alpha1.DragonflyRoleLabel] != "replica" {
 				t.Errorf("target labels = %v, want them untouched", l)
 			}
 		})

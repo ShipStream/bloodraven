@@ -52,7 +52,7 @@
     },
     {
       "front": "The three playground values that are not the shipped defaults",
-      "back": "failoverCooldown 30s (default 5m), replication.maxLagSeconds 30 (default 300), and dns.ttl 10 (default 60).",
+      "back": "failoverCooldown 30s (default 5m), replication.maxLagSeconds 30 (default 300), and dns.ttlSeconds 10 (default 60).",
       "orderIndex": 10
     },
     {
@@ -69,7 +69,7 @@
       "options": [
         "Bootstrap the DR group now — an unreachable API server means the MySQL workloads are gone with it",
         "Get a second independent signal before touching the DR cluster, because nothing in Bloodraven will catch a cross-cluster split brain if you are wrong",
-        "Bootstrap the DR group but declare its sites `role: dr-only`, so the operator fences the source copy automatically",
+        "Bootstrap the DR group but declare its sites `role: DisasterRecovery`, so the operator fences the source copy automatically",
         "Wait until the source operator raises a `SPLIT BRAIN` alert, then bootstrap the DR group"
       ],
       "correctOptionIndex": 1,
@@ -89,11 +89,11 @@
       "options": [
         "`spec.restoreInPlace`, with an RFC 3339 confirm token naming the dump",
         "`spec.initFromBackup`, pointed at the source bucket prefix",
-        "`spec.template` on the `MysqlStandbyCluster`, by requesting activation",
+        "A `MysqlStandbyCluster` pointed at the prefix, activated once the source is fenced",
         "`spec.backup.pitr.enabled`, which replays the archived binlogs into the new group"
       ],
       "correctOptionIndex": 1,
-      "explanation": "`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: `spec.template` does hold the shape of the group that a future activation would materialise, but activation is not implemented, so nothing consumes it. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)"
+      "explanation": "`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: a `MysqlStandbyCluster` only observes the bucket, activation is not implemented, and the CRD has no field that describes a group to create. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)"
     },
     {
       "question": "You are writing the on-call runbook for `playground` and want every step to be a `kubectl bloodraven` invocation. Which of these is not a subcommand the plugin has?",
@@ -112,8 +112,8 @@
       "question": "You are signing off `playground` for production tonight. Four findings are open: (a) nobody can say what `sync_binlog` is on the running instances; (b) `spec.replication.maxLagSeconds` is set and nobody has said what it gates; (c) the nightly S3 backup has never been verified; (d) the runbook quotes a 30-second anti-flap cooldown, taken from a playground run. Which do you block the launch on, and what do you attach to the ones you accept?",
       "type": "SHORT_ANSWER",
       "orderIndex": 4,
-      "sampleAnswer": "Block on (a) and (c). `sync_binlog=1` is only an overridable default — it is written into the base my.cnf before `spec.mysqlConf` is applied, so any override in the group's config wins silently. Until somebody reads the value off a running instance, the durability claim in the runbook is unverified, and it is the claim every RPO statement rests on. (c) is the same failure in a different place: an unverified backup is an assumption, and GitLab's 2017 outage is what an assumption looks like when it is finally tested. Accept (b) and (d) with a named owner. For (b) the owner must know that `maxLagSeconds` drives only the `ReplicationLagging` condition and is not a promotion gate — a replica beyond 300 seconds is still promoted, because no writable site is almost always worse. For (d) the owner re-measures every runbook timing against the shipped defaults, since the playground overrides `failoverCooldown` to 30s (against 5m), `maxLagSeconds` to 30 (against 300) and `dns.ttl` to 10 (against 60), so no playground timing transfers unchanged.",
-      "graderNotes": "A strong answer blocks on (a) and (c) and accepts (b) and (d) with a named owner, and gives the mechanism in each case: sync_binlog is an overridable default written before spec.mysqlConf so an override wins silently; an unverified backup is an assumption; maxLagSeconds drives only the ReplicationLagging condition and is explicitly not a promotion gate; the playground overrides failoverCooldown, maxLagSeconds and dns.ttl so its timings do not transfer. A different split is acceptable if the reasoning names the mechanism — for example blocking on (d) because a runbook with wrong timings misleads during an incident. An answer that merely labels the items without a mechanism, or that treats maxLagSeconds as a promotion gate, is weak.",
+      "sampleAnswer": "Block on (a) and (c). `sync_binlog=1` is only an overridable default — it is written into the base my.cnf before `spec.mysqlConf` is applied, so any override in the group's config wins silently. Until somebody reads the value off a running instance, the durability claim in the runbook is unverified, and it is the claim every RPO statement rests on. (c) is the same failure in a different place: an unverified backup is an assumption, and GitLab's 2017 outage is what an assumption looks like when it is finally tested. Accept (b) and (d) with a named owner. For (b) the owner must know that `maxLagSeconds` drives only the `ReplicationLagging` condition and is not a promotion gate — a replica beyond 300 seconds is still promoted, because no writable site is almost always worse. For (d) the owner re-measures every runbook timing against the shipped defaults, since the playground overrides `failoverCooldown` to 30s (against 5m), `maxLagSeconds` to 30 (against 300) and `dns.ttlSeconds` to 10 (against 60), so no playground timing transfers unchanged.",
+      "graderNotes": "A strong answer blocks on (a) and (c) and accepts (b) and (d) with a named owner, and gives the mechanism in each case: sync_binlog is an overridable default written before spec.mysqlConf so an override wins silently; an unverified backup is an assumption; maxLagSeconds drives only the ReplicationLagging condition and is explicitly not a promotion gate; the playground overrides failoverCooldown, maxLagSeconds and dns.ttlSeconds so its timings do not transfer. A different split is acceptable if the reasoning names the mechanism — for example blocking on (d) because a runbook with wrong timings misleads during an incident. An answer that merely labels the items without a mechanism, or that treats maxLagSeconds as a promotion gate, is weak.",
       "explanation": "The gate is about verdicts, not notes. The two blockers are the ones where an unexamined assumption sits underneath a durability claim: an unread `sync_binlog` and an untested backup. The two acceptable items are dangerous only through ignorance — a lagging replica really is promoted, and playground timings really are not the shipped defaults — so they are survivable when a named human holds them and fatal when nobody does. (objective 15)"
     }
   ]

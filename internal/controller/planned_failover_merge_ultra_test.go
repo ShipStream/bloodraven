@@ -33,10 +33,10 @@ func TestMergeUltra_HeldRequestConsumptionIsRetried(t *testing.T) {
 	if err := h.c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	h.setAnnotation(PlannedFailoverAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.faults.metaFaults = []pfWriteFault{pfWriteForbidden}
 	d := h.step()
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; !ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; !ok {
 		t.Fatal("setup: the request's removal was meant to fail")
 	}
 	if d <= 0 || d > plannedRequeuePoll {
@@ -44,7 +44,7 @@ func TestMergeUltra_HeldRequestConsumptionIsRetried(t *testing.T) {
 	}
 	h.clk.Advance(d)
 	h.step()
-	if _, ok := h.fg().GetAnnotations()[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the refused request was not consumed on the retry")
 	}
 	if d := h.step(); d < time.Minute {

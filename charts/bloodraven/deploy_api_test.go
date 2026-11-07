@@ -191,7 +191,7 @@ func TestDeployAPIChart(t *testing.T) {
 				t.Fatalf("incorrect TLS ingress: %+v", tls)
 			}
 			deploy, escrow := tls.From[0], tls.From[1]
-			if deploy.NamespaceSelector == nil || deploy.PodSelector == nil || deploy.NamespaceSelector.MatchLabels["shipstream.io/mysql-client"] != "true" || deploy.PodSelector.MatchLabels["bloodraven.shipstream.io/deploy-client"] != "true" {
+			if deploy.NamespaceSelector == nil || deploy.PodSelector == nil || deploy.NamespaceSelector.MatchLabels["bloodraven.shipstream.io/mysql-client"] != "true" || deploy.PodSelector.MatchLabels["bloodraven.shipstream.io/deploy-client"] != "true" {
 				t.Fatal("deployment namespace AND pod selectors must be in the same peer")
 			}
 			if escrow.NamespaceSelector == nil || len(escrow.NamespaceSelector.MatchLabels) != 0 || escrow.PodSelector == nil || escrow.PodSelector.MatchLabels["app.kubernetes.io/name"] != "mysql" || escrow.PodSelector.MatchLabels["app.kubernetes.io/managed-by"] != "bloodraven" {

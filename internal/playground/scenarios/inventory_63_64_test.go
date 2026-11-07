@@ -90,7 +90,7 @@ func TestS63HoldViolation(t *testing.T) {
 	held := func() *v1alpha1.MysqlFailoverGroup {
 		mfg := &v1alpha1.MysqlFailoverGroup{}
 		mfg.Status.ActiveSite = ""
-		mfg.Status.LastFailoverTarget = "iad"
+		mfg.Status.SetLastFailover(mfg.Status.LastFailoverTime(), "iad", mfg.Status.PromotionGtidExecuted())
 		mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, TargetSite: "pdx"}
 		return mfg
 	}
@@ -103,8 +103,10 @@ func TestS63HoldViolation(t *testing.T) {
 		"phase advanced": func(m *v1alpha1.MysqlFailoverGroup) {
 			m.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromoting
 		},
-		"target promoted":   func(m *v1alpha1.MysqlFailoverGroup) { m.Status.ActiveSite = "pdx" },
-		"failover recorded": func(m *v1alpha1.MysqlFailoverGroup) { m.Status.LastFailoverTarget = "pdx" },
+		"target promoted": func(m *v1alpha1.MysqlFailoverGroup) { m.Status.ActiveSite = "pdx" },
+		"failover recorded": func(m *v1alpha1.MysqlFailoverGroup) {
+			m.Status.SetLastFailover(m.Status.LastFailoverTime(), "pdx", m.Status.PromotionGtidExecuted())
+		},
 	}
 	for name, mutate := range cases {
 		mfg := held()
@@ -258,13 +260,13 @@ func TestDeployLeasesRevokedAndStopped(t *testing.T) {
 	records := []deployClientRecord{
 		rec("grant", "migration", 201, 5, "", "", at),
 		rec("grant", "failover-hold", 201, 5, "", "", at),
-		rec("renew", "migration", 409, 6, "revoked", "topology_changed", at.Add(30*time.Second)),
+		rec("renew", "migration", 409, 6, "revoked", "TopologyChanged", at.Add(30*time.Second)),
 	}
 	if deployLeasesRevokedAndStopped(records, 5, 2) {
 		t.Fatal("one revoked lease and no stop must not satisfy two")
 	}
 	records = append(records,
-		rec("renew", "failover-hold", 409, 6, "revoked", "operator_revoked", at.Add(31*time.Second)),
+		rec("renew", "failover-hold", 409, 6, "revoked", "OperatorRevoked", at.Add(31*time.Second)),
 		deployClientRecord{Action: "stopped", Status: 409})
 	if !deployLeasesRevokedAndStopped(records, 5, 2) {
 		t.Fatal("both leases revoked by a newer generation and stopped must satisfy")

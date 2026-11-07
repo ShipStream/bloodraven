@@ -59,15 +59,6 @@ const (
 	// container installs the bloodraven binary on plaintext Jobs, so the
 	// mysqlsh container can add serverClock.end after the dump.
 	backupStampToolMountPath = "/run/bloodraven/tools"
-
-	// BackupJobFailoverGroupUIDAnnotation pins the source group's UID on
-	// the backup Job; the reconciler recovers status.failoverGroupUID
-	// from it (F21: the Job is created before the status patch).
-	BackupJobFailoverGroupUIDAnnotation = "bloodraven.shipstream.io/failover-group-uid"
-	// BackupJobPITRArchiveIDAnnotation pins the source group's active
-	// PITR archive ID ("" when PITR is disabled), recovered into
-	// status.pitrArchiveID.
-	BackupJobPITRArchiveIDAnnotation = "bloodraven.shipstream.io/pitr-archive-id"
 )
 
 // BackupJobInputs bundles the resolved inputs for BuildBackupJob. Keeping
@@ -88,7 +79,7 @@ type BackupJobInputs struct {
 	// (#203, I-17), required for an encrypted profile: the encrypt-upload
 	// container and the backup-stamp init container mount its "passphrase"
 	// key under the backup-passphrase volume, so
-	// status.artifactStorage.passphraseSecret records it (Δ1). The user's
+	// status.artifactStorage.passphraseSecretKeyRef records it (Δ1). The user's
 	// Secret is never mounted.
 	DumpKeySecretName string
 	// PITRArchiveID is the archive ID the group's rendered writers archive
@@ -148,13 +139,13 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	mysqlshImage := backupImage(fg)
 	encryption := in.Profile.Encryption
 	encrypted := in.Profile.EncryptionEnabled()
-	// Treat a non-nil Encryption with a missing passphraseSecret.name
+	// Treat a non-nil Encryption with a missing passphraseSecretKeyRef.name
 	// as a hard misconfiguration. Falling back silently to the
 	// unencrypted path would be an unsafe surprise — an operator who
 	// set encryption.algorithm but forgot the Secret name would end up
 	// with plaintext backups that their dashboard claims are encrypted.
-	if encryption != nil && encryption.PassphraseSecret.Name == "" {
-		return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecret.name", in.Profile.Name)
+	if encryption != nil && encryption.PassphraseSecretKeyRef.Name == "" {
+		return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecretKeyRef.name", in.Profile.Name)
 	}
 
 	// Job name derived from the backup CR name; capped at 63 chars.
@@ -162,17 +153,17 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	// Labels applied to both Job and pod so listings/queries work.
 	labels := map[string]string{
-		labelAppName:       "mysql-backup",
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelSite:          in.SourceSite,
-		labelMysqlBackup:   backup.Name,
-		labelBackupProfile: in.Profile.Name,
-		labelManagedBy:     managerName,
-		labelResourceKind:  "backup",
+		labelAppName:                "mysql-backup",
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		v1alpha1.SiteLabel:          in.SourceSite,
+		v1alpha1.MysqlBackupLabel:   backup.Name,
+		v1alpha1.BackupProfileLabel: in.Profile.Name,
+		labelManagedBy:              managerName,
+		v1alpha1.ResourceLabel:      "backup",
 	}
 	if encrypted {
-		labels[labelBackupEncrypted] = "true"
+		labels[v1alpha1.BackupEncryptedLabel] = v1alpha1.LabelValueTrue
 	}
 
 	// --- Shared base envVars / storage / credentials volumes -----------
@@ -232,7 +223,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			Name: "aws-creds",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  in.Profile.Storage.S3.CredentialsSecret,
+					SecretName:  in.Profile.Storage.S3.CredentialsSecretName,
 					DefaultMode: ptr32(0o400),
 				},
 			},
@@ -279,9 +270,9 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	if activeDeadline <= 0 {
 		activeDeadline = 7200
 	}
-	backoffLimit := bspec.BackoffLimit
-	if backoffLimit < 0 {
-		backoffLimit = 0
+	backoffLimit := int32(2)
+	if bspec.BackoffLimit != nil {
+		backoffLimit = *bspec.BackoffLimit
 	}
 
 	podSC, containerSC := mergeSecurityContexts(bspec.PodSecurityContext, bspec.ContainerSecurityContext)
@@ -349,7 +340,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	if !encrypted {
 		// Legacy single-container layout. mysqlsh dumps directly to
-		// the final storage target; status.location reflects that
+		// the final storage target; status.artifactStorage.location reflects that
 		// target verbatim.
 		envVars := append([]corev1.EnvVar{}, baseEnv...)
 		envVars = append(envVars, corev1.EnvVar{Name: "HOME", Value: mysqlshHomeMountPath})
@@ -418,8 +409,8 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		// uploader only; the mysqlsh dump container never sees it
 		// (defense-in-depth: a mysqlsh exploit that read files in its
 		// pod wouldn't surface the passphrase).
-		if encryption.PassphraseSecret.Name == "" {
-			return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecret.name", in.Profile.Name)
+		if encryption.PassphraseSecretKeyRef.Name == "" {
+			return nil, fmt.Errorf("backup job: profile %q encryption requires passphraseSecretKeyRef.name", in.Profile.Name)
 		}
 		if in.DumpKeySecretName == "" {
 			return nil, fmt.Errorf("backup job: profile %q is encrypted but no dump-key snapshot was given", in.Profile.Name)
@@ -502,7 +493,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 			{Name: "BLOODRAVEN_OUTPUT_URL", Value: outputURL},
 			{
 				Name:  "BLOODRAVEN_ENCRYPTION_ALGORITHM",
-				Value: encryption.AlgorithmOrDefault(),
+				Value: string(encryption.AlgorithmOrDefault()),
 			},
 			{
 				Name:  "BLOODRAVEN_BACKUP_PASSPHRASE_FILE",
@@ -566,8 +557,8 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	}
 
 	annotations := map[string]string{
-		BackupJobFailoverGroupUIDAnnotation: string(stamp.Source.UID),
-		BackupJobPITRArchiveIDAnnotation:    stamp.PITRArchiveID,
+		v1alpha1.BackupJobFailoverGroupUIDAnnotation: string(stamp.Source.UID),
+		v1alpha1.BackupJobPITRArchiveIDAnnotation:    stamp.PITRArchiveID,
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -594,7 +585,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 					// its Service and may mount a node-pinned backup PVC, so
 					// it must be schedulable on, and not evicted from, the
 					// read-only side by a failover.
-					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					Tolerations:    groupReadOnlyTolerations(fg),
 					InitContainers: initContainers,
 					Containers:     []corev1.Container{mainContainer},
 					Volumes:        volumes,
@@ -608,22 +599,21 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 // backupStampTemplate is the stamp identity a backup Job pins: everything
 // but serverClock and createdAt, which the Job adds. ServerID is the
-// source site's server-id (101 + its index in spec.sites, F26), which the
-// backup-stamp init container checks against the server it reaches.
+// source site's spec.sites[].serverID (the same resolver the mysqld render
+// uses), which the backup-stamp init container checks against the server
+// it reaches.
 //
 // archiveID is the archive the group's rendered writers archive to (K5):
 // a backup is a PITR baseline only for the archive the pods actually
 // write, which a held render can keep on the previous prefix.
 func backupStampTemplate(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile v1alpha1.BackupProfile, sourceSite, archiveID string) (backupmeta.Stamp, error) {
-	serverID := uint32(0)
-	for i, site := range fg.Spec.Sites {
-		if site.Name == sourceSite {
-			serverID = uint32(101 + i)
-			break
-		}
-	}
-	if serverID == 0 {
+	site := fg.Spec.SiteByName(sourceSite)
+	if site == nil {
 		return backupmeta.Stamp{}, fmt.Errorf("backup job: source site %q is not in spec.sites", sourceSite)
+	}
+	serverID, err := site.MySQLServerID()
+	if err != nil {
+		return backupmeta.Stamp{}, fmt.Errorf("backup job: %w", err)
 	}
 	if archiveID != "" && !pitrarchive.ValidArchiveID(archiveID) {
 		return backupmeta.Stamp{}, fmt.Errorf("backup job: PITR archive ID %q is not an archive ID", archiveID)
@@ -651,7 +641,7 @@ func backupJobIdentity(job *batchv1.Job) (types.UID, string) {
 	if job == nil {
 		return "", ""
 	}
-	return types.UID(job.Annotations[BackupJobFailoverGroupUIDAnnotation]), job.Annotations[BackupJobPITRArchiveIDAnnotation]
+	return types.UID(job.Annotations[v1alpha1.BackupJobFailoverGroupUIDAnnotation]), job.Annotations[v1alpha1.BackupJobPITRArchiveIDAnnotation]
 }
 
 // mergeSecurityContexts returns the hardened pod- and container-level
@@ -796,7 +786,7 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=S3 but storage.s3 is nil", profile.Name)
 		}
 		// The prefix is normalized once, here, so the dump, its backup
-		// stamp, status.location, dump-meta and artifact cleanup all
+		// stamp, status.artifactStorage.location, dump-meta and artifact cleanup all
 		// spell the same bucket-relative key: "/prod" and "prod" are the
 		// same prefix, as they are for the PITR archive. A leading "/"
 		// would make the stamp writer's key differ from the key dump-meta
@@ -950,9 +940,6 @@ func marshalLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 	opts := map[string]any{}
 	if l.Threads > 0 {
 		opts["threads"] = l.Threads
-	}
-	if l.ResetProgress != nil {
-		opts["resetProgress"] = *l.ResetProgress
 	}
 	if l.SkipBinlog != nil {
 		opts["skipBinlog"] = *l.SkipBinlog

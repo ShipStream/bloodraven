@@ -12,7 +12,7 @@
 #
 # Required env:
 #   BLOODRAVEN_STORAGE_TYPE   "S3" or "PVC"
-#   BLOODRAVEN_OUTPUT_URL     the resolved dump location from MysqlBackup.status.location
+#   BLOODRAVEN_OUTPUT_URL     the resolved dump location from MysqlBackup.status.artifactStorage.location
 #
 # S3 path (BLOODRAVEN_STORAGE_TYPE=S3):
 #   BLOODRAVEN_S3_BUCKET              bucket name
@@ -51,7 +51,7 @@ def _configure_aws_creds_dir():
     """When BLOODRAVEN_AWS_CREDS_DIR is set, read the AWS_* files out of
     it and assemble a standard ~/.aws/credentials file so the AWS SDK
     inside mysqlsh's S3 client picks them up. The reconciler mounts the
-    required credentialsSecret here, so a missing key or an unwritable
+    required credentialsSecretName here, so a missing key or an unwritable
     credentials file fails the job rather than letting the SDK fall back
     to ambient (instance profile / IRSA) credentials."""
     aws_dir = os.environ.get("BLOODRAVEN_AWS_CREDS_DIR")

@@ -316,10 +316,10 @@ func s39WaitOldMasterHealthyReplica(ctx context.Context, env *runner.Env, oldMas
 			}
 			for _, s := range df.Sites {
 				if s.Name == oldMaster {
-					msg := fmt.Sprintf("role=%q link=%q reachable=%v sync=%v phase=%q", s.Role, s.LinkStatus, s.Reachable, s.SyncInProgress, df.Phase)
+					msg := fmt.Sprintf("role=%q link=%q reachable=%v sync=%s phase=%q", s.Role, s.LinkStatus, s.Reachable, optionalBoolString(s.SyncInProgress), df.Phase)
 					done := df.Phase == v1alpha1.DragonflyPhaseReady &&
 						s.Role == v1alpha1.DragonflyRoleReplica &&
-						s.LinkStatus == "up" && s.Reachable && !s.SyncInProgress
+						s.LinkStatus == "up" && s.Reachable && !dragonflySyncing(s.SyncInProgress)
 					return done, msg, nil
 				}
 			}

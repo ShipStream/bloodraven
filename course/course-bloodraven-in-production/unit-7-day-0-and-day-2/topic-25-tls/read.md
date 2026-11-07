@@ -9,25 +9,23 @@ spec.encryptionAtRest.enabled requires spec.tls: MySQL requires a secure
 connection to clone encrypted data
 ```
 
-This topic is that field. It is two lines of YAML with a surprising amount hanging off them: a
+This topic is that field. It is one line of YAML with a surprising amount hanging off it: a
 certificate you must design, a rolling restart you did not ask for, and a change to how every
 component in the group talks to MySQL.
 
-## Two lines, and what has to exist behind them
+## One line, and what has to exist behind it
 
 ```yaml
 spec:
   tls:
     secretName: ledger-mysql-tls        # a Secret with ca.crt, tls.crt, tls.key
-    issuerRef:
-      name: mysql-ca                    # a cert-manager Issuer or ClusterIssuer
-      kind: ClusterIssuer               # enum: Issuer | ClusterIssuer
 ```
 
-Note what the operator does and does not do with `issuerRef`. It records which issuer *should* be
-producing the material. **It does not create the `Certificate` for you.** Bloodraven's non-goals list
-said it does not replace cert-manager, and this is the exact place that bites: set `spec.tls`, forget
-the `Certificate`, and the Secret never appears. The operator logs
+Note what the operator does and does not do. It reads the Secret. **It does not issue the certificate
+or create a `Certificate` for you**, and `spec.tls` has no issuer field to tempt you into thinking
+otherwise (releases before v1.7.0 had a required `issuerRef` that nothing read). Bloodraven's non-goals
+list said it does not replace cert-manager, and this is the exact place that bites: set `spec.tls`,
+forget the `Certificate`, and the Secret never appears. The operator logs
 `TLS secret not found yet, skipping TLS hash` and carries on rendering the Deployment with a volume
 that mounts a Secret that does not exist — so the pods stay `ContainerCreating` and nothing tells you
 why in the CR.
@@ -140,10 +138,6 @@ A TLS-enabled Job **fails before connecting** if the CA path is empty, missing, 
 usable CA material. It never downgrades to unverified TLS. Backup verification is the deliberate
 exception: the ephemeral verify instance from Unit 6 listens on loopback with no certificate and no
 Service, so that connection stays plaintext and never touches the group's TLS material.
-
-If you are still on the legacy `spec.secretName` mode, one manual step falls to you: the DSN in that
-Secret is used verbatim, so add `?tls=true` to it yourself. The sidecar is the exception — it gets
-verified TLS automatically unless your DSN already sets `tls=`, in which case your choice wins.
 
 ## Certificate renewal is a rolling restart
 

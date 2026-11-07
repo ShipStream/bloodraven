@@ -19,21 +19,24 @@ func init() {
 
 const (
 	s20InventoryGroup         = "inventory"
-	s20InventoryGroupLabel    = "shipstream.io/failover-group.inventory"
-	s20InventorySiteLabel     = "shipstream.io/site.inventory"
-	s20PlaygroundReadOnly     = "shipstream.io/db-readonly-playground"
-	s20InventoryReadOnly      = "shipstream.io/db-readonly-inventory"
+	s20InventoryGroupLabel    = "bloodraven.shipstream.io/failover-group.inventory"
+	s20InventorySiteLabel     = "bloodraven.shipstream.io/site.inventory"
 	s20InventoryCanaryName    = "inventory-shared-node-canary"
 	s20PostFailoverWaitWindow = 60 * time.Second
+)
+
+var (
+	s20PlaygroundReadOnly = v1alpha1.ReadOnlyTaintKey(pgkube.PlaygroundNamespace, "playground")
+	s20InventoryReadOnly  = v1alpha1.ReadOnlyTaintKey(pgkube.PlaygroundNamespace, s20InventoryGroup)
 )
 
 // scenario20SharedNodeSelectorIsolation locks down the per-failover-
 // group taint scoping that lets one physical node serve multiple
 // failover groups without their failovers spilling into each other's
 // workloads. Concretely: a playground failover taints the playground
-// site's node with `shipstream.io/db-readonly-playground:NoExecute`,
+// site's node with `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground:NoExecute`,
 // and the operator must NOT also apply
-// `shipstream.io/db-readonly-inventory:NoExecute` even though the same
+// `bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory:NoExecute` even though the same
 // node also advertises membership in an `inventory` failover group.
 //
 // We simulate the multi-tenant deployment by labeling the active
@@ -48,8 +51,8 @@ func scenario20SharedNodeSelectorIsolation() runner.Scenario {
 		ID:    "20-shared-node-selector-isolation",
 		Title: "Shared-node selector isolation: per-FG taint scope respects label keys",
 		Hypothesis: "A node serving both `playground` and a fictional `inventory` failover group is " +
-			"tainted ONLY with `shipstream.io/db-readonly-playground` after a playground failover; " +
-			"`shipstream.io/db-readonly-inventory` is NOT applied; an inventory-tolerating canary stays Running.",
+			"tainted ONLY with `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` after a playground failover; " +
+			"`bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory` is NOT applied; an inventory-tolerating canary stays Running.",
 		Risk:     "low",
 		DocLink:  "playground/chaos-scenarios.md#20-shared-node-selector-isolation",
 		Timeout:  4 * time.Minute,

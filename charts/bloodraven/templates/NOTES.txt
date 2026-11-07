@@ -26,14 +26,14 @@ dashboards, and observability namespaces that require it.
 
 WARNING: the auxiliary Service name is {{ include "bloodraven.auxiliaryServiceName" . }}, not the release fullname
 {{ include "bloodraven.fullname" . }}. If any existing MysqlFailoverGroup sets
-spec.sidecar.bloodravenAddress to the old Service FQDN, update it to:
+spec.sidecar.operatorEndpoint to the old Service FQDN, update it to:
   {{ include "bloodraven.auxiliaryServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.auxiliary.service.port }}
 {{- end }}
 {{- else }}
 
 WARNING: auxiliary.service.enabled=false. MySQL sidecars require a reachable
 operator auxiliary endpoint for /active-site self-fencing checks and PITR
-retention. Set spec.sidecar.bloodravenAddress on every MysqlFailoverGroup to a
+retention. Set spec.sidecar.operatorEndpoint on every MysqlFailoverGroup to a
 reachable endpoint before creating or restarting MySQL pods.
 {{- end }}
 
@@ -75,7 +75,15 @@ Grafana dashboards are available but disabled. To enable:
 
 Next steps:
   1. Install external-dns with the DNSEndpoint CRD source enabled for your DNS provider.
-  2. Create a Secret with MySQL credentials (ROOT_PASSWORD, REPLICATION_USER, etc.)
+  2. Create the operator credentials Secret (keys username, password,
+     MYSQL_ROOT_PASSWORD; optionally MYSQL_REPLICATION_USER and
+     MYSQL_REPLICATION_PASSWORD), e.g.:
+
+     kubectl create secret generic orders-mysql-operator -n {{ .Release.Namespace }} \
+       --from-literal=username=bloodraven \
+       --from-literal=password=<operator-password> \
+       --from-literal=MYSQL_ROOT_PASSWORD=<root-password>
+
   3. Create a MysqlFailoverGroup custom resource:
 
      kubectl apply -f - <<EOF
@@ -85,30 +93,41 @@ Next steps:
        name: orders
        namespace: {{ .Release.Namespace }}
      spec:
-       secretName: mysql-credentials
-       sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:{{ .Chart.AppVersion }}
+       credentials:
+         operatorSecretName: orders-mysql-operator
        dns:
          hostname: orders.az.example.com
-         ttl: 60
+         ttlSeconds: 60
        sites:
          - name: iad
+           serverID: 101
            zone: us-east-1a
+           taintNodeSelector:
+             bloodraven.shipstream.io/failover-group.orders: "true"
+             bloodraven.shipstream.io/site.orders: iad
            lbIP: 10.0.1.1
            storage:
              size: 50Gi
              storageClassName: fast-ssd
          - name: pdx
+           serverID: 102
            zone: us-west-2a
+           taintNodeSelector:
+             bloodraven.shipstream.io/failover-group.orders: "true"
+             bloodraven.shipstream.io/site.orders: pdx
            lbIP: 10.0.2.1
            storage:
              size: 50Gi
              storageClassName: fast-ssd
      EOF
 
-  3. Monitor the operator:
+     Groups that leave spec.sidecar.image empty run the sidecar this release
+     ships with: {{ include "bloodraven.sidecarImage" . }}
+
+  4. Monitor the operator:
      kubectl logs -f deploy/{{ include "bloodraven.fullname" . }} -n {{ .Release.Namespace }}
 
-  4. Check the failover group status:
+  5. Check the failover group status:
      kubectl get mysqlfailovergroups -n {{ .Release.Namespace }}
 
   5. (ArgoCD users) Register custom health checks so MysqlFailoverGroup and

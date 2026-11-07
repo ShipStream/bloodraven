@@ -135,7 +135,7 @@ func (c *Client) AnnotateMFGNamed(ctx context.Context, namespace, name, key, val
 
 // SiteState returns the observed state for the named site, or "" if
 // the site is unknown to the status.
-func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) string {
+func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) v1alpha1.SiteState {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == site {
 			return s.State
@@ -148,7 +148,7 @@ func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) string {
 // "Unknown" if no Ready condition has been written yet.
 func ReadyCondition(mfg *v1alpha1.MysqlFailoverGroup) string {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			return string(c.Status)
 		}
 	}

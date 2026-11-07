@@ -7,17 +7,11 @@ import (
 	"strings"
 )
 
-// Defaults applied when the corresponding spec field is empty. The CRD
-// carries kubebuilder defaults for the same values; these exist so that
-// objects constructed in Go (tests, older CRs stored before the default was
-// added) resolve identically.
-const (
-	// DefaultDatabaseCharacterSet is the default value of
-	// spec.characterSet.
-	DefaultDatabaseCharacterSet = "utf8mb4"
-	// DefaultDatabaseCollation is the default value of spec.collation.
-	DefaultDatabaseCollation = "utf8mb4_unicode_ci"
-)
+// DefaultDatabaseCharacterSet is the default value of spec.characterSet.
+// The CRD carries the same kubebuilder default; this exists so that objects
+// constructed in Go (tests) resolve identically. spec.collation has no
+// default: unset means the character set's own default collation.
+const DefaultDatabaseCharacterSet = "utf8mb4"
 
 // mysqlIdentifierPattern constrains schema names, character sets and
 // collations. These values are interpolated into DDL; the pattern is the
@@ -168,14 +162,6 @@ func (s *MysqlDatabaseSpec) EffectiveCharacterSet() string {
 	return s.CharacterSet
 }
 
-// EffectiveCollation returns spec.collation or the default.
-func (s *MysqlDatabaseSpec) EffectiveCollation() string {
-	if s.Collation == "" {
-		return DefaultDatabaseCollation
-	}
-	return s.Collation
-}
-
 // EffectiveOwnerPrivileges returns spec.owner.privileges or the default.
 func (s *MysqlDatabaseSpec) EffectiveOwnerPrivileges() []MysqlPrivilege {
 	if len(s.Owner.Privileges) == 0 {
@@ -280,11 +266,11 @@ func validateHostList(kind string, hosts []string) error {
 	return nil
 }
 
-func (s *MysqlDatabaseSpec) EffectiveDeletionPolicy() MysqlDatabaseDeletionPolicy {
-	if s.DeletionPolicy == MysqlDatabaseDelete {
-		return MysqlDatabaseDelete
+func (s *MysqlDatabaseSpec) EffectiveDeletionPolicy() DeletionPolicy {
+	if s.DeletionPolicy == DeletionPolicyDelete {
+		return DeletionPolicyDelete
 	}
-	return MysqlDatabaseRetain
+	return DeletionPolicyRetain
 }
 
 // Validate checks every field that ends up in SQL, before any of it reaches
@@ -308,8 +294,10 @@ func (s *MysqlDatabaseSpec) Validate(ownerUsername string, userUsernames map[str
 	if err := ValidateMysqlIdentifier("spec.characterSet", s.EffectiveCharacterSet()); err != nil {
 		return err
 	}
-	if err := ValidateMysqlIdentifier("spec.collation", s.EffectiveCollation()); err != nil {
-		return err
+	if s.Collation != "" {
+		if err := ValidateMysqlIdentifier("spec.collation", s.Collation); err != nil {
+			return err
+		}
 	}
 	if err := ValidateMysqlUsername("spec.owner secret username", ownerUsername); err != nil {
 		return err

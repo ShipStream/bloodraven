@@ -242,13 +242,8 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	}
 	live.Spec.TLS = &v1alpha1.TLSSpec{
 		SecretName: "mysql-tls",
-		IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
 	}
-	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
-	if live.Annotations == nil {
-		live.Annotations = map[string]string{}
-	}
-	live.Annotations[AdoptEncryptionAnnotation] = "confirm"
+	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1alpha1.EncryptionExistingDataLeavePlaintext}
 	if err := c.Update(context.Background(), &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}
@@ -408,8 +403,8 @@ func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			fg := encTestFG()
-			fg.Spec.UpdateStrategy = "Recreate"
-			fg.Finalizers = []string{finalizerName}
+			fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
+			fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
 			fg.Status.ActiveSite = "dc1"
 			dc1 := v1alpha1.SiteEncryptionStatus{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest}

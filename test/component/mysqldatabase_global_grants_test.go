@@ -56,7 +56,7 @@ func TestMysqlDatabaseGlobalGrantsSurviveCleanupRetries(t *testing.T) {
 			grant := v1alpha1.MysqlDatabaseGrant{Username: username, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}
 			cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
 				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{grant}
-				m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+				m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 			})
 			h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 			if username != "operator" {

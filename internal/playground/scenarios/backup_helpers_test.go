@@ -37,7 +37,7 @@ func TestBackupProfileSpec(t *testing.T) {
 			if profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil {
 				t.Fatalf("storage=%+v, want S3 config", profile.Storage)
 			}
-			if profile.Storage.S3.Bucket != backupE2EBucket || profile.Storage.S3.Prefix != "e2e/test/run" || profile.Storage.S3.EndpointURL != backupE2EEndpoint || profile.Storage.S3.CredentialsSecret != backupE2ECredsSecret {
+			if profile.Storage.S3.Bucket != backupE2EBucket || profile.Storage.S3.Prefix != "e2e/test/run" || profile.Storage.S3.EndpointURL != backupE2EEndpoint || profile.Storage.S3.CredentialsSecretName != backupE2ECredsSecret {
 				t.Fatalf("unexpected S3 config: %+v", profile.Storage.S3)
 			}
 			if (spec.PITR != nil) != tc.pitr {
@@ -112,7 +112,7 @@ func TestBackupProfileRolloutReady(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mfg := &v1alpha1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Generation: 5},
-				Status:     v1alpha1.MysqlFailoverGroupStatus{ActiveSite: tc.active, UpdatePhase: tc.phase, Conditions: stale},
+				Status:     v1alpha1.MysqlFailoverGroupStatus{ActiveSite: tc.active, UpdatePhase: v1alpha1.UpdatePhase(tc.phase), Conditions: stale},
 			}
 			if got := backupProfileRolloutReady(mfg); got != tc.want {
 				t.Fatalf("backupProfileRolloutReady = %v, want %v", got, tc.want)
@@ -122,9 +122,12 @@ func TestBackupProfileRolloutReady(t *testing.T) {
 }
 
 func TestBackupArtifactPrefix(t *testing.T) {
-	succeeded := func(location string, storage *v1alpha1.BackupArtifactStorage) *v1alpha1.MysqlBackup {
+	succeeded := func(storage *v1alpha1.BackupArtifactStorage) *v1alpha1.MysqlBackup {
+		if storage != nil {
+			storage.Type = v1alpha1.BackupStorageS3
+		}
 		return &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{
-			Phase: v1alpha1.BackupPhaseSucceeded, StorageType: v1alpha1.BackupStorageS3, Location: location, ArtifactStorage: storage,
+			Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: storage,
 		}}
 	}
 	for _, tc := range []struct {
@@ -133,12 +136,14 @@ func TestBackupArtifactPrefix(t *testing.T) {
 		bucket, prefix string
 		ok, wantErr    bool
 	}{
-		{name: "plain", backup: succeeded("e2e/s30/x/b1", &v1alpha1.BackupArtifactStorage{Location: "e2e/s30/x/b1", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30/x/b1/", ok: true},
-		{name: "encrypted", backup: succeeded("s3://bk/e2e/s30e/x/b1/", &v1alpha1.BackupArtifactStorage{Location: "s3://bk/e2e/s30e/x/b1/", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30e/x/b1/", ok: true},
-		{name: "encrypted, other bucket", backup: succeeded("s3://other/x/b1/", &v1alpha1.BackupArtifactStorage{Location: "s3://other/x/b1/", Bucket: "bk"}), wantErr: true},
-		{name: "no recorded destination", backup: succeeded("x/b1", nil), wantErr: true},
-		{name: "PVC", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, StorageType: v1alpha1.BackupStoragePVC}}},
-		{name: "failed backup", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed, StorageType: v1alpha1.BackupStorageS3}}},
+		{name: "plain", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "e2e/s30/x/b1", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30/x/b1/", ok: true},
+		{name: "encrypted", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "s3://bk/e2e/s30e/x/b1/", Bucket: "bk"}), bucket: "bk", prefix: "e2e/s30e/x/b1/", ok: true},
+		{name: "encrypted, other bucket", backup: succeeded(&v1alpha1.BackupArtifactStorage{Location: "s3://other/x/b1/", Bucket: "bk"}), wantErr: true},
+		{name: "no recorded destination", backup: succeeded(nil), wantErr: true},
+		{name: "PVC", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded,
+			ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStoragePVC, Location: "/backups/b1"}}}},
+		{name: "failed backup", backup: &v1alpha1.MysqlBackup{Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed,
+			ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "x/b1", Bucket: "bk"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bucket, prefix, ok, err := backupArtifactPrefix(tc.backup)

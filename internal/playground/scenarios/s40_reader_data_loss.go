@@ -105,7 +105,7 @@ func s40Precheck(state *s40RunState) func(context.Context, *runner.Env) error {
 		if got := node.Labels["topology.kubernetes.io/zone"]; got != "zone-reader" {
 			return fmt.Errorf("reader pod %s scheduled in zone %q, want zone-reader", pod.Name, got)
 		}
-		if got := node.Labels["shipstream.io/site.playground"]; got != state.reader {
+		if got := node.Labels["bloodraven.shipstream.io/site.playground"]; got != state.reader {
 			return fmt.Errorf("reader pod node %s site label=%q, want %q", node.Name, got, state.reader)
 		}
 		for _, site := range mfg.Spec.Sites {
@@ -212,7 +212,7 @@ func s40ReplaceReaderDataAndObserve(state *s40RunState) runner.Step {
 						return false, "reader status missing", nil
 					}
 					err := assertReaderServingStatus(mfg, status, state.donorHost)
-					return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s lag=%v", status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
+					return err == nil, fmt.Sprintf("state=%s replication=%s source=%q convergence=%s lag=%v", status.State, status.Replication, status.SourceHost, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
 				})
 			cancelWait()
 			if err != nil {
@@ -435,8 +435,8 @@ func s40AssertServiceTopology(ctx context.Context, env *runner.Env, reader, expe
 	if internalPorts["mysql"] != 3306 || internalPorts["sidecar"] != 8080 || len(internalPorts) != 2 {
 		return fmt.Errorf("internal Service ports=%v, want mysql:3306 and sidecar:8080", internalPorts)
 	}
-	if _, gated := internalService.Spec.Selector["shipstream.io/healthy"]; gated {
-		return fmt.Errorf("internal Service must not select shipstream.io/healthy")
+	if _, gated := internalService.Spec.Selector[v1alpha1.HealthyLabel]; gated {
+		return fmt.Errorf("internal Service must not select bloodraven.shipstream.io/healthy")
 	}
 	return nil
 }

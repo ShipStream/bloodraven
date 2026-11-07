@@ -121,15 +121,15 @@ authority.
 ## The lease numbers, and the trap inside them
 
 `spec.sidecar.leaseTimeout` defaults to `20s`; `spec.sidecar.peerCheckInterval` defaults to `5s`.
-Three CEL rules guard them at admission: `peerCheckInterval >= 1s`, `leaseTimeout >= 3s`, and
-`leaseTimeout >= 3 × peerCheckInterval`. The shipped pair sits exactly on that floor — 3 × 5 s = 15 s,
-which 20 s clears with 5 s to spare — so a lease covers 20 / 5 = **4 consecutive ticks** of silence.
-Raise `peerCheckInterval` to 10 s alone and 3 × 10 s = 30 s > 20 s: the API server rejects the object.
+Three CEL rules guard them at admission: `peerCheckInterval` between 1s and 1m, `leaseTimeout`
+between 3s and 10m, and `leaseTimeout >= 3 × peerCheckInterval`. The shipped pair sits exactly on
+the 3× floor — 3 × 5 s = 15 s, which 20 s clears with 5 s to spare — so a lease covers
+20 / 5 = **4 consecutive ticks** of silence. Raise `peerCheckInterval` to 10 s alone and 3 × 10 s = 30 s > 20 s: the API server rejects the object.
 You must move both.
 
 Now the hard part. Rule #2 requires the operator **and every peer** to be silent for the whole window.
 One reachable peer keeps the primary writable. That is documented as "retained compatibility
-behavior, not a quorum guarantee" — no counting, no majority, no tie-break. And a `role: read-only`
+behavior, not a quorum guarantee" — no counting, no majority, no tie-break. And a `role: ReadOnly`
 reader counts as a peer: it relays topology and answers `/peer/ping`, and "A reachable peer without
 fresh authoritative topology can still suppress the lease-only all-peers-unreachable fence."
 

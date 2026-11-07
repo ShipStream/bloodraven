@@ -18,16 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
-
-const credentialHashAnnotation = "shipstream.io/credential-hash"
-
-// systemSchemaRestrictionAnnotation records the credential hash for which
-// appSystemSchemaRevoke last succeeded. The restriction is tracked apart
-// from credentialHashAnnotation because it can wait on a site that is
-// down; retrying it must not re-run every role's ALTER USER and GRANT.
-const systemSchemaRestrictionAnnotation = "shipstream.io/system-schema-restriction"
 
 // credentialGrantsVersion is mixed into the credential hash so a change to
 // the role grant sets re-runs credential reconciliation once on upgrade,
@@ -65,6 +56,49 @@ const appAdminPrivilegeQuery = `SELECT
 		File_priv = 'Y' OR Process_priv = 'Y' OR Reload_priv = 'Y' OR
 		Repl_slave_priv = 'Y' OR Repl_client_priv = 'Y' OR
 		Create_tablespace_priv = 'Y' OR Create_role_priv = 'Y' OR Drop_role_priv = 'Y'))`
+
+// Optional operator Secret keys naming a dedicated replication account. They
+// are set together or not at all; with neither, the operator's own username
+// and password replicate.
+const (
+	replicationUserKey     = "MYSQL_REPLICATION_USER"
+	replicationPasswordKey = "MYSQL_REPLICATION_PASSWORD"
+)
+
+// replicationCredentials resolves the account replicas, clones and
+// old-primary recovery use from the operator Secret's data, as the first-boot
+// init script resolves it. An empty value counts as absent. With neither
+// replication key it returns the operator's username and password. It
+// returns a non-empty problem, and no credentials, when only one key is set
+// (one half would be borrowed from the operator account, so a password-only
+// Secret would present the replication password for the operator account,
+// which MySQL does not hold), or when MYSQL_REPLICATION_USER names the
+// operator account with a different password (two passwords for one
+// account).
+func replicationCredentials(data map[string][]byte) (user, pass, problem string) {
+	opUser, opPass := string(data["username"]), string(data["password"])
+	user, pass = string(data[replicationUserKey]), string(data[replicationPasswordKey])
+	switch {
+	case user == "" && pass == "":
+		return opUser, opPass, ""
+	case user == "":
+		return "", "", fmt.Sprintf("%s is set without %s; set both to name a dedicated replication account, or omit both to replicate as the operator",
+			replicationPasswordKey, replicationUserKey)
+	case pass == "":
+		return "", "", fmt.Sprintf("%s is set without %s; set both to name a dedicated replication account, or omit both to replicate as the operator",
+			replicationUserKey, replicationPasswordKey)
+	case user == opUser && pass != opPass:
+		return "", "", fmt.Sprintf("%s names the operator account %q, but %s differs from its password; omit both keys to replicate as the operator, or name a dedicated account",
+			replicationUserKey, user, replicationPasswordKey)
+	}
+	return user, pass, ""
+}
+
+// replicationGrants is what a dedicated replication account needs: the
+// replica IO thread (REPLICATION SLAVE), the replica-status reads the
+// bootstrap and recovery paths make (REPLICATION CLIENT), and a clone donor
+// session (BACKUP_ADMIN, CLONE_ADMIN).
+const replicationGrants = "REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN"
 
 // credentialRole defines a MySQL user role with its expected privileges.
 type credentialRole struct {
@@ -112,9 +146,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 
 	// Check if credentials have changed since last reconciliation, and
 	// whether the app role's mysql schema restriction still has to land.
-	rolesCurrent := fg.Annotations[credentialHashAnnotation] == currentHash
-	restrictionCurrent := fg.Spec.Credentials.AppSecret == "" ||
-		fg.Annotations[systemSchemaRestrictionAnnotation] == currentHash
+	rolesCurrent := fg.Annotations[v1alpha1.CredentialHashAnnotation] == currentHash
+	restrictionCurrent := fg.Spec.Credentials.AppSecretName == "" ||
+		fg.Annotations[v1alpha1.SystemSchemaRestrictionAnnotation] == currentHash
 	if rolesCurrent && restrictionCurrent {
 		return nil
 	}
@@ -156,7 +190,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 			}
 			logger.Info("reconciled MySQL user", "role", role.name)
 		}
-		if err := r.setCredentialAnnotation(ctx, fg, credentialHashAnnotation, currentHash); err != nil {
+		if err := r.setCredentialAnnotation(ctx, fg, v1alpha1.CredentialHashAnnotation, currentHash); err != nil {
 			return err
 		}
 	}
@@ -175,7 +209,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 	if err := restrictSystemSchema(ctx, db, roles, ensure); err != nil {
 		return err
 	}
-	return r.setCredentialAnnotation(ctx, fg, systemSchemaRestrictionAnnotation, currentHash)
+	return r.setCredentialAnnotation(ctx, fg, v1alpha1.SystemSchemaRestrictionAnnotation, currentHash)
 }
 
 // tenantClaimedUsernames returns the MySQL usernames owned by live
@@ -194,7 +228,7 @@ func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Contex
 	claimed := make(map[string]string)
 	for i := range list.Items {
 		mdb := &list.Items[i]
-		if mdb.Spec.GroupRef.Name != fg.Name {
+		if mdb.Spec.FailoverGroupRef.Name != fg.Name {
 			continue
 		}
 		if mdb.Status.OwnerUser != "" {
@@ -234,14 +268,14 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 	// Operator: full admin.
 	roles = append(roles, credentialRole{
 		name:       "operator",
-		secretName: fg.Spec.Credentials.OperatorSecret,
+		secretName: fg.Spec.Credentials.OperatorSecretName,
 		grants:     []string{"GRANT ALL PRIVILEGES ON *.* TO '%s'@'%%' WITH GRANT OPTION"},
 	})
 
-	if fg.Spec.Credentials.AppSecret != "" {
+	if fg.Spec.Credentials.AppSecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "app",
-			secretName: fg.Spec.Credentials.AppSecret,
+			secretName: fg.Spec.Credentials.AppSecretName,
 			grants:     []string{"GRANT " + appGlobalPrivileges + " ON *.* TO '%s'@'%%'"},
 
 			resetAdminPrivileges: true,
@@ -249,20 +283,20 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 		})
 	}
 
-	if fg.Spec.Credentials.ReadOnlySecret != "" {
+	if fg.Spec.Credentials.ReadOnlySecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "readonly",
-			secretName: fg.Spec.Credentials.ReadOnlySecret,
+			secretName: fg.Spec.Credentials.ReadOnlySecretName,
 			grants: []string{
 				"GRANT SELECT, SHOW VIEW, SHOW DATABASES, PROCESS ON *.* TO '%s'@'%%'",
 			},
 		})
 	}
 
-	if fg.Spec.Credentials.MonitorSecret != "" {
+	if fg.Spec.Credentials.MonitorSecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "monitor",
-			secretName: fg.Spec.Credentials.MonitorSecret,
+			secretName: fg.Spec.Credentials.MonitorSecretName,
 			grants: []string{
 				"GRANT PROCESS, REPLICATION CLIENT ON *.* TO '%s'@'%%'",
 				"GRANT SELECT ON performance_schema.* TO '%s'@'%%'",
@@ -270,10 +304,10 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 		})
 	}
 
-	if fg.Spec.Credentials.BackupSecret != "" {
+	if fg.Spec.Credentials.BackupSecretName != "" {
 		roles = append(roles, credentialRole{
 			name:       "backup",
-			secretName: fg.Spec.Credentials.BackupSecret,
+			secretName: fg.Spec.Credentials.BackupSecretName,
 			grants: []string{
 				"GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT ON *.* TO '%s'@'%%'",
 			},
@@ -386,8 +420,8 @@ func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context
 	if err != nil {
 		return "", err
 	}
-	// Only what reconcileCredentials consumes (Δ15): the role accounts,
-	// the operator's replication account and, in legacy mode, the dsn.
+	// Only what reconcileCredentials consumes (Δ15): the role accounts
+	// and the operator's replication account.
 	// A passphrase or decryption Secret is never read here, so a missing
 	// one does not fail the reconcile and a passphrase edit does not
 	// re-run credential reconciliation.
@@ -421,16 +455,10 @@ func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Conte
 
 // adminCredentials resolves the username/password Bloodraven uses to connect
 // to a group's primary as an administrator, plus the root password used for
-// the initial-setup fallback.
-//
-// Both credential modes are handled here because openAdminConnection is the
-// single admin path and must therefore work wherever a MysqlFailoverGroup
-// works. In credentials mode the operator Secret carries username/password
-// keys; in legacy DSN mode (spec.secretName) the same information lives
-// inside the `dsn` key, which is what the backup and restore reconcilers
-// already parse.
+// the initial-setup fallback, from the operator Secret's username, password
+// and MYSQL_ROOT_PASSWORD keys.
 func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) (user, password, rootPassword string, err error) {
-	secretName := fg.Spec.EffectiveOperatorSecretName()
+	secretName := fg.Spec.Credentials.OperatorSecretName
 	if secretName == "" {
 		return "", "", "", fmt.Errorf("group %q references no operator credential secret", fg.Name)
 	}
@@ -440,28 +468,12 @@ func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.Mys
 		return "", "", "", fmt.Errorf("get operator secret: %w", err)
 	}
 	rootPassword = string(secret.Data["MYSQL_ROOT_PASSWORD"])
-
-	if fg.Spec.UsesCredentials() {
-		return string(secret.Data["username"]), string(secret.Data["password"]), rootPassword, nil
-	}
-
-	dsnBytes, ok := secret.Data["dsn"]
-	if !ok {
-		return "", "", "", fmt.Errorf("secret %s missing 'dsn' key", secretName)
-	}
-	parsed, err := internalmysql.ParseDSN(string(dsnBytes))
-	if err != nil {
-		return "", "", "", fmt.Errorf("parse dsn from secret %s: %w", secretName, err)
-	}
-	if parsed.User == "" {
-		return "", "", "", fmt.Errorf("dsn in secret %s has an empty user", secretName)
-	}
-	return parsed.User, parsed.Passwd, rootPassword, nil
+	return string(secret.Data["username"]), string(secret.Data["password"]), rootPassword, nil
 }
 
 // reservedGroupUsernames returns the MySQL account names that belong to the
 // MysqlFailoverGroup itself: root, the replication user, and every principal
-// named by spec.credentials (or by the legacy DSN).
+// named by spec.credentials.
 //
 // The MysqlDatabase reconciler uses this to refuse to adopt a group-level
 // principal as a tenant database owner. The reason is specific and worth
@@ -505,14 +517,12 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 		}
 	}
 
-	names := []string{fg.Spec.EffectiveOperatorSecretName()}
-	if fg.Spec.Credentials != nil {
-		names = append(names,
-			fg.Spec.Credentials.AppSecret,
-			fg.Spec.Credentials.ReadOnlySecret,
-			fg.Spec.Credentials.MonitorSecret,
-			fg.Spec.Credentials.BackupSecret,
-		)
+	names := []string{
+		fg.Spec.Credentials.OperatorSecretName,
+		fg.Spec.Credentials.AppSecretName,
+		fg.Spec.Credentials.ReadOnlySecretName,
+		fg.Spec.Credentials.MonitorSecretName,
+		fg.Spec.Credentials.BackupSecretName,
 	}
 
 	for _, name := range names {
@@ -524,17 +534,7 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 			return nil, fmt.Errorf("read group credential secret %s/%s: %w", fg.Namespace, name, err)
 		}
 		add(string(secret.Data["username"]))
-		add(string(secret.Data["MYSQL_REPLICATION_USER"]))
-		if dsn, ok := secret.Data["dsn"]; ok {
-			// A dsn that does not parse hides the account it names, so it
-			// fails the gate like an unreadable Secret does — a corrupt
-			// group Secret must not un-reserve the group's own principal.
-			parsed, err := internalmysql.ParseDSN(string(dsn))
-			if err != nil {
-				return nil, fmt.Errorf("parse dsn in group credential secret %s/%s: %w", fg.Namespace, name, err)
-			}
-			add(parsed.User)
-		}
+		add(string(secret.Data[replicationUserKey]))
 	}
 	return reserved, nil
 }
@@ -576,7 +576,7 @@ func openAdminConnection(
 
 	activeSite := fg.Spec.SiteByName(fg.Status.ActiveSite)
 	if activeSite == nil || !activeSite.IsPromotable() {
-		return nil, fmt.Errorf("active site %q is not a primary-candidate", fg.Status.ActiveSite)
+		return nil, fmt.Errorf("active site %q is not a PrimaryCandidate site", fg.Status.ActiveSite)
 	}
 	primaryHost := fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, activeSite.Name, fg.Namespace), mysqlPort)
 
@@ -589,10 +589,8 @@ func openAdminConnection(
 	}
 
 	// Try operator credentials first, fall back to root for initial setup.
-	// The fallback only exists where MYSQL_ROOT_PASSWORD is part of the
-	// Secret contract (credentials mode); a DSN-mode Secret without the key
-	// must not turn every operator-connect failure into an empty-password
-	// root login attempt.
+	// An operator Secret without MYSQL_ROOT_PASSWORD must not turn every
+	// operator-connect failure into an empty-password root login attempt.
 	db, err := open(operatorUser, operatorPass, primaryHost, tlsConfigName)
 	if err != nil {
 		if rootPass == "" {

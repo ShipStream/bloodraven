@@ -224,8 +224,8 @@ func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverG
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Dragonfly: &v1alpha1.DragonflySpec{Enabled: true},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad"},
-				{Name: "pdx"},
+				{Name: "iad", ServerID: 101},
+				{Name: "pdx", ServerID: 102},
 			},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
@@ -235,11 +235,10 @@ func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverG
 				Status: metav1.ConditionTrue,
 			}},
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
-				{Name: "pdx", State: "read-only", Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 			Dragonfly: &v1alpha1.DragonflyStatus{
-				Enabled:    true,
 				ActiveSite: "iad",
 				Phase:      dfPhase,
 				Sites: []v1alpha1.DragonflySiteStatus{
@@ -255,7 +254,7 @@ func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverG
 						Reachable:        true,
 						Ready:            true,
 						LinkStatus:       "up",
-						LastIOSecondsAgo: 0,
+						LastIOSecondsAgo: new(int64(0)),
 					},
 				},
 			},

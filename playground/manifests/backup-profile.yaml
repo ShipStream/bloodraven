@@ -30,22 +30,21 @@ spec:
     activeDeadlineSeconds: 1800
     retry:
       maxAttempts: 3
-      initialBackoffSeconds: 60
-      maxBackoffSeconds: 900
+      initialBackoff: 1m
+      maxBackoff: 15m
     profiles:
       - name: rustfs
-        retentionPolicy:
-          count: 5
-          maxAgeDays: 7
-          minKeep: 1
-          maxFailedKeep: 10
+        retention:
+          keepLast: 5
+          keepWithinDays: 7
+          keepFailed: 10
         storage:
           type: S3
           s3:
             bucket: bloodraven
             prefix: playground
             endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
-            credentialsSecret: dragonfly-s3-credentials
+            credentialsSecretName: dragonfly-s3-credentials
             region: us-east-1
         dump:
           threads: 2
@@ -62,16 +61,19 @@ spec:
           schedule: "*/30 * * * *"
           timeZone: "Etc/UTC"
           concurrencyPolicy: Forbid
-          retentionPolicy:
-            keepSuccessful: 5
-            keepFailures: 5
+          # Delete each successful run's Job and Pod at once; unset keeps
+          # them (and the restored datadir) until retention prunes the run.
+          ttlSecondsAfterFinished: 0
+          retention:
+            keepLast: 5
+            keepFailed: 5
           sanityCheck:
             query: "SELECT COUNT(*) FROM information_schema.tables"
-            expect:
-              minRows: 1
-              maxDurationSeconds: 30
+            minResult: 1
+            timeout: 30s
       - name: local-pvc
-        retention: 3
+        retention:
+          keepLast: 3
         storage:
           type: PVC
           pvc:

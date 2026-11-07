@@ -13,7 +13,7 @@ whether anybody notices.
 Change `spec.image` and apply. What follows is not a Deployment rollout — the operator deliberately
 takes that away from Kubernetes and runs it itself.
 
-The mechanism is the spec hash from the last topic. Under `updateStrategy: OrderedUpdate` (the
+The mechanism is the spec hash from the last topic. Under `updateStrategy.type: OrderedUpdate` (the
 default) the reconciler **leaves existing site Deployments untouched**, so the desired hash and the
 live Deployment annotation diverge. The runner notices that drift on its next pass and hands the
 rollout to the ordered updater, which does this:
@@ -21,7 +21,7 @@ rollout to the ordered updater, which does this:
 ```widget
 {
   "type": "flow",
-  "title": "Ordered update — status.updatePhase, one value per step",
+  "title": "Ordered update — status.updatePhase, one value per step until it clears",
   "steps": [
     {
       "label": "UpdateReplica",
@@ -44,8 +44,8 @@ rollout to the ordered updater, which does this:
       "detail": "Wait up to 5 minutes for it to come back. A timeout here only warns — the rollout is already complete in the sense that matters."
     },
     {
-      "label": "Complete",
-      "detail": "updatePhase clears. Both sites are on the new image, and the primary is on the site that was your standby."
+      "label": "Done",
+      "detail": "updatePhase is removed; there is no Complete value. Both sites are on the new image, and the primary is on the site that was your standby."
     }
   ]
 }
@@ -103,7 +103,7 @@ issues `START REPLICA` itself rather than waiting for something else to.
 
 ## `Recreate` is a decision about write availability
 
-`spec.updateStrategy` takes `OrderedUpdate` or `Recreate`, and the difference is not cosmetic. Under
+`spec.updateStrategy.type` takes `OrderedUpdate` or `Recreate`, and the difference is not cosmetic. Under
 `Recreate` the runner clears the drift list entirely and the reconciler patches every site Deployment
 in one pass — so their pod restarts may overlap, and a group with two sites can have both of them down
 at the same moment. That is the total-loss window `OrderedUpdate` exists to prevent.
@@ -167,21 +167,25 @@ the same thing is its `ServerSideApply=true` sync option.
     "1. Read the release notes for CRD changes and for the sidecar image tag. These are the only two things that can require action.",
     "2. kubectl apply --server-side --force-conflicts -f the CRDs from config/crd/bases/ (or the chart's crds/ directory) — Helm will not do this for you, on upgrade or on rollback, and client-side apply cannot carry a CRD this large.",
     "3. helm upgrade the operator chart. One Deployment, one replica; leader election means the new pod takes the lease when the old one releases it.",
-    "4. Bump spec.sidecarImage to the matching release and apply. This is an ordered update: it restarts pods, moves your primary, and increments the failover counter.",
+    "4. Let the sidecars follow. A group that leaves spec.sidecar.image unset runs the sidecar the new operator release ships with, so step 3 already changed its pod spec. This is an ordered update: it restarts pods, moves your primary, and increments the failover counter.",
     "5. Run a backup verification against the new version, because a restore path you have not exercised since the upgrade is an assumption again."
   ]
 }
 ```
 
-Step 4 catches people out because the sidecar looks like part of the operator and is not. It ships as
-its own image, referenced by `spec.sidecarImage` on the group, and moving it is a pod restart on every
-site — so it goes through the same ordered update as an image bump, with the same failover. Bloodraven
-tolerates a **one-minor** skew between operator and sidecar in either direction while pods roll, because
-both sides of the HTTP surface between them are additive-only. Beyond one minor is untested.
+Step 4 catches people out because it is not a step you take: it is a consequence of step 3. The sidecar
+ships as its own image, and a group that leaves `spec.sidecar.image` unset stores no image at all — it
+runs the one the operator release ships with, which the chart hands the operator from its
+`sidecar.image.repository` and `sidecar.image.tag` values. So the `helm upgrade` that moves the
+operator also changes every such group's pod spec, and moving the sidecar is a pod restart on every
+site — the same ordered update as an image bump, with the same failover. Plan the chart upgrade as you
+would plan that rollout. A group that pins `spec.sidecar.image` moves only when you change the pin, and
+a pin from another release gets a `SidecarVersionSkew` Warning. Bloodraven tolerates a **one-minor**
+skew between operator and sidecar in either direction while pods roll, because both sides of the HTTP
+surface between them are additive-only. Beyond one minor is untested.
 
-And if the same release bumps `spec.image` and `spec.sidecarImage` together, do it in one apply: the
-ordered updater restarts the sidecar as part of the pod restart it was already performing, so you pay
-for one rollout instead of two.
+The sidecar and MySQL share a pod, so a sidecar move and a `spec.image` bump go through the same
+ordered update; there is no separate sidecar sequencing to arrange.
 
 ## The one-way doors
 

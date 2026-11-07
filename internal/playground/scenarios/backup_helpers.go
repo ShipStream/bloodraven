@@ -60,25 +60,24 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 	consistent := true
 	spec := v1alpha1.BackupSpec{
 		Image:                  v1alpha1.DefaultBackupImage,
-		MaxLagSecondsForSource: 60,
+		MaxLagSecondsForSource: new(int64(60)),
 		ActiveDeadlineSeconds:  1800,
-		BackoffLimit:           0,
+		BackoffLimit:           new(int32(0)),
 		Profiles: []v1alpha1.BackupProfile{{
 			Name: backupE2EProfile,
-			RetentionPolicy: &v1alpha1.RetentionPolicy{
-				Count:         2,
-				MaxAgeDays:    1,
-				MinKeep:       1,
-				MaxFailedKeep: 2,
+			Retention: v1alpha1.BackupRetention{
+				KeepLast:       2,
+				KeepWithinDays: new(int32(1)),
+				KeepFailed:     new(int32(2)),
 			},
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
 				S3: &v1alpha1.S3Storage{
-					Bucket:            backupE2EBucket,
-					Prefix:            prefix,
-					EndpointURL:       backupE2EEndpoint,
-					CredentialsSecret: backupE2ECredsSecret,
-					Region:            "us-east-1",
+					Bucket:                backupE2EBucket,
+					Prefix:                prefix,
+					EndpointURL:           backupE2EEndpoint,
+					CredentialsSecretName: backupE2ECredsSecret,
+					Region:                "us-east-1",
 				},
 			},
 			Dump: &v1alpha1.DumpOptions{
@@ -94,7 +93,7 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 			Enabled:             true,
 			ProfileName:         backupE2EProfile,
 			MaxBinlogSize:       "1M",
-			ArchivePollInterval: &metav1.Duration{Duration: 2 * time.Second},
+			ArchivePollInterval: &metav1.Duration{Duration: 5 * time.Second},
 		}
 	}
 	return spec
@@ -102,8 +101,8 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 
 func backupE2EEncryption(secretName string) *v1alpha1.BackupEncryptionSpec {
 	return &v1alpha1.BackupEncryptionSpec{
-		Algorithm:        "AES-256-GCM",
-		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secretName},
+		Algorithm:              "AES-256-GCM",
+		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secretName},
 	}
 }
 
@@ -121,10 +120,10 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
-			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
+			Labels: map[string]string{"playground.bloodraven.shipstream.io/created-by-e2e": "true"},
 		},
 		StringData: map[string]string{
-			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): text,
+			backupE2EEncryption(name).PassphraseSecretKeyRef.PassphraseSecretKeyOrDefault(): text,
 		},
 	}
 	created, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Create(ctx, sec, metav1.CreateOptions{})
@@ -290,16 +289,16 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  profile,
-				"chaos.playground.bloodraven.io/scenario":       scenarioID,
-				"chaos.playground.bloodraven.io/created-by-e2e": "true",
+				v1alpha1.FailoverGroupLabel:                          env.FG,
+				v1alpha1.BackupProfileLabel:                          profile,
+				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
+				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
+			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: env.FG},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:      profile,
-			TriggeredBy:      "chaos/" + scenarioID,
 		},
 	}
 	if err := env.Kube.Controller.Create(ctx, b); err != nil {
@@ -309,33 +308,31 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 	return nil
 }
 
-func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1alpha1.PointInTimeVerificationSpec, query string, minRows int64) error {
+func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1alpha1.PointInTimeVerificationSpec, query string, minResult int64) error {
 	keep := true
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  backupE2EProfile,
-				"chaos.playground.bloodraven.io/scenario":       scenarioID,
-				"chaos.playground.bloodraven.io/created-by-e2e": "true",
+				v1alpha1.FailoverGroupLabel:                          env.FG,
+				v1alpha1.BackupProfileLabel:                          backupE2EProfile,
+				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
+				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
+			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef:        v1alpha1.LocalGroupRef{Name: env.FG},
+			FailoverGroupRef:        v1alpha1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:             backupE2EProfile,
-			BackupRef:               &corev1.LocalObjectReference{Name: backupName},
+			BackupRef:               &v1alpha1.LocalMysqlBackupRef{Name: backupName},
 			KeepOnFailure:           &keep,
-			TTLSecondsAfterFinished: 0,
-			TriggeredBy:             "chaos/" + scenarioID,
+			TTLSecondsAfterFinished: new(int32(0)),
 			PointInTime:             pit,
 			SanityCheck: &v1alpha1.SanityCheckSpec{
-				Query: query,
-				Expect: &v1alpha1.SanityCheckExpectation{
-					MinRows:            minRows,
-					MaxDurationSeconds: 30,
-				},
+				Query:     query,
+				MinResult: new(minResult),
+				Timeout:   &metav1.Duration{Duration: 30 * time.Second},
 			},
 		},
 	}
@@ -533,10 +530,10 @@ func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, nam
 // "/") of an S3 backup's artifact, from the recorded destination. ok is
 // false for a backup with no S3 artifact to check.
 func backupArtifactPrefix(b *v1alpha1.MysqlBackup) (bucket, prefix string, ok bool, err error) {
-	if b.Status.StorageType != v1alpha1.BackupStorageS3 || b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+	storage := b.Status.ArtifactStorage
+	if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || storage != nil && storage.Type != v1alpha1.BackupStorageS3 {
 		return "", "", false, nil
 	}
-	storage := b.Status.ArtifactStorage
 	if storage == nil || storage.Location == "" || storage.Bucket == "" {
 		return "", "", false, fmt.Errorf("succeeded S3 backup has no recorded status.artifactStorage")
 	}
@@ -580,7 +577,7 @@ func deleteAndWait(ctx context.Context, env *runner.Env, obj ctrlclient.Object, 
 				// the operator's reason, then unstick the CR so later
 				// scenarios start clean.
 				cause := "no ArtifactCleanup condition"
-				if c := apimeta.FindStatusCondition(backup.Status.Conditions, "ArtifactCleanup"); c != nil {
+				if c := apimeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup); c != nil {
 					cause = c.Reason + ": " + c.Message
 				}
 				if err := forceRemoveFinalizers(ctx, env, fresh, kind, name); err != nil {
@@ -744,8 +741,16 @@ func originalPITRExpected(env *runner.Env) (enabled bool, profile string, err er
 }
 
 func backupStatusSummary(b *v1alpha1.MysqlBackup) string {
-	return fmt.Sprintf("name=%s phase=%s message=%q job=%q source=%q location=%q storage=%s sizeBytes=%d gtid=%q binlog=%s:%d conditions=%s",
-		b.Name, b.Status.Phase, b.Status.Message, b.Status.JobName, b.Status.SourceSite, b.Status.Location, b.Status.StorageType, b.Status.SizeBytes, b.Status.GtidExecuted, b.Status.BinlogFile, b.Status.BinlogPos, conditionsSummary(b.Status.Conditions))
+	location, storageType := "", v1alpha1.BackupStorageType("")
+	if st := b.Status.ArtifactStorage; st != nil {
+		location, storageType = st.Location, st.Type
+	}
+	binlog := "-"
+	if bp := b.Status.BinlogPosition; bp != nil {
+		binlog = fmt.Sprintf("%s:%d", bp.File, bp.Position)
+	}
+	return fmt.Sprintf("name=%s phase=%s message=%q job=%q source=%q location=%q storage=%s sizeBytes=%d gtid=%q binlog=%s conditions=%s",
+		b.Name, b.Status.Phase, b.Status.Message, b.Status.JobName, b.Status.SourceSite, location, storageType, b.Status.SizeBytes, b.Status.GtidExecuted, binlog, conditionsSummary(b.Status.Conditions))
 }
 
 func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
@@ -753,8 +758,8 @@ func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
 	if v.Status.BackupRef != nil {
 		backupRef = fmt.Sprintf("%s/%s", v.Status.BackupRef.Name, v.Status.BackupRef.UID)
 	}
-	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q pod=%q pvc=%q replay=%v sanity=%v conditions=%s",
-		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.PodName, v.Status.PVCName, v.Status.ReplayedThroughBinlog, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
+	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q pointInTime=%v sanity=%v conditions=%s",
+		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.PointInTime, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
 }
 
 func conditionsSummary(conds []metav1.Condition) string {

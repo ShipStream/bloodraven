@@ -49,7 +49,7 @@ func concurrentEncryptionWriter(nn types.NamespacedName, desired *v1alpha1.Encry
 				}
 				latest.Status.EncryptionAtRest = desired.DeepCopy()
 				setCondition(&latest.Status.Conditions, metav1.Condition{
-					Type:               conditionEncryptionReady,
+					Type:               v1alpha1.ConditionEncryptionAtRestReady,
 					Status:             metav1.ConditionTrue,
 					Reason:             "AllSitesSealed",
 					LastTransitionTime: metav1.Now(),
@@ -69,7 +69,6 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	digest := keyringDigest([]byte("keyring"))
 	sealed := &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
@@ -128,9 +127,9 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 	if !after.SiteKeyringSealed("dc1") {
 		t.Error("dc1 would be re-rendered unsealed after a topology poll")
 	}
-	cond := findCondition(after.Status.Conditions, conditionEncryptionReady)
+	cond := findCondition(after.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
-		t.Errorf("%s = %+v, want the concurrently-written True", conditionEncryptionReady, cond)
+		t.Errorf("%s = %+v, want the concurrently-written True", v1alpha1.ConditionEncryptionAtRestReady, cond)
 	}
 }
 
@@ -191,8 +190,8 @@ func TestUpdateCRStatus_DoesNotResurrectDeletedEncryptionStatus(t *testing.T) {
 // TopologyConfig, the adoption path would rebuild the manager on its
 // own. The gate can stay always-on either way.
 func TestEncryptionToggleDoesNotRestartTheTopologyManager(t *testing.T) {
-	plain := CRConfigToTopologyConfig(newTestFG())
-	encrypted := CRConfigToTopologyConfig(encTestFG())
+	plain := mustTopologyConfig(newTestFG())
+	encrypted := mustTopologyConfig(encTestFG())
 
 	if !plain.Equal(encrypted) {
 		t.Fatal("TopologyConfig now distinguishes encrypted groups; the clone-gate wiring " +

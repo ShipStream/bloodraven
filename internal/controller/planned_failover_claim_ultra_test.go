@@ -21,7 +21,7 @@ func TestUltraK022_MarkerKeepsFenceNotAttributable(t *testing.T) {
 		Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable,
 			v1alpha1.PlannedFailoverWarningStatusStalled}}
 	fg := opsGroup(pf)
-	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: marker.String()}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: marker.String()}
 
 	if _, ok := plannedFenceAttributableEnd(fg); ok {
 		t.Fatal("a marker carrying FenceNotAttributable authorises a named re-assert of the source")
@@ -38,13 +38,13 @@ func TestUltraK022_MarkerKeepsFenceNotAttributable(t *testing.T) {
 	// Control: the same marker without the warning names the source.
 	ok := TerminalMarker{RunID: pf.RunID, Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
 		Reason: v1alpha1.PlannedFailoverReasonLagTimeout}
-	fg.Annotations[PlannedFailoverTerminalAnnotation] = ok.String()
+	fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation] = ok.String()
 	if _, attributable := plannedFenceAttributableEnd(fg); !attributable {
 		t.Fatal("an attributable marker no longer names the source")
 	}
 
 	// The marker-based terminal record keeps the warning.
-	fg.Annotations[PlannedFailoverTerminalAnnotation] = marker.String()
+	fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation] = marker.String()
 	h := newPFEngineHarness(t, fg)
 	h.stepUntil(5, func(cur *v1alpha1.MysqlFailoverGroup) bool {
 		return cur.Status.PlannedFailover != nil && cur.Status.PlannedFailover.Result != nil
@@ -164,11 +164,11 @@ func TestUltraK104_HoldRefusalNamesTheAcknowledgement(t *testing.T) {
 	f.tm.mu.Lock()
 	held := f.tm.bootstrapClaimRefusedLocked()
 	f.tm.mu.Unlock()
-	if !strings.Contains(held, AcknowledgePlannedFailoverHoldAnnotation+"=run-1") || strings.Contains(held, "in progress") {
+	if !strings.Contains(held, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation+"=run-1") || strings.Contains(held, "in progress") {
 		t.Fatalf("refusal under a hold = %q; want it to name the acknowledgement", held)
 	}
 	ok, why := f.tm.ReserveKeyringRotation("dc2")
-	if ok || !strings.Contains(why, AcknowledgePlannedFailoverHoldAnnotation+"=run-1") {
+	if ok || !strings.Contains(why, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation+"=run-1") {
 		t.Fatalf("rotation under a hold = %v %q", ok, why)
 	}
 }

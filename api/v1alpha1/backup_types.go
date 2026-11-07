@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,9 +31,14 @@ type BackupSpec struct {
 	// deployments should always pin a full major.minor tag here and
 	// avoid floating tags.
 	// +kubebuilder:default="container-registry.oracle.com/mysql/community-server:9.7"
+	// +optional
 	Image string `json:"image,omitempty"`
 
-	// ImagePullSecrets for the backup image.
+	// ImagePullSecrets for the backup image. Keyed by name.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
 	// Profiles are reusable, named backup configurations. Schedules and
@@ -46,17 +52,23 @@ type BackupSpec struct {
 
 	// Schedules describe cron-driven recurring backups, each referencing
 	// a profile by name. Each schedule becomes a Kubernetes CronJob owned
-	// by this failover group.
+	// by this failover group. Names are unique (the list is a map keyed by
+	// name).
 	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=32
 	Schedules []BackupSchedule `json:"schedules,omitempty"`
 
 	// MaxLagSecondsForSource is the threshold for replica-first source
 	// selection. The backup reconciler prefers the replica site as the
 	// dump source, but only if secondsBehindSource is at or below this
-	// value. Above it, the reconciler falls back to the primary.
+	// value. Above it, the reconciler falls back to the primary. 0 accepts
+	// only a fully caught-up replica. Default: 300.
 	// +kubebuilder:default=300
 	// +kubebuilder:validation:Minimum=0
-	MaxLagSecondsForSource int64 `json:"maxLagSecondsForSource,omitempty"`
+	// +optional
+	MaxLagSecondsForSource *int64 `json:"maxLagSecondsForSource,omitempty"`
 
 	// Resources for the backup Job's mysqlsh container.
 	// +optional
@@ -66,12 +78,15 @@ type BackupSpec struct {
 	// backup Job. Default: 7200 (2h).
 	// +kubebuilder:default=7200
 	// +kubebuilder:validation:Minimum=60
+	// +optional
 	ActiveDeadlineSeconds int64 `json:"activeDeadlineSeconds,omitempty"`
 
-	// BackoffLimit is the Job backoffLimit applied to backup Jobs.
+	// BackoffLimit is the Job backoffLimit applied to backup Jobs. 0 runs
+	// each Job's pod once. Default: 2.
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
-	BackoffLimit int32 `json:"backoffLimit,omitempty"`
+	// +optional
+	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
 	// Retry configures operator-level retries for scheduled MysqlBackup
 	// CRs that land in Failed. This is independent of Job-level
@@ -127,6 +142,7 @@ type PITRSpec struct {
 	// Enabled turns binlog archival on or off. Omitting spec.backup.pitr
 	// entirely is equivalent to Enabled=false.
 	// +kubebuilder:default=false
+	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
 	// ProfileName selects the BackupProfile whose storage backend will
@@ -137,6 +153,7 @@ type PITRSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
 	ProfileName string `json:"profileName,omitempty"`
 
 	// MaxBinlogSize is forwarded as the MySQL max_binlog_size variable,
@@ -146,12 +163,15 @@ type PITRSpec struct {
 	// storage. Accepts any value MySQL accepts (e.g. "100M", "256M",
 	// "1073741824"). Defaults to "100M" when PITR is enabled.
 	// +kubebuilder:default="100M"
+	// +optional
 	MaxBinlogSize string `json:"maxBinlogSize,omitempty"`
 
 	// ArchivePollInterval is how often the archiver reconciles the list
 	// of binlog files against storage as a belt-and-suspenders safety
-	// net alongside inotify. Default: 60s.
-	// +kubebuilder:default="60s"
+	// net alongside inotify. Default: 60s. Bounds: 5s to 1h.
+	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5s') && duration(self) <= duration('1h')",message="archivePollInterval must be between 5s and 1h"
+	// +optional
 	ArchivePollInterval *metav1.Duration `json:"archivePollInterval,omitempty"`
 }
 
@@ -161,40 +181,38 @@ type PITRSpec struct {
 // that site's manifest. While a sidecar does not answer, its last
 // reported coverage is kept and Message says so.
 type PITRStatus struct {
-	// Enabled mirrors spec.backup.pitr.enabled so consumers (status
-	// widgets, `kubectl get -o wide`) can see at a glance whether
-	// archival is running.
-	Enabled bool `json:"enabled,omitempty"`
-
-	// ProfileName mirrors spec.backup.pitr.profileName.
-	ProfileName string `json:"profileName,omitempty"`
-
 	// OldestArchivedTime is the earliest first-event timestamp across
 	// all archived binlogs still present in storage. It bounds archive
 	// retention; it does not prove that a target can be restored.
+	// +optional
 	OldestArchivedTime *metav1.Time `json:"oldestArchivedTime,omitempty"`
 
 	// NewestArchivedTime is the latest last-event timestamp across all
 	// archived binlogs. It measures archive freshness. Whether a target
 	// is covered is decided per restore from verified archive bytes, a
 	// single replaying site and a proven stop event.
+	// +optional
 	NewestArchivedTime *metav1.Time `json:"newestArchivedTime,omitempty"`
 
 	// ArchivedFileCount is the number of binlog files currently held in
 	// storage across all sites.
+	// +optional
 	ArchivedFileCount int32 `json:"archivedFileCount,omitempty"`
 
 	// ArchivedBytes is the total size of archived binlog files.
+	// +optional
 	ArchivedBytes int64 `json:"archivedBytes,omitempty"`
 
 	// LastArchivedTime is the wall clock at which the most recent
 	// binlog file was uploaded (archivedAt on the manifest entry).
+	// +optional
 	LastArchivedTime *metav1.Time `json:"lastArchivedTime,omitempty"`
 
 	// Message lists per-site problems as "site: error" joined with "; "
 	// (for example an archive store that cannot be initialized, a
 	// manifest read error, or an unreachable sidecar, in which case the
 	// coverage fields are last-known). Empty on the happy path.
+	// +optional
 	Message string `json:"message,omitempty"`
 
 	// Archive is the archive identity the sidecars observed at the active
@@ -226,27 +244,25 @@ type PointInTimeSpec struct {
 	ArchiveProfileName string `json:"archiveProfileName,omitempty"`
 
 	// AllowPartial accepts an archive with no transaction at or after
-	// StopDatetime: the restore then replays to the archive head (outcome
+	// StopTime: the restore then replays to the archive head (outcome
 	// Partial). It relaxes nothing else; archive identity, lineage and
 	// continuity checks still apply.
 	// +optional
 	// +kubebuilder:default=false
 	AllowPartial bool `json:"allowPartial,omitempty"`
 
-	// StopDatetime is the target instant, a whole second: RFC 3339
-	// ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00") or
-	// "YYYY-MM-DD HH:MM:SS", which is read as UTC. Fractional seconds are
-	// refused. Replay restores the history of the first archived
-	// transaction committed at or after it (commit times are compared to
-	// the microsecond), cut just before that transaction. Required.
-	// An object stored with a fractional target before this rule existed
-	// fails every update (finalizer removal included) on clusters without
-	// CRD validation ratcheting until an update also corrects the target;
-	// correct such targets before applying the CRD.
+	// StopTime is the target instant: RFC 3339 with an explicit zone and
+	// whole seconds ("2026-04-15T09:30:00Z", "2026-04-15T09:30:00+02:00").
+	// Fractional seconds, a lowercase "t" or "z", and an offset outside
+	// -23:59..+23:59 are refused. Replay restores the history of the first
+	// archived transaction committed at or after it (commit times are
+	// compared to the microsecond), cut just before that transaction.
 	// +required
-	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`
 	// +kubebuilder:validation:MaxLength=40
-	StopDatetime string `json:"stopDatetime"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	StopTime metav1.Time `json:"stopTime"`
 
 	// ExcludeGtids are never replayed and must not intersect the backup.
 	// Every archived transaction committed between the backup's newest
@@ -263,25 +279,30 @@ type PointInTimeSpec struct {
 
 // BackupRetrySpec configures operator-level retries for scheduled
 // MysqlBackup CRs. MaxAttempts includes the original attempt.
+// +kubebuilder:validation:XValidation:rule="!has(self.initialBackoff) || !has(self.maxBackoff) || duration(self.maxBackoff) >= duration(self.initialBackoff)",message="retry.maxBackoff must be at least retry.initialBackoff"
 type BackupRetrySpec struct {
 	// MaxAttempts is the total number of attempts (including the
 	// original). 1 disables retries. Values are clamped to [1, 10].
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
+	// +optional
 	MaxAttempts int32 `json:"maxAttempts,omitempty"`
 
-	// InitialBackoffSeconds is the delay between the first failure and
-	// the first retry. Subsequent retries double the backoff until
-	// MaxBackoffSeconds.
-	// +kubebuilder:default=60
-	// +kubebuilder:validation:Minimum=1
-	InitialBackoffSeconds int32 `json:"initialBackoffSeconds,omitempty"`
+	// InitialBackoff is the delay between the first failure and the first
+	// retry. Subsequent retries double the backoff until MaxBackoff.
+	// Default: 1m. Bounds: 1s to 1h.
+	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="retry.initialBackoff must be between 1s and 1h"
+	// +optional
+	InitialBackoff *metav1.Duration `json:"initialBackoff,omitempty"`
 
-	// MaxBackoffSeconds caps the exponential backoff. Default: 1800 (30m).
-	// +kubebuilder:default=1800
-	// +kubebuilder:validation:Minimum=1
-	MaxBackoffSeconds int32 `json:"maxBackoffSeconds,omitempty"`
+	// MaxBackoff caps the exponential backoff. Default: 30m. Bounds: 1s to
+	// 24h, and at least InitialBackoff.
+	// +kubebuilder:default="30m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('24h')",message="retry.maxBackoff must be between 1s and 24h"
+	// +optional
+	MaxBackoff *metav1.Duration `json:"maxBackoff,omitempty"`
 }
 
 // BackupProfile is a named, reusable backup configuration.
@@ -292,28 +313,23 @@ type BackupProfile struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	Name string `json:"name"`
 
 	// Storage selects and configures the backup destination.
+	// +required
 	Storage BackupStorage `json:"storage"`
 
 	// Dump customizes util.dumpInstance() options.
 	// +optional
 	Dump *DumpOptions `json:"dump,omitempty"`
 
-	// Retention is the legacy shorthand for count-based retention: the
-	// maximum number of successful MysqlBackup CRs to keep for this
-	// profile. 0 disables count-based pruning. If RetentionPolicy is
-	// set it fully overrides this field.
-	// +kubebuilder:default=7
-	// +kubebuilder:validation:Minimum=0
-	Retention int32 `json:"retention,omitempty"`
-
-	// RetentionPolicy is the structured retention configuration. When
-	// set it replaces the shorthand Retention field and enables
-	// age-based pruning plus a min-keep safety floor.
+	// Retention decides which of this profile's MysqlBackup objects are
+	// deleted after each terminal backup. Deleting a backup removes its
+	// artifacts. See BackupRetention.
+	// +kubebuilder:default={}
 	// +optional
-	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
+	Retention BackupRetention `json:"retention,omitempty"`
 
 	// Verification, when set and Enabled=true, schedules periodic
 	// MysqlBackupVerification runs against the most recent Succeeded
@@ -335,7 +351,7 @@ type BackupProfile struct {
 	//
 	// The operator snapshots the passphrase into immutable Secrets it
 	// manages: each MysqlBackup encrypts its dump with its own snapshot
-	// (recorded in its status.artifactStorage.passphraseSecret), and the
+	// (recorded in its status.artifactStorage.passphraseSecretKeyRef), and the
 	// PITR archive with the snapshot its binding accepted
 	// (status.pitrArchiveBindings). Changing the passphrase bytes or this
 	// field on a profile in PITR archive use is refused: archive with a
@@ -369,17 +385,18 @@ type BackupEncryptionSpec struct {
 	// future releases can add envelope-over-KMS / XChaCha20-Poly1305
 	// / external key-manager modes without a breaking CRD bump.
 	// +kubebuilder:default="AES-256-GCM"
-	// +kubebuilder:validation:Enum=AES-256-GCM
-	Algorithm string `json:"algorithm,omitempty"`
+	// +optional
+	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`
 
-	// PassphraseSecret references the Secret in the same namespace
-	// as the MysqlFailoverGroup holding the passphrase. The
+	// PassphraseSecretKeyRef selects the Secret key, in the same namespace
+	// as the MysqlFailoverGroup, holding the passphrase. The
 	// passphrase must be non-empty; recommended length is >=32 bytes
 	// of random material (use `head -c 48 /dev/urandom | base64`).
-	PassphraseSecret PassphraseSecretRef `json:"passphraseSecret"`
+	// +required
+	PassphraseSecretKeyRef PassphraseSecretKeyRef `json:"passphraseSecretKeyRef"`
 }
 
-// PassphraseSecretRef points at a Secret key holding the passphrase
+// PassphraseSecretKeyRef points at a Secret key holding the passphrase
 // used as input to the per-file HKDF-SHA256 key derivation. The
 // same shape is reused by restore specs (spec.initFromBackup.decryption,
 // spec.restoreInPlace.decryption) and the standby cluster's
@@ -392,10 +409,12 @@ type BackupEncryptionSpec struct {
 // backup that never succeeded and recorded no dump key (made before dump
 // keys were recorded) runs its abandoned-artifact cleanup Job with this
 // Secret, to read that backup's stamp.
-type PassphraseSecretRef struct {
+type PassphraseSecretKeyRef struct {
 	// Name of the Secret.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
 	Name string `json:"name"`
 
 	// Key within the Secret that holds the passphrase bytes. Leading
@@ -404,6 +423,8 @@ type PassphraseSecretRef struct {
 	// +kubebuilder:default="passphrase"
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	// +optional
 	Key string `json:"key,omitempty"`
 }
 
@@ -415,48 +436,47 @@ type PassphraseSecretRef struct {
 // consumers never need to pick an Algorithm (the ciphertext header encodes
 // it), so the surface is just "where is the passphrase".
 type BackupDecryptionSpec struct {
-	// PassphraseSecret references the Secret holding the passphrase
+	// PassphraseSecretKeyRef selects the Secret key holding the passphrase
 	// that was used when the source artifact was originally encrypted.
 	// Bumping the Secret contents to a new value does not rotate the
 	// ciphertext — it will simply fail to decrypt.
-	PassphraseSecret PassphraseSecretRef `json:"passphraseSecret"`
+	// +required
+	PassphraseSecretKeyRef PassphraseSecretKeyRef `json:"passphraseSecretKeyRef"`
 }
 
-// RetentionPolicy is the structured retention configuration that replaces
-// the legacy single-int Retention shorthand on BackupProfile. All fields
-// are optional; a zero value disables the corresponding policy knob. The
-// reconciler keeps a successful MysqlBackup iff ANY of the enabled checks
-// say "keep":
-//
-//   - MinKeep: this many newest successes are always kept (safety floor).
-//   - Count: keep the newest Count successful CRs.
-//   - MaxAgeDays: keep successful CRs with completionTime newer than this.
-//
-// MinKeep is the critical knob: it prevents a retention sweep from wiping
-// the last good backup after a long outage in which every recent attempt
-// has failed.
-type RetentionPolicy struct {
-	// Count is the max number of successful CRs to keep. 0 disables
-	// count-based pruning.
-	// +kubebuilder:validation:Minimum=0
-	Count int32 `json:"count,omitempty"`
+// BackupRetention is a profile's retention. A successful backup is kept
+// when any rule keeps it: it is one of the newest KeepLast, or it
+// completed within KeepWithinDays. So a successful backup is deleted only
+// when it is outside KeepLast and older than KeepWithinDays. Failed
+// backups are counted separately, against KeepFailed. A backup that a
+// verification may be reading is kept until that run stops.
+type BackupRetention struct {
+	// KeepLast is how many of the newest successful backups are always
+	// kept. At least one is, so retention never deletes the last good
+	// backup.
+	// +kubebuilder:default=7
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	KeepLast int32 `json:"keepLast,omitempty"`
 
-	// MaxAgeDays is the maximum age (in days) of a successful CR before
-	// it becomes eligible for pruning. 0 disables age-based pruning.
-	// +kubebuilder:validation:Minimum=0
-	MaxAgeDays int32 `json:"maxAgeDays,omitempty"`
+	// KeepWithinDays also keeps every successful backup that completed
+	// within this many days, however many there are. Unset keeps by count
+	// only.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	KeepWithinDays *int32 `json:"keepWithinDays,omitempty"`
 
-	// MinKeep is a safety floor: this many newest successful CRs are
-	// always kept, regardless of Count / MaxAgeDays. Default: 1.
-	// +kubebuilder:default=1
-	// +kubebuilder:validation:Minimum=0
-	MinKeep int32 `json:"minKeep,omitempty"`
-
-	// MaxFailedKeep caps the Failed bucket independently of the success
-	// retention policy. Default: 10.
+	// KeepFailed is how many of the newest failed backups are kept; 0
+	// keeps none. A failed backup is kept for two minutes after the
+	// operator records its verdict, so a waiting client reads it. A
+	// failed backup that is still the latest of a schedule in
+	// spec.backup.schedules is kept until a newer backup of that schedule
+	// exists, whatever this says: spec.backup.retry retries it, and
+	// status.backupSchedules reports it.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
-	MaxFailedKeep int32 `json:"maxFailedKeep,omitempty"`
+	// +optional
+	KeepFailed *int32 `json:"keepFailed,omitempty"`
 }
 
 // BackupStorageType enumerates the supported storage backends.
@@ -473,6 +493,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="(self.type == 'S3' && has(self.s3) && !has(self.pvc)) || (self.type == 'PVC' && has(self.pvc) && !has(self.s3))",message="exactly one of s3 or pvc must be set and must match type"
 type BackupStorage struct {
 	// Type is the storage backend discriminator.
+	// +required
 	Type BackupStorageType `json:"type"`
 
 	// S3 configures an S3-compatible object store destination.
@@ -492,6 +513,7 @@ type S3Storage struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 63",message="bucket must be at most 63 bytes (UTF-8)"
+	// +required
 	Bucket string `json:"bucket"`
 
 	// Prefix is the object-name prefix inside the bucket. Each backup
@@ -504,9 +526,11 @@ type S3Storage struct {
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="prefix must be at most 512 bytes (UTF-8)"
 	// +kubebuilder:validation:Pattern=`^/?(([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*)?/?$`
+	// +optional
 	Prefix string `json:"prefix,omitempty"`
 
 	// Region is the AWS region. Optional for non-AWS S3 stores.
+	// +optional
 	Region string `json:"region,omitempty"`
 
 	// EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
@@ -515,20 +539,20 @@ type S3Storage struct {
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="endpointURL must be at most 512 bytes (UTF-8)"
 	// +kubebuilder:validation:Pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`
+	// +optional
 	EndpointURL string `json:"endpointURL,omitempty"`
 
-	// CredentialsSecret references a Secret whose keys provide AWS
+	// CredentialsSecretName names a Secret whose keys provide AWS
 	// credentials to backup and restore Jobs. Expected keys:
 	//   AWS_ACCESS_KEY_ID (required)
 	//   AWS_SECRET_ACCESS_KEY (required)
 	//   AWS_SESSION_TOKEN (optional)
 	//   AWS_REGION (optional, overrides .region)
 	// +kubebuilder:validation:MinLength=1
-	CredentialsSecret string `json:"credentialsSecret"`
-
-	// StorageClass is the S3 storage class (e.g. STANDARD_IA,
-	// DEEP_ARCHIVE). Informational; not enforced by the operator.
-	StorageClass string `json:"storageClass,omitempty"`
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
+	CredentialsSecretName string `json:"credentialsSecretName"`
 }
 
 // PVCStorage configures a local persistent volume as the backup destination.
@@ -539,12 +563,15 @@ type PVCStorage struct {
 	// operator provisions a PVC per profile.
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 253",message="claimName must be at most 253 bytes (UTF-8)"
+	// +optional
 	ClaimName string `json:"claimName,omitempty"`
 
 	// StorageClassName is used when the operator provisions the PVC.
+	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
 	// Size is used when the operator provisions the PVC.
+	// +optional
 	Size resource.Quantity `json:"size,omitempty"`
 
 	// SubPath inside the PVC to use. Each backup lands under
@@ -553,6 +580,7 @@ type PVCStorage struct {
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="subPath must be at most 512 bytes (UTF-8)"
 	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
+	// +optional
 	SubPath string `json:"subPath,omitempty"`
 }
 
@@ -561,32 +589,60 @@ type DumpOptions struct {
 	// Threads is the number of parallel dump threads.
 	// +kubebuilder:default=4
 	// +kubebuilder:validation:Minimum=1
+	// +optional
 	Threads int32 `json:"threads,omitempty"`
 
 	// BytesPerChunk is the approximate chunk size (e.g. "64M").
 	// +kubebuilder:default="64M"
+	// +optional
 	BytesPerChunk string `json:"bytesPerChunk,omitempty"`
 
 	// Compression algorithm used by the dump utility.
 	// +kubebuilder:default="zstd"
-	// +kubebuilder:validation:Enum=none;gzip;zstd
-	Compression string `json:"compression,omitempty"`
+	// +optional
+	Compression DumpCompression `json:"compression,omitempty"`
 
 	// ExcludeSchemas skipped by the dump.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
 	ExcludeSchemas []string `json:"excludeSchemas,omitempty"`
 
 	// IncludeSchemas, if non-empty, restricts the dump to these schemas.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
 	IncludeSchemas []string `json:"includeSchemas,omitempty"`
 
 	// Consistent toggles consistent (locking) dumps. Requires BACKUP_ADMIN
 	// on the MySQL user.
 	// +kubebuilder:default=true
+	// +optional
 	Consistent *bool `json:"consistent,omitempty"`
 
 	// Ocimds enables MySQL HeatWave Service compatibility checks.
 	// +kubebuilder:default=false
+	// +optional
 	Ocimds *bool `json:"ocimds,omitempty"`
 }
+
+// DumpCompression is the util.dumpInstance() compression option. The
+// values are mysqlsh's own and are passed to it verbatim.
+// +kubebuilder:validation:Enum=none;gzip;zstd
+type DumpCompression string
+
+const (
+	// DumpCompressionNone stores the dump chunks uncompressed.
+	DumpCompressionNone DumpCompression = "none"
+	// DumpCompressionGzip compresses the dump chunks with gzip.
+	DumpCompressionGzip DumpCompression = "gzip"
+	// DumpCompressionZstd compresses the dump chunks with zstd.
+	DumpCompressionZstd DumpCompression = "zstd"
+)
 
 // BackupSchedule drives recurring backups via a Kubernetes CronJob owned
 // by the operator. Each schedule references a named profile. The CronJob's
@@ -594,17 +650,24 @@ type DumpOptions struct {
 // subcommand; the MysqlBackupReconciler then materializes the backup Job.
 type BackupSchedule struct {
 	// Name uniquely identifies this schedule within the failover group.
+	// It is used as a label value, hence the 63-character bound.
+	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// ProfileName references a BackupProfile by name.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	ProfileName string `json:"profileName"`
 
 	// Schedule is a standard cron expression (5 fields). Evaluation uses
 	// TimeZone below, not kube-controller-manager's local clock.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Schedule string `json:"schedule"`
 
 	// TimeZone is an IANA timezone name ("America/Los_Angeles",
@@ -617,29 +680,35 @@ type BackupSchedule struct {
 	// cron at different wall-clock times. Per-schedule TimeZone makes
 	// backups reproducible regardless of where the control plane runs.
 	// +kubebuilder:default="Etc/UTC"
+	// +optional
 	TimeZone string `json:"timeZone,omitempty"`
 
 	// Suspend pauses this schedule without deleting the CronJob.
 	// +kubebuilder:default=false
+	// +optional
 	Suspend bool `json:"suspend,omitempty"`
 
 	// StartingDeadlineSeconds is forwarded to the CronJob spec.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	StartingDeadlineSeconds *int64 `json:"startingDeadlineSeconds,omitempty"`
 
 	// ConcurrencyPolicy is forwarded to the CronJob spec.
 	// +kubebuilder:default=Forbid
 	// +kubebuilder:validation:Enum=Allow;Forbid;Replace
-	ConcurrencyPolicy string `json:"concurrencyPolicy,omitempty"`
+	// +optional
+	ConcurrencyPolicy batchv1.ConcurrencyPolicy `json:"concurrencyPolicy,omitempty"`
 
 	// SuccessfulJobsHistoryLimit is forwarded to the CronJob spec.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	SuccessfulJobsHistoryLimit *int32 `json:"successfulJobsHistoryLimit,omitempty"`
 
 	// FailedJobsHistoryLimit is forwarded to the CronJob spec.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	FailedJobsHistoryLimit *int32 `json:"failedJobsHistoryLimit,omitempty"`
 }
 
@@ -652,8 +721,9 @@ type BackupSchedule struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.pointInTime) || has(self.pointInTime.archiveProfileName)",message="pointInTime.archiveProfileName is required: name the backup profile whose PITR archive the restore reads"
 type InitFromBackupSpec struct {
 	// Source is a tagged reference to the artifact to restore.
-	// +kubebuilder:validation:XValidation:rule="(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of mysqlBackupRef, s3, or pvc must be set"
-	Source InitFromBackupSource `json:"source"`
+	// +kubebuilder:validation:XValidation:rule="(has(self.backupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of backupRef, s3, or pvc must be set"
+	// +required
+	Source RestoreSource `json:"source"`
 
 	// LoadOptions are forwarded to util.loadDump(). Omit for sane defaults.
 	// +optional
@@ -669,8 +739,8 @@ type InitFromBackupSpec struct {
 
 	// Decryption, when set, provides the passphrase that decrypts the
 	// source dump. The dump key is resolved in this order: Decryption;
-	// else, for a MysqlBackupRef source, the dump-key snapshot that backup
-	// recorded (status.artifactStorage.passphraseSecret); else the restore
+	// else, for a backupRef source, the dump-key snapshot that backup
+	// recorded (status.artifactStorage.passphraseSecretKeyRef); else the restore
 	// is refused (PITRBackupDumpKeyMissing). The profile's live
 	// passphrase Secret is never used: it may hold other bytes since the
 	// backup ran. For direct S3/PVC sources of encrypted dumps Decryption
@@ -681,14 +751,15 @@ type InitFromBackupSpec struct {
 	Decryption *BackupDecryptionSpec `json:"decryption,omitempty"`
 }
 
-// InitFromBackupSource is the tagged-union selector for the restore source.
-type InitFromBackupSource struct {
-	// MysqlBackupRef restores from a previously-completed MysqlBackup in
-	// the same namespace. Its status.location is resolved automatically.
+// RestoreSource is the tagged-union selector for the restore source.
+type RestoreSource struct {
+	// BackupRef restores from a previously-completed MysqlBackup in
+	// the same namespace. Its status.artifactStorage is resolved
+	// automatically.
 	// +optional
-	MysqlBackupRef *corev1.LocalObjectReference `json:"mysqlBackupRef,omitempty"`
+	BackupRef *LocalMysqlBackupRef `json:"backupRef,omitempty"`
 
-	// S3 restores directly from an S3 URL. Requires credentialsSecret.
+	// S3 restores directly from an S3 URL. Requires credentialsSecretName.
 	// +optional
 	S3 *S3Storage `json:"s3,omitempty"`
 
@@ -705,6 +776,7 @@ type InitFromBackupPVCSource struct {
 	// ClaimName is the name of an existing PersistentVolumeClaim in the same
 	// namespace to use as the restore source.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	ClaimName string `json:"claimName"`
 
 	// SubPath inside the PVC where the dump is located. Optional.
@@ -719,15 +791,8 @@ type LoadOptions struct {
 	// Threads is the number of parallel load threads.
 	// +kubebuilder:default=4
 	// +kubebuilder:validation:Minimum=1
+	// +optional
 	Threads int32 `json:"threads,omitempty"`
-
-	// ResetProgress clears previous loadDump progress tracking. Restore
-	// and verification Jobs disable progress tracking (local dump sources
-	// are mounted read-only, and restore state is kept out of backup
-	// storage), so this field currently has no effect and is kept for
-	// compatibility.
-	// +kubebuilder:default=true
-	ResetProgress *bool `json:"resetProgress,omitempty"`
 
 	// SkipBinlog disables binary logging during the load to speed it up.
 	// For in-place restores that must replicate to the peer site via
@@ -735,10 +800,12 @@ type LoadOptions struct {
 	// should set this to false so the load's DDL/DMLs flow through the
 	// primary's binlog to the replica.
 	// +kubebuilder:default=true
+	// +optional
 	SkipBinlog *bool `json:"skipBinlog,omitempty"`
 
 	// LoadIndexes controls whether indexes are rebuilt during load.
 	// +kubebuilder:default=true
+	// +optional
 	LoadIndexes *bool `json:"loadIndexes,omitempty"`
 
 	// IncludeSchemas, if non-empty, restricts the load to these schemas.
@@ -746,11 +813,19 @@ type LoadOptions struct {
 	// (e.g. migrating one client schema into its own failover group).
 	// Forwarded to util.loadDump() as includeSchemas.
 	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
 	IncludeSchemas []string `json:"includeSchemas,omitempty"`
 
 	// ExcludeSchemas, if non-empty, skips these schemas during load.
 	// Forwarded to util.loadDump() as excludeSchemas.
 	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=64
 	ExcludeSchemas []string `json:"excludeSchemas,omitempty"`
 }
 
@@ -758,39 +833,48 @@ type LoadOptions struct {
 // MysqlFailoverGroupStatus.
 type BackupScheduleStatus struct {
 	// Name of the schedule this entry describes.
+	// +required
 	Name string `json:"name"`
 
 	// CronJobName is the name of the Kubernetes CronJob that materializes
 	// this schedule.
+	// +optional
 	CronJobName string `json:"cronJobName,omitempty"`
 
 	// LastScheduleTime is the most recent time this schedule created a
 	// MysqlBackup CR.
+	// +optional
 	LastScheduleTime *metav1.Time `json:"lastScheduleTime,omitempty"`
 
 	// LastSuccessfulTime is the most recent time a MysqlBackup created by
 	// this schedule reached the Succeeded phase.
+	// +optional
 	LastSuccessfulTime *metav1.Time `json:"lastSuccessfulTime,omitempty"`
 
 	// LastBackupName is the name of the most recent MysqlBackup created
 	// by this schedule.
+	// +optional
 	LastBackupName string `json:"lastBackupName,omitempty"`
 
 	// LastBackupPhase is the phase of that most-recent MysqlBackup.
-	LastBackupPhase string `json:"lastBackupPhase,omitempty"`
+	// +optional
+	LastBackupPhase BackupPhase `json:"lastBackupPhase,omitempty"`
 
 	// LastSuccessfulBackupName is the name of the most recent Succeeded
 	// MysqlBackup created by this schedule. Lets dashboards link to the
 	// last known-good CR even after a subsequent failure.
+	// +optional
 	LastSuccessfulBackupName string `json:"lastSuccessfulBackupName,omitempty"`
 
 	// LastRetryAttempt is the attempt counter of the latest CR (or the
 	// latest retry created off it). 0 or 1 for the original attempt.
+	// +optional
 	LastRetryAttempt int32 `json:"lastRetryAttempt,omitempty"`
 
 	// NextRetryTime, when set, is the earliest time the operator will
 	// create a retry CR for a Failed latest attempt. Used by the
 	// scheduler loop to wake up at exactly the right moment.
+	// +optional
 	NextRetryTime *metav1.Time `json:"nextRetryTime,omitempty"`
 
 	// RetryConflict names the existing MysqlBackup whose lineage blocks
@@ -829,6 +913,7 @@ type BackupScheduleStatus struct {
 // session's current default database at log time, not on the schemas
 // actually referenced. For well-isolated multi-tenant schemas this is
 // fine; for cross-schema apps, use a full-instance restore instead.
+// +kubebuilder:validation:XValidation:rule="!has(self.loadOptions) || !has(self.loadOptions.includeSchemas) || size(self.loadOptions.includeSchemas) <= 1",message="restoreInPlace.loadOptions.includeSchemas supports at most one schema; use a full-instance restore instead"
 type RestoreInPlaceSpec struct {
 	// Confirm is a required anti-fat-finger token that gates the
 	// destructive restore. Must be an RFC 3339 timestamp (e.g.
@@ -839,11 +924,13 @@ type RestoreInPlaceSpec struct {
 	// while also protecting against replay (an older manifest applied
 	// accidentally will not re-trigger a restore).
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Confirm string `json:"confirm"`
 
 	// Source is a tagged reference to the artifact to restore.
-	// +kubebuilder:validation:XValidation:rule="(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of mysqlBackupRef, s3, or pvc must be set"
-	Source InitFromBackupSource `json:"source"`
+	// +kubebuilder:validation:XValidation:rule="(has(self.backupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of backupRef, s3, or pvc must be set"
+	// +required
+	Source RestoreSource `json:"source"`
 
 	// LoadOptions are forwarded to util.loadDump(). In-place restores
 	// require includeSchemas to be either empty (full instance) or
@@ -853,22 +940,11 @@ type RestoreInPlaceSpec struct {
 	// +optional
 	LoadOptions *LoadOptions `json:"loadOptions,omitempty"`
 
-	// PointInTime is not supported for in-place restores yet; the
-	// operator rejects a restore that sets it (RestoreInPlaceRejected)
-	// before fencing anything, without consuming confirm. The replayed
-	// binlogs carry GTIDs the live primary has already executed, so the
-	// replay would be skipped and the restore would stop at the backup.
-	// To recover to a point in time, restore into a new failover group
-	// with initFromBackup.pointInTime. The field is kept so existing
-	// objects still validate.
-	// +optional
-	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
-
 	// Decryption, when set, provides the passphrase that decrypts the
 	// source dump, resolved as InitFromBackupSpec.Decryption is:
-	// Decryption; else, for a MysqlBackupRef source, the dump-key
+	// Decryption; else, for a backupRef source, the dump-key
 	// snapshot that backup recorded
-	// (status.artifactStorage.passphraseSecret); else the restore is
+	// (status.artifactStorage.passphraseSecretKeyRef); else the restore is
 	// refused (PITRBackupDumpKeyMissing). The profile's live passphrase
 	// Secret is never used. For direct S3/PVC sources of encrypted dumps
 	// Decryption is required. Archived binlogs are decrypted with the key
@@ -890,15 +966,13 @@ type RestoreInPlaceSpec struct {
 // The in-place restore is considered Succeeded once the primary has the
 // fresh data; the peers are recloned afterwards, and until then they are
 // excluded from automatic promotion and the reader Services.
-// +kubebuilder:validation:Enum="";Preflight;Fencing;Restoring;Resuming;Succeeded;Failed
+//
+// A terminal status is kept, even after spec.restoreInPlace is removed, so
+// its confirmTokenUsed keeps blocking replays.
+// +kubebuilder:validation:Enum=Preflight;Fencing;Restoring;Resuming;Succeeded;Failed
 type RestoreInPlacePhase string
 
 const (
-	// RestoreInPlaceNone is the zero value (no in-place restore has been
-	// observed). A terminal status is kept, even after spec.restoreInPlace
-	// is removed, so its confirmTokenUsed keeps blocking replays.
-	RestoreInPlaceNone RestoreInPlacePhase = ""
-
 	// RestoreInPlacePreflight means the operator has accepted the
 	// confirmation token and is validating preconditions (active site
 	// writable, deployment rolled out, source artifact resolvable).
@@ -980,11 +1054,13 @@ const (
 type RestoreReclonesStatus struct {
 	// ConfirmToken is the spec.restoreInPlace.confirm value of the
 	// restore that owns this queue.
+	// +required
 	ConfirmToken string `json:"confirmToken"`
 
 	// Phase is Armed while the owning restore runs and Draining after it
 	// succeeded. Held means a restore ran on the primary and failed, so
 	// nothing is cloned from it.
+	// +required
 	Phase RestoreReclonesPhase `json:"phase"`
 
 	// FencedGtidExecuted is the primary's @@GLOBAL.gtid_executed when the
@@ -997,10 +1073,11 @@ type RestoreReclonesStatus struct {
 	FencedGtidExecuted string `json:"fencedGtidExecuted,omitempty"`
 
 	// Pending lists the peer sites still to be recloned, in the order
-	// they are recloned (primary-candidate sites first). Pending sites
+	// they are recloned (PrimaryCandidate sites first). Pending sites
 	// are never promoted automatically and are removed from the -replica
 	// and read-only Services.
 	// +optional
+	// +listType=atomic
 	Pending []string `json:"pending,omitempty"`
 
 	// Requested is the pending site whose reclone the operator has
@@ -1008,16 +1085,18 @@ type RestoreReclonesStatus struct {
 	// +optional
 	Requested string `json:"requested,omitempty"`
 
-	// RequestedAt is when Requested was set. A request whose clone has
+	// RequestTime is when Requested was set. A request whose clone has
 	// not started within a few minutes counts as a failed attempt, so one
 	// site that cannot be cloned does not hold up the others.
 	// +optional
-	RequestedAt *metav1.Time `json:"requestedAt,omitempty"`
+	RequestTime *metav1.Time `json:"requestTime,omitempty"`
 
 	// Failures holds the latest failed reclone attempt of each pending
 	// site that has one. A site is retried after a short backoff; other
-	// pending sites are recloned in the meantime.
+	// pending sites are recloned in the meantime. Keyed by site.
 	// +optional
+	// +listType=map
+	// +listMapKey=site
 	Failures []RestoreRecloneFailure `json:"failures,omitempty"`
 
 	// Superseded is the queue of an earlier restore that this one
@@ -1031,13 +1110,18 @@ type RestoreReclonesStatus struct {
 
 // RestoreRecloneFailure is the latest failed reclone attempt of one site.
 type RestoreRecloneFailure struct {
-	// Site is the pending site whose reclone failed.
+	// Site is the pending site whose reclone failed: the key of
+	// failures.
+	// +required
+	// +kubebuilder:validation:MinLength=1
 	Site string `json:"site"`
 
 	// Message describes the failure.
+	// +required
 	Message string `json:"message"`
 
 	// Time is when the failure was recorded.
+	// +required
 	Time metav1.Time `json:"time"`
 }
 
@@ -1045,10 +1129,12 @@ type RestoreRecloneFailure struct {
 // queue a later restore keeps until it succeeds.
 type RestoreReclonesCarryover struct {
 	// ConfirmToken is the earlier restore's confirm token.
+	// +required
 	ConfirmToken string `json:"confirmToken"`
 
 	// Pending lists the earlier restore's sites not yet recloned.
 	// +optional
+	// +listType=atomic
 	Pending []string `json:"pending,omitempty"`
 
 	// Held is true when the earlier queue was already Held: the primary
@@ -1065,10 +1151,12 @@ type RestoreReclonesCarryover struct {
 // puts the prior value back once the restore has finished.
 type RestoreOfflineFenceStatus struct {
 	// Site is the primary the fence applies to.
+	// +required
 	Site string `json:"site"`
 
 	// ConfirmToken is the spec.restoreInPlace.confirm value of the
 	// restore that owns the fence.
+	// +required
 	ConfirmToken string `json:"confirmToken"`
 
 	// RunID is status.restoreInPlace.runID of the run that owns the
@@ -1090,13 +1178,42 @@ type RestoreOfflineFenceStatus struct {
 	SessionsEvicted bool `json:"sessionsEvicted,omitempty"`
 }
 
+// RestoreScopeType is what an in-place restore restores.
+// +kubebuilder:validation:Enum=Full;Schema
+type RestoreScopeType string
+
+const (
+	// RestoreScopeFull restores the whole instance.
+	RestoreScopeFull RestoreScopeType = "Full"
+	// RestoreScopeSchema restores one schema, named by RestoreScope.Schema.
+	RestoreScopeSchema RestoreScopeType = "Schema"
+)
+
+// RestoreScope is the scope of an accepted in-place restore, inferred from
+// spec.restoreInPlace.loadOptions.includeSchemas: one schema is a Schema
+// restore, none is a Full restore.
+// +kubebuilder:validation:XValidation:rule="self.type == 'Schema' ? has(self.schema) : !has(self.schema)",message="schema is required when type is Schema, and forbidden otherwise"
+type RestoreScope struct {
+	// Type is Full or Schema.
+	// +required
+	Type RestoreScopeType `json:"type"`
+
+	// Schema is the restored schema when Type is Schema.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Schema string `json:"schema,omitempty"`
+}
+
 // RestoreInPlaceStatus tracks an in-flight or completed in-place
 // restore.
 type RestoreInPlaceStatus struct {
 	// Phase of the in-place restore.
+	// +optional
 	Phase RestoreInPlacePhase `json:"phase,omitempty"`
 
 	// JobName is the name of the batchv1.Job performing the load.
+	// +optional
 	JobName string `json:"jobName,omitempty"`
 
 	// JobCreating is set, with RunConfirm bound, before the restore Job
@@ -1110,11 +1227,13 @@ type RestoreInPlaceStatus struct {
 
 	// TargetSite is the site that received the load (always the active
 	// primary at the moment of preflight).
+	// +optional
 	TargetSite string `json:"targetSite,omitempty"`
 
-	// Scope is a human-readable tag: "full" for a full-instance
-	// restore, or "schema:<name>" for a per-schema restore.
-	Scope string `json:"scope,omitempty"`
+	// Scope is what the run restores: the whole instance, or one schema.
+	// It is pinned when the run is accepted.
+	// +optional
+	Scope *RestoreScope `json:"scope,omitempty"`
 
 	// ConfirmTokenUsed records the spec.restoreInPlace.confirm value of
 	// the most recent executed restore. Subsequent reconciles ignore
@@ -1124,6 +1243,7 @@ type RestoreInPlaceStatus struct {
 	// and it is kept when spec.restoreInPlace is removed. A run whose Job
 	// disappeared after spec.restoreInPlace was removed (JobLost) may
 	// have executed, so it records that run's confirm (RunConfirm).
+	// +optional
 	ConfirmTokenUsed string `json:"confirmTokenUsed,omitempty"`
 
 	// RunConfirm is the spec.restoreInPlace.confirm of the run in
@@ -1143,40 +1263,83 @@ type RestoreInPlaceStatus struct {
 	RunID string `json:"runID,omitempty"`
 
 	// StartTime is when the restore entered Preflight.
+	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
 	// CompletionTime is when the restore reached a terminal phase.
+	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// SourceSizeBytes is the source backup artifact size in bytes when
-	// known from a referenced MysqlBackup. 0 means unknown.
-	SourceSizeBytes int64 `json:"sourceSizeBytes,omitempty"`
-
-	// SourceGtidExecuted is the referenced MysqlBackup GTID set when known.
-	SourceGtidExecuted string `json:"sourceGtidExecuted,omitempty"`
-
-	// SourceBinlogFile is the referenced MysqlBackup binary log file when known.
-	SourceBinlogFile string `json:"sourceBinlogFile,omitempty"`
-
-	// SourceBinlogPos is the referenced MysqlBackup binary log position when known.
-	SourceBinlogPos int64 `json:"sourceBinlogPos,omitempty"`
-
-	// TargetGtidExecuted is @@global.gtid_executed on the target after load and optional PITR.
-	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
-
-	// TargetBinlogFile is the target binary log file after load and optional PITR.
-	TargetBinlogFile string `json:"targetBinlogFile,omitempty"`
-
-	// TargetBinlogPos is the target binary log position after load and optional PITR.
-	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
-
-	// PointInTime is the certified outcome of the point-in-time replay,
-	// read from the replay's verdict. Unset without pointInTime.
+	// Provenance records what the restore loaded and what the target held
+	// afterwards. An in-place restore never replays binary logs, so its
+	// provenance.pointInTime stays unset.
 	// +optional
-	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
+	Provenance *RestoreProvenance `json:"provenance,omitempty"`
 
 	// Message is a human-readable status line.
+	// +optional
 	Message string `json:"message,omitempty"`
+}
+
+// RestoreProvenance is the provenance of a restore: the backup it loaded,
+// the target after the load, and the point-in-time replay's result.
+type RestoreProvenance struct {
+	// Source is what the referenced MysqlBackup recorded about its
+	// artifact. Absent when the source was not a MysqlBackup.
+	// +optional
+	Source *RestoreSourceProvenance `json:"source,omitempty"`
+
+	// Target is the target's state after the load and any replay.
+	// +optional
+	Target *RestoreTargetProvenance `json:"target,omitempty"`
+
+	// PointInTime is the certified outcome of the point-in-time replay,
+	// read from the replay's verdict. Unset when no replay ran.
+	// +optional
+	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
+}
+
+// RestoreSourceProvenance is what the source MysqlBackup recorded about
+// its artifact.
+type RestoreSourceProvenance struct {
+	// SizeBytes is the artifact size in bytes. Unset when unknown.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
+
+	// GtidExecuted is the GTID set the backup recorded.
+	// +optional
+	GtidExecuted string `json:"gtidExecuted,omitempty"`
+
+	// BinlogPosition is the binary-log position the backup recorded.
+	// +optional
+	BinlogPosition *BinlogCoordinate `json:"binlogPosition,omitempty"`
+}
+
+// RestoreTargetProvenance is the restore target's state after the load and
+// any point-in-time replay.
+type RestoreTargetProvenance struct {
+	// GtidExecuted is @@global.gtid_executed on the target.
+	// +optional
+	GtidExecuted string `json:"gtidExecuted,omitempty"`
+
+	// BinlogPosition is the target's binary-log position.
+	// +optional
+	BinlogPosition *BinlogCoordinate `json:"binlogPosition,omitempty"`
+}
+
+// BinlogCoordinate is a position in a server's binary log.
+type BinlogCoordinate struct {
+	// File is the binary-log file name, e.g. "mysql-bin.000412".
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	File string `json:"file"`
+
+	// Position is the byte offset within File.
+	// +required
+	// +kubebuilder:validation:Minimum=0
+	Position int64 `json:"position"`
 }
 
 // RestoreStatus tracks an in-flight or completed initFromBackup run.
@@ -1184,54 +1347,42 @@ type RestoreStatus struct {
 	// JobUID identifies the producing Job across retries using the same name.
 	// +optional
 	JobUID string `json:"jobUID,omitempty"`
-	// Reason is the failure token (the first word of the failing step's
-	// termination message, for example PITRArchiveDivergentHistory), or
-	// PointInTimePartial on a partial point-in-time success.
+	// Reason is the failure token: the PITR catalog token found in the
+	// failing step's termination message, for example
+	// PITRArchiveDivergentHistory. Absent on success and for a failure
+	// that carries no token.
 	// +optional
-	Reason string `json:"reason,omitempty"`
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
+	Reason PITRToken `json:"reason,omitempty"`
 
 	// Phase of the restore Job.
+	// +optional
 	Phase BackupPhase `json:"phase,omitempty"`
 
 	// JobName is the name of the batchv1.Job performing the restore.
+	// +optional
 	JobName string `json:"jobName,omitempty"`
 
 	// TargetSite is the site name whose MySQL instance is being populated.
+	// +optional
 	TargetSite string `json:"targetSite,omitempty"`
 
 	// StartTime is when the restore Job was created.
+	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
 	// CompletionTime is when the restore Job reached a terminal state.
+	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// SourceSizeBytes is the source backup artifact size in bytes when
-	// known from a referenced MysqlBackup. 0 means unknown.
-	SourceSizeBytes int64 `json:"sourceSizeBytes,omitempty"`
-
-	// SourceGtidExecuted is the referenced MysqlBackup GTID set when known.
-	SourceGtidExecuted string `json:"sourceGtidExecuted,omitempty"`
-
-	// SourceBinlogFile is the referenced MysqlBackup binary log file when known.
-	SourceBinlogFile string `json:"sourceBinlogFile,omitempty"`
-
-	// SourceBinlogPos is the referenced MysqlBackup binary log position when known.
-	SourceBinlogPos int64 `json:"sourceBinlogPos,omitempty"`
-
-	// TargetGtidExecuted is @@global.gtid_executed on the target after load and optional PITR.
-	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
-
-	// TargetBinlogFile is the target binary log file after load and optional PITR.
-	TargetBinlogFile string `json:"targetBinlogFile,omitempty"`
-
-	// TargetBinlogPos is the target binary log position after load and optional PITR.
-	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
-
-	// PointInTime is the certified outcome of the point-in-time replay,
-	// read from the replay's verdict. Unset without pointInTime.
+	// Provenance records what the restore loaded, what the target held
+	// afterwards and, with spec.initFromBackup.pointInTime, the certified
+	// outcome of the point-in-time replay.
 	// +optional
-	PointInTime *PointInTimeResult `json:"pointInTime,omitempty"`
+	Provenance *RestoreProvenance `json:"provenance,omitempty"`
 
 	// Message is a human-readable status message.
+	// +optional
 	Message string `json:"message,omitempty"`
 }

@@ -15,7 +15,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
-	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 // fgWithDragonfly returns a baseline failover group with Dragonfly enabled
@@ -27,8 +26,8 @@ func fgWithDragonfly(opts ...func(*v1alpha1.MysqlFailoverGroup)) *v1alpha1.Mysql
 		Image:           "docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0",
 		Port:            6379,
 		AdminPort:       9999,
-		MaxMemoryMb:     256,
-		ProactorThreads: 2,
+		MaxMemory:       new(resource.MustParse("256Mi")),
+		ProactorThreads: new(int32(2)),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("250m"),
@@ -63,7 +62,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 			t.Errorf("%s: nodeSelector zone = %q, want lion-%s", siteName, got, siteName)
 		}
 		// Tolerates the failover group's db-readonly taint.
-		taintKey := platform.TaintKeyForGroup(fg.Name)
+		taintKey := v1alpha1.ReadOnlyTaintKey(fg.Namespace, fg.Name)
 		found := false
 		for _, tol := range sts.Spec.Template.Spec.Tolerations {
 			if tol.Key == taintKey && tol.Operator == corev1.TolerationOpExists {
@@ -75,7 +74,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 			t.Errorf("%s: missing toleration for taint %q", siteName, taintKey)
 		}
 		// Pod label includes operator-assigned dragonfly-role=replica.
-		if got := sts.Spec.Template.ObjectMeta.Labels[labelDragonflyRole]; got != "replica" {
+		if got := sts.Spec.Template.ObjectMeta.Labels[v1alpha1.DragonflyRoleLabel]; got != "replica" {
 			t.Errorf("%s: dragonfly-role label = %q, want replica", siteName, got)
 		}
 		// Owner reference back to the failover group.
@@ -89,7 +88,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 		for _, want := range []string{
 			"--port=6379",
 			"--admin_port=9999",
-			"--maxmemory=256mb",
+			"--maxmemory=268435456",
 			"--proactor_threads=2",
 			"--break_replication_on_master_restart",
 		} {
@@ -113,7 +112,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 		if got := pdb.Spec.Selector.MatchLabels[labelInstance]; got != fg.Name {
 			t.Errorf("dragonfly PDB %s selector instance=%q, want %q", siteName, got, fg.Name)
 		}
-		if got := pdb.Spec.Selector.MatchLabels[labelSite]; got != siteName {
+		if got := pdb.Spec.Selector.MatchLabels[v1alpha1.SiteLabel]; got != siteName {
 			t.Errorf("dragonfly PDB %s selector site=%q, want %q", siteName, got, siteName)
 		}
 	}
@@ -122,8 +121,7 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 	fg := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
 		fg.Spec.Dragonfly.Auth = &v1alpha1.DragonflyAuthSpec{
-			SecretName:  "lion-dragonfly-auth",
-			PasswordKey: "password",
+			PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "lion-dragonfly-auth", Key: "password"},
 		}
 	})
 	r, c := newReconciler(fg)
@@ -171,14 +169,12 @@ func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 
 func TestReconcileDragonflyStatefulSet_SnapshotS3WiresDirAndServiceAccount(t *testing.T) {
 	fg := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
-		useHTTPS := false
 		signPayload := false
 		fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{
 			Dir:                   "s3://tenant-dragonfly/orders/prod",
 			ServiceAccountName:    "dragonfly-backup",
 			CredentialsSecretName: "dragonfly-s3",
-			S3Endpoint:            "rustfs.bloodraven-playground.svc.cluster.local:9000",
-			S3UseHTTPS:            &useHTTPS,
+			S3EndpointURL:         "http://rustfs.bloodraven-playground.svc.cluster.local:9000",
 			S3SignPayload:         &signPayload,
 		}
 		fg.Spec.Dragonfly.Args = []string{"--dir=/tmp/ignored", "--s3_endpoint=ignored"}
@@ -223,7 +219,7 @@ func TestReconcileDragonflyStatefulSet_SnapshotS3WiresDirAndServiceAccount(t *te
 func TestDesiredDragonflyStatefulSet_ProbeDefaultsAreExplicit(t *testing.T) {
 	fg := fgWithDragonfly()
 	r, _ := newReconciler(fg)
-	sts, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0])
+	sts, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0], nil)
 	if err != nil {
 		t.Fatalf("desiredDragonflyStatefulSet: %v", err)
 	}
@@ -246,7 +242,7 @@ func TestDesiredDragonflyStatefulSet_ProbeDefaultsAreExplicit(t *testing.T) {
 func TestDragonflyStatefulSetTemplateEqual_TreatsDefaultedPodSecurityContextAsEmpty(t *testing.T) {
 	fg := fgWithDragonfly()
 	r, _ := newReconciler(fg)
-	desired, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0])
+	desired, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0], nil)
 	if err != nil {
 		t.Fatalf("desiredDragonflyStatefulSet: %v", err)
 	}
@@ -278,9 +274,9 @@ func TestReconcileDragonflySiteService(t *testing.T) {
 		t.Fatalf("site service not created: %v", err)
 	}
 	wantSel := map[string]string{
-		labelAppName:  dragonflyAppName,
-		labelInstance: "lion",
-		labelSite:     "dc1",
+		labelAppName:       dragonflyAppName,
+		labelInstance:      "lion",
+		v1alpha1.SiteLabel: "dc1",
 	}
 	for k, v := range wantSel {
 		if got := svc.Spec.Selector[k]; got != v {
@@ -289,7 +285,7 @@ func TestReconcileDragonflySiteService(t *testing.T) {
 	}
 	// Selector must NOT carry dragonfly-role: per-site Service is for
 	// debugging and replication wiring, not for app traffic.
-	if _, ok := svc.Spec.Selector[labelDragonflyRole]; ok {
+	if _, ok := svc.Spec.Selector[v1alpha1.DragonflyRoleLabel]; ok {
 		t.Errorf("site Service selector unexpectedly includes dragonfly-role")
 	}
 }
@@ -304,19 +300,19 @@ func TestReconcileDragonflyActiveService_SelectsMasterRoleAndTraffic(t *testing.
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly", Namespace: "shared-lion"}, &svc); err != nil {
 		t.Fatalf("active service not created: %v", err)
 	}
-	// Selector AND-gates role=master AND traffic=enabled. Both labels
+	// Selector AND-gates role=master AND traffic=true. Both labels
 	// must be present so that removing the traffic label sheds an
 	// endpoint atomically without depending on role-flip ordering.
-	if got := svc.Spec.Selector[labelDragonflyRole]; got != "master" {
+	if got := svc.Spec.Selector[v1alpha1.DragonflyRoleLabel]; got != "master" {
 		t.Errorf("active service selector dragonfly-role = %q, want master", got)
 	}
-	if got := svc.Spec.Selector[labelDragonflyTraffic]; got != dragonflyTrafficEnabled {
+	if got := svc.Spec.Selector[v1alpha1.DragonflyTrafficLabel]; got != dragonflyTrafficEnabled {
 		t.Errorf("active service selector dragonfly-traffic = %q, want %q", got, dragonflyTrafficEnabled)
 	}
 	// Selector does NOT pin a specific site (the active site is
 	// determined by which pod carries the master label).
-	if _, ok := svc.Spec.Selector[labelSite]; ok {
-		t.Errorf("active service selector unexpectedly pins labelSite")
+	if _, ok := svc.Spec.Selector[v1alpha1.SiteLabel]; ok {
+		t.Errorf("active service selector unexpectedly pins v1alpha1.SiteLabel")
 	}
 }
 
@@ -330,7 +326,7 @@ func TestReconcileDragonflyStatefulSet_PodTemplateSeedsTrafficEnabled(t *testing
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &sts); err != nil {
 		t.Fatalf("statefulset not created: %v", err)
 	}
-	if got := sts.Spec.Template.ObjectMeta.Labels[labelDragonflyTraffic]; got != dragonflyTrafficEnabled {
+	if got := sts.Spec.Template.ObjectMeta.Labels[v1alpha1.DragonflyTrafficLabel]; got != dragonflyTrafficEnabled {
 		t.Errorf("pod template traffic label = %q, want %q", got, dragonflyTrafficEnabled)
 	}
 }
@@ -407,7 +403,7 @@ func TestReconcileDragonflyResources_DisabledTearsDownPriorResources(t *testing.
 func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 10}})
@@ -474,7 +470,7 @@ func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t
 func TestReconcileDragonflyResources_SerializesImageRolloutWhenActiveSiteIsSecond(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 2}})
@@ -529,7 +525,7 @@ func TestReconcileDragonflyResources_SerializesImageRolloutWhenActiveSiteIsSecon
 func TestReconcileDragonflyResources_UsesUncachedStatefulSetForActiveDrift(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 2}})
@@ -585,7 +581,7 @@ func TestReconcileDragonflyResources_UsesUncachedStatefulSetForActiveDrift(t *te
 func TestReconcileDragonflyResources_HoldsActiveImageUntilReplicaReady(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	ctx := context.Background()
 	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {
@@ -615,7 +611,7 @@ func TestReconcileDragonflyResources_HoldsActiveImageUntilReplicaReady(t *testin
 // the split-brain guard. Verify the filter strips matching flags.
 func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
 	spec := &v1alpha1.DragonflySpec{
-		MaxMemoryMb: 256,
+		MaxMemory: new(resource.MustParse("256Mi")),
 		Args: []string{
 			// Forms gflags accepts: try both for each flag we filter.
 			"--break_replication_on_master_restart=false",
@@ -660,14 +656,14 @@ func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
 }
 
 // TestBuildDragonflyEnv_EmptySecretNameOmitsEnv regression-tests B8:
-// when auth.SecretName is empty (unset by partial in-place patch or
-// admission-webhook bypass), the env var must not be emitted with an
+// when auth.passwordSecretKeyRef.name is empty (a client that skips
+// admission), the env var must not be emitted with an
 // empty SecretKeyRef name — that produces a pod that fails to start
 // with a secret-not-found event rather than a clean reconcile error.
 // The corresponding --requirepass / --masterauth args must also be omitted.
 func TestBuildDragonflyEnv_EmptySecretNameOmitsEnv(t *testing.T) {
 	spec := &v1alpha1.DragonflySpec{
-		Auth: &v1alpha1.DragonflyAuthSpec{SecretName: ""},
+		Auth: &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: ""}},
 	}
 	if env := buildDragonflyEnv(spec); env != nil {
 		t.Errorf("expected nil env when SecretName empty; got %+v", env)
@@ -679,6 +675,66 @@ func TestBuildDragonflyEnv_EmptySecretNameOmitsEnv(t *testing.T) {
 	}
 	if contains(joined, "--masterauth") {
 		t.Errorf("--masterauth emitted with empty SecretName; args = %q", joined)
+	}
+}
+
+// TestDragonflyS3EndpointArgs pins the adapter from the API's
+// s3EndpointURL to Dragonfly's --s3_endpoint (host[:port], no scheme) and
+// --s3_use_https (the scheme as a boolean).
+func TestDragonflyS3EndpointArgs(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want []string
+	}{
+		{"http://rustfs.default.svc.cluster.local:9000", []string{"--s3_endpoint=rustfs.default.svc.cluster.local:9000", "--s3_use_https=false"}},
+		{"http://rustfs.default.svc.cluster.local", []string{"--s3_endpoint=rustfs.default.svc.cluster.local", "--s3_use_https=false"}},
+		{"https://minio.example.com:9443", []string{"--s3_endpoint=minio.example.com:9443", "--s3_use_https=true"}},
+		{"https://minio.example.com", []string{"--s3_endpoint=minio.example.com", "--s3_use_https=true"}},
+		{"https://minio.example.com/", []string{"--s3_endpoint=minio.example.com", "--s3_use_https=true"}},
+		{"http://[fd00::1]:9000", []string{"--s3_endpoint=[fd00::1]:9000", "--s3_use_https=false"}},
+		// Empty means AWS S3 with Dragonfly's defaults: no flag at all.
+		{"", nil},
+		// Not admissible; never rendered into a flag Dragonfly would misread.
+		{"rustfs:9000", nil},
+		{"https://", nil},
+		{"https://minio.example.com/bucket", nil},
+		// N-13: an empty, non-numeric or out-of-range port.
+		{"http://rustfs:", nil},
+		{"http://rustfs:abc", nil},
+		{"http://rustfs:0", nil},
+		{"http://rustfs:65536", nil},
+		{"http://rustfs:09000", nil},
+		{"http://rustfs:9000:1", nil},
+		{"http://[fd00::1]:", nil},
+		{"http://[fd00::1]x", nil},
+		{"http://[]:9000", nil},
+		{"http://rustfs:65535", []string{"--s3_endpoint=rustfs:65535", "--s3_use_https=false"}},
+		{"http://[fd00::1]", []string{"--s3_endpoint=[fd00::1]", "--s3_use_https=false"}},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			got := dragonflyS3EndpointArgs(tc.url)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("dragonflyS3EndpointArgs(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+
+	// Through the args builder: the flags render only with a snapshot dir,
+	// and an https URL flips --s3_use_https.
+	spec := &v1alpha1.DragonflySpec{Snapshot: &v1alpha1.DragonflySnapshotSpec{
+		Dir:           "s3://bucket/prefix",
+		S3EndpointURL: "https://s3.example.com:8443",
+	}}
+	joined := joinArgs(buildDragonflyArgs(spec, 6379, 9999))
+	for _, want := range []string{"--s3_endpoint=s3.example.com:8443", "--s3_use_https=true"} {
+		if !contains(joined, want) {
+			t.Errorf("args missing %q: %s", want, joined)
+		}
+	}
+	spec.Snapshot.S3EndpointURL = ""
+	joined = joinArgs(buildDragonflyArgs(spec, 6379, 9999))
+	if contains(joined, "--s3_endpoint") || contains(joined, "--s3_use_https") {
+		t.Errorf("empty s3EndpointURL must emit neither flag: %s", joined)
 	}
 }
 
@@ -745,4 +801,26 @@ func (r statefulSetOverrideReader) Get(ctx context.Context, key client.ObjectKey
 		return r.sts.Get(ctx, key, obj, opts...)
 	}
 	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// TestBuildDragonflyArgs_MaxMemoryBytes (A-41, F-12): maxMemory renders as
+// --maxmemory in bytes, a fractional quantity rounds up to the next byte,
+// and an unset maxMemory or proactorThreads renders no flag.
+func TestBuildDragonflyArgs_MaxMemoryBytes(t *testing.T) {
+	for in, want := range map[string]string{
+		"512Mi": "--maxmemory=536870912",
+		"1G":    "--maxmemory=1000000000",
+		"1.5Gi": "--maxmemory=1610612736",
+		"1.5":   "--maxmemory=2",
+	} {
+		q := resource.MustParse(in)
+		joined := joinArgs(buildDragonflyArgs(&v1alpha1.DragonflySpec{MaxMemory: &q}, 6379, 9999))
+		if !contains(joined, want) {
+			t.Errorf("maxMemory %s: args %s, want %s", in, joined, want)
+		}
+	}
+	joined := joinArgs(buildDragonflyArgs(&v1alpha1.DragonflySpec{}, 6379, 9999))
+	if contains(joined, "--maxmemory") || contains(joined, "--proactor_threads") {
+		t.Errorf("unset maxMemory/proactorThreads rendered flags: %s", joined)
+	}
 }

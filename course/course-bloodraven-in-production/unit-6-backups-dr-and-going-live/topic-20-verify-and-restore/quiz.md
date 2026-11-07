@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: "1"` against a `minRows: 1` floor. What has it proved?
+A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.result: "1"` against a `minResult: 1` floor. What has it proved?
 
 - The artifact loads into a real mysqld, and your scalar assertion held. Nothing about the live primary.
 - The artifact is logically equivalent to the live primary as it stood when the dump was taken.
@@ -64,7 +64,7 @@ You apply a new group with `spec.initFromBackup.pointInTime` set, no `pointInTim
 
 **Explanation:**
 
-The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards in `status.restore` and a `RestoreBuildFailed` Warning Event — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. `spec.restoreInPlace.pointInTime` is refused at the same stage for a different reason: in place it is never supported, because the live primary already executed the archived GTIDs. (objective 6)
+The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards in `status.restore` and a `RestoreBuildFailed` Warning Event — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. `spec.restoreInPlace` has no `pointInTime` at all, for a different reason: in place it cannot work, because the live primary already executed the archived GTIDs. (objective 6)
 
 ## Question 5
 

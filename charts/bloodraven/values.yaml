@@ -14,6 +14,15 @@ image:
   # -- Image pull policy
   pullPolicy: IfNotPresent
 
+sidecar:
+  image:
+    # -- MySQL sidecar image repository. Failover groups that leave
+    # spec.sidecar.image empty run this image, so an operator upgrade moves
+    # their sidecars too. Point it at a mirror for air-gapped registries.
+    repository: ghcr.io/shipstream/bloodraven-sidecar
+    # -- Sidecar image tag (defaults to .Chart.AppVersion)
+    tag: ""
+
 # -- Image pull secrets for private registries
 imagePullSecrets: []
 
@@ -174,13 +183,13 @@ auxiliary:
     # (see AUDIT H2); anything on the pod network can read failover-group
     # state for arbitrary namespaces and open unbounded WebSockets.
     # The sidecar self-fencing monitor and PITR retention sweeper need this
-    # endpoint unless every MysqlFailoverGroup sets spec.sidecar.bloodravenAddress
+    # endpoint unless every MysqlFailoverGroup sets spec.sidecar.operatorEndpoint
     # to a reachable alternative. Pair with a NetworkPolicy that limits ingress
     # to sidecars, dashboards, and observability namespaces that require it.
     enabled: true
     # -- Stable auxiliary Service name. The operator passes this Service FQDN
     # to sidecars as BLOODRAVEN_ADDRESS by default; changing it requires a
-    # matching spec.sidecar.bloodravenAddress override for existing groups.
+    # matching spec.sidecar.operatorEndpoint override for existing groups.
     name: bloodraven
     # -- Auxiliary service port (status API + WebSocket)
     port: 8082

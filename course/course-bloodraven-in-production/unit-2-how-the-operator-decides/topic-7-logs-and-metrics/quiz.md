@@ -36,7 +36,7 @@ The reversal: `-1` is the worst reading on this gauge, not the best. The operato
 
 **Type:** MULTIPLE_CHOICE
 
-In `playground`, `bloodraven_replication_lag_seconds{site="reader"}` reads 45. `playground` sets `maxLagSeconds: 30` and `readOnlyMaxLagSeconds: 10`; `reader` is the `role: read-only` site. What follows?
+In `playground`, `bloodraven_replication_lag_seconds{site="reader"}` reads 45. `playground` sets `maxLagSeconds: 30` and `readOnlyMaxLagSeconds: 10`; `reader` is the `role: ReadOnly` site. What follows?
 
 - The group goes Degraded with reason `ReplicationLagging`, because 45 breaches both configured lag thresholds
 - `reader` is dropped from the `-replicas` reader endpoint; the group's own health is unchanged
@@ -47,7 +47,7 @@ In `playground`, `bloodraven_replication_lag_seconds{site="reader"}` reads 45. `
 
 **Explanation:**
 
-The lag gauge carries only a `site` label, so you must join it against the site's role yourself. `reader` is `role: read-only`, so its lag is judged against `readOnlyMaxLagSeconds` (30), and breaching it costs the site its reader-endpoint eligibility — nothing more. `ReplicationLagging` is driven by `maxLagSeconds` against the group's core sites, and 45 is nowhere near 300, so the group's condition is untouched. "Ineligible for promotion" mistakes cause for effect: a `read-only` site can *never* be promoted and is excluded from `coreCount` entirely, whatever its lag. And "nothing changes" is the failure of the join itself — applying the group threshold to a site that has its own. (objective 12)
+The lag gauge carries only a `site` label, so you must join it against the site's role yourself. `reader` is `role: ReadOnly`, so its lag is judged against `readOnlyMaxLagSeconds` (30), and breaching it costs the site its reader-endpoint eligibility — nothing more. `ReplicationLagging` is driven by `maxLagSeconds` against the group's core sites, and 45 is nowhere near 300, so the group's condition is untouched. "Ineligible for promotion" mistakes cause for effect: a `ReadOnly` site can *never* be promoted and is excluded from `coreCount` entirely, whatever its lag. And "nothing changes" is the failure of the join itself — applying the group threshold to a site that has its own. (objective 12)
 
 ## Question 4
 
@@ -70,7 +70,7 @@ A climbing `_count` is the loop's heartbeat: cycles are finishing, so the readin
 
 **Type:** SHORT_ANSWER
 
-In issue #93 the operator reported `activeSite=iad`, `state=writable` and `Ready=True` for two minutes while the `iad` sidecar had already self-fenced under a deny-all NetworkPolicy. The first fix attempted was `SetConnMaxLifetime(10s)` on the MySQL pool. Explain why that could not have worked, and what the artefacts should have pointed at instead.
+In issue #93 the operator reported `activeSite=iad`, `state=Writable` and `Ready=True` for two minutes while the `iad` sidecar had already self-fenced under a deny-all NetworkPolicy. The first fix attempted was `SetConnMaxLifetime(10s)` on the MySQL pool. Explain why that could not have worked, and what the artefacts should have pointed at instead.
 
 **Sample answer:**
 

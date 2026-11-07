@@ -34,7 +34,6 @@ const (
 	operatorDeployment          = "bloodraven"
 	mysqlSelector               = "app.kubernetes.io/name=mysql"
 	operatorSelector            = "app.kubernetes.io/name=bloodraven"
-	readonlyTaintKey            = "shipstream.io/db-readonly-playground"
 	resetBaselineStableDuration = 20 * time.Second
 )
 
@@ -206,7 +205,7 @@ func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1alpha1.Si
 			case "mysql":
 				dep.Spec.Template.Spec.Containers[i].Resources = site.Resources
 			case "sidecar":
-				dep.Spec.Template.Spec.Containers[i].Resources = mfg.Spec.SidecarResources
+				dep.Spec.Template.Spec.Containers[i].Resources = mfg.Spec.Sidecar.Resources
 			}
 		}
 		if _, err := r.k.Kubernetes.AppsV1().Deployments(r.namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
@@ -372,7 +371,7 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 // TestMFGStatusFieldsToClear classifies every status field, so a new one
 // must be added here or to its kept list.
 func mfgStatusFieldsToClear(keepEncryption bool) []string {
-	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"}
+	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"}
 	if !keepEncryption {
 		fields = append(fields, "encryptionAtRest", "pitrArchiveBindings")
 	}
@@ -382,10 +381,9 @@ func mfgStatusFieldsToClear(keepEncryption bool) []string {
 // Key snapshots the operator makes (#203). They have no owner reference, so
 // nothing else removes them from a reused playground.
 const (
-	keySnapshotSelector   = "app.kubernetes.io/name in (mysql-pitr-key,mysql-dump-key)"
-	keySnapshotAppLabel   = "app.kubernetes.io/name"
-	dumpKeySnapshotApp    = "mysql-dump-key"
-	dumpKeyBackupUIDLabel = "bloodraven.shipstream.io/mysqlbackup-uid"
+	keySnapshotSelector = "app.kubernetes.io/name in (mysql-pitr-key,mysql-dump-key)"
+	keySnapshotAppLabel = "app.kubernetes.io/name"
+	dumpKeySnapshotApp  = "mysql-dump-key"
 )
 
 // staleKeySnapshots selects the key snapshots a wipe deletes: every archive
@@ -396,7 +394,7 @@ const (
 func staleKeySnapshots(secrets []corev1.Secret, liveBackups map[types.UID]bool) []corev1.Secret {
 	var out []corev1.Secret
 	for _, s := range secrets {
-		if s.Labels[keySnapshotAppLabel] == dumpKeySnapshotApp && liveBackups[types.UID(s.Labels[dumpKeyBackupUIDLabel])] {
+		if s.Labels[keySnapshotAppLabel] == dumpKeySnapshotApp && liveBackups[types.UID(s.Labels[v1alpha1.MysqlBackupUIDLabel])] {
 			continue
 		}
 		out = append(out, s)
@@ -496,7 +494,7 @@ func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) err
 // has consumed it.
 func (r *resetter) clearPlannedFailoverRequest(ctx context.Context) error {
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{
-		brcontroller.PlannedFailoverAnnotation: nil}}})
+		v1alpha1.PlannedFailoverAnnotation: nil}}})
 	if err != nil {
 		return err
 	}
@@ -784,12 +782,12 @@ func podReady(pod *corev1.Pod) bool {
 }
 
 func (r *resetter) siteNode(ctx context.Context, site string) (string, error) {
-	nodes, err := r.k.Kubernetes.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "shipstream.io/site.playground=" + site})
+	nodes, err := r.k.Kubernetes.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "bloodraven.shipstream.io/site.playground=" + site})
 	if err != nil {
 		return "", err
 	}
 	if len(nodes.Items) == 0 {
-		return "", fmt.Errorf("no node has shipstream.io/site.playground=%s", site)
+		return "", fmt.Errorf("no node has bloodraven.shipstream.io/site.playground=%s", site)
 	}
 	return nodes.Items[0].Name, nil
 }
@@ -830,6 +828,7 @@ func (r *resetter) createManualPV(ctx context.Context, site v1alpha1.SiteSpec, n
 }
 
 func (r *resetter) clearReadOnlyTaints(ctx context.Context) error {
+	readonlyTaintKey := v1alpha1.ReadOnlyTaintKey(r.namespace, r.fg)
 	nodes, err := r.k.ListNodes(ctx)
 	if err != nil {
 		return err

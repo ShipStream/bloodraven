@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -20,10 +19,9 @@ func init() {
 }
 
 const (
-	s36ID          = "36-rustfs-outage-during-restore-in-place"
-	s36RestoreDB   = "chaos_s36_restore"
-	s36SafeDB      = "chaos_s36_safe"
-	s36RecloneAnno = "bloodraven.shipstream.io/reclone-site"
+	s36ID        = "36-rustfs-outage-during-restore-in-place"
+	s36RestoreDB = "chaos_s36_restore"
+	s36SafeDB    = "chaos_s36_safe"
 )
 
 // scenario36RustFSOutageRestoreInPlace exercises a per-schema in-place restore
@@ -201,7 +199,7 @@ func s36RejectInvalidConfirm() runner.Step {
 			backupName := ctxFetch(env, "backupName")
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm:     "not-a-timestamp",
-				Source:      v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: backupName}},
+				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
 			}
 			if _, err := patchRestoreInPlace(ctx, env, spec); err != nil {
@@ -275,7 +273,7 @@ func s36StartRestoreThenOutage() runner.Step {
 			env.Capture.Note("applying fresh confirm=" + confirm)
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm:     confirm,
-				Source:      v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: backupName}},
+				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
 				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
 			}
 			stale, err := patchRestoreInPlace(ctx, env, spec)
@@ -449,12 +447,12 @@ func s36VerifySafety() runner.Step {
 			if mfg.Status.ActiveSite != activeAtRestore {
 				return fmt.Errorf("status.activeSite changed %q -> %q during a frozen in-place restore", activeAtRestore, mfg.Status.ActiveSite)
 			}
-			if _, ok := mfg.Annotations[s36RecloneAnno]; ok {
-				return fmt.Errorf("unexpected reclone annotation set for a per-schema restore: %q", mfg.Annotations[s36RecloneAnno])
+			if _, ok := mfg.Annotations[v1alpha1.RecloneAnnotation]; ok {
+				return fmt.Errorf("unexpected reclone annotation set for a per-schema restore: %q", mfg.Annotations[v1alpha1.RecloneAnnotation])
 			}
 			writable := 0
 			for _, s := range mfg.Status.Sites {
-				if s.State == "writable" {
+				if s.State == v1alpha1.SiteStateWritable {
 					writable++
 				}
 				if s.RecoveryState == "RecoveryBlocked" {

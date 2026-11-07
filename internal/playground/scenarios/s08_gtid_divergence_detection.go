@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -139,9 +140,9 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 		return fmt.Errorf("cleanup: divergentGtid %q on site %s is shorter than 8 characters; cannot auto-reclone — run ./playground/reset-mysql.sh",
 			gtid, divergent)
 	}
-	value := fmt.Sprintf("%s:%s", divergent, gtid[:8])
+	value := controller.RecloneAnnotationValueWithPrefix(mfg, divergent, gtid[:8])
 	env.Capture.Note(fmt.Sprintf("cleanup: submitting reclone-site=%s to clear divergence", value))
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 		return fmt.Errorf("cleanup: set reclone annotation: %w", err)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
@@ -152,9 +153,9 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 			var writable, readOnly, blocked, div []string
 			for _, s := range mfg.Status.Sites {
 				switch s.State {
-				case "writable":
+				case v1alpha1.SiteStateWritable:
 					writable = append(writable, s.Name)
-				case "read-only":
+				case v1alpha1.SiteStateReadOnly:
 					readOnly = append(readOnly, s.Name)
 				}
 				if s.RecoveryState == "RecoveryBlocked" {

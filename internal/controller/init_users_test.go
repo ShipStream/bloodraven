@@ -12,24 +12,24 @@ import (
 )
 
 // credentialsModeGroup builds a group that exercises every optional secret so
-// the generated credentials-mode script contains all create_user_with_grants
+// the generated script contains all create_user_with_grants
 // call sites.
 func credentialsModeGroup() *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{}
-	fg.Spec.Credentials = &v1alpha1.CredentialsSpec{
-		OperatorSecret: "op",
-		AppSecret:      "app",
-		ReadOnlySecret: "ro",
-		MonitorSecret:  "mon",
-		BackupSecret:   "bk",
+	fg.Spec.Credentials = v1alpha1.CredentialsSpec{
+		OperatorSecretName: "op",
+		AppSecretName:      "app",
+		ReadOnlySecretName: "ro",
+		MonitorSecretName:  "mon",
+		BackupSecretName:   "bk",
 	}
 	return fg
 }
 
 func initScriptVariants() map[string]string {
 	return map[string]string{
-		"secretName":  generateSecretNameModeInitScript(),
-		"credentials": generateCredentialsModeInitScript(credentialsModeGroup()),
+		"all roles":     generateInitUsersScript(credentialsModeGroup()),
+		"operator only": generateInitUsersScript(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "op"}}}),
 	}
 }
 
@@ -135,6 +135,144 @@ func TestInitScriptSocketResolution(t *testing.T) {
 			}
 			if !strings.Contains(string(out), tt.wantOutput) {
 				t.Errorf("output %q does not contain %q", out, tt.wantOutput)
+			}
+		})
+	}
+}
+
+// TestInitUsersScriptCreatesReplicationUser runs the generated script under
+// bash against a fake mysql client and checks the statements it sends for
+// the replication account. MYSQL_REPLICATION_USER / MYSQL_REPLICATION_PASSWORD
+// arrive as replication/username and replication/password, set together or
+// not at all, as the topology manager resolves them. The
+// account must get the grants bootstrap, clone and old-primary recovery use.
+func TestInitUsersScriptCreatesReplicationUser(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	const grant = "GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO "
+	tests := []struct {
+		name        string
+		replication map[string]string // files under creds/replication
+		wantSQL     []string
+		wantNoSQL   []string
+		wantOutput  string
+	}{
+		{
+			name:        "dedicated account",
+			replication: map[string]string{"username": "replicator", "password": "repl-pw"},
+			wantSQL: []string{
+				"CREATE USER IF NOT EXISTS 'replicator'@'%' IDENTIFIED BY 'repl-pw';",
+				"ALTER USER 'replicator'@'%' IDENTIFIED BY 'repl-pw';",
+				grant + "'replicator'@'%';",
+			},
+			wantOutput: "creating replication user 'replicator'",
+		},
+		{
+			name:        "user without password creates nothing",
+			replication: map[string]string{"username": "replicator"},
+			wantNoSQL:   []string{"REPLICATION SLAVE", "'replicator'"},
+			wantOutput:  "must be set together",
+		},
+		{
+			name:        "password without user creates nothing",
+			replication: map[string]string{"password": "repl-pw"},
+			wantNoSQL:   []string{"REPLICATION SLAVE", "repl-pw"},
+			wantOutput:  "must be set together",
+		},
+		{
+			name:        "empty keys count as absent",
+			replication: map[string]string{"username": "", "password": ""},
+			wantNoSQL:   []string{"REPLICATION SLAVE"},
+			wantOutput:  "replication uses the operator account",
+		},
+		{
+			name:        "quotes are escaped",
+			replication: map[string]string{"username": "o'repl", "password": `p'w\x`},
+			wantSQL: []string{
+				`CREATE USER IF NOT EXISTS 'o''repl'@'%' IDENTIFIED BY 'p''w\\x';`,
+				grant + "'o''repl'@'%';",
+			},
+		},
+		{
+			name:       "no keys: the operator account replicates",
+			wantNoSQL:  []string{"REPLICATION SLAVE"},
+			wantOutput: "replication uses the operator account",
+		},
+		{
+			name:        "key naming the operator account",
+			replication: map[string]string{"username": "bloodraven", "password": "op-pw"},
+			wantNoSQL:   []string{"REPLICATION SLAVE"},
+			wantOutput:  "replication uses the operator account",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, err := os.MkdirTemp("", "brinit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = os.RemoveAll(base) }()
+			sock := filepath.Join(base, "s.sock")
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Skipf("cannot create unix socket: %v", err)
+			}
+			defer func() { _ = ln.Close() }()
+
+			creds := filepath.Join(base, "creds")
+			writeFiles := func(dir string, files map[string]string) {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for name, v := range files {
+					if err := os.WriteFile(filepath.Join(dir, name), []byte(v), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			writeFiles(filepath.Join(creds, "operator"), map[string]string{"username": "bloodraven", "password": "op-pw"})
+			writeFiles(filepath.Join(creds, "replication"), tt.replication)
+
+			// The fake client records every statement it is sent and
+			// reports the clone plugin as already installed.
+			bin := filepath.Join(base, "bin")
+			sqlLog := filepath.Join(base, "sql.log")
+			writeFiles(bin, nil)
+			fake := "#!/bin/bash\nfor a in \"$@\"; do case \"$a\" in -Nse) echo 1; exit 0;; esac; done\ncat >> " + sqlLog + "\n"
+			if err := os.WriteFile(filepath.Join(bin, "mysql"), []byte(fake), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			script := strings.ReplaceAll(generateInitUsersScript(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{
+				Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "op"},
+			}}), "/etc/mysql/creds", creds)
+			cmd := exec.Command(bash, "-c", script)
+			cmd.Env = append(os.Environ(), "SOCKET="+sock, "PATH="+bin+":"+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("script failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), tt.wantOutput) {
+				t.Errorf("output %q does not contain %q", out, tt.wantOutput)
+			}
+			sent, err := os.ReadFile(sqlLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(sent), "CREATE USER IF NOT EXISTS 'bloodraven'@'%'") {
+				t.Errorf("operator user not created; SQL:\n%s", sent)
+			}
+			for _, want := range tt.wantSQL {
+				if !strings.Contains(string(sent), want) {
+					t.Errorf("SQL does not contain %q:\n%s", want, sent)
+				}
+			}
+			for _, unwanted := range tt.wantNoSQL {
+				if strings.Contains(string(sent), unwanted) {
+					t.Errorf("SQL contains %q:\n%s", unwanted, sent)
+				}
 			}
 		})
 	}

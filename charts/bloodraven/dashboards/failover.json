@@ -54,10 +54,10 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Planned failovers — success (24h)",
+      "title": "Planned failovers — succeeded (24h)",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
-      "targets": [{"expr": "sum(increase(bloodraven_planned_failovers_total{result=\"success\"}[24h]))", "refId": "A"}],
+      "targets": [{"expr": "sum(increase(bloodraven_planned_failovers_total{result=\"succeeded\"}[24h]))", "refId": "A"}],
       "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
         {"color": "green", "value": null}
@@ -66,10 +66,10 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Planned failovers — failed/rejected (24h)",
+      "title": "Planned failovers — not succeeded (24h)",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
-      "targets": [{"expr": "sum(increase(bloodraven_planned_failovers_total{result=~\"failed_.*|rejected\"}[24h]))", "refId": "A"}],
+      "targets": [{"expr": "sum(increase(bloodraven_planned_failovers_total{result!=\"succeeded\"}[24h]))", "refId": "A"}],
       "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
         {"color": "green", "value": null}, {"color": "red", "value": 1}

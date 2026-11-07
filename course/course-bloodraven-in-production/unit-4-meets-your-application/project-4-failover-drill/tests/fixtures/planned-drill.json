@@ -18,9 +18,11 @@
   },
   "status": {
     "activeSite": "pdx",
-    "lastFailover": "2026-08-11T09:40:08Z",
-    "lastFailoverTarget": "pdx",
-    "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-184002",
+    "lastFailover": {
+      "time": "2026-08-11T09:40:08Z",
+      "target": "pdx",
+      "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-184002"
+    },
     "plannedFailover": {
       "runID": "5b0e8c1d-3f2a-4c7e-9d41-6a2f0e7b9c13",
       "phase": "Succeeded",
@@ -49,18 +51,18 @@
     "sites": [
       {
         "name": "iad",
-        "role": "primary-candidate",
-        "state": "read-only"
+        "role": "PrimaryCandidate",
+        "state": "ReadOnly"
       },
       {
         "name": "pdx",
-        "role": "primary-candidate",
-        "state": "writable"
+        "role": "PrimaryCandidate",
+        "state": "Writable"
       },
       {
         "name": "reader",
-        "role": "read-only",
-        "state": "read-only"
+        "role": "ReadOnly",
+        "state": "ReadOnly"
       }
     ]
   }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -102,18 +101,15 @@ func plannedTakeoverMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
 // default (Proceed) when none is set. Only Fail rolls back.
 func effectiveDragonflyOnSyncTimeout(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.DragonflySyncTimeoutPolicy {
 	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil {
-		return normalizeDragonflySyncTimeout(d.PlannedFailover.OnSyncTimeout)
+		return dragonflySyncTimeoutPolicy(d.PlannedFailover.OnSyncTimeout)
 	}
 	return v1alpha1.DragonflySyncTimeoutProceed
 }
 
-// normalizeDragonflySyncTimeout maps a stored policy to its canonical
-// value. The comparison ignores case: releases before v1beta1 wrote the
-// lower-case `fail`/`proceed`, and CRD ratcheting keeps such a value on
-// an object that is updated without touching the field, so a stored
-// `fail` must keep rolling back. Anything else is Proceed.
-func normalizeDragonflySyncTimeout(p v1alpha1.DragonflySyncTimeoutPolicy) v1alpha1.DragonflySyncTimeoutPolicy {
-	if strings.EqualFold(string(p), string(v1alpha1.DragonflySyncTimeoutFail)) {
+// dragonflySyncTimeoutPolicy returns p when it is Fail, else Proceed (the
+// default; an empty or malformed value never enables the rollback).
+func dragonflySyncTimeoutPolicy(p v1alpha1.DragonflySyncTimeoutPolicy) v1alpha1.DragonflySyncTimeoutPolicy {
+	if p == v1alpha1.DragonflySyncTimeoutFail {
 		return v1alpha1.DragonflySyncTimeoutFail
 	}
 	return v1alpha1.DragonflySyncTimeoutProceed
@@ -122,7 +118,7 @@ func normalizeDragonflySyncTimeout(p v1alpha1.DragonflySyncTimeoutPolicy) v1alph
 // effectiveDragonflyMaxSyncWait returns the configured budget or the
 // default. The run snapshots it into settings.dragonfly at acceptance.
 func effectiveDragonflyMaxSyncWait(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil && d.PlannedFailover.MaxSyncWait != nil && d.PlannedFailover.MaxSyncWait.Duration > 0 {
+	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil && d.PlannedFailover.MaxSyncWait != nil {
 		return d.PlannedFailover.MaxSyncWait.Duration
 	}
 	return defaultDragonflySyncWait
@@ -410,7 +406,7 @@ const dragonflySyncPollInterval = 1 * time.Second
 // takeover with sessions lost; Fail rolls back.
 func (e *PlannedFailoverEngine) dragonflySyncTimeout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	elapsed time.Duration, why string) (time.Duration, error) {
-	e.sink.Event(fg, corev1.EventTypeWarning, ReasonDragonflySyncTimeout,
+	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySyncTimedOut,
 		fmt.Sprintf("dragonfly sync timed out (%s): %s", truncateDur(elapsed), why))
 	if plannedSettings(pf).Dragonfly.OnSyncTimeout == v1alpha1.DragonflySyncTimeoutFail {
 		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonDragonflySyncTimeout)
@@ -574,7 +570,7 @@ func (e *PlannedFailoverEngine) noteDragonflyGateWait(ctx context.Context, fg *v
 		plannedDragonflyBlock(next).Message = plannedDragonflyGateWaitMessage
 	})
 	if out == WriteCommitted {
-		e.sink.Event(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionWaiting,
+		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionDeferred,
 			fmt.Sprintf("planned failover to %q is waiting for an in-progress Dragonfly promotion to finish; MySQL writes stay paused on %q until it does (at most about 40s)",
 				pf.TargetSite, pf.SourceSite))
 	}
@@ -657,7 +653,7 @@ func (o reconcilerDragonflyOps) underGate(ctx context.Context, fg *v1alpha1.Mysq
 		why := fmt.Sprintf("the Dragonfly master is %q, not the run's source %q; not taking over", master, pf.SourceSite)
 		metrics.DragonflyPromotionsTotal.WithLabelValues(fresh.Name, pf.TargetSite, "failed").Inc()
 		if r.Recorder != nil {
-			r.Recorder.Eventf(fresh, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed, "%s", why)
+			r.Recorder.Eventf(fresh, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed, "%s", why)
 		}
 		return plannedTakeoverResult{Why: why}, nil
 	}
@@ -677,7 +673,7 @@ func (o reconcilerDragonflyOps) Abandon(ctx context.Context, fg *v1alpha1.MysqlF
 // Dragonfly gate:
 //
 //  1. Strip the dragonfly-traffic label from the source pod. The active
-//     Service selector requires (role=master AND traffic=enabled), so this
+//     Service selector requires (role=master AND traffic=true), so this
 //     sheds the source endpoint regardless of the pending role-label flip.
 //  2. Issue REPLTAKEOVER against the target Dragonfly (bounded by the run's
 //     maxSyncWait).
@@ -708,7 +704,7 @@ func (o reconcilerDragonflyOps) takeover(ctx context.Context, fg *v1alpha1.Mysql
 	r := o.r
 	timeout := plannedDragonflyMaxSyncWait(pf)
 	if r.Recorder != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionStarted,
 			"promoting Dragonfly target %q via REPLTAKEOVER", pf.TargetSite)
 	}
 	// The gate wait and the fresh read may have taken seconds: the claim is
@@ -791,7 +787,7 @@ func (o reconcilerDragonflyOps) fail(ctx context.Context, fg *v1alpha1.MysqlFail
 	o.restoreDetached(ctx, fg, pf)
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, pf.TargetSite, "failed").Inc()
 	if o.r.Recorder != nil {
-		o.r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed, "%s", why)
+		o.r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed, "%s", why)
 	}
 }
 
@@ -811,7 +807,7 @@ func (o reconcilerDragonflyOps) finishPromotion(ctx context.Context, fg *v1alpha
 		log.FromContext(ctx).Error(err, "post-promotion: stamp target role=master", "site", pf.TargetSite)
 	}
 	if err := r.setDragonflyTrafficOnSite(ctx, fg, pf.TargetSite, true); err != nil {
-		log.FromContext(ctx).Error(err, "post-promotion: stamp target traffic=enabled", "site", pf.TargetSite)
+		log.FromContext(ctx).Error(err, "post-promotion: stamp target traffic=true", "site", pf.TargetSite)
 	}
 	sourceDemoted := pf.SourceSite == ""
 	if pf.SourceSite != "" {
@@ -821,14 +817,14 @@ func (o reconcilerDragonflyOps) finishPromotion(ctx context.Context, fg *v1alpha
 		if err := r.setDragonflyRoleOnSite(ctx, fg, pf.SourceSite, "replica"); err != nil {
 			log.FromContext(ctx).Error(err, "post-promotion: stamp source role=replica; leaving source out of active Service to avoid split-brain", "site", pf.SourceSite)
 			if r.Recorder != nil {
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed,
 					"post-promotion demote of source %q failed (%v); source kept out of active Service to avoid split-brain. Manual intervention required.",
 					pf.SourceSite, err)
 			}
 		} else {
 			sourceDemoted = true
 			if err := r.setDragonflyTrafficOnSite(ctx, fg, pf.SourceSite, true); err != nil {
-				log.FromContext(ctx).Error(err, "post-promotion: restore source traffic=enabled", "site", pf.SourceSite)
+				log.FromContext(ctx).Error(err, "post-promotion: restore source traffic=true", "site", pf.SourceSite)
 			}
 		}
 	}
@@ -839,7 +835,7 @@ func (o reconcilerDragonflyOps) finishPromotion(ctx context.Context, fg *v1alpha
 	r.stampDragonflyLastPromotion(ctx, fg, pf.TargetSite, metav1.Now())
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, pf.TargetSite, "success").Inc()
 	if r.Recorder != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionCompleted,
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionSucceeded,
 			"Dragonfly target %q promoted via REPLTAKEOVER", pf.TargetSite)
 	}
 }

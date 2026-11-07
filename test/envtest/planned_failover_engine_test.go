@@ -141,7 +141,7 @@ func pfEnvGroup(t *testing.T, prefix string, annotations map[string]string) type
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}, {Name: "dc2", State: "read-only", Replicating: true}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func pfEnvStepUntil(t *testing.T, r *controller.MysqlFailoverGroupReconciler, nn
 // record committed, revisions strictly increasing, and the failover record
 // written with the terminal record.
 func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-e2e", map[string]string{controller.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-e2e", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
 	topo := &pfEnvTopology{}
 	r := pfEnvReconciler(topo)
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
@@ -194,7 +194,7 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Revision != 1 {
 		t.Fatalf("admitting record = %+v", pf)
 	}
-	if _, ok := fg.Annotations[controller.PlannedFailoverAnnotation]; ok {
+	if _, ok := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("annotation kept after the Admitting record committed")
 	}
 	runID, rev := pf.RunID, pf.Revision
@@ -216,16 +216,23 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("final = %+v", pf)
 	}
-	if fg.Status.LastFailoverTarget != "dc2" || fg.Status.PromotionGtidExecuted != "uuid-dc1:1-5" || fg.Status.LastFailover == nil {
-		t.Errorf("failover record = %v %q %q", fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted)
+	if fg.Status.LastFailoverTarget() != "dc2" || fg.Status.PromotionGtidExecuted() != "uuid-dc1:1-5" || fg.Status.LastFailoverTime() == nil {
+		t.Errorf("failover record = %v %q %q", fg.Status.LastFailoverTime(), fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
 	}
 }
 
 // §13, against the real upgrade path: blocks written by an older operator
-// under the pre-#235 CRD, then the CRD is upgraded to the final schema.
-//   - The old fields are pruned on read, and an unchanged legacy block stays
-//     writable (validation ratcheting), so the runner's status writes keep
-//     working while it is there.
+// under the pre-#235 CRD, then the CRD is upgraded to the final schema and
+// the objects get the spec fields the final schema requires (serverID,
+// credentials.operatorSecretName).
+//   - The old fields are pruned on read. A legacy block whose values the
+//     final schema still accepts stays writable beside the runner's status
+//     writes. One in a removed phase (Validating) is outside the phase enum:
+//     Kubernetes 1.33 and newer ratchet it on status writes, so those keep
+//     working; 1.31 and 1.32 validate status writes without ratcheting, so
+//     they are refused until the engine replaces the block. The engine's
+//     refusal is that replacement on every version, so the group never
+//     wedges: its status writes work again right after.
 //   - A mid-run legacy block is refused (Failed{SourceLeftFenced,
 //     LegacyRunRefused}, the Event), and nothing is hydrated from it.
 //   - A legacy terminal block is replaced by the next request's run.
@@ -259,7 +266,12 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		t.Helper()
 		fg := newTestFG(ns.Name)
 		fg.Name = name
-		if err := c.Create(ctx, fg); err != nil {
+		// The pre-#235 CRD spells the operator Secret credentials.operatorSecret.
+		old := inertFieldsObject(t, fg, "MysqlFailoverGroup")
+		inertFieldsSet(t, old, map[string]any{"operatorSecret": fg.Spec.Credentials.OperatorSecretName}, "spec", "credentials")
+		// ... and spec.updateStrategy as a string, which it defaults.
+		unstructured.RemoveNestedField(old.Object, "spec", "updateStrategy")
+		if err := c.Create(ctx, old); err != nil {
 			t.Fatal(err)
 		}
 		u := &unstructured.Unstructured{}
@@ -270,8 +282,13 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		status := map[string]any{
 			"activeSite": "dc1",
 			"sites": []any{
-				map[string]any{"name": "dc1", "state": "writable"},
-				map[string]any{"name": "dc2", "state": "read-only", "replicating": true},
+				// No state: the old CRD admits only the lower-case spelling,
+				// which the final schema refuses on a status write that does
+				// not ratchet (1.31, 1.32). snapshotWrite sets the states and
+				// the replication the final schema names (the old
+				// "replicating" is pruned).
+				map[string]any{"name": "dc1"},
+				map[string]any{"name": "dc2", "replicating": true},
 			},
 			"plannedFailover": block,
 		}
@@ -332,6 +349,43 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	// The pre-#235 CRD pruned spec.sites[].serverID on create, and the
+	// final schema prunes credentials.operatorSecret; it requires both
+	// spec.sites[].serverID (A-08) and credentials.operatorSecretName
+	// (A-02), and every write evaluates the rule that keeps serverID
+	// unique, so the upgrade adds them first. The old CRD also defaulted
+	// the lower-case role primary-candidate and the string updateStrategy
+	// OrderedUpdate, which the final schema refuses (A-27), and the integer
+	// cloneTimeout 3600, which is now a bounded Duration (A-35, A-36), so
+	// the upgrade rewrites them too.
+	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		if err := c.Get(ctx, nn, u); err != nil {
+			t.Fatal(err)
+		}
+		sites, _, _ := unstructured.NestedSlice(u.Object, "spec", "sites")
+		for i := range sites {
+			sites[i].(map[string]any)["serverID"] = int64(101 + i)
+			sites[i].(map[string]any)["role"] = string(v1alpha1.SiteRolePrimaryCandidate)
+		}
+		if err := unstructured.SetNestedSlice(u.Object, sites, "spec", "sites"); err != nil {
+			t.Fatal(err)
+		}
+		if err := unstructured.SetNestedField(u.Object, map[string]any{"type": string(v1alpha1.UpdateStrategyOrderedUpdate)}, "spec", "updateStrategy"); err != nil {
+			t.Fatal(err)
+		}
+		if err := unstructured.SetNestedField(u.Object, "mysql-credentials", "spec", "credentials", "operatorSecretName"); err != nil {
+			t.Fatal(err)
+		}
+		if err := unstructured.SetNestedField(u.Object, "1h", "spec", "cloneTimeout"); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Update(ctx, u); err != nil {
+			t.Fatalf("%s: add spec.sites[].serverID and credentials.operatorSecretName after the upgrade: %v", nn.Name, err)
+		}
+	}
+
 	get := func(nn types.NamespacedName) *v1alpha1.MysqlFailoverGroup {
 		t.Helper()
 		var fg v1alpha1.MysqlFailoverGroup
@@ -340,14 +394,39 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		}
 		return &fg
 	}
-	// A status write that leaves the legacy block unchanged (the runner's
-	// snapshot writes) is still accepted.
-	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
+	// snapshotWrite is a runner status write: it rewrites status.sites
+	// from the poll (so in the CamelCase states, A-28) and leaves the
+	// planned-failover block alone.
+	snapshotWrite := func(nn types.NamespacedName) error {
+		t.Helper()
 		fg := get(nn)
 		fg.Status.UpdatePhase = ""
 		fg.Status.TopologyGeneration++
-		if err := c.Status().Update(ctx, fg); err != nil {
-			t.Fatalf("%s: a status write beside the unchanged legacy block was refused: %v", nn.Name, err)
+		for i := range fg.Status.Sites {
+			fg.Status.Sites[i].State = v1alpha1.SiteStateReadOnly
+			fg.Status.Sites[i].Replication = v1alpha1.SiteReplicationHealthy
+			if fg.Status.Sites[i].Name == "dc1" {
+				fg.Status.Sites[i].State = v1alpha1.SiteStateWritable
+				fg.Status.Sites[i].Replication = v1alpha1.SiteReplicationNotApplicable
+			}
+		}
+		return c.Status().Update(ctx, fg)
+	}
+	// A status write that leaves the legacy block unchanged (the runner's
+	// snapshot writes) is accepted beside a block the schema still accepts,
+	// and beside a removed phase only where status writes ratchet.
+	ratchets := statusWritesRatchet(t, oldCfg)
+	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
+		err := snapshotWrite(nn)
+		switch {
+		case nn != validating || ratchets:
+			if err != nil {
+				t.Fatalf("%s: a status write beside the unchanged legacy block was refused: %v", nn.Name, err)
+			}
+		case err == nil:
+			t.Fatalf("%s: a status write beside a phase outside the enum was accepted without status ratcheting", nn.Name)
+		case !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "status.plannedFailover.phase"):
+			t.Fatalf("%s: status write refused for another reason: %v", nn.Name, err)
 		}
 	}
 
@@ -373,6 +452,13 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	if len(topo.calls) != 0 || topo.PlannedClaimHeld(midRun) {
 		t.Errorf("a legacy block reached the topology: %v", topo.calls)
 	}
+	// The refusal replaced the block, so status writes work on every
+	// version, including those that do not ratchet status writes.
+	for _, nn := range []types.NamespacedName{midRun, validating} {
+		if err := snapshotWrite(nn); err != nil {
+			t.Fatalf("%s: a status write after the legacy block was refused failed: %v", nn.Name, err)
+		}
+	}
 	found := false
 	for len(r.Recorder.(*record.FakeRecorder).Events) > 0 {
 		if ev := <-r.Recorder.(*record.FakeRecorder).Events; strings.Contains(ev, "PlannedFailoverLegacyRunRefused") {
@@ -385,7 +471,7 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 
 	// A legacy terminal block is history: a new request replaces it.
 	fg := get(finished)
-	fg.Annotations = map[string]string{controller.PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
 	if err := c.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +496,7 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 	if noop.ResourceVersion != base.ResourceVersion {
 		t.Fatalf("a no-op status update moved resourceVersion %s → %s; the fence must change bytes", base.ResourceVersion, noop.ResourceVersion)
 	}
-	for _, key := range []string{controller.PlannedFailoverStatusFenceAnnotation, controller.PlannedFailoverTerminalAnnotation} {
+	for _, key := range []string{v1alpha1.PlannedFailoverStatusFenceAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation} {
 		cur := pfEnvGet(t, nn)
 		fenced := cur.DeepCopy()
 		if fenced.Annotations == nil {
@@ -431,7 +517,7 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 // §10.5: the hold condition survives a runner status write, and the
 // acknowledgement clears it, releases the slot and deletes itself.
 func TestEnvtest_PlannedFailover_HoldSurvivesRunnerWriteAndAck(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-hold", map[string]string{controller.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-hold", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
 	topo := &pfEnvTopology{promote: func() controller.PromoteOutcome {
 		return controller.PromoteOutcome{Kind: controller.PromoteInconsistent, Reason: v1alpha1.PlannedFailoverReasonForeignWritable, MayHaveWritten: true}
 	}}
@@ -459,12 +545,12 @@ func TestEnvtest_PlannedFailover_HoldSurvivesRunnerWriteAndAck(t *testing.T) {
 	}
 
 	fg = pfEnvGet(t, nn)
-	fg.Annotations = map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: pf.RunID}
+	fg.Annotations = map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: pf.RunID}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	pfEnvStepUntil(t, r, nn, 5, func(fg *v1alpha1.MysqlFailoverGroup) bool {
-		_, ack := fg.Annotations[controller.AcknowledgePlannedFailoverHoldAnnotation]
+		_, ack := fg.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]
 		return !ack
 	})
 	fg = pfEnvGet(t, nn)
@@ -503,7 +589,7 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 		if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 			t.Fatal(err)
 		}
-		got := pfEnvGet(t, nn).Annotations[controller.PlannedFailoverManagerAbsentSinceAnnotation]
+		got := pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]
 		if got == "" {
 			t.Fatal("no manager-absent-since annotation")
 		}
@@ -519,7 +605,7 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 		t.Fatal(err)
 	}
-	if v, ok := pfEnvGet(t, nn).Annotations[controller.PlannedFailoverManagerAbsentSinceAnnotation]; ok {
+	if v, ok := pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]; ok {
 		t.Errorf("absent-since kept once a manager answered: %q", v)
 	}
 }

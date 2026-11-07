@@ -1,0 +1,37 @@
+tests:
+- inputPath: no-status.yaml
+  healthStatus: {status: Progressing, message: Waiting for status}
+- inputPath: healthy.yaml
+  healthStatus: {status: Healthy, message: At least one site is writable and replication is healthy}
+- inputPath: spec-not-applied.yaml
+  healthStatus: {status: Progressing, message: Controller processing updated spec}
+- inputPath: no-observed-generation.yaml
+  healthStatus: {status: Progressing, message: Controller processing updated spec}
+- inputPath: bootstrap-failed.yaml
+  healthStatus: {status: Degraded, message: "BootstrapFailed: Reclone into pdx failed: clone plugin error"}
+- inputPath: bootstrap-failed-recovered.yaml
+  healthStatus: {status: Healthy, message: At least one site is writable and replication is healthy}
+- inputPath: bootstrapping.yaml
+  healthStatus: {status: Progressing, message: "Reclone in progress: Cloning"}
+- inputPath: automatic-failover-held.yaml
+  healthStatus: {status: Degraded, message: "AutomaticFailoverHeld: planned failover run r1 ended ManualRecoveryRequired (ForeignWritable)"}
+- inputPath: automatic-failover-hold-acknowledged.yaml
+  healthStatus: {status: Healthy, message: At least one site is writable and replication is healthy}
+- inputPath: ordered-update-stalled.yaml
+  healthStatus: {status: Degraded, message: "OrderedUpdateStalled: Ordered update stalled: site pdx was updated but its pod is not Ready"}
+- inputPath: ordered-update.yaml
+  healthStatus: {status: Progressing, message: "Ordered update in progress: UpdateReplica"}
+- inputPath: site-unhealthy.yaml
+  healthStatus: {status: Degraded, message: "SiteUnhealthy: pdx unreachable while iad is primary"}
+- inputPath: recovery-pending.yaml
+  healthStatus: {status: Degraded, message: "RecoveryPending: Old primary pdx is being reconfigured as a replica"}
+- inputPath: initializing.yaml
+  healthStatus: {status: Progressing, message: "Waiting for the first classification of iad, pdx"}
+- inputPath: no-writable-primary.yaml
+  healthStatus: {status: Degraded, message: "NoPrimary: both sites are read-only"}
+- inputPath: spec-not-applied-degraded.yaml
+  healthStatus: {status: Degraded, message: "SiteUnhealthy: pdx unreachable while iad is primary"}
+- inputPath: spec-not-applied-held.yaml
+  healthStatus: {status: Degraded, message: "AutomaticFailoverHeld: planned failover run r1 ended ManualRecoveryRequired (ForeignWritable)"}
+- inputPath: spec-not-applied-recovery-pending.yaml
+  healthStatus: {status: Degraded, message: "RecoveryPending: Old primary pdx is being reconfigured as a replica"}

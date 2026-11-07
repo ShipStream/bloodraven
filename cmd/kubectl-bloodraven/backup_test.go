@@ -9,19 +9,29 @@ import (
 
 func TestBuildBackupCR(t *testing.T) {
 	tests := []struct {
-		name        string
-		group       string
-		profile     string
-		sourceSite  string
-		triggeredBy string
-		wantPrefix  string
+		name         string
+		group        string
+		profile      string
+		sourceSite   string
+		triggeredBy  string
+		wantPrefix   string
 		wantOverride bool
+		wantTrigger  string
 	}{
 		{
-			name:       "manual backup without source override",
-			group:      "orders",
-			profile:    "nightly",
-			wantPrefix: "orders-nightly-",
+			name:        "manual backup without source override",
+			group:       "orders",
+			profile:     "nightly",
+			wantPrefix:  "orders-nightly-",
+			wantTrigger: "manual",
+		},
+		{
+			name:        "explicit trigger",
+			group:       "orders",
+			profile:     "nightly",
+			triggeredBy: "ci/release",
+			wantPrefix:  "orders-nightly-",
+			wantTrigger: "ci/release",
 		},
 		{
 			name:         "manual backup with source override",
@@ -30,6 +40,7 @@ func TestBuildBackupCR(t *testing.T) {
 			sourceSite:   "pdx",
 			wantPrefix:   "orders-ondemand-",
 			wantOverride: true,
+			wantTrigger:  "manual",
 		},
 	}
 	for _, tc := range tests {
@@ -47,20 +58,23 @@ func TestBuildBackupCR(t *testing.T) {
 			if b.Spec.ProfileName != tc.profile {
 				t.Errorf("ProfileName = %q, want %q", b.Spec.ProfileName, tc.profile)
 			}
-			if tc.wantOverride && b.Spec.SourceSiteOverride != tc.sourceSite {
-				t.Errorf("SourceSiteOverride = %q, want %q", b.Spec.SourceSiteOverride, tc.sourceSite)
+			if tc.wantOverride && b.Spec.SourceSite != tc.sourceSite {
+				t.Errorf("SourceSite = %q, want %q", b.Spec.SourceSite, tc.sourceSite)
 			}
-			if !tc.wantOverride && b.Spec.SourceSiteOverride != "" {
-				t.Errorf("SourceSiteOverride = %q, want empty", b.Spec.SourceSiteOverride)
+			if !tc.wantOverride && b.Spec.SourceSite != "" {
+				t.Errorf("SourceSite = %q, want empty", b.Spec.SourceSite)
 			}
-			if got := b.Labels["shipstream.io/failover-group"]; got != tc.group {
+			if got := b.Labels["bloodraven.shipstream.io/failover-group"]; got != tc.group {
 				t.Errorf("failover-group label = %q, want %q", got, tc.group)
 			}
-			if got := b.Labels["shipstream.io/backup-profile"]; got != tc.profile {
+			if got := b.Labels["bloodraven.shipstream.io/backup-profile"]; got != tc.profile {
 				t.Errorf("backup-profile label = %q, want %q", got, tc.profile)
 			}
 			if got := b.Labels["app.kubernetes.io/managed-by"]; got != "bloodraven" {
 				t.Errorf("managed-by label = %q, want bloodraven", got)
+			}
+			if got := b.Annotations[v1alpha1.TriggeredByAnnotation]; got != tc.wantTrigger {
+				t.Errorf("triggered-by annotation = %q, want %q", got, tc.wantTrigger)
 			}
 		})
 	}

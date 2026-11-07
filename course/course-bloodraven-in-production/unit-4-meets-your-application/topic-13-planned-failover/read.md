@@ -15,10 +15,11 @@ Only planned failover actually drains. Nothing else does.
 ## The trigger
 
 One annotation, `bloodraven.shipstream.io/planned-failover`. Its value is a bare site name, or a site
-name followed by `:key=value` overrides; `maxLagWait` is the only supported key, and an unknown or
-repeated key is rejected outright (a `PlannedFailoverRejected` Event, no run) so a typo cannot quietly run
-with defaults. A valid request is given a `runID` and the annotation is removed as the run enters
-`Admitting`; only a `Deferred` request keeps it.
+name followed by `:key=value` overrides; `maxLagWait` is the only supported key and takes the spec
+field's 1s–1h range, and an unknown or repeated key, or an out-of-range value, is rejected outright
+(a `PlannedFailoverRejected` Event, no run) so a typo cannot quietly run with defaults. A valid
+request is given a `runID` and the annotation is removed as the run enters `Admitting`; only a
+`Deferred` request keeps it.
 
 ```widget
 {
@@ -128,7 +129,7 @@ At `WaitingForLag` the operator polls `pdx`'s `GTID_EXECUTED` and asks one quest
 `fence.gtidSet`? The check is a genuine GTID-set superset test. Not seconds. And immediately before it
 clears `super_read_only` on `pdx`, a pre-write gate demands that `pdx` hold exactly the fenced set, with
 no channel left and every other promotable site answering read-only. On success
-`status.promotionGtidExecuted` equals `fence.gtidSet`: nothing acknowledged was lost, by construction.
+`status.lastFailover.promotionGtidExecuted` equals `fence.gtidSet`: nothing acknowledged was lost, by construction.
 There is no "transactions lost" counter on this path, because a clean switchover cannot produce a
 number.
 
@@ -142,6 +143,8 @@ so it reads 0 when the IO thread has stalled.
 ## Draining is a deadline, not a barrier
 
 The defaults on `spec.plannedFailover`: `maxLagWait` 5m, `drainTimeout` 30s, `onCooldown` `Reject`.
+Admission bounds the two timers, `maxLagWait` to 1s–1h and `drainTimeout` to 1s–10m; a `0` is refused,
+not quietly replaced by the default.
 
 Two things take the write endpoint away. At `Fencing` the source's primary role label is stripped to
 `fenced`, which matches neither the `-primary` selector nor the `-replicas` selector, so the write
@@ -177,19 +180,19 @@ expires against a `pdx` that is genuinely behind, let the rollback fire and fix 
 window in which your source is fenced and your writes are refused.
 
 Two refusals worth recognising before you meet them. A planned failover aimed at `reader` ends
-`Failed{NotStarted, TargetNotPromotable}` with `only primary-candidate sites may be promoted` — the
+`Failed{NotStarted, TargetNotPromotable}` with `only PrimaryCandidate sites may be promoted` — the
 promotability rule from Unit 1, enforced again at this entry point. And the anti-flap cooldown gates
 planned admission just as it gates the automatic path, with reason `CooldownActive`; because
 `onCooldown` defaults to `Reject`, a planned failover attempted soon after an emergency one ends
 `NotStarted` and the annotation is cleared, not queued. Set `onCooldown: Defer` if you would rather it
 wait in `Deferred` and retry itself at `admission.retryTime`. One more: planned failover is strict. If a
-`primary-candidate` or `dr-only` site does not answer, admission waits with `waitReason: PeerUnreadable`
+`PrimaryCandidate` or `DisasterRecovery` site does not answer, admission waits with `waitReason: PeerUnreadable`
 and ends `AdmissionTimeout` after two minutes. A site it cannot read might be writable.
 
 ## What you have now
 
 You can move `playground`' primary on purpose, follow `status.plannedFailover.phase` to `Succeeded`,
-check that `status.promotionGtidExecuted` is the fenced set, and argue the superset gate to anyone who
+check that `status.lastFailover.promotionGtidExecuted` is the fenced set, and argue the superset gate to anyone who
 thinks it is a lag threshold. You can also say which outcomes hand you the cluster back intact and which
 hand you a fenced primary, an automation hold and a pager. Everything above assumed MySQL was the only
 thing moving. Next: what happens when there is a Dragonfly beside it, and what Bloodraven does and does

@@ -130,7 +130,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 					}
 					if r.Action == "renew" && r.Status == 409 && r.Body.Error == "revoked" &&
 						!r.At.IsZero() && r.At.Before(expires[r.Kind]) &&
-						(r.Body.Reason == "topology_changed" || r.Body.Reason == "operator_revoked") &&
+						(r.Body.Reason == "TopologyChanged" || r.Body.Reason == "OperatorRevoked") &&
 						r.Body.TopologyGeneration > state.grant.Body.TopologyGeneration {
 						revoked[r.Kind] = true
 					}
@@ -145,7 +145,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if mode == "emergency" || mode == "renew" {
-			if _, err := waitForMFGEvent(waitCtx, env, env.StartTime, "DeploymentLeaseRevoked", ""); err != nil {
+			if _, err := waitForMFGEvent(waitCtx, env, env.StartTime, v1alpha1.EventDeploymentLeaseRevoked, ""); err != nil {
 				return err
 			}
 		}
@@ -177,8 +177,8 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 		return fmt.Errorf("playground TLS Secret has no ca.crt")
 	}
 	mdb := &v1alpha1.MysqlDatabase{ObjectMeta: meta, Spec: v1alpha1.MysqlDatabaseSpec{
-		GroupRef: v1alpha1.LocalGroupRef{Name: env.FG}, DatabaseName: strings.ReplaceAll(s.name, "-", "_"),
-		Owner: v1alpha1.MysqlDatabaseOwner{SecretName: s.name}, DeletionPolicy: v1alpha1.MysqlDatabaseDelete,
+		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG}, DatabaseName: strings.ReplaceAll(s.name, "-", "_"),
+		Owner: v1alpha1.MysqlDatabaseOwner{SecretName: s.name}, DeletionPolicy: v1alpha1.DeletionPolicyDelete,
 		DeploymentClients: []v1alpha1.DeploymentClient{{Namespace: env.Namespace, ServiceAccount: s.name}},
 	}}
 	for _, obj := range []client.Object{
@@ -244,11 +244,11 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 
 func deploymentClientPod(meta metav1.ObjectMeta, operation, group, mode string) *corev1.Pod {
 	no, seconds, deadline := false, int64(3600), int64(600)
-	meta.Labels = map[string]string{"bloodraven.shipstream.io/deploy-client": "true"}
+	meta.Labels = map[string]string{v1alpha1.DeployClientLabel: v1alpha1.LabelValueTrue}
 	return &corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{
 		ServiceAccountName: meta.Name, AutomountServiceAccountToken: &no, RestartPolicy: corev1.RestartPolicyNever,
 		ActiveDeadlineSeconds: &deadline,
-		Tolerations:           []corev1.Toleration{{Key: "shipstream.io/db-readonly-" + group, Operator: corev1.TolerationOpExists}},
+		Tolerations:           []corev1.Toleration{{Key: v1alpha1.ReadOnlyTaintKey(meta.Namespace, group), Operator: corev1.TolerationOpExists}},
 		Containers: []corev1.Container{{Name: "client", Image: "python:3.13-alpine", Command: []string{"python", "-u", "-c", deployClientScript},
 			Env: []corev1.EnvVar{{Name: "DEPLOY_URL", Value: "https://bloodraven." + meta.Namespace + ".svc.cluster.local:8443/deploy/v1/groups/" + group},
 				{Name: "OPERATION_ID", Value: operation}, {Name: "INSTANCE", Value: meta.Name}, {Name: "MODE", Value: mode}},

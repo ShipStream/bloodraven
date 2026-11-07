@@ -17,9 +17,6 @@ import (
 )
 
 const (
-	eventLicenseInvalid  = "LicenseInvalid"
-	eventLicenseVerified = "LicenseVerified"
-
 	msgLicenseVerified      = "license verified"
 	msgLicenseInvalid       = "license invalid"
 	msgLicenseUpdatesEnded  = "license updates period ended"
@@ -194,7 +191,7 @@ func (r *MysqlFailoverGroupReconciler) emitLicenseSignals(fg *v1alpha1.MysqlFail
 	case !result.Valid:
 		logger.Warn(msgLicenseInvalid, "fg", fgName, "reason", result.Reason, "kid", result.Kid)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, eventLicenseInvalid,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventLicenseInvalid,
 				"license token failed offline verification (%s); operator behavior is unchanged", result.Reason)
 		}
 	case result.Community:
@@ -207,7 +204,7 @@ func (r *MysqlFailoverGroupReconciler) emitLicenseSignals(fg *v1alpha1.MysqlFail
 			"updatesUntil", result.UpdatesUntil.UTC().Format(time.RFC3339),
 		)
 		if r.Recorder != nil && (!seen || !prev.updatesExpired || prev.digest != next.digest) {
-			r.Recorder.Eventf(fg, corev1.EventTypeNormal, eventLicenseVerified,
+			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventLicenseVerified,
 				"license verified for %s (%s); update period ended %s; operator behavior is unchanged",
 				result.Organization, result.Edition, result.UpdatesUntil.UTC().Format(time.RFC3339))
 		}
@@ -221,7 +218,7 @@ func (r *MysqlFailoverGroupReconciler) emitLicenseSignals(fg *v1alpha1.MysqlFail
 			"kid", result.Kid,
 		)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeNormal, eventLicenseVerified,
+			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventLicenseVerified,
 				"license verified for %s (%s); updates until %s",
 				result.Organization, result.Edition, result.UpdatesUntil.UTC().Format(time.RFC3339))
 		}

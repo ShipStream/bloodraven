@@ -1,6 +1,6 @@
 {
   "id": "candidate-lagging",
-  "title": "pdx (primary-candidate) is genuinely behind while the reader is also soaked",
+  "title": "pdx (PrimaryCandidate) is genuinely behind while the reader is also soaked",
   "note": "The exclusion must be a site exclusion, not a deleted rule. pdx is 64s behind and must page; the reader at 91s must not.",
   "now": 1786536000,
   "samples": [

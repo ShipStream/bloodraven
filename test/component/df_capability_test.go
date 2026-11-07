@@ -57,7 +57,7 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "ns"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}},
+			Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
 			Dragonfly: &v1alpha1.DragonflySpec{
 				Enabled: true,
 				Image:   "example.invalid/dragonfly:old",
@@ -105,7 +105,7 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 	}
 
 	probeEvents := drainRec(rec, 4, 100*time.Millisecond)
-	if !eventHas(probeEvents, controller.ReasonDragonflyReplTakeoverUnsupported) {
+	if !eventHas(probeEvents, v1alpha1.EventDragonflyReplTakeoverUnsupported) {
 		t.Fatalf("missing unsupported event: %v", probeEvents)
 	}
 
@@ -118,7 +118,7 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 		t.Errorf("sessions_lost = %v, want %v", after, before+1)
 	}
 	fbEvents := drainRec(rec, 4, 100*time.Millisecond)
-	if !eventHas(fbEvents, controller.ReasonDragonflySessionsLost) {
+	if !eventHas(fbEvents, v1alpha1.EventDragonflySessionsLost) {
 		t.Fatalf("missing sessions-lost event: %v", fbEvents)
 	}
 }

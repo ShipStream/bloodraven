@@ -384,7 +384,7 @@ func (s *simPlannedStore) SetRequest(value string) {
 	if s.obj == nil {
 		return
 	}
-	s.patchAnnotationsLocked("request", map[string]string{controller.PlannedFailoverAnnotation: value})
+	s.patchAnnotationsLocked("request", map[string]string{v1alpha1.PlannedFailoverAnnotation: value})
 }
 
 // ---------------------------------------------------------------------------
@@ -543,7 +543,7 @@ func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailover
 		// (K029). A fence that moved nothing proves nothing: Unknown.
 		s.fenceSeq++
 		s.patchAnnotationsLocked("statusFence", map[string]string{
-			controller.PlannedFailoverStatusFenceAnnotation: controller.FormatStatusFenceValue(
+			v1alpha1.PlannedFailoverStatusFenceAnnotation: controller.FormatStatusFenceValue(
 				s.clk.Now().Add(time.Duration(s.fenceSeq))),
 		})
 		if s.rv == baseRV {
@@ -561,7 +561,7 @@ func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailover
 func (s *simPlannedStore) WriteTerminalMarker(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
 	m controller.TerminalMarker) (controller.WriteOutcome, error) {
 	return s.metadataWrite("terminalMarker", base, func(a map[string]string) map[string]string {
-		return map[string]string{controller.PlannedFailoverTerminalAnnotation: m.String()}
+		return map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: m.String()}
 	})
 }
 
@@ -569,20 +569,20 @@ func (s *simPlannedStore) WriteTerminalMarker(_ context.Context, base *v1alpha1.
 func (s *simPlannedStore) ClearTerminalMarker(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
 	runID string) (controller.WriteOutcome, error) {
 	return s.metadataWrite("clearTerminalMarker", base, func(a map[string]string) map[string]string {
-		if markerRunID(a[controller.PlannedFailoverTerminalAnnotation]) != runID {
+		if markerRunID(a[v1alpha1.PlannedFailoverTerminalAnnotation]) != runID {
 			return nil
 		}
-		return map[string]string{controller.PlannedFailoverTerminalAnnotation: ""}
+		return map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: ""}
 	})
 }
 
 // ConsumeRequest removes the request annotation.
 func (s *simPlannedStore) ConsumeRequest(_ context.Context, base *v1alpha1.MysqlFailoverGroup) (controller.WriteOutcome, error) {
 	return s.metadataWrite("consumeRequest", base, func(a map[string]string) map[string]string {
-		if _, ok := a[controller.PlannedFailoverAnnotation]; !ok {
+		if _, ok := a[v1alpha1.PlannedFailoverAnnotation]; !ok {
 			return nil
 		}
-		return map[string]string{controller.PlannedFailoverAnnotation: ""}
+		return map[string]string{v1alpha1.PlannedFailoverAnnotation: ""}
 	})
 }
 
@@ -660,10 +660,10 @@ func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFai
 func (s *simPlannedStore) DeleteHoldAck(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
 	runID string) (controller.WriteOutcome, error) {
 	return s.metadataWrite("deleteHoldAck", base, func(a map[string]string) map[string]string {
-		if v, ok := a[controller.AcknowledgePlannedFailoverHoldAnnotation]; !ok || strings.TrimSpace(v) != runID {
+		if v, ok := a[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; !ok || strings.TrimSpace(v) != runID {
 			return nil
 		}
-		return map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: ""}
+		return map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: ""}
 	})
 }
 
@@ -814,7 +814,7 @@ func holdStands(obj *v1alpha1.MysqlFailoverGroup) bool {
 	if obj.Status.PlannedFailoverHold != nil || holdConditionTrue(obj) {
 		return true
 	}
-	m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation])
+	m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
 	return ok && m.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
 }
 

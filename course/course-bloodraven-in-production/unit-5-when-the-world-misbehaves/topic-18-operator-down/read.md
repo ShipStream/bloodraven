@@ -20,7 +20,7 @@
       "out": "{\"value\":<n+k, k>0>,\"dbHost\":\"mysql-playground-iad-…\",\"readOnly\":false}   # still climbing"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mfg playground -o jsonpath='{.status.sites[*].lastSeen}'",
+      "cmd": "kubectl -n bloodraven-playground get mfg playground -o jsonpath='{.status.sites[*].lastSeenTime}'",
       "out": "<the last poll before the scale-down — identical sixty seconds later>"
     }
   ],
@@ -28,13 +28,13 @@
 }
 ```
 
-The counter keeps incrementing, `readOnly` stays `false`, and the only thing that changes is the custom resource: `status.sites[].lastSeen` freezes at the final poll. That is the whole shape of operator downtime. A healthy primary and replica keep serving reads and writes with zero operator involvement — the operator sits on the failure-detection and promotion path, not the request path.
+The counter keeps incrementing, `readOnly` stays `false`, and the only thing that changes is the custom resource: `status.sites[].lastSeenTime` freezes at the final poll. That is the whole shape of operator downtime. A healthy primary and replica keep serving reads and writes with zero operator involvement — the operator sits on the failure-detection and promotion path, not the request path.
 
 ## Availability and correctness fail separately
 
 **Correctness** — no split brain, no silent divergence — is preserved by the sidecar fencing layer regardless of how long the operator is gone. The sidecars are separate processes with their own timers, and a dead operator is exactly what their lease rule exists for. A MySQL pod that restarts mid-outage comes up fenced and stays fenced: the startup safety net cannot get an authoritative answer and refuses to guess.
 
-**Availability** is not. If the primary dies while the operator is down, nothing promotes the replica, and `playground` has no writable site until the operator returns. The same holds for a primary whose MySQL container merely restarts: `mysqld` comes back `read_only=ON`, and only the operator, once it is back, lifts that by re-asserting the site it last saw as primary. If the restart took 30 s or more, the sidecar's re-armed safety net has meanwhile turned it into `super_read_only=ON`; the returning operator lifts that fence only from a recorded `lastFailoverTarget`, so in a group that has never failed over it waits for a human.
+**Availability** is not. If the primary dies while the operator is down, nothing promotes the replica, and `playground` has no writable site until the operator returns. The same holds for a primary whose MySQL container merely restarts: `mysqld` comes back `read_only=ON`, and only the operator, once it is back, lifts that by re-asserting the site it last saw as primary. If the restart took 30 s or more, the sidecar's re-armed safety net has meanwhile turned it into `super_read_only=ON`; the returning operator lifts that fence only from a recorded `lastFailover.target`, so in a group that has never failed over it waits for a human.
 
 | Behaviour | At zero replicas |
 | --- | --- |

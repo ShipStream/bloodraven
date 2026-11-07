@@ -720,7 +720,7 @@ func opsReproveGroup(f *opsFixture, pf *v1alpha1.PlannedFailoverStatus, last tim
 	fg := opsGroup(pf)
 	if !last.IsZero() {
 		t := metav1.NewTime(last)
-		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &t, target
+		fg.Status.SetLastFailover(&t, target, "")
 	}
 	return fg
 }
@@ -824,10 +824,10 @@ func TestReprove_RecognisesOwnRecord(t *testing.T) {
 	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
 	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
 	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:             failoverStampFormat(pf.Promotion.IntentTime.Add(2 * time.Second)),
-		LastFailoverTargetAnnotation:       "dc2",
-		PromotionGtidExecutedAnnotation:    opsF,
-		PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(pf.Promotion.IntentTime.Add(2*time.Second), "dc2"),
+		v1alpha1.LastFailoverAnnotation:             failoverStampFormat(pf.Promotion.IntentTime.Add(2 * time.Second)),
+		v1alpha1.LastFailoverTargetAnnotation:       "dc2",
+		v1alpha1.PromotionGtidExecutedAnnotation:    opsF,
+		v1alpha1.PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(pf.Promotion.IntentTime.Add(2*time.Second), "dc2"),
 	}
 	res, err := f.topo.Reprove(context.Background(), f.ref, fg)
 	if err != nil || !res.OK {
@@ -896,7 +896,7 @@ func TestPF_SourceLeftFencedNamingSurvivesRestart(t *testing.T) {
 		{"terminal record", end(func(*v1alpha1.PlannedFailoverStatus, *v1alpha1.MysqlFailoverGroup) {}), time.Time{}, true},
 		{"terminal marker", end(func(pf *v1alpha1.PlannedFailoverStatus, fg *v1alpha1.MysqlFailoverGroup) {
 			pf.Result, pf.Phase = nil, v1alpha1.PlannedFailoverPhaseWaitingForLag
-			fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
+			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
 				Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}.String()}
 		}), time.Time{}, true},
 		{"fence not attributable", end(func(pf *v1alpha1.PlannedFailoverStatus, _ *v1alpha1.MysqlFailoverGroup) {

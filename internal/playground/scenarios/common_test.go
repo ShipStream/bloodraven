@@ -7,7 +7,6 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,8 +72,8 @@ func TestAssertHealthyBaselineRejectsOrderedUpdateInProgress(t *testing.T) {
 func TestAssertHealthyBaselineUsesAnnotationFailoverRecord(t *testing.T) {
 	mfg := testBaselineMFG(false)
 	mfg.Annotations = map[string]string{
-		brcontroller.LastFailoverAnnotation:       time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-		brcontroller.LastFailoverTargetAnnotation: "pdx",
+		v1alpha1.LastFailoverAnnotation:       time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		v1alpha1.LastFailoverTargetAnnotation: "pdx",
 	}
 	env := testScenarioEnv(t, mfg)
 
@@ -135,8 +134,8 @@ func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
 		},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad"},
-				{Name: "pdx"},
+				{Name: "iad", ServerID: 101},
+				{Name: "pdx", ServerID: 102},
 			},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
@@ -146,15 +145,14 @@ func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
 				Status: metav1.ConditionTrue,
 			}},
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
-				{Name: "pdx", State: "read-only", Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 		},
 	}
 	if dragonflyEnabled {
 		mfg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true}
 		mfg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-			Enabled:    true,
 			ActiveSite: "iad",
 			Phase:      v1alpha1.DragonflyPhaseReady,
 			Sites: []v1alpha1.DragonflySiteStatus{
@@ -168,7 +166,7 @@ func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
 					Role:             v1alpha1.DragonflyRoleReplica,
 					Reachable:        true,
 					LinkStatus:       "up",
-					LastIOSecondsAgo: 0,
+					LastIOSecondsAgo: new(int64(0)),
 				},
 			},
 		}

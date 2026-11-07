@@ -20,7 +20,7 @@ import (
 )
 
 // abandonedFixture is a cleanup fixture whose backup never succeeded: no
-// status.location, but status.artifactStorage records the planned
+// completed artifact, but status.artifactStorage records the planned
 // destination its Job wrote the backup stamp to.
 func abandonedFixture(t *testing.T, phase v1alpha1.BackupPhase) *cleanupFixture {
 	t.Helper()
@@ -29,7 +29,7 @@ func abandonedFixture(t *testing.T, phase v1alpha1.BackupPhase) *cleanupFixture 
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	f.mb.Status.Phase, f.mb.Status.Location, f.mb.Status.CompletionTime = phase, "", nil
+	f.mb.Status.Phase, f.mb.Status.CompletionTime = phase, nil
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func (f *cleanupFixture) producerJob(t *testing.T, terminal batchv1.JobCondition
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: backupJobName(f.mb.Name), Namespace: f.mb.Namespace, UID: "producer-uid",
-			Labels: map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup"},
+			Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "MysqlBackup",
 				Name: f.mb.Name, UID: f.mb.UID, Controller: boolPtr(true)}},
 		},
@@ -107,9 +107,6 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 		if _, ok := env["BLOODRAVEN_BACKUP_PASSPHRASE_FILE"]; ok {
 			t.Fatal("a plaintext backup's cleanup mounts a passphrase")
 		}
-		if f.mb.Status.Location != "" {
-			t.Fatalf("status.location = %q, want empty", f.mb.Status.Location)
-		}
 
 		f.finishCleanupJob(t, batchv1.JobComplete, 0, backupmeta.FormatCleanupComplete(3))
 		drainEvents(f.rec)
@@ -140,7 +137,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
 		producer := f.producerJob(t, "")
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dump-pod", Namespace: "ns",
-			Labels: map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup"}},
+			Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"}},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 		if err := f.c.Create(context.Background(), pod); err != nil {
 			t.Fatal(err)
@@ -169,7 +166,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 
 	t.Run("encrypted backup mounts the producing Job's passphrase", func(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
-		f.mb.Status.Encrypted = true
+		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 		if err := f.c.Status().Update(context.Background(), f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +194,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 
 	t.Run("encrypted backup without a passphrase source is skipped", func(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
-		f.mb.Status.Encrypted = true
+		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 		if err := f.c.Status().Update(context.Background(), f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -232,7 +229,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 func (f *cleanupFixture) runningProducerPod(t *testing.T, mutate func(*corev1.Pod)) *corev1.Pod {
 	t.Helper()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dump-pod", Namespace: "ns",
-		Labels: map[string]string{labelMysqlBackup: f.mb.Name, labelResourceKind: "backup"}},
+		Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 	if mutate != nil {
 		mutate(pod)
@@ -354,7 +351,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		t.Cleanup(func() { SetOperatorImageDefaults("", "") })
 		fg := fgWithBackup()
 		profile := fg.Spec.Backup.Profiles[0]
-		profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "secret-a", Key: "pp"}}
+		profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "secret-a", Key: "pp"}}
 		mb := backupCR("art", "lion", profile.Name)
 		job, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: fg, Profile: profile, Backup: mb,
 			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
@@ -367,7 +364,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		}
 		// The Job mounts the backup's dump-key snapshot, never the
 		// profile's Secret (#203), and records it.
-		if got := storage.PassphraseSecret; got == nil || got.Name != testDumpKeySecret || got.Key != pitrKeySnapshotDataKey {
+		if got := storage.PassphraseSecretKeyRef; got == nil || got.Name != testDumpKeySecret || got.Key != pitrKeySnapshotDataKey {
 			t.Fatalf("passphrase not recorded: %+v", got)
 		}
 		profile.Encryption = nil
@@ -376,7 +373,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if storage, err := artifactStorageFromJob(plain); err != nil || storage.PassphraseSecret != nil {
+		if storage, err := artifactStorageFromJob(plain); err != nil || storage.PassphraseSecretKeyRef != nil {
 			t.Fatalf("plaintext Job records a passphrase: %+v %v", storage, err)
 		}
 	})
@@ -384,15 +381,15 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 	t.Run("cleanup after the producer is gone mounts the recorded Secret", func(t *testing.T) {
 		f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
 		ctx := context.Background()
-		f.fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "secret-b"}}
+		f.fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "secret-b"}}
 		if err := f.c.Update(ctx, f.fg); err != nil {
 			t.Fatal(err)
 		}
 		if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 			t.Fatal(err)
 		}
-		f.mb.Status.Encrypted = true
-		f.mb.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: "secret-a", Key: "pp"}
+		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+		f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "secret-a", Key: "pp"}
 		if err := f.c.Status().Update(ctx, f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -437,7 +434,7 @@ func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
 	if done, requeue := f.finalize(t); done || requeue != 5*time.Second {
 		t.Fatalf("done=%v requeue=%s, want a quiet short wait before the deadline", done, requeue)
 	}
-	if n := countEvents(f.rec, "ArtifactCleanupProducerStuck"); n != 0 {
+	if n := countEvents(f.rec, "ArtifactCleanupStalledProducerStop"); n != 0 {
 		t.Fatal("stuck warning before the deadline")
 	}
 	f.r.now = func() time.Time { return time.Now().Add(producerStopStuckAfter + time.Minute) }
@@ -446,16 +443,16 @@ func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
 	if done || requeue != 30*time.Second {
 		t.Fatalf("done=%v requeue=%s, want a held deletion", done, requeue)
 	}
-	cond := apiMeta.FindStatusCondition(f.mb.Status.Conditions, ConditionArtifactCleanup)
-	if cond == nil || cond.Reason != cleanupReasonProducerStopStuck || !strings.Contains(cond.Message, "dump-pod") ||
+	cond := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
+	if cond == nil || cond.Reason != v1alpha1.ReasonProducerStopStuck || !strings.Contains(cond.Message, "dump-pod") ||
 		!strings.Contains(cond.Message, "--force") {
 		t.Fatalf("condition %+v", cond)
 	}
-	if n := countEvents(f.rec, "Warning ArtifactCleanupProducerStuck"); n != 1 {
+	if n := countEvents(f.rec, "Warning ArtifactCleanupStalledProducerStop"); n != 1 {
 		t.Fatal("no stuck warning")
 	}
 	f.finalize(t)
-	if n := countEvents(f.rec, "ArtifactCleanupProducerStuck"); n != 0 {
+	if n := countEvents(f.rec, "ArtifactCleanupStalledProducerStop"); n != 0 {
 		t.Fatal("stuck warning repeated for an unchanged wait")
 	}
 	if _, ok := f.cleanupJob(t); ok {

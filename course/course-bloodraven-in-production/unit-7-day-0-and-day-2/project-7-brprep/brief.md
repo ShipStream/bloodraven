@@ -12,9 +12,10 @@ incident.
 ## How this works
 
 Topic 1 of this unit drew the line that matters on day 0: **admission validates the object, and
-nothing validates the object against the cluster.** A manifest that sets both credential modes is
-refused in milliseconds. A manifest whose `taintNodeSelector` names labels no node carries is
-accepted, applied, and silently does nothing for the rest of its life.
+nothing validates the object against the cluster.** A manifest that still carries the removed
+`spec.secretName` beside `spec.credentials` is refused in milliseconds. A manifest whose
+`taintNodeSelector` names labels no node carries is accepted, applied, and silently does nothing for
+the rest of its life.
 
 `brprep` makes that line executable. It reads a manifest as JSON and prints three kinds of line:
 
@@ -49,17 +50,18 @@ is measured against.
 
 **TODO A — `check_admission`.** Print one `REJECT <rule>` line per admission rule the manifest
 violates, in the order the `RULE_*` constants are declared. A clean manifest prints nothing at all. The nine rules
-are documented in the script — seven CEL rules on the CRD plus the `MinItems`/`MaxItems` bound on
-`spec.sites`, all of them refusals at `kubectl apply` — and two are worth flagging here.
+are documented in the script — CEL rules on the CRD, the `MinItems`/`MaxItems` bound and the name
+key on `spec.sites` and the required `spec.credentials`, all of them refusals at `kubectl apply` — and two
+are worth flagging here.
 
 *The role default is load-bearing.* `spec.sites[].role` is optional and defaults to
-`primary-candidate`, so a site with no `role` key counts toward the two-candidate minimum and is
+`PrimaryCandidate`, so a site with no `role` key counts toward the two-candidate minimum and is
 required to carry `lbIP` and `taintNodeSelector`. Reading a missing role as "not a candidate" fails
 half the fixtures.
 
 *The reader exemption is the discriminator.* `taintNodeSelector` and `lbIP` are required **unless**
-the role is `read-only` — because a reader is never promoted and never tainted, so it needs neither.
-`tests/fixtures/reader-lbip.json` has a legitimate reader without them *and* a `primary-candidate`
+the role is `ReadOnly` — because a reader is never promoted and never tainted, so it needs neither.
+`tests/fixtures/reader-lbip.json` has a legitimate reader without them *and* a `PrimaryCandidate`
 missing both. A check that demands them unconditionally fails it; a check that never demands them
 fails too.
 
@@ -72,7 +74,7 @@ the `WARN_*` templates verbatim. Six findings, documented in the script:
   evict your primary first
 - `readOnlyMaxLagSeconds` above `maxLagSeconds`
 - `encryptionAtRest` enabled with no backup profile at all
-- `updateStrategy: Recreate`
+- `updateStrategy.type: Recreate`
 
 None of these may change the exit code.
 
@@ -127,7 +129,7 @@ WARN spec.image is a floating tag; pin an immutable one or a restart can drift y
 WARN backup profile nightly uses storage.type PVC; a backup sharing a failure domain with the data is an assumption, not a backup
 WARN site iad sets resources.requests != resources.limits; without Guaranteed QoS the kubelet may evict this MySQL first
 WARN replication.readOnlyMaxLagSeconds (300) is above maxLagSeconds (30); the reader endpoint is now looser than the group threshold
-WARN updateStrategy Recreate patches every site Deployment in one pass; both sites can restart at once
+WARN updateStrategy.type Recreate patches every site Deployment in one pass; both sites can restart at once
 verdict: APPLYABLE (5 finding(s))
 $ echo $?
 0

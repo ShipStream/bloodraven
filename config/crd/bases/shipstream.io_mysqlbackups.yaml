@@ -24,13 +24,16 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     - jsonPath: .status.startTime
       name: Started
       type: date
     - jsonPath: .status.completionTime
       name: Completed
       type: date
-    - jsonPath: .status.location
+    - jsonPath: .status.artifactStorage.location
       name: Location
       priority: 1
       type: string
@@ -69,6 +72,23 @@ spec:
           spec:
             description: MysqlBackupSpec defines the desired state of a MysqlBackup.
             properties:
+              deletionPolicy:
+                default: Delete
+                description: |-
+                  DeletionPolicy controls what happens to the backup's artifact when
+                  this CR is deleted, by hand or by retention:
+                    - Delete (default) removes the artifact from storage, and then the
+                      backup's dump-key snapshot Secret, so retention frees storage.
+                    - Retain leaves the artifact in storage and keeps the dump-key
+                      snapshot Secret that decrypts it; an ArtifactRetained Event names
+                      both. Nothing tracks them afterwards: delete them by hand when
+                      they are no longer needed.
+                  It is read when the deletion is processed, so it can be changed up to
+                  then.
+                enum:
+                - Retain
+                - Delete
+                type: string
               failoverGroupRef:
                 description: |-
                   FailoverGroupRef identifies the MysqlFailoverGroup in the same
@@ -76,7 +96,9 @@ spec:
                 properties:
                   name:
                     description: Name of the MysqlFailoverGroup.
+                    maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
                 required:
                 - name
@@ -85,18 +107,18 @@ spec:
                 description: |-
                   ProfileName is the name of a spec.backup.profiles[] entry on the
                   referenced failover group.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
-              sourceSiteOverride:
+              sourceSite:
                 description: |-
-                  SourceSiteOverride, if set, forces a specific site to be the dump
-                  source. Leave empty to let the reconciler choose (replica-first).
-                type: string
-              triggeredBy:
-                description: |-
-                  TriggeredBy is a free-form label recording what created this CR
-                  (e.g. "schedule/nightly", "manual", "retry/nightly/attempt-2").
-                  Informational only.
+                  SourceSite, if set, forces a specific site (a spec.sites[].name of
+                  the referenced group) to be the dump source. Leave empty to let the
+                  reconciler choose (replica-first).
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9-]+$
                 type: string
             required:
             - failoverGroupRef
@@ -115,13 +137,15 @@ spec:
               artifactStorage:
                 description: |-
                   ArtifactStorage records the storage destination the producing Job
-                  wrote to: the exact artifact location, plus bucket, endpoint and
-                  region for S3 or the claim for PVC. It is captured from the Job when
-                  the Job is created and never follows later profile edits, so artifact
-                  cleanup cannot be redirected to another bucket, claim or prefix. Once
-                  its location is recorded it is immutable. Credentials are
-                  deliberately not recorded: cleanup reads them from the profile's
-                  current credentialsSecret.
+                  wrote to: the storage type and the exact artifact location, plus
+                  bucket, endpoint and region for S3 or the claim for PVC. It is
+                  captured from the Job when the Job is created and never follows later
+                  profile edits, so restores, verifications and artifact cleanup cannot
+                  be redirected to another bucket, claim or prefix. Once its location is
+                  recorded it is immutable. Credentials are deliberately not recorded:
+                  consumers read them from the profile's current credentialsSecretName.
+                  Durable: after the producing Job is gone it is the only record of
+                  where the artifact is and which key encrypted it.
                 properties:
                   bucket:
                     description: Bucket is the S3 bucket the artifact was written
@@ -138,13 +162,12 @@ spec:
                     type: string
                   location:
                     description: |-
-                      Location is the artifact location the producing Job wrote, in the
-                      form of MysqlBackupStatus.Location. Cleanup refuses to run unless the
-                      two are identical.
+                      Location is the artifact location the producing Job wrote, e.g.
+                      "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
                     type: string
-                  passphraseSecret:
+                  passphraseSecretKeyRef:
                     description: |-
-                      PassphraseSecret is the passphrase Secret and key the producing Job
+                      PassphraseSecretKeyRef is the passphrase Secret and key the producing Job
                       mounted, for an encrypted backup: the backup's own immutable dump-key
                       snapshot (mysqlbackup-<name>-dump-key-<uid8>, key passphrase), which
                       the operator made from the profile's passphrase before the Job and
@@ -155,11 +178,15 @@ spec:
                     properties:
                       key:
                         description: Key is the data key within the Secret.
+                        maxLength: 253
                         minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
                         type: string
                       name:
                         description: Name is the Secret name.
+                        maxLength: 253
                         minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                         type: string
                     required:
                     - key
@@ -169,6 +196,15 @@ spec:
                     description: Region is the S3 region in effect for the producing
                       Job.
                     type: string
+                  type:
+                    description: Type is the storage backend the producing Job wrote
+                      to.
+                    enum:
+                    - S3
+                    - PVC
+                    type: string
+                required:
+                - type
                 type: object
               attempt:
                 description: |-
@@ -177,15 +213,26 @@ spec:
                   as 1 for older CRs.
                 format: int32
                 type: integer
-              binlogFile:
+              binlogPosition:
                 description: |-
-                  BinlogFile is the binary log file name at dump time. Populated
-                  alongside BinlogPos for pre-GTID point-in-time tooling.
-                type: string
-              binlogPos:
-                description: BinlogPos is the binary log position at dump time.
-                format: int64
-                type: integer
+                  BinlogPosition is the binary-log position at dump time, for
+                  pre-GTID point-in-time tooling. Unset when the dump did not report
+                  one.
+                properties:
+                  file:
+                    description: File is the binary-log file name, e.g. "mysql-bin.000412".
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  position:
+                    description: Position is the byte offset within File.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                required:
+                - file
+                - position
+                type: object
               completionTime:
                 description: CompletionTime is when the backup Job reached a terminal
                   state.
@@ -250,28 +297,42 @@ spec:
                   - type
                   type: object
                 type: array
-              encrypted:
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              encryption:
                 description: |-
-                  Encrypted records whether the artifact at Location was encrypted
-                  at rest by the operator. True when the driving profile had
-                  spec.backup.profiles[].encryption set at the time the backup was
-                  taken. The restore side uses this flag to decide whether to run
-                  the decrypt init container; it is also useful as a compliance-
-                  audit trail for "prove every production backup was encrypted".
-                type: boolean
-              encryptionAlgorithm:
-                description: |-
-                  EncryptionAlgorithm is the algorithm identifier stamped onto the
-                  artifact header (e.g. "AES-256-GCM"). Empty on unencrypted
-                  artifacts. Forward-compat field — a future release that adds a
-                  second algorithm can dispatch on this rather than re-reading the
-                  header from storage.
-                type: string
+                  Encryption attributes the artifact's encryption: Passphrase when the
+                  producing Job encrypted it (artifactStorage.passphraseSecretKeyRef
+                  names the key), None when it wrote plaintext. It is written from the
+                  owned producing Job when the Job is created, and derived again from
+                  that Job at completion. Absent when no owned producing Job attributes
+                  it. Restores and verifications use it to decide whether to decrypt.
+                properties:
+                  algorithm:
+                    description: |-
+                      Algorithm is the algorithm stamped onto the artifact header; empty
+                      for None.
+                    enum:
+                    - AES-256-GCM
+                    type: string
+                  mode:
+                    description: Mode is Passphrase for an encrypted artifact and
+                      None for plaintext.
+                    enum:
+                    - None
+                    - Passphrase
+                    type: string
+                required:
+                - mode
+                type: object
               failoverGroupUID:
                 description: |-
                   FailoverGroupUID is the metadata.uid of the source failover group,
                   pinned in the backup Job's template when the Job is created and
                   recovered from the Job. The backup's stamp records the same UID.
+                  Durable: after the producing Job is gone it is the only record of
+                  which group incarnation produced the artifact.
                 type: string
               gtidExecuted:
                 description: |-
@@ -280,11 +341,6 @@ spec:
                 type: string
               jobName:
                 description: JobName is the name of the batchv1.Job running the dump.
-                type: string
-              location:
-                description: |-
-                  Location is the resolved URL/path of the backup artifact, e.g.
-                  "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
                 type: string
               message:
                 description: Message is a human-readable status message.
@@ -319,6 +375,7 @@ spec:
                   PITRArchiveID is the archive ID of the source group's active PITR
                   archive when the Job was created, pinned in the Job's template and
                   recovered from it. Empty when PITR was disabled.
+                  Durable: PITR replay and binlog retention select the archive by it.
                 pattern: ^(ar1-[a-z2-7]{26})?$
                 type: string
               size:
@@ -342,17 +399,9 @@ spec:
                 description: StartTime is when the backup Job was created.
                 format: date-time
                 type: string
-              storageType:
-                description: |-
-                  StorageType is the storage backend kind (S3 or PVC) that was used
-                  for this backup. Populated at Job creation time so cleanup logic
-                  can dispatch on it without resorting to a brittle location
-                  heuristic after the referenced profile is gone.
-                enum:
-                - S3
-                - PVC
-                type: string
             type: object
+        required:
+        - spec
         type: object
         x-kubernetes-validations:
         - message: 'metadata.name must not end in .bloodraven-backup.json: that is

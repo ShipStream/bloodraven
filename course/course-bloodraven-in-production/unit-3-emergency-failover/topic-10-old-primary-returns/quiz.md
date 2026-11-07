@@ -24,7 +24,7 @@ The test is one-directional: does the NEW primary's set contain the OLD primary'
 
 **Type:** MULTIPLE_CHOICE
 
-`iad` is `RecoveryBlocked` and its `divergentGtid` begins `589f4b67`. You run `kubectl annotate mfg playground bloodraven.shipstream.io/reclone-site=iad:589f4b`. What happens?
+`iad` is `RecoveryBlocked` and its `divergentGtid` begins `589f4b67`. You run `kubectl annotate mfg playground bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=$UID:gtidPrefix=589f4b`, with `$UID` the group's `metadata.uid`. What happens?
 
 - The reclone starts — `589f4b` is a correct prefix of the observed set, and the 8-character figure is only a hint printed in the error message.
 - Nothing happens until the next 30 s re-verification, which re-reads the annotation and accepts it.
@@ -35,7 +35,7 @@ The test is one-directional: does the NEW primary's set contain the OLD primary'
 
 **Explanation:**
 
-The interlock checks length before it checks match: a prefix under 8 characters is rejected outright, even though it happens to be a genuine prefix of the divergent set. The rejection emits a `RecloneRejected` warning event and the annotation is then deleted, so you must re-annotate rather than wait. The “a correct prefix is enough” answer is the tempting one — but the floor exists to make the token specific to one incident, not merely plausible. The “wait for the next re-verification” answer misreads the 30 s cadence, which re-verifies the divergence report, not the annotation; the annotation is already gone by then. The “parsed as a cold reclone” answer inverts the two forms — a colon-suffixed value is a hot reclone token, the cold form is `iad:confirm=playground`, and nothing about a short prefix converts one into the other (objective 8).
+The interlock checks length before it checks match: a prefix under 8 characters is rejected outright, even though it happens to be a genuine prefix of the divergent set. The rejection emits a `RecloneRejected` warning event and the annotation is then deleted, so you must re-annotate rather than wait. The “a correct prefix is enough” answer is the tempting one — but the floor exists to make the token specific to one incident, not merely plausible. The “wait for the next re-verification” answer misreads the 30 s cadence, which re-verifies the divergence report, not the annotation; the annotation is already gone by then. The “parsed as a cold reclone” answer inverts the two forms — a value with `gtidPrefix=` is the divergent form, the cold form is the same `iad:confirm=playground:uid=…` value without it, and nothing about a short prefix converts one into the other (objective 8).
 
 ## Question 3
 
@@ -45,27 +45,27 @@ The interlock checks length before it checks match: a prefix under 8 characters 
 
 **Sample answer:**
 
-It wants the cold form with the confirm token: `bloodraven.shipstream.io/reclone-site=iad:confirm=playground`, where the token is a literal string equal to the failover group's name. With no divergentGtid recorded there is no GTID prefix to prove intent against, but `CLONE INSTANCE` still wipes iad's datadir, so the group name stands in as the anti-fat-finger confirmation — you cannot destroy a site by typing one site name. The rejection message prints the exact value to set, and the rejected annotation is deleted, so re-annotate with the confirm form.
+It wants the cold form with the confirmation pairs: `bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=<playground's metadata.uid>`. `CLONE INSTANCE` wipes iad's datadir, so every reclone names the group (`confirm=` equal to the failover group's name) and its incarnation (`uid=`, so a request left over for an earlier group of the same name cannot apply) — you cannot destroy a site by typing one site name. With no divergentGtid recorded there is no GTID prefix to add, so no `gtidPrefix=`. The rejection message prints the exact value to set, and the rejected annotation is deleted, so re-annotate with the full form, or run `kubectl bloodraven reclone playground iad --cold`, which builds it.
 
 **A full-credit answer shows:**
 
-A strong answer gives the form `<siteName>:confirm=<groupName>` and uses the group name (`playground`), not the site name or the GTID; and explains that a cold reclone is still destructive, so the interlock demands a confirmation even with nothing divergent recorded. Credit for noting the rejection message names the exact string and that the rejected annotation is deleted from the CR. Deduct if the answer supplies a GTID prefix (there is none to supply) or claims the bare form always works when no divergence is recorded.
+A strong answer gives the form `<siteName>:confirm=<groupName>:uid=<groupUID>` and uses the group name (`playground`) and its uid, not the site name or the GTID; and explains that a cold reclone is still destructive, so the interlock demands the confirmation even with nothing divergent recorded. Credit for noting the rejection message names the exact string, that the rejected annotation is deleted from the CR, or that `kubectl bloodraven reclone --cold` builds the value. Deduct if the answer supplies a GTID prefix (there is none to supply) or claims the bare form works when no divergence is recorded.
 
 **Explanation:**
 
-The interlock branches on whether `divergentGtid` is populated. Populated means a hot reclone and an 8-character matching prefix. Empty means a cold reclone, which is exactly when the operator has no observed value to check you against — so the confirm token equal to the failover-group name takes its place (objective 8).
+Both forms wipe the datadir, so the interlock always demands `confirm=<group name>` and `uid=<group uid>`. It branches on whether `divergentGtid` is populated only for the extra token: populated means the divergent form, which adds `gtidPrefix=` with an 8-character matching prefix; empty means a cold reclone, where the operator has no observed value to check you against, so the name and uid are the whole confirmation (objective 8).
 
 ## Question 4
 
 **Type:** TRUE_FALSE
 
-`iad` is blocked. You edit the CR status and clear `recoveryState` by hand, then re-apply `reclone-site=iad`. The bare form is now accepted, because `RecoveryBlocked` is what the interlock was checking.
+`iad` is blocked. You edit the CR status and clear `recoveryState` by hand, then re-apply the cold form `reclone-site=iad:confirm=playground:uid=<uid>` (no `gtidPrefix=`). It is now accepted, because `RecoveryBlocked` is what the interlock was checking.
 
 **Correct answer:** false
 
 **Explanation:**
 
-The reversal: the interlock never reads `RecoveryState`. It keys on the presence of `divergentGtid` alone, precisely because `RecoveryBlocked` is a downstream UX field that can be transiently unset during a reconcile — gating on it would let a routine reconcile blip open the destructive path. With `divergentGtid` still populated, the bare form is rejected exactly as before. And there is no hand-edit that helps: clear `divergentGtid` too and you fall into the cold branch, which demands `iad:confirm=playground` instead. Either way the rejected annotation is deleted and a `RecloneRejected` event is emitted (objective 8).
+The reversal: the interlock never reads `RecoveryState`. It keys on the presence of `divergentGtid` alone, precisely because `RecoveryBlocked` is a downstream UX field that can be transiently unset during a reconcile — gating on it would let a routine reconcile blip open the destructive path. With `divergentGtid` still populated, a value without `gtidPrefix=` is rejected exactly as before. And there is no hand-edit that helps: clearing `divergentGtid` too would let the cold form through only by deleting the operator's record of what the clone throws away, and the next re-verification records it again. Either way the rejected annotation is deleted and a `RecloneRejected` event is emitted (objective 8).
 
 ## Question 5
 

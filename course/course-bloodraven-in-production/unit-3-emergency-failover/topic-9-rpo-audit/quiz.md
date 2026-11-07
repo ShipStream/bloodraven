@@ -36,7 +36,7 @@ The reversal: Bloodraven promotes it anyway. maxLagSeconds drives exactly one th
 
 **Type:** MULTIPLE_CHOICE
 
-You hold the old primary's gtid_executed set (O) and the value recorded in status.promotionGtidExecuted for the new primary (N). Which expression gives the number of transactions lost?
+You hold the old primary's gtid_executed set (O) and the value recorded in status.lastFailover.promotionGtidExecuted for the new primary (N). Which expression gives the number of transactions lost?
 
 - GTID_SUBSET(O, N)
 - The cardinality of GTID_SUBTRACT(O, N)

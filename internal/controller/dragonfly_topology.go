@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -374,7 +375,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 		m.logger.Info("dragonfly/mysql active-site drift: promoting Dragonfly replica to match MySQL",
 			"oldSource", oldSource, "target", target, "mysqlActiveSite", fg.Status.ActiveSite, "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(&fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
+			m.recorder.Eventf(&fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionStarted,
 				"mysql active site %q differs from Dragonfly master %q; promoting Dragonfly replica %q",
 				fg.Status.ActiveSite, oldSource, target)
 		}
@@ -384,7 +385,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 	if target, oldSource, ok := m.dragonflyOnlyPromotionCandidate(&fg, snap); ok {
 		m.logger.Info("dragonfly-only emergency: active master unreachable; promoting replica", "oldSource", oldSource, "target", target, "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(&fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
+			m.recorder.Eventf(&fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionStarted,
 				"dragonfly-only emergency: active master %q unreachable; promoting replica %q",
 				oldSource, target)
 		}
@@ -533,21 +534,19 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 // error rather than swallowing the cause entirely.
 func (m *DragonflyManager) fetchPassword(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) string {
 	auth := fg.Spec.Dragonfly.Auth
-	if auth == nil || auth.SecretName == "" {
+	if auth == nil || auth.PasswordSecretKeyRef.Name == "" {
 		return ""
 	}
-	key := auth.PasswordKey
-	if key == "" {
-		key = "password"
-	}
+	ref := auth.PasswordSecretKeyRef
+	key := ref.KeyOrDefault()
 	var secret corev1.Secret
-	if err := m.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: auth.SecretName}, &secret); err != nil {
-		m.logger.Warn("dragonfly: read auth secret", "secret", auth.SecretName, "error", err)
+	if err := m.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &secret); err != nil {
+		m.logger.Warn("dragonfly: read auth secret", "secret", ref.Name, "error", err)
 		return ""
 	}
 	raw, ok := secret.Data[key]
 	if !ok {
-		m.logger.Warn("dragonfly: auth secret missing key", "secret", auth.SecretName, "key", key)
+		m.logger.Warn("dragonfly: auth secret missing key", "secret", ref.Name, "key", key)
 		return ""
 	}
 	return string(raw)
@@ -604,7 +603,6 @@ func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySit
 func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) v1alpha1.DragonflyStatus {
 	expectedActive := activeDragonflySiteFromObservation(fg, snaps)
 	st := v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: expectedActive,
 	}
 	mastersOnExpected := 0
@@ -632,13 +630,13 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 		}
 		siteOut = append(siteOut, v1alpha1.DragonflySiteStatus{
 			Name:             s.Name,
-			Role:             v1alpha1.DragonflyRole(role),
+			Role:             apiDragonflyRole(role),
 			Reachable:        s.Reachable,
 			ServiceName:      dragonflySiteServiceName(fg.Name, s.Name),
 			ReplicationState: s.Info.Role,
 			LinkStatus:       linkStatus,
-			SyncInProgress:   s.Info.MasterSyncInProgress,
-			LastIOSecondsAgo: s.Info.MasterLastIOSecondsAgo,
+			SyncInProgress:   dragonflySyncInProgress(s.Info),
+			LastIOSecondsAgo: dragonflyLastIOSecondsAgo(s.Info),
 			Ready:            ready,
 			Message:          dragonflySiteMessage(s, role),
 		})
@@ -669,6 +667,8 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 		st.LastPromotionTime = fg.Status.Dragonfly.LastPromotionTime
 		st.LastPromotionTarget = fg.Status.Dragonfly.LastPromotionTarget
 		st.Upgrade = fg.Status.Dragonfly.Upgrade
+		// The reconciler observes the image from the StatefulSets.
+		st.Image = fg.Status.Dragonfly.Image
 	}
 	applyReplTakeoverStatus(&st, fg, snaps)
 	return st
@@ -760,7 +760,7 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 	if next != nil && !*next {
 		m.logger.Warn("dragonfly: REPLTAKEOVER not advertised", "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyReplTakeoverUnsupported,
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyReplTakeoverUnsupported,
 				"Dragonfly does not advertise REPLTAKEOVER; emergency promotion will fall back to REPLICAOF NO ONE (session continuity not guaranteed)")
 		}
 		return
@@ -768,7 +768,7 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 	if prev != nil && !*prev && next != nil && *next {
 		m.logger.Info("dragonfly: REPLTAKEOVER capability restored", "fg", m.fgKey.String())
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyReplTakeoverSupported,
+			m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyReplTakeoverSupported,
 				"Dragonfly now advertises REPLTAKEOVER")
 		}
 	}
@@ -977,7 +977,7 @@ func (m *DragonflyManager) attemptStaleMasterReconfigure(ctx context.Context, fg
 	}
 	m.logger.Info("stale-master reconfigure: REPLICAOF applied", "site", siteName, "host", masterHost, "port", masterPort)
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyOldSiteReconfigured,
+		m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyOldSiteReconfigured,
 			"stale Dragonfly master on site %q auto-reconfigured as replica of %s:%d (connected_slaves=0, master_repl_offset=0 — provably never accepted writes)",
 			siteName, masterHost, masterPort)
 	}
@@ -1196,7 +1196,7 @@ func (m *DragonflyManager) rolloutPromoteLocked(work context.Context, target, ol
 // group the caller made under the gate and validated with
 // rolloutPromotionBlocked.
 func (m *DragonflyManager) rolloutPromoteFG(work context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) bool {
-	return m.promoteLocked(work, fg, target, oldSource, effectiveDragonflyMaxSyncWaitFromFG(fg)/2)
+	return m.promoteLocked(work, fg, target, oldSource, effectiveDragonflyMaxSyncWait(fg)/2)
 }
 
 // rolloutPromotionBlocked returns why a rollout promotion of target, taking
@@ -1246,7 +1246,7 @@ func supersededPromotionRequest(fg *v1alpha1.MysqlFailoverGroup, req *dragonflyP
 			return fmt.Sprintf("planned failover to %q claimed the group after the request", pf.TargetSite)
 		}
 	}
-	if t := fg.Status.LastFailoverTarget; t != "" && t != req.target && fg.Status.LastFailover != nil && !fg.Status.LastFailover.Time.Before(issued) {
+	if t := fg.Status.LastFailoverTarget(); t != "" && t != req.target && fg.Status.LastFailoverTime() != nil && !fg.Status.LastFailoverTime().Time.Before(issued) {
 		return fmt.Sprintf("MySQL failed over to %q after the request", t)
 	}
 	if df := fg.Status.Dragonfly; df != nil && df.LastPromotionTime != nil && df.LastPromotionTarget != "" &&
@@ -1359,7 +1359,7 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 		m.logger.Warn("dragonfly emergency: target unreachable; skipping promotion", "site", target, "error", err, "fg", fgKey)
 		metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "failed").Inc()
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed,
 				"emergency: target Dragonfly %q unreachable; cache continuity unavailable", target)
 		}
 		m.stampPromotionWithin(ctx, target, false)
@@ -1392,7 +1392,7 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 			m.logger.Info("dragonfly emergency: REPLTAKEOVER succeeded", "site", target, "fg", fgKey)
 			metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "success").Inc()
 			if m.recorder != nil {
-				m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionCompleted,
+				m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionSucceeded,
 					"emergency: target Dragonfly %q promoted via REPLTAKEOVER (best-effort)", target)
 			}
 			m.finishDragonflyPromotion(ctx, fg, target, oldSource, password)
@@ -1462,7 +1462,7 @@ func (m *DragonflyManager) resolveUnconfirmedPromotion(ctx context.Context, fg *
 	m.logger.Warn("dragonfly emergency: promotion failed; target not observed as master", "site", target, "role", role, "cause", cause, "fg", fgKey)
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "failed").Inc()
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed,
 			"emergency: target Dragonfly %q failed to promote (%s); observed role %s", target, cause, role)
 	}
 	m.restoreSourceTraffic(ctx, fg, oldSource)
@@ -1476,9 +1476,7 @@ func (m *DragonflyManager) resolveUnconfirmedPromotion(ctx context.Context, fg *
 func (m *DragonflyManager) recordSessionsLostPromotion(fg *v1alpha1.MysqlFailoverGroup, target, what string) {
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "sessions_lost").Inc()
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionCompleted,
-			"emergency: target Dragonfly %q %s", target, what)
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflySessionsLost,
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySessionsLost,
 			"emergency: target Dragonfly %q %s", target, what)
 	}
 }
@@ -1551,13 +1549,13 @@ func (m *DragonflyManager) stampPromotionWithin(ctx context.Context, target stri
 	m.stampPromotion(stampCtx, target, success)
 }
 
-// applyEmergencyPromotionLabels stamps role=master+traffic=enabled on
+// applyEmergencyPromotionLabels stamps role=master+traffic=true on
 // the target site and demotes the old source to role=replica with its
 // traffic label restored.
 //
 // Demote MUST succeed before we restore the source's traffic label.
 // Otherwise the source pod stays labelled dragonfly-role=master with
-// traffic=enabled and gets selected by the active Service alongside
+// traffic=true and gets selected by the active Service alongside
 // the newly-promoted target — split-brain at the routing layer.
 //
 // Other patches are logged-and-dropped because the reconciler's
@@ -1568,7 +1566,7 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 		m.logger.Info("emergency: stamp target role=master", "site", target, "error", err)
 	}
 	if err := m.setTrafficLabel(ctx, fg, target, true); err != nil {
-		m.logger.Info("emergency: stamp target traffic=enabled", "site", target, "error", err)
+		m.logger.Info("emergency: stamp target traffic=true", "site", target, "error", err)
 	}
 	if oldSource == "" {
 		return true
@@ -1576,7 +1574,7 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 	if err := m.setRoleLabel(ctx, fg, oldSource, "replica"); err != nil {
 		m.logger.Warn("emergency: stamp old source role=replica failed; leaving traffic stripped to avoid split-brain", "site", oldSource, "error", err)
 		if m.recorder != nil {
-			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyPromotionFailed,
 				"emergency: demote of old source %q failed (%v); source kept out of active Service to avoid split-brain. Manual intervention required.",
 				oldSource, err)
 		}
@@ -1585,7 +1583,7 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 	if err := m.setTrafficLabel(ctx, fg, oldSource, true); err != nil {
 		// Demote succeeded so the active Service ignores the source
 		// (role=replica). Traffic-label drift is cosmetic; log only.
-		m.logger.Info("emergency: restore old source traffic=enabled", "site", oldSource, "error", err)
+		m.logger.Info("emergency: restore old source traffic=true", "site", oldSource, "error", err)
 	}
 	return true
 }
@@ -1666,16 +1664,6 @@ func (m *DragonflyManager) setTrafficLabel(ctx context.Context, fg *v1alpha1.Mys
 	return setDragonflyTrafficOnSite(ctx, m.client, fg, siteName, set)
 }
 
-// effectiveDragonflyMaxSyncWaitFromFG mirrors the planned-failover
-// helper but works against a freshly-fetched FG. Returns
-// defaultDragonflySyncWait when no override is set.
-func effectiveDragonflyMaxSyncWaitFromFG(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if d := fg.Spec.Dragonfly; d != nil && d.PlannedFailover != nil && d.PlannedFailover.MaxSyncWait != nil && d.PlannedFailover.MaxSyncWait.Duration > 0 {
-		return d.PlannedFailover.MaxSyncWait.Duration
-	}
-	return defaultDragonflySyncWait
-}
-
 // stampPromotion writes lastPromotionTime/Target, and writes
 // status.dragonfly.activeSite only after a successful promotion. Wrapped in RetryOnConflict so a concurrent
 // patchStatus write from the manager's own poll loop or the
@@ -1699,7 +1687,7 @@ func stampDragonflyPromotionStatus(ctx context.Context, reader client.Reader, c 
 		}
 		base := fg.DeepCopy()
 		if fg.Status.Dragonfly == nil {
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true}
+			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{}
 		}
 		if success {
 			if fg.Status.Dragonfly.ActiveSite != target {
@@ -1743,7 +1731,7 @@ func (m *DragonflyManager) recordStaleMaster(fg *v1alpha1.MysqlFailoverGroup, si
 		// connected_slaves=0 AND master_repl_offset=0; this Event fires
 		// on every detection regardless of whether the auto-rejoin gate
 		// passed.
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyStaleMasterDetected,
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyStaleMasterDetected,
 			"stale Dragonfly master detected on site %q (active=%q); auto-rejoin attempted only when connected_slaves=0 AND master_repl_offset=0",
 			siteName, fg.Status.ActiveSite)
 	}
@@ -1783,7 +1771,7 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	if a.Enabled != b.Enabled || a.ActiveSite != b.ActiveSite || a.Phase != b.Phase || a.Message != b.Message {
+	if a.ActiveSite != b.ActiveSite || a.Phase != b.Phase || a.Message != b.Message || a.Image != b.Image {
 		return false
 	}
 	if (a.LastPromotionTime == nil) != (b.LastPromotionTime == nil) {
@@ -1811,9 +1799,30 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 		return false
 	}
 	for i := range a.Sites {
-		if a.Sites[i] != b.Sites[i] {
+		// The optional observations are pointers: compare their values.
+		if !equality.Semantic.DeepEqual(a.Sites[i], b.Sites[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// dragonflySyncInProgress is status.dragonfly.sites[].syncInProgress: nil
+// when Dragonfly did not report master_sync_in_progress.
+func dragonflySyncInProgress(info dragonfly.ReplicationInfo) *bool {
+	if !info.MasterSyncInProgressReported {
+		return nil
+	}
+	v := info.MasterSyncInProgress
+	return &v
+}
+
+// dragonflyLastIOSecondsAgo is status.dragonfly.sites[].lastIOSecondsAgo:
+// nil when Dragonfly did not report master_last_io_seconds_ago.
+func dragonflyLastIOSecondsAgo(info dragonfly.ReplicationInfo) *int64 {
+	if !info.MasterLastIOReported {
+		return nil
+	}
+	v := int64(info.MasterLastIOSecondsAgo)
+	return &v
 }

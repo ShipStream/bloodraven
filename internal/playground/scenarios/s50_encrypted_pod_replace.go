@@ -120,7 +120,7 @@ func s50RequireEncryptedBaseline(mfg *v1alpha1.MysqlFailoverGroup) error {
 	if mfg.Status.ActiveSite == "" {
 		return fmt.Errorf("no active site reported; cluster has not settled")
 	}
-	if mfg.Status.EncryptionAtRest == nil || !mfg.Status.EncryptionAtRest.Sealed {
+	if mfg.Status.EncryptionAtRest == nil || !encryptionAllSitesSealed(mfg) {
 		return fmt.Errorf("not every site is sealed yet: %s", s48UnsealedSummary(mfg.Status.EncryptionAtRest))
 	}
 	return nil

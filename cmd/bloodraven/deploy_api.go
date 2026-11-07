@@ -215,7 +215,7 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var namespaces []string
 	instancesByNamespace := map[string][]string{}
 	for _, db := range databases.Items {
-		if !db.DeletionTimestamp.IsZero() || db.Spec.GroupRef.Name != group || (instance != "" && db.Name != instance) {
+		if !db.DeletionTimestamp.IsZero() || db.Spec.FailoverGroupRef.Name != group || (instance != "" && db.Name != instance) {
 			continue
 		}
 		for _, caller := range db.Spec.DeploymentClients {
@@ -329,23 +329,33 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.DeploymentLeaseView, reason string) map[string]any {
-	ready := apimeta.IsStatusConditionTrue(fg.Status.Conditions, "Ready")
+	ready := apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1alpha1.ConditionReady)
 	degraded := ""
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Degraded"); c != nil && c.Status == metav1.ConditionTrue {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionDegraded); c != nil && c.Status == metav1.ConditionTrue {
 		degraded = c.Reason
 	}
-	replicating, recovery, lag := true, apimeta.IsStatusConditionTrue(fg.Status.Conditions, "RecoveryPending"), int64(0)
+	// replicationRunning: every non-active spec site has a status entry
+	// whose replication is Healthy or Lagging (and no other non-active
+	// entry reports otherwise). Lag is reported separately.
+	replicating, recovery, lag := true, apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1alpha1.ConditionRecoveryPending), int64(0)
+	statusByName := make(map[string]v1alpha1.SiteStatus, len(fg.Status.Sites))
 	for _, s := range fg.Status.Sites {
+		statusByName[s.Name] = s
 		if s.Name != fg.Status.ActiveSite {
-			replicating = replicating && s.Replicating
+			replicating = replicating && s.Replication.Running()
 			if s.SecondsBehindSource != nil {
 				lag = max(lag, *s.SecondsBehindSource)
 			}
 		}
 		recovery = recovery || s.RecoveryState != "" || s.SourceConvergenceState == v1alpha1.SourceConvergencePending || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked
 	}
-	if len(fg.Status.Sites) < len(fg.Spec.Sites) {
-		replicating = false
+	for _, site := range fg.Spec.Sites {
+		if site.Name == fg.Status.ActiveSite {
+			continue
+		}
+		if s, ok := statusByName[site.Name]; !ok || !s.Replication.Running() {
+			replicating = false
+		}
 	}
 	planned := plannedFailoverOperation(fg)
 	restore, dragonfly := "", ""
@@ -373,7 +383,7 @@ func plannedFailoverOperation(fg *v1alpha1.MysqlFailoverGroup) map[string]string
 	if p == nil {
 		return out
 	}
-	if m, ok := controller.ParseTerminalMarker(fg.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]); ok && p.RunID != "" && m.RunID == p.RunID {
+	if m, ok := controller.ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && p.RunID != "" && m.RunID == p.RunID {
 		out["phase"] = string(v1alpha1.PlannedFailoverPhaseFailed)
 		if m.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
 			out["phase"] = string(v1alpha1.PlannedFailoverPhaseSucceeded)

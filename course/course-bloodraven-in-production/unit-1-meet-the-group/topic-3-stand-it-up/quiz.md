@@ -7,10 +7,10 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` reports `activeSite: iad`, and its site entries read: `iad` state `writable`, no other fields; `pdx` state `read-only`, `replicating: true`, `secondsBehindSource: 0`; `reader` state `read-only`, `replicating: true`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?
+`playground` reports `activeSite: iad`, and its site entries read: `iad` state `Writable`, `replication: NotApplicable`, no other fields; `pdx` state `ReadOnly`, `replication: Healthy`, `secondsBehindSource: 0`; `reader` state `ReadOnly`, `replication: Healthy`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?
 
-- `iad` — it is named in `activeSite` and it is the one site whose state is `writable`
-- `pdx` — it is the only site the operator reports as `replicating`, which is what a primary does
+- `iad` — it is named in `activeSite` and it is the one site whose state is `Writable`
+- `pdx` — the operator reports its replication as `Healthy`, which is what a primary does
 - `iad` — it is the first entry in `status.sites[]`, and the operator lists the primary first
 - You cannot tell: `activeSite` records the last site that was promoted, not the site that is writable now
 
@@ -18,33 +18,33 @@
 
 **Explanation:**
 
-`activeSite` names the site the operator currently treats as the writable authority, and `iad` is the only entry in state `writable` — the two agree, which is what a healthy group looks like. `pdx` is wrong because `replicating: true` marks a follower applying the primary's stream, not a primary; the primary is never probed for replication at all. The first-entry answer is wrong because `status.sites[]` runs parallel to `spec.sites`, in declaration order, with no relation to who is primary. The last option confuses `activeSite` with `status.lastFailoverTarget`, which is the field that records a past promotion. (objective 8)
+`activeSite` names the site the operator currently treats as the writable authority, and `iad` is the only entry in state `Writable` — the two agree, which is what a healthy group looks like. `pdx` is wrong because `replication: Healthy` marks a follower applying the primary's stream, not a primary; the primary is never probed for replication at all and reads `NotApplicable`. The first-entry answer is wrong because `status.sites[]` runs parallel to `spec.sites`, in declaration order, with no relation to who is primary. The last option confuses `activeSite` with `status.lastFailover.target`, which is the field that records a past promotion. (objective 8)
 
 ## Question 2
 
 **Type:** MULTIPLE_CHOICE
 
-Same dump. `pdx` and `reader` both read state `read-only`, `replicating: true`, `secondsBehindSource: 0`. How do you establish which of them is the dedicated non-promotable reader?
+Same dump. `pdx` and `reader` both read state `ReadOnly`, `replication: Healthy`, `secondsBehindSource: 0`. How do you establish which of them is the dedicated non-promotable reader?
 
 - Read `spec.sites[].role` — the status block carries no role field
-- Read `status.sites[].role`, which reports `read-only` for the reader and `primary-candidate` for `pdx`
-- The reader is the site whose `state` is `read-only` while the other candidate's state would be `unknown`
+- Read `status.sites[].role`, which reports `ReadOnly` for the reader and `PrimaryCandidate` for `pdx`
+- The reader is the site whose `state` is `ReadOnly` while the other candidate's state would be `Unknown`
 - The reader is the one with no `lbIP` in its status entry
 
 **Correct option index:** 0
 
 **Explanation:**
 
-Role is spec, not status: `status.sites[]` carries name, state, lastSeen, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `primary-candidate` follower and a `read-only` reader sit in state `read-only` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `lbIP` is spec, and status never mirrors it. (objective 8)
+Role is spec, not status: `status.sites[]` carries name, state, lastSeenTime, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `PrimaryCandidate` follower and a `ReadOnly` reader sit in state `ReadOnly` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `lbIP` is spec, and status never mirrors it. (objective 8)
 
 ## Question 3
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` now reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; `reader` state `unreachable`. What `reason` does the `Degraded` condition carry?
+`playground` now reports `activeSite: iad`; `iad` state `Writable`; `pdx` state `ReadOnly`, `replication: Healthy`; `reader` state `Unreachable`. What `reason` does the `Degraded` condition carry?
 
-- `Healthy` — `role: read-only` sites are excluded from the writable/read-only/unreachable tallies
-- `Degraded` — one site is unreachable while the primary is up
+- `Healthy` — `role: ReadOnly` sites are excluded from the writable/read-only/unreachable tallies
+- `SiteUnhealthy` — one site is unreachable while the primary is up
 - `TotalLoss` — a site the operator cannot reach counts as lost
 - `NoPrimary` — the group is down to one writable site with no spare reader
 
@@ -52,13 +52,13 @@ Role is spec, not status: `status.sites[]` carries name, state, lastSeen, replic
 
 **Explanation:**
 
-The reasons are computed over core sites only, and a site with `role: read-only` is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is `Healthy`. The second option is the most tempting and would be right if the unreachable site were `pdx`: a live primary with an unreachable *core* peer is exactly the `Degraded` shape, but the reader does not count. `TotalLoss` requires every core site unreachable, not one site of any kind. `NoPrimary` describes the opposite situation — no writable site at all, every core site read-only — and here `iad` is writable. (objective 8)
+The reasons are computed over core sites only, and a site with `role: ReadOnly` is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is `Healthy`. The second option is the most tempting and would be right if the unreachable site were `pdx`: a live primary with an unreachable *core* peer is exactly the `SiteUnhealthy` shape, but the reader does not count. `TotalLoss` requires every core site unreachable, not one site of any kind. `NoPrimary` describes the opposite situation — no writable site at all, every core site read-only — and here `iad` is writable. (objective 8)
 
 ## Question 4
 
 **Type:** TRUE_FALSE
 
-Your counter application has just written through `mysql-playground-primary`. `status.sites[]` shows `pdx` with `replicating: true` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.
+Your counter application has just written through `mysql-playground-primary`. `status.sites[]` shows `pdx` with `replication: Healthy` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.
 
 **Correct answer:** false
 

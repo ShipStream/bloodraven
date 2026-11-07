@@ -21,16 +21,18 @@ import (
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
-// pitrFailureReason returns the first refusal token in message (§7.1), or
-// "". Every PITR step writes its token as the first word of its termination
-// message; the controller may prefix it ("PITRCoverageInvalid: " when it
-// refuses a verdict), so the earliest whole-word token wins.
-func pitrFailureReason(message string) string {
+// pitrFailureReason returns the served reason for the first refusal token
+// in message (§7.1), or "". Every PITR step writes its token as the first
+// word of its termination message; the controller may prefix it
+// ("PITRCoverageInvalid: " when it refuses a verdict), so the earliest
+// whole-word token wins. The replay script's sentinel is served as
+// PITRReplayFailed; the message keeps the raw sentinel.
+func pitrFailureReason(message string) v1alpha1.PITRToken {
 	for _, field := range strings.FieldsFunc(message, func(r rune) bool {
 		return strings.ContainsRune(" \t\n\r:,;()\"{}=", r)
 	}) {
 		if t := pitrarchive.Token(strings.TrimSuffix(field, ".")); t.Known() {
-			return string(t)
+			return v1alpha1.PITRToken(t.Served())
 		}
 	}
 	return ""
@@ -188,7 +190,7 @@ func renderedPITRRequest(job *batchv1.Job) pitrRenderedRequest {
 		Destination:       init["BLOODRAVEN_PITR_DESTINATION"],
 		EncryptionMode:    init["BLOODRAVEN_PITR_ENCRYPTION_MODE"],
 		ExpectedSourceUID: main["BLOODRAVEN_PITR_EXPECTED_SOURCE_UID"],
-		Verification:      main["BLOODRAVEN_VERIFY_PITR_MODE"] != "" && main["BLOODRAVEN_VERIFY_PITR_MODE"] != "none",
+		Verification:      main["BLOODRAVEN_VERIFY_PITR_MODE"] != "",
 	}
 }
 
@@ -288,8 +290,8 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		if err != nil {
 			return nil, fmt.Errorf("PITR verdict stop: %w", err)
 		}
-		mt := metav1.NewMicroTime(stop.Time)
-		res.StopTime = &mt
+		st := metav1.NewTime(stop.Time)
+		res.StopTime = &st
 	case "latest":
 		res.Mode = v1alpha1.PointInTimeModeLatest
 		if fields["stop"] != "" {
@@ -312,8 +314,8 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 	if !pitrarchive.ValidArchiveID(fields["archive"]) {
 		return nil, fmt.Errorf("PITR verdict archive %q is malformed", fields["archive"])
 	}
-	mode := v1alpha1.PITRArchiveEncryptionMode(fields["encryptionMode"])
-	if mode != v1alpha1.PITRArchiveEncryptionNone && mode != v1alpha1.PITRArchiveEncryptionPassphrase {
+	mode := v1alpha1.EncryptionMode(fields["encryptionMode"])
+	if mode != v1alpha1.EncryptionModeNone && mode != v1alpha1.EncryptionModePassphrase {
 		return nil, fmt.Errorf("PITR verdict encryption mode %q is invalid", mode)
 	}
 	if req.EncryptionMode != "" && string(mode) != req.EncryptionMode {
@@ -336,7 +338,7 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		Source:         v1alpha1.PITRArchiveSource{Namespace: fields["sourceNamespace"], Name: fields["sourceName"], UID: types.UID(fields["sourceUID"])},
 		EncryptionMode: mode,
 	}
-	if mode == v1alpha1.PITRArchiveEncryptionPassphrase {
+	if mode == v1alpha1.EncryptionModePassphrase {
 		archive.Algorithm = v1alpha1.EncryptionAlgorithmAES256GCM
 	}
 	res.Archive = archive

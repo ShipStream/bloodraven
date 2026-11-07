@@ -34,19 +34,19 @@ func TestInPlaceRestoreGuards_FollowAcceptedRun(t *testing.T) {
 		status                  *v1alpha1.RestoreInPlaceStatus
 		inFlight, frozen, fence bool
 	}{
-		{name: "spec removed mid full restore", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: "full"},
+		{name: "spec removed mid full restore", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}},
 			inFlight: true, frozen: true, fence: true},
-		{name: "spec removed mid per-schema restore", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: "schema:orders"},
+		{name: "spec removed mid per-schema restore", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}},
 			inFlight: true, frozen: true},
-		{name: "spec removed while resuming", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceResuming, Scope: "full"},
+		{name: "spec removed while resuming", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceResuming, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}},
 			inFlight: true, frozen: true, fence: true},
 		{name: "scope edited to per-schema mid full restore", spec: perSchema,
-			status:   &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: "full"},
+			status:   &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}},
 			inFlight: true, frozen: true, fence: true},
 		{name: "scope edited to full mid per-schema restore", spec: full,
-			status:   &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: "schema:orders"},
+			status:   &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}},
 			inFlight: true, frozen: true},
-		{name: "spec removed after success", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: "full"}},
+		{name: "spec removed after success", status: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}},
 		{name: "nothing requested"},
 		{name: "requested, not yet observed", spec: full, inFlight: true, fence: true},
 	} {
@@ -73,7 +73,7 @@ func TestInPlaceRestoreGuards_FollowAcceptedRun(t *testing.T) {
 func runningInPlaceJob(fg *v1alpha1.MysqlFailoverGroup, site, confirm string, created time.Time) *batchv1.Job {
 	return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 		Name: inPlaceRestoreJobName(fg.Name, site), Namespace: fg.Namespace,
-		Annotations:       map[string]string{restoreInPlaceConfirmAnnotation: confirm},
+		Annotations:       map[string]string{v1alpha1.RestoreInPlaceConfirmAnnotation: confirm},
 		CreationTimestamp: metav1.NewTime(created),
 	}}
 }
@@ -99,7 +99,7 @@ func TestReconcileInPlaceRestore_SpecRemovedMidJobHoldsUntilJobFinishes(t *testi
 	site := fg.Spec.Sites[0].Name
 	start := time.Now().Add(-time.Minute)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "full",
+		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
 		JobName: inPlaceRestoreJobName(fg.Name, site), StartTime: ptrTime(start),
 		ConfirmTokenUsed: previousRestoreConfirm,
 	}
@@ -109,7 +109,7 @@ func TestReconcileInPlaceRestore_SpecRemovedMidJobHoldsUntilJobFinishes(t *testi
 	job := runningInPlaceJob(fg, site, testRestoreConfirm, start.Add(5*time.Second))
 	pod := primaryFencedPod(fg.Name, site)
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, job, pod, dsnSecret())
+	r, c := newReconciler(fg, job, pod, operatorCredsSecret())
 	rec := r.Recorder.(*record.FakeRecorder)
 
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
@@ -140,8 +140,8 @@ func TestReconcileInPlaceRestore_SpecRemovedMidJobHoldsUntilJobFinishes(t *testi
 	if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &gotPod); err != nil {
 		t.Fatal(err)
 	}
-	if gotPod.Labels[labelRole] != "fenced" {
-		t.Fatalf("primary pod role = %q, want fenced while the Job runs", gotPod.Labels[labelRole])
+	if gotPod.Labels[v1alpha1.RoleLabel] != "fenced" {
+		t.Fatalf("primary pod role = %q, want fenced while the Job runs", gotPod.Labels[v1alpha1.RoleLabel])
 	}
 	if !strings.Contains(strings.Join(drainEvents(rec), "\n"), "RestoreInPlaceSpecRemoved") {
 		t.Error("want a RestoreInPlaceSpecRemoved event")
@@ -177,7 +177,7 @@ func TestReconcileInPlaceRestore_SpecRemovedMidJobHoldsUntilJobFinishes(t *testi
 		t.Fatalf("terminal status must survive a spec-less reconcile, got %+v", st)
 	}
 	reapplied := getFG(t, c, fg)
-	reapplied.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: testRestoreConfirm, Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}}
+	reapplied.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: testRestoreConfirm, Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}}
 	if _, err := r.reconcileInPlaceRestore(context.Background(), reapplied); err != nil {
 		t.Fatal(err)
 	}
@@ -194,11 +194,11 @@ func TestReconcileInPlaceRestore_SpecRemovedAdoptsJobFromCrashWindow(t *testing.
 	site := fg.Spec.Sites[0].Name
 	start := time.Now().Add(-time.Minute).Truncate(time.Second)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "full", StartTime: ptrTime(start),
+		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(start),
 	}
 	job := runningInPlaceJob(fg, site, testRestoreConfirm, start.Add(5*time.Second))
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, job, dsnSecret())
+	r, c := newReconciler(fg, job, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -232,11 +232,11 @@ func TestReconcileInPlaceRestore_SpecRemovedBeforeJobCancels(t *testing.T) {
 			site := fg.Spec.Sites[0].Name
 			start := time.Now().Add(-time.Minute).Truncate(time.Second)
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: tc.phase, TargetSite: site, Scope: "full", StartTime: ptrTime(start),
+				Phase: tc.phase, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(start),
 				ConfirmTokenUsed: previousRestoreConfirm,
 			}
 			fg.Spec.RestoreInPlace = nil
-			r, c := newReconciler(fg, dsnSecret())
+			r, c := newReconciler(fg, operatorCredsSecret())
 			if tc.staleJob {
 				stale := runningInPlaceJob(fg, site, previousRestoreConfirm, start.Add(-time.Hour))
 				stale.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
@@ -265,13 +265,13 @@ func TestReconcileInPlaceRestore_SpecRemovedBeforeJobCancels(t *testing.T) {
 					t.Fatalf("no Job may be created for a cancelled run, got err=%v", err)
 				}
 			}
-			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCancelled") {
-				t.Error("want a RestoreInPlaceCancelled event")
+			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCanceled") {
+				t.Error("want a RestoreInPlaceCanceled event")
 			}
 
 			// Re-applying the earlier, already executed confirm does nothing.
 			old := getFG(t, c, fg)
-			old.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: previousRestoreConfirm, Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}}
+			old.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: previousRestoreConfirm, Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}}
 			if _, err := r.reconcileInPlaceRestore(context.Background(), old); err != nil {
 				t.Fatal(err)
 			}
@@ -288,9 +288,9 @@ func TestReconcileInPlaceRestore_SpecRemovedBeforeJobCancels(t *testing.T) {
 func TestReconcileInPlaceRestore_NewRunKeepsLastConsumedConfirm(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: "full", ConfirmTokenUsed: previousRestoreConfirm,
+		Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: previousRestoreConfirm,
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -301,11 +301,11 @@ func TestReconcileInPlaceRestore_NewRunKeepsLastConsumedConfirm(t *testing.T) {
 	}
 
 	rejected := fgInPlaceRestore("")
-	rejected.Spec.RestoreInPlace.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-17T13:00:00Z"}
+	rejected.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders", "billing"}}
 	rejected.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: "full", ConfirmTokenUsed: previousRestoreConfirm,
+		Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: previousRestoreConfirm,
 	}
-	r2, c2 := newReconciler(rejected, succeededSeedBackup(), dsnSecret())
+	r2, c2 := newReconciler(rejected, succeededSeedBackup(), operatorCredsSecret())
 	if _, err := r2.reconcileInPlaceRestore(context.Background(), rejected); err != nil {
 		t.Fatal(err)
 	}
@@ -321,10 +321,10 @@ func TestReconcileInPlaceRestore_ScopeChangedBeforeJobIsRejected(t *testing.T) {
 	fg := fgInPlaceRestore("orders") // the spec now asks for a per-schema restore
 	site := fg.Spec.Sites[0].Name
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "full", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 		ConfirmTokenUsed: previousRestoreConfirm,
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -345,11 +345,11 @@ func TestReconcileInPlaceRestore_SpecRemovedWaitsForForeignRunningJob(t *testing
 	site := fg.Spec.Sites[0].Name
 	start := time.Now().Add(-time.Minute).Truncate(time.Second)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "full", StartTime: ptrTime(start),
+		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(start),
 	}
 	fg.Spec.RestoreInPlace = nil
 	foreign := runningInPlaceJob(fg, site, previousRestoreConfirm, start.Add(-time.Hour))
-	r, c := newReconciler(fg, foreign, dsnSecret())
+	r, c := newReconciler(fg, foreign, operatorCredsSecret())
 	d, err := r.reconcileInPlaceRestore(context.Background(), fg)
 	if err != nil {
 		t.Fatal(err)
@@ -370,7 +370,7 @@ func TestReconcileInPlaceRestore_JobLostConsumesTheRunsConfirm(t *testing.T) {
 		prior *v1alpha1.RestoreInPlaceStatus
 	}{
 		{name: "after an earlier restore", prior: &v1alpha1.RestoreInPlaceStatus{
-			Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: "schema:orders", ConfirmTokenUsed: previousRestoreConfirm,
+			Phase: v1alpha1.RestoreInPlaceSucceeded, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}, ConfirmTokenUsed: previousRestoreConfirm,
 		}},
 		{name: "first restore"},
 	} {
@@ -378,7 +378,7 @@ func TestReconcileInPlaceRestore_JobLostConsumesTheRunsConfirm(t *testing.T) {
 			fg := fgInPlaceRestore("orders")
 			fg.Status.RestoreInPlace = tc.prior
 			manifest := fg.Spec.RestoreInPlace.DeepCopy()
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 
 			for i := 0; i < 4 && (fg.Status.RestoreInPlace == nil || fg.Status.RestoreInPlace.JobName == ""); i++ {
 				if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -435,7 +435,7 @@ func TestReconcileInPlaceRestore_JobLostConsumesTheRunsConfirm(t *testing.T) {
 func TestReconcileInPlaceRestore_ConfirmBumpedBeforeJobIsBoundToTheJob(t *testing.T) {
 	const bumped = "2026-04-18T10:00:00Z"
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	step := func() {
 		t.Helper()
 		*fg = *getFG(t, c, fg)
@@ -503,12 +503,12 @@ func TestReconcileInPlaceRestore_AdoptedJobRecordsItsConfirm(t *testing.T) {
 	site := fg.Spec.Sites[0].Name
 	start := time.Now().Add(-time.Minute).Truncate(time.Second)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "full", StartTime: ptrTime(start),
+		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(start),
 		RunConfirm: testRestoreConfirm,
 	}
 	job := runningInPlaceJob(fg, site, bumped, start.Add(5*time.Second))
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, job, dsnSecret())
+	r, c := newReconciler(fg, job, operatorCredsSecret())
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +578,7 @@ func driveToJobCreate(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Cl
 func TestReconcileInPlaceRestore_LostPostCreateWriteStillCountsAsExecuted(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
 	manifest := fg.Spec.RestoreInPlace.DeepCopy()
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 
 	failStatusWrites(t, r, c, func(fg *v1alpha1.MysqlFailoverGroup) bool {
@@ -629,7 +629,7 @@ func TestReconcileInPlaceRestore_LostPostCreateWriteStillCountsAsExecuted(t *tes
 // No Job is created unless the write-ahead succeeded.
 func TestReconcileInPlaceRestore_NoJobWithoutWriteAhead(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 	failStatusWrites(t, r, c, func(fg *v1alpha1.MysqlFailoverGroup) bool {
 		return fg.Status.RestoreInPlace != nil && fg.Status.RestoreInPlace.JobCreating
@@ -655,13 +655,13 @@ func TestReconcileInPlaceRestore_LostJobIsNeverRecreated(t *testing.T) {
 			fg := fgInPlaceRestore("orders")
 			site := fg.Spec.Sites[0].Name
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "schema:orders", StartTime: ptrTime(time.Now()),
+				Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}, StartTime: ptrTime(time.Now()),
 				RunConfirm: fg.Spec.RestoreInPlace.Confirm, JobCreating: true,
 			}
 			if tc.jobName {
 				fg.Status.RestoreInPlace.JobName = inPlaceRestoreJobName(fg.Name, site)
 			}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 				t.Fatal(err)
 			}
@@ -683,7 +683,7 @@ func TestReconcileInPlaceRestore_LostJobIsNeverRecreated(t *testing.T) {
 // afterwards is still a clean cancellation that consumes nothing.
 func TestReconcileInPlaceRestore_RefusedCreateWithdrawsWriteAhead(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
@@ -729,11 +729,11 @@ func TestReconcileInPlaceRestore_UnrecordedLostJobHoldsSupersededQueue(t *testin
 		Superseded: &v1alpha1.RestoreReclonesCarryover{ConfirmToken: testRestoreConfirm, Pending: []string{"pdx"}},
 	}
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "full", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 		ConfirmTokenUsed: testRestoreConfirm, RunConfirm: confirmB, JobCreating: true,
 	}
 	fg.Spec.RestoreInPlace = nil
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -751,7 +751,7 @@ func TestReconcileInPlaceRestore_UnrecordedLostJobHoldsSupersededQueue(t *testin
 	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld || q.ConfirmToken != testRestoreConfirm {
 		t.Fatalf("queue = %+v, want A's queue held", q)
 	}
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; got != "" {
+	if got := fresh.GetAnnotations()[v1alpha1.RecloneAnnotation]; got != "" {
 		t.Fatalf("recloned from the primary of a restore whose Job may have run: annotation %q", got)
 	}
 }
@@ -790,7 +790,7 @@ func TestReconcileInPlaceRestore_CachedJobMissDoesNotEndLiveRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInPlaceRestore("orders")
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			driveToJobCreate(t, r, c, fg)
 			if tc.loseNameWrite {
 				failStatusWrites(t, r, c, func(fg *v1alpha1.MysqlFailoverGroup) bool {
@@ -834,7 +834,7 @@ func TestReconcileInPlaceRestore_CachedJobMissDoesNotEndLiveRun(t *testing.T) {
 // A failed authoritative read keeps the run as it is and retries.
 func TestReconcileInPlaceRestore_JobReadErrorKeepsGuards(t *testing.T) {
 	fg := fgInPlaceRestore("orders")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	driveToJobCreate(t, r, c, fg)
 	_, _ = r.reconcileInPlaceRestore(context.Background(), fg)
 	r.APIReader = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
@@ -878,10 +878,10 @@ func TestReconcileInPlaceRestore_ConfirmMovedBackBeforeJobCancels(t *testing.T) 
 				fg.Spec.RestoreInPlace.Confirm = tc.confirm
 			}
 			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: tc.phase, TargetSite: site, Scope: "schema:orders", StartTime: ptrTime(time.Now()),
+				Phase: tc.phase, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}, StartTime: ptrTime(time.Now()),
 				ConfirmTokenUsed: executed, RunConfirm: newer,
 			}
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			for i := 0; i < 3; i++ {
 				*fg = *getFG(t, c, fg)
 				if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
@@ -897,8 +897,8 @@ func TestReconcileInPlaceRestore_ConfirmMovedBackBeforeJobCancels(t *testing.T) 
 			if err := c.Get(context.Background(), key, &job); !apierrors.IsNotFound(err) {
 				t.Fatalf("a restore Job was built from the reverted spec: err=%v", err)
 			}
-			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCancelled") {
-				t.Error("want a RestoreInPlaceCancelled event")
+			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreInPlaceCanceled") {
+				t.Error("want a RestoreInPlaceCanceled event")
 			}
 		})
 	}
@@ -913,12 +913,12 @@ func TestReconcileInPlaceRestore_ConfirmMovedBackWhileJobRunsStartsNothing(t *te
 	site := fg.Spec.Sites[0].Name
 	start := time.Now().Add(-time.Minute)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: "schema:orders", StartTime: ptrTime(start),
+		Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"}, StartTime: ptrTime(start),
 		JobName: inPlaceRestoreJobName(fg.Name, site), JobCreating: true,
 		ConfirmTokenUsed: fg.Spec.RestoreInPlace.Confirm, RunConfirm: newer,
 	}
 	job := runningInPlaceJob(fg, site, newer, start.Add(5*time.Second))
-	r, c := newReconciler(fg, job, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, job, succeededSeedBackup(), operatorCredsSecret())
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}

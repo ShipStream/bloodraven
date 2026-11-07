@@ -1,7 +1,7 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 GOLANGCI_LINT_VERSION := v2.14.0
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration test-license-roundtrip dst dst-repro fmt vet install-lint golangci-lint-version lint docker-build e2e-images chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-verify-only course-check course-drift
+.PHONY: help generate manifests events-doc well-known-doc build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration test-license-roundtrip dst dst-repro fmt vet install-lint golangci-lint-version lint docker-build e2e-images chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-verify-only course-check course-drift
 
 ##@ General
 
@@ -81,6 +81,12 @@ generate: ## Regenerate deep copy code
 manifests: ## Generate CRD and RBAC manifests
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:dir=config/crd/bases
 	$(CONTROLLER_GEN) rbac:roleName=bloodraven-role paths=./internal/controller/... output:rbac:dir=config/rbac
+
+events-doc: ## Regenerate the Event reason reference in site/content/docs/8.observability/2.monitoring.md from api/v1alpha1/events.go
+	go test ./internal/apiregistry -run '^TestEventReasonDocTable$$' -count=1 -args -update
+
+well-known-doc: ## Regenerate site/content/docs/4.configuration/12.well-known-metadata.md from api/v1alpha1/well_known.go
+	go test ./internal/apiregistry -run '^TestWellKnownMetadataDoc$$' -count=1 -args -update
 
 ##@ Testing
 

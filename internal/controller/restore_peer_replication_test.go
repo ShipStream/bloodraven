@@ -42,13 +42,13 @@ func peerFencingRestore(t *testing.T, retrieved string) (*MysqlFailoverGroupReco
 	fg := fgInPlaceRestore("")
 	site, peer := fg.Spec.Sites[0].Name, fg.Spec.Sites[1].Name
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: "full", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, StartTime: ptrTime(time.Now()),
 	}
 	no := false
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{
 		Site: site, ConfirmToken: fg.Spec.RestoreInPlace.Confirm, PriorOfflineMode: &no,
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret(), primaryFencedPod(fg.Name, site))
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 	tm, mocks := withFenceRunner(r, c, fg)
 	r.Recorder = record.NewFakeRecorder(100)
 	mocks[site].gtidExecuted = peerGTID("1-10")
@@ -95,7 +95,7 @@ func TestInPlaceFencing_StopsPeerReceiversBeforeRestoring(t *testing.T) {
 		t.Fatal("peer not held after its receiver was stopped")
 	}
 	if events := strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"); !strings.Contains(events, "RestorePeerReplicationStopped") ||
-		strings.Contains(events, "RestorePeerReplicationIncomplete") {
+		strings.Contains(events, "RestorePeerReplicationStoppedBehind") {
 		t.Fatalf("events %q, want RestorePeerReplicationStopped only", events)
 	}
 }
@@ -104,9 +104,9 @@ func TestInPlaceFencing_PerSchemaRestoreLeavesPeersReplicating(t *testing.T) {
 	fg := fgInPlaceRestore("tenant")
 	site := fg.Spec.Sites[0].Name
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: "schema:tenant", StartTime: ptrTime(time.Now()),
+		Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "tenant"}, StartTime: ptrTime(time.Now()),
 	}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	peer := mocks[fg.Spec.Sites[1].Name]
 	peer.replicaStatusVal = replicatingPeer(peerGTID("1-10"))
@@ -143,7 +143,7 @@ func TestInPlaceFencing_CatchUpTimeoutStopsAndWarns(t *testing.T) {
 		t.Fatalf("phase %s stops %d, want Restoring with the receiver stopped after the catch-up bound", fg.Status.RestoreInPlace.Phase, peer.stopIOCalls)
 	}
 	events := strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n")
-	if !strings.Contains(events, "RestorePeerReplicationIncomplete") || !strings.Contains(events, peerGTID("6-10")) {
+	if !strings.Contains(events, "RestorePeerReplicationStoppedBehind") || !strings.Contains(events, peerGTID("6-10")) {
 		t.Fatalf("events %q, want an incomplete warning naming the missing transactions", events)
 	}
 }
@@ -158,8 +158,8 @@ func TestInPlaceFencing_ConnectingReceiverStoppedAtOnce(t *testing.T) {
 	if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceRestoring || peer.stopIOCalls != 1 || peer.replicaStatusVal.IOConnecting {
 		t.Fatalf("phase %s stops %d status %+v, want the connecting receiver stopped without waiting", fg.Status.RestoreInPlace.Phase, peer.stopIOCalls, peer.replicaStatusVal)
 	}
-	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestorePeerReplicationIncomplete") {
-		t.Fatal("want RestorePeerReplicationIncomplete for the transactions it never received")
+	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestorePeerReplicationStoppedBehind") {
+		t.Fatal("want RestorePeerReplicationStoppedBehind for the transactions it never received")
 	}
 }
 
@@ -236,7 +236,7 @@ func TestInPlaceFencing_ArmsMissingQueueWithRunConfirm(t *testing.T) {
 
 func TestReconcileInPlaceRestore_PreflightRejectsPeerWithoutStopPrivilege(t *testing.T) {
 	fg := fgInPlaceRestore("")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	peer := fg.Spec.Sites[1].Name
 	mocks[peer].missingIOStopPriv = []string{"REPLICATION_SLAVE_ADMIN"}
@@ -267,7 +267,7 @@ func TestReconcileInPlaceRestore_PreflightWaitsForUnreachablePeerAndUpdates(t *t
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInPlaceRestore("")
-			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			tm, mocks := withFenceRunner(r, c, fg)
 			tc.setup(tm, mocks[fg.Spec.Sites[1].Name])
 			restorePass(t, r, c, fg) // -> Preflight
@@ -547,7 +547,7 @@ func waitBootstrapIdle(t *testing.T, tm *TopologyManager) {
 func failedRestoreFG(jobRan bool, fenced string) *v1alpha1.MysqlFailoverGroup {
 	fg := fgThreeSiteRestore()
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "iad", Scope: "full", ConfirmTokenUsed: testRestoreConfirm,
+		Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: testRestoreConfirm,
 	}
 	if jobRan {
 		fg.Status.RestoreInPlace.JobName = "mysql-lion-iad-inplace-restore"
@@ -561,7 +561,7 @@ func failedRestoreFG(jobRan bool, fenced string) *v1alpha1.MysqlFailoverGroup {
 
 func TestSettle_FailedRestoreThatChangedPrimaryHoldsPeers(t *testing.T) {
 	fg := failedRestoreFG(true, peerGTID("1-10"))
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].gtidExecuted = peerGTID("1-14") // the Job's DROPs
 	if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
@@ -578,7 +578,7 @@ func TestSettle_FailedRestoreThatChangedPrimaryHoldsPeers(t *testing.T) {
 
 func TestSettle_FailedRestoreThatLeftPrimaryUnchangedResumesPeers(t *testing.T) {
 	fg := failedRestoreFG(true, peerGTID("1-10"))
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].gtidExecuted = peerGTID("1-10")
 	if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
@@ -604,7 +604,7 @@ func TestSettle_UnreadablePrimaryOrMissingSnapshotHolds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := failedRestoreFG(true, tc.fenced)
-			r, c := newReconciler(fg, dsnSecret())
+			r, c := newReconciler(fg, operatorCredsSecret())
 			_, mocks := withFenceRunner(r, c, fg)
 			mocks["iad"].gtidExecuted, mocks["iad"].gtidExecutedErr = peerGTID("1-10"), tc.gtidEr
 			// The read has been failing for longer than the retry bound.
@@ -625,7 +625,7 @@ func TestReleaseFence_SettlesQueueFirst(t *testing.T) {
 	fg := failedRestoreFG(true, peerGTID("1-10"))
 	no := false
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: &no, SessionsEvicted: true}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	primary := mocks["iad"]
 	primary.offlineMode = true
@@ -648,7 +648,7 @@ func TestHeldQueue_KeepsSiteRemovedFromSpec(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "iad"}
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"pdx", "sea"}}
 	fg.Spec.Sites = fg.Spec.Sites[:2] // sea removed
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}

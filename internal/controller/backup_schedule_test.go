@@ -75,8 +75,8 @@ func TestReconcileBackupSchedules_PrunesOrphanCronJobs(t *testing.T) {
 			Name:      scheduleCronJobName("lion", "gone"),
 			Namespace: "ns",
 			Labels: map[string]string{
-				labelFailoverGroup: "lion",
-				labelResourceKind:  "backup-schedule",
+				v1alpha1.FailoverGroupLabel: "lion",
+				v1alpha1.ResourceLabel:      "backup-schedule",
 			},
 		},
 		Spec: batchv1.CronJobSpec{
@@ -136,8 +136,8 @@ func TestReconcileBackupAssets_CreatesScriptsWhenOnlyInitFromBackup(t *testing.T
 	fg := fgWithBackup()
 	fg.Spec.Backup = nil
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
-			S3: &v1alpha1.S3Storage{Bucket: "b", CredentialsSecret: "s3-creds"},
+		Source: v1alpha1.RestoreSource{
+			S3: &v1alpha1.S3Storage{Bucket: "b", CredentialsSecretName: "s3-creds"},
 		},
 	}
 	r, c := newReconciler(fg)

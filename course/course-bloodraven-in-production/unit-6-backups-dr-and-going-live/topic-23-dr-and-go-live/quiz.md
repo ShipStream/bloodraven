@@ -11,7 +11,7 @@ The cluster hosting `playground` has stopped answering: `kubectl --context=sourc
 
 - Bootstrap the DR group now — an unreachable API server means the MySQL workloads are gone with it
 - Get a second independent signal before touching the DR cluster, because nothing in Bloodraven will catch a cross-cluster split brain if you are wrong
-- Bootstrap the DR group but declare its sites `role: dr-only`, so the operator fences the source copy automatically
+- Bootstrap the DR group but declare its sites `role: DisasterRecovery`, so the operator fences the source copy automatically
 - Wait until the source operator raises a `SPLIT BRAIN` alert, then bootstrap the DR group
 
 **Correct option index:** 1
@@ -40,14 +40,14 @@ The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup
 
 - `spec.restoreInPlace`, with an RFC 3339 confirm token naming the dump
 - `spec.initFromBackup`, pointed at the source bucket prefix
-- `spec.template` on the `MysqlStandbyCluster`, by requesting activation
+- A `MysqlStandbyCluster` pointed at the prefix, activated once the source is fenced
 - `spec.backup.pitr.enabled`, which replays the archived binlogs into the new group
 
 **Correct option index:** 1
 
 **Explanation:**
 
-`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: `spec.template` does hold the shape of the group that a future activation would materialise, but activation is not implemented, so nothing consumes it. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)
+`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: a `MysqlStandbyCluster` only observes the bucket, activation is not implemented, and the CRD has no field that describes a group to create. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)
 
 ## Question 4
 
@@ -74,11 +74,11 @@ You are signing off `playground` for production tonight. Four findings are open:
 
 **Sample answer:**
 
-Block on (a) and (c). `sync_binlog=1` is only an overridable default — it is written into the base my.cnf before `spec.mysqlConf` is applied, so any override in the group's config wins silently. Until somebody reads the value off a running instance, the durability claim in the runbook is unverified, and it is the claim every RPO statement rests on. (c) is the same failure in a different place: an unverified backup is an assumption, and GitLab's 2017 outage is what an assumption looks like when it is finally tested. Accept (b) and (d) with a named owner. For (b) the owner must know that `maxLagSeconds` drives only the `ReplicationLagging` condition and is not a promotion gate — a replica beyond 300 seconds is still promoted, because no writable site is almost always worse. For (d) the owner re-measures every runbook timing against the shipped defaults, since the playground overrides `failoverCooldown` to 30s (against 5m), `maxLagSeconds` to 30 (against 300) and `dns.ttl` to 10 (against 60), so no playground timing transfers unchanged.
+Block on (a) and (c). `sync_binlog=1` is only an overridable default — it is written into the base my.cnf before `spec.mysqlConf` is applied, so any override in the group's config wins silently. Until somebody reads the value off a running instance, the durability claim in the runbook is unverified, and it is the claim every RPO statement rests on. (c) is the same failure in a different place: an unverified backup is an assumption, and GitLab's 2017 outage is what an assumption looks like when it is finally tested. Accept (b) and (d) with a named owner. For (b) the owner must know that `maxLagSeconds` drives only the `ReplicationLagging` condition and is not a promotion gate — a replica beyond 300 seconds is still promoted, because no writable site is almost always worse. For (d) the owner re-measures every runbook timing against the shipped defaults, since the playground overrides `failoverCooldown` to 30s (against 5m), `maxLagSeconds` to 30 (against 300) and `dns.ttlSeconds` to 10 (against 60), so no playground timing transfers unchanged.
 
 **A full-credit answer shows:**
 
-A strong answer blocks on (a) and (c) and accepts (b) and (d) with a named owner, and gives the mechanism in each case: sync_binlog is an overridable default written before spec.mysqlConf so an override wins silently; an unverified backup is an assumption; maxLagSeconds drives only the ReplicationLagging condition and is explicitly not a promotion gate; the playground overrides failoverCooldown, maxLagSeconds and dns.ttl so its timings do not transfer. A different split is acceptable if the reasoning names the mechanism — for example blocking on (d) because a runbook with wrong timings misleads during an incident. An answer that merely labels the items without a mechanism, or that treats maxLagSeconds as a promotion gate, is weak.
+A strong answer blocks on (a) and (c) and accepts (b) and (d) with a named owner, and gives the mechanism in each case: sync_binlog is an overridable default written before spec.mysqlConf so an override wins silently; an unverified backup is an assumption; maxLagSeconds drives only the ReplicationLagging condition and is explicitly not a promotion gate; the playground overrides failoverCooldown, maxLagSeconds and dns.ttlSeconds so its timings do not transfer. A different split is acceptable if the reasoning names the mechanism — for example blocking on (d) because a runbook with wrong timings misleads during an incident. An answer that merely labels the items without a mechanism, or that treats maxLagSeconds as a promotion gate, is weak.
 
 **Explanation:**
 

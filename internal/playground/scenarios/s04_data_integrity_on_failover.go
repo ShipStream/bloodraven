@@ -69,7 +69,7 @@ func assertReplicationRunningPrecheck(ctx context.Context, env *runner.Env) erro
 	}
 	var replica string
 	for _, s := range mfg.Status.Sites {
-		if s.State == "read-only" {
+		if s.State == v1alpha1.SiteStateReadOnly {
 			replica = s.Name
 			break
 		}
@@ -181,7 +181,7 @@ func s04VerifyDataIntegrity() runner.Step {
 			}
 			var newPrimary string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "writable" {
+				if s.State == v1alpha1.SiteStateWritable {
 					newPrimary = s.Name
 					break
 				}
@@ -270,13 +270,13 @@ func waitForS04CleanupBaseline(ctx context.Context, env *runner.Env) (*v1alpha1.
 			ready := pgkube.ReadyCondition(mfg) == "True"
 			var bad []string
 			for _, s := range mfg.Status.Sites {
-				if s.State != "writable" && s.State != "read-only" {
+				if s.State != v1alpha1.SiteStateWritable && s.State != v1alpha1.SiteStateReadOnly {
 					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
 				}
 				if s.RecoveryState == "RecoveryBlocked" {
 					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
 				}
-				if s.Name != mfg.Status.ActiveSite && isPromotableSite(mfg, s.Name) && !s.Replicating {
+				if s.Name != mfg.Status.ActiveSite && isPromotableSite(mfg, s.Name) && !s.Replication.Running() {
 					bad = append(bad, fmt.Sprintf("%s=not-replicating", s.Name))
 				}
 			}

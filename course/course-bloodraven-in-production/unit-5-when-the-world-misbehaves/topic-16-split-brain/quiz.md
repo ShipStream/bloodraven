@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailoverTarget` empty. Dump B has `status.lastFailoverTarget: pdx`, with `pdx` writable and still `primary-candidate`. Which site ends up writable in each?
+`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailover.target` empty. Dump B has `status.lastFailover.target: pdx`, with `pdx` writable and still `PrimaryCandidate`. Which site ends up writable in each?
 
 - `iad` in both — `sitePriorities` is your standing decision and the operator honours it either way
 - `iad` in A, `pdx` in B — usable history is tier 1 and pre-empts the policy list entirely
@@ -18,7 +18,7 @@
 
 **Explanation:**
 
-The tiers are evaluated in order. In B the recorded target is live, writable and promotable, so tier 1 fires and fences everything except `pdx` — `sitePriorities` is never consulted, which is exactly the case where policy and history give different answers and history wins. In A there is no usable history, so tier 2 runs `ResolveSplitBrain` and `iad`, the earliest currently-writable primary-candidate in the list, wins. Option 1 is the common misreading that policy is the top-level control; it is the fallback. Option 3 invents a conflict-detection behaviour the operator does not have — it does not compare the two and give up. Option 4 gets A wrong: a non-empty `sitePriorities` is precisely what stops the no-history case from being alert-only. (objective 4)
+The tiers are evaluated in order. In B the recorded target is live, writable and promotable, so tier 1 fires and fences everything except `pdx` — `sitePriorities` is never consulted, which is exactly the case where policy and history give different answers and history wins. In A there is no usable history, so tier 2 runs `ResolveSplitBrain` and `iad`, the earliest currently-writable primary candidate in the list, wins. Option 1 is the common misreading that policy is the top-level control; it is the fallback. Option 3 invents a conflict-detection behaviour the operator does not have — it does not compare the two and give up. Option 4 gets A wrong: a non-empty `sitePriorities` is precisely what stops the no-history case from being alert-only. (objective 4)
 
 ## Question 2
 
@@ -58,13 +58,13 @@ You copy the `splitBrainPolicy: preferSite: iad` block from the published failov
 - Nothing — the field is not in the CRD schema, so it was pruned and the group stays on tier 3
 - The group now resolves split brains in favour of `iad`, since `preferSite` is the legacy alias for `sitePriorities`
 - Nothing, and admission rejected the apply with a CEL error naming the unknown field
-- The group is now on tier 1, because `preferSite` seeds `status.lastFailoverTarget` with `iad`
+- The group is now on tier 1, because `preferSite` seeds `status.lastFailover.target` with `iad`
 
 **Correct option index:** 0
 
 **Explanation:**
 
-`preferSite` does not exist in the CRD. The API server prunes unknown fields, so the apply succeeds and changes nothing — the group keeps whatever tier it had, which with no `sitePriorities` is tier 3, alert only. Option 2 is the belief the documentation invites; there is no alias, and no code outside the docs reads that name. Option 3 gets the outcome half right but the mechanism wrong, and the difference matters operationally: an admission rejection would have told you at apply time, whereas silent pruning is what costs you an hour at 3am. Option 4 confuses policy with history — nothing writes `lastFailoverTarget` except a recorded failover. Verify with `kubectl explain` or by grepping the shipped CRD. (objective 5)
+`preferSite` does not exist in the CRD. The API server prunes unknown fields, so the apply succeeds and changes nothing — the group keeps whatever tier it had, which with no `sitePriorities` is tier 3, alert only. Option 2 is the belief the documentation invites; there is no alias, and no code outside the docs reads that name. Option 3 gets the outcome half right but the mechanism wrong, and the difference matters operationally: an admission rejection would have told you at apply time, whereas silent pruning is what costs you an hour at 3am. Option 4 confuses policy with history — nothing writes `status.lastFailover` except a recorded failover. Verify with `kubectl explain` or by grepping the shipped CRD. (objective 5)
 
 ## Question 5
 
@@ -74,7 +74,7 @@ Your colleague proposes setting `sitePriorities: [iad, pdx]` on `playground` and
 
 **Sample answer:**
 
-`sitePriorities` does not prevent data loss — it decides in advance which data you are willing to lose. It makes resolution fast and deterministic at the cost of silently discarding the loser's unreplicated writes; the loss is surfaced loudly but not prevented, and it does not stop split brain from occurring in the first place. It is a policy, not a safety feature. After a resolution fires on `playground`, the winner (`iad`) keeps authority and `pdx` is fenced with `SET GLOBAL super_read_only = ON`. I would then audit the damage before touching anything: read `status.sites[].divergentGtid` for the exact set of transactions `pdx` holds that `iad` never saw, and the `bloodraven_divergent_transactions` gauge for the count — the condition reason will be `DivergentTransactions`. Only once that is captured would I recover `pdx` with the `bloodraven.shipstream.io/reclone-site` annotation, giving it `pdx:<divergentGtidPrefix>` of at least 8 characters so the request is matched against the observed divergence rather than applied blind.
+`sitePriorities` does not prevent data loss — it decides in advance which data you are willing to lose. It makes resolution fast and deterministic at the cost of silently discarding the loser's unreplicated writes; the loss is surfaced loudly but not prevented, and it does not stop split brain from occurring in the first place. It is a policy, not a safety feature. After a resolution fires on `playground`, the winner (`iad`) keeps authority and `pdx` is fenced with `SET GLOBAL super_read_only = ON`. I would then audit the damage before touching anything: read `status.sites[].divergentGtid` for the exact set of transactions `pdx` holds that `iad` never saw, and the `bloodraven_divergent_transactions` gauge for the count — the condition reason will be `DivergentTransactions`. Only once that is captured would I recover `pdx` with the `bloodraven.shipstream.io/reclone-site` annotation, giving it `pdx:confirm=playground:uid=<uid>:gtidPrefix=<divergentGtidPrefix>`, a prefix of at least 8 characters, so the request is matched against the observed divergence rather than applied blind.
 
 **A full-credit answer shows:**
 

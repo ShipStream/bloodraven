@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
+	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -24,7 +24,7 @@ func init() {
 //
 //	A) bare site name      — REJECTED (RecloneRejected event), annotation cleared
 //	B) site:wrongprefix    — REJECTED (RecloneRejected event), annotation cleared
-//	C) site:correctprefix  — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles to Done
+//	C) site:correctprefix  — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles back to False/NotBootstrapping
 //
 // The cold-reclone "must include :confirm=<fg-name>" interlock branch
 // is intentionally NOT exercised here — sub-case C drives the divergent
@@ -126,8 +126,8 @@ func injectDivergenceViaFailover() runner.Step {
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("new primary %s stable and cooldown clear before reintroducing old primary %s", peer, active),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					peerState := "<missing>"
-					activeState := "<missing>"
+					peerState := v1alpha1.SiteState("<missing>")
+					activeState := v1alpha1.SiteState("<missing>")
 					for _, s := range mfg.Status.Sites {
 						switch s.Name {
 						case peer:
@@ -137,18 +137,18 @@ func injectDivergenceViaFailover() runner.Step {
 						}
 					}
 					cooldownRemaining := time.Duration(0)
-					if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailover != nil {
-						cooldownRemaining = mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailover.Time)
+					if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailoverTime() != nil {
+						cooldownRemaining = mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailoverTime().Time)
 						if cooldownRemaining < 0 {
 							cooldownRemaining = 0
 						}
 					}
 					msg := fmt.Sprintf("activeSite=%q peerState=%s oldState=%s lastFailoverTarget=%q cooldownRemaining=%s",
-						mfg.Status.ActiveSite, peerState, activeState, mfg.Status.LastFailoverTarget, cooldownRemaining.Round(time.Second))
+						mfg.Status.ActiveSite, peerState, activeState, mfg.Status.LastFailoverTarget(), cooldownRemaining.Round(time.Second))
 					done := mfg.Status.ActiveSite == peer &&
-						mfg.Status.LastFailoverTarget == peer &&
-						peerState == "writable" &&
-						activeState != "writable" &&
+						mfg.Status.LastFailoverTarget() == peer &&
+						peerState == v1alpha1.SiteStateWritable &&
+						activeState != v1alpha1.SiteStateWritable &&
 						cooldownRemaining == 0
 					return done, msg, nil
 				},
@@ -294,7 +294,13 @@ func verifyRecloneRejectedBare() runner.Step {
 		Name:  "sub-case A: bare site name is rejected against divergent site",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			site := ctxFetch(env, "divergentSite")
-			return submitAndExpectRejection(ctx, env, site, "must include the divergent-GTID prefix")
+			// The cold form, confirmed: the divergence still needs its
+			// gtidPrefix interlock.
+			value, err := recloneValueForCold(ctx, env, site)
+			if err != nil {
+				return err
+			}
+			return submitAndExpectRejection(ctx, env, value, "must include gtidPrefix=")
 		},
 	}
 }
@@ -309,7 +315,11 @@ func verifyRecloneRejectedMismatch() runner.Step {
 			site := ctxFetch(env, "divergentSite")
 			// "deadbeef" is intentionally chosen to be the right length
 			// (8 chars passes the length check) and obviously wrong.
-			return submitAndExpectRejection(ctx, env, site+":deadbeef", "does not match the observed divergentGtid")
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return fmt.Errorf("get MFG: %w", err)
+			}
+			return submitAndExpectRejection(ctx, env, controller.RecloneAnnotationValueWithPrefix(mfg, site, "deadbeef"), "does not match the observed divergentGtid")
 		},
 	}
 }
@@ -317,7 +327,8 @@ func verifyRecloneRejectedMismatch() runner.Step {
 // verifyRecloneAcceptedMatching submits the correct 8-character prefix
 // and waits for the clone to complete. The Bootstrapping condition is
 // the operator-side narrative: it cycles Cloning → WaitingForRestart →
-// SetupReplication → Done as the clone runs.
+// SetupReplication (True) as the clone runs and returns to
+// False/NotBootstrapping after it, with the recloned site replicating.
 func verifyRecloneAcceptedMatching() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
@@ -329,16 +340,20 @@ func verifyRecloneAcceptedMatching() runner.Step {
 				return fmt.Errorf("recorded divergentGtid %q shorter than 8 characters", gtid)
 			}
 			prefix := gtid[:8]
-			value := site + ":" + prefix
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return fmt.Errorf("get MFG: %w", err)
+			}
+			value := controller.RecloneAnnotationValueWithPrefix(mfg, site, prefix)
 			env.Capture.Note(fmt.Sprintf("submitting reclone-site=%s (gtid prefix from %q)", value, gtid))
 			before := time.Now()
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("set reclone annotation: %w", err)
 			}
 			// Expect a RecloneRequested event within the operator's
 			// sync interval (~30s, plus some slack).
 			eventCtx, eventCancel := context.WithTimeout(ctx, 60*time.Second)
-			ev, err := waitForMFGEvent(eventCtx, env, before, "RecloneRequested", "")
+			ev, err := waitForMFGEvent(eventCtx, env, before, v1alpha1.EventRecloneRequested, "")
 			eventCancel()
 			if err != nil {
 				return fmt.Errorf("waiting for RecloneRequested event: %w", err)
@@ -357,9 +372,9 @@ func verifyRecloneAcceptedMatching() runner.Step {
 					var writable, readOnly, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						}
 						if s.RecoveryState == "RecoveryBlocked" {
@@ -369,16 +384,11 @@ func verifyRecloneAcceptedMatching() runner.Step {
 							divergent = append(divergent, s.Name)
 						}
 					}
-					boot := findCondition(mfg.Status.Conditions, "Bootstrapping")
-					bootState := "<missing>"
-					bootDone := false
-					if boot != nil {
-						bootState = fmt.Sprintf("%s/%s", boot.Status, boot.Reason)
-						if boot.Status == metav1.ConditionFalse && boot.Reason == "Failed" {
-							return false, bootState, fmt.Errorf("reclone bootstrap failed: %s", boot.Message)
-						}
-						bootDone = boot.Status == metav1.ConditionFalse && boot.Reason == "Done"
+					boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
+					if bootstrapFailed(boot) && !boot.LastTransitionTime.Time.Before(before.Truncate(time.Second)) {
+						return false, boot.Message, fmt.Errorf("reclone bootstrap failed: %s", boot.Message)
 					}
+					bootDone, bootState := bootstrapCompletedSince(mfg, before, site)
 					clean := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0 && len(divergent) == 0 && bootDone
 					now := time.Now()
 					if clean {
@@ -410,12 +420,12 @@ func verifyRecloneAcceptedMatching() runner.Step {
 func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expectedSnippet string) error {
 	env.Capture.Note(fmt.Sprintf("submitting reclone-site=%q (expecting rejection: %q)", value, expectedSnippet))
 	before := time.Now()
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 		return fmt.Errorf("set reclone annotation: %w", err)
 	}
 	// Operator sync ticker is 30s; allow 60s of slack.
 	evCtx, evCancel := context.WithTimeout(ctx, 60*time.Second)
-	ev, err := waitForMFGEvent(evCtx, env, before, "RecloneRejected", expectedSnippet)
+	ev, err := waitForMFGEvent(evCtx, env, before, v1alpha1.EventRecloneRejected, expectedSnippet)
 	evCancel()
 	if err != nil {
 		return fmt.Errorf("waiting for RecloneRejected event with %q: %w", expectedSnippet, err)
@@ -430,7 +440,7 @@ func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expec
 	for {
 		mfg, err := env.Kube.GetMFGNamed(clearCtx, env.Namespace, env.FG)
 		if err == nil {
-			if _, present := mfg.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]; !present {
+			if _, present := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]; !present {
 				return nil
 			}
 		}
@@ -440,4 +450,14 @@ func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expec
 		case <-tick.C:
 		}
 	}
+}
+
+// recloneValueForCold reads the group and returns the confirmed cold form
+// for site, <site>:confirm=<name>:uid=<uid>, without gtidPrefix.
+func recloneValueForCold(ctx context.Context, env *runner.Env, site string) (string, error) {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return "", fmt.Errorf("get MFG: %w", err)
+	}
+	return actionvalue.Format(site, actionvalue.ConfirmPairs(mfg.Name, string(mfg.UID))...), nil
 }

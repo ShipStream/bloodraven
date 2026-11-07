@@ -32,7 +32,7 @@ func TestEnvtest_BackupCompletionMetadataRecoversAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -96,15 +96,11 @@ func TestEnvtest_BackupCompletionMetadataRecoversAfterRestart(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Status.Location != location || result.RequeueAfter <= 0 {
+	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.Location != location || result.RequeueAfter <= 0 {
 		t.Fatalf("successful artifact lost during log outage: result=%+v status=%+v", result, backup.Status)
 	}
 	completion := backup.Status.CompletionTime.DeepCopy()
-	// Reproduce a historical Succeeded record with no location, then restart.
-	backup.Status.Location = ""
-	if err := k8sClient.Status().Update(ctx, backup); err != nil {
-		t.Fatal(err)
-	}
+	// The logs come back; a restarted operator retries the collection.
 	available.Store(true)
 	r = &controller.MysqlBackupReconciler{Client: k8sClient, Scheme: scheme, Recorder: recorder, Clientset: logClient}
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
@@ -113,8 +109,8 @@ func TestEnvtest_BackupCompletionMetadataRecoversAfterRestart(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, controller.ConditionBackupMetadataComplete)
-	if backup.Status.Location != location || backup.Status.SizeBytes != 42 || backup.Status.GtidExecuted != "uuid:my_tag:1-3" || condition == nil || condition.Status != metav1.ConditionTrue || !backup.Status.CompletionTime.Equal(completion) {
+	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
+	if backup.Status.ArtifactStorage.Location != location || backup.Status.SizeBytes != 42 || backup.Status.GtidExecuted != "uuid:my_tag:1-3" || condition == nil || condition.Status != metav1.ConditionTrue || !backup.Status.CompletionTime.Equal(completion) {
 		t.Fatalf("completion metadata was not durably recovered: %+v", backup.Status)
 	}
 }

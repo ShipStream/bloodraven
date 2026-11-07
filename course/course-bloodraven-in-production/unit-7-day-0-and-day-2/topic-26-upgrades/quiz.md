@@ -9,8 +9,8 @@
 
 At 02:14 you are paged: `BloodravenFailoverOccurred` on the `ledger` group, `activeSite` has moved from `iad` to `pdx`, and the DNS record flipped. Nothing looks broken. What is the first thing to check, and why?
 
-- `status.updatePhase` — it is non-empty for exactly the duration of an ordered update, and a routine `spec.image` or `spec.sidecarImage` bump performs a real promotion that increments the same counter
-- `status.lastFailover` against `failoverCooldown` — if the promotion happened inside the cooldown window it must have been manual
+- `status.updatePhase` — it is non-empty for exactly the duration of an ordered update, and a routine `spec.image` bump, or an operator upgrade that moves the sidecar, performs a real promotion that increments the same counter
+- `status.lastFailover.time` against `failoverCooldown` — if the promotion happened inside the cooldown window it must have been manual
 - `bloodraven_divergent_transactions` — a rollout-driven promotion never produces divergence, so a zero reading proves it was planned
 - The `Degraded` condition reason — an ordered update sets `reason: Updating`, which distinguishes it from an emergency failover
 
@@ -29,7 +29,7 @@ You bump `spec.image` on a two-site group. Ninety seconds in, the rollout stops 
 - The standby came back from its restart writable — something cleared the `read_only=ON` every `mysqld` boots with — with no working replication, and because cross-site recovery is suppressed during an update nothing is going to start it — so the updater gives up early rather than burning its five-minute deadline
 - The image tag is wrong and MySQL failed to start, so the checker read a stale writable value from before the restart
 - The primary was promoted twice, leaving both sites writable, and the updater refuses to continue into a split brain
-- `recoveryThreshold` was not reached before the deadline, so the standby never debounced to `writable` and the updater timed out
+- `recoveryThreshold` was not reached before the deadline, so the standby never debounced to `Writable` and the updater timed out
 
 **Correct option index:** 0
 
@@ -57,7 +57,7 @@ You run `helm upgrade bloodraven ./charts/bloodraven` to move from one release t
 
 - Helm installs CRDs from `crds/` on first install and never upgrades them, so the API server is still validating against the old schema and pruned the unknown field without an error
 - The operator caches the CRD schema at startup and needs a second restart after the chart upgrade
-- The new field requires a matching `spec.sidecarImage` bump, and the sidecar rejects fields it does not recognise
+- The new field requires a matching `spec.sidecar.image` bump, and the sidecar rejects fields it does not recognise
 - The field was set on the wrong resource; new fields land on `MysqlStandbyCluster` first and are promoted to `MysqlFailoverGroup` a release later
 
 **Correct option index:** 0
@@ -74,12 +74,12 @@ Write the order in which you would upgrade a production Bloodraven install from 
 
 **Sample answer:**
 
-First, read the release notes for two things only: CRD changes and the sidecar image tag — those are the only items that require action. Second, apply the CRDs from `config/crd/bases/` (or the chart's `crds/`) with `kubectl apply --server-side --force-conflicts`. Helm will not do it on upgrade or on rollback, a new operator against an old schema means silently pruned fields, and it has to be server-side because the `MysqlFailoverGroup` CRD is too large for the annotation client-side apply writes. That step disturbs nothing running. Third, `helm upgrade` the operator chart: one Deployment, one replica, leader election, and the operator is not on the request path — so this costs failover cover for a few seconds and costs the data plane nothing. Fourth, bump `spec.sidecarImage` to the matching release and apply; this is an ordered update, so it restarts every site's pod, moves the primary, increments `bloodraven_failovers_total` and fires the failover alert. If the release also moves `spec.image`, do both in the same apply so you pay for one rollout instead of two. Fifth, run a backup verification against the new version, because a restore path you have not exercised since the upgrade is an assumption again.
+First, read the release notes for two things only: CRD changes and the sidecar image tag — those are the only items that require action. Second, apply the CRDs from `config/crd/bases/` (or the chart's `crds/`) with `kubectl apply --server-side --force-conflicts`. Helm will not do it on upgrade or on rollback, a new operator against an old schema means silently pruned fields, and it has to be server-side because the `MysqlFailoverGroup` CRD is too large for the annotation client-side apply writes. That step disturbs nothing running. Third, `helm upgrade` the operator chart: one Deployment, one replica, leader election, and the operator is not on the request path — so this costs failover cover for a few seconds and costs the data plane nothing. Fourth, expect the sidecars to follow: a group that leaves `spec.sidecar.image` unset runs the sidecar of the operator's release, so the chart upgrade changes its pod spec and starts an ordered update, which restarts every site's pod, moves the primary, increments `bloodraven_failovers_total` and fires the failover alert. Schedule the chart upgrade as you would that rollout; a group that pins `spec.sidecar.image` moves only when you change the pin. Fifth, run a backup verification against the new version, because a restore path you have not exercised since the upgrade is an assumption again.
 
 **A full-credit answer shows:**
 
-A strong answer has CRDs before the chart, gives the reason (Helm never upgrades CRDs, and the failure is silent pruning), places the sidecar bump last among the changes and says it is an ordered update that moves the primary and fires the failover alert, and closes with a verification run. Credit combining `spec.image` and `spec.sidecarImage` into one apply. Credit noting that the operator upgrade itself is cheap because it is not on the request path. An answer that treats `helm upgrade` as the whole procedure has missed the step that actually causes incidents.
+A strong answer has CRDs before the chart, gives the reason (Helm never upgrades CRDs, and the failure is silent pruning), says the sidecar move follows the chart upgrade and is an ordered update that moves the primary and fires the failover alert, and closes with a verification run. Credit noting that groups without a `spec.sidecar.image` pin follow the operator, so the `helm upgrade` itself starts their rollout. Credit noting that the operator upgrade itself is cheap because it is not on the request path. An answer that treats `helm upgrade` as the whole procedure has missed the step that actually causes incidents.
 
 **Explanation:**
 
-The ordering exists because the three things you upgrade move by three different mechanisms with three different blast radii, and only one of them is automatic. Getting CRDs after the chart produces a failure with no symptom; getting the sidecar bump wrong produces a failover you did not schedule. (objective 9)
+The ordering exists because the three things you upgrade move by three different mechanisms with three different blast radii, and only one of them is automatic. Getting CRDs after the chart produces a failure with no symptom; forgetting that the sidecar follows the operator produces a failover you did not schedule. (objective 9)
