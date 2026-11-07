@@ -18,8 +18,8 @@ func plannedDrainRunner(nn types.NamespacedName, iad, pdx *mockMySQL) *TopologyM
 	cfg := TopologyConfig{
 		Name: "lion",
 		Sites: []SiteTopologyConfig{
-			{Name: "iad", Zone: "lion-iad", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("iad"), Host: "mysql-iad"},
-			{Name: "pdx", Zone: "lion-pdx", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("pdx"), Host: "mysql-pdx"},
+			{Name: "iad", Zone: "lion-iad", LoadBalancerIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("iad"), Host: "mysql-iad"},
+			{Name: "pdx", Zone: "lion-pdx", LoadBalancerIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("pdx"), Host: "mysql-pdx"},
 		},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,

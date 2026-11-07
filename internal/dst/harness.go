@@ -237,18 +237,18 @@ func (r *trialRunner) setup(capture bool) {
 	siteCfgs := make([]controller.SiteTopologyConfig, len(t.SiteNames))
 	for i, name := range t.SiteNames {
 		specs[i] = SiteSpec{
-			Name: name,
-			Host: name + ".mysql.sim",
-			LBIP: fmt.Sprintf("10.0.0.%d", i+1),
-			UUID: fmt.Sprintf("00000000-0000-0000-0000-%012d", i+1),
+			Name:           name,
+			Host:           name + ".mysql.sim",
+			LoadBalancerIP: fmt.Sprintf("10.0.0.%d", i+1),
+			UUID:           fmt.Sprintf("00000000-0000-0000-0000-%012d", i+1),
 		}
 		siteCfgs[i] = controller.SiteTopologyConfig{
-			Name:          name,
-			Zone:          "zone-" + name,
-			LBIP:          specs[i].LBIP,
-			Role:          t.Roles[i],
-			TaintSelector: "sim/site=" + name,
-			Host:          specs[i].Host,
+			Name:           name,
+			Zone:           "zone-" + name,
+			LoadBalancerIP: specs[i].LoadBalancerIP,
+			Role:           t.Roles[i],
+			TaintSelector:  "sim/site=" + name,
+			Host:           specs[i].Host,
 		}
 	}
 

@@ -116,9 +116,9 @@ spec:
                   SourceSite, if set, forces a specific site (a spec.sites[].name of
                   the referenced group) to be the dump source. Leave empty to let the
                   reconciler choose (replica-first).
-                maxLength: 253
+                maxLength: 20
                 minLength: 1
-                pattern: ^[a-z0-9-]+$
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
             required:
             - failoverGroupRef
@@ -404,6 +404,16 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
+        - message: 'metadata.name must be at most 63 characters: it is a label value
+            on the objects the run creates'
+          rule: size(self.metadata.name) <= 63
+        - message: spec.failoverGroupRef is immutable; create a new object instead
+          rule: self.spec.failoverGroupRef.name == oldSelf.spec.failoverGroupRef.name
+        - message: spec.profileName is immutable; create a new object instead
+          rule: self.spec.profileName == oldSelf.spec.profileName
+        - message: spec.sourceSite is immutable; create a new object instead
+          rule: has(self.spec.sourceSite) == has(oldSelf.spec.sourceSite) && (!has(self.spec.sourceSite)
+            || self.spec.sourceSite == oldSelf.spec.sourceSite)
         - message: 'metadata.name must not end in .bloodraven-backup.json: that is
             the backup stamp''s key suffix, and the dump location ends in the backup''s
             name'

@@ -32,12 +32,12 @@ type monFixture struct {
 func newMonFixture(t *testing.T, roles ...state.SiteRole) *monFixture {
 	t.Helper()
 	specs := []SiteSpec{
-		{Name: "alpha", Host: "alpha.mysql.sim", LBIP: "10.0.0.1", UUID: "00000000-0000-0000-0000-000000000001"},
-		{Name: "beta", Host: "beta.mysql.sim", LBIP: "10.0.0.2", UUID: "00000000-0000-0000-0000-000000000002"},
+		{Name: "alpha", Host: "alpha.mysql.sim", LoadBalancerIP: "10.0.0.1", UUID: "00000000-0000-0000-0000-000000000001"},
+		{Name: "beta", Host: "beta.mysql.sim", LoadBalancerIP: "10.0.0.2", UUID: "00000000-0000-0000-0000-000000000002"},
 	}
 	names := []string{"alpha", "beta"}
 	if len(roles) == 3 {
-		specs = append(specs, SiteSpec{Name: "gamma", Host: "gamma.mysql.sim", LBIP: "10.0.0.3", UUID: "00000000-0000-0000-0000-000000000003"})
+		specs = append(specs, SiteSpec{Name: "gamma", Host: "gamma.mysql.sim", LoadBalancerIP: "10.0.0.3", UUID: "00000000-0000-0000-0000-000000000003"})
 		names = append(names, "gamma")
 	}
 	if len(roles) == 0 {

@@ -58,7 +58,7 @@ func TestEnvtest_SpecEnumsRefuseReleasedSpellings(t *testing.T) {
 	third := fg.Spec.Sites[1]
 	third.Name, third.ServerID, third.Role = "dr", 103, v1alpha1.SiteRoleDisasterRecovery
 	reader := fg.Spec.Sites[1]
-	reader.Name, reader.ServerID, reader.Role, reader.TaintNodeSelector, reader.LBIP = "reader", 104, v1alpha1.SiteRoleReadOnly, nil, ""
+	reader.Name, reader.ServerID, reader.Role, reader.TaintNodeSelector, reader.LoadBalancerIP = "reader", 104, v1alpha1.SiteRoleReadOnly, nil, ""
 	fg.Spec.Sites = append(fg.Spec.Sites, third, reader)
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("CamelCase roles: %v", err)

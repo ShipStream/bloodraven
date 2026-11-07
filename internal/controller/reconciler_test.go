@@ -50,11 +50,11 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					Name:              "dc1",
 					ServerID:          101,
 					Zone:              "lion-dc1",
-					LBIP:              "203.0.113.1",
+					LoadBalancerIP:    "203.0.113.1",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc1",
-						Size:             resource.MustParse("100Gi"),
+						Size:             "100Gi",
 					},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
@@ -67,11 +67,11 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					Name:              "dc2",
 					ServerID:          102,
 					Zone:              "lion-dc2",
-					LBIP:              "203.0.113.2",
+					LoadBalancerIP:    "203.0.113.2",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc2",
-						Size:             resource.MustParse("100Gi"),
+						Size:             "100Gi",
 					},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
@@ -978,7 +978,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	fg := newTestFG()
 	reader := v1alpha1.SiteSpec{
 		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-		Storage: v1alpha1.StorageSpec{StorageClassName: "local", Size: resource.MustParse("10Gi")},
+		Storage: v1alpha1.StorageSpec{StorageClassName: "local", Size: "10Gi"},
 		ServiceTemplate: &v1alpha1.SiteServiceTemplate{
 			Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
 			NodePort: 31001, Annotations: map[string]string{"site": "reader"},
@@ -1017,7 +1017,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 func TestReaderLoadBalancerIPLifecycle(t *testing.T) {
 	fg := newTestFG()
 	reader := v1alpha1.SiteSpec{
-		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, LBIP: "203.0.113.30",
+		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, LoadBalancerIP: "203.0.113.30",
 		ServiceTemplate: &v1alpha1.SiteServiceTemplate{Type: corev1.ServiceTypeLoadBalancer},
 	}
 	r, c := newReconciler(fg)
@@ -1030,8 +1030,8 @@ func TestReaderLoadBalancerIPLifecycle(t *testing.T) {
 	if err := c.Get(ctx, key, &svc); err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.Spec.LoadBalancerIP; got != reader.LBIP {
-		t.Fatalf("loadBalancerIP = %q, want %q", got, reader.LBIP)
+	if got := svc.Spec.LoadBalancerIP; got != reader.LoadBalancerIP {
+		t.Fatalf("loadBalancerIP = %q, want %q", got, reader.LoadBalancerIP)
 	}
 
 	reader.ServiceTemplate.Type = corev1.ServiceTypeClusterIP
@@ -1820,7 +1820,7 @@ func TestReconcile_StartupDefersExistingDeploymentsBeforeManagerRegistration(t *
 	fresh.Spec.Image = "mysql:startup-drift"
 	fresh.Spec.Sites = append(fresh.Spec.Sites, v1alpha1.SiteSpec{
 		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly,
-		Storage: v1alpha1.StorageSpec{StorageClassName: "local-reader", Size: resource.MustParse("10Gi")},
+		Storage: v1alpha1.StorageSpec{StorageClassName: "local-reader", Size: "10Gi"},
 	})
 	if err := c.Update(ctx, &fresh); err != nil {
 		t.Fatal(err)
@@ -2016,7 +2016,7 @@ func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 			Name: "nightly",
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStoragePVC,
-				PVC:  &v1alpha1.PVCStorage{StorageClassName: "fast", Size: resource.MustParse("50Gi")},
+				PVC:  &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{StorageClassName: new("fast"), Size: "50Gi"}},
 			},
 		}},
 		Schedules: []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly", Schedule: "0 2 * * *"}},

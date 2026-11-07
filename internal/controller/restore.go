@@ -136,7 +136,27 @@ func initRestoreSeedSite(fg *v1alpha1.MysqlFailoverGroup) string {
 // condition so both say the same thing.
 const initRestoreRecovery = "The group stays out of service (no DNS record, no Service endpoints) and no site is cloned. " +
 	"To retry: if the load had started (BLOODRAVEN_LOAD_START in the Job log), empty the target first by deleting and recreating the group, " +
-	"or by deleting the group's MySQL PVCs; then delete the restore Job and the operator rebuilds it"
+	"or by deleting the group's MySQL PVCs; then delete the restore Job and the operator rebuilds it. " +
+	initFromBackupFixedAtCreation
+
+// initFromBackupFixedAtCreation is the remedy for a cause inside
+// spec.initFromBackup, which admission refuses to change.
+const initFromBackupFixedAtCreation = "spec.initFromBackup is fixed at creation: if the cause is in it, " +
+	"delete the group and create it again with the corrected block (" + initFromBackupRecoveryDoc + ")"
+
+// initFromBackupRecoveryDoc is the failed-bootstrap procedure.
+const initFromBackupRecoveryDoc = "https://bloodraven.dev/docs/backup-and-restore/backup-restore#a-failed-bootstrap-restore"
+
+// restoreSpecFix tells the user how to change field (a path below the
+// restore block fp) to fix a refused restore. spec.restoreInPlace is edited;
+// spec.initFromBackup is fixed at creation, so the group is created again.
+func restoreSpecFix(fp, field string) string {
+	if fp == "restoreInPlace" {
+		return fmt.Sprintf("set %s.%s", fp, field)
+	}
+	return fmt.Sprintf("delete the group and create it again with %s.%s set (%s is fixed at creation; see %s)",
+		fp, field, fp, initFromBackupRecoveryDoc)
+}
 
 // initRestoreReadyCondition returns the Ready=False reason and message for
 // a group whose initFromBackup restore has not succeeded, or "" when the
@@ -153,7 +173,7 @@ func initRestoreReadyCondition(fg *v1alpha1.MysqlFailoverGroup) (reason, message
 		}
 		if rs.JobName == "" {
 			return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf(
-				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed.", detail)
+				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed. %s.", detail, initFromBackupFixedAtCreation)
 		}
 		return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
 	}
@@ -901,19 +921,19 @@ func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile 
 	case profile == nil:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q is missing from spec.backup.profiles; "+
-				"either restore the profile or set %s.source.%s explicitly",
-			fp, ref.Name, kind, location, ref.Spec.ProfileName, fp, field)
+				"either restore the profile or %s explicitly",
+			fp, ref.Name, kind, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source."+field))
 	case profile.Storage.Type != want:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q now stores to %s; "+
-				"either restore the profile's %s storage or set %s.source.%s explicitly",
-			fp, ref.Name, kind, location, ref.Spec.ProfileName, profile.Storage.Type, want, fp, field)
+				"either restore the profile's %s storage or %s explicitly",
+			fp, ref.Name, kind, location, ref.Spec.ProfileName, profile.Storage.Type, want, restoreSpecFix(fp, "source."+field))
 	case want == v1alpha1.BackupStorageS3 && profile.Storage.S3 == nil,
 		want == v1alpha1.BackupStoragePVC && profile.Storage.PVC == nil:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to %s location (%q) but profile %q has no storage.%s configuration; "+
-				"either restore the profile's %s storage or set %s.source.%s explicitly",
-			fp, ref.Name, kind, location, ref.Spec.ProfileName, field, want, fp, field)
+				"either restore the profile's %s storage or %s explicitly",
+			fp, ref.Name, kind, location, ref.Spec.ProfileName, field, want, restoreSpecFix(fp, "source."+field))
 	}
 	return nil
 }
@@ -1069,15 +1089,15 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 					}
 					return nil, fmt.Errorf(
 						"%s: %s.source.backupRef=%q is encrypted and the Secret %q it recorded as its dump key is gone; "+
-							"restore that Secret or set %s.decryption.passphraseSecretKeyRef",
-						pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, recorded.Name, fp)
+							"restore that Secret or %s",
+						pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, recorded.Name, restoreSpecFix(fp, "decryption.passphraseSecretKeyRef"))
 				}
 				passphraseRef = &v1alpha1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}
 			default:
 				return nil, fmt.Errorf(
 					"%s: %s.source.backupRef=%q is encrypted but recorded no dump key; "+
-						"set %s.decryption.passphraseSecretKeyRef",
-					pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, fp)
+						"%s",
+					pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, restoreSpecFix(fp, "decryption.passphraseSecretKeyRef"))
 			}
 			if s3Storage != nil {
 				decryptSourceKind = "S3"

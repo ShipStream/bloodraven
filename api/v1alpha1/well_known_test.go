@@ -7,15 +7,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// The A-15 name bounds the taint key is sized against. E6 enforces them at
-// admission; until then this test pins that the key fits whatever names
-// those bounds admit.
+// The name bounds the taint key is sized against, which admission
+// enforces.
 const (
 	// maxNamespaceLength is a namespace name's limit (a DNS-1123 label).
 	maxNamespaceLength = 63
 	// maxGroupNameLength is the longest MysqlFailoverGroup name: the group
-	// plus a site name of at least one character is at most 41 (A-15).
-	maxGroupNameLength = 40
+	// plus a site name of at least one character.
+	maxGroupNameLength = MaxGroupAndSiteNameLength - 1
 	// maxTaintKeyPrefixLength is the bound A-21 promises for the prefix.
 	maxTaintKeyPrefixLength = 100
 )

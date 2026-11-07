@@ -129,7 +129,7 @@ kubectl -n $NS scale deployment mysql-playground-iad --replicas=0
 `failover picker: selected promotion target by GTID freshness
 site=fra ...`. `status.activeSite` should be `fra`, not `pdx`, even
 though `pdx` is first in `sitePriorities`. DNS should point to
-`fra`'s `lbIP`. The event `FailoverExecuted` should name `fra`.
+`fra`'s `loadBalancerIP`. The event `FailoverExecuted` should name `fra`.
 
 **Teardown**:
 ```bash
@@ -483,7 +483,10 @@ kubectl -n $NS exec deploy/mysql-playground-fra -c mysql -- \
 Deployment/Service/PVC and auto-clone from the current primary —
 without impact to the existing primary/replica pair.
 
-**Setup**: Apply the 2-site manifest first (not the 3-site one):
+**Setup**: Start from the 2-site group (not the 3-site one). Sites
+cannot be removed, so applying the 2-site manifest over a 3-site group is
+refused; tear the playground down and set it up again if it runs the
+3-site manifest:
 ```bash
 kubectl -n $NS apply -f playground/manifests/failovergroup.yaml
 # Wait for steady-state iad (primary) + pdx (replica).
@@ -493,7 +496,7 @@ kubectl -n $NS apply -f playground/manifests/failovergroup.yaml
 ```bash
 kubectl -n $NS patch mfg playground --type json -p '[
   {"op":"add","path":"/spec/sites/-","value":{
-    "name":"fra","serverID":104,"role":"DisasterRecovery","zone":"zone-fra","lbIP":"10.96.100.30",
+    "name":"fra","serverID":104,"role":"DisasterRecovery","zone":"zone-fra","loadBalancerIP":"10.96.100.30",
     "taintNodeSelector":{"bloodraven.shipstream.io/failover-group.playground":"true","bloodraven.shipstream.io/site.playground":"fra"},
     "storage":{"storageClassName":"playground-fast","size":"1Gi"},
     "resources":{
@@ -523,13 +526,13 @@ pair.
 
 ---
 
-### 9. Scale in: remove a DisasterRecovery site cleanly
-**Category**: Day-2 contraction | **Risk**: Medium
+### 9. Scale in: removing a site is refused
+**Category**: Day-2 contraction | **Risk**: Low
 
-**Hypothesis**: Removing `fra` from `spec.sites[]` tears down its
-Deployment, Service, and PVC via owner-reference garbage collection.
-The remaining primary/replica pair is untouched, and
-`status.sites[]` contracts accordingly.
+**Hypothesis**: Removing `fra` from `spec.sites[]` is refused at
+admission: sites cannot be removed or renamed (their names are part of
+Deployment, PVC, Service, archive and keyring names, and no code prunes a
+removed site's resources). The cluster is untouched.
 
 **Injection**:
 ```bash
@@ -538,23 +541,17 @@ kubectl -n $NS patch mfg playground --type json \
 ```
 
 **Verify**:
-- `kubectl -n $NS get deployment mysql-playground-fra` → NotFound
-  within ~10s.
-- `kubectl -n $NS get svc,pvc -l bloodraven.shipstream.io/site=fra` → empty.
-- `status.sites[]` now has two entries.
-- `status.activeSite` unchanged; primary still writable.
-- Dashboard reflects the two-site layout without reload errors.
+- The patch fails with `spec.sites cannot be removed or renamed; see the
+  site-replacement procedure`.
+- `kubectl -n $NS get deployment mysql-playground-fra` still exists, and
+  `status.sites[]` still has three entries.
+- Renaming a site (`{"op":"replace","path":"/spec/sites/2/name","value":"fra2"}`)
+  is refused with the same message.
 
-**Caution — if fra had been recently promoted**: Removing an active
-site is undefined; it should fail CRD validation (only `iad` and
-`pdx` are PrimaryCandidate sites in this manifest, so `fra` cannot be the
-active site) but if it somehow did, a pre-removal planned-failover
-is the correct precondition. Don't test active-site removal here —
-that's a Wishlist #11 scenario.
-
-**Cleanup / reset to 3-site**: Reapply
-`playground/manifests/failovergroup-3site.yaml` to restore the full
-topology for subsequent scenarios.
+**To drop a site**: replace the group with a new one restored from a
+backup (site docs: Operations, "Replacing a site"). In the playground,
+`./playground/teardown.sh` and a re-run of `./playground/setup.sh` give a
+fresh 2-site group.
 
 ---
 

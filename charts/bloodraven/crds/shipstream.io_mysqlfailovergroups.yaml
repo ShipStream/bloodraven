@@ -778,25 +778,42 @@ spec:
                               properties:
                                 claimName:
                                   description: |-
-                                    ClaimName is the name of a pre-existing PVC to use. If empty the
-                                    operator provisions a PVC per profile.
+                                    ClaimName is the name of an existing PVC to use. Exactly one of
+                                    ClaimName and Provisioned is set.
                                   maxLength: 253
+                                  minLength: 1
                                   type: string
                                   x-kubernetes-validations:
                                   - message: claimName must be at most 253 bytes (UTF-8)
                                     rule: bytes(self).size() <= 253
-                                size:
-                                  anyOf:
-                                  - type: integer
-                                  - type: string
-                                  description: Size is used when the operator provisions
-                                    the PVC.
-                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                  x-kubernetes-int-or-string: true
-                                storageClassName:
-                                  description: StorageClassName is used when the operator
-                                    provisions the PVC.
-                                  type: string
+                                provisioned:
+                                  description: |-
+                                    Provisioned makes the operator create and own the profile's claim,
+                                    "mysql-<fg>-backup-<profile>", with this class and size. It is
+                                    applied only when the claim is created, so it is immutable. Exactly
+                                    one of ClaimName and Provisioned is set.
+                                  properties:
+                                    size:
+                                      description: Size is the requested size of the
+                                        claim, such as "50Gi".
+                                      maxLength: 64
+                                      minLength: 1
+                                      pattern: ^(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                      type: string
+                                      x-kubernetes-validations:
+                                      - message: a storage size must be greater than
+                                          0
+                                        rule: quantity(self).isGreaterThan(quantity('0'))
+                                    storageClassName:
+                                      description: |-
+                                        StorageClassName is the StorageClass of the claim. Unset uses the
+                                        cluster's default StorageClass.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                  - size
+                                  type: object
                                 subPath:
                                   description: |-
                                     SubPath inside the PVC to use. Each backup lands under
@@ -809,6 +826,19 @@ spec:
                                   - message: subPath must be at most 512 bytes (UTF-8)
                                     rule: bytes(self).size() <= 512
                               type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of claimName or provisioned must
+                                  be set
+                                rule: has(self.claimName) != has(self.provisioned)
+                              - message: 'pvc.provisioned is immutable and cannot
+                                  be added or removed: the operator applies it only
+                                  when it creates the claim'
+                                rule: has(self.provisioned) == has(oldSelf.provisioned)
+                                  && (!has(self.provisioned) || (has(self.provisioned.storageClassName)
+                                  == has(oldSelf.provisioned.storageClassName) &&
+                                  (!has(self.provisioned.storageClassName) || self.provisioned.storageClassName
+                                  == oldSelf.provisioned.storageClassName) && quantity(self.provisioned.size).compareTo(quantity(oldSelf.provisioned.size))
+                                  == 0))
                             s3:
                               description: S3 configures an S3-compatible object store
                                 destination.
@@ -863,6 +893,7 @@ spec:
                                 region:
                                   description: Region is the AWS region. Optional
                                     for non-AWS S3 stores.
+                                  maxLength: 64
                                   type: string
                               required:
                               - bucket
@@ -1014,6 +1045,7 @@ spec:
                                     Query is a single SQL statement. Must return a scalar
                                     (single-row, single-column) result. Multi-statement inputs are
                                     rejected to keep the timeout budget predictable.
+                                  maxLength: 4096
                                   minLength: 1
                                   type: string
                                 timeout:
@@ -1022,6 +1054,7 @@ spec:
                                     Timeout is the client-side timeout for the sanity query, applied in
                                     whole seconds (rounded up). Exceeding it fails the verification with
                                     reason=SanityCheckTimeout. Default: 60s. Bounds: 1s to 1h.
+                                  maxLength: 64
                                   type: string
                                   x-kubernetes-validations:
                                   - message: sanityCheck.timeout must be between 1s
@@ -2365,7 +2398,9 @@ spec:
                     description: |-
                       Enabled turns on data-at-rest encryption for every site in the
                       group. Enabling requires spec.tls to be set, because MySQL
-                      requires a secure connection to clone encrypted data.
+                      requires a secure connection to clone encrypted data. Once true it
+                      cannot be set back to false or removed: the data is encrypted, and
+                      decrypting a group means a new group restored from a backup.
 
                       Encryption can only be enabled on a group that has not yet
                       bootstrapped, or adopted by an existing group via the replica-first
@@ -2405,6 +2440,7 @@ spec:
                           path is NOT inside the data directory. Admission rejects the
                           default /var/lib/mysql datadir and its descendants; custom-image
                           datadirs must be checked manually.
+                        maxLength: 1024
                         pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                         type: string
                       escrowTimeout:
@@ -2426,6 +2462,7 @@ spec:
                           MysqldDir is the directory containing the mysqld binary. MySQL
                           only reads its global component manifest from there, so the
                           operator mounts `mysqld.my` into this directory.
+                        maxLength: 1024
                         pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                         type: string
                       pluginDir:
@@ -2434,6 +2471,7 @@ spec:
                           PluginDir is MySQL's plugin_dir. MySQL only reads the global
                           `component_keyring_file.cnf` from there, so the operator mounts
                           the generated config into this directory.
+                        maxLength: 1024
                         pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                         type: string
                       retainVersions:
@@ -5824,12 +5862,14 @@ spec:
                             description: |-
                               ClaimName is the name of an existing PersistentVolumeClaim in the same
                               namespace to use as the restore source.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           subPath:
                             description: |-
                               SubPath inside the PVC where the dump is located. Optional.
                               A ".." segment is rejected so the path cannot leave the PVC.
+                            maxLength: 512
                             pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                             type: string
                         required:
@@ -5888,6 +5928,7 @@ spec:
                           region:
                             description: Region is the AWS region. Optional for non-AWS
                               S3 stores.
+                            maxLength: 64
                             type: string
                         required:
                         - bucket
@@ -6281,8 +6322,14 @@ spec:
                       timestamp recorded in status.restoreInPlace.confirmTokenUsed.
                       This gives programmatic callers a simple "just send now()" idiom
                       while also protecting against replay (an older manifest applied
-                      accidentally will not re-trigger a restore).
+                      accidentally will not re-trigger a restore). Admission requires an
+                      upper-case "T" and "Z", an offset within -23:59..+23:59 and a
+                      digits-only fraction. The value is kept as written: the status
+                      tokens compare it byte for byte.
+                    format: date-time
+                    maxLength: 64
                     minLength: 1
+                    pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$
                     type: string
                   decryption:
                     description: |-
@@ -6405,12 +6452,14 @@ spec:
                             description: |-
                               ClaimName is the name of an existing PersistentVolumeClaim in the same
                               namespace to use as the restore source.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           subPath:
                             description: |-
                               SubPath inside the PVC where the dump is located. Optional.
                               A ".." segment is rejected so the path cannot leave the PVC.
+                            maxLength: 512
                             pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                             type: string
                         required:
@@ -6469,6 +6518,7 @@ spec:
                           region:
                             description: Region is the AWS region. Optional for non-AWS
                               S3 stores.
+                            maxLength: 64
                             type: string
                         required:
                         - bucket
@@ -6645,9 +6695,12 @@ spec:
                   description: SiteSpec defines the configuration for a single site
                     in the failover group.
                   properties:
-                    lbIP:
-                      description: LBIP is the load balancer IP for DNS failover.
-                      minLength: 1
+                    loadBalancerIP:
+                      description: |-
+                        LoadBalancerIP is the IPv4 address the DNS record points at while
+                        this site is active. Required unless role is ReadOnly.
+                      format: ipv4
+                      maxLength: 15
                       type: string
                     mysqlConf:
                       additionalProperties:
@@ -6658,13 +6711,14 @@ spec:
                     name:
                       description: |-
                         Name is the site identifier (e.g. "iad", "pdx", "lhr"), the key of
-                        spec.sites. MaxLength caps the CEL cost of the spec-level
-                        priority-membership rule. The pattern matches what the per-site
-                        Service names already require, and keeps the name safe to use in
-                        object-storage keys.
-                      maxLength: 253
+                        spec.sites. It is a DNS label of at most 20 characters, and the
+                        group name plus the site name are at most 41 characters: the site
+                        name is part of the names of the site's Deployment, PVC, Services
+                        and Dragonfly StatefulSet, of label values and of object-storage
+                        keys. Sites cannot be removed or renamed.
+                      maxLength: 20
                       minLength: 1
-                      pattern: ^[a-z0-9-]+$
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     resources:
                       description: Resources defines the compute resources for the
@@ -6787,16 +6841,28 @@ spec:
                         site.
                       properties:
                         size:
-                          anyOf:
-                          - type: integer
-                          - type: string
-                          description: Size is the requested storage size.
-                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                          x-kubernetes-int-or-string: true
+                          description: |-
+                            Size is the requested storage size, such as "100Gi". Immutable; it is
+                            compared by value, so 1Gi and 1024Mi are the same size.
+                          maxLength: 64
+                          minLength: 1
+                          pattern: ^(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          type: string
+                          x-kubernetes-validations:
+                          - message: 'size is immutable: the operator does not resize
+                              a site''s volume'
+                            rule: quantity(self).compareTo(quantity(oldSelf)) == 0
+                          - message: a storage size must be greater than 0
+                            rule: quantity(self).isGreaterThan(quantity('0'))
                         storageClassName:
                           description: StorageClassName is the name of the StorageClass.
+                            Immutable.
+                          maxLength: 253
                           minLength: 1
                           type: string
+                          x-kubernetes-validations:
+                          - message: storageClassName is immutable
+                            rule: self == oldSelf
                       required:
                       - size
                       - storageClassName
@@ -6812,9 +6878,16 @@ spec:
                       minProperties: 1
                       type: object
                     zone:
-                      description: Zone is the Kubernetes topology zone for node selection.
+                      description: |-
+                        Zone is the Kubernetes topology zone for node selection. It cannot
+                        change: the site's volume is bound to its zone.
+                      maxLength: 63
                       minLength: 1
                       type: string
+                      x-kubernetes-validations:
+                      - message: 'zone is immutable: the site''s volume cannot follow
+                          its pods into another zone'
+                        rule: self == oldSelf
                   required:
                   - name
                   - serverID
@@ -6822,10 +6895,10 @@ spec:
                   - zone
                   type: object
                   x-kubernetes-validations:
-                  - message: taintNodeSelector and lbIP are required unless role is
-                      ReadOnly
+                  - message: taintNodeSelector and loadBalancerIP are required unless
+                      role is ReadOnly
                     rule: self.role == 'ReadOnly' || (has(self.taintNodeSelector)
-                      && has(self.lbIP))
+                      && has(self.loadBalancerIP))
                 maxItems: 16
                 minItems: 2
                 type: array
@@ -6854,7 +6927,8 @@ spec:
                       estimator can bound the "every priority entry names a real
                       PrimaryCandidate" rule.
                     items:
-                      maxLength: 253
+                      maxLength: 20
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     maxItems: 16
                     type: array
@@ -9258,6 +9332,91 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
+        - message: 'metadata.name must be a DNS-1035 label (a lowercase letter, then
+            lowercase letters, digits or ''-'', ending in a letter or digit): it starts
+            the names of the group''s Services'
+          rule: self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')
+        - message: 'metadata.name plus each spec.sites[].name must be at most 41 characters:
+            the site''s Dragonfly StatefulSet <group>-dragonfly-<site> must fit in
+            52'
+          rule: self.spec.sites.all(s, size(self.metadata.name) + size(s.name) <=
+            41)
+        - message: spec.sites cannot be removed or renamed; see the site-replacement
+            procedure (Operations > Replacing a site)
+          rule: oldSelf.spec.sites.all(o, self.spec.sites.exists(s, s.name == o.name))
+        - message: 'spec.initFromBackup is fixed at creation: it cannot be added,
+            changed or removed. To retry a bootstrap restore that never succeeded,
+            delete the group and create it again with the corrected block (see Backup
+            and restore > A failed bootstrap restore)'
+          rule: 'has(self.spec.initFromBackup) == has(oldSelf.spec.initFromBackup)
+            && (!has(self.spec.initFromBackup) || ((has(self.spec.initFromBackup.source.backupRef)
+            == has(oldSelf.spec.initFromBackup.source.backupRef) && (!has(self.spec.initFromBackup.source.backupRef)
+            || self.spec.initFromBackup.source.backupRef.name == oldSelf.spec.initFromBackup.source.backupRef.name))
+            && (has(self.spec.initFromBackup.source.s3) == has(oldSelf.spec.initFromBackup.source.s3)
+            && (!has(self.spec.initFromBackup.source.s3) || (self.spec.initFromBackup.source.s3.bucket
+            == oldSelf.spec.initFromBackup.source.s3.bucket && (has(self.spec.initFromBackup.source.s3.prefix)
+            ? self.spec.initFromBackup.source.s3.prefix : '''') == (has(oldSelf.spec.initFromBackup.source.s3.prefix)
+            ? oldSelf.spec.initFromBackup.source.s3.prefix : '''') && (has(self.spec.initFromBackup.source.s3.region)
+            ? self.spec.initFromBackup.source.s3.region : '''') == (has(oldSelf.spec.initFromBackup.source.s3.region)
+            ? oldSelf.spec.initFromBackup.source.s3.region : '''') && (has(self.spec.initFromBackup.source.s3.endpointURL)
+            ? self.spec.initFromBackup.source.s3.endpointURL : '''') == (has(oldSelf.spec.initFromBackup.source.s3.endpointURL)
+            ? oldSelf.spec.initFromBackup.source.s3.endpointURL : '''') && self.spec.initFromBackup.source.s3.credentialsSecretName
+            == oldSelf.spec.initFromBackup.source.s3.credentialsSecretName))) && (has(self.spec.initFromBackup.source.pvc)
+            == has(oldSelf.spec.initFromBackup.source.pvc) && (!has(self.spec.initFromBackup.source.pvc)
+            || (self.spec.initFromBackup.source.pvc.claimName == oldSelf.spec.initFromBackup.source.pvc.claimName
+            && (has(self.spec.initFromBackup.source.pvc.subPath) ? self.spec.initFromBackup.source.pvc.subPath
+            : '''') == (has(oldSelf.spec.initFromBackup.source.pvc.subPath) ? oldSelf.spec.initFromBackup.source.pvc.subPath
+            : '''')))) && (has(self.spec.initFromBackup.decryption) == has(oldSelf.spec.initFromBackup.decryption)
+            && (!has(self.spec.initFromBackup.decryption) || (self.spec.initFromBackup.decryption.passphraseSecretKeyRef.name
+            == oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.name
+            && (has(self.spec.initFromBackup.decryption.passphraseSecretKeyRef.key)
+            ? self.spec.initFromBackup.decryption.passphraseSecretKeyRef.key : '''')
+            == (has(oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.key)
+            ? oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.key :
+            '''')))) && (has(self.spec.initFromBackup.loadOptions) == has(oldSelf.spec.initFromBackup.loadOptions)
+            && (!has(self.spec.initFromBackup.loadOptions) || ((has(self.spec.initFromBackup.loadOptions.threads)
+            ? self.spec.initFromBackup.loadOptions.threads : 0) == (has(oldSelf.spec.initFromBackup.loadOptions.threads)
+            ? oldSelf.spec.initFromBackup.loadOptions.threads : 0) && (has(self.spec.initFromBackup.loadOptions.skipBinlog)
+            == has(oldSelf.spec.initFromBackup.loadOptions.skipBinlog) && (!has(self.spec.initFromBackup.loadOptions.skipBinlog)
+            || self.spec.initFromBackup.loadOptions.skipBinlog == oldSelf.spec.initFromBackup.loadOptions.skipBinlog))
+            && (has(self.spec.initFromBackup.loadOptions.loadIndexes) == has(oldSelf.spec.initFromBackup.loadOptions.loadIndexes)
+            && (!has(self.spec.initFromBackup.loadOptions.loadIndexes) || self.spec.initFromBackup.loadOptions.loadIndexes
+            == oldSelf.spec.initFromBackup.loadOptions.loadIndexes)) && (has(self.spec.initFromBackup.loadOptions.includeSchemas)
+            ? self.spec.initFromBackup.loadOptions.includeSchemas : []) == (has(oldSelf.spec.initFromBackup.loadOptions.includeSchemas)
+            ? oldSelf.spec.initFromBackup.loadOptions.includeSchemas : []) && (has(self.spec.initFromBackup.loadOptions.excludeSchemas)
+            ? self.spec.initFromBackup.loadOptions.excludeSchemas : []) == (has(oldSelf.spec.initFromBackup.loadOptions.excludeSchemas)
+            ? oldSelf.spec.initFromBackup.loadOptions.excludeSchemas : [])))) && (has(self.spec.initFromBackup.pointInTime)
+            == has(oldSelf.spec.initFromBackup.pointInTime) && (!has(self.spec.initFromBackup.pointInTime)
+            || ((has(self.spec.initFromBackup.pointInTime.archiveProfileName) ? self.spec.initFromBackup.pointInTime.archiveProfileName
+            : '''') == (has(oldSelf.spec.initFromBackup.pointInTime.archiveProfileName)
+            ? oldSelf.spec.initFromBackup.pointInTime.archiveProfileName : '''') &&
+            (has(self.spec.initFromBackup.pointInTime.allowPartial) && self.spec.initFromBackup.pointInTime.allowPartial)
+            == (has(oldSelf.spec.initFromBackup.pointInTime.allowPartial) && oldSelf.spec.initFromBackup.pointInTime.allowPartial)
+            && self.spec.initFromBackup.pointInTime.stopTime == oldSelf.spec.initFromBackup.pointInTime.stopTime
+            && (has(self.spec.initFromBackup.pointInTime.excludeGtids) ? self.spec.initFromBackup.pointInTime.excludeGtids
+            : '''') == (has(oldSelf.spec.initFromBackup.pointInTime.excludeGtids)
+            ? oldSelf.spec.initFromBackup.pointInTime.excludeGtids : ''''))))))'
+        - message: 'spec.encryptionAtRest.enabled cannot be turned off: the data is
+            encrypted. Decrypting needs a new group restored from a backup'
+          rule: '!has(oldSelf.spec.encryptionAtRest) || !(has(oldSelf.spec.encryptionAtRest.enabled)
+            && oldSelf.spec.encryptionAtRest.enabled) || (has(self.spec.encryptionAtRest)
+            && has(self.spec.encryptionAtRest.enabled) && self.spec.encryptionAtRest.enabled)'
+        - message: spec.encryptionAtRest.keyring.dataFileDir, mysqldDir and pluginDir
+            cannot change while encryption is enabled
+          rule: '!has(oldSelf.spec.encryptionAtRest) || !(has(oldSelf.spec.encryptionAtRest.enabled)
+            && oldSelf.spec.encryptionAtRest.enabled) || !has(self.spec.encryptionAtRest)
+            || !(has(self.spec.encryptionAtRest.enabled) && self.spec.encryptionAtRest.enabled)
+            || ((has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.dataFileDir)
+            ? self.spec.encryptionAtRest.keyring.dataFileDir : ''/run/mysql-keyring'')
+            == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.dataFileDir)
+            ? oldSelf.spec.encryptionAtRest.keyring.dataFileDir : ''/run/mysql-keyring'')
+            && (has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.mysqldDir)
+            ? self.spec.encryptionAtRest.keyring.mysqldDir : ''/usr/sbin'') == (has(oldSelf.spec.encryptionAtRest.keyring)
+            && has(oldSelf.spec.encryptionAtRest.keyring.mysqldDir) ? oldSelf.spec.encryptionAtRest.keyring.mysqldDir
+            : ''/usr/sbin'') && (has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.pluginDir)
+            ? self.spec.encryptionAtRest.keyring.pluginDir : ''/usr/lib64/mysql/plugin'')
+            == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.pluginDir)
+            ? oldSelf.spec.encryptionAtRest.keyring.pluginDir : ''/usr/lib64/mysql/plugin''))'
         - message: spec.backup.profiles[pitr.profileName].encryption (presence, algorithm,
             passphraseSecretKeyRef) cannot change while that profile archives PITR
             binlogs to the same storage; create a new profile with a new storage prefix

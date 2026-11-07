@@ -57,9 +57,9 @@
 
 ---
 
-**Front:** `lbIP` and `taintNodeSelector`
+**Front:** `loadBalancerIP` and `taintNodeSelector`
 
-**Back:** Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and lbIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.
+**Back:** Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and loadBalancerIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.
 
 ---
 

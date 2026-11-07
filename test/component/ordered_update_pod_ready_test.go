@@ -35,8 +35,8 @@ func TestOrderedUpdate_DoesNotWalkTheGroupWhenRolledPodIsNotReady(t *testing.T) 
 	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: handoffFenced,
 		replicaStatus: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: pdxHost}}
 	sites := []controller.SiteTopologyConfig{
-		{Name: "pdx", Zone: "zone-pdx", LBIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: pdxHost},
-		{Name: "iad", Zone: "zone-iad", LBIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: iadHost},
+		{Name: "pdx", Zone: "zone-pdx", LoadBalancerIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: pdxHost},
+		{Name: "iad", Zone: "zone-iad", LoadBalancerIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: iadHost},
 	}
 	clk := clock.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	fc := controller.NewFailoverController(logger)

@@ -4,6 +4,7 @@ package envtest
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -271,6 +272,16 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		inertFieldsSet(t, old, map[string]any{"operatorSecret": fg.Spec.Credentials.OperatorSecretName}, "spec", "credentials")
 		// ... and spec.updateStrategy as a string, which it defaults.
 		unstructured.RemoveNestedField(old.Object, "spec", "updateStrategy")
+		// ... and spec.sites[].loadBalancerIP as lbIP.
+		oldSites, _, _ := unstructured.NestedSlice(old.Object, "spec", "sites")
+		for _, site := range oldSites {
+			m := site.(map[string]any)
+			m["lbIP"] = m["loadBalancerIP"]
+			delete(m, "loadBalancerIP")
+		}
+		if err := unstructured.SetNestedSlice(old.Object, oldSites, "spec", "sites"); err != nil {
+			t.Fatal(err)
+		}
 		if err := c.Create(ctx, old); err != nil {
 			t.Fatal(err)
 		}
@@ -350,9 +361,10 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	}
 
 	// The pre-#235 CRD pruned spec.sites[].serverID on create, and the
-	// final schema prunes credentials.operatorSecret; it requires both
-	// spec.sites[].serverID (A-08) and credentials.operatorSecretName
-	// (A-02), and every write evaluates the rule that keeps serverID
+	// final schema prunes credentials.operatorSecret and spec.sites[].lbIP;
+	// it requires spec.sites[].serverID (A-08),
+	// credentials.operatorSecretName (A-02) and spec.sites[].loadBalancerIP
+	// (A-19), and every write evaluates the rule that keeps serverID
 	// unique, so the upgrade adds them first. The old CRD also defaulted
 	// the lower-case role primary-candidate and the string updateStrategy
 	// OrderedUpdate, which the final schema refuses (A-27), and the integer
@@ -368,6 +380,7 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		for i := range sites {
 			sites[i].(map[string]any)["serverID"] = int64(101 + i)
 			sites[i].(map[string]any)["role"] = string(v1alpha1.SiteRolePrimaryCandidate)
+			sites[i].(map[string]any)["loadBalancerIP"] = fmt.Sprintf("203.0.113.%d", i+1)
 		}
 		if err := unstructured.SetNestedSlice(u.Object, sites, "spec", "sites"); err != nil {
 			t.Fatal(err)

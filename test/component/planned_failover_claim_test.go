@@ -324,12 +324,12 @@ func newPFHarness(t *testing.T, o pfOpts) *pfHarness {
 		sink:   &pfSink{},
 	}
 	sites := []controller.SiteTopologyConfig{
-		{Name: "dc1", Zone: "z1", LBIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc1", TaintSelector: "site=dc1"},
-		{Name: "dc2", Zone: "z2", LBIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc2", TaintSelector: "site=dc2"},
+		{Name: "dc1", Zone: "z1", LoadBalancerIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc1", TaintSelector: "site=dc1"},
+		{Name: "dc2", Zone: "z2", LoadBalancerIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc2", TaintSelector: "site=dc2"},
 	}
 	if o.third != "" {
 		h.third = newPFMock(pfUUIDC, true, "mysql-dc1")
-		sites = append(sites, controller.SiteTopologyConfig{Name: "dc3", Zone: "z3", LBIP: "10.0.0.3", Role: o.third, Host: "mysql-dc3", TaintSelector: "site=dc3"})
+		sites = append(sites, controller.SiteTopologyConfig{Name: "dc3", Zone: "z3", LoadBalancerIP: "10.0.0.3", Role: o.third, Host: "mysql-dc3", TaintSelector: "site=dc3"})
 	}
 	h.cfg = controller.TopologyConfig{Namespace: h.nn.Namespace, Name: h.nn.Name, Sites: sites, PollInterval: int64(time.Second),
 		FailureThreshold: 3, RecoveryThreshold: 2, FailoverCooldown: int64(o.cooldown)}

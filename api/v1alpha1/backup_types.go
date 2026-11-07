@@ -530,6 +530,7 @@ type S3Storage struct {
 	Prefix string `json:"prefix,omitempty"`
 
 	// Region is the AWS region. Optional for non-AWS S3 stores.
+	// +kubebuilder:validation:MaxLength=64
 	// +optional
 	Region string `json:"region,omitempty"`
 
@@ -555,24 +556,26 @@ type S3Storage struct {
 	CredentialsSecretName string `json:"credentialsSecretName"`
 }
 
-// PVCStorage configures a local persistent volume as the backup destination.
-// If ClaimName is empty the operator provisions and owns a PVC named
-// "mysql-<fg>-backup-<profile>".
+// PVCStorage configures a local persistent volume as the backup destination:
+// either an existing claim (ClaimName) or a claim the operator provisions
+// and owns, named "mysql-<fg>-backup-<profile>" (Provisioned).
+// +kubebuilder:validation:XValidation:rule="has(self.claimName) != has(self.provisioned)",message="exactly one of claimName or provisioned must be set"
+// +kubebuilder:validation:XValidation:rule="has(self.provisioned) == has(oldSelf.provisioned) && (!has(self.provisioned) || (has(self.provisioned.storageClassName) == has(oldSelf.provisioned.storageClassName) && (!has(self.provisioned.storageClassName) || self.provisioned.storageClassName == oldSelf.provisioned.storageClassName) && quantity(self.provisioned.size).compareTo(quantity(oldSelf.provisioned.size)) == 0))",message="pvc.provisioned is immutable and cannot be added or removed: the operator applies it only when it creates the claim"
 type PVCStorage struct {
-	// ClaimName is the name of a pre-existing PVC to use. If empty the
-	// operator provisions a PVC per profile.
+	// ClaimName is the name of an existing PVC to use. Exactly one of
+	// ClaimName and Provisioned is set.
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 253",message="claimName must be at most 253 bytes (UTF-8)"
 	// +optional
 	ClaimName string `json:"claimName,omitempty"`
 
-	// StorageClassName is used when the operator provisions the PVC.
+	// Provisioned makes the operator create and own the profile's claim,
+	// "mysql-<fg>-backup-<profile>", with this class and size. It is
+	// applied only when the claim is created, so it is immutable. Exactly
+	// one of ClaimName and Provisioned is set.
 	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
-	// Size is used when the operator provisions the PVC.
-	// +optional
-	Size resource.Quantity `json:"size,omitempty"`
+	Provisioned *ProvisionedVolumeSpec `json:"provisioned,omitempty"`
 
 	// SubPath inside the PVC to use. Each backup lands under
 	// "<subPath>/<mysqlbackup-name>/".
@@ -582,6 +585,21 @@ type PVCStorage struct {
 	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
 	// +optional
 	SubPath string `json:"subPath,omitempty"`
+}
+
+// ProvisionedVolumeSpec is a volume the operator provisions: a claim of
+// Size, of class StorageClassName.
+type ProvisionedVolumeSpec struct {
+	// StorageClassName is the StorageClass of the claim. Unset uses the
+	// cluster's default StorageClass.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// Size is the requested size of the claim, such as "50Gi".
+	// +required
+	Size StorageQuantity `json:"size"`
 }
 
 // DumpOptions maps onto the options argument of util.dumpInstance().
@@ -776,12 +794,14 @@ type InitFromBackupPVCSource struct {
 	// ClaimName is the name of an existing PersistentVolumeClaim in the same
 	// namespace to use as the restore source.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	// +required
 	ClaimName string `json:"claimName"`
 
 	// SubPath inside the PVC where the dump is located. Optional.
 	// A ".." segment is rejected so the path cannot leave the PVC.
 	// +optional
+	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
 	SubPath string `json:"subPath,omitempty"`
 }
@@ -922,8 +942,14 @@ type RestoreInPlaceSpec struct {
 	// timestamp recorded in status.restoreInPlace.confirmTokenUsed.
 	// This gives programmatic callers a simple "just send now()" idiom
 	// while also protecting against replay (an older manifest applied
-	// accidentally will not re-trigger a restore).
+	// accidentally will not re-trigger a restore). Admission requires an
+	// upper-case "T" and "Z", an offset within -23:59..+23:59 and a
+	// digits-only fraction. The value is kept as written: the status
+	// tokens compare it byte for byte.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Format=date-time
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`
 	// +required
 	Confirm string `json:"confirm"`
 

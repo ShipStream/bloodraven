@@ -34,10 +34,10 @@ func withMySQLSafetyTimeout(ctx context.Context, probe func(context.Context) err
 
 // SiteTopologyConfig holds per-site configuration for the topology manager.
 type SiteTopologyConfig struct {
-	Name string
-	Zone string
-	LBIP string
-	Role state.SiteRole
+	Name           string
+	Zone           string
+	LoadBalancerIP string
+	Role           state.SiteRole
 	// TaintSelector is the Kubernetes label selector used to find nodes
 	// that should receive this failover group's readonly taint for the site.
 	TaintSelector string
@@ -935,7 +935,7 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checke
 		sites[i] = siteTracker{
 			name:          s.Name,
 			zone:          s.Zone,
-			lbIP:          s.LBIP,
+			lbIP:          s.LoadBalancerIP,
 			role:          role,
 			taintSelector: s.TaintSelector,
 			host:          s.Host,

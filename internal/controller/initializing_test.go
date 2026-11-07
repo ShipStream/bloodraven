@@ -23,7 +23,7 @@ import (
 func newThreeSiteTestTopologyManager(site0, site1, site2 *mockMySQL) (*TopologyManager, *mockDNS) {
 	cfg := testTopologyConfig()
 	cfg.Sites = append(cfg.Sites, SiteTopologyConfig{
-		Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
+		Name: "dc3", Zone: "lion-dc3", LoadBalancerIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
 		TaintSelector: taintSelector("dc3"), Host: "mysql-dc3",
 	})
 	dns := &mockDNS{}

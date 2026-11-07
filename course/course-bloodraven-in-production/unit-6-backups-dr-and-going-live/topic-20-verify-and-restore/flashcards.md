@@ -41,7 +41,7 @@
 
 **Front:** spec.initFromBackup
 
-**Back:** The one-shot restore entry point: it gates normal bootstrap of a brand-new group and is skipped on later reconciles once it has succeeded, even if the field is left in place.
+**Back:** The one-shot restore entry point: it gates normal bootstrap of a brand-new group and is skipped on later reconciles once it has succeeded, even if the field is left in place. It is fixed at creation: it cannot be added to an existing group, edited or removed.
 
 ---
 

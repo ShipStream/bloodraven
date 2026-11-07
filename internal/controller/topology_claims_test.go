@@ -392,7 +392,7 @@ func TestTopologyClaimMatrix_ReaderBootstrap(t *testing.T) {
 		t.Run(col.name, func(t *testing.T) {
 			f := newClaimFixture(t)
 			cfg := testTopologyConfig()
-			cfg.Sites = append(cfg.Sites, SiteTopologyConfig{Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRoleReadOnly, Host: "mysql-dc3"})
+			cfg.Sites = append(cfg.Sites, SiteTopologyConfig{Name: "dc3", Zone: "lion-dc3", LoadBalancerIP: "3.3.3.3", Role: state.SiteRoleReadOnly, Host: "mysql-dc3"})
 			dc1 := &claimMySQL{mockMySQL: &mockMySQL{}, uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
 			dc2 := &claimMySQL{mockMySQL: &mockMySQL{readOnly: true, superReadOnly: true,
 				replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}},

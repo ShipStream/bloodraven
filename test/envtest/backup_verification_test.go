@@ -9,7 +9,6 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -30,10 +29,10 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 			Image:       "mysql:9.7",
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", LBIP: "203.0.113.1", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
-					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
-				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", LBIP: "203.0.113.2", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
-					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
+				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", LoadBalancerIP: "203.0.113.1", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
+					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
+				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", LoadBalancerIP: "203.0.113.2", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
+					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
 			Backup: &v1alpha1.BackupSpec{

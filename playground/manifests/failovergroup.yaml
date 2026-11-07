@@ -24,7 +24,7 @@ spec:
       taintNodeSelector:
         bloodraven.shipstream.io/failover-group.playground: "true"
         bloodraven.shipstream.io/site.playground: iad
-      lbIP: "10.96.100.10"
+      loadBalancerIP: "10.96.100.10"
       storage:
         storageClassName: playground-fast
         size: 1Gi
@@ -42,7 +42,7 @@ spec:
       taintNodeSelector:
         bloodraven.shipstream.io/failover-group.playground: "true"
         bloodraven.shipstream.io/site.playground: pdx
-      lbIP: "10.96.100.20"
+      loadBalancerIP: "10.96.100.20"
       storage:
         storageClassName: playground-fast
         size: 1Gi

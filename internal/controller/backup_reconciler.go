@@ -263,6 +263,24 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return r.failBackup(ctx, &backup, v1alpha1.ReasonProfileReadOnly, why)
 		}
 
+		// An owned claim left by an earlier profile of the same name is
+		// never written with other values than the profile names.
+		expanded := false
+		if profile.Storage.Type == v1alpha1.BackupStoragePVC && profile.Storage.PVC != nil && profile.Storage.PVC.Provisioned != nil {
+			var pvc corev1.PersistentVolumeClaim
+			err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ownedBackupPVCName(fg.Name, profile.Name)}, &pvc)
+			switch {
+			case err == nil:
+				refusal, grown := ownedBackupPVCMismatch(profile.Storage.PVC.Provisioned, &pvc)
+				if refusal != "" {
+					return r.failBackup(ctx, &backup, v1alpha1.ReasonBackupStorageMismatch, refusal)
+				}
+				expanded = grown
+			case !apierrors.IsNotFound(err):
+				return ctrl.Result{}, fmt.Errorf("get owned backup PVC: %w", err)
+			}
+		}
+
 		// The stamp names the archive the group's writers render (K5),
 		// never one nobody writes. While the site Deployments do not
 		// agree on one, only a backup of the active PITR profile during
@@ -330,6 +348,11 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		r.Recorder.Eventf(&backup, corev1.EventTypeNormal, v1alpha1.EventBackupStarted,
 			"created Job %s targeting site %s (reason=%s)", built.Name, sourceSite, reason)
+		if expanded {
+			r.Recorder.Eventf(&backup, corev1.EventTypeNormal, v1alpha1.EventBackupStorageExpansionAccepted,
+				"PVC %s requests more than pvc.provisioned.size %s; using it",
+				ownedBackupPVCName(fg.Name, profile.Name), profile.Storage.PVC.Provisioned.Size)
+		}
 
 		now := metav1.Now()
 		patch := client.MergeFrom(backup.DeepCopy())

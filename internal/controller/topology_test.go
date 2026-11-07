@@ -574,8 +574,8 @@ func testTopologyConfig() TopologyConfig {
 	return TopologyConfig{
 		Name: "lion",
 		Sites: []SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc1"), Host: "mysql-dc1"},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc2"), Host: "mysql-dc2"},
+			{Name: "dc1", Zone: "lion-dc1", LoadBalancerIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc1"), Host: "mysql-dc1"},
+			{Name: "dc2", Zone: "lion-dc2", LoadBalancerIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc2"), Host: "mysql-dc2"},
 		},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,

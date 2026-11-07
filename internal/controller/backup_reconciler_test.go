@@ -10,7 +10,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -161,10 +160,10 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 			Image:       "mysql:9.7",
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", ServerID: 101, Zone: "az-iad", LBIP: "10.0.0.1",
-					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
-				{Name: "pdx", ServerID: 102, Zone: "az-pdx", LBIP: "10.0.0.2",
-					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
+				{Name: "iad", ServerID: 101, Zone: "az-iad", LoadBalancerIP: "10.0.0.1",
+					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
+				{Name: "pdx", ServerID: 102, Zone: "az-pdx", LoadBalancerIP: "10.0.0.2",
+					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "lion.example.com", TTLSeconds: 60},
 			Backup: &v1alpha1.BackupSpec{
@@ -197,10 +196,10 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 						Name: "daily-local",
 						Storage: v1alpha1.BackupStorage{
 							Type: v1alpha1.BackupStoragePVC,
-							PVC: &v1alpha1.PVCStorage{
-								StorageClassName: "fast",
-								Size:             resource.MustParse("50Gi"),
-							},
+							PVC: &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{
+								StorageClassName: new("fast"),
+								Size:             "50Gi",
+							}},
 						},
 					},
 				},

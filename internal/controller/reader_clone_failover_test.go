@@ -17,12 +17,12 @@ func newReaderCloneTopology(t *testing.T) *TopologyManager {
 	t.Helper()
 	cfg := testTopologyConfig()
 	cfg.Sites = append(cfg.Sites, SiteTopologyConfig{
-		Name:          "reader",
-		Zone:          "lion-reader",
-		LBIP:          "3.3.3.3",
-		Role:          state.SiteRoleReadOnly,
-		TaintSelector: taintSelector("reader"),
-		Host:          "mysql-reader",
+		Name:           "reader",
+		Zone:           "lion-reader",
+		LoadBalancerIP: "3.3.3.3",
+		Role:           state.SiteRoleReadOnly,
+		TaintSelector:  taintSelector("reader"),
+		Host:           "mysql-reader",
 	})
 	checkers := []mysql.Checker{
 		&mockMySQL{readOnly: false},

@@ -134,8 +134,8 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 	src.Status.ActiveSite = "pdx"
 	src.Spec.DNS = v1alpha1.DNSSpec{Hostname: "playground-db.example.local", TTLSeconds: 10}
 	src.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-iad", LBIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
-		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LBIP: "10.0.0.2"},
+		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-iad", LoadBalancerIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
+		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LoadBalancerIP: "10.0.0.2"},
 		{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "zone-reader"},
 	}
 	src.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true}
@@ -154,8 +154,8 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 	for _, s := range got.Spec.Sites {
 		zones[s.Name] = s.Zone
 		// The CRD requires both on a primary candidate.
-		if s.LBIP == "" || s.LBIP == "10.0.0.1" || s.LBIP == "10.0.0.2" {
-			t.Errorf("site %s lbIP %q, want its own placeholder", s.Name, s.LBIP)
+		if s.LoadBalancerIP == "" || s.LoadBalancerIP == "10.0.0.1" || s.LoadBalancerIP == "10.0.0.2" {
+			t.Errorf("site %s loadBalancerIP %q, want its own placeholder", s.Name, s.LoadBalancerIP)
 		}
 		if len(s.TaintNodeSelector) != 1 || s.TaintNodeSelector["bloodraven.shipstream.io/failover-group.s37-restored"] != "true" {
 			t.Errorf("site %s taintNodeSelector %v must name only the restored group's own label", s.Name, s.TaintNodeSelector)
@@ -176,7 +176,7 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 	if pit.ArchiveProfileName != backupE2EProfile || !pit.StopTime.Equal(&metav1.Time{Time: time.Date(2026, 11, 5, 10, 0, 1, 0, time.UTC)}) || got.Spec.InitFromBackup.Source.BackupRef.Name != "bk" {
 		t.Errorf("initFromBackup = %+v", got.Spec.InitFromBackup)
 	}
-	if src.Spec.Backup.PITR == nil || src.Spec.Sites[0].LBIP != "10.0.0.1" || src.Spec.Sites[0].Zone != "zone-iad" || src.Spec.Sites[0].TaintNodeSelector["a"] != "b" {
+	if src.Spec.Backup.PITR == nil || src.Spec.Sites[0].LoadBalancerIP != "10.0.0.1" || src.Spec.Sites[0].Zone != "zone-iad" || src.Spec.Sites[0].TaintNodeSelector["a"] != "b" {
 		t.Error("the source spec must not be mutated")
 	}
 }

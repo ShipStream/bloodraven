@@ -50,7 +50,7 @@ Operators reach for a `MysqlRestore` CR. **There is no restore CR.** Restore is 
 
 | Field | Shape | Use it to |
 | --- | --- | --- |
-| `spec.initFromBackup` | one-shot; gates normal bootstrap, skipped after success even if left in place | seed a brand-new group from an artifact |
+| `spec.initFromBackup` | one-shot; gates normal bootstrap, skipped after success even if left in place; fixed at creation (cannot be added, edited or removed) | seed a brand-new group from an artifact |
 | `spec.restoreInPlace` | re-runnable; no teardown-and-rename cycle | repair the live `playground` you already have |
 
 An in-place restore runs against a live cluster, so it walks discrete phases one step per reconcile, and an operator restart always lands on a well-defined observable state.

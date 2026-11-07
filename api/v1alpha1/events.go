@@ -905,6 +905,17 @@ const (
 	// `PendingTimedOut` after 30 minutes. Emitted once on entering the
 	// wait.
 	EventPassphraseSecretMissing = ReasonPassphraseSecretMissing
+	// Terminal: the profile's owned claim `mysql-<group>-backup-<profile>`
+	// has another StorageClass than `pvc.provisioned.storageClassName`, or
+	// requests less than `pvc.provisioned.size` (the claim was created for
+	// an earlier profile of the same name). The backup is `Failed` with
+	// `Ready=False/BackupStorageMismatch` and never writes to that claim;
+	// delete the claim or restore the profile's values.
+	EventBackupStorageMismatch = ReasonBackupStorageMismatch
+	// The profile's owned claim requests more than `pvc.provisioned.size`,
+	// for example after it was expanded out of band. The backup uses it.
+	// Emitted when a backup's Job is created.
+	EventBackupStorageExpansionAccepted = "BackupStorageExpansionAccepted"
 )
 
 // Events: Backup and verification setup. On: MysqlBackup, MysqlBackupVerification.

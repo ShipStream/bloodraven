@@ -206,8 +206,8 @@ func TestFixR5_I001_ManagerReplacedBetweenGateProbesAndSROClear(t *testing.T) {
 func opsReplacementManager(t *testing.T, f *opsFixture, targetRole state.SiteRole) *TopologyManager {
 	t.Helper()
 	sites := []SiteTopologyConfig{
-		{Name: "dc1", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc1", LBIP: "1.1.1.1"},
-		{Name: "dc2", Role: targetRole, Host: "mysql-dc2", LBIP: "2.2.2.2"},
+		{Name: "dc1", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc1", LoadBalancerIP: "1.1.1.1"},
+		{Name: "dc2", Role: targetRole, Host: "mysql-dc2", LoadBalancerIP: "2.2.2.2"},
 	}
 	cfg := TopologyConfig{Name: "lion", Namespace: "ns", Sites: sites, PollInterval: int64(50 * time.Millisecond),
 		FailureThreshold: 3, RecoveryThreshold: 2}

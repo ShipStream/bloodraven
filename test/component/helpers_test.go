@@ -873,9 +873,9 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 // the component test harness helpers.
 func defaultTwoSiteConfig() []controller.SiteTopologyConfig {
 	return []controller.SiteTopologyConfig{
-		{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate,
+		{Name: "dc1", Zone: "lion-dc1", LoadBalancerIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate,
 			TaintSelector: taintSelector("dc1"), Host: "mysql-lion-dc1.default.svc.cluster.local"},
-		{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate,
+		{Name: "dc2", Zone: "lion-dc2", LoadBalancerIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate,
 			TaintSelector: taintSelector("dc2"), Host: "mysql-lion-dc2.default.svc.cluster.local"},
 	}
 }

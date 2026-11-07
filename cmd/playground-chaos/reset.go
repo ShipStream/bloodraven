@@ -798,8 +798,8 @@ func (r *resetter) createManualPV(ctx context.Context, site v1alpha1.SiteSpec, n
 	if err := r.k.Kubernetes.CoreV1().PersistentVolumes().Delete(ctx, pvName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	capacity := site.Storage.Size
-	if capacity.IsZero() {
+	capacity, err := site.Storage.Size.Quantity()
+	if err != nil || capacity.IsZero() {
 		capacity = apiresource.MustParse("1Gi")
 	}
 	storageClass := site.Storage.StorageClassName
@@ -823,7 +823,7 @@ func (r *resetter) createManualPV(ctx context.Context, site v1alpha1.SiteSpec, n
 			}}}}}},
 		},
 	}
-	_, err := r.k.Kubernetes.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
+	_, err = r.k.Kubernetes.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
 	return err
 }
 

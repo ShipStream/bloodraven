@@ -92,10 +92,10 @@ spec:
   sites:                                    # DR-cluster topology, not the source's
     - name: east-1
       role: PrimaryCandidate
-      lbIP: 10.1.20.11
+      loadBalancerIP: 10.1.20.11
     - name: east-2
       role: PrimaryCandidate
-      lbIP: 10.1.20.12
+      loadBalancerIP: 10.1.20.12
   dns:
     hostname: playground-east.example.com
     ttlSeconds: 60                          # shipped default, not the playground's 10

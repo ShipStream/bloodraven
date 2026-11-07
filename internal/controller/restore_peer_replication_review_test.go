@@ -498,7 +498,7 @@ func TestDrainingReclone_StartsOnlyItsOwnSite(t *testing.T) {
 	dc3 := &mockMySQL{readOnly: true, gtidExecuted: gtid, replicaStatusVal: stopped()}
 	cfg := testTopologyConfig()
 	cfg.Sites[0].Host, cfg.Sites[1].Host = "mysql-dc1", "mysql-dc2"
-	cfg.Sites = append(cfg.Sites, SiteTopologyConfig{Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
+	cfg.Sites = append(cfg.Sites, SiteTopologyConfig{Name: "dc3", Zone: "lion-dc3", LoadBalancerIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
 		TaintSelector: taintSelector("dc3"), Host: "mysql-dc3"})
 	tm := NewTopologyManager(cfg, []mysql.Checker{dc1, dc2, dc3}, NewFailoverController(testLogger()), nil,
 		NewBootstrapController(testLogger()), BootstrapConfig{ReplUser: "repl", ReplPassword: "pw", CloneTimeout: 10 * time.Second},

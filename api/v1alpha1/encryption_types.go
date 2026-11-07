@@ -36,7 +36,9 @@ import (
 type EncryptionAtRestSpec struct {
 	// Enabled turns on data-at-rest encryption for every site in the
 	// group. Enabling requires spec.tls to be set, because MySQL
-	// requires a secure connection to clone encrypted data.
+	// requires a secure connection to clone encrypted data. Once true it
+	// cannot be set back to false or removed: the data is encrypted, and
+	// decrypting a group means a new group restored from a backup.
 	//
 	// Encryption can only be enabled on a group that has not yet
 	// bootstrapped, or adopted by an existing group via the replica-first
@@ -146,7 +148,9 @@ type EncryptionCoverageSpec struct {
 //	docker run --rm --entrypoint sh <image> -c 'command -v mysqld; mysqld --verbose --help | grep plugin_dir'
 //
 // The three paths are limited to the characters [A-Za-z0-9._/-]: the
-// operator embeds them in the mysqld launcher shell script.
+// operator embeds them in the mysqld launcher shell script. They cannot
+// change while encryption is enabled, so set them for the image before
+// enabling it.
 type KeyringSpec struct {
 	// DataFileDir is the in-container directory holding the keyring data
 	// file. It is backed by a Secret volume when sealed and by a
@@ -156,6 +160,7 @@ type KeyringSpec struct {
 	// datadirs must be checked manually.
 	// +kubebuilder:default="/run/mysql-keyring"
 	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	DataFileDir string `json:"dataFileDir,omitempty"`
 
@@ -164,6 +169,7 @@ type KeyringSpec struct {
 	// operator mounts `mysqld.my` into this directory.
 	// +kubebuilder:default="/usr/sbin"
 	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	MysqldDir string `json:"mysqldDir,omitempty"`
 
@@ -172,6 +178,7 @@ type KeyringSpec struct {
 	// the generated config into this directory.
 	// +kubebuilder:default="/usr/lib64/mysql/plugin"
 	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	PluginDir string `json:"pluginDir,omitempty"`
 

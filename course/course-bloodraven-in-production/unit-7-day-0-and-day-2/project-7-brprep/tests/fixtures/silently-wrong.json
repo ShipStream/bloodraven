@@ -72,7 +72,7 @@
             "memory": "16Gi"
           }
         },
-        "lbIP": "10.20.30.11",
+        "loadBalancerIP": "10.20.30.11",
         "taintNodeSelector": {
           "bloodraven.shipstream.io/failover-group.ledger": "true",
           "bloodraven.shipstream.io/site.ledger": "iad"
@@ -97,7 +97,7 @@
             "memory": "8Gi"
           }
         },
-        "lbIP": "10.20.30.12",
+        "loadBalancerIP": "10.20.30.12",
         "taintNodeSelector": {
           "bloodraven.shipstream.io/failover-group.ledger": "true",
           "bloodraven.shipstream.io/site.ledger": "pdx"

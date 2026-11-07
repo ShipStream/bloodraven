@@ -72,7 +72,7 @@ RULE_SITE_COUNT="spec.sites must contain between 2 and 16 entries"
 RULE_SITE_NAMES="spec.sites[].name must be unique"
 RULE_TWO_CANDIDATES="spec.sites must contain at least two sites with role PrimaryCandidate"
 RULE_PRIORITIES="splitBrainPolicy.sitePriorities entries must match the names of sites with role PrimaryCandidate"
-RULE_SITE_FIELDS="taintNodeSelector and lbIP are required unless role is ReadOnly"
+RULE_SITE_FIELDS="taintNodeSelector and loadBalancerIP are required unless role is ReadOnly"
 RULE_PEER_INTERVAL="sidecar.peerCheckInterval must be between 1s and 1m"
 RULE_LEASE_RANGE="sidecar.leaseTimeout must be between 3s and 10m"
 RULE_LEASE_RATIO="sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval"
@@ -108,7 +108,7 @@ WARN_RECREATE="updateStrategy.type Recreate patches every site Deployment in one
 #                       names a site whose effective role is
 #                       PrimaryCandidate. An absent list is fine.
 #   RULE_SITE_FIELDS    every site whose effective role is NOT "ReadOnly" has
-#                       both .lbIP and .taintNodeSelector. A ReadOnly site
+#                       both .loadBalancerIP and .taintNodeSelector. A ReadOnly site
 #                       needs neither — it is never promoted and never tainted.
 #                       This is the one the fixtures try hardest to break.
 #   RULE_PEER_INTERVAL  1 <= secs(.spec.sidecar.peerCheckInterval) <= 60,

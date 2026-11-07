@@ -40,7 +40,7 @@ func fgInPlaceDC() *v1alpha1.MysqlFailoverGroup {
 func fgThreeSiteRestore() *v1alpha1.MysqlFailoverGroup {
 	fg := fgInPlaceRestore("")
 	third := fg.Spec.Sites[1]
-	third.Name, third.LBIP = "sea", "10.0.0.3"
+	third.Name, third.LoadBalancerIP = "sea", "10.0.0.3"
 	fg.Spec.Sites = append(fg.Spec.Sites, third)
 	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "sea", State: v1alpha1.SiteStateReadOnly})
 	return fg

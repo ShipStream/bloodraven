@@ -296,11 +296,11 @@ yaml: |-
       - name: iad
         serverID: 101
         zone: us-east-1a
-        lbIP: 10.0.1.1
+        loadBalancerIP: 10.0.1.1
       - name: pdx
         serverID: 102
         zone: us-west-2a
-        lbIP: 10.0.2.1
+        loadBalancerIP: 10.0.2.1
       - name: reader
         serverID: 103
         role: ReadOnly

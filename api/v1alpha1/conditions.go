@@ -259,7 +259,11 @@ const (
 
 // MysqlBackup condition reasons.
 const (
-	ReasonBackupJobConflict         = "BackupJobConflict"
+	ReasonBackupJobConflict = "BackupJobConflict"
+	// ReasonBackupStorageMismatch fails a MysqlBackup whose profile's
+	// owned claim has another StorageClass or a smaller request than
+	// pvc.provisioned.
+	ReasonBackupStorageMismatch     = "BackupStorageMismatch"
 	ReasonCleanupFailed             = "CleanupFailed"
 	ReasonCleanupJobConflict        = "CleanupJobConflict"
 	ReasonCleanupJobInvalid         = "CleanupJobInvalid"

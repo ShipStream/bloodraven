@@ -236,14 +236,14 @@ func newOpsFixture(t *testing.T, thirdRole state.SiteRole) *opsFixture {
 			repl: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}},
 	}
 	sites := []SiteTopologyConfig{
-		{Name: "dc1", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc1", LBIP: "1.1.1.1"},
-		{Name: "dc2", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc2", LBIP: "2.2.2.2"},
+		{Name: "dc1", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc1", LoadBalancerIP: "1.1.1.1"},
+		{Name: "dc2", Role: state.SiteRolePrimaryCandidate, Host: "mysql-dc2", LoadBalancerIP: "2.2.2.2"},
 	}
 	checkers := []mysql.Checker{f.src, f.tgt}
 	if thirdRole != "" {
 		f.third = &opsMySQL{name: "dc3", uuid: opsUUIDC, gtid: opsF, ro: true, sro: true,
 			repl: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
-		sites = append(sites, SiteTopologyConfig{Name: "dc3", Role: thirdRole, Host: "mysql-dc3", LBIP: "3.3.3.3"})
+		sites = append(sites, SiteTopologyConfig{Name: "dc3", Role: thirdRole, Host: "mysql-dc3", LoadBalancerIP: "3.3.3.3"})
 		checkers = append(checkers, f.third)
 	}
 	cfg := TopologyConfig{Name: "lion", Namespace: "ns", Sites: sites, PollInterval: int64(50 * time.Millisecond),

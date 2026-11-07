@@ -1310,6 +1310,10 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, pitrOn bool, sites ...v1alph
 }
 
 func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+	size, err := site.Storage.Size.Quantity()
+	if err != nil {
+		return fmt.Errorf("site %s: storage.size: %w", site.Name, err)
+	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name) + "-data",
@@ -1317,7 +1321,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1a
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
 		if err := controllerutil.SetControllerReference(fg, pvc, r.Scheme); err != nil {
 			return err
 		}
@@ -1330,7 +1334,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1a
 				StorageClassName: &site.Storage.StorageClassName,
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: site.Storage.Size,
+						corev1.ResourceStorage: size,
 					},
 				},
 			}
@@ -1948,7 +1952,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 			},
 		})
 		if serviceType == corev1.ServiceTypeLoadBalancer {
-			svc.Spec.LoadBalancerIP = site.LBIP
+			svc.Spec.LoadBalancerIP = site.LoadBalancerIP
 		}
 		svc.Spec.PublishNotReadyAddresses = false
 		return nil
@@ -2547,12 +2551,12 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) (TopologyConfig, 
 			return TopologyConfig{}, fmt.Errorf("site %q: %w", s.Name, err)
 		}
 		sites[i] = SiteTopologyConfig{
-			Name:          s.Name,
-			Zone:          s.Zone,
-			LBIP:          s.LBIP,
-			Role:          role,
-			TaintSelector: taintNodeSelectorString(s.TaintNodeSelector),
-			Host:          internalSiteServiceHost(fg.Name, s.Name, fg.Namespace),
+			Name:           s.Name,
+			Zone:           s.Zone,
+			LoadBalancerIP: s.LoadBalancerIP,
+			Role:           role,
+			TaintSelector:  taintNodeSelectorString(s.TaintNodeSelector),
+			Host:           internalSiteServiceHost(fg.Name, s.Name, fg.Namespace),
 		}
 	}
 

@@ -22,13 +22,13 @@ import (
 // strip selected verbs, then restore them in cleanup.
 const operatorServiceAccount = "bloodraven"
 
-// siteLBIP returns spec.sites[<site>].lbIP, or "" if the site is unknown.
+// siteLBIP returns spec.sites[<site>].loadBalancerIP, or "" if the site is unknown.
 // The DNSEndpoint failover scenario (38) compares this against the live
 // DNSEndpoint targets.
 func siteLBIP(mfg *v1alpha1.MysqlFailoverGroup, site string) string {
 	for _, s := range mfg.Spec.Sites {
 		if s.Name == site {
-			return s.LBIP
+			return s.LoadBalancerIP
 		}
 	}
 	return ""

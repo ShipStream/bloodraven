@@ -354,7 +354,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Storage.S3.CredentialsSecretName = "s3-creds-2"
-				a.Storage.S3.Region = strings.Repeat("r", 2048)
+				a.Storage.S3.Region = strings.Repeat("r", 64)
 				a.Retention = v1alpha1.BackupRetention{KeepLast: 3, KeepFailed: new(int32(0))}
 			},
 		},
@@ -400,23 +400,26 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 	}
 }
 
-// TestPITRBindingCELLongRegionCreate: region is outside the rule and has no
-// bound; a long value must not make the object unadmittable.
+// TestPITRBindingCELLongRegionCreate: region is outside the rule and is
+// bounded at 64 characters (the initFromBackup rule compares it); a value
+// at the bound is admitted and can be edited, a longer one is refused.
 func TestPITRBindingCELLongRegionCreate(t *testing.T) {
 	ns := createNamespace(t, "pitr-cel-region")
 	fg := newPITRBindingFG(ns, "long-region")
-	pitrProfile(fg, "a").Storage.S3.Region = strings.Repeat("r", 4096)
+	pitrProfile(fg, "a").Storage.S3.Region = strings.Repeat("r", 64)
 	if err := k8sClient.Create(ctx, fg); err != nil {
-		t.Fatalf("create with a long region: %v", err)
+		t.Fatalf("create with a 64-character region: %v", err)
 	}
 	cur := &v1alpha1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), cur); err != nil {
 		t.Fatal(err)
 	}
-	pitrProfile(cur, "a").Storage.S3.Region = strings.Repeat("s", 4096)
+	pitrProfile(cur, "a").Storage.S3.Region = strings.Repeat("s", 64)
 	if err := k8sClient.Update(ctx, cur); err != nil {
-		t.Fatalf("update a long region: %v", err)
+		t.Fatalf("update a 64-character region: %v", err)
 	}
+	pitrProfile(cur, "a").Storage.S3.Region = strings.Repeat("s", 65)
+	e4WantInvalid(t, "a 65-character region", k8sClient.Update(ctx, cur), "region")
 }
 
 // TestPITRBindingCELAlgorithmEnum (G13): only AES-256-GCM exists, so the

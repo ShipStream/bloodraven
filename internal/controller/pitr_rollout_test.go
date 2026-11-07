@@ -10,7 +10,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -101,21 +100,36 @@ func TestComputeSpecHashPITRRender(t *testing.T) {
 // Δ29: neither the profile name nor the backup PVC's size or storage class
 // is a render input.
 func TestComputeSpecHashPITRIgnoresProfileNameAndPVCSizing(t *testing.T) {
-	fg := pitrRolloutFG(false)
-	fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC,
-		PVC: &v1alpha1.PVCStorage{ClaimName: "archive", Size: resource.MustParse("10Gi"), StorageClassName: "fast"}}
-	fg.Spec.Backup.Profiles[0].Encryption = nil
-	fg.Status.PITRArchiveBindings = nil
-	bindAllTestPITRArchives(fg)
-	base := ComputeSpecHash(fg, fg.Spec.Sites[0], "", testPITRRender(fg))
+	hash := func(fg *v1alpha1.MysqlFailoverGroup) string {
+		return ComputeSpecHash(fg, fg.Spec.Sites[0], "", testPITRRender(fg))
+	}
+	setup := func(pvc v1alpha1.PVCStorage) *v1alpha1.MysqlFailoverGroup {
+		fg := pitrRolloutFG(false)
+		fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: &pvc}
+		fg.Spec.Backup.Profiles[0].Encryption = nil
+		fg.Status.PITRArchiveBindings = nil
+		bindAllTestPITRArchives(fg)
+		return fg
+	}
 
-	changed := fg.DeepCopy()
-	changed.Spec.Backup.Profiles[0].Storage.PVC.Size = resource.MustParse("20Gi")
-	changed.Spec.Backup.Profiles[0].Storage.PVC.StorageClassName = "slow"
-	changed.Spec.Backup.Profiles[0].Name = "renamed"
-	changed.Spec.Backup.PITR.ProfileName = "renamed"
-	if got := ComputeSpecHash(changed, changed.Spec.Sites[0], "", testPITRRender(changed)); got != base {
-		t.Fatalf("profile name or PVC sizing changed the hash: %s → %s", testPITRRender(fg).Canonical(), testPITRRender(changed).Canonical())
+	// An existing claim: the profile name is no render input.
+	fg := setup(v1alpha1.PVCStorage{ClaimName: "archive"})
+	base := hash(fg)
+	renamed := fg.DeepCopy()
+	renamed.Spec.Backup.Profiles[0].Name = "renamed"
+	renamed.Spec.Backup.PITR.ProfileName = "renamed"
+	if got := hash(renamed); got != base {
+		t.Fatalf("profile name changed the hash: %s → %s", testPITRRender(fg).Canonical(), testPITRRender(renamed).Canonical())
+	}
+
+	// A provisioned claim: its size and class are no render input.
+	fg = setup(v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{Size: "10Gi", StorageClassName: new("fast")}})
+	base = hash(fg)
+	resized := fg.DeepCopy()
+	resized.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "20Gi"
+	resized.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.StorageClassName = new("slow")
+	if got := hash(resized); got != base {
+		t.Fatalf("PVC sizing changed the hash: %s → %s", testPITRRender(fg).Canonical(), testPITRRender(resized).Canonical())
 	}
 }
 

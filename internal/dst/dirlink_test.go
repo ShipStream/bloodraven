@@ -10,8 +10,8 @@ import (
 // alpha writable, beta a caught-up replica of alpha.
 func twoSiteCluster() *Cluster {
 	return NewCluster([]SiteSpec{
-		{Name: "alpha", Host: "alpha.mysql.sim", LBIP: "10.0.0.1", UUID: "00000000-0000-0000-0000-000000000001"},
-		{Name: "beta", Host: "beta.mysql.sim", LBIP: "10.0.0.2", UUID: "00000000-0000-0000-0000-000000000002"},
+		{Name: "alpha", Host: "alpha.mysql.sim", LoadBalancerIP: "10.0.0.1", UUID: "00000000-0000-0000-0000-000000000001"},
+		{Name: "beta", Host: "beta.mysql.sim", LoadBalancerIP: "10.0.0.2", UUID: "00000000-0000-0000-0000-000000000002"},
 	}, 100)
 }
 

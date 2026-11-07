@@ -178,7 +178,7 @@ spec:
       serverID: 101
       role: PrimaryCandidate
       zone: us-east-1a
-      lbIP: "10.20.30.11"                 # required unless role is ReadOnly
+      loadBalancerIP: "10.20.30.11"                 # required unless role is ReadOnly
       taintNodeSelector:                  # required unless role is ReadOnly
         bloodraven.shipstream.io/failover-group.ledger: "true"
         bloodraven.shipstream.io/site.ledger: iad
@@ -191,10 +191,10 @@ spec:
     - name: pdx
       serverID: 102
       role: PrimaryCandidate
-      # … same shape, its own zone, lbIP, node labels and storage class …
+      # … same shape, its own zone, loadBalancerIP, node labels and storage class …
     - name: reader
       serverID: 103
-      role: ReadOnly                      # no lbIP and no taintNodeSelector: never promoted, never tainted
+      role: ReadOnly                      # no loadBalancerIP and no taintNodeSelector: never promoted, never tainted
       storage:
         storageClassName: standard-west
         size: 500Gi
@@ -217,7 +217,7 @@ for memory pressure is an unplanned failover you did not schedule.
 labels. Get the label wrong and nothing errors — the taint is simply applied to nothing, and the
 eviction half of your failover strategy silently does not exist.
 
-**`lbIP` and `taintNodeSelector` are required unless the role is `ReadOnly`.** That is a CEL rule, so
+**`loadBalancerIP` and `taintNodeSelector` are required unless the role is `ReadOnly`.** That is a CEL rule, so
 you find out at `kubectl apply`, which is the good case.
 
 ## What admission catches, and what it does not
@@ -233,7 +233,7 @@ Learn this split. It decides which of your mistakes cost you seconds and which c
   it is the MySQL `server_id`, so it does not change when sites are reordered
 - at least two sites with role `PrimaryCandidate`
 - `splitBrainPolicy.sitePriorities` entries must name `PrimaryCandidate` sites
-- `taintNodeSelector` and `lbIP` are required unless the role is `ReadOnly`
+- `taintNodeSelector` and `loadBalancerIP` are required unless the role is `ReadOnly`
 - `sidecar.peerCheckInterval` between 1s and 1m, `sidecar.leaseTimeout` between 3s and 10m, and
   `leaseTimeout` ≥ 3 × `peerCheckInterval`
 - every timer is bounded, and a zero is refused rather than replaced by the default:
