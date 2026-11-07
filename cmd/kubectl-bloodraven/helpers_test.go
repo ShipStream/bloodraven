@@ -169,7 +169,7 @@ func TestPrintGroupList(t *testing.T) {
 	items := []v1alpha1.MysqlFailoverGroup{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-			Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+			Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 			// Leave ActiveSite empty to assert the emptyDash fallback.
 		},
 	}
@@ -223,8 +223,8 @@ func TestPrintGroupStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default", CreationTimestamp: now},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", Zone: "us-east-1a"},
-				{Name: "pdx", Zone: "us-west-2a"},
+				{Name: "iad", ServerID: 101, Zone: "us-east-1a"},
+				{Name: "pdx", ServerID: 102, Zone: "us-west-2a"},
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "orders.example.com", TTL: 60},
 		},
@@ -267,7 +267,7 @@ func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 	msg := "Ordered update stalled: site pdx was updated but its pod mysql-orders-pdx-1 is not Ready (sidecar not ready: crash looping, last exit code 1 (Error))"
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{
 			Type: "Updating", Status: metav1.ConditionFalse, Reason: "OrderedUpdateStalled", Message: msg,
 		}}},
@@ -296,7 +296,7 @@ func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 func TestPrintGroupStatus_EmptyActiveRendersDash(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "fresh", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}}},
+		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}}},
 	}
 	var buf bytes.Buffer
 	if err := printGroupStatus(&buf, fg, "table"); err != nil {

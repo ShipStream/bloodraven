@@ -273,7 +273,7 @@ func TestPITRKeyMaterialLostMessages(t *testing.T) {
 // the reason names the way out.
 func TestRenderedWriterArchiveIDRemovedSite(t *testing.T) {
 	fg := renderFG()
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "dc1"}, {Name: "dc2"}}
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}
 	bindAllTestPITRArchives(fg)
 	cur := testPITRRender(fg)
 	old := cur
@@ -339,7 +339,7 @@ func TestSpecDriftRepairsRenderAnnotation(t *testing.T) {
 // is not rewritten from the candidate; a site being created gets one.
 func TestReconcileSiteConfigMapsDeferKeepsExisting(t *testing.T) {
 	fg := renderFG()
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "dc1"}, {Name: "dc2"}}
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}
 	existing := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: siteConfigMapName(fg.Name, "dc1"), Namespace: fg.Namespace},
 		Data: map[string]string{"bloodraven.cnf": "pre-upgrade"}}
 	r, c := newReconciler(fg, existing)

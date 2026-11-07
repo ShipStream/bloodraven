@@ -19,7 +19,7 @@ import (
 func requestFixture() *v1alpha1.MysqlFailoverGroup {
 	fg := waitFixture("", v1alpha1.PlannedFailoverPhaseSucceeded)
 	fg.Status.PlannedFailover.RunID = "run-0"
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	return fg
 }
 

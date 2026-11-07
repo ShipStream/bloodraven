@@ -387,6 +387,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               durationSeconds:
                 description: |-
                   DurationSeconds is the wall-clock duration from StartTime to
@@ -644,6 +647,8 @@ spec:
                 format: date-time
                 type: string
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

@@ -72,7 +72,7 @@ func newBindingEnv(t *testing.T, profiles []v1alpha1.BackupProfile, secrets map[
 	_ = v1alpha1.AddToScheme(scheme)
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: pbcGroupName, Namespace: pbcNS, UID: types.UID(writerGroup)},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "a"}, {Name: "b"}},
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "a", ServerID: 101}, {Name: "b", ServerID: 102}},
 			Backup: &v1alpha1.BackupSpec{Profiles: profiles, PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: profiles[0].Name}}},
 	}
 	objs := []client.Object{fg}

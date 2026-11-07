@@ -50,7 +50,7 @@ func pbtGroup(profiles ...v1alpha1.BackupProfile) *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: pbtName, Namespace: pbtNS, UID: pbtUID, Generation: 3},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}},
+			Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
 			Backup: &v1alpha1.BackupSpec{Profiles: profiles,
 				PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: profiles[0].Name}},
 		},

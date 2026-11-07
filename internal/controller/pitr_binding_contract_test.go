@@ -49,7 +49,7 @@ func pbcGroup() *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "db", UID: pbcUID},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}, {Name: "sfo"}},
+			Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}, {Name: "sfo", ServerID: 103}},
 		},
 	}
 }

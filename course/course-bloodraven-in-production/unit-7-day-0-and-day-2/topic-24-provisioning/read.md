@@ -176,6 +176,7 @@ spec:
     readOnlyMaxLagSeconds: 30             # reader endpoint membership only
   sites:
     - name: iad
+      serverID: 101
       role: primary-candidate
       zone: us-east-1a
       lbIP: "10.20.30.11"                 # required unless role is read-only
@@ -189,9 +190,11 @@ spec:
         requests: { cpu: "2", memory: 8Gi }
         limits:   { cpu: "4", memory: 8Gi }
     - name: pdx
+      serverID: 102
       role: primary-candidate
       # … same shape, its own zone, lbIP, node labels and storage class …
     - name: reader
+      serverID: 103
       role: read-only                     # no lbIP and no taintNodeSelector: never promoted, never tainted
       storage:
         storageClassName: standard-west
@@ -226,7 +229,9 @@ Learn this split. It decides which of your mistakes cost you seconds and which c
 
 - `spec.credentials` is required; a manifest that still carries `spec.secretName` gets
   `unknown field "spec.secretName"` from `kubectl apply` (strict field validation)
-- `spec.sites[].name` must be unique
+- `spec.sites[].name` must be unique (`spec.sites` is a list keyed by name)
+- every site has a `serverID` between 1 and 4294967295, unique in the group and immutable once set:
+  it is the MySQL `server_id`, so it does not change when sites are reordered
 - at least two sites with role `primary-candidate`
 - `splitBrainPolicy.sitePriorities` entries must name `primary-candidate` sites
 - `taintNodeSelector` and `lbIP` are required unless the role is `read-only`

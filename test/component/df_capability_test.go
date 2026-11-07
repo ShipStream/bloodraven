@@ -57,7 +57,7 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "ns"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}},
+			Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
 			Dragonfly: &v1alpha1.DragonflySpec{
 				Enabled: true,
 				Image:   "example.invalid/dragonfly:old",

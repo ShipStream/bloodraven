@@ -61,7 +61,7 @@ func TestDeploymentUnstableReason_SourceConvergence(t *testing.T) {
 // stable.
 func stableDeploymentGroup() *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Conditions: []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonHealthy}},

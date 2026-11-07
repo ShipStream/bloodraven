@@ -44,7 +44,8 @@ type EncryptionAtRestSpec struct {
 	// The operator rejects flipping this flag on a group whose sites
 	// already hold unencrypted data.
 	// +kubebuilder:default=false
-	Enabled bool `json:"enabled"`
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 
 	// Coverage selects which MySQL encryption settings the operator
 	// enforces in the generated my.cnf. Every field defaults to true;
@@ -244,6 +245,7 @@ type EncryptionAtRestStatus struct {
 // SiteEncryptionStatus is the per-site keyring lifecycle state.
 type SiteEncryptionStatus struct {
 	// Name is the site identifier, mirrored from spec.sites[].name.
+	// +required
 	Name string `json:"name"`
 
 	// Phase is the keyring lifecycle phase for this site.

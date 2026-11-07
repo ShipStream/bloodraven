@@ -244,6 +244,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               encrypted:
                 description: |-
                   Encrypted records whether the artifact at Location was encrypted
@@ -347,6 +350,8 @@ spec:
                 - PVC
                 type: string
             type: object
+        required:
+        - spec
         type: object
         x-kubernetes-validations:
         - message: 'metadata.name must not end in .bloodraven-backup.json: that is

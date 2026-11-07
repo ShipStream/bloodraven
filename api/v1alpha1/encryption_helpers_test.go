@@ -8,7 +8,7 @@ import (
 func encFG(spec *EncryptionAtRestSpec) *MysqlFailoverGroup {
 	return &MysqlFailoverGroup{
 		Spec: MysqlFailoverGroupSpec{
-			Sites: []SiteSpec{{Name: "iad"}, {Name: "pdx"}},
+			Sites: []SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
 
 			EncryptionAtRest: spec,
 		},

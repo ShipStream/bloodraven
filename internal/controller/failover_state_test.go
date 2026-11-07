@@ -218,7 +218,7 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 	statusStamp := metav1.NewTime(now.Add(-10 * time.Minute))
 	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "alpha"}, {Name: "beta"}}},
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "alpha", ServerID: 101}, {Name: "beta", ServerID: 102}}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			LastFailover:       &statusStamp,
 			LastFailoverTarget: "alpha",

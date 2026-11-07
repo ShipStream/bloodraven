@@ -599,22 +599,21 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 // backupStampTemplate is the stamp identity a backup Job pins: everything
 // but serverClock and createdAt, which the Job adds. ServerID is the
-// source site's server-id (101 + its index in spec.sites, F26), which the
-// backup-stamp init container checks against the server it reaches.
+// source site's spec.sites[].serverID (the same resolver the mysqld render
+// uses), which the backup-stamp init container checks against the server
+// it reaches.
 //
 // archiveID is the archive the group's rendered writers archive to (K5):
 // a backup is a PITR baseline only for the archive the pods actually
 // write, which a held render can keep on the previous prefix.
 func backupStampTemplate(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile v1alpha1.BackupProfile, sourceSite, archiveID string) (backupmeta.Stamp, error) {
-	serverID := uint32(0)
-	for i, site := range fg.Spec.Sites {
-		if site.Name == sourceSite {
-			serverID = uint32(101 + i)
-			break
-		}
-	}
-	if serverID == 0 {
+	site := fg.Spec.SiteByName(sourceSite)
+	if site == nil {
 		return backupmeta.Stamp{}, fmt.Errorf("backup job: source site %q is not in spec.sites", sourceSite)
+	}
+	serverID, err := site.MySQLServerID()
+	if err != nil {
+		return backupmeta.Stamp{}, fmt.Errorf("backup job: %w", err)
 	}
 	if archiveID != "" && !pitrarchive.ValidArchiveID(archiveID) {
 		return backupmeta.Stamp{}, fmt.Errorf("backup job: PITR archive ID %q is not an archive ID", archiveID)

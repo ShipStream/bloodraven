@@ -134,8 +134,8 @@ func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
 		},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad"},
-				{Name: "pdx"},
+				{Name: "iad", ServerID: 101},
+				{Name: "pdx", ServerID: 102},
 			},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{

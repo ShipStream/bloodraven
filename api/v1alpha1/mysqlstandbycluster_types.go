@@ -28,7 +28,9 @@ type MysqlStandbyCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   MysqlStandbyClusterSpec   `json:"spec,omitempty"`
+	// +required
+	Spec MysqlStandbyClusterSpec `json:"spec"`
+	// +optional
 	Status MysqlStandbyClusterStatus `json:"status,omitempty"`
 }
 
@@ -95,6 +97,7 @@ type StandbyS3Source struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 63",message="bucket must be at most 63 bytes (UTF-8)"
+	// +required
 	Bucket string `json:"bucket"`
 
 	// Prefix is the source profile's object-name prefix inside the bucket.
@@ -105,6 +108,7 @@ type StandbyS3Source struct {
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="prefix must be at most 512 bytes (UTF-8)"
 	// +kubebuilder:validation:Pattern=`^/?([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*/?$`
+	// +required
 	Prefix string `json:"prefix"`
 
 	// Region is the AWS region. Optional for non-AWS S3 stores.
@@ -125,6 +129,7 @@ type StandbyS3Source struct {
 	// AWS_SECRET_ACCESS_KEY (required), AWS_SESSION_TOKEN and AWS_REGION
 	// (optional; AWS_REGION overrides region).
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	CredentialsSecret string `json:"credentialsSecret"`
 }
 
@@ -136,6 +141,7 @@ type StandbyFreshnessSpec struct {
 	// poll; the reconciler also enforces this floor as defense-in-depth).
 	// +kubebuilder:default="5m"
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s')",message="discoveryInterval must be at least 30s"
+	// +optional
 	DiscoveryInterval *metav1.Duration `json:"discoveryInterval,omitempty"`
 }
 
@@ -143,6 +149,7 @@ type StandbyFreshnessSpec struct {
 type MysqlStandbyClusterStatus struct {
 	// ObservedGeneration is the .metadata.generation this status was
 	// computed against.
+	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Discovered is the result of the most recent complete bucket scan. A
@@ -152,6 +159,9 @@ type MysqlStandbyClusterStatus struct {
 	Discovered *StandbyDiscovered `json:"discovered,omitempty"`
 
 	// Conditions are BucketReadable and SourceConfigKnown.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

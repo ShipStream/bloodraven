@@ -25,7 +25,9 @@ type MysqlBackup struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   MysqlBackupSpec   `json:"spec,omitempty"`
+	// +required
+	Spec MysqlBackupSpec `json:"spec"`
+	// +optional
 	Status MysqlBackupStatus `json:"status,omitempty"`
 }
 
@@ -42,11 +44,13 @@ type MysqlBackupList struct {
 type MysqlBackupSpec struct {
 	// FailoverGroupRef identifies the MysqlFailoverGroup in the same
 	// namespace whose profile should drive this backup.
+	// +required
 	FailoverGroupRef LocalGroupRef `json:"failoverGroupRef"`
 
 	// ProfileName is the name of a spec.backup.profiles[] entry on the
 	// referenced failover group.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	ProfileName string `json:"profileName"`
 
 	// SourceSiteOverride, if set, forces a specific site to be the dump
@@ -59,6 +63,7 @@ type MysqlBackupSpec struct {
 type LocalGroupRef struct {
 	// Name of the MysqlFailoverGroup.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Name string `json:"name"`
 }
 
@@ -80,29 +85,36 @@ const (
 // MysqlBackupStatus tracks the observed state of a MysqlBackup.
 type MysqlBackupStatus struct {
 	// Phase is the lifecycle phase of this backup run.
+	// +optional
 	Phase BackupPhase `json:"phase,omitempty"`
 
 	// StartTime is when the backup Job was created.
+	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
 	// CompletionTime is when the backup Job reached a terminal state.
+	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
 	// JobName is the name of the batchv1.Job running the dump.
+	// +optional
 	JobName string `json:"jobName,omitempty"`
 
 	// SourceSite is the site name whose MySQL instance was used as the
 	// dump source.
+	// +optional
 	SourceSite string `json:"sourceSite,omitempty"`
 
 	// Location is the resolved URL/path of the backup artifact, e.g.
 	// "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
+	// +optional
 	Location string `json:"location,omitempty"`
 
 	// StorageType is the storage backend kind (S3 or PVC) that was used
 	// for this backup. Populated at Job creation time so cleanup logic
 	// can dispatch on it without resorting to a brittle location
 	// heuristic after the referenced profile is gone.
+	// +optional
 	StorageType BackupStorageType `json:"storageType,omitempty"`
 
 	// ArtifactStorage records the storage destination the producing Job
@@ -118,22 +130,27 @@ type MysqlBackupStatus struct {
 
 	// Size is the reported backup size as a human-readable string, best
 	// effort. Empty when the Job log did not report a size.
+	// +optional
 	Size string `json:"size,omitempty"`
 
 	// SizeBytes is the structured backup size emitted by the dump
 	// sidecar. 0 when unknown (e.g. remote output where the dump
 	// utility did not return a total).
+	// +optional
 	SizeBytes int64 `json:"sizeBytes,omitempty"`
 
 	// GtidExecuted is the value of @@global.gtid_executed captured at
 	// dump time. Empty on non-GTID instances.
+	// +optional
 	GtidExecuted string `json:"gtidExecuted,omitempty"`
 
 	// BinlogFile is the binary log file name at dump time. Populated
 	// alongside BinlogPos for pre-GTID point-in-time tooling.
+	// +optional
 	BinlogFile string `json:"binlogFile,omitempty"`
 
 	// BinlogPos is the binary log position at dump time.
+	// +optional
 	BinlogPos int64 `json:"binlogPos,omitempty"`
 
 	// MysqlImage is the resolved MySQL server image (spec.image, or the
@@ -151,11 +168,13 @@ type MysqlBackupStatus struct {
 	// observed when this backup's Job was created. The reconciler uses
 	// this to emit an InFlightFailover warning when the group's active
 	// site drifts while the backup is running.
+	// +optional
 	ActiveSiteAtStart string `json:"activeSiteAtStart,omitempty"`
 
 	// Attempt is the retry attempt number for scheduled CRs: 1 for the
 	// original attempt, 2 for the first retry, and so on. 0 is treated
 	// as 1 for older CRs.
+	// +optional
 	Attempt int32 `json:"attempt,omitempty"`
 
 	// Encrypted records whether the artifact at Location was encrypted
@@ -164,6 +183,7 @@ type MysqlBackupStatus struct {
 	// taken. The restore side uses this flag to decide whether to run
 	// the decrypt init container; it is also useful as a compliance-
 	// audit trail for "prove every production backup was encrypted".
+	// +optional
 	Encrypted bool `json:"encrypted,omitempty"`
 
 	// EncryptionAlgorithm is the algorithm identifier stamped onto the
@@ -171,6 +191,7 @@ type MysqlBackupStatus struct {
 	// artifacts. Forward-compat field — a future release that adds a
 	// second algorithm can dispatch on this rather than re-reading the
 	// header from storage.
+	// +optional
 	EncryptionAlgorithm string `json:"encryptionAlgorithm,omitempty"`
 
 	// FailoverGroupUID is the metadata.uid of the source failover group,
@@ -187,14 +208,19 @@ type MysqlBackupStatus struct {
 	PITRArchiveID string `json:"pitrArchiveID,omitempty"`
 
 	// Message is a human-readable status message.
+	// +optional
 	Message string `json:"message,omitempty"`
 
 	// ObservedGeneration is the .metadata.generation this status was
 	// computed against.
+	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions represent the latest available observations of this
 	// backup's state.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
@@ -237,9 +263,11 @@ type BackupArtifactStorage struct {
 type BackupArtifactPassphrase struct {
 	// Name is the Secret name.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Name string `json:"name"`
 	// Key is the data key within the Secret.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Key string `json:"key"`
 }
 

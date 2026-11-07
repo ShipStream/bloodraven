@@ -13,8 +13,8 @@ func recloneFG(sites []string, divergentPerSite map[string]string) *v1alpha1.Mys
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
 	}
-	for _, name := range sites {
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name})
+	for i, name := range sites {
+		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i)})
 		st := v1alpha1.SiteStatus{Name: name}
 		if g, ok := divergentPerSite[name]; ok {
 			st.DivergentGtid = g

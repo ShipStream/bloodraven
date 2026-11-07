@@ -25,7 +25,7 @@ import (
 
 func backupTestGroup(status *v1alpha1.MysqlFailoverGroupStatus) *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
-		Spec:   v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+		Spec:   v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 		Status: *status,
 	}
 }
@@ -133,7 +133,7 @@ func TestSelectSourceSite_ExcludesReadOnlyRole(t *testing.T) {
 	lag := int64(0)
 	fg := &v1alpha1.MysqlFailoverGroup{
 		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
-			{Name: "iad"}, {Name: "pdx", Role: v1alpha1.SiteRoleDROnly}, {Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
+			{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRoleDROnly}, {Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
 		}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", Sites: []v1alpha1.SiteStatus{
 			{Name: "iad", State: "writable"},
@@ -160,9 +160,9 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 			Image:       "mysql:9.7",
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecret: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", Zone: "az-iad", LBIP: "10.0.0.1",
+				{Name: "iad", ServerID: 101, Zone: "az-iad", LBIP: "10.0.0.1",
 					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
-				{Name: "pdx", Zone: "az-pdx", LBIP: "10.0.0.2",
+				{Name: "pdx", ServerID: 102, Zone: "az-pdx", LBIP: "10.0.0.2",
 					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "lion.example.com", TTL: 60},

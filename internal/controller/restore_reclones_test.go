@@ -171,11 +171,11 @@ func TestRestoreReclone_ConsumerAcceptsRestoreRequest(t *testing.T) {
 func TestRestoreRecloneRecipients_PromotableFirst(t *testing.T) {
 	fg := fgWithBackup()
 	fg.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "a"},
-		{Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
-		{Name: "dr", Role: v1alpha1.SiteRoleDROnly},
-		{Name: "b"},
-		{Name: "c"},
+		{Name: "a", ServerID: 101},
+		{Name: "reader", ServerID: 102, Role: v1alpha1.SiteRoleReadOnly},
+		{Name: "dr", ServerID: 103, Role: v1alpha1.SiteRoleDROnly},
+		{Name: "b", ServerID: 104},
+		{Name: "c", ServerID: 105},
 	}
 	fg.Spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: []string{"c", "a"}}
 	got := restoreRecloneRecipients(fg, "a")

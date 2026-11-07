@@ -106,10 +106,13 @@ spec:
   image: mysql:9.7            # the one MySQL baseline Bloodraven supports — pin it, never mysql:9
   sites:                      # MinItems 2, MaxItems 16
     - name: iad
+      serverID: 101           # MySQL server_id: unique in the group, never changes
       role: primary-candidate
     - name: pdx
+      serverID: 102
       role: primary-candidate
     - name: reader
+      serverID: 103
       role: read-only
   dns:
     hostname: playground-db.example.local

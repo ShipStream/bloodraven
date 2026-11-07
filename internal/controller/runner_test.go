@@ -448,7 +448,7 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
 		t.Run(string(role), func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", Role: v1alpha1.SiteRole(role)})
+			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", ServerID: 103, Role: v1alpha1.SiteRole(role)})
 			scheme := testScheme()
 			c := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).

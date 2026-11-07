@@ -26,6 +26,7 @@ spec:
     sitePriorities: [iad, pdx]
   sites:
     - name: iad
+      serverID: 101
       role: primary-candidate
       zone: zone-iad
       taintNodeSelector:
@@ -39,6 +40,7 @@ spec:
         requests: { cpu: 100m, memory: 256Mi }
         limits:   { cpu: 500m, memory: 512Mi }
     - name: pdx
+      serverID: 102
       role: primary-candidate
       zone: zone-pdx
       taintNodeSelector:
@@ -52,6 +54,7 @@ spec:
         requests: { cpu: 100m, memory: 256Mi }
         limits:   { cpu: 500m, memory: 512Mi }
     - name: fra
+      serverID: 103
       role: dr-only
       zone: zone-fra
       taintNodeSelector:

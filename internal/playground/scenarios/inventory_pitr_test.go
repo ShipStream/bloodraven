@@ -133,9 +133,9 @@ func TestPITRSourceSpecForRestore(t *testing.T) {
 	src.Status.ActiveSite = "pdx"
 	src.Spec.DNS = v1alpha1.DNSSpec{Hostname: "playground-db.example.local", TTL: 10}
 	src.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-iad", LBIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
-		{Name: "pdx", Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LBIP: "10.0.0.2"},
-		{Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "zone-reader"},
+		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-iad", LBIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
+		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LBIP: "10.0.0.2"},
+		{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "zone-reader"},
 	}
 	src.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true}
 	src.Spec.Backup = &v1alpha1.BackupSpec{

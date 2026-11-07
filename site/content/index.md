@@ -292,12 +292,15 @@ yaml: |-
       readOnlyMaxLagSeconds: 30
     sites:
       - name: iad
+        serverID: 101
         zone: us-east-1a
         lbIP: 10.0.1.1
       - name: pdx
+        serverID: 102
         zone: us-west-2a
         lbIP: 10.0.2.1
       - name: reader
+        serverID: 103
         role: read-only
         zone: us-east-1b
 ---

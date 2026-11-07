@@ -32,6 +32,7 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name:              "dc1",
+					ServerID:          101,
 					Zone:              "lion-dc1",
 					LBIP:              "203.0.113.1",
 					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
@@ -42,6 +43,7 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 				},
 				{
 					Name:              "dc2",
+					ServerID:          102,
 					Zone:              "lion-dc2",
 					LBIP:              "203.0.113.2",
 					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
@@ -121,7 +123,7 @@ func TestEnvtest_CRCreationAndSchemaAcceptance(t *testing.T) {
 func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
 	readerSite := func() v1alpha1.SiteSpec {
 		return v1alpha1.SiteSpec{
-			Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+			Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
 			Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 		}
 	}
@@ -188,7 +190,7 @@ func TestEnvtest_ReadOnlyRoleTransitions(t *testing.T) {
 	ensureNamespace(t, ns)
 	fg := newTestFG(ns)
 	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{
-		Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
 		Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 	})
 	if err := k8sClient.Create(ctx, fg); err != nil {

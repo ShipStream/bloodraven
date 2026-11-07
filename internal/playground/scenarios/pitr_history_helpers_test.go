@@ -940,9 +940,9 @@ func TestGTIDOverlap(t *testing.T) {
 func TestPITRReaderSites(t *testing.T) {
 	mfg := &v1alpha1.MysqlFailoverGroup{}
 	mfg.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", Role: v1alpha1.SiteRolePrimaryCandidate},
-		{Name: "pdx", Role: v1alpha1.SiteRolePrimaryCandidate},
-		{Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
+		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
+		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
+		{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
 	}
 	if got := pitrReaderSites(mfg); len(got) != 1 || got[0] != "reader" {
 		t.Fatalf("pitrReaderSites=%v, want [reader]", got)

@@ -179,9 +179,9 @@ func s40ObserverTestEnv(t *testing.T, clientset *k8sfake.Clientset) (*runner.Env
 		ObjectMeta: metav1.ObjectMeta{Name: pgkube.FailoverGroupName, Namespace: pgkube.PlaygroundNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "pdx", Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
+				{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
+				{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
+				{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
 			},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{

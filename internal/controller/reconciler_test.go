@@ -48,6 +48,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name:              "dc1",
+					ServerID:          101,
 					Zone:              "lion-dc1",
 					LBIP:              "203.0.113.1",
 					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
@@ -64,6 +65,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 				},
 				{
 					Name:              "dc2",
+					ServerID:          102,
 					Zone:              "lion-dc2",
 					LBIP:              "203.0.113.2",
 					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
@@ -933,7 +935,7 @@ func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 	site := fg.Spec.Sites[0]
 	twoSiteHash := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 
-	reader := v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly}
+	reader := v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly}
 	fg.Spec.Sites = append(fg.Spec.Sites, reader)
 	threeSiteHash := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 	if threeSiteHash == twoSiteHash {
@@ -975,7 +977,7 @@ func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	fg := newTestFG()
 	reader := v1alpha1.SiteSpec{
-		Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
 		Storage: v1alpha1.StorageSpec{StorageClassName: "local", Size: resource.MustParse("10Gi")},
 		ServiceTemplate: &v1alpha1.SiteServiceTemplate{
 			Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
@@ -1015,7 +1017,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 func TestReaderLoadBalancerIPLifecycle(t *testing.T) {
 	fg := newTestFG()
 	reader := v1alpha1.SiteSpec{
-		Name: "reader", Role: v1alpha1.SiteRoleReadOnly, LBIP: "203.0.113.30",
+		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, LBIP: "203.0.113.30",
 		ServiceTemplate: &v1alpha1.SiteServiceTemplate{Type: corev1.ServiceTypeLoadBalancer},
 	}
 	r, c := newReconciler(fg)
@@ -1196,7 +1198,7 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 	lag0, lagHigh := int64(0), int64(301)
 	base := func() *v1alpha1.MysqlFailoverGroup {
 		fg := newTestFG()
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly})
+		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
 		return fg
 	}
 	healthyStatuses := func() []v1alpha1.SiteStatus {
@@ -1817,7 +1819,7 @@ func TestReconcile_StartupDefersExistingDeploymentsBeforeManagerRegistration(t *
 	}
 	fresh.Spec.Image = "mysql:startup-drift"
 	fresh.Spec.Sites = append(fresh.Spec.Sites, v1alpha1.SiteSpec{
-		Name: "reader", Role: v1alpha1.SiteRoleReadOnly,
+		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly,
 		Storage: v1alpha1.StorageSpec{StorageClassName: "local-reader", Size: resource.MustParse("10Gi")},
 	})
 	if err := c.Update(ctx, &fresh); err != nil {

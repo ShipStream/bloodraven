@@ -257,6 +257,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               discovered:
                 description: |-
                   Discovered is the result of the most recent complete bucket scan. A
@@ -405,6 +408,8 @@ spec:
                 format: int64
                 type: integer
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

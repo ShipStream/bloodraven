@@ -50,7 +50,9 @@ type MysqlDatabase struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   MysqlDatabaseSpec   `json:"spec,omitempty"`
+	// +required
+	Spec MysqlDatabaseSpec `json:"spec"`
+	// +optional
 	Status MysqlDatabaseStatus `json:"status,omitempty"`
 }
 
@@ -132,6 +134,7 @@ type DeploymentClient struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	Namespace string `json:"namespace"`
 
 	// ServiceAccount is a Kubernetes ServiceAccount name (a DNS subdomain).
@@ -139,6 +142,7 @@ type DeploymentClient struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
 	ServiceAccount string `json:"serviceAccount"`
 }
 
@@ -189,13 +193,17 @@ type MysqlDatabaseSpec struct {
 	// the old one, and aim any later deletionPolicy: Delete cleanup at the
 	// wrong MySQL. Changing groups is a migration, not a spec edit.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.groupRef is immutable; moving a database between groups is a migration, not a spec edit"
+	// +required
 	GroupRef LocalGroupRef `json:"groupRef"`
 
 	// DeploymentClients authorizes ServiceAccounts to use the deployment
-	// companion API for this database. Each namespace has one client.
+	// companion API for this database, keyed by (namespace,
+	// serviceAccount). A namespace may list several ServiceAccounts.
 	// +optional
 	// +listType=map
 	// +listMapKey=namespace
+	// +listMapKey=serviceAccount
+	// +kubebuilder:validation:MaxItems=16
 	DeploymentClients []DeploymentClient `json:"deploymentClients,omitempty"`
 
 	// DatabaseName is the MySQL schema name to create.
@@ -218,6 +226,7 @@ type MysqlDatabaseSpec struct {
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.databaseName is immutable; renaming would orphan the existing database"
 	// +kubebuilder:validation:XValidation:rule="!(self.lowerAscii() in ['mysql', 'sys', 'information_schema', 'performance_schema'])",message="spec.databaseName must not name a MySQL system schema"
+	// +required
 	DatabaseName string `json:"databaseName"`
 
 	// CharacterSet is the database default character set. Defaults to
@@ -239,6 +248,7 @@ type MysqlDatabaseSpec struct {
 	// Owner is the user that owns this database. It is the only principal
 	// a MysqlDatabase may bring into existence, and only because the
 	// caller supplied its password in a Secret first.
+	// +required
 	Owner MysqlDatabaseOwner `json:"owner"`
 
 	// Grants are additional, already-existing principals to grant on this
@@ -294,6 +304,7 @@ type MysqlDatabaseOwner struct {
 	// Bloodraven never generates, returns, or stores a password.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +required
 	SecretName string `json:"secretName"`
 
 	// Privileges granted to the owner ON <databaseName>.*. Defaults to
@@ -346,6 +357,7 @@ type MysqlDatabaseUser struct {
 	// USER, so rotating the password is a Secret write and nothing else.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +required
 	SecretName string `json:"secretName"`
 
 	// Privileges granted to this user ON <databaseName>.*. Required, no
@@ -356,6 +368,7 @@ type MysqlDatabaseUser struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=19
 	// +listType=atomic
+	// +required
 	Privileges []MysqlPrivilege `json:"privileges"`
 
 	// ResourceLimits caps this account's server-side resource usage.
@@ -413,12 +426,14 @@ type MysqlDatabaseGrant struct {
 	// contract, not a formatting preference.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_][A-Za-z0-9_.$-]{0,31}$`
 	// +kubebuilder:validation:MaxLength=32
+	// +required
 	Username string `json:"username"`
 
 	// Privileges granted to this user ON <databaseName>.*.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=19
 	// +listType=atomic
+	// +required
 	Privileges []MysqlPrivilege `json:"privileges"`
 }
 
@@ -429,6 +444,7 @@ type MysqlDatabaseUserState struct {
 	// SecretName is the spec.users[] entry this record belongs to. It
 	// outlives the spec entry: removal-driven cleanup runs off this
 	// record, then deletes it.
+	// +required
 	SecretName string `json:"secretName"`
 
 	// Username is the account name echoed from the Secret, recorded

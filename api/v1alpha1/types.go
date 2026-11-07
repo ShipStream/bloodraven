@@ -19,7 +19,9 @@ type MysqlFailoverGroup struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   MysqlFailoverGroupSpec   `json:"spec,omitempty"`
+	// +required
+	Spec MysqlFailoverGroupSpec `json:"spec"`
+	// +optional
 	Status MysqlFailoverGroupStatus `json:"status,omitempty"`
 }
 
@@ -33,7 +35,7 @@ type MysqlFailoverGroupList struct {
 }
 
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
-// +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)",message="spec.sites[].name must be unique"
+// +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size() == 1)",message="spec.sites[].serverID must be unique within the group"
 // +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'primary-candidate').size() >= 2",message="spec.sites must contain at least two sites with role 'primary-candidate'"
 // +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"
 // +kubebuilder:validation:XValidation:rule="!has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || (has(self.serviceTemplate.type) && self.serviceTemplate.type in ['NodePort', 'LoadBalancer'])",message="serviceTemplate.externalTrafficPolicy requires serviceTemplate.type NodePort or LoadBalancer"
@@ -45,11 +47,13 @@ type MysqlFailoverGroupList struct {
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.7
 	// +kubebuilder:default="mysql:9.7"
+	// +optional
 	Image string `json:"image,omitempty"`
 
 	// SidecarImage is the image used for the sidecar/init container.
 	// +kubebuilder:default="ghcr.io/shipstream/bloodraven-sidecar:1.3.2"
 	// +kubebuilder:validation:MinLength=1
+	// +optional
 	SidecarImage string `json:"sidecarImage,omitempty"`
 
 	// Sites defines the sites that form this failover group. The slice must
@@ -58,9 +62,14 @@ type MysqlFailoverGroupSpec struct {
 	// Failover is performed by picking the best primary-candidate replica
 	// when the active site is lost.
 	//
-	// MaxItems is set to 16 so the Kubernetes CEL cost estimator can bound
-	// the uniqueness-and-priority validation rules. Real deployments are
-	// expected to use well under that; raise the cap if needed.
+	// The list is a map keyed by name, so names are unique and server-side
+	// apply merges per site. MaxItems is set to 16 so the Kubernetes CEL
+	// cost estimator can bound the serverID-uniqueness and priority
+	// validation rules. Real deployments are expected to use well under
+	// that.
+	// +required
+	// +listType=map
+	// +listMapKey=name
 	// +kubebuilder:validation:MinItems=2
 	// +kubebuilder:validation:MaxItems=16
 	Sites []SiteSpec `json:"sites"`
@@ -71,9 +80,11 @@ type MysqlFailoverGroupSpec struct {
 	Credentials CredentialsSpec `json:"credentials"`
 
 	// TLS configures TLS for the MySQL instances.
+	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
 
 	// DNS configures the external DNS record managed via the external-dns DNSEndpoint CRD.
+	// +required
 	DNS DNSSpec `json:"dns"`
 
 	// PollInterval is the interval for polling MySQL instances. After a site
@@ -81,20 +92,24 @@ type MysqlFailoverGroupSpec struct {
 	// off exponentially to a 30s cap; other sites keep this interval.
 	// Default: 2s.
 	// +kubebuilder:default="2s"
+	// +optional
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 
 	// FailureThreshold is how many consecutive failures before marking unreachable. Default: 3
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=1
+	// +optional
 	FailureThreshold int32 `json:"failureThreshold,omitempty"`
 
 	// RecoveryThreshold is how many consecutive successes before marking recovered. Default: 2
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=1
+	// +optional
 	RecoveryThreshold int32 `json:"recoveryThreshold,omitempty"`
 
 	// FailoverCooldown is the minimum time between failovers. Default: 5m
 	// +kubebuilder:default="5m"
+	// +optional
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
 
 	// ConnectionDrainTimeout bounds the operator-side retry window for
@@ -107,6 +122,7 @@ type MysqlFailoverGroupSpec struct {
 	ConnectionDrainTimeout *metav1.Duration `json:"connectionDrainTimeout,omitempty"`
 
 	// Sidecar configures sidecar behavior.
+	// +optional
 	Sidecar SidecarSpec `json:"sidecar,omitempty"`
 
 	// CloneTimeout is the timeout in seconds for CLONE INSTANCE operations. It
@@ -115,44 +131,61 @@ type MysqlFailoverGroupSpec struct {
 	// (GLOBAL-only; set via SET GLOBAL before cloning). Default: 3600 (1 hour).
 	// +kubebuilder:default=3600
 	// +kubebuilder:validation:Minimum=60
+	// +optional
 	CloneTimeout int `json:"cloneTimeout,omitempty"`
 
 	// MysqlConf allows overriding default my.cnf settings.
+	// +optional
 	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
 
 	// Replication configures replication health monitoring.
+	// +optional
 	Replication *ReplicationSpec `json:"replication,omitempty"`
 
 	// UpdateStrategy controls how spec changes are rolled out. Default: OrderedUpdate
 	// +kubebuilder:default="OrderedUpdate"
 	// +kubebuilder:validation:Enum=OrderedUpdate;Recreate
+	// +optional
 	UpdateStrategy string `json:"updateStrategy,omitempty"`
 
 	// SidecarResources defines the compute resources for the sidecar container.
+	// +optional
 	SidecarResources corev1.ResourceRequirements `json:"sidecarResources,omitempty"`
 
 	// TerminationGracePeriodSeconds is the grace period for MySQL container shutdown. Default: 60
 	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=1
+	// +optional
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
 	// PodLabels are additional labels applied to every MySQL pod managed by this failover group.
 	// These are merged with the operator's required labels; operator labels take precedence on conflict.
+	// +optional
 	PodLabels map[string]string `json:"podLabels,omitempty"`
 
 	// PodAnnotations are additional annotations applied to every MySQL pod managed by this failover group.
 	// These are merged with the operator's required annotations; operator annotations take precedence on conflict.
+	// +optional
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 
 	// ServiceTemplate customizes the Services created by the operator (site, primary, and replicas).
+	// +optional
 	ServiceTemplate *ServiceTemplate `json:"serviceTemplate,omitempty"`
 
 	// ExtraContainers are additional containers injected into every MySQL pod.
-	// Useful for exporters, log shippers, or other sidecars.
+	// Useful for exporters, log shippers, or other sidecars. Keyed by name.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
 	ExtraContainers []corev1.Container `json:"extraContainers,omitempty"`
 
 	// ExtraInitContainers are additional init containers injected into every MySQL pod.
-	// These run after the operator's built-in init container.
+	// These run after the operator's built-in init container. Keyed by name.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
 	ExtraInitContainers []corev1.Container `json:"extraInitContainers,omitempty"`
 
 	// Backup configures scheduled and on-demand backups for this failover
@@ -272,6 +305,7 @@ type SplitBrainPolicySpec struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.filter(y, y == x).size() == 1)",message="splitBrainPolicy.sitePriorities entries must be unique"
 	SitePriorities []string `json:"sitePriorities,omitempty"`
 }
 
@@ -280,6 +314,7 @@ type ReplicationSpec struct {
 	// MaxLagSeconds is the maximum acceptable replication lag before marking degraded. Default: 300
 	// +kubebuilder:default=300
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	MaxLagSeconds int64 `json:"maxLagSeconds,omitempty"`
 
 	// ReadOnlyMaxLagSeconds is the maximum lag for a read-only site's
@@ -328,15 +363,27 @@ const (
 // SiteSpec defines the configuration for a single site in the failover group.
 // +kubebuilder:validation:XValidation:rule="self.role == 'read-only' || (has(self.taintNodeSelector) && has(self.lbIP))",message="taintNodeSelector and lbIP are required unless role is read-only"
 type SiteSpec struct {
-	// Name is the site identifier (e.g. "iad", "pdx", "lhr").
-	// Must be unique within spec.sites. MaxLength caps the CEL cost
-	// of the spec-level uniqueness and priority-membership rules. The
-	// pattern matches what the per-site Service names already require,
-	// and keeps the name safe to use in object-storage keys.
+	// Name is the site identifier (e.g. "iad", "pdx", "lhr"), the key of
+	// spec.sites. MaxLength caps the CEL cost of the spec-level
+	// priority-membership rule. The pattern matches what the per-site
+	// Service names already require, and keeps the name safe to use in
+	// object-storage keys.
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
 	Name string `json:"name"`
+
+	// ServerID is the MySQL server_id of this site's server. It must be
+	// unique within the group, and it cannot change: it identifies the
+	// server in the binary logs, the PITR archive and backup stamps, so it
+	// does not depend on the order of spec.sites. Use 101, 102, ... in
+	// declaration order unless another scheme is needed.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="serverID is immutable"
+	ServerID int64 `json:"serverID"`
 
 	// Role governs whether this site can be auto-promoted on failover.
 	// Default: primary-candidate.
@@ -346,6 +393,7 @@ type SiteSpec struct {
 
 	// Zone is the Kubernetes topology zone for node selection.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Zone string `json:"zone"`
 
 	// TaintNodeSelector identifies the Kubernetes nodes that receive this
@@ -362,12 +410,15 @@ type SiteSpec struct {
 	LBIP string `json:"lbIP,omitempty"`
 
 	// Storage configures the persistent volume for this site.
+	// +required
 	Storage StorageSpec `json:"storage"`
 
 	// Resources defines the compute resources for the MySQL container.
+	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// MysqlConf overrides group-level MySQL settings for this site.
+	// +optional
 	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
 
 	// ServiceTemplate overrides the group Service template for this site's
@@ -397,9 +448,11 @@ func (s SiteSpec) IsPromotable() bool {
 type StorageSpec struct {
 	// StorageClassName is the name of the StorageClass.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	StorageClassName string `json:"storageClassName"`
 
 	// Size is the requested storage size.
+	// +required
 	Size resource.Quantity `json:"size"`
 }
 
@@ -410,6 +463,7 @@ type TLSSpec struct {
 	// operator does not issue certificates; create the Secret yourself or
 	// with a tool such as cert-manager.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	SecretName string `json:"secretName"`
 }
 
@@ -420,11 +474,13 @@ type DNSSpec struct {
 	// Hostname is the fully-qualified DNS name to update on failover
 	// (e.g. "lion.az.example.com"). Apps should CNAME to this hostname.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Hostname string `json:"hostname"`
 
 	// TTL is the DNS record TTL in seconds. Default: 60
 	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=1
+	// +optional
 	TTL int64 `json:"ttl,omitempty"`
 }
 
@@ -442,15 +498,18 @@ type SidecarSpec struct {
 	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
 	// Must be at least 3s and at least 3x PeerCheckInterval.
 	// +kubebuilder:default="20s"
+	// +optional
 	LeaseTimeout *metav1.Duration `json:"leaseTimeout,omitempty"`
 
 	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
 	// Must be at least 1s.
 	// +kubebuilder:default="5s"
+	// +optional
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
 
 	// BloodravenAddress is the address of the Bloodraven operator auxiliary endpoint.
 	// When empty, the operator uses its configured default auxiliary Service address.
+	// +optional
 	BloodravenAddress string `json:"bloodravenAddress,omitempty"`
 }
 
@@ -458,6 +517,7 @@ type SidecarSpec struct {
 type ServiceTemplate struct {
 	// Type is the Kubernetes Service type. Default: ClusterIP
 	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort
+	// +optional
 	Type corev1.ServiceType `json:"type,omitempty"`
 
 	// ExternalTrafficPolicy controls external traffic routing for Services
@@ -467,6 +527,7 @@ type ServiceTemplate struct {
 	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicyType `json:"externalTrafficPolicy,omitempty"`
 
 	// Annotations are additional annotations applied to every Service managed by this failover group.
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
@@ -489,6 +550,7 @@ type SiteServiceTemplate struct {
 	NodePort int32 `json:"nodePort,omitempty"`
 
 	// Annotations are merged over group Service annotations for this site.
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
@@ -503,6 +565,7 @@ type CredentialsSpec struct {
 	// (default to operator username/password if omitted).
 	// Grants: ALL PRIVILEGES WITH GRANT OPTION.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	OperatorSecret string `json:"operatorSecret"`
 
 	// AppSecret references the Secret for application read-write connections.
@@ -540,6 +603,7 @@ type CredentialsSpec struct {
 // MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
 type MysqlFailoverGroupStatus struct {
 	// ActiveSite is the name of the site currently acting as primary (writable).
+	// +optional
 	ActiveSite string `json:"activeSite,omitempty"`
 
 	// TopologyGeneration increments whenever the authoritative active site changes
@@ -548,16 +612,24 @@ type MysqlFailoverGroupStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	TopologyGeneration int64 `json:"topologyGeneration,omitempty"`
 
-	// Sites is the observed state of each site, parallel to spec.sites.
+	// Sites is the observed state of each site, keyed by name.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Sites []SiteStatus `json:"sites,omitempty"`
 
 	// Conditions represent the latest available observations.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// LastFailover is the timestamp of the last failover event.
+	// +optional
 	LastFailover *metav1.Time `json:"lastFailover,omitempty"`
 
 	// LastFailoverTarget is the site that was last promoted during failover.
+	// +optional
 	LastFailoverTarget string `json:"lastFailoverTarget,omitempty"`
 
 	// PromotionGtidExecuted is the GTID executed set recorded on the
@@ -567,6 +639,7 @@ type MysqlFailoverGroupStatus struct {
 	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
 
 	// UpdatePhase indicates the current phase of an ordered update, empty if not updating.
+	// +optional
 	UpdatePhase string `json:"updatePhase,omitempty"`
 
 	// Restore tracks an in-flight or completed initFromBackup operation.
@@ -599,6 +672,8 @@ type MysqlFailoverGroupStatus struct {
 	// BackupSchedules is a per-schedule rollup of the most recent backup
 	// activity for each entry in spec.backup.schedules.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	BackupSchedules []BackupScheduleStatus `json:"backupSchedules,omitempty"`
 
 	// LastBackupTime is the completion time of the most recent successful
@@ -655,23 +730,31 @@ type MysqlFailoverGroupStatus struct {
 
 // SiteStatus describes the observed state of a single site.
 type SiteStatus struct {
-	// Name is the site identifier, mirrored from spec for convenience.
-	Name string `json:"name,omitempty"`
+	// Name is the site identifier, mirrored from spec: the key of
+	// status.sites.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 
 	// State is the current state: writable, read-only, unreachable, or unknown.
 	// +kubebuilder:validation:Enum=writable;read-only;unreachable;unknown
+	// +optional
 	State string `json:"state,omitempty"`
 
 	// LastSeen is the last time this site was successfully polled.
+	// +optional
 	LastSeen *metav1.Time `json:"lastSeen,omitempty"`
 
 	// GtidExecuted is the GTID executed set (populated when replication status is enriched).
+	// +optional
 	GtidExecuted string `json:"gtidExecuted,omitempty"`
 
 	// Replicating indicates whether replication is running (populated when replication status is enriched).
+	// +optional
 	Replicating bool `json:"replicating,omitempty"`
 
 	// SecondsBehindSource is the replication lag in seconds (populated when replication status is enriched).
+	// +optional
 	SecondsBehindSource *int64 `json:"secondsBehindSource,omitempty"`
 
 	// RecoveryState tracks old-primary recovery progress after failover.

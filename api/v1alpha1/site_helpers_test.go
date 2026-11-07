@@ -29,7 +29,7 @@ func TestSiteRoleHelpers(t *testing.T) {
 
 func TestPeerSiteNamesIncludesReaders(t *testing.T) {
 	s := MysqlFailoverGroupSpec{Sites: []SiteSpec{
-		{Name: "iad"}, {Name: "pdx"}, {Name: "reader", Role: SiteRoleReadOnly},
+		{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}, {Name: "reader", ServerID: 103, Role: SiteRoleReadOnly},
 	}}
 	got := s.PeerSiteNames("iad")
 	if len(got) != 2 || got[0] != "pdx" || got[1] != "reader" {

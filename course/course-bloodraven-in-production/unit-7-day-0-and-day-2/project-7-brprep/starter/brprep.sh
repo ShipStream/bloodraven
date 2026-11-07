@@ -63,9 +63,9 @@ secs() {
 
 # The nine admission rules, in the fixed order brprep reports them. Most are
 # CEL rules on the CRD; the site-count one is a MinItems/MaxItems constraint on
-# the schema, and the credentials one is a required field plus kubectl's strict
-# field validation. All are refusals at `kubectl apply`, which is all brprep
-# claims.
+# the schema, the site-names one is the name key of the spec.sites list map, and
+# the credentials one is a required field plus kubectl's strict field
+# validation. All are refusals at `kubectl apply`, which is all brprep claims.
 # The grader matches these tokens exactly, so do not reword them.
 RULE_CREDENTIALS="spec.credentials.operatorSecret is required and spec.secretName is not a field"
 RULE_SITE_COUNT="spec.sites must contain between 2 and 16 entries"

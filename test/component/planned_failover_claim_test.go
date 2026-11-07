@@ -340,8 +340,8 @@ func newPFHarness(t *testing.T, o pfOpts) *pfHarness {
 	}
 
 	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: h.nn.Namespace, Name: h.nn.Name}}
-	for _, s := range sites {
-		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: s.Name, Role: v1alpha1.SiteRole(s.Role)})
+	for i, s := range sites {
+		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: s.Name, ServerID: int64(101 + i), Role: v1alpha1.SiteRole(s.Role)})
 	}
 	obj.Spec.FailoverCooldown = &metav1.Duration{Duration: o.cooldown}
 	obj.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{

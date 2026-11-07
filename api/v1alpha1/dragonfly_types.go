@@ -59,6 +59,7 @@ type DragonflySpec struct {
 	// --requirepass, --masterauth, and --replicaof) are reserved for the
 	// operator and cannot be overridden via spec.dragonfly.args.
 	// +optional
+	// +listType=atomic
 	Args []string `json:"args,omitempty"`
 
 	// Auth references a Secret containing the Dragonfly password. When
@@ -143,6 +144,7 @@ type DragonflySnapshotSpec struct {
 type DragonflyAuthSpec struct {
 	// SecretName is the name of the Secret containing the password.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	SecretName string `json:"secretName"`
 
 	// PasswordKey is the key inside the Secret that holds the password.
@@ -267,9 +269,11 @@ type DragonflyStatus struct {
 	// +optional
 	LastPromotionTarget string `json:"lastPromotionTarget,omitempty"`
 
-	// Sites is the per-site Dragonfly observation, parallel in spirit
-	// to status.sites for MySQL.
+	// Sites is the per-site Dragonfly observation, keyed by name like
+	// status.sites for MySQL.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Sites []DragonflySiteStatus `json:"sites,omitempty"`
 
 	// Upgrade tracks an explicit Dragonfly snapshot-restore upgrade
@@ -362,8 +366,11 @@ type DragonflyUpgradeStatus struct {
 // DragonflySiteStatus describes the observed state of one site's Dragonfly
 // instance.
 type DragonflySiteStatus struct {
-	// Name is the site identifier, mirrored from spec for convenience.
-	Name string `json:"name,omitempty"`
+	// Name is the site identifier, mirrored from spec: the key of
+	// status.dragonfly.sites.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 
 	// Role is the site's observed Dragonfly role.
 	// +optional

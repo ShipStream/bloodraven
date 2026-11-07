@@ -95,7 +95,7 @@ func TestDivergentReplica_Issue202UpgradeStallsUntilReconciled(t *testing.T) {
 
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1"}, {Name: "dc2"}}},
+		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
 	}
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {

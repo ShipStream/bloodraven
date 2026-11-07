@@ -255,7 +255,7 @@ func pitrArchiveTestPoller(t *testing.T, r *TopologyManagerRunner, fg *v1alpha1.
 func pitrArchiveFG(persisted *metav1.Condition) *v1alpha1.MysqlFailoverGroup {
 	fg := pitrEnabledFG("default", "orders")
 	fg.Generation = 3
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	// A profile the PITR spec can render, so rollout suppression applies.
 	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{{Name: "nightly", Storage: v1alpha1.BackupStorage{
 		Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive"},

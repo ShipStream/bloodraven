@@ -282,7 +282,7 @@ spec:
                       avoid floating tags.
                     type: string
                   imagePullSecrets:
-                    description: ImagePullSecrets for the backup image.
+                    description: ImagePullSecrets for the backup image. Keyed by name.
                     items:
                       description: |-
                         LocalObjectReference contains enough information to let you locate the
@@ -299,7 +299,11 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    maxItems: 16
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   maxLagSecondsForSource:
                     default: 300
                     description: |-
@@ -621,14 +625,20 @@ spec:
                             excludeSchemas:
                               description: ExcludeSchemas skipped by the dump.
                               items:
+                                maxLength: 64
                                 type: string
+                              maxItems: 256
                               type: array
+                              x-kubernetes-list-type: set
                             includeSchemas:
                               description: IncludeSchemas, if non-empty, restricts
                                 the dump to these schemas.
                               items:
+                                maxLength: 64
                                 type: string
+                              maxItems: 256
                               type: array
+                              x-kubernetes-list-type: set
                             ocimds:
                               default: false
                               description: Ocimds enables MySQL HeatWave Service compatibility
@@ -1158,7 +1168,8 @@ spec:
                     description: |-
                       Schedules describe cron-driven recurring backups, each referencing
                       a profile by name. Each schedule becomes a Kubernetes CronJob owned
-                      by this failover group.
+                      by this failover group. Names are unique (the list is a map keyed by
+                      name).
                     items:
                       description: |-
                         BackupSchedule drives recurring backups via a Kubernetes CronJob owned
@@ -1183,8 +1194,10 @@ spec:
                           minimum: 0
                           type: integer
                         name:
-                          description: Name uniquely identifies this schedule within
-                            the failover group.
+                          description: |-
+                            Name uniquely identifies this schedule within the failover group.
+                            It is used as a label value, hence the 63-character bound.
+                          maxLength: 63
                           minLength: 1
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
@@ -1233,7 +1246,11 @@ spec:
                       - profileName
                       - schedule
                       type: object
+                    maxItems: 32
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   stagingVolumeSizeLimit:
                     anyOf:
                     - type: integer
@@ -1551,6 +1568,7 @@ spec:
                     items:
                       type: string
                     type: array
+                    x-kubernetes-list-type: atomic
                   auth:
                     description: |-
                       Auth references a Secret containing the Dragonfly password. When
@@ -2311,13 +2329,11 @@ spec:
                         minimum: 2
                         type: integer
                     type: object
-                required:
-                - enabled
                 type: object
               extraContainers:
                 description: |-
                   ExtraContainers are additional containers injected into every MySQL pod.
-                  Useful for exporters, log shippers, or other sidecars.
+                  Useful for exporters, log shippers, or other sidecars. Keyed by name.
                 items:
                   description: A single application container that you want to run
                     within a pod.
@@ -3896,11 +3912,15 @@ spec:
                   required:
                   - name
                   type: object
+                maxItems: 16
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               extraInitContainers:
                 description: |-
                   ExtraInitContainers are additional init containers injected into every MySQL pod.
-                  These run after the operator's built-in init container.
+                  These run after the operator's built-in init container. Keyed by name.
                 items:
                   description: A single application container that you want to run
                     within a pod.
@@ -5479,7 +5499,11 @@ spec:
                   required:
                   - name
                   type: object
+                maxItems: 16
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               failoverCooldown:
                 default: 5m
                 description: 'FailoverCooldown is the minimum time between failovers.
@@ -5552,8 +5576,11 @@ spec:
                           ExcludeSchemas, if non-empty, skips these schemas during load.
                           Forwarded to util.loadDump() as excludeSchemas.
                         items:
+                          maxLength: 64
                           type: string
+                        maxItems: 256
                         type: array
+                        x-kubernetes-list-type: set
                       includeSchemas:
                         description: |-
                           IncludeSchemas, if non-empty, restricts the load to these schemas.
@@ -5561,8 +5588,11 @@ spec:
                           (e.g. migrating one client schema into its own failover group).
                           Forwarded to util.loadDump() as includeSchemas.
                         items:
+                          maxLength: 64
                           type: string
+                        maxItems: 256
                         type: array
+                        x-kubernetes-list-type: set
                       loadIndexes:
                         default: true
                         description: LoadIndexes controls whether indexes are rebuilt
@@ -6164,8 +6194,11 @@ spec:
                           ExcludeSchemas, if non-empty, skips these schemas during load.
                           Forwarded to util.loadDump() as excludeSchemas.
                         items:
+                          maxLength: 64
                           type: string
+                        maxItems: 256
                         type: array
+                        x-kubernetes-list-type: set
                       includeSchemas:
                         description: |-
                           IncludeSchemas, if non-empty, restricts the load to these schemas.
@@ -6173,8 +6206,11 @@ spec:
                           (e.g. migrating one client schema into its own failover group).
                           Forwarded to util.loadDump() as includeSchemas.
                         items:
+                          maxLength: 64
                           type: string
+                        maxItems: 256
                         type: array
+                        x-kubernetes-list-type: set
                       loadIndexes:
                         default: true
                         description: LoadIndexes controls whether indexes are rebuilt
@@ -6300,6 +6336,11 @@ spec:
                 - confirm
                 - source
                 type: object
+                x-kubernetes-validations:
+                - message: restoreInPlace.loadOptions.includeSchemas supports at most
+                    one schema; use a full-instance restore instead
+                  rule: '!has(self.loadOptions) || !has(self.loadOptions.includeSchemas)
+                    || size(self.loadOptions.includeSchemas) <= 1'
               serviceTemplate:
                 description: ServiceTemplate customizes the Services created by the
                   operator (site, primary, and replicas).
@@ -6433,9 +6474,11 @@ spec:
                   Failover is performed by picking the best primary-candidate replica
                   when the active site is lost.
 
-                  MaxItems is set to 16 so the Kubernetes CEL cost estimator can bound
-                  the uniqueness-and-priority validation rules. Real deployments are
-                  expected to use well under that; raise the cap if needed.
+                  The list is a map keyed by name, so names are unique and server-side
+                  apply merges per site. MaxItems is set to 16 so the Kubernetes CEL
+                  cost estimator can bound the serverID-uniqueness and priority
+                  validation rules. Real deployments are expected to use well under
+                  that.
                 items:
                   description: SiteSpec defines the configuration for a single site
                     in the failover group.
@@ -6452,11 +6495,11 @@ spec:
                       type: object
                     name:
                       description: |-
-                        Name is the site identifier (e.g. "iad", "pdx", "lhr").
-                        Must be unique within spec.sites. MaxLength caps the CEL cost
-                        of the spec-level uniqueness and priority-membership rules. The
-                        pattern matches what the per-site Service names already require,
-                        and keeps the name safe to use in object-storage keys.
+                        Name is the site identifier (e.g. "iad", "pdx", "lhr"), the key of
+                        spec.sites. MaxLength caps the CEL cost of the spec-level
+                        priority-membership rule. The pattern matches what the per-site
+                        Service names already require, and keeps the name safe to use in
+                        object-storage keys.
                       maxLength: 253
                       minLength: 1
                       pattern: ^[a-z0-9-]+$
@@ -6531,6 +6574,20 @@ spec:
                       - dr-only
                       - read-only
                       type: string
+                    serverID:
+                      description: |-
+                        ServerID is the MySQL server_id of this site's server. It must be
+                        unique within the group, and it cannot change: it identifies the
+                        server in the binary logs, the PITR archive and backup stamps, so it
+                        does not depend on the order of spec.sites. Use 101, 102, ... in
+                        declaration order unless another scheme is needed.
+                      format: int64
+                      maximum: 4294967295
+                      minimum: 1
+                      type: integer
+                      x-kubernetes-validations:
+                      - message: serverID is immutable
+                        rule: self == oldSelf
                     serviceTemplate:
                       description: |-
                         ServiceTemplate overrides the group Service template for this site's
@@ -6598,6 +6655,7 @@ spec:
                       type: string
                   required:
                   - name
+                  - serverID
                   - storage
                   - zone
                   type: object
@@ -6609,6 +6667,9 @@ spec:
                 maxItems: 16
                 minItems: 2
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               splitBrainPolicy:
                 description: |-
                   SplitBrainPolicy configures automated resolution when more than
@@ -6636,6 +6697,9 @@ spec:
                     maxItems: 16
                     type: array
                     x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: splitBrainPolicy.sitePriorities entries must be unique
+                      rule: self.all(x, self.filter(y, y == x).size() == 1)
                 type: object
               terminationGracePeriodSeconds:
                 default: 60
@@ -6672,8 +6736,8 @@ spec:
             - sites
             type: object
             x-kubernetes-validations:
-            - message: spec.sites[].name must be unique
-              rule: self.sites.all(x, self.sites.filter(y, y.name == x.name).size()
+            - message: spec.sites[].serverID must be unique within the group
+              rule: self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size()
                 == 1)
             - message: spec.sites must contain at least two sites with role 'primary-candidate'
               rule: self.sites.filter(s, s.role == 'primary-candidate').size() >=
@@ -6789,6 +6853,9 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               conditions:
                 description: Conditions represent the latest available observations.
                 items:
@@ -6846,6 +6913,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               dragonfly:
                 description: |-
                   Dragonfly is the observed state of the Dragonfly subsystem when
@@ -6910,8 +6980,8 @@ spec:
                     type: boolean
                   sites:
                     description: |-
-                      Sites is the per-site Dragonfly observation, parallel in spirit
-                      to status.sites for MySQL.
+                      Sites is the per-site Dragonfly observation, keyed by name like
+                      status.sites for MySQL.
                     items:
                       description: |-
                         DragonflySiteStatus describes the observed state of one site's Dragonfly
@@ -6933,8 +7003,10 @@ spec:
                             this site.
                           type: string
                         name:
-                          description: Name is the site identifier, mirrored from
-                            spec for convenience.
+                          description: |-
+                            Name is the site identifier, mirrored from spec: the key of
+                            status.dragonfly.sites.
+                          minLength: 1
                           type: string
                         podName:
                           description: PodName is the Dragonfly pod name.
@@ -6974,8 +7046,13 @@ spec:
                             SyncInProgress is the parsed master_sync_in_progress field from
                             INFO replication on a replica.
                           type: boolean
+                      required:
+                      - name
                       type: object
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   upgrade:
                     description: |-
                       Upgrade tracks an explicit Dragonfly snapshot-restore upgrade
@@ -8609,7 +8686,7 @@ spec:
                     description: |-
                       Failures holds the latest failed reclone attempt of each pending
                       site that has one. A site is retried after a short backoff; other
-                      pending sites are recloned in the meantime.
+                      pending sites are recloned in the meantime. Keyed by site.
                     items:
                       description: RestoreRecloneFailure is the latest failed reclone
                         attempt of one site.
@@ -8618,7 +8695,10 @@ spec:
                           description: Message describes the failure.
                           type: string
                         site:
-                          description: Site is the pending site whose reclone failed.
+                          description: |-
+                            Site is the pending site whose reclone failed: the key of
+                            failures.
+                          minLength: 1
                           type: string
                         time:
                           description: Time is when the failure was recorded.
@@ -8630,6 +8710,9 @@ spec:
                       - time
                       type: object
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - site
+                    x-kubernetes-list-type: map
                   fencedGtidExecuted:
                     description: |-
                       FencedGtidExecuted is the primary's @@GLOBAL.gtid_executed when the
@@ -8648,6 +8731,7 @@ spec:
                     items:
                       type: string
                     type: array
+                    x-kubernetes-list-type: atomic
                   phase:
                     description: |-
                       Phase is Armed while the owning restore runs and Draining after it
@@ -8693,6 +8777,7 @@ spec:
                         items:
                           type: string
                         type: array
+                        x-kubernetes-list-type: atomic
                     required:
                     - confirmToken
                     type: object
@@ -8701,8 +8786,7 @@ spec:
                 - phase
                 type: object
               sites:
-                description: Sites is the observed state of each site, parallel to
-                  spec.sites.
+                description: Sites is the observed state of each site, keyed by name.
                 items:
                   description: SiteStatus describes the observed state of a single
                     site.
@@ -8746,8 +8830,10 @@ spec:
                       format: date-time
                       type: string
                     name:
-                      description: Name is the site identifier, mirrored from spec
-                        for convenience.
+                      description: |-
+                        Name is the site identifier, mirrored from spec: the key of
+                        status.sites.
+                      minLength: 1
                       type: string
                     recoveryState:
                       description: |-
@@ -8799,8 +8885,13 @@ spec:
                       - unreachable
                       - unknown
                       type: string
+                  required:
+                  - name
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               topologyGeneration:
                 description: |-
                   TopologyGeneration increments whenever the authoritative active site changes
@@ -8813,6 +8904,8 @@ spec:
                   update, empty if not updating.
                 type: string
             type: object
+        required:
+        - spec
         type: object
         x-kubernetes-validations:
         - message: spec.backup.profiles[pitr.profileName].encryption (presence, algorithm,

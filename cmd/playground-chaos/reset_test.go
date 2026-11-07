@@ -87,7 +87,7 @@ func TestEscapeSQLString(t *testing.T) {
 
 func TestNodeStorageWipePathsUsesFailoverGroup(t *testing.T) {
 	r := &resetter{fg: "dragonfly"}
-	sites := []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}
+	sites := []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 
 	got := r.nodeStorageWipePaths(sites)
 	want := []string{

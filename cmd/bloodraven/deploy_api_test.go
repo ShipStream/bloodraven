@@ -52,7 +52,7 @@ func newDeployAPIFixture(t *testing.T) *deployAPIFixture {
 	t.Helper()
 	f := &deployAPIFixture{now: time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC), logs: new(bytes.Buffer)}
 	f.group = &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "database-ns", UID: "group-uid"}}
-	f.group.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}
+	f.group.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	f.group.Status.ActiveSite = "iad"
 	f.group.Status.TopologyGeneration = 7
 	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}, {Name: "pdx", State: "read-only", Replicating: true}}

@@ -222,10 +222,16 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 }
 
 // §13, against the real upgrade path: blocks written by an older operator
-// under the pre-#235 CRD, then the CRD is upgraded to the final schema.
-//   - The old fields are pruned on read, and an unchanged legacy block stays
-//     writable (validation ratcheting), so the runner's status writes keep
-//     working while it is there.
+// under the pre-#235 CRD, then the CRD is upgraded to the final schema and
+// the objects get the spec fields the final schema requires (serverID).
+//   - The old fields are pruned on read. A legacy block whose values the
+//     final schema still accepts stays writable beside the runner's status
+//     writes. One in a removed phase (Validating) is outside the phase enum:
+//     Kubernetes 1.33 and newer ratchet it on status writes, so those keep
+//     working; 1.31 and 1.32 validate status writes without ratcheting, so
+//     they are refused until the engine replaces the block. The engine's
+//     refusal is that replacement on every version, so the group never
+//     wedges: its status writes work again right after.
 //   - A mid-run legacy block is refused (Failed{SourceLeftFenced,
 //     LegacyRunRefused}, the Event), and nothing is hydrated from it.
 //   - A legacy terminal block is replaced by the next request's run.
@@ -332,6 +338,27 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	// The pre-#235 CRD pruned spec.sites[].serverID on create; the final
+	// schema requires it (A-08), and every write evaluates the rule that
+	// keeps it unique, so the upgrade adds it first.
+	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		if err := c.Get(ctx, nn, u); err != nil {
+			t.Fatal(err)
+		}
+		sites, _, _ := unstructured.NestedSlice(u.Object, "spec", "sites")
+		for i := range sites {
+			sites[i].(map[string]any)["serverID"] = int64(101 + i)
+		}
+		if err := unstructured.SetNestedSlice(u.Object, sites, "spec", "sites"); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Update(ctx, u); err != nil {
+			t.Fatalf("%s: add spec.sites[].serverID after the upgrade: %v", nn.Name, err)
+		}
+	}
+
 	get := func(nn types.NamespacedName) *v1alpha1.MysqlFailoverGroup {
 		t.Helper()
 		var fg v1alpha1.MysqlFailoverGroup
@@ -340,14 +367,28 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		}
 		return &fg
 	}
-	// A status write that leaves the legacy block unchanged (the runner's
-	// snapshot writes) is still accepted.
-	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
+	snapshotWrite := func(nn types.NamespacedName) error {
+		t.Helper()
 		fg := get(nn)
 		fg.Status.UpdatePhase = ""
 		fg.Status.TopologyGeneration++
-		if err := c.Status().Update(ctx, fg); err != nil {
-			t.Fatalf("%s: a status write beside the unchanged legacy block was refused: %v", nn.Name, err)
+		return c.Status().Update(ctx, fg)
+	}
+	// A status write that leaves the legacy block unchanged (the runner's
+	// snapshot writes) is accepted beside a block the schema still accepts,
+	// and beside a removed phase only where status writes ratchet.
+	ratchets := statusWritesRatchet(t, oldCfg)
+	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
+		err := snapshotWrite(nn)
+		switch {
+		case nn != validating || ratchets:
+			if err != nil {
+				t.Fatalf("%s: a status write beside the unchanged legacy block was refused: %v", nn.Name, err)
+			}
+		case err == nil:
+			t.Fatalf("%s: a status write beside a phase outside the enum was accepted without status ratcheting", nn.Name)
+		case !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "status.plannedFailover.phase"):
+			t.Fatalf("%s: status write refused for another reason: %v", nn.Name, err)
 		}
 	}
 
@@ -372,6 +413,13 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	}
 	if len(topo.calls) != 0 || topo.PlannedClaimHeld(midRun) {
 		t.Errorf("a legacy block reached the topology: %v", topo.calls)
+	}
+	// The refusal replaced the block, so status writes work on every
+	// version, including those that do not ratchet status writes.
+	for _, nn := range []types.NamespacedName{midRun, validating} {
+		if err := snapshotWrite(nn); err != nil {
+			t.Fatalf("%s: a status write after the legacy block was refused failed: %v", nn.Name, err)
+		}
 	}
 	found := false
 	for len(r.Recorder.(*record.FakeRecorder).Events) > 0 {

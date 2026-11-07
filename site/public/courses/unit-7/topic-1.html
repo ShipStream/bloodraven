@@ -121,6 +121,7 @@ course; the comments say which.</p>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">    readOnlyMaxLagSeconds</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#005CC5;--shiki-dark:#6CB6FF">30</span><span style="color:#6A737D;--shiki-dark:#768390">             # reader endpoint membership only</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">  sites</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:</span></span>
 <span class="line"><span style="color:#24292E;--shiki-dark:#ADBAC7">    - </span><span style="color:#22863A;--shiki-dark:#8DDB8C">name</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">iad</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      serverID</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#005CC5;--shiki-dark:#6CB6FF">101</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      role</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">primary-candidate</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      zone</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">us-east-1a</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      lbIP</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">"10.20.30.11"</span><span style="color:#6A737D;--shiki-dark:#768390">                 # required unless role is read-only</span></span>
@@ -134,9 +135,11 @@ course; the comments say which.</p>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        requests</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: { </span><span style="color:#22863A;--shiki-dark:#8DDB8C">cpu</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">"2"</span><span style="color:#24292E;--shiki-dark:#ADBAC7">, </span><span style="color:#22863A;--shiki-dark:#8DDB8C">memory</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">8Gi</span><span style="color:#24292E;--shiki-dark:#ADBAC7"> }</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        limits</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:   { </span><span style="color:#22863A;--shiki-dark:#8DDB8C">cpu</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">"4"</span><span style="color:#24292E;--shiki-dark:#ADBAC7">, </span><span style="color:#22863A;--shiki-dark:#8DDB8C">memory</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">8Gi</span><span style="color:#24292E;--shiki-dark:#ADBAC7"> }</span></span>
 <span class="line"><span style="color:#24292E;--shiki-dark:#ADBAC7">    - </span><span style="color:#22863A;--shiki-dark:#8DDB8C">name</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">pdx</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      serverID</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#005CC5;--shiki-dark:#6CB6FF">102</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      role</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">primary-candidate</span></span>
 <span class="line"><span style="color:#6A737D;--shiki-dark:#768390">      # … same shape, its own zone, lbIP, node labels and storage class …</span></span>
 <span class="line"><span style="color:#24292E;--shiki-dark:#ADBAC7">    - </span><span style="color:#22863A;--shiki-dark:#8DDB8C">name</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">reader</span></span>
+<span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      serverID</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#005CC5;--shiki-dark:#6CB6FF">103</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      role</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">read-only</span><span style="color:#6A737D;--shiki-dark:#768390">                     # no lbIP and no taintNodeSelector: never promoted, never tainted</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">      storage</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:</span></span>
 <span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">        storageClassName</span><span style="color:#24292E;--shiki-dark:#ADBAC7">: </span><span style="color:#032F62;--shiki-dark:#96D0FF">standard-west</span></span>
@@ -162,7 +165,9 @@ you find out at <code>kubectl apply</code>, which is the good case.</p>
 <ul>
 <li><code>spec.credentials</code> is required; a manifest that still carries <code>spec.secretName</code> gets
 <code>unknown field "spec.secretName"</code> from <code>kubectl apply</code> (strict field validation)</li>
-<li><code>spec.sites[].name</code> must be unique</li>
+<li><code>spec.sites[].name</code> must be unique (<code>spec.sites</code> is a list keyed by name)</li>
+<li>every site has a <code>serverID</code> between 1 and 4294967295, unique in the group and immutable once set:
+it is the MySQL <code>server_id</code>, so it does not change when sites are reordered</li>
 <li>at least two sites with role <code>primary-candidate</code></li>
 <li><code>splitBrainPolicy.sitePriorities</code> entries must name <code>primary-candidate</code> sites</li>
 <li><code>taintNodeSelector</code> and <code>lbIP</code> are required unless the role is <code>read-only</code></li>

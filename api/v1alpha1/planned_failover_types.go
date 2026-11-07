@@ -403,8 +403,10 @@ type FailoverRecordRef struct {
 // PlannedFailoverSettings are a run's effective timing settings.
 type PlannedFailoverSettings struct {
 	// MaxLagWait bounds WaitingForLag.
+	// +required
 	MaxLagWait metav1.Duration `json:"maxLagWait"`
 	// DrainTimeout bounds Draining.
+	// +required
 	DrainTimeout metav1.Duration `json:"drainTimeout"`
 	// Dragonfly is set when spec.dragonfly was enabled at acceptance.
 	// +optional
@@ -414,9 +416,11 @@ type PlannedFailoverSettings struct {
 // PlannedFailoverDragonflySettings are a run's Dragonfly settings.
 type PlannedFailoverDragonflySettings struct {
 	// MaxSyncWait bounds WaitingForDragonflySync.
+	// +required
 	MaxSyncWait metav1.Duration `json:"maxSyncWait"`
 	// OnSyncTimeout is spec.dragonfly.plannedFailover.onSyncTimeout at
 	// acceptance.
+	// +required
 	OnSyncTimeout DragonflySyncTimeoutPolicy `json:"onSyncTimeout"`
 }
 
@@ -439,13 +443,16 @@ type PlannedFailoverAdmission struct {
 
 // PlannedFailoverFenceRecord is the write-ahead record of the run's fence.
 type PlannedFailoverFenceRecord struct {
-	State      PlannedFailoverFenceState `json:"state"`
-	IntentTime metav1.Time               `json:"intentTime"`
+	// +required
+	State PlannedFailoverFenceState `json:"state"`
+	// +required
+	IntentTime metav1.Time `json:"intentTime"`
 	// SourceServerUUID is the source's @@server_uuid recorded by the grant's
 	// evidence probe and written with the intent. The fence is sent only to a
 	// server with this uuid, and a cross-process re-run attributes
 	// super_read_only=ON to this run only when the uuid still matches.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	SourceServerUUID string `json:"sourceServerUUID"`
 	// ApplyTime is set iff state is Applied.
 	// +optional
@@ -458,6 +465,7 @@ type PlannedFailoverFenceRecord struct {
 
 // PlannedFailoverDrainRecord records the source connection drain.
 type PlannedFailoverDrainRecord struct {
+	// +required
 	StartTime metav1.Time `json:"startTime"`
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
@@ -468,6 +476,7 @@ type PlannedFailoverDrainRecord struct {
 // PlannedFailoverLagWaitRecord records the wait for the target to apply
 // the fenced set.
 type PlannedFailoverLagWaitRecord struct {
+	// +required
 	StartTime metav1.Time `json:"startTime"`
 	// +optional
 	CatchUpTime *metav1.Time `json:"catchUpTime,omitempty"`
@@ -476,11 +485,14 @@ type PlannedFailoverLagWaitRecord struct {
 // PlannedFailoverPromotionRecord is the write-ahead record of the target's
 // promotion.
 type PlannedFailoverPromotionRecord struct {
-	State      PlannedFailoverPromotionState `json:"state"`
-	IntentTime metav1.Time                   `json:"intentTime"`
+	// +required
+	State PlannedFailoverPromotionState `json:"state"`
+	// +required
+	IntentTime metav1.Time `json:"intentTime"`
 	// TargetServerUUID is the target's @@server_uuid read on a pinned
 	// session before the first promotion statement.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	TargetServerUUID string `json:"targetServerUUID"`
 	// +optional
 	ConfirmationTime *metav1.Time `json:"confirmationTime,omitempty"`
@@ -494,24 +506,30 @@ type PlannedFailoverPromotionRecord struct {
 
 // PlannedFailoverDNSRecord records publishing the promoted target.
 type PlannedFailoverDNSRecord struct {
-	State       PlannedFailoverDNSState `json:"state"`
-	AttemptTime metav1.Time             `json:"attemptTime"`
+	// +required
+	State PlannedFailoverDNSState `json:"state"`
+	// +required
+	AttemptTime metav1.Time `json:"attemptTime"`
 	// +optional
 	LastError string `json:"lastError,omitempty"`
 }
 
 // PlannedFailoverRollbackRecord is the write-ahead record of a rollback.
 type PlannedFailoverRollbackRecord struct {
-	Reason     PlannedFailoverReason `json:"reason"`
-	IntentTime metav1.Time           `json:"intentTime"`
+	// +required
+	Reason PlannedFailoverReason `json:"reason"`
+	// +required
+	IntentTime metav1.Time `json:"intentTime"`
 }
 
 // PlannedFailoverResult is a run's terminal result.
 type PlannedFailoverResult struct {
+	// +required
 	Outcome PlannedFailoverOutcome `json:"outcome"`
 	// +optional
-	Reason         PlannedFailoverReason `json:"reason,omitempty"`
-	CompletionTime metav1.Time           `json:"completionTime"`
+	Reason PlannedFailoverReason `json:"reason,omitempty"`
+	// +required
+	CompletionTime metav1.Time `json:"completionTime"`
 	// +optional
 	// +listType=set
 	Warnings []PlannedFailoverWarning `json:"warnings,omitempty"`
@@ -609,8 +627,10 @@ const (
 // DragonflyTakeoverRecord is the write-ahead record of the target
 // Dragonfly's takeover.
 type DragonflyTakeoverRecord struct {
-	State      DragonflyTakeoverState `json:"state"`
-	IntentTime metav1.Time            `json:"intentTime"`
+	// +required
+	State DragonflyTakeoverState `json:"state"`
+	// +required
+	IntentTime metav1.Time `json:"intentTime"`
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 	// +optional

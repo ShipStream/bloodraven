@@ -1,5 +1,7 @@
 package v1alpha1
 
+import "fmt"
+
 // SiteByName returns a pointer to the SiteSpec with the given name, or
 // nil if no such site exists.
 func (s *MysqlFailoverGroupSpec) SiteByName(name string) *SiteSpec {
@@ -9,6 +11,23 @@ func (s *MysqlFailoverGroupSpec) SiteByName(name string) *SiteSpec {
 		}
 	}
 	return nil
+}
+
+// MaxServerID is the largest MySQL server_id (an unsigned 32-bit value),
+// the upper bound of spec.sites[].serverID.
+const MaxServerID = 1<<32 - 1
+
+// MySQLServerID returns the site's server_id as MySQL holds it. It is the
+// one resolver every server_id consumer uses (the mysqld render and the
+// backup stamp's expected server), so none of them can narrow or wrap
+// it. It refuses a value outside 1..MaxServerID, which admission already
+// rejects, so an object that bypassed validation fails instead of
+// rendering a wrong id.
+func (s SiteSpec) MySQLServerID() (uint32, error) {
+	if s.ServerID < 1 || s.ServerID > MaxServerID {
+		return 0, fmt.Errorf("site %q: serverID %d is outside 1..%d", s.Name, s.ServerID, uint64(MaxServerID))
+	}
+	return uint32(s.ServerID), nil
 }
 
 // SiteNames returns the names of every site in spec.sites, in declared

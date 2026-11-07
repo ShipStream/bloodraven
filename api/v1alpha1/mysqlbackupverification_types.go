@@ -33,7 +33,9 @@ type MysqlBackupVerification struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   MysqlBackupVerificationSpec   `json:"spec,omitempty"`
+	// +required
+	Spec MysqlBackupVerificationSpec `json:"spec"`
+	// +optional
 	Status MysqlBackupVerificationStatus `json:"status,omitempty"`
 }
 
@@ -50,11 +52,13 @@ type MysqlBackupVerificationList struct {
 type MysqlBackupVerificationSpec struct {
 	// FailoverGroupRef identifies the MysqlFailoverGroup in the same
 	// namespace whose backup profile should drive this verification.
+	// +required
 	FailoverGroupRef LocalGroupRef `json:"failoverGroupRef"`
 
 	// ProfileName is the name of a spec.backup.profiles[] entry on the
 	// referenced failover group.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	ProfileName string `json:"profileName"`
 
 	// BackupRef optionally pins the verification to a specific
@@ -72,6 +76,7 @@ type MysqlBackupVerificationSpec struct {
 	// Defaults to true. Retention GC still reclaims KeepOnFailure
 	// artifacts once the CR ages out of the failed-run retention bucket.
 	// +kubebuilder:default=true
+	// +optional
 	KeepOnFailure *bool `json:"keepOnFailure,omitempty"`
 
 	// TTLSecondsAfterFinished controls how long the verification Job and
@@ -80,6 +85,7 @@ type MysqlBackupVerificationSpec struct {
 	// Failed verifications with KeepOnFailure=true ignore this value.
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	TTLSecondsAfterFinished int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
 	// Resources sets requests and limits for the verification MySQL
@@ -123,6 +129,7 @@ type PointInTimeVerificationSpec struct {
 	// Mode selects the replay behavior.
 	// +kubebuilder:default=none
 	// +kubebuilder:validation:Enum=none;latest;timestamp
+	// +optional
 	Mode string `json:"mode,omitempty"`
 
 	// Timestamp is the target instant, a whole second in the same forms as
@@ -166,6 +173,7 @@ type SanityCheckSpec struct {
 	// (single-row, single-column) result. Multi-statement inputs are
 	// rejected to keep the timeout budget predictable.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Query string `json:"query"`
 
 	// Expect configures the pass/fail thresholds applied to the query
@@ -190,6 +198,7 @@ type SanityCheckExpectation struct {
 	// reason=SanityCheckTimeout. Default: 60.
 	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=1
+	// +optional
 	MaxDurationSeconds int32 `json:"maxDurationSeconds,omitempty"`
 }
 
@@ -216,25 +225,31 @@ const (
 // MysqlBackupVerificationStatus tracks observed state of a verification.
 type MysqlBackupVerificationStatus struct {
 	// Phase is the lifecycle phase of this verification run.
+	// +optional
 	Phase VerificationPhase `json:"phase,omitempty"`
 
 	// StartTime is when the verification entered Provisioning.
+	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
 	// CompletionTime is when the verification reached a terminal phase.
+	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
 	// DurationSeconds is the wall-clock duration from StartTime to
 	// CompletionTime, computed on terminal transition.
+	// +optional
 	DurationSeconds int64 `json:"durationSeconds,omitempty"`
 
 	// BackupRef is the resolved reference to the MysqlBackup that was
 	// verified. Populated once the reconciler resolves spec.backupRef
 	// (or the latest-Succeeded default).
+	// +optional
 	BackupRef *VerificationBackupRef `json:"backupRef,omitempty"`
 
 	// JobName is the name of the restore Job that loaded the dump into
 	// the ephemeral MySQL instance.
+	// +optional
 	JobName string `json:"jobName,omitempty"`
 
 	// ReplayedThroughBinlog is populated on Succeeded verifications
@@ -258,15 +273,20 @@ type MysqlBackupVerificationStatus struct {
 	SanityCheck *SanityCheckResult `json:"sanityCheck,omitempty"`
 
 	// Message is a human-readable status message.
+	// +optional
 	Message string `json:"message,omitempty"`
 
 	// ObservedGeneration is the .metadata.generation this status was
 	// computed against.
+	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions represent the latest available observations of this
 	// verification's state. Types include "Verified" and
 	// "ResourcesCleanedUp".
+	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
@@ -300,6 +320,7 @@ type SanityCheckResult struct {
 	// Ran is true when the verification Job actually executed the
 	// sanity query. Useful for distinguishing "skipped because upstream
 	// phase failed" from "ran but returned 0 rows".
+	// +optional
 	Ran bool `json:"ran,omitempty"`
 
 	// DurationMs is the client-side wall-clock duration of the query.
@@ -322,6 +343,7 @@ type SanityCheckResult struct {
 // GenerateName collision cannot confuse the audit trail.
 type VerificationBackupRef struct {
 	// Name of the verified MysqlBackup.
+	// +required
 	Name string `json:"name"`
 	// UID of the verified MysqlBackup at resolution time.
 	// +optional
@@ -343,6 +365,7 @@ type VerificationSpec struct {
 	// Omitting spec.backup.profiles[].verification entirely is
 	// equivalent to Enabled=false.
 	// +kubebuilder:default=false
+	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Schedule is a standard cron expression (5 fields). Evaluated in
@@ -354,10 +377,12 @@ type VerificationSpec struct {
 	// Schedule. Defaults to "Etc/UTC" for the same reproducibility
 	// reasons as BackupSchedule.TimeZone.
 	// +kubebuilder:default="Etc/UTC"
+	// +optional
 	TimeZone string `json:"timeZone,omitempty"`
 
 	// Suspend pauses the scheduled CronJob without deleting it.
 	// +kubebuilder:default=false
+	// +optional
 	Suspend bool `json:"suspend,omitempty"`
 
 	// ConcurrencyPolicy is forwarded to the CronJob spec. Only Forbid
@@ -366,6 +391,7 @@ type VerificationSpec struct {
 	// of the backup onto node disk and racing for the newest backup.
 	// +kubebuilder:default=Forbid
 	// +kubebuilder:validation:Enum=Forbid;Replace
+	// +optional
 	ConcurrencyPolicy string `json:"concurrencyPolicy,omitempty"`
 
 	// StartingDeadlineSeconds is forwarded to the CronJob spec.
@@ -375,22 +401,26 @@ type VerificationSpec struct {
 	// SuccessfulJobsHistoryLimit is forwarded to the CronJob spec.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	SuccessfulJobsHistoryLimit *int32 `json:"successfulJobsHistoryLimit,omitempty"`
 
 	// FailedJobsHistoryLimit is forwarded to the CronJob spec.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	FailedJobsHistoryLimit *int32 `json:"failedJobsHistoryLimit,omitempty"`
 
 	// KeepOnFailure mirrors MysqlBackupVerificationSpec.KeepOnFailure
 	// for CRs created by this schedule. Default: true.
 	// +kubebuilder:default=true
+	// +optional
 	KeepOnFailure *bool `json:"keepOnFailure,omitempty"`
 
 	// TTLSecondsAfterFinished mirrors the per-CR field for scheduled
 	// CRs. Default: 0.
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	TTLSecondsAfterFinished int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
 	// RetentionPolicy caps how many verification CRs per profile are
@@ -418,6 +448,7 @@ type VerificationRetentionPolicy struct {
 	// Default: 30.
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	KeepSuccessful int32 `json:"keepSuccessful,omitempty"`
 
 	// KeepFailures is the max number of Failed CRs to keep. Failed
@@ -425,6 +456,7 @@ type VerificationRetentionPolicy struct {
 	// retained independently of the Succeeded bucket. Default: 10.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
+	// +optional
 	KeepFailures int32 `json:"keepFailures,omitempty"`
 }
 

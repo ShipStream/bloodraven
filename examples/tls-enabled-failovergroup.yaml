@@ -35,6 +35,7 @@ spec:
     ttl: 60
   sites:
     - name: iad
+      serverID: 101
       zone: us-east-1a
       taintNodeSelector:
         shipstream.io/failover-group.orders: "true"
@@ -44,6 +45,7 @@ spec:
         storageClassName: fast-ssd
         size: 100Gi
     - name: pdx
+      serverID: 102
       zone: us-west-2a
       taintNodeSelector:
         shipstream.io/failover-group.orders: "true"

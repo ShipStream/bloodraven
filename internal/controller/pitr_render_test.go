@@ -456,8 +456,12 @@ func TestReconcileDeploymentDeferLeavesDeploymentUntouched(t *testing.T) {
 	existing.Spec.Template.Spec.Containers = []corev1.Container{{Name: "mysql", Image: "mysql:old"}}
 	r, c := newReconciler(fg, &existing)
 	render := groupPITRRender{inputs: testPITRRender(fg), action: pitrRenderDefer}
-	for i, site := range fg.Spec.Sites {
-		if err := r.reconcileDeployment(ctx, fg, site, int32(101+i), fg.Spec.Image, render); err != nil {
+	for _, site := range fg.Spec.Sites {
+		serverID, err := site.MySQLServerID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.reconcileDeployment(ctx, fg, site, serverID, fg.Spec.Image, render); err != nil {
 			t.Fatal(err)
 		}
 	}

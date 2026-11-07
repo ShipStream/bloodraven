@@ -19,6 +19,7 @@ spec:
     ttl: 10
   sites:
     - name: iad
+      serverID: 101
       role: primary-candidate
       zone: zone-iad
       taintNodeSelector:
@@ -36,6 +37,7 @@ spec:
           cpu: 500m
           memory: 1Gi
     - name: pdx
+      serverID: 102
       role: primary-candidate
       zone: zone-pdx
       taintNodeSelector:
@@ -53,6 +55,7 @@ spec:
           cpu: 500m
           memory: 1Gi
     - name: reader
+      serverID: 103
       role: read-only
       zone: zone-reader
       mysqlConf:

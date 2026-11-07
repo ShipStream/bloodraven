@@ -22,12 +22,12 @@ func plannedFG(sites, drOnly []string, active string, statusStates map[string]st
 	for _, n := range drOnly {
 		drSet[n] = true
 	}
-	for _, name := range sites {
+	for i, name := range sites {
 		role := v1alpha1.SiteRolePrimaryCandidate
 		if drSet[name] {
 			role = v1alpha1.SiteRoleDROnly
 		}
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, Role: role})
+		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: role})
 		st := v1alpha1.SiteStatus{Name: name}
 		if s, ok := statusStates[name]; ok {
 			st.State = s

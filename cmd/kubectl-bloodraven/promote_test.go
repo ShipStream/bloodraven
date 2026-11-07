@@ -70,8 +70,8 @@ func TestGroupHasSite(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad"},
-				{Name: "pdx"},
+				{Name: "iad", ServerID: 101},
+				{Name: "pdx", ServerID: 102},
 			},
 		},
 	}

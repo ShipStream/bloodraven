@@ -350,7 +350,7 @@ func TestCanonicalExcludeGtidsBounds(t *testing.T) {
 // both the AWS creds secret and the shared emptyDir are mounted.
 func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "primary"})
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "us-east-1a"}, {Name: "us-east-1b"}}
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "us-east-1a", ServerID: 101}, {Name: "us-east-1b", ServerID: 102}}
 	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{{
 		Name: "primary",
 		Storage: v1alpha1.BackupStorage{

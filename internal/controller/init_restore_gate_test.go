@@ -28,7 +28,7 @@ import (
 func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup {
 	lag0 := int64(0)
 	fg := newTestFG()
-	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly})
+	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}},
 	}

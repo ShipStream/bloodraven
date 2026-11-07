@@ -50,8 +50,8 @@ is measured against.
 
 **TODO A — `check_admission`.** Print one `REJECT <rule>` line per admission rule the manifest
 violates, in the order the `RULE_*` constants are declared. A clean manifest prints nothing at all. The nine rules
-are documented in the script — CEL rules on the CRD, the `MinItems`/`MaxItems` bound on
-`spec.sites` and the required `spec.credentials`, all of them refusals at `kubectl apply` — and two
+are documented in the script — CEL rules on the CRD, the `MinItems`/`MaxItems` bound and the name
+key on `spec.sites` and the required `spec.credentials`, all of them refusals at `kubectl apply` — and two
 are worth flagging here.
 
 *The role default is load-bearing.* `spec.sites[].role` is optional and defaults to

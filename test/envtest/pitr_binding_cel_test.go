@@ -6,10 +6,8 @@ package envtest
 // freezes the active PITR profile's encryption identity while it archives to
 // the same storage, the bounds that keep that rule inside the CEL cost budget,
 // the profiles list-map under server-side apply, and the
-// status.pitrArchiveBindings schema. CI runs these on the supported floor
-// (1.31) as well as the current envtest version:
-//
-//	go test -tags envtest ./test/envtest -run 'TestPITRBinding(CEL|Status|SSA)'
+// status.pitrArchiveBindings schema. CI runs the whole envtest suite on the
+// supported floor (1.31) as well as the current envtest version.
 
 import (
 	"fmt"

@@ -51,6 +51,7 @@
     "sites": [
       {
         "name": "iad",
+        "serverID": 101,
         "role": "primary-candidate",
         "zone": "zone-iad",
         "storage": {
@@ -75,6 +76,7 @@
       },
       {
         "name": "iad",
+        "serverID": 102,
         "role": "primary-candidate",
         "zone": "zone-pdx",
         "storage": {
@@ -99,6 +101,7 @@
       },
       {
         "name": "reader",
+        "serverID": 103,
         "role": "read-only",
         "zone": "zone-reader",
         "storage": {

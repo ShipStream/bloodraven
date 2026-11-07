@@ -167,7 +167,8 @@ spec:
               deploymentClients:
                 description: |-
                   DeploymentClients authorizes ServiceAccounts to use the deployment
-                  companion API for this database. Each namespace has one client.
+                  companion API for this database, keyed by (namespace,
+                  serviceAccount). A namespace may list several ServiceAccounts.
                 items:
                   description: DeploymentClient identifies a ServiceAccount allowed
                     to deploy this database.
@@ -191,9 +192,11 @@ spec:
                   - namespace
                   - serviceAccount
                   type: object
+                maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
                 - namespace
+                - serviceAccount
                 x-kubernetes-list-type: map
               grants:
                 description: |-
@@ -803,6 +806,8 @@ spec:
                 - Deleting
                 type: string
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

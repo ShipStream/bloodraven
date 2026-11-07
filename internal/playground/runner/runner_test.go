@@ -224,8 +224,8 @@ func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverG
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Dragonfly: &v1alpha1.DragonflySpec{Enabled: true},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad"},
-				{Name: "pdx"},
+				{Name: "iad", ServerID: 101},
+				{Name: "pdx", ServerID: 102},
 			},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{

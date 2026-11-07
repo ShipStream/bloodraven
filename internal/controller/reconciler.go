@@ -426,8 +426,11 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Reconcile per-site resources
-	for i, site := range fg.Spec.Sites {
-		serverID := int32(101 + i)
+	for _, site := range fg.Spec.Sites {
+		serverID, err := site.MySQLServerID()
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 
 		if err := r.reconcilePVC(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", site.Name, err)
@@ -870,7 +873,7 @@ func mysqlSecurityContext(fg *v1alpha1.MysqlFailoverGroup) *corev1.SecurityConte
 // configInitScript copies the operator-managed my.cnf fragments into the
 // conf emptyDir. When encryption is enabled it also plants a local
 // component manifest in the datadir (see encryptionConfigInitSnippet).
-func configInitScript(fg *v1alpha1.MysqlFailoverGroup, serverID int32) string {
+func configInitScript(fg *v1alpha1.MysqlFailoverGroup, serverID uint32) string {
 	script := fmt.Sprintf(
 		"cp /etc/mysql/config-map/bloodraven.cnf /etc/mysql/conf.d/bloodraven.cnf && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf",
 		serverID,
@@ -1292,7 +1295,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1a
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, serverID int32, image string, pitr groupPITRRender) error {
+func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, serverID uint32, image string, pitr groupPITRRender) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name),
@@ -2680,7 +2683,7 @@ func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, 
 		return err
 	}
 	siteFound := false
-	for i, site := range fg.Spec.Sites {
+	for _, site := range fg.Spec.Sites {
 		if site.Name == siteName {
 			siteFound = true
 			if !pitrRender.defers(resourceName(fg.Name, site.Name)) {
@@ -2688,7 +2691,10 @@ func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, 
 					return fmt.Errorf("reconcile site configmap: %w", err)
 				}
 			}
-			serverID := int32(101 + i)
+			serverID, err := site.MySQLServerID()
+			if err != nil {
+				return err
+			}
 			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender); err != nil {
 				return err
 			}
