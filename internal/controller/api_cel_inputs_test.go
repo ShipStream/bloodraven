@@ -347,3 +347,114 @@ func TestCELRuleInputsResolve(t *testing.T) {
 		}
 	}
 }
+
+// celLeaves lists the leaf paths under s: scalars, a list's items as
+// path[] and a map's values as path{}.
+func celLeaves(s apiCRDSchema, path string, out map[string]bool) {
+	switch {
+	case s.Items != nil:
+		celLeaves(*s.Items, path+"[]", out)
+	case s.AdditionalProperties != nil:
+		celLeaves(*s.AdditionalProperties, path+"{}", out)
+	case len(s.Properties) > 0:
+		for name, p := range s.Properties {
+			celLeaves(p, path+"."+name, out)
+		}
+	default:
+		out[path] = true
+	}
+}
+
+// celFrozenLeafExempt are leaves under a fixed-at-creation block that no
+// root transition rule reads, with why each may change. Empty today: every
+// leaf of the three blocks is frozen.
+var celFrozenLeafExempt = map[string]string{}
+
+// frozenLeavesNotCompared returns the leaves under each block (a spec path
+// of root) that no root rule using oldSelf reads, minus the exemptions.
+func frozenLeavesNotCompared(t *testing.T, kind string, root apiCRDSchema, blocks []string) []string {
+	t.Helper()
+	read := map[string]bool{}
+	rootRules := 0
+	for _, v := range root.Validations {
+		if !strings.Contains(v.Rule, "oldSelf") {
+			continue
+		}
+		rootRules++
+		for _, in := range celRuleInputs(t, kind, root, v.Rule) {
+			if in.container {
+				continue
+			}
+			celLeaves(in.schema, in.path, read)
+		}
+	}
+	if rootRules == 0 {
+		t.Fatalf("%s: no root transition rule; the walk is broken", kind)
+	}
+	var missing []string
+	for _, block := range blocks {
+		s := root
+		for _, seg := range strings.Split(block, ".") {
+			var ok bool
+			if s, ok = s.Properties[seg]; !ok {
+				t.Fatalf("%s: no %s in the schema", kind, block)
+			}
+		}
+		leaves := map[string]bool{}
+		celLeaves(s, kind+"."+block, leaves)
+		for leaf := range leaves {
+			if _, exempt := celFrozenLeafExempt[leaf]; !read[leaf] && !exempt {
+				missing = append(missing, leaf)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// TestFrozenBlocksCompareEveryLeaf (A-22, A-23): spec.initFromBackup on a
+// MysqlFailoverGroup and spec.pointInTime and spec.sanityCheck on a
+// MysqlBackupVerification are fixed at creation by root transition rules
+// that compare them field by field. A field added to one of those types
+// later is not frozen until a rule reads it, so every leaf must be read by
+// a root rule that uses oldSelf, or be listed in celFrozenLeafExempt with
+// the reason it may change. A leaf compared only through its parent object
+// (self.x == oldSelf.x) counts as read.
+func TestFrozenBlocksCompareEveryLeaf(t *testing.T) {
+	for _, tc := range []struct {
+		file, kind string
+		blocks     []string
+	}{
+		{"shipstream.io_mysqlfailovergroups.yaml", "MysqlFailoverGroup", []string{"spec.initFromBackup"}},
+		{"shipstream.io_mysqlbackupverifications.yaml", "MysqlBackupVerification", []string{"spec.pointInTime", "spec.sanityCheck"}},
+	} {
+		for crdPath, root := range apiCRDRoots(t, tc.file) {
+			for _, leaf := range frozenLeavesNotCompared(t, tc.kind, root, tc.blocks) {
+				t.Errorf("%s: %s is in a fixed-at-creation block but no root transition rule compares it; add it to the rule or exempt it with the reason", crdPath, leaf)
+			}
+		}
+	}
+
+	// The check itself: a leaf the rule leaves out is reported, and one
+	// compared through its parent object is not.
+	str := apiCRDSchema{Type: "string"}
+	synthetic := func(rule string) apiCRDSchema {
+		root := apiCRDSchema{Type: "object", Properties: map[string]apiCRDSchema{"spec": {Type: "object", Properties: map[string]apiCRDSchema{
+			"blk": {Type: "object", Properties: map[string]apiCRDSchema{
+				"a":   str,
+				"b":   str,
+				"ref": {Type: "object", Properties: map[string]apiCRDSchema{"name": str}},
+			}},
+		}}}}
+		root.Validations = append(root.Validations, struct {
+			Rule string `json:"rule"`
+		}{rule})
+		return root
+	}
+	if got := frozenLeavesNotCompared(t, "K", synthetic("self.spec.blk.a == oldSelf.spec.blk.a && self.spec.blk.ref == oldSelf.spec.blk.ref"), []string{"spec.blk"}); strings.Join(got, ",") != "K.spec.blk.b" {
+		t.Errorf("synthetic rule missing b: reported %v, want [K.spec.blk.b]", got)
+	}
+	if got := frozenLeavesNotCompared(t, "K", synthetic("has(self.spec.blk.b) == has(oldSelf.spec.blk.b) && self.spec.blk.a == oldSelf.spec.blk.a && self.spec.blk.ref.name == oldSelf.spec.blk.ref.name"), []string{"spec.blk"}); strings.Join(got, ",") != "K.spec.blk.b" {
+		t.Errorf("presence-only check of b: reported %v, want [K.spec.blk.b]", got)
+	}
+}

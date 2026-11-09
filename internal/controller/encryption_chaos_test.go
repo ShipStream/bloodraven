@@ -880,15 +880,18 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 }
 
 // -------------------------------------------------------------------
-// EXP-19 · Disable encryption after sealing
+// EXP-19 · A sealed group stored with encryption off (legacy state)
 // -------------------------------------------------------------------
 
-// TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes is EXP-19.
-// Turning the flag off does not decrypt anything, so deleting the escrow
-// Secrets would strand every encrypted tablespace still on disk. The
-// status must clear, the Secrets must survive, and re-enabling must pick
-// the lifecycle back up rather than requiring a wipe.
-func TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes(t *testing.T) {
+// TestEncryptionChaos_LegacyDisabledStateRetainsEscrowAndReEnableResumes
+// is EXP-19. Admission refuses turning encryption off (A-24), so this is
+// not a supported transition: it covers the defensive branch for an
+// object stored before that rule, with enabled false over a sealed status.
+// Nothing is decrypted, so deleting the escrow Secrets would strand every
+// encrypted tablespace still on disk. The status must clear, the Secrets
+// must survive, and re-enabling (false to true is admitted) must pick the
+// lifecycle back up rather than requiring a wipe.
+func TestEncryptionChaos_LegacyDisabledStateRetainsEscrowAndReEnableResumes(t *testing.T) {
 	fg := encTestFG()
 	ctx := context.Background()
 	raw := []byte("keyring")
@@ -909,17 +912,18 @@ func TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes(t *testing.T) {
 		}
 	}
 
+	// The stored legacy state: enabled false over a sealed status.
 	fg.Spec.EncryptionAtRest.Enabled = false
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
-		t.Fatalf("disable: %v", err)
+		t.Fatalf("legacy disabled state: %v", err)
 	}
 	if fg.Status.EncryptionAtRest != nil {
-		t.Fatal("status.encryptionAtRest must be cleared when the flag goes off")
+		t.Fatal("status.encryptionAtRest must be cleared while the flag is off")
 	}
 	for _, name := range []string{"mysql-lion-dc1-keyring-v1", "mysql-lion-dc2-keyring-v1"} {
 		var sec corev1.Secret
 		if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &sec); err != nil {
-			t.Fatalf("escrow Secret %s was deleted on disable — the data on disk is still encrypted with it: %v", name, err)
+			t.Fatalf("escrow Secret %s was deleted while the flag is off; the data on disk is still encrypted with it: %v", name, err)
 		}
 	}
 

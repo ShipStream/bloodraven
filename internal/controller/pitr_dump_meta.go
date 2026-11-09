@@ -90,6 +90,12 @@ func pitrDumpSourceForBackup(backup *v1alpha1.MysqlBackup, profile *v1alpha1.Bac
 	return src, nil
 }
 
+// errDumpAtStoreRoot refuses point-in-time replay of a dump at the root of
+// its store. It names no remedy: the restore caller adds the one for its
+// block (restoreRemedy).
+var errDumpAtStoreRoot = fmt.Errorf("%s: point-in-time replay needs the dump's own directory, where its backup stamp identifies it, but the dump is at the root of its store (no S3 prefix or PVC subPath)",
+	pitrarchive.TokenBackupIdentityUnknown)
+
 // buildDumpMetaInitContainer renders the dump-meta init container and the
 // volumes only it uses. It reads <prefix>/@.json, <prefix>/@.done.json and
 // the stamp, checks them against the expected identity and writes
@@ -101,9 +107,7 @@ func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSou
 		// F037: a dump at the root of its store (a direct source with
 		// no S3 prefix or PVC subPath) has no directory a backup stamp
 		// could sit beside, so nothing can identify it.
-		return corev1.Container{}, nil, fmt.Errorf("%s: point-in-time replay needs the dump's own directory, where its backup stamp identifies it, but the dump is at the root of its store (no S3 prefix or PVC subPath); "+
-			"name the dump's directory in source.s3.prefix or source.pvc.subPath, or restore from the MysqlBackup with source.backupRef",
-			pitrarchive.TokenBackupIdentityUnknown)
+		return corev1.Container{}, nil, errDumpAtStoreRoot
 	}
 	env := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_DUMP_META_OUTPUT_DIR", Value: restorePITRDumpMetaDir},
@@ -205,6 +209,7 @@ func pitrLoadFilterRefusal(fp string, opts *v1alpha1.LoadOptions) error {
 	if opts == nil || (len(opts.IncludeSchemas) == 0 && len(opts.ExcludeSchemas) == 0) {
 		return nil
 	}
-	return fmt.Errorf("%s: %s.loadOptions includeSchemas/excludeSchemas cannot be combined with %s.pointInTime: point-in-time replay needs the full dump loaded; remove the schema filters",
-		pitrarchive.TokenBackupFiltered, fp, fp)
+	return fmt.Errorf("%s: %s.loadOptions includeSchemas/excludeSchemas cannot be combined with %s.pointInTime: point-in-time replay needs the full dump loaded; %s",
+		pitrarchive.TokenBackupFiltered, fp, fp,
+		restoreRemedy(fp, "remove the schema filters", fp+".loadOptions without includeSchemas or excludeSchemas"))
 }

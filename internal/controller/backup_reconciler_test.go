@@ -305,6 +305,34 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 	}
 }
 
+// A-18: a PVC profile that names neither a claimName nor provisioned (an
+// object stored before admission required one) is refused with the fix,
+// instead of mounting the owned claim name, which nothing provisions.
+func TestBuildBackupJob_PVCWithoutClaimIsRefused(t *testing.T) {
+	fg := fgWithBackup()
+	profile := *fg.Spec.Backup.Profiles[1].DeepCopy()
+	profile.Storage.PVC = &v1alpha1.PVCStorage{SubPath: "orders"}
+	mb := &v1alpha1.MysqlBackup{
+		ObjectMeta: metav1.ObjectMeta{Name: "lion-daily-xyz", Namespace: "ns"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: profile.Name},
+	}
+	_, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
+		FailoverGroup:        fg,
+		Profile:              profile,
+		Backup:               mb,
+		SourceSite:           "iad",
+		CredsSecretName:      "mysqlbackup-lion-daily-xyz-creds",
+		ScriptsConfigMapName: "mysql-lion-backup-scripts",
+	})
+	if err == nil || !strings.Contains(err.Error(), "sets neither storage.pvc.claimName nor storage.pvc.provisioned") {
+		t.Fatalf("BuildBackupJob = %v, want the claimName|provisioned refusal", err)
+	}
+	if _, owned := ownedProfileClaim(fg.Name, &profile); owned {
+		t.Fatal("a profile without provisioned must not resolve to an owned claim to provision")
+	}
+}
+
 func TestBuildBackupJob_PVC_MountsClaim(t *testing.T) {
 	fg := fgWithBackup()
 	mb := &v1alpha1.MysqlBackup{

@@ -54,13 +54,16 @@ func loadAPICRDFiles(t *testing.T) map[string]apiCRDFile {
 }
 
 // A-93: every kind has short names and the bloodraven and mysql
-// categories; MysqlBackup and MysqlBackupVerification are also backup.
+// categories. No kind takes the generic backup category: kubectl expands a
+// category before it resolves a resource name, so `kubectl get backup` and
+// `kubectl delete backup --all` would act on MysqlBackups instead of another
+// operator's backups resource (Velero, CloudNativePG).
 func TestKindShortNamesAndCategories(t *testing.T) {
 	want := map[string]struct{ short, categories string }{
 		"MysqlFailoverGroup":      {"mfg,mfgs", "bloodraven,mysql"},
 		"MysqlDatabase":           {"mydb,mydbs", "bloodraven,mysql"},
-		"MysqlBackup":             {"mbk,mbks", "bloodraven,mysql,backup"},
-		"MysqlBackupVerification": {"mbv,mbvs", "bloodraven,mysql,backup"},
+		"MysqlBackup":             {"mbk,mbks", "bloodraven,mysql"},
+		"MysqlBackupVerification": {"mbv,mbvs", "bloodraven,mysql"},
 		"MysqlStandbyCluster":     {"msc,mscs", "bloodraven,mysql,dr"},
 	}
 	for f, crd := range loadAPICRDFiles(t) {

@@ -108,8 +108,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 			if profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil {
 				continue
 			}
-			if profile.Storage.PVC.Provisioned == nil {
-				// User-managed PVC; nothing to do.
+			if _, owned := ownedProfileClaim(fg.Name, &profile); !owned {
+				// A claimName profile's claim is user-managed. A profile
+				// with neither or both alternatives (only an object stored
+				// before admission required one) names no claim: the backup
+				// Job build refuses it naming the fix, and the PITR render
+				// treats it as an unresolvable profile, so nothing mounts a
+				// claim that is never provisioned.
 				continue
 			}
 			if err := r.reconcileOwnedBackupPVC(ctx, fg, profile); err != nil {
@@ -190,9 +195,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupScriptsConfigMap(ctx conte
 
 // reconcileOwnedBackupPVC provisions the PVC of a profile with
 // pvc.provisioned. An existing claim is never changed: the backup
-// reconciler refuses a claim that does not match (ownedBackupPVCMismatch).
+// reconciler refuses new backup Jobs on a claim that does not match
+// (ownedBackupPVCMismatch); a PITR archiver keeps writing to it.
 func (r *MysqlFailoverGroupReconciler) reconcileOwnedBackupPVC(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.BackupProfile) error {
-	if profile.Storage.PVC == nil || profile.Storage.PVC.Provisioned == nil {
+	claim, owned := ownedProfileClaim(fg.Name, &profile)
+	if !owned {
 		return nil
 	}
 	provisioned := profile.Storage.PVC.Provisioned
@@ -202,7 +209,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileOwnedBackupPVC(ctx context.Conte
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ownedBackupPVCName(fg.Name, profile.Name),
+			Name:      claim,
 			Namespace: fg.Namespace,
 		},
 	}

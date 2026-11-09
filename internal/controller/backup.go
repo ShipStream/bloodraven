@@ -84,9 +84,11 @@ func scheduleCronJobName(fgName, scheduleName string) string {
 	return truncateCronJobName(fmt.Sprintf("mysql-%s-backup-%s", fgName, scheduleName))
 }
 
-// maxCronJobNameLength is the longest CronJob name the API server accepts:
-// the CronJob controller names each Job <cronjob>-<up to 11-digit
-// scheduled time>, and that Job name must be a DNS-1123 label.
+// maxCronJobNameLength is the longest CronJob name the API server accepts.
+// The CronJob controller names each Job <cronjob>-<scheduled time in
+// minutes>, and the API server reserves 11 characters for that suffix (the
+// hyphen plus up to 10 digits; 8 today) so the Job name fits a 63-character
+// label: 63 - 11 = 52.
 const maxCronJobNameLength = 52
 
 // truncateCronJobName bounds a derived CronJob name to
@@ -100,6 +102,21 @@ func truncateCronJobName(name string) string {
 // pitrprofile so the provisioned PVC and the archive destination agree.
 func ownedBackupPVCName(fgName, profileName string) string {
 	return pitrprofile.OwnedBackupPVCName(fgName, profileName)
+}
+
+// ownedProfileClaim returns the operator-owned claim of a PVC profile with
+// pvc.provisioned, resolved by pitrprofile.ClaimFor, and whether there is
+// one. A claimName profile, an S3 profile and a profile whose pvc names no
+// claim have none.
+func ownedProfileClaim(fgName string, profile *v1alpha1.BackupProfile) (string, bool) {
+	if profile == nil || profile.Storage.Type != v1alpha1.BackupStoragePVC {
+		return "", false
+	}
+	claim, owned, err := pitrprofile.ClaimFor(fgName, profile.Name, profile.Storage.PVC)
+	if err != nil || !owned {
+		return "", false
+	}
+	return claim, true
 }
 
 // checkPVCSubPath rejects a PVC subPath with a ".." segment, which would

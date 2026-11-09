@@ -390,11 +390,17 @@ func canonicalExcludeGtids(field, raw string) (string, error) {
 	}
 	canonical := set.String()
 	if len(canonical) > maxExcludeGtidsEnvBytes {
-		return "", fmt.Errorf("%s: %s is %d bytes in canonical form (tags grouped under one UUID are spelled out per tag), over the %d-byte limit for the replay containers; exclude fewer GTIDs",
-			pitrarchive.TokenTargetInvalid, field, len(canonical), maxExcludeGtidsEnvBytes)
+		return "", &excludeGtidsTooLongError{msg: fmt.Sprintf("%s: %s is %d bytes in canonical form (tags grouped under one UUID are spelled out per tag), over the %d-byte limit for the replay containers",
+			pitrarchive.TokenTargetInvalid, field, len(canonical), maxExcludeGtidsEnvBytes)}
 	}
 	return canonical, nil
 }
+
+// excludeGtidsTooLongError is canonicalExcludeGtids' over-limit refusal.
+// It names no remedy: each caller adds the one its object allows.
+type excludeGtidsTooLongError struct{ msg string }
+
+func (e *excludeGtidsTooLongError) Error() string { return e.msg }
 
 // maxExcludeGtidsEnvBytes bounds the canonical excludeGtids rendered into
 // BLOODRAVEN_PITR_EXCLUDE_GTIDS: half of Linux's 128 KiB per-string exec

@@ -349,8 +349,9 @@ func TestE16_LicenseShape(t *testing.T) {
 	}
 }
 
-// A-93: MysqlBackup and MysqlBackupVerification serve short names and the
-// bloodraven, mysql and backup categories.
+// A-93: every kind serves its short names and the bloodraven and mysql
+// categories, and no kind serves the generic backup category, which would
+// shadow another operator's backups resource for `kubectl get backup`.
 func TestE16_KindMetadataServed(t *testing.T) {
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
@@ -361,8 +362,8 @@ func TestE16_KindMetadataServed(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]struct{ short, categories []string }{
-		"mysqlbackups":             {[]string{"mbk", "mbks"}, []string{"bloodraven", "mysql", "backup"}},
-		"mysqlbackupverifications": {[]string{"mbv", "mbvs"}, []string{"bloodraven", "mysql", "backup"}},
+		"mysqlbackups":             {[]string{"mbk", "mbks"}, []string{"bloodraven", "mysql"}},
+		"mysqlbackupverifications": {[]string{"mbv", "mbvs"}, []string{"bloodraven", "mysql"}},
 		"mysqlfailovergroups":      {[]string{"mfg", "mfgs"}, []string{"bloodraven", "mysql"}},
 		"mysqldatabases":           {[]string{"mydb", "mydbs"}, []string{"bloodraven", "mysql"}},
 		"mysqlstandbyclusters":     {[]string{"msc", "mscs"}, []string{"bloodraven", "mysql", "dr"}},

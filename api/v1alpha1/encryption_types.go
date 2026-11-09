@@ -37,12 +37,14 @@ type EncryptionAtRestSpec struct {
 	// Enabled turns on data-at-rest encryption for every site in the
 	// group. Enabling requires spec.tls to be set, because MySQL
 	// requires a secure connection to clone encrypted data. Once true it
-	// cannot be set back to false or removed: the data is encrypted, and
-	// decrypting a group means a new group restored from a backup.
+	// cannot be set back to false or removed, even if encryption never
+	// started (a refused adoption): a group without encryption is a new
+	// group restored from a backup.
 	//
-	// Encryption can only be enabled on a group that has not yet
-	// bootstrapped, or adopted by an existing group via the replica-first
-	// reclone procedure documented in https://bloodraven.dev/docs/configuration/encryption-at-rest.
+	// Encryption covers all data only on a group enabled before it
+	// bootstraps. An existing group's data moves to a new encrypted group
+	// restored from a backup, as documented in
+	// https://bloodraven.dev/docs/configuration/encryption-at-rest.
 	// On a group whose sites already hold unencrypted data, ExistingData
 	// decides.
 	// +kubebuilder:default=false
@@ -53,8 +55,8 @@ type EncryptionAtRestSpec struct {
 	// group that is already serving, whose existing tablespaces MySQL
 	// does not rewrite:
 	//   - Refuse (default): encryption is not started, and
-	//     EncryptionAtRestReady is False with reason AdoptionRefused. Move
-	//     onto an encrypted replica with a planned failover instead.
+	//     EncryptionAtRestReady is False with reason AdoptionRefused.
+	//     Restore a backup into a new encrypted group instead.
 	//   - LeavePlaintext: encryption starts and covers data written from
 	//     then on; the existing tablespaces stay plaintext until they are
 	//     rebuilt (status.encryptionAtRest.sites[].coverage reports how

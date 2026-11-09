@@ -174,6 +174,16 @@ func e6WithPVCProfile(pvc v1alpha1.PVCStorage) func(*v1alpha1.MysqlFailoverGroup
 	}
 }
 
+func e6S3Storage() v1alpha1.BackupStorage {
+	return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "orders", CredentialsSecretName: "s3"}}
+}
+
+// e6WithS3Profile gives fg one S3 profile named "local", the name
+// e6WithPVCProfile uses, so a test can switch the same profile's backend.
+func e6WithS3Profile(fg *v1alpha1.MysqlFailoverGroup) {
+	fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{{Name: "local", Storage: e6S3Storage()}}}
+}
+
 func e6WithPITRProfile(fg *v1alpha1.MysqlFailoverGroup) {
 	fg.Spec.Backup = &v1alpha1.BackupSpec{
 		Profiles: []v1alpha1.BackupProfile{{
@@ -286,7 +296,10 @@ func TestE6_TransitionRules(t *testing.T) {
 		{"PITR profile encryption", e6FG(e6WithPITRProfile), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "other-key"
 		}), pitrEnc},
-		// A-18 (R04: removal is refused, so it cannot be re-added with new values)
+		// A-18 (R04): presence is compared on the profile's storage, so
+		// provisioned cannot be removed, also by switching storage.type, and
+		// so cannot come back with new values. Removing the whole profile
+		// and adding it back later is runtime-guarded (BackupStorageMismatch).
 		{"provisioned size", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "20Gi"
 		}), pvc},
@@ -308,6 +321,13 @@ func TestE6_TransitionRules(t *testing.T) {
 		{"claimName to provisioned", e6FG(e6WithPVCProfile(v1alpha1.PVCStorage{ClaimName: "backups"})), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
 			pvc := e6Provisioned("fast", "10Gi")
 			fg.Spec.Backup.Profiles[0].Storage.PVC = &pvc
+		}), pvc},
+		{"provisioned to S3", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Profiles[0].Storage = e6S3Storage()
+		}), pvc},
+		{"S3 to provisioned", e6FG(e6WithS3Profile), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+			pvc := e6Provisioned("fast", "10Gi")
+			fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: &pvc}
 		}), pvc},
 		// A-22, MysqlBackup
 		{"backup failoverGroupRef", e6Backup(nil), e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.FailoverGroupRef.Name = "tiger" }), groupRef},
@@ -663,6 +683,107 @@ func TestE6_BackupPVCUnion(t *testing.T) {
 	} {
 		if err := create(name, pvc); err != nil {
 			t.Fatalf("%s refused: %v", name, err)
+		}
+	}
+}
+
+// TestE6_ProvisionedAcrossStorageTypeSwitch is R04 across storage.type:
+// the PVC to S3 to PVC round trip cannot carry a provisioned profile to new
+// class or size values, because its first step is refused. A claimName
+// profile may switch backends freely, and a provisioned profile under a new
+// name is a new claim and is admitted.
+func TestE6_ProvisionedAcrossStorageTypeSwitch(t *testing.T) {
+	ns := createNamespace(t, "e6-pvc-switch")
+	const pvcMsg = "pvc.provisioned is immutable"
+	update := func(name string, f func(*v1alpha1.MysqlFailoverGroup)) error {
+		var fg v1alpha1.MysqlFailoverGroup
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &fg); err != nil {
+			t.Fatal(err)
+		}
+		f(&fg)
+		return k8sClient.Update(ctx, &fg)
+	}
+	toS3 := func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage = e6S3Storage() }
+	toPVC := func(pvc v1alpha1.PVCStorage) func(*v1alpha1.MysqlFailoverGroup) {
+		return func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: pvc.DeepCopy()}
+		}
+	}
+
+	if err := k8sClient.Create(ctx, e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi")))(ns, "owned")); err != nil {
+		t.Fatal(err)
+	}
+	e4WantInvalid(t, "provisioned profile to S3", update("owned", toS3), pvcMsg)
+	e4WantInvalid(t, "provisioned profile to claimName", update("owned", toPVC(v1alpha1.PVCStorage{ClaimName: "backups"})), pvcMsg)
+	if err := update("owned", func(fg *v1alpha1.MysqlFailoverGroup) {
+		fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, v1alpha1.BackupProfile{Name: "local-2",
+			Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: new(e6Provisioned("slow", "20Gi"))}})
+	}); err != nil {
+		t.Fatalf("a provisioned profile under a new name refused: %v", err)
+	}
+
+	if err := k8sClient.Create(ctx, e6FG(e6WithPVCProfile(v1alpha1.PVCStorage{ClaimName: "backups"}))(ns, "claim")); err != nil {
+		t.Fatal(err)
+	}
+	if err := update("claim", toS3); err != nil {
+		t.Fatalf("claimName profile to S3 refused: %v", err)
+	}
+	e4WantInvalid(t, "S3 profile to provisioned", update("claim", toPVC(e6Provisioned("slow", "20Gi"))), pvcMsg)
+	if err := update("claim", toPVC(v1alpha1.PVCStorage{ClaimName: "other"})); err != nil {
+		t.Fatalf("S3 profile back to a claimName refused: %v", err)
+	}
+}
+
+// TestE6_ZoneAndStorageClassGrammar: the immutable zone and both
+// storageClassName fields admit only what the derived object accepts (a
+// nodeSelector label value; a PVC storageClassName, a DNS-1123 subdomain),
+// so a typo is refused at creation instead of wedging a group whose
+// fields can no longer be corrected.
+func TestE6_ZoneAndStorageClassGrammar(t *testing.T) {
+	ns := createNamespace(t, "e6-grammar")
+	n := 0
+	create := func(mutate func(*v1alpha1.MysqlFailoverGroup)) error {
+		n++
+		return k8sClient.Create(ctx, e6FG(mutate)(ns, fmt.Sprintf("g%d", n)))
+	}
+	zone := func(z string) func(*v1alpha1.MysqlFailoverGroup) {
+		return func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Zone = z }
+	}
+	siteClass := func(c string) func(*v1alpha1.MysqlFailoverGroup) {
+		return func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.StorageClassName = c }
+	}
+	backupClass := func(c string) func(*v1alpha1.MysqlFailoverGroup) {
+		return e6WithPVCProfile(e6Provisioned(c, "10Gi"))
+	}
+	for _, tc := range []struct {
+		what     string
+		mutate   func(*v1alpha1.MysqlFailoverGroup)
+		fragment string
+	}{
+		{"zone with spaces", zone("us east 1"), "spec.sites[0].zone"},
+		{"zone with trailing punctuation", zone("us-east-1a-"), "spec.sites[0].zone"},
+		{"zone with leading dot", zone(".us-east-1a"), "spec.sites[0].zone"},
+		{"zone with a slash", zone("region/us-east-1a"), "spec.sites[0].zone"},
+		{"site class uppercase and underscore", siteClass("Fast_SSD"), "spec.sites[0].storage.storageClassName"},
+		{"site class with trailing dot", siteClass("fast."), "spec.sites[0].storage.storageClassName"},
+		{"site class with a space", siteClass("fast ssd"), "spec.sites[0].storage.storageClassName"},
+		{"provisioned class uppercase and underscore", backupClass("Fast_SSD"), "spec.backup.profiles[0].storage.pvc.provisioned.storageClassName"},
+		{"provisioned class with trailing hyphen", backupClass("fast-"), "spec.backup.profiles[0].storage.pvc.provisioned.storageClassName"},
+	} {
+		e4WantInvalid(t, tc.what, create(tc.mutate), tc.fragment)
+	}
+	for _, tc := range []struct {
+		what   string
+		mutate func(*v1alpha1.MysqlFailoverGroup)
+	}{
+		{"zone us-east-1a", zone("us-east-1a")},
+		{"zone with dots, underscores and capitals", zone("EU_West.1a")},
+		{"zone of 63 characters", zone(strings.Repeat("z", 63))},
+		{"site class with dots", siteClass("fast-ssd.storage.example.com")},
+		{"provisioned class", backupClass("ebs.gp3")},
+	} {
+		if err := create(tc.mutate); err != nil {
+			t.Fatalf("%s refused: %v", tc.what, err)
 		}
 	}
 }

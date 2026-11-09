@@ -8,31 +8,35 @@ failover, split-brain, and recovery paths and are not repeated here.
 
 ## Prerequisites
 
-1. k3d cluster, operator image, and dashboard already deployed per
+1. A k3d cluster with at least three worker nodes (scenario 8 needs a
+   fourth), and the images built, as described in the header of
    `playground/setup.sh`.
-2. Label a node for the `fra` site. In a three-worker k3d cluster, use
-   the third worker; in a smaller lab, reuse a worker node intentionally.
+2. A fresh group created from the 3-site manifest. Sites cannot be removed
+   or renamed, so `failovergroup-3site.yaml` (`iad`, `pdx`, `fra`) cannot be
+   applied over the default group (`iad`, `pdx`, `reader`): admission
+   refuses dropping `reader`. Choose the topology when the group is
+   created:
    ```bash
-   kubectl label node <fra-node> topology.kubernetes.io/zone=zone-fra --overwrite
-   kubectl label node <fra-node> bloodraven.shipstream.io/failover-group.playground=true --overwrite
-   kubectl label node <fra-node> bloodraven.shipstream.io/site.playground=fra --overwrite
-   ```
-3. Swap the default 2-site manifest for the 3-site variant:
-   ```bash
+   ./playground/teardown.sh        # only if a playground is already deployed
+   BLOODRAVEN_SETUP_TOPOLOGY=3site ./playground/setup.sh
    NS=bloodraven-playground
-   kubectl -n $NS apply -f playground/manifests/failovergroup-3site.yaml
    ```
-   The variant declares three sites: `iad` and `pdx` as
-   `PrimaryCandidate`, `fra` as `DisasterRecovery`, with
-   `spec.splitBrainPolicy.sitePriorities: [iad, pdx]`.
-4. Wait for initial bootstrap to finish. Expected healthy state:
+   `setup.sh` labels the third worker for `fra` (`zone-fra` and the
+   playground's group and site labels) and creates the group from
+   `playground/manifests/failovergroup-3site.yaml`. The variant declares
+   three sites: `iad` and `pdx` as `PrimaryCandidate`, `fra` as
+   `DisasterRecovery`, with `spec.splitBrainPolicy.sitePriorities: [iad, pdx]`.
+   `setup.sh` refuses to run over a group whose sites differ from the
+   topology it was asked for; switching topology always means
+   `teardown.sh` first.
+3. Wait for initial bootstrap to finish. Expected healthy state:
    ```
    kubectl -n $NS get mfg playground -o wide
    # ACTIVE=iad  READY=True
    kubectl -n $NS get mfg playground -o jsonpath='{.status.sites[*].state}'
    # Writable ReadOnly ReadOnly     (iad, pdx, fra respectively)
    ```
-5. Verify the star topology wired up: both `pdx` and `fra` should be
+4. Verify the star topology wired up: both `pdx` and `fra` should be
    replicating from the `mysql-playground-iad` service.
    ```bash
    for SITE in pdx fra; do
@@ -478,21 +482,31 @@ kubectl -n $NS exec deploy/mysql-playground-fra -c mysql -- \
 ### 8. Scale out: add a DisasterRecovery site to a running cluster
 **Category**: Day-2 expansion | **Risk**: Medium
 
-**Hypothesis**: Starting from the default 2-site manifest, appending
-`fra` with `role: DisasterRecovery` causes the operator to provision the
-Deployment/Service/PVC and auto-clone from the current primary —
-without impact to the existing primary/replica pair.
+**Hypothesis**: Starting from the default group (`iad`, `pdx` and the
+`ReadOnly` `reader`), appending `fra` with `role: DisasterRecovery` causes
+the operator to provision the Deployment/Service/PVC and auto-clone from
+the current primary, without impact on the existing sites.
 
-**Setup**: Start from the 2-site group (not the 3-site one). Sites
-cannot be removed, so applying the 2-site manifest over a 3-site group is
-refused; tear the playground down and set it up again if it runs the
-3-site manifest:
+**Setup**: Start from a fresh default group, not the 3-site one. Sites
+cannot be removed, so the default manifest cannot be applied over a 3-site
+group, and a group that already has `fra` cannot run this scenario again.
+Set the playground up again with the default topology unless it already
+runs a default group without `fra`:
 ```bash
-kubectl -n $NS apply -f playground/manifests/failovergroup.yaml
-# Wait for steady-state iad (primary) + pdx (replica).
+./playground/teardown.sh
+./playground/setup.sh
+# Wait for steady-state iad (primary) + pdx and reader (replicas).
+```
+The default group's three sites use the first three workers, so `fra`
+needs a fourth worker node (`k3d node create bloodraven-agent-3 --cluster bloodraven --role agent`):
+```bash
+kubectl label node <fourth-worker> topology.kubernetes.io/zone=zone-fra --overwrite
+kubectl label node <fourth-worker> bloodraven.shipstream.io/failover-group.playground=true --overwrite
+kubectl label node <fourth-worker> bloodraven.shipstream.io/site.playground=fra --overwrite
 ```
 
-**Injection**: Patch in the third site.
+**Injection**: Patch in `fra`. It gets `serverID` 104 because `reader`
+already uses 103 (in `failovergroup-3site.yaml`, `fra` is 103).
 ```bash
 kubectl -n $NS patch mfg playground --type json -p '[
   {"op":"add","path":"/spec/sites/-","value":{
@@ -508,7 +522,7 @@ kubectl -n $NS patch mfg playground --type json -p '[
 ```
 
 **Verify**:
-- `kubectl -n $NS get deployments` shows three deployments within 10s.
+- `kubectl -n $NS get deployment mysql-playground-fra` exists within 10s.
 - Reconciler creates `mysql-playground-fra`, PVC, and the two
   ClusterIP services.
 - Operator triggers auto-clone to populate `fra`'s empty instance. The
@@ -537,35 +551,64 @@ admission: sites cannot be removed or renamed (their names are part of
 Deployment, PVC, Service, archive and keyring names, and no code prunes a
 removed site's resources). The cluster is untouched.
 
-**Injection**:
+**Setup**: Any group that has `fra`: the 3-site group, or the default
+group after scenario 8. `fra`'s position in `spec.sites` differs between
+them, so find it by name, and record the site lists:
 ```bash
-kubectl -n $NS patch mfg playground --type json \
-  -p '[{"op":"remove","path":"/spec/sites/2"}]'
+FRA=$(kubectl -n $NS get mfg playground -o json | jq '.spec.sites | map(.name) | index("fra")')
+SPEC_BEFORE=$(kubectl -n $NS get mfg playground -o jsonpath='{.spec.sites[*].name}')
+STATUS_BEFORE=$(kubectl -n $NS get mfg playground -o jsonpath='{.status.sites[*].name}')
+echo "fra is spec.sites[$FRA] of: $SPEC_BEFORE"
+```
+
+**Injection**: The `test` operation makes the patch fail outright if the
+index does not name `fra`.
+```bash
+kubectl -n $NS patch mfg playground --type json -p "[
+  {\"op\":\"test\",\"path\":\"/spec/sites/$FRA/name\",\"value\":\"fra\"},
+  {\"op\":\"remove\",\"path\":\"/spec/sites/$FRA\"}
+]"
 ```
 
 **Verify**:
 - The patch fails with `spec.sites cannot be removed or renamed; see the
-  site-replacement procedure`.
-- `kubectl -n $NS get deployment mysql-playground-fra` still exists, and
-  `status.sites[]` still has three entries.
-- Renaming a site (`{"op":"replace","path":"/spec/sites/2/name","value":"fra2"}`)
-  is refused with the same message.
+  site-replacement procedure (Operations > Replacing a site)`.
+- `kubectl -n $NS get deployment mysql-playground-fra` still exists.
+- The site lists are unchanged:
+  ```bash
+  [[ "$(kubectl -n $NS get mfg playground -o jsonpath='{.spec.sites[*].name}')" == "$SPEC_BEFORE" ]] && echo spec unchanged
+  [[ "$(kubectl -n $NS get mfg playground -o jsonpath='{.status.sites[*].name}')" == "$STATUS_BEFORE" ]] && echo status unchanged
+  ```
+- Renaming the site is refused with the same message:
+  ```bash
+  kubectl -n $NS patch mfg playground --type json -p "[
+    {\"op\":\"test\",\"path\":\"/spec/sites/$FRA/name\",\"value\":\"fra\"},
+    {\"op\":\"replace\",\"path\":\"/spec/sites/$FRA/name\",\"value\":\"fra2\"}
+  ]"
+  ```
 
 **To drop a site**: replace the group with a new one restored from a
 backup (site docs: Operations, "Replacing a site"). In the playground,
 `./playground/teardown.sh` and a re-run of `./playground/setup.sh` give a
-fresh 2-site group.
+fresh group of the chosen topology.
 
 ---
 
 ## Execution Plan
 
-1. **Starting state**: the 3-site manifest is applied and `fra` has
-   finished its initial clone (healthy 3-site steady state).
-   Scenarios 1-7 assume this as their entry state.
+1. **Starting state**: a group created from the 3-site manifest (see
+   Prerequisites), with `fra` past its initial clone (healthy 3-site steady
+   state). Scenarios 1-7 assume this as their entry state.
    ```bash
-   kubectl -n bloodraven-playground apply -f playground/manifests/failovergroup-3site.yaml
+   ./playground/teardown.sh        # only if a playground is already deployed
+   BLOODRAVEN_SETUP_TOPOLOGY=3site ./playground/setup.sh
    ```
+   `./playground/reset-mysql.sh` wipes the data but keeps the group and
+   its sites, so it returns a 3-site group to a fresh 3-site state without
+   re-applying the manifest. The chaos runner's `--auto-reset` runs
+   `reset-mysql.sh` and then `setup.sh`: export
+   `BLOODRAVEN_SETUP_TOPOLOGY=3site` before running it against a 3-site
+   group.
 2. **Run 1 (GTID-first picker)** before any other promotion scenario
    — the role-flip setup makes it a self-contained test, and verifying
    the picker early prevents confused state in later scenarios.
@@ -578,9 +621,10 @@ fresh 2-site group.
    NetworkPolicy side effects are the fiddliest part of this doc.
 6. **Run 7 (PVC wipe on fra)** last among the in-place scenarios; it
    re-exercises the bootstrap path end-to-end.
-7. **Scale tests (8 and 9)** are independent of the others and safe
-   to run at any point, but should start from the 2-site manifest
-   (see scenario 8 setup).
-8. **After everything**: `./playground/teardown.sh` or
-   `./playground/reset-mysql.sh` + re-apply `failovergroup-3site.yaml`
-   to leave the environment clean.
+7. **Scale tests (8 and 9)** run last. Scenario 8 needs a fresh default
+   group (`teardown.sh` + `setup.sh`, see its setup) and a fourth worker;
+   scenario 9 runs on any group that has `fra`, including the 3-site group
+   before the teardown or the default group after scenario 8.
+8. **After everything**: `./playground/teardown.sh`, then `./playground/setup.sh`
+   for the default topology, to leave the environment clean. A group that
+   gained `fra` in scenario 8 cannot go back to either manifest in place.

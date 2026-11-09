@@ -500,7 +500,19 @@ const (
 
 // BackupStorage is a tagged union. Exactly one of S3 or PVC must be set
 // and must match the Type discriminator.
+//
+// pvc.provisioned is applied only when the operator creates the profile's
+// claim, so it is immutable for as long as the profile is in
+// spec.backup.profiles (R04, A-18). The rule sits here, not on PVCStorage,
+// so that it compares the profile's old and new storage even when one side
+// has no pvc: switching a provisioned profile to S3 and back, or an S3 or
+// claimName profile to provisioned, is refused like an edit inside pvc.
+// The profile list is a map keyed by name, so a profile added under a new
+// name has no old value and is admitted. Removing a profile and adding it
+// back under the same name in a later update is not visible here; the
+// controller refuses that profile's backups with BackupStorageMismatch.
 // +kubebuilder:validation:XValidation:rule="(self.type == 'S3' && has(self.s3) && !has(self.pvc)) || (self.type == 'PVC' && has(self.pvc) && !has(self.s3))",message="exactly one of s3 or pvc must be set and must match type"
+// +kubebuilder:validation:XValidation:rule="(has(self.pvc) && has(self.pvc.provisioned)) == (has(oldSelf.pvc) && has(oldSelf.pvc.provisioned)) && (!has(self.pvc) || !has(self.pvc.provisioned) || (has(self.pvc.provisioned.storageClassName) == has(oldSelf.pvc.provisioned.storageClassName) && (!has(self.pvc.provisioned.storageClassName) || self.pvc.provisioned.storageClassName == oldSelf.pvc.provisioned.storageClassName) && quantity(self.pvc.provisioned.size).compareTo(quantity(oldSelf.pvc.provisioned.size)) == 0))",message="pvc.provisioned is immutable and cannot be added or removed, also by changing storage.type: the operator applies it only when it creates the claim; add a profile under a new name for other values"
 type BackupStorage struct {
 	// Type is the storage backend discriminator.
 	// +required
@@ -570,7 +582,6 @@ type S3Storage struct {
 // either an existing claim (ClaimName) or a claim the operator provisions
 // and owns, named "mysql-<fg>-backup-<profile>" (Provisioned).
 // +kubebuilder:validation:XValidation:rule="has(self.claimName) != has(self.provisioned)",message="exactly one of claimName or provisioned must be set"
-// +kubebuilder:validation:XValidation:rule="has(self.provisioned) == has(oldSelf.provisioned) && (!has(self.provisioned) || (has(self.provisioned.storageClassName) == has(oldSelf.provisioned.storageClassName) && (!has(self.provisioned.storageClassName) || self.provisioned.storageClassName == oldSelf.provisioned.storageClassName) && quantity(self.provisioned.size).compareTo(quantity(oldSelf.provisioned.size)) == 0))",message="pvc.provisioned is immutable and cannot be added or removed: the operator applies it only when it creates the claim"
 type PVCStorage struct {
 	// ClaimName is the name of an existing PVC to use. Exactly one of
 	// ClaimName and Provisioned is set.
@@ -600,10 +611,12 @@ type PVCStorage struct {
 // ProvisionedVolumeSpec is a volume the operator provisions: a claim of
 // Size, of class StorageClassName.
 type ProvisionedVolumeSpec struct {
-	// StorageClassName is the StorageClass of the claim. Unset uses the
-	// cluster's default StorageClass.
+	// StorageClassName is the StorageClass of the claim, a DNS-1123
+	// subdomain as the PVC requires. Unset uses the cluster's default
+	// StorageClass.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty"`
 

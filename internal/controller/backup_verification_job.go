@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -619,6 +620,10 @@ func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrRep
 	}
 	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", in.ExcludeGtids)
 	if err != nil {
+		var tooLong *excludeGtidsTooLongError
+		if errors.As(err, &tooLong) {
+			return nil, fmt.Errorf("%w; create a new MysqlBackupVerification that excludes fewer GTIDs", err)
+		}
 		return nil, err
 	}
 	req.ExcludeGtids = exclude

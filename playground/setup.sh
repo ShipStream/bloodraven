@@ -14,6 +14,10 @@
 #     are installed.
 #     Set BLOODRAVEN_SETUP_TLS=1 to configure MySQL and the keyring
 #     escrow listener with TLS before the failover group is created.
+#     Set BLOODRAVEN_SETUP_TOPOLOGY=3site to create the group from
+#     manifests/failovergroup-3site.yaml (iad, pdx, fra) instead of
+#     manifests/failovergroup.yaml (iad, pdx, reader). Sites cannot be
+#     removed, so switching topology needs ./playground/teardown.sh first.
 #
 # Cluster setup (do once, before running this script):
 #
@@ -48,8 +52,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAMESPACE="bloodraven-playground"
-SITE_NAMES=(iad pdx reader)
-SITE_ZONES=(zone-iad zone-pdx zone-reader)
+case "${BLOODRAVEN_SETUP_TOPOLOGY:-default}" in
+  default)
+    FAILOVERGROUP_MANIFEST="$SCRIPT_DIR/manifests/failovergroup.yaml"
+    SITE_NAMES=(iad pdx reader)
+    SITE_ZONES=(zone-iad zone-pdx zone-reader)
+    ;;
+  3site)
+    FAILOVERGROUP_MANIFEST="$SCRIPT_DIR/manifests/failovergroup-3site.yaml"
+    SITE_NAMES=(iad pdx fra)
+    SITE_ZONES=(zone-iad zone-pdx zone-fra)
+    ;;
+  *)
+    echo "BLOODRAVEN_SETUP_TOPOLOGY must be default or 3site, got '${BLOODRAVEN_SETUP_TOPOLOGY}'" >&2
+    exit 1
+    ;;
+esac
 EXPECTED_SITE_COUNT=${#SITE_NAMES[@]}
 
 info()  { echo -e "\033[1;34m==>\033[0m $*"; }
@@ -146,7 +164,7 @@ for i in "${!SITE_NAMES[@]}"; do
   kubectl label node "${WORKERS[$i]}" bloodraven.shipstream.io/failover-group.playground=true --overwrite
   kubectl label node "${WORKERS[$i]}" "bloodraven.shipstream.io/site.playground=${SITE_NAMES[$i]}" --overwrite
 done
-ok "Nodes labeled: ${WORKERS[0]}=iad, ${WORKERS[1]}=pdx, ${WORKERS[2]}=reader"
+ok "Nodes labeled: ${WORKERS[0]}=${SITE_NAMES[0]}, ${WORKERS[1]}=${SITE_NAMES[1]}, ${WORKERS[2]}=${SITE_NAMES[2]}"
 
 # ── 3. Build images ──────────────────────────────────────────────────────
 if [[ -n "${SKIP_IMAGE_BUILD:-}" ]]; then
@@ -339,6 +357,10 @@ ok "Operator deployed"
 # MySQL TLS must be present on the first observed generation. Adding it
 # later would make old pods and freshly rendered configuration disagree
 # about their connection contract during an ordered rollout.
+EXISTING_SITES=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground -o jsonpath='{.spec.sites[*].name}' 2>/dev/null || true)
+if [[ -n "$EXISTING_SITES" && "$EXISTING_SITES" != "${SITE_NAMES[*]}" ]]; then
+  fail "MysqlFailoverGroup playground has sites '$EXISTING_SITES', not '${SITE_NAMES[*]}'. Sites cannot be removed or renamed: run ./playground/teardown.sh, then this script again (BLOODRAVEN_SETUP_TOPOLOGY selects the topology)."
+fi
 info "Creating MysqlFailoverGroup CR..."
 if [[ "$SETUP_TLS" == "true" ]]; then
   {
@@ -347,10 +369,10 @@ if [[ "$SETUP_TLS" == "true" ]]; then
       if [[ "$line" == "    operatorSecretName: mysql-credentials" ]]; then
         printf '  tls:\n    secretName: mysql-playground-tls\n'
       fi
-    done <"$SCRIPT_DIR/manifests/failovergroup.yaml"
+    done <"$FAILOVERGROUP_MANIFEST"
   } | kubectl apply -f -
 else
-  kubectl apply -f "$SCRIPT_DIR/manifests/failovergroup.yaml"
+  kubectl apply -f "$FAILOVERGROUP_MANIFEST"
 fi
 
 info "Seeding DNSEndpoint CR (so external-dns chain works immediately)..."
@@ -530,7 +552,7 @@ fi
 echo "  Chaos monkey:"
 echo "    ./playground/chaos.sh kill-site iad"
 echo "    ./playground/chaos.sh kill-site pdx"
-echo "    ./playground/chaos.sh kill-site reader"
+echo "    ./playground/chaos.sh kill-site ${SITE_NAMES[2]}"
 echo "    ./playground/chaos.sh cordon iad"
 echo "    ./playground/chaos.sh network-partition iad"
 echo "    ./playground/chaos.sh kill-dragonfly iad"

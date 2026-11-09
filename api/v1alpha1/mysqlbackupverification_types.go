@@ -8,7 +8,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=mbv;mbvs,categories=bloodraven;mysql;backup
+// +kubebuilder:resource:shortName=mbv;mbvs,categories=bloodraven;mysql
 // +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.failoverGroupRef.name`
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profileName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`

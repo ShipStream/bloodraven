@@ -25,7 +25,12 @@ type s3CredentialRef struct {
 	secret string
 }
 
-// s3CredentialRefs lists the S3 credentialsSecretName references on fg's spec.
+// s3CredentialRefs lists the S3 credentialsSecretName references on fg's
+// spec that a Job can still read. spec.initFromBackup is fixed at creation,
+// so its Secret stays named after the bootstrap restore has succeeded; no
+// Job reads it again then (reconcileRestoreJob returns early), and it is
+// left out so that retiring the import Secret does not report the group's
+// live credentials as incomplete.
 func s3CredentialRefs(fg *v1alpha1.MysqlFailoverGroup) []s3CredentialRef {
 	var refs []s3CredentialRef
 	if fg.Spec.Backup != nil {
@@ -38,13 +43,19 @@ func s3CredentialRefs(fg *v1alpha1.MysqlFailoverGroup) []s3CredentialRef {
 			}
 		}
 	}
-	if in := fg.Spec.InitFromBackup; in != nil && in.Source.S3 != nil {
+	if in := fg.Spec.InitFromBackup; in != nil && in.Source.S3 != nil && !initRestoreSucceeded(fg) {
 		refs = append(refs, s3CredentialRef{field: "spec.initFromBackup.source.s3.credentialsSecretName", secret: in.Source.S3.CredentialsSecretName})
 	}
 	if in := fg.Spec.RestoreInPlace; in != nil && in.Source.S3 != nil {
 		refs = append(refs, s3CredentialRef{field: "spec.restoreInPlace.source.s3.credentialsSecretName", secret: in.Source.S3.CredentialsSecretName})
 	}
 	return refs
+}
+
+// initRestoreSucceeded reports whether fg's bootstrap restore has
+// succeeded, after which nothing reads spec.initFromBackup's source.
+func initRestoreSucceeded(fg *v1alpha1.MysqlFailoverGroup) bool {
+	return fg.Status.Restore != nil && fg.Status.Restore.Phase == v1alpha1.BackupPhaseSucceeded
 }
 
 // s3CredentialProblems checks each referenced Secret and returns one

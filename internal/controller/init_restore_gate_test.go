@@ -254,7 +254,7 @@ func TestReconcileRestoreJob_FailedEventCarriesRecovery(t *testing.T) {
 			if !strings.Contains(ev, "RestoreFailed") {
 				continue
 			}
-			for _, want := range []string{"out of service", "no site is cloned", "deleting and recreating the group", "delete the restore Job"} {
+			for _, want := range []string{"out of service", "no site is cloned", "delete the group and create it again", "kubectl delete pvc,pod -l app.kubernetes.io/instance=" + fg.Name + ",app.kubernetes.io/name=mysql -n " + fg.Namespace, "delete the restore Job"} {
 				if !strings.Contains(ev, want) {
 					t.Errorf("RestoreFailed event %q missing %q", ev, want)
 				}

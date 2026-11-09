@@ -65,12 +65,12 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].retention.keepFailed` | integer (int32) |  | `10` | minimum=0 |
 | `spec.backup.profiles[].retention.keepLast` | integer (int32) |  | `7` | minimum=1 |
 | `spec.backup.profiles[].retention.keepWithinDays` | integer (int32) |  |  | minimum=1 |
-| `spec.backup.profiles[].storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))` |
-| `spec.backup.profiles[].storage.pvc` | object |  |  | CEL: `has(self.claimName) != has(self.provisioned)`; CEL(transition): `has(self.provisioned) == has(oldSelf.provisioned) && (!has(self.provisioned) \|\| (has(self.provisioned.storageClassName) == has(oldSelf.provisioned.storageClassName) && (!has(self.provisioned.storageClassName) \|\| self.provisioned.storageClassName == oldSelf.provisioned.storageClassName) && quantity(self.provisioned.size).compareTo(quantity(oldSelf.provisioned.size)) == 0))` |
+| `spec.backup.profiles[].storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))`; CEL(transition): `(has(self.pvc) && has(self.pvc.provisioned)) == (has(oldSelf.pvc) && has(oldSelf.pvc.provisioned)) && (!has(self.pvc) \|\| !has(self.pvc.provisioned) \|\| (has(self.pvc.provisioned.storageClassName) == has(oldSelf.pvc.provisioned.storageClassName) && (!has(self.pvc.provisioned.storageClassName) \|\| self.pvc.provisioned.storageClassName == oldSelf.pvc.provisioned.storageClassName) && quantity(self.pvc.provisioned.size).compareTo(quantity(oldSelf.pvc.provisioned.size)) == 0))` |
+| `spec.backup.profiles[].storage.pvc` | object |  |  | CEL: `has(self.claimName) != has(self.provisioned)` |
 | `spec.backup.profiles[].storage.pvc.claimName` | string |  |  | minLength=1; maxLength=253; CEL: `bytes(self).size() <= 253` |
 | `spec.backup.profiles[].storage.pvc.provisioned` | object |  |  |  |
 | `spec.backup.profiles[].storage.pvc.provisioned.size` | string | yes |  | minLength=1; maxLength=64; pattern=`^(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$`; CEL: `quantity(self).isGreaterThan(quantity('0'))` |
-| `spec.backup.profiles[].storage.pvc.provisioned.storageClassName` | string |  |  | minLength=1; maxLength=253 |
+| `spec.backup.profiles[].storage.pvc.provisioned.storageClassName` | string |  |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
 | `spec.backup.profiles[].storage.pvc.subPath` | string |  |  | maxLength=512; pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.backup.profiles[].storage.s3` | object |  |  |  |
 | `spec.backup.profiles[].storage.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
@@ -266,9 +266,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.sites[].serviceTemplate.type` | string |  |  | enum: `ClusterIP`, `LoadBalancer`, `NodePort` |
 | `spec.sites[].storage` | object | yes |  |  |
 | `spec.sites[].storage.size` | string | yes |  | minLength=1; maxLength=64; pattern=`^(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$`; CEL(transition): `quantity(self).compareTo(quantity(oldSelf)) == 0`; CEL: `quantity(self).isGreaterThan(quantity('0'))` |
-| `spec.sites[].storage.storageClassName` | string | yes |  | minLength=1; maxLength=253; CEL(transition): `self == oldSelf` |
+| `spec.sites[].storage.storageClassName` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`; CEL(transition): `self == oldSelf` |
 | `spec.sites[].taintNodeSelector` | map[string]string |  |  | minProperties=1 |
-| `spec.sites[].zone` | string | yes |  | minLength=1; maxLength=63; CEL(transition): `self == oldSelf` |
+| `spec.sites[].zone` | string | yes |  | minLength=1; maxLength=63; pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`; CEL(transition): `self == oldSelf` |
 | `spec.splitBrainPolicy` | object |  |  |  |
 | `spec.splitBrainPolicy.sitePriorities` | []string |  |  | maxItems=16; listType=atomic; items maxLength=20; items pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`; CEL: `self.all(x, self.filter(y, y == x).size() == 1)` |
 | `spec.terminationGracePeriodSeconds` | integer (int64) |  | `60` | minimum=1 |
@@ -607,7 +607,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 ## MysqlBackup
 
-- Scope: Namespaced; plural `mysqlbackups`; shortNames: `mbk`, `mbks`; categories: bloodraven, mysql, backup
+- Scope: Namespaced; plural `mysqlbackups`; shortNames: `mbk`, `mbks`; categories: bloodraven, mysql
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Started (`.status.startTime`), Completed (`.status.completionTime`), Location (`.status.artifactStorage.location`), Size (`.status.size`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
@@ -629,7 +629,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.sourceSite` | string |  |  | minLength=1; maxLength=20; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 
 
-### MysqlBackup `status` (32 fields)
+### MysqlBackup `status` (33 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -648,6 +648,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.binlogPosition` | object |  |  |  |
 | `status.binlogPosition.file` | string | yes |  | minLength=1; maxLength=512 |
 | `status.binlogPosition.position` | integer (int64) | yes |  | minimum=0 |
+| `status.cleanupStartTime` | string (date-time) |  |  |  |
 | `status.completionTime` | string (date-time) |  |  |  |
 | `status.conditions` | []metav1.Condition |  |  | listType=map keys=type |
 | `status.encryption` | object |  |  |  |
@@ -668,7 +669,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 ## MysqlBackupVerification
 
-- Scope: Namespaced; plural `mysqlbackupverifications`; shortNames: `mbv`, `mbvs`; categories: bloodraven, mysql, backup
+- Scope: Namespaced; plural `mysqlbackupverifications`; shortNames: `mbv`, `mbvs`; categories: bloodraven, mysql
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Backup (`.status.backupRef.name`), Started (`.status.startTime`), Completed (`.status.completionTime`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`

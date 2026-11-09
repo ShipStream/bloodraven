@@ -273,12 +273,17 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return r.failBackup(ctx, &backup, v1alpha1.ReasonProfileReadOnly, why)
 		}
 
-		// An owned claim left by an earlier profile of the same name is
-		// never written with other values than the profile names.
+		// An owned claim left by an earlier profile of the same name, with
+		// another class or a smaller size than the profile names, gets no
+		// new backup Job. Only backup Jobs are refused: a PITR archiver of
+		// the same profile keeps writing to the claim, because stopping it
+		// would open a gap in the archive and the claim still works.
+		// A profile whose pvc names no claim is refused by BuildBackupJob
+		// below (pitrprofile.ClaimFor).
 		expanded := false
-		if profile.Storage.Type == v1alpha1.BackupStoragePVC && profile.Storage.PVC != nil && profile.Storage.PVC.Provisioned != nil {
+		if claim, owned := ownedProfileClaim(fg.Name, profile); owned {
 			var pvc corev1.PersistentVolumeClaim
-			err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ownedBackupPVCName(fg.Name, profile.Name)}, &pvc)
+			err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: claim}, &pvc)
 			switch {
 			case err == nil:
 				refusal, grown := ownedBackupPVCMismatch(profile.Storage.PVC.Provisioned, &pvc)
