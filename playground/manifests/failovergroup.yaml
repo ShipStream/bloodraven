@@ -5,8 +5,8 @@ metadata:
   namespace: bloodraven-playground
 spec:
   image: mysql:9.7
-  sidecarImage: bloodraven-sidecar:playground
-  secretName: mysql-credentials
+  credentials:
+    operatorSecretName: mysql-credentials
   pollInterval: 2s
   failureThreshold: 3
   recoveryThreshold: 2
@@ -15,14 +15,15 @@ spec:
     sitePriorities: [iad, pdx]
   dns:
     hostname: playground-db.example.local
-    ttl: 10
+    ttlSeconds: 10
   sites:
     - name: iad
-      role: primary-candidate
+      serverID: 101
+      role: PrimaryCandidate
       zone: zone-iad
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: iad
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: iad
       lbIP: "10.96.100.10"
       storage:
         storageClassName: playground-fast
@@ -35,11 +36,12 @@ spec:
           cpu: 500m
           memory: 1Gi
     - name: pdx
-      role: primary-candidate
+      serverID: 102
+      role: PrimaryCandidate
       zone: zone-pdx
       taintNodeSelector:
-        shipstream.io/failover-group.playground: "true"
-        shipstream.io/site.playground: pdx
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: pdx
       lbIP: "10.96.100.20"
       storage:
         storageClassName: playground-fast
@@ -52,7 +54,8 @@ spec:
           cpu: 500m
           memory: 1Gi
     - name: reader
-      role: read-only
+      serverID: 103
+      role: ReadOnly
       zone: zone-reader
       mysqlConf:
         max-connections: "150"
@@ -61,7 +64,7 @@ spec:
         externalTrafficPolicy: Local
         nodePort: 30306
         annotations:
-          playground.bloodraven.io/purpose: site-local-reads
+          playground.bloodraven.shipstream.io/purpose: site-local-reads
       storage:
         storageClassName: playground-fast
         size: 1Gi
@@ -87,7 +90,7 @@ spec:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0
     port: 6379
     adminPort: 9999
-    maxMemoryMb: 256
+    maxMemory: 256Mi
     proactorThreads: 1
     plannedFailover:
       maxSyncWait: 30s

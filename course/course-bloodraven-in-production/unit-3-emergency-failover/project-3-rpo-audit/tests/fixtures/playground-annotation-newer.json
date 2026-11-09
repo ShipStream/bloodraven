@@ -22,38 +22,40 @@
       "maxLagSeconds": 30
     },
     "sites": [
-      {"name": "iad", "role": "primary-candidate", "zone": "zone-iad"},
-      {"name": "pdx", "role": "primary-candidate", "zone": "zone-pdx"},
-      {"name": "reader", "role": "read-only", "zone": "zone-reader"}
+      {"name": "iad", "role": "PrimaryCandidate", "zone": "zone-iad"},
+      {"name": "pdx", "role": "PrimaryCandidate", "zone": "zone-pdx"},
+      {"name": "reader", "role": "ReadOnly", "zone": "zone-reader"}
     ]
   },
   "status": {
     "activeSite": "iad",
-    "lastFailover": "2026-05-02T05:17:03Z",
-    "lastFailoverTarget": "pdx",
-    "promotionGtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7",
+    "lastFailover": {
+      "time": "2026-05-02T05:17:03Z",
+      "target": "pdx",
+      "promotionGtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7"
+    },
     "sites": [
       {
         "name": "iad",
-        "state": "writable",
-        "lastSeen": "2026-05-02T05:39:44Z",
+        "state": "Writable",
+        "lastSeenTime": "2026-05-02T05:39:44Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-24,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-12",
-        "replicating": false,
+        "replication": "NotApplicable",
         "sourceConvergenceState": "Converged"
       },
       {
         "name": "pdx",
-        "state": "unreachable",
-        "lastSeen": "2026-05-02T05:34:05Z",
+        "state": "Unreachable",
+        "lastSeenTime": "2026-05-02T05:34:05Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-15",
-        "replicating": false
+        "replication": "Unknown"
       },
       {
         "name": "reader",
-        "state": "read-only",
-        "lastSeen": "2026-05-02T05:39:44Z",
+        "state": "ReadOnly",
+        "lastSeenTime": "2026-05-02T05:39:44Z",
         "gtidExecuted": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-24,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-12",
-        "replicating": true,
+        "replication": "Healthy",
         "secondsBehindSource": 0,
         "sourceHost": "mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local",
         "sourceConvergenceState": "Converged"
@@ -63,7 +65,7 @@
       {
         "type": "Degraded",
         "status": "True",
-        "reason": "Degraded",
+        "reason": "SiteUnhealthy",
         "message": "pdx unreachable while iad is primary",
         "lastTransitionTime": "2026-05-02T05:34:11Z"
       }

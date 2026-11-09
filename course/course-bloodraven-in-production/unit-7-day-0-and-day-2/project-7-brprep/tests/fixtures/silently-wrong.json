@@ -7,19 +7,20 @@
   },
   "spec": {
     "image": "mysql:9",
-    "sidecarImage": "ghcr.io/shipstream/bloodraven-sidecar:1.0.0",
     "credentials": {
-      "operatorSecret": "ledger-operator",
-      "appSecret": "ledger-app",
-      "readOnlySecret": "ledger-readonly",
-      "monitorSecret": "ledger-monitor",
-      "backupSecret": "ledger-backup"
+      "operatorSecretName": "ledger-operator",
+      "appSecretName": "ledger-app",
+      "readOnlySecretName": "ledger-readonly",
+      "monitorSecretName": "ledger-monitor",
+      "backupSecretName": "ledger-backup"
     },
     "dns": {
       "hostname": "ledger-db.example.com",
-      "ttl": 60
+      "ttlSeconds": 60
     },
-    "updateStrategy": "Recreate",
+    "updateStrategy": {
+      "type": "Recreate"
+    },
     "splitBrainPolicy": {
       "sitePriorities": [
         "iad",
@@ -44,14 +45,18 @@
               "size": "500Gi"
             }
           },
-          "retention": 7
+          "retention": {
+            "keepLast": 7,
+            "keepFailed": 10
+          }
         }
       ]
     },
     "sites": [
       {
         "name": "iad",
-        "role": "primary-candidate",
+        "serverID": 101,
+        "role": "PrimaryCandidate",
         "zone": "zone-iad",
         "storage": {
           "storageClassName": "fast-ssd",
@@ -69,13 +74,14 @@
         },
         "lbIP": "10.20.30.11",
         "taintNodeSelector": {
-          "shipstream.io/failover-group.ledger": "true",
-          "shipstream.io/site.ledger": "iad"
+          "bloodraven.shipstream.io/failover-group.ledger": "true",
+          "bloodraven.shipstream.io/site.ledger": "iad"
         }
       },
       {
         "name": "pdx",
-        "role": "primary-candidate",
+        "serverID": 102,
+        "role": "PrimaryCandidate",
         "zone": "zone-pdx",
         "storage": {
           "storageClassName": "fast-ssd",
@@ -93,13 +99,14 @@
         },
         "lbIP": "10.20.30.12",
         "taintNodeSelector": {
-          "shipstream.io/failover-group.ledger": "true",
-          "shipstream.io/site.ledger": "pdx"
+          "bloodraven.shipstream.io/failover-group.ledger": "true",
+          "bloodraven.shipstream.io/site.ledger": "pdx"
         }
       },
       {
         "name": "reader",
-        "role": "read-only",
+        "serverID": 103,
+        "role": "ReadOnly",
         "zone": "zone-reader",
         "storage": {
           "storageClassName": "fast-ssd",

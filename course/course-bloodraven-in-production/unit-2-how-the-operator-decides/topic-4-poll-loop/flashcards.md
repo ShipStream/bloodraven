@@ -11,19 +11,19 @@
 
 **Front:** `spec.failureThreshold` — what it counts, and its default
 
-**Back:** Consecutive failed probes before a site becomes `unreachable`. Default 3 — and one successful probe resets `failCount` to 0, so they must be consecutive.
+**Back:** Consecutive failed probes before a site becomes `Unreachable`. Default 3 — and one successful probe resets `failCount` to 0, so they must be consecutive.
 
 ---
 
 **Front:** `spec.recoveryThreshold` — which transition it gates, and its default
 
-**Back:** Only the transition **to** `writable`: that many consecutive `read_only=0` answers. Default 2.
+**Back:** Only the transition **to** `Writable`: that many consecutive `read_only=0` answers. Default 2.
 
 ---
 
 **Front:** You need a dead primary noticed faster. Which of `failureThreshold` and `recoveryThreshold` do you touch?
 
-**Back:** `failureThreshold` — it is the only one of the two in the detection-delay sum. `recoveryThreshold` gates the opposite transition, back to `writable`.
+**Back:** `failureThreshold` — it is the only one of the two in the detection-delay sum. `recoveryThreshold` gates the opposite transition, back to `Writable`.
 
 ---
 

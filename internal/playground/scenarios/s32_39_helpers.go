@@ -113,6 +113,54 @@ func setSourceDelay(ctx context.Context, c *pgmysql.SiteClient, seconds int) err
 	return nil
 }
 
+// waitOperatorSeesReplicating waits until the group status has reported
+// site's replication as running (Healthy or Lagging) for stable without a
+// break. setSourceDelay stops and restarts replication; a topology poll
+// that lands in that window publishes the site as not running, and the
+// debounced healthy streak keeps it so for a few more polls. A planned
+// failover annotated meanwhile is refused at admission (TargetUnhealthy)
+// instead of reaching the state the scenario drives. Holding for longer
+// than a poll interval and the streak means no poll from the stopped
+// window is still to be published.
+func waitOperatorSeesReplicating(ctx context.Context, env *runner.Env, site string, stable, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var since time.Time
+	var last string
+	for {
+		mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+		running := false
+		switch {
+		case err != nil:
+			last = err.Error()
+		default:
+			last = fmt.Sprintf("site %s not in status.sites", site)
+			for _, s := range mfg.Status.Sites {
+				if s.Name == site {
+					running = s.Replication.Running()
+					last = fmt.Sprintf("site %s replication=%s", site, s.Replication)
+				}
+			}
+		}
+		now := time.Now()
+		if !running {
+			since = time.Time{}
+		} else if since.IsZero() {
+			since = now
+		}
+		if running && now.Sub(since) >= stable {
+			return nil
+		}
+		if now.After(deadline) {
+			return fmt.Errorf("the operator did not report site %s replicating for %s within %s (last: %s)", site, stable, timeout, last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
 // clearSourceDelay resets SOURCE_DELAY to 0 and restarts replication.
 func clearSourceDelay(ctx context.Context, c *pgmysql.SiteClient) error {
 	return setSourceDelay(ctx, c, 0)

@@ -158,8 +158,8 @@ func openPrimaryDB(dsn string) (*sql.DB, error) {
 //
 // The clone pool must NOT carry socket read/write deadlines: CLONE INSTANCE is a
 // single statement that legitimately blocks for minutes, so any ReadTimeout /
-// WriteTimeout inherited from a caller-supplied DSN (credentials mode never sets
-// them, but a raw `dsn` secret could) is stripped. The initial dial must still
+// WriteTimeout inherited from a caller-supplied DSN (the operator's own DSNs
+// never set them) is stripped. The initial dial must still
 // be bounded so an unreachable host fails fast instead of wedging bootstrap, so
 // an explicit caller dial timeout is preserved and a default supplied when the
 // DSN sets none.

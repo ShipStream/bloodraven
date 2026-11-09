@@ -1060,7 +1060,7 @@ func (p *runnerPlannedTopology) ApplyDNS(ctx context.Context, ref PlannedRunRef)
 // could not be confirmed as lastFailoverTarget in the manager's memory only
 // (OPEN-1): no lastFailover and no promotedSite, so emergency failover to
 // the fenced source is not cooldown-blocked. The name reaches
-// status.lastFailoverTarget through the next snapshot write.
+// status.lastFailover.target through the next snapshot write.
 func (p *runnerPlannedTopology) NameUnconfirmedTarget(ref PlannedRunRef) error {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
@@ -1081,7 +1081,7 @@ func (tm *TopologyManager) namePlannedTargetUnconfirmed(target string) {
 	// The retry replays statusRetrySnapshot, which refreshes the failover
 	// record only after a topology-generation bump; a name-only target (no
 	// generation bump when read_only=OFF was never sent) must reach
-	// status.lastFailoverTarget all the same.
+	// status.lastFailover.target all the same.
 	if tm.statusRetrySnapshot != nil {
 		snap := *tm.statusRetrySnapshot
 		snap.LastFailoverTarget = target
@@ -1826,7 +1826,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		// manager) is not re-proven, so the target's role is checked here
 		// before any statement, and again at the pre-write gate.
 		tm.logger.Warn("planned failover: the target is no longer a primary candidate; not promoting it",
-			"runId", ref.RunID, "site", ref.Target, "role", string(tgt.role))
+			"runId", ref.RunID, "site", ref.Target, "role", string(APISiteRole(tgt.role)))
 		return PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonTargetNotPromotable,
 			TargetServerUUID: U, TargetReachable: true, MayHaveWritten: !p.memoProvesNoWrite(ref.RunID)}, nil
 	}
@@ -1924,7 +1924,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 			var refusal *plannedGateRefusal
 			if errors.As(err, &refusal) {
 				tm.logger.Warn("planned failover: the target is no longer a primary candidate; not promoting it",
-					"runId", ref.RunID, "site", ref.Target, "role", string(tgt.role))
+					"runId", ref.RunID, "site", ref.Target, "role", string(APISiteRole(tgt.role)))
 			}
 			return err
 		},

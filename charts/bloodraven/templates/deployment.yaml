@@ -90,9 +90,14 @@ spec:
             # same binary.
             - name: BLOODRAVEN_OPERATOR_IMAGE
               value: {{ include "bloodraven.image" . | quote }}
-            # Default operator auxiliary address injected into MySQL sidecars
-            # when spec.sidecar.bloodravenAddress is not set.
-            - name: BLOODRAVEN_DEFAULT_AUXILIARY_ADDRESS
+            # Sidecar image for failover groups that leave
+            # spec.sidecar.image empty (sidecar.image.repository and
+            # sidecar.image.tag).
+            - name: BLOODRAVEN_SIDECAR_IMAGE
+              value: {{ include "bloodraven.sidecarImage" . | quote }}
+            # Default operator auxiliary endpoint injected into MySQL sidecars
+            # when spec.sidecar.operatorEndpoint is not set.
+            - name: BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT
               value: {{ printf "%s.%s.svc.cluster.local:%v" (include "bloodraven.auxiliaryServiceName" .) .Release.Namespace (.Values.auxiliary.service.port | int) | quote }}
             {{- if .Values.auxiliary.escrowTLS.enabled }}
             - name: BLOODRAVEN_DEFAULT_ESCROW_URL

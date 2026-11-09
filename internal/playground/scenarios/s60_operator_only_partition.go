@@ -126,7 +126,7 @@ func scenario60OperatorOnlyPartition() runner.Scenario {
 						return err
 					}
 					env.Capture.Note(fmt.Sprintf("during partition: activeSite=%q lastFailoverTarget=%q; %s",
-						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, st.writer.summary()))
+						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), st.writer.summary()))
 					return nil
 				},
 			},
@@ -148,7 +148,7 @@ func scenario60OperatorOnlyPartition() runner.Scenario {
 						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 							var blocked []string
 							for _, s := range mfg.Status.Sites {
-								if s.RecoveryState == "RecoveryBlocked" || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
+								if s.RecoveryState == v1alpha1.RecoveryStateBlocked || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
 									blocked = append(blocked, s.Name)
 								}
 							}
@@ -167,7 +167,7 @@ func scenario60OperatorOnlyPartition() runner.Scenario {
 					}
 					var blocked []string
 					for _, s := range mfg.Status.Sites {
-						if s.RecoveryState == "RecoveryBlocked" || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}

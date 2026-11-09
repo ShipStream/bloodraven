@@ -8,8 +8,8 @@
 #
 #   - no rule for `secrets` in any verb, so the caller cannot read the owner
 #     password it writes, nor the group's operator credential;
-#   - no rule for `mysqlfailovergroups`, so the caller cannot read the DSN,
-#     the credential secret names, or the topology;
+#   - no rule for `mysqlfailovergroups`, so the caller cannot read the
+#     credential secret names or the topology;
 #   - no MySQL credential of any kind, because Bloodraven holds the only one.
 #
 # A caller bound to this Role can provision a tenant database, its owning

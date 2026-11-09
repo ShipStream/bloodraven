@@ -36,7 +36,7 @@
       "orderIndex": 6
     },
     {
-      "front": "status.promotionGtidExecuted — where does its value come from?",
+      "front": "status.lastFailover.promotionGtidExecuted — where does its value come from?",
       "back": "SELECT @@global.gtid_executed run on the candidate at promotion, before it accepts any write.",
       "orderIndex": 7
     },
@@ -83,7 +83,7 @@
       "explanation": "The reversal: Bloodraven promotes it anyway. maxLagSeconds drives exactly one thing — the ReplicationLagging reason on the Degraded condition — and nothing in candidate selection consults it, because no writable site at all is almost always worse than a stale one. The practical consequence is the point: if you believe maxLagSeconds bounds your RPO, your RPO is whatever the lag happened to be when the primary died. A true GTID-superset test is what actually bounds loss, and that gate belongs to the planned path. (objective 4)"
     },
     {
-      "question": "You hold the old primary's gtid_executed set (O) and the value recorded in status.promotionGtidExecuted for the new primary (N). Which expression gives the number of transactions lost?",
+      "question": "You hold the old primary's gtid_executed set (O) and the value recorded in status.lastFailover.promotionGtidExecuted for the new primary (N). Which expression gives the number of transactions lost?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [

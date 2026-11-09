@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,7 +20,7 @@ import (
 func pitrRestoreFG(ns string, pit *v1alpha1.PointInTimeSpec) *v1alpha1.MysqlFailoverGroup {
 	fg := newVerificationFG(ns)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source:      v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}},
+		Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
 		PointInTime: pit,
 	}
 	return fg
@@ -41,7 +40,7 @@ func TestPITRInitFromBackupRequiresArchiveProfile(t *testing.T) {
 	} {
 		ns := fmt.Sprintf("pitr-archive-profile-%d", i)
 		ensureNamespace(t, ns)
-		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ArchiveProfileName: tc.profile}))
+		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)), ArchiveProfileName: tc.profile}))
 		if tc.want == "" {
 			if err != nil {
 				t.Fatalf("%q refused: %v", tc.profile, err)
@@ -64,7 +63,7 @@ func TestPITRInitFromBackupRequiresArchiveProfile(t *testing.T) {
 func TestPITRRemovedFieldsArePruned(t *testing.T) {
 	ns := "pitr-removed-fields"
 	ensureNamespace(t, ns)
-	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ArchiveProfileName: "nightly-s3"})
+	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)), ArchiveProfileName: "nightly-s3"})
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(fg)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +93,7 @@ func TestPITRRemovedFieldsArePruned(t *testing.T) {
 		"apiVersion": v1alpha1.GroupVersion.String(), "kind": "MysqlBackupVerification",
 		"metadata": map[string]any{"name": "verify", "namespace": ns},
 		"spec": map[string]any{"failoverGroupRef": map[string]any{"name": "lion"}, "profileName": "nightly-s3",
-			"pointInTime": map[string]any{"mode": "latest", "sites": []any{"iad"}}},
+			"pointInTime": map[string]any{"mode": string(v1alpha1.PointInTimeModeLatest), "sites": []any{"iad"}}},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -171,7 +170,7 @@ func TestPITRStatusArchiveObservation(t *testing.T) {
 			t.Fatal(err)
 		}
 		obs := tc.obs
-		cur.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ProfileName: "nightly-s3", Archive: &obs}
+		cur.Status.PITR = &v1alpha1.PITRStatus{Archive: &obs}
 		err := k8sClient.Status().Update(ctx, cur)
 		if (err == nil) != tc.ok {
 			t.Fatalf("observation %+v: %v", tc.obs.State, err)
@@ -193,49 +192,36 @@ func TestPITRStatusArchiveObservation(t *testing.T) {
 	}
 }
 
-// §6.1 / A-39: stopDatetime and the verification timestamp accept a whole
-// second only (RFC 3339 or the MySQL form, bounded offset, no fraction);
-// excludeGtids is bounded at 131072 bytes (A-23), and verifications accept
-// it.
-func TestPITRTargetPatternAndExclusions(t *testing.T) {
+// A-23: excludeGtids is bounded at 131072 bytes on both carriers, and
+// verifications accept it. The stopTime pattern is covered by
+// TestEnvtest_StopTimePattern.
+func TestPITRExcludeGtidsBound(t *testing.T) {
+	stop := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	for i, tc := range []struct {
-		stop    string
 		exclude string
 		ok      bool
 	}{
-		{stop: "2030-01-01T00:00:00Z", ok: true},
-		{stop: "2030-01-01 00:00:00", ok: true},
-		{stop: "2030-01-01T02:00:00+02:00", ok: true},
-		{stop: "2030-01-01T02:00:00-23:59", ok: true},
-		{stop: "2030-01-01T00:00:00.123456Z"},
-		{stop: "2030-01-01 00:00:00.5"},
-		{stop: "2030-01-01T02:00:00.000001+02:00"},
-		{stop: "2030-01-01T00:00:00.1234567Z"},
-		{stop: "2030-01-01T00:00:00,5Z"},
-		{stop: "2030-01-01T00:00:00+25:00"},
-		{stop: "2030-01-01T00:00:00+05:99"},
-		{stop: "yesterday"},
-		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 131072), ok: true},
-		{stop: "2030-01-01T00:00:00Z", exclude: strings.Repeat("a", 131073)},
+		{exclude: strings.Repeat("a", 131072), ok: true},
+		{exclude: strings.Repeat("a", 131073)},
 	} {
-		ns := fmt.Sprintf("pitr-target-pattern-%d", i)
+		ns := fmt.Sprintf("pitr-exclude-bound-%d", i)
 		ensureNamespace(t, ns)
-		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: tc.stop, ArchiveProfileName: "nightly-s3", ExcludeGtids: tc.exclude}))
+		err := k8sClient.Create(ctx, pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: stop, ArchiveProfileName: "nightly-s3", ExcludeGtids: tc.exclude}))
 		if (err == nil) != tc.ok {
-			t.Fatalf("restore stop %q exclude %d chars: %v", tc.stop, len(tc.exclude), err)
+			t.Fatalf("restore exclude %d chars: %v", len(tc.exclude), err)
 		}
 		v := &v1alpha1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
 			Spec: v1alpha1.MysqlBackupVerificationSpec{
-				FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
-				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: tc.stop, ExcludeGtids: tc.exclude},
+				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
+				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop, ExcludeGtids: tc.exclude},
 			},
 		}
 		err = k8sClient.Create(ctx, v)
 		if (err == nil) != tc.ok {
-			t.Fatalf("verification timestamp %q exclude %d chars: %v", tc.stop, len(tc.exclude), err)
+			t.Fatalf("verification exclude %d chars: %v", len(tc.exclude), err)
 		}
-		if tc.ok && tc.exclude != "" {
+		if tc.ok {
 			got := &v1alpha1.MysqlBackupVerification{}
 			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "verify"}, got); err != nil {
 				t.Fatal(err)
@@ -243,24 +229,6 @@ func TestPITRTargetPatternAndExclusions(t *testing.T) {
 			if got.Spec.PointInTime.ExcludeGtids != tc.exclude {
 				t.Fatal("verification excludeGtids did not round-trip")
 			}
-		}
-	}
-	// The anchored pattern rejects trailing whitespace.
-	ensureNamespace(t, "pitr-target-pattern-long")
-	if err := k8sClient.Create(ctx, pitrRestoreFG("pitr-target-pattern-long", &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00+02:00" + strings.Repeat(" ", 20), ArchiveProfileName: "nightly-s3"})); err == nil {
-		t.Fatal("stopDatetime with trailing whitespace accepted")
-	}
-	// No string the pattern admits is longer than 25 characters, so the
-	// maxLength of 40 (which bounds the pattern's CEL/regex cost) is never
-	// the deciding rejection; assert the installed schema carries it
-	// (F233).
-	for _, path := range [][]string{
-		{"mysqlfailovergroups.shipstream.io", "spec", "initFromBackup", "pointInTime", "stopDatetime"},
-		{"mysqlbackupverifications.shipstream.io", "spec", "pointInTime", "timestamp"},
-	} {
-		prop := installedSchemaProperty(t, path[0], path[1:]...)
-		if prop.MaxLength == nil || *prop.MaxLength != 40 {
-			t.Fatalf("%s %v: maxLength %v, want 40", path[0], path[1:], prop.MaxLength)
 		}
 	}
 }
@@ -325,12 +293,12 @@ func TestS3PrefixRefusesAmbiguousSegments(t *testing.T) {
 }
 
 func pointInTimeFixture() *v1alpha1.PointInTimeResult {
-	stop := metav1.NewMicroTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	stop := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	newest := metav1.NewMicroTime(time.Date(2029, 12, 31, 23, 59, 59, 654321000, time.UTC))
 	return &v1alpha1.PointInTimeResult{
 		Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop, Outcome: v1alpha1.PointInTimeTargetCovered,
 		Archive: &v1alpha1.PITRArchiveIdentity{ArchiveID: "ar1-abcdefghijklmnopqrstuvwxyz", Destination: "s3://b/p/binlogs?endpoint=aws",
-			Source: v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: "src-uid"}, EncryptionMode: v1alpha1.PITRArchiveEncryptionPassphrase,
+			Source: v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: "src-uid"}, EncryptionMode: v1alpha1.EncryptionModePassphrase,
 			Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM},
 		ReplaySites: []string{"a", "b"}, SegmentCount: 3, ReplayedBinlogCount: 2,
 		LastReplayedBinlog: &v1alpha1.ReplayedBinlogRef{Site: "a", Name: "mysql-bin.000010"}, ReplayedTransactionCount: 1234,
@@ -359,7 +327,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 	ns := "pitr-result-shape"
 	ensureNamespace(t, ns)
 
-	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ArchiveProfileName: "nightly-s3"})
+	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)), ArchiveProfileName: "nightly-s3"})
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +352,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 		}
 		res := pointInTimeFixture()
 		tc.mutate(res)
-		cur.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded, PointInTime: res}
+		cur.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded, Provenance: &v1alpha1.RestoreProvenance{PointInTime: res}}
 		err := k8sClient.Status().Update(ctx, cur)
 		if (err == nil) != tc.ok {
 			t.Fatalf("%s: %v", tc.name, err)
@@ -394,7 +362,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: fg.Name}, got); err != nil {
 		t.Fatal(err)
 	}
-	assertPointInTimeRoundTrip(t, "status.restore", got.Status.Restore.PointInTime)
+	assertPointInTimeRoundTrip(t, "status.restore.provenance", got.Status.Restore.Provenance.PointInTime)
 
 	// The flat pitr* restore fields are gone from the schema.
 	u := &unstructured.Unstructured{}
@@ -418,7 +386,7 @@ func TestPointInTimeResultShape(t *testing.T) {
 	// MBV status.pointInTime.
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: ns},
-		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -434,8 +402,8 @@ func TestPointInTimeResultShape(t *testing.T) {
 	}
 	assertPointInTimeRoundTrip(t, "verification status", gotV.Status.PointInTime)
 
-	// C6: status.activation carries no pointInTime (no activation writes
-	// one, and A-61 deletes status.activation); the apiserver prunes it.
+	// C6: a MysqlStandbyCluster has no status.activation (activation is not
+	// implemented); the apiserver prunes the whole block.
 	msc := minimalEnvtestStandby("standby", ns)
 	if err := k8sClient.Create(ctx, msc); err != nil {
 		t.Fatal(err)
@@ -454,8 +422,8 @@ func TestPointInTimeResultShape(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "standby"}, u); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "activation", "pointInTime"); found {
-		t.Fatal("status.activation.pointInTime survived")
+	if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "status", "activation"); found {
+		t.Fatal("status.activation survived")
 	}
 }
 

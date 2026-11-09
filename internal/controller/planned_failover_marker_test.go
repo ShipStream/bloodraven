@@ -29,10 +29,10 @@ func TestHoldAckLifecycle(t *testing.T) {
 
 	// A new request is refused while the hold stands; the hold run's record
 	// stays.
-	h.setAnnotation(PlannedFailoverAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
 	h.step()
 	fg := h.fg()
-	if _, ok := fg.Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("request kept while a hold stands")
 	}
 	if pf := fg.Status.PlannedFailover; pf.RunID != "run-1" || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
@@ -43,14 +43,14 @@ func TestHoldAckLifecycle(t *testing.T) {
 	}
 
 	// An acknowledgement naming another run is ignored.
-	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-0")
+	h.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-0")
 	h.step()
-	if PlannedHoldFrom(h.fg()) == nil || h.sink.eventCount("PlannedFailoverHoldAcknowledgementIgnored") != 1 {
+	if PlannedHoldFrom(h.fg()) == nil || h.sink.eventCount("PlannedFailoverHoldAcknowledgmentIgnored") != 1 {
 		t.Fatalf("a foreign acknowledgement cleared the hold (events %v)", h.sink.events)
 	}
 
 	// The matching acknowledgement: condition, then slot, then the ack.
-	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-1")
+	h.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-1")
 	h.step()
 	fg = h.fg()
 	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); fg.Status.PlannedFailoverHold != nil ||
@@ -66,7 +66,7 @@ func TestHoldAckLifecycle(t *testing.T) {
 	if held, _ := h.topo.held(); held != "" {
 		t.Errorf("slot still held by %q", held)
 	}
-	if _, ok := fg.Annotations[AcknowledgePlannedFailoverHoldAnnotation]; ok {
+	if _, ok := fg.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Error("acknowledgement not deleted")
 	}
 	if got := h.topo.releasesCopy(); !slices.Equal(got, []string{"run-1:toHold", "run-1:ack"}) {
@@ -84,10 +84,10 @@ func TestHoldAckLifecycle(t *testing.T) {
 // until the marker is gone, and only then is the acknowledgement deleted.
 func TestHoldAck_FailedMarkerDeleteThenRestart(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
-	h.setAnnotation(PlannedFailoverTerminalAnnotation, `{"schemaVersion":1,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"ForeignWritable"}`)
+	h.setAnnotation(v1alpha1.PlannedFailoverTerminalAnnotation, `{"schemaVersion":1,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"ForeignWritable"}`)
 	h.topo.setHeld("run-1", true)
-	h.setAnnotation(AcknowledgePlannedFailoverHoldAnnotation, "run-1")
-	h.faults.denyMetaKey = PlannedFailoverTerminalAnnotation
+	h.setAnnotation(v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, "run-1")
+	h.faults.denyMetaKey = v1alpha1.PlannedFailoverTerminalAnnotation
 
 	h.step() // step 2: the terminal record lands (no condition to remove)
 	fg := h.fg()
@@ -98,7 +98,7 @@ func TestHoldAck_FailedMarkerDeleteThenRestart(t *testing.T) {
 		t.Fatal("the acknowledged pass re-set the hold condition")
 	}
 	h.step() // step 3: the marker delete fails
-	if _, ok := h.fg().Annotations[PlannedFailoverTerminalAnnotation]; !ok {
+	if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverTerminalAnnotation]; !ok {
 		t.Fatal("setup: marker delete should have failed")
 	}
 
@@ -111,7 +111,7 @@ func TestHoldAck_FailedMarkerDeleteThenRestart(t *testing.T) {
 	if held, mode := h.topo.held(); held != "run-1" || !mode {
 		t.Fatalf("slot = %q hold=%v; the hold must stand while the marker does", held, mode)
 	}
-	if _, ok := h.fg().Annotations[AcknowledgePlannedFailoverHoldAnnotation]; !ok {
+	if _, ok := h.fg().Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; !ok {
 		t.Fatal("acknowledgement deleted before the marker")
 	}
 	if plannedFailoverOwnsSites(h.fg()) || plannedFailoverActive(h.fg()) {
@@ -122,10 +122,10 @@ func TestHoldAck_FailedMarkerDeleteThenRestart(t *testing.T) {
 	h.step() // the marker goes
 	h.step() // both records gone: release, then delete the acknowledgement
 	fg = h.fg()
-	if _, ok := fg.Annotations[PlannedFailoverTerminalAnnotation]; ok {
+	if _, ok := fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation]; ok {
 		t.Error("marker kept")
 	}
-	if _, ok := fg.Annotations[AcknowledgePlannedFailoverHoldAnnotation]; ok {
+	if _, ok := fg.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Error("acknowledgement kept")
 	}
 	if held, _ := h.topo.held(); held != "" {

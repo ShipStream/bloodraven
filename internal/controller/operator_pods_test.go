@@ -16,7 +16,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
-	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 // operatorPodsTestImage is a sentinel operator image so the walk below
@@ -46,9 +45,8 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	plainProfile := fg.Spec.Backup.Profiles[1]
 
 	seed := successfulBackup("seed", fg.Name, encProfile.Name)
-	seed.Status.Encrypted = true
+	seed.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	recordTestDumpKey(seed)
-	seed.Status.EncryptionAlgorithm = "AES-256-GCM"
 
 	var pods []renderedPod
 	addJob := func(name string, job *batchv1.Job, err error) {
@@ -62,7 +60,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	for _, p := range []v1alpha1.BackupProfile{encProfile, plainProfile} {
 		mb := &v1alpha1.MysqlBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: "b-" + p.Name, Namespace: fg.Namespace},
-			Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: p.Name},
+			Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: p.Name},
 		}
 		job, err := BuildBackupJob(BackupJobInputs{
 			DumpKeySecretName: testDumpKeySecret,
@@ -75,7 +73,7 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: fg.Namespace},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      encProfile.Name,
 		},
 	}
@@ -87,7 +85,6 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 
 	job, err = buildCleanupJob(cleanupJobInputs{
 		FailoverGroup: fg, Profile: &encProfile, Backup: seed,
-		Storage: &v1alpha1.BackupArtifactStorage{Bucket: "bloodraven-backups"},
 	})
 	addJob("cleanup", job, err)
 
@@ -108,17 +105,17 @@ func renderOperatorPods(t *testing.T) (*v1alpha1.MysqlFailoverGroup, []renderedP
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
-		enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionNone}
+		enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone}
 		if tc.key != "" {
-			enc = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionPassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM, KeySecretName: tc.key}
+			enc = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM, KeySecretName: tc.key}
 		}
 		entry := &v1alpha1.PITRArchiveBinding{ID: pitrBindingID(dest), Destination: dest.String(), Encryption: enc}
 		job, err := buildPITRArchiveCheckJob(checkFG, entry, &pitrBindingTarget{dest: dest, write: tc.write, profile: &tc.profile}, tc.key)
 		addJob(tc.name, job, err)
 	}
 
-	src := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: seed.Name}}
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
+	src := v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: seed.Name}}
+	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, PointInTime: pit}
 	// In-place restores refuse pointInTime, so that variant has no PITR init container.
 	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "c1", Source: src}
@@ -264,14 +261,14 @@ func TestNoBareOperatorBinaryCommand(t *testing.T) {
 // TestOperatorPodsTolerateOwnGroupReadOnlyTaint pins the placement rule:
 // every pod the operator builds for a group survives, and can schedule
 // onto, nodes carrying that group's read-only NoExecute taint, exactly
-// like the group's MySQL pods. Other groups' taints (shared nodes) and
-// the legacy unscoped key stay untolerated.
+// like the group's MySQL pods. Other groups' taints (shared nodes), also
+// a same-name group's in another namespace, stay untolerated.
 func TestOperatorPodsTolerateOwnGroupReadOnlyTaint(t *testing.T) {
 	fg, pods := renderOperatorPods(t)
 
-	own := corev1.Taint{Key: platform.TaintKeyForGroup(fg.Name), Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
-	other := corev1.Taint{Key: platform.TaintKeyForGroup(fg.Name + "-other"), Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
-	legacy := corev1.Taint{Key: platform.LegacyTaintKey, Value: platform.TaintValue, Effect: corev1.TaintEffectNoExecute}
+	own := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Namespace, fg.Name), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
+	other := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Namespace, fg.Name+"-other"), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
+	sameName := corev1.Taint{Key: v1alpha1.ReadOnlyTaintKey(fg.Namespace+"-other", fg.Name), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute}
 
 	if len(pods) != 10 {
 		t.Fatalf("rendered %d pod templates, want 10", len(pods))
@@ -283,8 +280,8 @@ func TestOperatorPodsTolerateOwnGroupReadOnlyTaint(t *testing.T) {
 		if tolerates(p.spec.Tolerations, other) {
 			t.Errorf("%s: tolerates another group's taint %s", p.name, other.Key)
 		}
-		if tolerates(p.spec.Tolerations, legacy) {
-			t.Errorf("%s: tolerates legacy taint %s", p.name, legacy.Key)
+		if tolerates(p.spec.Tolerations, sameName) {
+			t.Errorf("%s: tolerates a same-name group's taint in another namespace %s", p.name, sameName.Key)
 		}
 		if p.spec.NodeSelector != nil || p.spec.Affinity != nil {
 			t.Errorf("%s: unexpected nodeSelector/affinity %v/%v; Jobs reach MySQL via Services and may be pinned by PVC topology", p.name, p.spec.NodeSelector, p.spec.Affinity)

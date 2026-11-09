@@ -2,7 +2,7 @@
 
 These scenarios exercise behaviours that only exist (or only matter)
 when `spec.sites[]` contains more than two entries or when at least one
-site has `role: dr-only`. The 2-site scenarios in
+site has `role: DisasterRecovery`. The 2-site scenarios in
 [`chaos-scenarios.md`](./chaos-scenarios.md) cover the baseline
 failover, split-brain, and recovery paths and are not repeated here.
 
@@ -14,8 +14,8 @@ failover, split-brain, and recovery paths and are not repeated here.
    the third worker; in a smaller lab, reuse a worker node intentionally.
    ```bash
    kubectl label node <fra-node> topology.kubernetes.io/zone=zone-fra --overwrite
-   kubectl label node <fra-node> shipstream.io/failover-group.playground=true --overwrite
-   kubectl label node <fra-node> shipstream.io/site.playground=fra --overwrite
+   kubectl label node <fra-node> bloodraven.shipstream.io/failover-group.playground=true --overwrite
+   kubectl label node <fra-node> bloodraven.shipstream.io/site.playground=fra --overwrite
    ```
 3. Swap the default 2-site manifest for the 3-site variant:
    ```bash
@@ -23,14 +23,14 @@ failover, split-brain, and recovery paths and are not repeated here.
    kubectl -n $NS apply -f playground/manifests/failovergroup-3site.yaml
    ```
    The variant declares three sites: `iad` and `pdx` as
-   `primary-candidate`, `fra` as `dr-only`, with
+   `PrimaryCandidate`, `fra` as `DisasterRecovery`, with
    `spec.splitBrainPolicy.sitePriorities: [iad, pdx]`.
 4. Wait for initial bootstrap to finish. Expected healthy state:
    ```
    kubectl -n $NS get mfg playground -o wide
    # ACTIVE=iad  READY=True
    kubectl -n $NS get mfg playground -o jsonpath='{.status.sites[*].state}'
-   # writable read-only read-only     (iad, pdx, fra respectively)
+   # Writable ReadOnly ReadOnly     (iad, pdx, fra respectively)
    ```
 5. Verify the star topology wired up: both `pdx` and `fra` should be
    replicating from the `mysql-playground-iad` service.
@@ -65,9 +65,9 @@ Key 3-site config: `pollInterval=2s`, `failureThreshold=3`
   picker ranks by GTID freshness first; priority order is a
   tiebreaker. Always check `SHOW REPLICA STATUS` to confirm which
   replica was fresher *before* asserting on which one got promoted.
-- **dr-only sites never receive the `role=primary` pod label.** The
+- **DisasterRecovery sites never receive the `role=primary` pod label.** The
   reconciler's `syncPodLabels` only flips a site to primary when
-  `status.activeSite` matches its name, and a dr-only site cannot
+  `status.activeSite` matches its name, and a DisasterRecovery site cannot
   become the active site through auto-promotion.
 
 ---
@@ -80,12 +80,12 @@ Key 3-site config: `pollInterval=2s`, `failureThreshold=3`
 **Hypothesis**: Failover ranks by GTID freshness before priority.
 Given `sitePriorities: [iad, pdx]` and an `iad`-primary cluster, if
 `pdx` is artificially lagged behind and `iad` dies while `fra` is
-caught up, the picker should still refuse `fra` (dr-only, never
-promoted) — but should pick **the freshest primary-candidate replica
+caught up, the picker should still refuse `fra` (DisasterRecovery, never
+promoted) — but should pick **the freshest PrimaryCandidate replica
 even when priority would favour a staler one**.
 
 To exercise the ordering without changing roles, temporarily patch
-`pdx` to `primary-candidate` so there are three PCs, lag `iad` behind
+`pdx` to `PrimaryCandidate` so there are three PCs, lag `iad` behind
 `pdx` and `fra` (via replication delay on the standbys), then kill
 the active site.
 
@@ -93,7 +93,7 @@ the active site.
 ```bash
 NS=bloodraven-playground
 kubectl -n $NS patch mfg playground --type json \
-  -p '[{"op":"replace","path":"/spec/sites/2/role","value":"primary-candidate"}]'
+  -p '[{"op":"replace","path":"/spec/sites/2/role","value":"PrimaryCandidate"}]'
 # Wait for the CR to settle; no pod restart is triggered by a role flip.
 ```
 
@@ -135,7 +135,7 @@ though `pdx` is first in `sitePriorities`. DNS should point to
 ```bash
 # Revert the role flip.
 kubectl -n $NS patch mfg playground --type json \
-  -p '[{"op":"replace","path":"/spec/sites/2/role","value":"dr-only"}]'
+  -p '[{"op":"replace","path":"/spec/sites/2/role","value":"DisasterRecovery"}]'
 # Restore iad and let it rejoin. Clear SOURCE_DELAY on pdx.
 kubectl -n $NS scale deployment mysql-playground-iad --replicas=1
 # Wait for pdx to rebecome read-only replica of fra, then:
@@ -145,10 +145,10 @@ kubectl -n $NS exec deploy/mysql-playground-pdx -c mysql -- \
 
 ---
 
-### 2. All primary-candidates down — dr-only is NOT promoted
+### 2. All PrimaryCandidate sites down — DisasterRecovery is NOT promoted
 **Category**: Role-based promotion gate | **Risk**: High
 
-**Hypothesis**: When every `primary-candidate` site is unreachable,
+**Hypothesis**: When every `PrimaryCandidate` site is unreachable,
 the operator alerts `NO PRIMARY` and refuses to auto-promote `fra`
 even though it is reachable and read-only. `fra` staying read-only
 with no primary is the correct safety posture — promoting a
@@ -176,26 +176,26 @@ kubectl -n $NS exec deploy/mysql-playground-fra -c mysql -- \
 
 **Recovery**:
 ```bash
-# Bring either primary-candidate back. Operator resumes writes on iad
+# Bring either PrimaryCandidate site back. Operator resumes writes on iad
 # because its data is current (fra never took writes).
 kubectl -n $NS scale deployment mysql-playground-iad --replicas=1
 ```
 
 **Documented behaviour**: This is the safety property Wishlist #10
 built in — losing both PCs escalates to human intervention. Manual
-promotion of a dr-only site is a separate, explicit operator action
+promotion of a DisasterRecovery site is a separate, explicit operator action
 (pending the planned-failover API in Wishlist #11).
 
 ---
 
-### 3. Star rewiring: dr-only re-parents to new primary
+### 3. Star rewiring: DisasterRecovery re-parents to new primary
 **Category**: Replication topology integrity | **Risk**: Medium
 
-**Hypothesis**: After `iad → pdx` failover, `fra` (dr-only) must
+**Hypothesis**: After `iad → pdx` failover, `fra` (DisasterRecovery) must
 re-point its replication source to `mysql-playground-pdx`. The
 operator should issue `CHANGE REPLICATION SOURCE TO` on `fra` exactly
 once, driven by the same post-failover recovery path that handles
-primary-candidate replicas.
+PrimaryCandidate replicas.
 
 **Injection**: Standard failover.
 ```bash
@@ -203,7 +203,7 @@ primary-candidate replicas.
 ```
 
 **Verify**: After failover settles (~37s), both `pdx` (the new
-primary) and `fra` (dr-only) should be reachable.
+primary) and `fra` (DisasterRecovery) should be reachable.
 ```bash
 # New primary:
 kubectl -n $NS exec deploy/mysql-playground-pdx -c mysql -- \
@@ -239,9 +239,9 @@ a 5-15s window, not an instantaneous flip.
 **Hypothesis**: If every site is simultaneously writable and
 `sitePriorities=[iad, pdx]`, the operator:
 1. picks `iad` as the winner (first entry in priority list that is
-   currently writable and `primary-candidate`);
+   currently writable and `PrimaryCandidate`);
 2. fences both `pdx` AND `fra` via `SET GLOBAL super_read_only=ON`,
-   even though `fra` is dr-only;
+   even though `fra` is DisasterRecovery;
 3. synthesises a promotion of `iad` through the standard path
    (respecting the anti-flap cooldown and emitting the usual events).
 
@@ -287,7 +287,7 @@ done
 
 **Critical correctness check**: This is the scenario Copilot flagged
 on PR #53 — the `SiteRole` doc now explicitly records that writable
-`dr-only` sites ARE fenced as split-brain losers. Verify `fra`'s
+`DisasterRecovery` sites ARE fenced as split-brain losers. Verify `fra`'s
 super_read_only is `1`; if it is `0`, the role is leaking past the
 safety check.
 
@@ -299,12 +299,12 @@ intervene if writes happened during the split — in that case expect
 
 ---
 
-### 5. Writable dr-only anomaly — operator fences it
-**Category**: dr-only safety invariant | **Risk**: Medium
+### 5. Writable DisasterRecovery anomaly — operator fences it
+**Category**: DisasterRecovery safety invariant | **Risk**: Medium
 
-**Hypothesis**: A dr-only site should never be writable. If somehow
+**Hypothesis**: A DisasterRecovery site should never be writable. If somehow
 it becomes writable (manual error, partial bootstrap bug) while the
-legitimate primary-candidate primary is still active, the operator
+legitimate PrimaryCandidate primary is still active, the operator
 should detect this as a 2-site split-brain (iad + fra), pick `iad`
 per priority, and fence `fra`.
 
@@ -326,7 +326,7 @@ kubectl -n $NS exec deploy/mysql-playground-fra -c mysql -- \
 
 **Why it matters**: This proves the split-brain fencing is
 role-agnostic on the loser side. It complements scenario 4
-(dr-only as part of 3-way SB) and makes the invariant explicit:
+(DisasterRecovery as part of 3-way SB) and makes the invariant explicit:
 any writable non-winner is fenced regardless of role.
 
 ---
@@ -356,13 +356,13 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      shipstream.io/site: iad
+      bloodraven.shipstream.io/site: iad
   policyTypes: [Egress]
   egress:
     - to:
         - podSelector:
             matchLabels:
-              shipstream.io/site: fra
+              bloodraven.shipstream.io/site: fra
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
@@ -395,7 +395,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      shipstream.io/site: iad
+      bloodraven.shipstream.io/site: iad
   policyTypes: [Egress]
   egress:
     - ports: [{protocol: UDP, port: 53}]
@@ -429,7 +429,7 @@ scenario is the regression test for the quorum rule added in Wishlist
 
 ---
 
-### 7. dr-only PVC wipe — re-bootstrap from active primary
+### 7. DisasterRecovery PVC wipe — re-bootstrap from active primary
 **Category**: Bootstrap resilience for passive followers | **Risk**: Medium
 
 **Hypothesis**: Wiping `fra`'s PVC should trigger an auto-clone from
@@ -443,9 +443,9 @@ NS=bloodraven-playground
 
 # Clear the db-readonly taint on fra's node before the PVC delete,
 # otherwise local-path-provisioner helper pods get evicted.
-NODE=$(kubectl -n $NS get pods -l shipstream.io/site=fra \
+NODE=$(kubectl -n $NS get pods -l bloodraven.shipstream.io/site=fra \
   -o jsonpath='{.items[0].spec.nodeName}')
-kubectl taint nodes $NODE shipstream.io/db-readonly-playground- 2>/dev/null || true
+kubectl taint nodes $NODE bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground- 2>/dev/null || true
 
 # Stop fra, wipe its PVC, let it respawn.
 kubectl -n $NS scale deployment mysql-playground-fra --replicas=0
@@ -455,8 +455,10 @@ kubectl -n $NS scale deployment mysql-playground-fra --replicas=1
 
 **Verify**:
 - `status.conditions[type=Bootstrapping]` transitions through
-  `Cloning → WaitingForRestart → SetupReplication → Done` on `fra`
-  only.
+  `Cloning → WaitingForRestart → SetupReplication` (`True`) on `fra`
+  only, then returns to `False`/`NotBootstrapping` with `fra` replicating.
+  `False`/`BootstrapFailed` (with `Degraded=True/BootstrapFailed`) is a
+  failed clone.
 - Operator log: `starting bootstrap source=auto-clone donor=iad
   recipient=fra` (or `donor=<current-active>`, whichever it is).
   Donor must match `status.activeSite`, never `pdx`.
@@ -473,11 +475,11 @@ kubectl -n $NS exec deploy/mysql-playground-fra -c mysql -- \
 
 ---
 
-### 8. Scale out: add a dr-only site to a running cluster
+### 8. Scale out: add a DisasterRecovery site to a running cluster
 **Category**: Day-2 expansion | **Risk**: Medium
 
 **Hypothesis**: Starting from the default 2-site manifest, appending
-`fra` with `role: dr-only` causes the operator to provision the
+`fra` with `role: DisasterRecovery` causes the operator to provision the
 Deployment/Service/PVC and auto-clone from the current primary —
 without impact to the existing primary/replica pair.
 
@@ -491,8 +493,8 @@ kubectl -n $NS apply -f playground/manifests/failovergroup.yaml
 ```bash
 kubectl -n $NS patch mfg playground --type json -p '[
   {"op":"add","path":"/spec/sites/-","value":{
-    "name":"fra","role":"dr-only","zone":"zone-fra","lbIP":"10.96.100.30",
-    "taintNodeSelector":{"shipstream.io/failover-group.playground":"true","shipstream.io/site.playground":"fra"},
+    "name":"fra","serverID":104,"role":"DisasterRecovery","zone":"zone-fra","lbIP":"10.96.100.30",
+    "taintNodeSelector":{"bloodraven.shipstream.io/failover-group.playground":"true","bloodraven.shipstream.io/site.playground":"fra"},
     "storage":{"storageClassName":"playground-fast","size":"1Gi"},
     "resources":{
       "requests":{"cpu":"100m","memory":"256Mi"},
@@ -506,13 +508,16 @@ kubectl -n $NS patch mfg playground --type json -p '[
 - `kubectl -n $NS get deployments` shows three deployments within 10s.
 - Reconciler creates `mysql-playground-fra`, PVC, and the two
   ClusterIP services.
-- Operator triggers auto-clone to populate `fra`'s empty instance;
-  `status.sites[2].state` transitions `unknown → writable → read-only`
-  over the course of the clone.
+- Operator triggers auto-clone to populate `fra`'s empty instance. The
+  `fra` entry of `status.sites` (`kubectl -n $NS get mfg playground -o
+  jsonpath='{.status.sites[?(@.name=="fra")].state}'`) is absent at first,
+  may read `Unreachable` or `Unknown` while the pod starts and the clone
+  restarts it, and converges to `ReadOnly` with `replication` `Healthy`
+  once the clone finishes. Do not expect a particular intermediate state.
 - `status.activeSite` stays on the original primary throughout — no
   disruption.
 - `sitePriorities` (if present) is untouched and still only names
-  primary-candidates.
+  PrimaryCandidate sites.
 
 **Timing**: ~60-90s end-to-end (PVC provision + clone + replication
 setup). Watch for the cluster to remain healthy (`Ready=True`)
@@ -521,7 +526,7 @@ pair.
 
 ---
 
-### 9. Scale in: remove a dr-only site cleanly
+### 9. Scale in: remove a DisasterRecovery site cleanly
 **Category**: Day-2 contraction | **Risk**: Medium
 
 **Hypothesis**: Removing `fra` from `spec.sites[]` tears down its
@@ -538,14 +543,14 @@ kubectl -n $NS patch mfg playground --type json \
 **Verify**:
 - `kubectl -n $NS get deployment mysql-playground-fra` → NotFound
   within ~10s.
-- `kubectl -n $NS get svc,pvc -l shipstream.io/site=fra` → empty.
+- `kubectl -n $NS get svc,pvc -l bloodraven.shipstream.io/site=fra` → empty.
 - `status.sites[]` now has two entries.
 - `status.activeSite` unchanged; primary still writable.
 - Dashboard reflects the two-site layout without reload errors.
 
 **Caution — if fra had been recently promoted**: Removing an active
 site is undefined; it should fail CRD validation (only `iad` and
-`pdx` are primary-candidates in this manifest, so `fra` cannot be the
+`pdx` are PrimaryCandidate sites in this manifest, so `fra` cannot be the
 active site) but if it somehow did, a pre-removal planned-failover
 is the correct precondition. Don't test active-site removal here —
 that's a Wishlist #11 scenario.

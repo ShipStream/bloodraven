@@ -11,13 +11,13 @@
 
 **Front:** Which two labels does the active Dragonfly Service AND-gate?
 
-**Back:** shipstream.io/dragonfly-role=master AND shipstream.io/dragonfly-traffic=enabled — a pod is an endpoint only when both match.
+**Back:** bloodraven.shipstream.io/dragonfly-role=master AND bloodraven.shipstream.io/dragonfly-traffic=true — a pod is an endpoint only when both match.
 
 ---
 
 **Front:** You need to shed a Dragonfly pod from the active Service. What does the operator do to the traffic label?
 
-**Back:** Deletes the key outright. The selector is an exists-and-equals check on "enabled", so a missing key sheds the endpoint with no ambiguity.
+**Back:** Deletes the key outright. The selector is an exists-and-equals check on "true", so a missing key sheds the endpoint with no ambiguity.
 
 ---
 

@@ -86,11 +86,11 @@ def select_failover_record(obj, now):
     Returns {"at": <datetime or None>, "target": <str>, "source": <str>} where
     source is "status", "annotations", or "none".
     """
-    status = obj.get("status") or {}
+    status_record = (obj.get("status") or {}).get("lastFailover") or {}
     # The naive read: trust status and stop. It is right until the status write
     # is the one that failed. Replace it.
-    at = parse_time(status.get("lastFailover"))
-    return {"at": at, "target": status.get("lastFailoverTarget", ""), "source": "status" if at else "none"}  # TODO D
+    at = parse_time(status_record.get("time"))
+    return {"at": at, "target": status_record.get("target", ""), "source": "status" if at else "none"}  # TODO D
 
 
 # --- TODO E ------------------------------------------------------------------
@@ -106,7 +106,7 @@ def audit(obj, now):
         "recordSource": record["source"],
         "from": "-",
         "to": record["target"] or "-",
-        "promotionGtidExecuted": "-",  # TODO E: render status.promotionGtidExecuted
+        "promotionGtidExecuted": "-",  # TODO E: render status.lastFailover.promotionGtidExecuted
         "sites": [],                   # TODO E: one entry per non-active site
         "lost": 0,                     # TODO E: measured total, or None
         "verdict": "RPO 0 — no transaction was lost",  # TODO E

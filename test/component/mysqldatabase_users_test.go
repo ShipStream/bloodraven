@@ -197,7 +197,7 @@ func TestMysqlDatabaseUsersRotationSurvivesFailedReadyStamp(t *testing.T) {
 	h.server.removeUser(mdbSupportUser)
 	h.server.addUser("acme_support_v2", "support-pw-2")
 	mdb := h.get()
-	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
 	mdb.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
 		SecretName:      mdbSupportSecretName,
 		Username:        mdbSupportUser,
@@ -308,7 +308,7 @@ func TestMysqlDatabaseUsersRefusesPreExistingAccount(t *testing.T) {
 		}
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if !h.server.hasUser(mdbSupportUser) {
@@ -318,7 +318,7 @@ func TestMysqlDatabaseUsersRefusesPreExistingAccount(t *testing.T) {
 
 func TestMysqlDatabaseDeletePolicyDropsUsersPrincipals(t *testing.T) {
 	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 
@@ -700,7 +700,7 @@ func TestMysqlDatabaseHostsUsernameRotationDropsOldNameOnEveryHost(t *testing.T)
 
 func TestMysqlDatabaseHostsDeletePolicyDropsEveryAccount(t *testing.T) {
 	cr := mdbCR(withOwnerHosts(threeHosts...), withSupportUser, withSupportHosts(threeHosts...), func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.reconcile()
@@ -768,7 +768,7 @@ func TestMysqlDatabaseHostsUpgradeFromPreHostsStatus(t *testing.T) {
 // record is a deletion drop candidate.
 func TestMysqlDatabaseRefusedOwnerRotationRestoresPendingRecord(t *testing.T) {
 	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.reconcile()

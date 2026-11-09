@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -13,7 +14,7 @@ import (
 //
 // +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.image) && self.image.size() > 0)",message="spec.dragonfly.image is required when spec.dragonfly.enabled is true"
 // +kubebuilder:validation:XValidation:rule="!self.enabled || !self.image.endsWith(':latest')",message="spec.dragonfly.image must be pinned (no :latest)"
-// +kubebuilder:validation:XValidation:rule="!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName.size() > 0)",message="spec.dragonfly.auth.secretName is required when auth is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.upgradeStrategy) || self.upgradeStrategy != 'SnapshotRestore' || (has(self.snapshot) && has(self.snapshot.dir) && self.snapshot.dir.size() > 0)",message="spec.dragonfly.snapshot.dir is required when spec.dragonfly.upgradeStrategy is SnapshotRestore"
 type DragonflySpec struct {
 	// Enabled toggles Dragonfly co-management. When false (default), no
 	// Dragonfly resources are created and existing MySQL-only behavior
@@ -23,9 +24,35 @@ type DragonflySpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Image is the pinned Dragonfly container image. Required when
-	// Enabled is true. Tag ":latest" is rejected.
+	// Enabled is true. Tag ":latest" is rejected. How a change reaches the
+	// running sites is UpgradeStrategy's choice.
 	// +optional
 	Image string `json:"image,omitempty"`
+
+	// UpgradeStrategy decides how a change of Image reaches the running
+	// Dragonfly sites:
+	//   - Rolling (default): the StatefulSets roll like any other template
+	//     change, replicas first, then the active site after a promotion.
+	//     Cache contents survive only through replication.
+	//   - SnapshotRestore: the operator saves a snapshot of the active
+	//     site into snapshot.dir, restarts it on the new image restoring
+	//     from that snapshot, then moves the other sites and re-attaches
+	//     them as replicas. Cache and session traffic is shed while it
+	//     runs; status.dragonfly.upgrade records the run. The ordinary
+	//     render never moves an image under this strategy; it rolls out
+	//     every other change first, and a run starts only once the sites
+	//     run it. A run that fails is not restarted for the same
+	//     spec.dragonfly: change spec.dragonfly to retry. When every site
+	//     still runs one image, setting Image back to it removes the
+	//     failed record, and setting it forward again retries; when the
+	//     sites run different images, that would start a run back to the
+	//     old image instead. A run ends when spec.dragonfly changes under
+	//     it, and after an hour. Requires snapshot.dir.
+	// Switching to Rolling, during a run or while a change is pending,
+	// rolls it the ordinary way.
+	// +kubebuilder:default=Rolling
+	// +optional
+	UpgradeStrategy DragonflyUpgradeStrategy `json:"upgradeStrategy,omitempty"`
 
 	// Port is the client (Redis-compatible) port. Default: 6379.
 	// +kubebuilder:default=6379
@@ -41,17 +68,18 @@ type DragonflySpec struct {
 	// +optional
 	AdminPort int32 `json:"adminPort,omitempty"`
 
-	// MaxMemoryMb caps Dragonfly's memory budget per pod. Translates to
-	// the --maxmemory flag. 0 means leave unset (Dragonfly default).
-	// +kubebuilder:validation:Minimum=0
+	// MaxMemory caps Dragonfly's memory budget per pod (for example
+	// "512Mi"), rendered as --maxmemory in bytes. Must be positive. Unset
+	// leaves Dragonfly's default.
+	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="dragonfly.maxMemory must be greater than 0"
 	// +optional
-	MaxMemoryMb int32 `json:"maxMemoryMb,omitempty"`
+	MaxMemory *resource.Quantity `json:"maxMemory,omitempty"`
 
-	// ProactorThreads sets Dragonfly's --proactor_threads flag. 0 means
-	// leave unset (Dragonfly default: one per CPU).
-	// +kubebuilder:validation:Minimum=0
+	// ProactorThreads sets Dragonfly's --proactor_threads flag. Unset
+	// leaves Dragonfly's default (one per CPU).
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	ProactorThreads int32 `json:"proactorThreads,omitempty"`
+	ProactorThreads *int32 `json:"proactorThreads,omitempty"`
 
 	// Args are additional command-line arguments appended to the
 	// Dragonfly container command. Operator-managed flags (for example
@@ -59,6 +87,7 @@ type DragonflySpec struct {
 	// --requirepass, --masterauth, and --replicaof) are reserved for the
 	// operator and cannot be overridden via spec.dragonfly.args.
 	// +optional
+	// +listType=atomic
 	Args []string `json:"args,omitempty"`
 
 	// Auth references a Secret containing the Dragonfly password. When
@@ -102,6 +131,19 @@ type DragonflySpec struct {
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }
 
+// DragonflyUpgradeStrategy is spec.dragonfly.upgradeStrategy.
+// +kubebuilder:validation:Enum=Rolling;SnapshotRestore
+type DragonflyUpgradeStrategy string
+
+const (
+	// DragonflyUpgradeStrategyRolling rolls an image change like any other
+	// StatefulSet template change.
+	DragonflyUpgradeStrategyRolling DragonflyUpgradeStrategy = "Rolling"
+	// DragonflyUpgradeStrategySnapshotRestore moves an image change
+	// through the snapshot-restore upgrade.
+	DragonflyUpgradeStrategySnapshotRestore DragonflyUpgradeStrategy = "SnapshotRestore"
+)
+
 // DragonflySnapshotSpec configures Dragonfly's native snapshot location.
 type DragonflySnapshotSpec struct {
 	// Dir is passed to Dragonfly as --dir. Use s3://bucket[/prefix] for S3
@@ -119,19 +161,25 @@ type DragonflySnapshotSpec struct {
 	// environment variables for S3-compatible snapshot access. Typical keys
 	// are AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION. Optional
 	// when ServiceAccountName provides credentials through cloud IAM.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	// +optional
 	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
 
-	// S3Endpoint is passed to Dragonfly as --s3_endpoint for S3-compatible
-	// services such as RustFS or MinIO. Leave empty for AWS S3.
+	// S3EndpointURL overrides the S3 endpoint for S3-compatible services
+	// such as RustFS or MinIO, in the URL form backup storage uses: an
+	// absolute http:// or https:// URL with a host (a name, an IPv4
+	// address, or an IPv6 address in brackets) and an optional port from 1
+	// to 65535, and no path, credentials, query or fragment. The operator
+	// passes the host and port to Dragonfly as --s3_endpoint and the
+	// scheme as --s3_use_https (false for http://, true for https://).
+	// Omit it, or leave it empty, for AWS S3 with Dragonfly's defaults.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 512",message="s3EndpointURL must be at most 512 bytes (UTF-8)"
+	// +kubebuilder:validation:Pattern=`^(https?://(\[[0-9A-Fa-f:.]+\]|[^\s/?#@:\[\]]+)(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?/?)?$`
 	// +optional
-	S3Endpoint string `json:"s3Endpoint,omitempty"`
-
-	// S3UseHTTPS controls Dragonfly's --s3_use_https flag. Leave nil for
-	// Dragonfly's default. Set false for in-cluster HTTP services like the
-	// playground RustFS deployment.
-	// +optional
-	S3UseHTTPS *bool `json:"s3UseHTTPS,omitempty"`
+	S3EndpointURL string `json:"s3EndpointURL,omitempty"`
 
 	// S3SignPayload controls Dragonfly's --s3_sign_payload flag. Leave nil
 	// for Dragonfly's default.
@@ -141,15 +189,29 @@ type DragonflySnapshotSpec struct {
 
 // DragonflyAuthSpec references a Secret containing the Dragonfly password.
 type DragonflyAuthSpec struct {
-	// SecretName is the name of the Secret containing the password.
-	// +kubebuilder:validation:MinLength=1
-	SecretName string `json:"secretName"`
+	// PasswordSecretKeyRef selects the Secret key, in the group's
+	// namespace, that holds the Dragonfly password.
+	// +required
+	PasswordSecretKeyRef DragonflyPasswordSecretKeyRef `json:"passwordSecretKeyRef"`
+}
 
-	// PasswordKey is the key inside the Secret that holds the password.
-	// Default: "password".
+// DragonflyPasswordSecretKeyRef selects the Secret key holding the
+// Dragonfly password.
+type DragonflyPasswordSecretKeyRef struct {
+	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
+	// +required
+	Name string `json:"name"`
+
+	// Key within the Secret that holds the password. Default: "password".
 	// +kubebuilder:default="password"
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
 	// +optional
-	PasswordKey string `json:"passwordKey,omitempty"`
+	Key string `json:"key,omitempty"`
 }
 
 // DragonflyPlannedFailoverSpec configures planned-switchover semantics for
@@ -160,9 +222,10 @@ type DragonflyPlannedFailoverSpec struct {
 	// up to the source's replication offset. The same duration is used
 	// as the REPLTAKEOVER timeout argument during PromotingDragonfly;
 	// Dragonfly takes that argument in whole seconds, so it is rounded up
-	// to the next second (minimum 1s).
-	// Default: 30s.
+	// to the next second.
+	// Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="dragonfly.plannedFailover.maxSyncWait must be between 1s and 10m"
 	// +optional
 	MaxSyncWait *metav1.Duration `json:"maxSyncWait,omitempty"`
 
@@ -193,7 +256,7 @@ const (
 
 // DragonflyPhase describes the high-level state of the Dragonfly subsystem
 // for a failover group.
-// +kubebuilder:validation:Enum="";Disabled;Reconciling;ConfiguringReplication;Ready;Degraded;Promoting
+// +kubebuilder:validation:Enum=Disabled;Reconciling;ConfiguringReplication;Ready;Degraded;Promoting
 type DragonflyPhase string
 
 const (
@@ -223,26 +286,32 @@ const (
 )
 
 // DragonflyRole describes a Dragonfly site's observed role.
-// +kubebuilder:validation:Enum=unknown;master;replica;stale-master;unconfigured;unreachable
+// +kubebuilder:validation:Enum=Unknown;Master;Replica;StaleMaster;Unconfigured;Unreachable
 type DragonflyRole string
 
 const (
-	DragonflyRoleUnknown      DragonflyRole = "unknown"
-	DragonflyRoleMaster       DragonflyRole = "master"
-	DragonflyRoleReplica      DragonflyRole = "replica"
-	DragonflyRoleStaleMaster  DragonflyRole = "stale-master"
-	DragonflyRoleUnconfigured DragonflyRole = "unconfigured"
-	DragonflyRoleUnreachable  DragonflyRole = "unreachable"
+	// DragonflyRoleUnknown: the site answered with a replication role the
+	// operator does not recognise.
+	DragonflyRoleUnknown DragonflyRole = "Unknown"
+	// DragonflyRoleMaster: the site reports master and is the expected
+	// active site.
+	DragonflyRoleMaster DragonflyRole = "Master"
+	// DragonflyRoleReplica: the site reports replica, whatever its link
+	// health.
+	DragonflyRoleReplica DragonflyRole = "Replica"
+	// DragonflyRoleStaleMaster: the site reports master but is not the
+	// expected active site.
+	DragonflyRoleStaleMaster DragonflyRole = "StaleMaster"
+	// DragonflyRoleUnconfigured: the site reports no replication role (a
+	// fresh pod, not yet wired).
+	DragonflyRoleUnconfigured DragonflyRole = "Unconfigured"
+	// DragonflyRoleUnreachable: the operator could not reach the site.
+	DragonflyRoleUnreachable DragonflyRole = "Unreachable"
 )
 
 // DragonflyStatus is the observed state of the Dragonfly subsystem for a
 // failover group.
 type DragonflyStatus struct {
-	// Enabled mirrors spec.dragonfly.enabled at the time of the last
-	// observation.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
 	// ActiveSite is the site currently acting as Dragonfly master.
 	// Normally equal to status.activeSite (MySQL active); during a
 	// planned-failover Dragonfly promotion the two may briefly diverge.
@@ -267,15 +336,28 @@ type DragonflyStatus struct {
 	// +optional
 	LastPromotionTarget string `json:"lastPromotionTarget,omitempty"`
 
-	// Sites is the per-site Dragonfly observation, parallel in spirit
-	// to status.sites for MySQL.
+	// Sites is the per-site Dragonfly observation, keyed by name like
+	// status.sites for MySQL.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Sites []DragonflySiteStatus `json:"sites,omitempty"`
 
-	// Upgrade tracks an explicit Dragonfly snapshot-restore upgrade
-	// requested by annotation. It is separate from normal spec reconciliation
-	// because this workflow intentionally creates a short cache outage while
-	// preserving sessions through a pre-upgrade snapshot.
+	// Image is the Dragonfly container image of the active Dragonfly
+	// site's StatefulSet, as the operator last observed it. It is an
+	// observation only: the snapshot-restore upgrade compares
+	// spec.dragonfly.image with each site's live StatefulSet, never with
+	// this field, and sites can run different images while an upgrade
+	// runs or after one stopped part way (status.dragonfly.upgrade).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Upgrade records the latest snapshot-restore upgrade run
+	// (spec.dragonfly.upgradeStrategy SnapshotRestore). The run
+	// intentionally creates a short cache outage while preserving sessions
+	// through a pre-upgrade snapshot. A Failed record stays until
+	// spec.dragonfly changes, or until no site runs an image other than
+	// spec.dragonfly.image, when it is removed.
 	// +optional
 	Upgrade *DragonflyUpgradeStatus `json:"upgrade,omitempty"`
 
@@ -315,22 +397,33 @@ const (
 	DragonflyUpgradePhaseFailed                  DragonflyUpgradePhase = "Failed"
 )
 
-// DragonflyUpgradeStatus is the observable audit trail for a one-shot
-// snapshot-restore Dragonfly upgrade.
+// DragonflyUpgradeStatus is the run record of one snapshot-restore
+// Dragonfly upgrade.
 type DragonflyUpgradeStatus struct {
 	// Phase is the current upgrade phase.
 	// +optional
 	Phase DragonflyUpgradePhase `json:"phase,omitempty"`
 
-	// SourceImage is the image in use when the request was accepted.
+	// SourceImage is the image the run moves from: the live image of the
+	// active site's StatefulSet when the run started, or, for a run that
+	// started after the active site had already moved, the live image of
+	// the first site that had not.
 	// +optional
 	SourceImage string `json:"sourceImage,omitempty"`
 
-	// TargetImage is the requested replacement image.
+	// TargetImage is the image the run moves to: spec.dragonfly.image when
+	// the run started.
 	// +optional
 	TargetImage string `json:"targetImage,omitempty"`
 
-	// ActiveSite is the site that was active when the request was accepted.
+	// SpecDigest is "sha256:<hex>" over spec.dragonfly as the run saw it
+	// when it started. A Failed run is not restarted while spec.dragonfly
+	// still matches it.
+	// +optional
+	SpecDigest string `json:"specDigest,omitempty"`
+
+	// ActiveSite is the MySQL active site when the run started: the site
+	// whose snapshot it saves and restores.
 	// +optional
 	ActiveSite string `json:"activeSite,omitempty"`
 
@@ -338,7 +431,7 @@ type DragonflyUpgradeStatus struct {
 	// +optional
 	SnapshotDir string `json:"snapshotDir,omitempty"`
 
-	// StartTime is when the upgrade request was accepted.
+	// StartTime is when the run started.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
@@ -350,20 +443,68 @@ type DragonflyUpgradeStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// Reason is a machine-readable terminal or waiting reason.
+	// Reason is a machine-readable terminal reason.
 	// +optional
-	Reason string `json:"reason,omitempty"`
+	Reason DragonflyUpgradeReason `json:"reason,omitempty"`
 
 	// Message is a human-readable status line.
 	// +optional
 	Message string `json:"message,omitempty"`
 }
 
+// DragonflyUpgradeReason is status.dragonfly.upgrade.reason.
+// +kubebuilder:validation:MaxLength=1024
+// +kubebuilder:validation:Pattern=`^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
+type DragonflyUpgradeReason string
+
+const (
+	// DragonflyUpgradeReasonCompleted: the upgrade succeeded.
+	DragonflyUpgradeReasonCompleted DragonflyUpgradeReason = "Completed"
+	// DragonflyUpgradeReasonActiveSiteChanged: the MySQL active site moved
+	// while the upgrade ran.
+	DragonflyUpgradeReasonActiveSiteChanged DragonflyUpgradeReason = "ActiveSiteChanged"
+	// DragonflyUpgradeReasonUnknownPhase: the recorded phase is not one
+	// this operator knows.
+	DragonflyUpgradeReasonUnknownPhase DragonflyUpgradeReason = "UnknownPhase"
+	// DragonflyUpgradeReasonSnapshotDialFailed: the operator could not
+	// connect to the active Dragonfly to save the snapshot.
+	DragonflyUpgradeReasonSnapshotDialFailed DragonflyUpgradeReason = "DragonflySnapshotDialFailed"
+	// DragonflyUpgradeReasonSnapshotSaveFailed: SAVE failed on the active
+	// Dragonfly.
+	DragonflyUpgradeReasonSnapshotSaveFailed DragonflyUpgradeReason = "DragonflySnapshotSaveFailed"
+	// DragonflyUpgradeReasonWorkloadSelectorMismatch: a site's StatefulSet
+	// was refused for its selector (WorkloadSelectorMismatch) while the
+	// upgrade ran, so the upgrade stopped before touching it.
+	DragonflyUpgradeReasonWorkloadSelectorMismatch DragonflyUpgradeReason = "WorkloadSelectorMismatch"
+	// DragonflyUpgradeReasonActiveWorkloadDeleted: the active site's
+	// StatefulSet was deleted before its snapshot was saved or after it
+	// restored, so the data the upgrade moves was lost; the operator
+	// re-creates the StatefulSet.
+	DragonflyUpgradeReasonActiveWorkloadDeleted DragonflyUpgradeReason = "ActiveWorkloadDeleted"
+	// DragonflyUpgradeReasonSpecChanged: spec.dragonfly changed while the
+	// upgrade ran (the image, upgradeStrategy, the snapshot block or any
+	// other field), so the upgrade stopped; the operator then decides
+	// again for the new spec.dragonfly.
+	DragonflyUpgradeReasonSpecChanged DragonflyUpgradeReason = "SpecChanged"
+	// DragonflyUpgradeReasonDragonflyDisabled: spec.dragonfly was disabled
+	// or removed while the upgrade ran; the operator removes the Dragonfly
+	// workloads.
+	DragonflyUpgradeReasonDragonflyDisabled DragonflyUpgradeReason = "DragonflyDisabled"
+	// DragonflyUpgradeReasonTimedOut: the upgrade had not finished an hour
+	// after it started (an active site that never restored, or a replica
+	// that never synced), so it stopped and gave the group's reconcile
+	// back.
+	DragonflyUpgradeReasonTimedOut DragonflyUpgradeReason = "TimedOut"
+)
+
 // DragonflySiteStatus describes the observed state of one site's Dragonfly
 // instance.
 type DragonflySiteStatus struct {
-	// Name is the site identifier, mirrored from spec for convenience.
-	Name string `json:"name,omitempty"`
+	// Name is the site identifier, mirrored from spec: the key of
+	// status.dragonfly.sites.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 
 	// Role is the site's observed Dragonfly role.
 	// +optional
@@ -392,15 +533,17 @@ type DragonflySiteStatus struct {
 	LinkStatus string `json:"linkStatus,omitempty"`
 
 	// SyncInProgress is the parsed master_sync_in_progress field from
-	// INFO replication on a replica.
+	// INFO replication on a replica. Unset when Dragonfly did not report
+	// it.
 	// +optional
-	SyncInProgress bool `json:"syncInProgress,omitempty"`
+	SyncInProgress *bool `json:"syncInProgress,omitempty"`
 
 	// LastIOSecondsAgo is the parsed master_last_io_seconds_ago field from
 	// INFO replication on a replica. A value of -1 means the replica has
-	// never received data from its master.
+	// never received data from its master. Unset when Dragonfly did not
+	// report it.
 	// +optional
-	LastIOSecondsAgo int `json:"lastIOSecondsAgo,omitempty"`
+	LastIOSecondsAgo *int64 `json:"lastIOSecondsAgo,omitempty"`
 
 	// Ready reports operator-level readiness: a master must be reachable
 	// and accepting writes; a replica must additionally have its link up,

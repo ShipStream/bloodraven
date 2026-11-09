@@ -98,7 +98,7 @@ func TestRepointReplica_RollbackUsesFreshBoundedContext(t *testing.T) {
 	follower.stopReplicaCancel = cancel
 
 	err := tm.repointReplica(opCtx, &tm.sites[0], &tm.sites[1], "wrong")
-	if err == nil || !strings.Contains(err.Error(), sourceReasonProbeFailed) {
+	if err == nil || !strings.Contains(err.Error(), string(sourceReasonProbeFailed)) {
 		t.Fatalf("repointReplica() error = %v, want post-stop probe failure", err)
 	}
 	if follower.startReplicaCalls != 1 {

@@ -338,7 +338,7 @@ func TestDragonflyManager_StopJoinsRunAndAdmitsNothing(t *testing.T) {
 // a recorded topology with dc2 behind the active Service.
 func TestDragonflyManager_StopAfterAcknowledgedRoleChangeRecordsIt(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	source := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	target := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	cb, key := newDragonflyFakeClient(fg)
@@ -397,7 +397,7 @@ func TestDragonflyManager_StopAfterAcknowledgedRoleChangeRecordsIt(t *testing.T)
 // planned owner starts from labels and status that match the servers.
 func TestDragonflyManager_OwnerWaitingDuringTakeoverGetsRecordedState(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "master", true),
@@ -576,7 +576,7 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 	mgr, get := newEmergencyManager(t)
 	fg := get()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +601,7 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	now := metav1.Now()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", LastPromotionTime: &now, LastPromotionTarget: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTime: &now, LastPromotionTarget: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +652,7 @@ func TestDragonflyManager_RequestSkipsTargetPromotedAfterIt(t *testing.T) {
 		t.Errorf("duplicate request re-ran the promotion (%d target dials)", dials)
 	}
 	for _, ev := range drainEventsCh(rec.Events, 4, 50*time.Millisecond) {
-		if strings.Contains(ev, ReasonDragonflySessionsLost) {
+		if strings.Contains(ev, v1alpha1.EventDragonflySessionsLost) {
 			t.Errorf("duplicate request reported sessions lost: %q", ev)
 		}
 	}
@@ -667,7 +667,7 @@ func TestDragonflyManager_RequestSkipsTargetObservedAsMaster(t *testing.T) {
 	mgr, get := newEmergencyManager(t)
 	fg := get()
 	earlier := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", LastPromotionTarget: "dc2", LastPromotionTime: &earlier}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc2", LastPromotionTarget: "dc2", LastPromotionTime: &earlier}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +835,7 @@ func TestDragonflyManager_TickRepairAndPromotionAreOrdered(t *testing.T) {
 // label sweep keeps dc2 behind the active Service.
 func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	source := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	target := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	cb, key := newDragonflyFakeClient(fg)
@@ -885,14 +885,14 @@ func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) 
 		t.Errorf("Tick overwrote the dc2 promotion: %+v", current.Status.Dragonfly)
 	}
 	r := &MysqlFailoverGroupReconciler{Client: c}
-	if err := r.syncDragonflyPodLabels(context.Background(), current); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), current); err != nil {
 		t.Fatal(err)
 	}
 	var pod corev1.Pod
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(target), &pod); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Labels[labelDragonflyRole] != "master" {
+	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
 		t.Errorf("label sweep removed the sole master from the active Service: %v", pod.Labels)
 	}
 }
@@ -992,7 +992,7 @@ func TestDragonflyManager_StopTimeoutKeepsReplacementOut(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: makeDragonflyPod(fg.Name, "dc1", "", false).Name}, &pod); err != nil {
 		t.Fatalf("replacement owner's dc1 master: %v", err)
 	}
-	if pod.Labels[labelDragonflyRole] != "master" {
+	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
 		t.Errorf("replacement did not label dc1 master: %v", pod.Labels)
 	}
 }
@@ -1072,7 +1072,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), live, "dc1", "dc2"); promoted || !deferred {
 		t.Fatalf("rollout promotion with the gate held = (promoted %v, deferred %v), want deferred", promoted, deferred)
 	}
-	if err := r.syncDragonflyPodLabels(context.Background(), live); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), live); err != nil {
 		t.Fatalf("label sweep with the gate held: %v", err)
 	}
 	if n := plannedDials.Load(); n != 0 {
@@ -1108,7 +1108,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: makeDragonflyPod(fg.Name, "dc1", "", false).Name}, &pod); err != nil {
 		t.Fatalf("planned dc1 master: %v", err)
 	}
-	if pod.Labels[labelDragonflyRole] != "master" {
+	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
 		t.Errorf("planned failover did not label dc1 master: %v", pod.Labels)
 	}
 }
@@ -1194,7 +1194,7 @@ func TestPlannedFailoverPromotingDragonfly_WaitsForSentEmergencyTakeover(t *test
 // status must not be undone from the status it is about to replace.
 func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "replica", true),
@@ -1208,7 +1208,7 @@ func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 	if !ok {
 		t.Fatal("gate busy")
 	}
-	if err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
 		t.Fatal(err)
 	}
 	if after := podLabels(t, c, fg.Namespace); !maps.EqualFunc(before, after, maps.Equal) {
@@ -1218,7 +1218,7 @@ func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 
 	// With the gate free the same pass converges on status (dc1), which
 	// shows the skipped pass would have relabelled.
-	if err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
 		t.Fatal(err)
 	}
 	if eps := writableEndpoints(t, c, fg); !slices.Equal(eps, []string{"dc1"}) {
@@ -1230,7 +1230,7 @@ func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 // stamped after the reconcile read its copy is honoured.
 func TestSyncDragonflyPodLabels_ReadsStatusAfterTakingGate(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "replica", true),
@@ -1241,7 +1241,7 @@ func TestSyncDragonflyPodLabels_ReadsStatusAfterTakingGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &MysqlFailoverGroupReconciler{Client: c, Runner: &TopologyManagerRunner{}}
-	if err := r.syncDragonflyPodLabels(context.Background(), stale); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), stale); err != nil {
 		t.Fatal(err)
 	}
 	if eps := writableEndpoints(t, c, fg); !slices.Equal(eps, []string{"dc2"}) {

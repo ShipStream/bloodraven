@@ -21,7 +21,7 @@ func TestDeploymentMetricsContract(t *testing.T) {
 		{"bloodraven_deploy_leases_active", DeployLeasesActive, nil, groupKind},
 		{"bloodraven_deploy_lease_grants_total", nil, DeployLeaseGrantsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "result": "granted"}},
 		{"bloodraven_deploy_lease_expirations_total", nil, DeployLeaseExpirationsTotal, groupKind},
-		{"bloodraven_deploy_lease_revocations_total", nil, DeployLeaseRevocationsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "reason": "topology_changed"}},
+		{"bloodraven_deploy_lease_revocations_total", nil, DeployLeaseRevocationsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "reason": "TopologyChanged"}},
 		{"bloodraven_deploy_lease_age_seconds", DeployLeaseAgeSeconds, nil, groupKind},
 		{"bloodraven_planned_failovers_deferred_total", nil, PlannedFailoversDeferredTotal, map[string]string{"group": "deploy-test", "reason": "DeploymentHold"}},
 	}
@@ -357,9 +357,9 @@ func TestSiteGaugesSeparateFailoverGroups(t *testing.T) {
 func TestDeleteReplicationGaugesDropsOldRole(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(ReplicationLag, ReplicationRunning)
-	ReplicationLag.WithLabelValues("ns", "g", "pdx", "dr-only").Set(9)
-	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "dr-only", "io").Set(1)
-	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "dr-only", "sql").Set(1)
+	ReplicationLag.WithLabelValues("ns", "g", "pdx", "disaster-recovery").Set(9)
+	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "disaster-recovery", "io").Set(1)
+	ReplicationRunning.WithLabelValues("ns", "g", "pdx", "disaster-recovery", "sql").Set(1)
 	t.Cleanup(func() { DeleteReplicationGauges("ns", "g", "pdx") })
 
 	DeleteReplicationGauges("ns", "g", "pdx")

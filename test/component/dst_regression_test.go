@@ -267,7 +267,7 @@ func TestRecovery_EmptySiteDoesNotStarveDivergentSite(t *testing.T) {
 	blocked := ""
 	for _, s := range tm.Status().Sites {
 		if s.Name == "dc2" {
-			blocked = s.RecoveryState
+			blocked = string(s.RecoveryState)
 		}
 	}
 	if blocked != "RecoveryBlocked" {
@@ -617,7 +617,7 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
 	h.setCurrent(nil)
 	h.pass()
-	start := h.store.Object().GetAnnotations()[controller.PlannedFailoverManagerAbsentSinceAnnotation]
+	start := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]
 	if start == "" {
 		t.Fatal("no manager-absent-since annotation")
 	}
@@ -627,7 +627,7 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 		if pf := h.pf(); pf.Result != nil {
 			break
 		}
-		if got := h.store.Object().GetAnnotations()[controller.PlannedFailoverManagerAbsentSinceAnnotation]; got != start {
+		if got := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]; got != start {
 			t.Fatalf("the absent-since start moved: %q → %q", start, got)
 		}
 	}
@@ -729,7 +729,7 @@ func TestDSTPF_RetiredManagerHandoffReachesReplacement(t *testing.T) {
 		t.Fatalf("the replacement made dc1 writable %s after the handoff, inside the 10m cooldown; dc1 statements %v",
 			15*time.Second, h.src.statements())
 	}
-	if got := h.store.Object().Status.LastFailoverTarget; got != "dc2" {
+	if got := h.store.Object().Status.LastFailoverTarget(); got != "dc2" {
 		t.Fatalf("status.lastFailoverTarget = %q, want the carried handoff target dc2", got)
 	}
 }

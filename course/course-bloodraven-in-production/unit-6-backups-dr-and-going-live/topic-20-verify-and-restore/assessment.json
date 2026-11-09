@@ -11,22 +11,22 @@
       "orderIndex": 1
     },
     {
-      "front": "Minimum size of the ephemeral verification datadir PVC",
-      "back": "10 GiB. Auto-sizing is max(10Gi, 1.5 × the backup's sizeBytes rounded up to the nearest 10Gi).",
+      "front": "Where a verification's datadir lives, and what bounds it",
+      "back": "An `emptyDir` on the Job's node, never a PVC, and not size-limited. Budget about 1.5 × the backup's `sizeBytes` of node disk; bound it with `spec.resources.limits.ephemeral-storage`.",
       "orderIndex": 2
     },
     {
       "front": "Verification terminal reason: SanityCheckFailed",
-      "back": "The sanity query returned a scalar below expect.minRows (or errored outright) — the data is wrong.",
+      "back": "The sanity query returned a scalar below sanityCheck.minResult (or errored outright) — the data is wrong. status.sanityCheck.outcome reads Failed.",
       "orderIndex": 3
     },
     {
       "front": "Verification terminal reason: SanityCheckTimeout",
-      "back": "The sanity query exceeded expect.maxDurationSeconds (default 60) — the instance is wedged rather than wrong.",
+      "back": "The sanity query ran longer than sanityCheck.timeout (default 60s) — the instance is wedged rather than wrong. status.sanityCheck.outcome reads TimedOut.",
       "orderIndex": 4
     },
     {
-      "front": "A verification sanity query runs cleanly but returns zero rows. What scalar does the check compare against minRows?",
+      "front": "A verification sanity query runs cleanly but returns zero rows. What scalar does the check compare against minResult?",
       "back": "0. An empty result set is deliberately treated as scalar 0, so a silently-empty restore fails instead of passing.",
       "orderIndex": 5
     },
@@ -57,13 +57,13 @@
     },
     {
       "front": "spec.keepOnFailure on a MysqlBackupVerification — default, and what it preserves",
-      "back": "Defaults to true; it leaves the verification Pod and its ephemeral PVC in place after a Failed run so you can exec in and inspect why the load failed.",
+      "back": "Defaults to true; it leaves the verification Job and its Pod (with the `emptyDir` datadir) in place after a Failed run so you can exec in and inspect why the load failed.",
       "orderIndex": 11
     }
   ],
   "quiz": [
     {
-      "question": "A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: \"1\"` against a `minRows: 1` floor. What has it proved?",
+      "question": "A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.result: \"1\"` against a `minResult: 1` floor. What has it proved?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -106,7 +106,7 @@
         "Only in the restore Job's container logs, once the Job pod starts and fails to replay."
       ],
       "correctOptionIndex": 2,
-      "explanation": "The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards in `status.restore` and a `RestoreBuildFailed` Warning Event — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. `spec.restoreInPlace.pointInTime` is refused at the same stage for a different reason: in place it is never supported, because the live primary already executed the archived GTIDs. (objective 6)"
+      "explanation": "The check lives in the reconciler's PITR fragment builder, not in the admission chain, so the write is accepted and the error surfaces afterwards in `status.restore` and a `RestoreBuildFailed` Warning Event — watch there, not at the exit code of your apply. It is not an admission webhook rejection and not a CEL rule: neither runs this check, which is why the apply comes back clean. Nor does it wait for the restore Job — the builder returns the error while assembling the Job's init containers, so no Job is ever created. `spec.restoreInPlace` has no `pointInTime` at all, for a different reason: in place it cannot work, because the live primary already executed the archived GTIDs. (objective 6)"
     },
     {
       "question": "Chaos scenario 31 failed with `ERROR 1062 Duplicate entry` because the ephemeral verify `mysqld` was started with `gtid_mode=OFF`, defeating server-side GTID dedup on binlog replay. What does that bug argue for, and why?",

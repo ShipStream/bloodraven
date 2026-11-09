@@ -92,7 +92,7 @@ func TestS25_RestartMidSyncThenFollowUpKeepsDragonflyStatusConsistent(t *testing
 	cur := fetchFG(t, r, nn)
 	cur.Status.ActiveSite = "pdx"
 	cur.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseSucceeded
-	cur.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "iad"}
+	cur.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "iad"}
 	if err := c.Status().Update(context.Background(), cur); err != nil {
 		t.Fatalf("finish the run: %v", err)
 	}

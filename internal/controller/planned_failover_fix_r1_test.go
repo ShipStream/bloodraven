@@ -132,19 +132,19 @@ func TestFixR1_ConfirmedStallMarksOnlyDurableRecord(t *testing.T) {
 	for range 3 {
 		h.step()
 	}
-	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != "" {
+	if m := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]; m != "" {
 		t.Fatalf("the stall ended a confirmed run with marker %q while its failover record was not durable", m)
 	}
 	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
 		t.Fatalf("block = %+v", pf)
 	}
 	// The out-of-band record lands (recordFailover's flush).
-	h.setAnnotation(LastFailoverAnnotation, failoverStampFormat(confirmedAt))
-	h.setAnnotation(LastFailoverTargetAnnotation, "pdx")
-	h.setAnnotation(PromotionGtidExecutedAnnotation, "uuid-iad:1-10")
-	h.setAnnotation(PromotionGtidExecutedForAnnotation, failoverWatermarkBinding(confirmedAt, "pdx"))
+	h.setAnnotation(v1alpha1.LastFailoverAnnotation, failoverStampFormat(confirmedAt))
+	h.setAnnotation(v1alpha1.LastFailoverTargetAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PromotionGtidExecutedAnnotation, "uuid-iad:1-10")
+	h.setAnnotation(v1alpha1.PromotionGtidExecutedForAnnotation, failoverWatermarkBinding(confirmedAt, "pdx"))
 	h.step()
-	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded","warnings":["StatusStalled"]}` {
+	if m := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"Succeeded","warnings":["StatusStalled"]}` {
 		t.Fatalf("marker = %q, want run-1/Succeeded/ once the record is durable", m)
 	}
 	// A new process recovers the run from the marker and applies its record.
@@ -156,9 +156,9 @@ func TestFixR1_ConfirmedStallMarksOnlyDurableRecord(t *testing.T) {
 	if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded || pf.Promotion == nil || pf.Promotion.ConfirmationTime == nil {
 		t.Fatalf("terminal block = %+v", pf)
 	}
-	if fg.Status.LastFailoverTarget != "pdx" || fg.Status.PromotionGtidExecuted != "uuid-iad:1-10" || fg.Status.LastFailover == nil {
+	if fg.Status.LastFailoverTarget() != "pdx" || fg.Status.PromotionGtidExecuted() != "uuid-iad:1-10" || fg.Status.LastFailoverTime() == nil {
 		t.Fatalf("status record = %v %q %q; the marker-ended Succeeded record must apply the failover record",
-			fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted)
+			fg.Status.LastFailoverTime(), fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
 	}
 }
 
@@ -228,7 +228,7 @@ func TestFixR1_ConfirmedTailRechecksDurableRecord(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
 	fg := h.fg()
 	at := metav1.NewTime(h.clk.Now().Add(-time.Second))
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &at, "iad"
+	fg.Status.SetLastFailover(&at, "iad", "")
 	if err := h.c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -268,11 +268,11 @@ func TestFixR1_FencingStallWithNoSETRollsBack(t *testing.T) {
 		return fg.Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhaseFencing
 	})
 	h.faults.statusDenied = true
-	for i := 0; i < 400 && h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation] == ""; i++ {
+	for i := 0; i < 400 && h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation] == ""; i++ {
 		h.step()
 		h.clk.Advance(time.Second)
 	}
-	if m := h.fg().GetAnnotations()[PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","reason":"StatusStalled","warnings":["StatusStalled","UnreachablePeers"]}` {
+	if m := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]; m != `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","reason":"StatusStalled","warnings":["StatusStalled","UnreachablePeers"]}` {
 		t.Fatalf("marker = %q, want run-1/RolledBack/StatusStalled (nothing was sent)", m)
 	}
 }
@@ -410,10 +410,10 @@ func TestFixR1_ReplacedTargetRollsBackOnlyWhenUnrecorded(t *testing.T) {
 
 	h = pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
 	h.topo.promote = inconsistent
-	h.setAnnotation(LastFailoverAnnotation, failoverStampFormat(h.clk.Now()))
-	h.setAnnotation(LastFailoverTargetAnnotation, "pdx")
-	h.setAnnotation(PromotionGtidExecutedAnnotation, "uuid-iad:1-10")
-	h.setAnnotation(PromotionGtidExecutedForAnnotation, failoverWatermarkBinding(h.clk.Now(), "pdx"))
+	h.setAnnotation(v1alpha1.LastFailoverAnnotation, failoverStampFormat(h.clk.Now()))
+	h.setAnnotation(v1alpha1.LastFailoverTargetAnnotation, "pdx")
+	h.setAnnotation(v1alpha1.PromotionGtidExecutedAnnotation, "uuid-iad:1-10")
+	h.setAnnotation(v1alpha1.PromotionGtidExecutedForAnnotation, failoverWatermarkBinding(h.clk.Now(), "pdx"))
 	h.step()
 	if r := h.pf().Result; r == nil || r.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
 		t.Fatalf("result = %+v, want ManualRecoveryRequired once the run's own record is durable", r)
@@ -831,12 +831,12 @@ func TestFixR1_OwnRecordUsesSelectedWatermark(t *testing.T) {
 	t0m := metav1.NewTime(t0)
 	pf.ClaimBaseline = &v1alpha1.FailoverRecordRef{Time: &t0m, Target: "dc1"}
 	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
-	fg.Status.PromotionGtidExecuted = opsF
+	fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), fg.Status.LastFailoverTarget(), opsF)
 	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:             failoverStampFormat(t0),
-		LastFailoverTargetAnnotation:       "dc1",
-		PromotionGtidExecutedAnnotation:    opsUUIDA + ":1-5",
-		PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(t0, "dc1"),
+		v1alpha1.LastFailoverAnnotation:             failoverStampFormat(t0),
+		v1alpha1.LastFailoverTargetAnnotation:       "dc1",
+		v1alpha1.PromotionGtidExecutedAnnotation:    opsUUIDA + ":1-5",
+		v1alpha1.PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(t0, "dc1"),
 	}
 	res, err := f.topo.Reprove(context.Background(), f.ref, fg)
 	if err != nil || !res.OK {

@@ -78,11 +78,11 @@ func runAckPlannedFailoverHold(args []string, stdout, stderr *os.File) error {
 	if patched.Annotations == nil {
 		patched.Annotations = map[string]string{}
 	}
-	patched.Annotations[brcontroller.AcknowledgePlannedFailoverHoldAnnotation] = value
+	patched.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation] = value
 	if err := cl.Patch(ctx, patched, client.MergeFrom(&fg)); err != nil {
 		return fmt.Errorf("annotate failover group: %w", err)
 	}
-	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, brcontroller.AcknowledgePlannedFailoverHoldAnnotation, value)
+	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, value)
 	fmt.Fprintln(stdout, "Watch the AutomaticFailoverHeld condition turn False with: kubectl bloodraven status", group, "-n", ns)
 	return nil
 }

@@ -25,6 +25,13 @@ func TestDeploymentClientsValidation(t *testing.T) {
 	entry := func(namespace, account string) map[string]any {
 		return map[string]any{"namespace": namespace, "serviceAccount": account}
 	}
+	clientList := func(n int) []any {
+		out := make([]any, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, entry("tenant", fmt.Sprintf("deploy-%d", i)))
+		}
+		return out
+	}
 	// A 253-character DNS subdomain whose labels each stay within 63 characters.
 	maxServiceAccount := strings.Join([]string{
 		strings.Repeat("b", 63), strings.Repeat("b", 63), strings.Repeat("b", 63), strings.Repeat("b", 61),
@@ -60,8 +67,12 @@ func TestDeploymentClientsValidation(t *testing.T) {
 		{"service account empty label", []any{entry("tenant", "deploy..sa")}, false},
 		{"service account leading hyphen", []any{entry("tenant", "-deploy")}, false},
 		{"service account trailing dot", []any{entry("tenant", "deploy.")}, false},
-		{"duplicate namespace", []any{entry("tenant", "deploy"), entry("tenant", "other")}, false},
+		// A-14: the key is (namespace, serviceAccount), so one namespace may
+		// declare several ServiceAccounts; at most 16 entries.
+		{"one namespace, two service accounts", []any{entry("tenant", "deploy"), entry("tenant", "other")}, true},
 		{"duplicate identity", []any{entry("tenant", "deploy"), entry("tenant", "deploy")}, false},
+		{"sixteen entries", clientList(16), true},
+		{"seventeen entries", clientList(17), false},
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -68,7 +68,7 @@ func TestStore_Settle_DroppedIsFencedNotCommitted(t *testing.T) {
 		t.Fatalf("Write = %s, want NotCommitted", out)
 	}
 	after := load()
-	if after.Annotations[PlannedFailoverStatusFenceAnnotation] == "" || after.ResourceVersion == base.ResourceVersion {
+	if after.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] == "" || after.ResourceVersion == base.ResourceVersion {
 		t.Fatalf("settlement did not fence: rv %s → %s, annotations %v", base.ResourceVersion, after.ResourceVersion, after.Annotations)
 	}
 	// The late commit of the lost write (conditioned on the old version).
@@ -93,7 +93,7 @@ func TestStore_Settle_MovedVersionIsNotCommitted(t *testing.T) {
 	if out != WriteNotCommitted {
 		t.Fatalf("Settle = %s, want NotCommitted", out)
 	}
-	if load().Annotations[PlannedFailoverStatusFenceAnnotation] != "" {
+	if load().Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
 		t.Error("a fence was written although the version had moved")
 	}
 }
@@ -139,7 +139,7 @@ func TestStore_Write_DefiniteOutcomes(t *testing.T) {
 		if out, _ := store.Write(context.Background(), base, pfNextRevision(base), nil); out != tc.want {
 			t.Errorf("fault %d: Write = %s, want %s", tc.fault, out, tc.want)
 		}
-		if tc.fault != pfWriteOK && load().Annotations[PlannedFailoverStatusFenceAnnotation] != "" {
+		if tc.fault != pfWriteOK && load().Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
 			t.Errorf("fault %d: a definite outcome was settled", tc.fault)
 		}
 	}
@@ -175,10 +175,10 @@ func TestStore_TerminalMarkerFencesLateCommit(t *testing.T) {
 		Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted}); out != WriteConflict {
 		t.Errorf("stale marker write = %s, want Conflict", out)
 	}
-	if out, _ := store.ClearTerminalMarker(context.Background(), after, "run-2"); out != WriteCommitted || load().Annotations[PlannedFailoverTerminalAnnotation] == "" {
+	if out, _ := store.ClearTerminalMarker(context.Background(), after, "run-2"); out != WriteCommitted || load().Annotations[v1alpha1.PlannedFailoverTerminalAnnotation] == "" {
 		t.Error("a marker of run-1 was cleared for run-2")
 	}
-	if out, _ := store.ClearTerminalMarker(context.Background(), load(), "run-1"); out != WriteCommitted || load().Annotations[PlannedFailoverTerminalAnnotation] != "" {
+	if out, _ := store.ClearTerminalMarker(context.Background(), load(), "run-1"); out != WriteCommitted || load().Annotations[v1alpha1.PlannedFailoverTerminalAnnotation] != "" {
 		t.Error("run-1's marker not cleared")
 	}
 }
@@ -200,11 +200,11 @@ func TestStore_MarkDeadlineStartNeverMovesForward(t *testing.T) {
 		t.Errorf("another run's start = %s", other)
 	}
 	if out, _ := store.ClearDeadlineStart(context.Background(), load(), DeadlineStatusStall, "run-1"); out != WriteCommitted ||
-		load().Annotations[PlannedFailoverStallSinceAnnotation] == "" {
+		load().Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation] == "" {
 		t.Error("run-1's clear removed run-2's start")
 	}
 	if out, _ := store.ClearDeadlineStart(context.Background(), load(), DeadlineStatusStall, "run-2"); out != WriteCommitted ||
-		load().Annotations[PlannedFailoverStallSinceAnnotation] != "" {
+		load().Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation] != "" {
 		t.Error("run-2's start not cleared")
 	}
 }

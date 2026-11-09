@@ -150,7 +150,7 @@ func s63PrepareBacklogAndAnnotate() runner.Step {
 				s63KeySource:        source,
 				s63KeyTarget:        target,
 				s63KeyBaselineRunID: baselineRunID,
-				s63KeyBaselineLFT:   mfg.Status.LastFailoverTarget,
+				s63KeyBaselineLFT:   mfg.Status.LastFailoverTarget(),
 			} {
 				if err := ctxStash(ctx, env, k, v); err != nil {
 					return err
@@ -183,6 +183,11 @@ func s63PrepareBacklogAndAnnotate() runner.Step {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("SOURCE_DELAY=%ds applied on target %s", s63SourceDelay, target))
+			// The delay restarted replication; admission refuses a target
+			// the operator last saw stopped.
+			if err := waitOperatorSeesReplicating(ctx, env, target, 10*time.Second, 90*time.Second); err != nil {
+				return err
+			}
 
 			// 3) A marker written after the delay: the fenced set always holds
 			//    at least one transaction the target has not applied.
@@ -435,8 +440,8 @@ func s63HoldViolation(mfg *v1alpha1.MysqlFailoverGroup, runID, target, baselineL
 	if mfg.Status.ActiveSite == target {
 		return fmt.Errorf("status.activeSite=%q while run %s was held: the target was promoted outside the run", target, runID)
 	}
-	if lft := mfg.Status.LastFailoverTarget; lft != baselineLastFailoverTarget {
-		return fmt.Errorf("status.lastFailoverTarget changed %q -> %q while run %s was held", baselineLastFailoverTarget, lft, runID)
+	if lft := mfg.Status.LastFailoverTarget(); lft != baselineLastFailoverTarget {
+		return fmt.Errorf("status.lastFailover.target changed %q -> %q while run %s was held", baselineLastFailoverTarget, lft, runID)
 	}
 	return nil
 }
@@ -714,7 +719,7 @@ func s63Cleanup(ctx context.Context, env *runner.Env) error {
 		return errors.Join(append(errs, fmt.Errorf("get MFG: %w", err))...)
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != "writable" {
+		if s.State != v1alpha1.SiteStateWritable {
 			continue
 		}
 		c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, s.Name, env.Creds)

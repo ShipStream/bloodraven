@@ -23,6 +23,26 @@ func TestRenderCreateDatabase(t *testing.T) {
 	}
 }
 
+// TestRenderDatabaseWithoutCollation pins A-53: an unset spec.collation
+// renders no COLLATE clause on CREATE and ALTER, so MySQL applies the
+// character set's own default collation.
+func TestRenderDatabaseWithoutCollation(t *testing.T) {
+	create, err := renderCreateDatabase("acme_wms", "utf8mb4", "")
+	if err != nil {
+		t.Fatalf("renderCreateDatabase() error = %v", err)
+	}
+	if want := "CREATE DATABASE IF NOT EXISTS `acme_wms` CHARACTER SET utf8mb4"; create != want {
+		t.Fatalf("renderCreateDatabase() = %q, want %q", create, want)
+	}
+	alter, err := renderAlterDatabase("acme_wms", "utf8mb4", "")
+	if err != nil {
+		t.Fatalf("renderAlterDatabase() error = %v", err)
+	}
+	if want := "ALTER DATABASE `acme_wms` CHARACTER SET utf8mb4"; alter != want {
+		t.Fatalf("renderAlterDatabase() = %q, want %q", alter, want)
+	}
+}
+
 func TestRenderCreateDatabaseRejectsBeforeFormatting(t *testing.T) {
 	// Each case would be a SQL injection if the value were merely escaped
 	// and interpolated. The contract is rejection, so the statement is
@@ -260,9 +280,9 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	mdb := &v1alpha1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: "tenant-acme", Namespace: "bloodraven"},
 		Spec: v1alpha1.MysqlDatabaseSpec{
-			GroupRef:     v1alpha1.LocalGroupRef{Name: "main"},
-			DatabaseName: "acme_wms",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+			DatabaseName:     "acme_wms",
+			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 			Grants: []v1alpha1.MysqlDatabaseGrant{
 				{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete}},
 			},

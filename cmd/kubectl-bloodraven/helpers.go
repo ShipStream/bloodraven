@@ -37,13 +37,6 @@ func emptyDash(s string) string {
 	return s
 }
 
-func boolYesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
-}
-
 // age formats a duration since t in a kubectl-style short form
 // ("5s", "12m", "3h45m", "2d6h", "30d"). t.IsZero() prints "-".
 func age(t time.Time) string {
@@ -142,7 +135,7 @@ func plannedTerminalMarker(fg *v1alpha1.MysqlFailoverGroup) (v1alpha1.PlannedFai
 	if pf == nil || pf.RunID == "" {
 		return "", "", false
 	}
-	m, ok := brcontroller.ParseTerminalMarker(fg.Annotations[brcontroller.PlannedFailoverTerminalAnnotation])
+	m, ok := brcontroller.ParseTerminalMarker(fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation])
 	if !ok || m.RunID != pf.RunID {
 		return "", "", false
 	}
@@ -174,9 +167,9 @@ func siteCountSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 	writable, readonly, unhealthy := 0, 0, 0
 	for _, s := range fg.Status.Sites {
 		switch s.State {
-		case "writable":
+		case v1alpha1.SiteStateWritable:
 			writable++
-		case "read-only":
+		case v1alpha1.SiteStateReadOnly:
 			readonly++
 		default:
 			// Includes "unreachable", "unknown", and the empty
@@ -193,7 +186,7 @@ func siteCountSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 // readyString extracts the Ready condition value, defaulting to "-".
 func readyString(fg *v1alpha1.MysqlFailoverGroup) string {
 	for _, c := range fg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			return string(c.Status)
 		}
 	}

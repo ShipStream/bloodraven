@@ -54,14 +54,18 @@ metadata:
   generateName: ${name_stem}
   namespace: ${NAMESPACE}
   labels:
-    shipstream.io/failover-group: ${GROUP}
-    shipstream.io/backup-profile: ${profile}
+    bloodraven.shipstream.io/failover-group: ${GROUP}
+    bloodraven.shipstream.io/backup-profile: ${profile}
     app.kubernetes.io/managed-by: bloodraven
+  annotations:
+    bloodraven.shipstream.io/triggered-by: manual
 spec:
   failoverGroupRef:
     name: ${GROUP}
   profileName: ${profile}
-  triggeredBy: manual
+  # Clean up the Job and Pod once the run succeeds, like the scheduled
+  # profile does; unset would keep them until retention prunes the run.
+  ttlSecondsAfterFinished: 0
 YAML
 }
 
@@ -71,7 +75,7 @@ ensure_succeeded_backup_exists() {
   # kubectl jsonpath filters the list server-side-ish and avoids a `jq`
   # dependency. One name per line → wc -l is the count.
   count=$(kubectl -n "$NAMESPACE" get mysqlbackups \
-    -l "shipstream.io/failover-group=${GROUP},shipstream.io/backup-profile=${profile}" \
+    -l "bloodraven.shipstream.io/failover-group=${GROUP},bloodraven.shipstream.io/backup-profile=${profile}" \
     -o jsonpath='{range .items[?(@.status.phase=="Succeeded")]}{.metadata.name}{"\n"}{end}' \
     2>/dev/null | grep -c . || true)
   if [[ "${count:-0}" -eq 0 ]]; then
@@ -132,7 +136,7 @@ cmd_run() {
 
 cmd_status() {
   kubectl -n "$NAMESPACE" get mysqlbackupverifications \
-    -L shipstream.io/backup-profile \
+    -L bloodraven.shipstream.io/backup-profile \
     -o wide
 }
 
@@ -147,7 +151,7 @@ cmd_logs() {
   fi
   local pod
   pod=$(kubectl -n "$NAMESPACE" get pod \
-    -l "shipstream.io/mysqlbackup-verification=${name}" \
+    -l "bloodraven.shipstream.io/mysqlbackup-verification=${name}" \
     -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null)
   if [[ -z "$pod" ]]; then
     warn "no Job pod yet for ${name} — it may still be provisioning"
@@ -178,7 +182,7 @@ cmd_cleanup() {
 
 cmd_schedule_list() {
   kubectl -n "$NAMESPACE" get cronjobs \
-    -l "shipstream.io/failover-group=${GROUP},shipstream.io/resource=backup-verification-schedule" \
+    -l "bloodraven.shipstream.io/failover-group=${GROUP},bloodraven.shipstream.io/resource=backup-verification-schedule" \
     -o wide
 }
 

@@ -23,7 +23,7 @@ import (
 func TestSettlementWait_KeepsReassertingOfflineFence(t *testing.T) {
 	fg := jobLostFG(time.Now())
 	pod := restorePod(corev1.PodRunning)
-	r, c := newReconciler(fg, dsnSecret(), pod)
+	r, c := newReconciler(fg, operatorCredsSecret(), pod)
 	tm, mocks := withFenceRunner(r, c, fg)
 	primary := mocks["iad"]
 	primary.offlineMode, primary.gtidExecuted = true, peerGTID("1-10")
@@ -80,7 +80,7 @@ func TestRestoreOfflineFenceGuard(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgThreeSiteRestore()
-			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: "iad", Scope: "full"}
+			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: tc.queue, Pending: []string{"pdx"}}
 			fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: tc.prior}
 			if got, _ := restoreOfflineFenceGuard(fg); got != tc.want {
@@ -97,8 +97,8 @@ func TestConfirmBumpDuringSettlement_DoesNotStallReconcile(t *testing.T) {
 	const confirmB = "2026-04-18T10:00:00Z"
 	fg := jobLostFG(time.Now())
 	fg.Spec.RestoreInPlace.Confirm = confirmB
-	fg.SetAnnotations(map[string]string{PlannedFailoverAnnotation: "pdx"})
-	r, c := newReconciler(fg, dsnSecret(), restorePod(corev1.PodRunning))
+	fg.SetAnnotations(map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx"})
+	r, c := newReconciler(fg, operatorCredsSecret(), restorePod(corev1.PodRunning))
 	r.Recorder = record.NewFakeRecorder(200)
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].offlineMode, mocks["iad"].gtidExecuted = true, peerGTID("1-10")
@@ -124,7 +124,7 @@ func TestConfirmBumpDuringSettlement_DoesNotStallReconcile(t *testing.T) {
 	if fresh.Status.PlannedFailover == nil {
 		t.Fatal("the planned-failover step did not run: the pass stopped at the restore")
 	}
-	if n := strings.Count(strings.Join(events, "\n"), "RestoreInPlaceWaitingForPreviousQueue"); n != 1 {
+	if n := strings.Count(strings.Join(events, "\n"), "RestoreInPlaceDeferredPreviousQueue"); n != 1 {
 		t.Fatalf("waiting events = %d, want exactly one (%q)", n, events)
 	}
 }

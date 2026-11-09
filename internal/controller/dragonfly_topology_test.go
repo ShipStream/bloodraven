@@ -29,9 +29,10 @@ import (
 // fakeDragonflyConn is a hand-rolled stub for DragonflyConnection. Each
 // site addr maps to a scripted ReplicationInfo and an optional error.
 type fakeDragonflyConn struct {
-	infoErr error
-	info    dragonfly.ReplicationInfo
-	persist dragonfly.PersistenceInfo
+	infoErr    error
+	info       dragonfly.ReplicationInfo
+	persist    dragonfly.PersistenceInfo
+	persistErr error
 
 	replicaOfErr  error
 	replicaOfArgs []string
@@ -61,7 +62,7 @@ func (c *fakeDragonflyConn) InfoReplication(_ context.Context) (dragonfly.Replic
 }
 
 func (c *fakeDragonflyConn) InfoPersistence(_ context.Context) (dragonfly.PersistenceInfo, error) {
-	return c.persist, nil
+	return c.persist, c.persistErr
 }
 
 func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32) error {
@@ -246,7 +247,6 @@ func TestDragonflyManager_Tick_HappyPath(t *testing.T) {
 func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: "dc1",
 	}
 	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
@@ -297,16 +297,21 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 	} else if err == nil {
 		t.Errorf("source pod still exists after takeover; want deleted to reset CrashLoopBackOff")
 	}
-	if gotTarget.Labels[labelDragonflyRole] != "master" {
-		t.Errorf("target role = %q, want master", gotTarget.Labels[labelDragonflyRole])
+	if gotTarget.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+		t.Errorf("target role = %q, want master", gotTarget.Labels[v1alpha1.DragonflyRoleLabel])
 	}
 
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, ReasonDragonflyPromotionStarted) {
-		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionStarted)
+	if !eventsContain(events, v1alpha1.EventDragonflyPromotionStarted) {
+		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionStarted)
 	}
-	if !eventsContain(events, ReasonDragonflyPromotionCompleted) {
-		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionCompleted)
+	// The old master is unreachable, so the promotion falls back to
+	// REPLICAOF NO ONE: one Warning, DragonflySessionsLost (A-75).
+	if !eventsContain(events, v1alpha1.EventDragonflySessionsLost) {
+		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflySessionsLost)
+	}
+	if eventsContain(events, v1alpha1.EventDragonflyPromotionSucceeded) {
+		t.Errorf("events = %v, want no %s for a sessions-lost promotion", events, v1alpha1.EventDragonflyPromotionSucceeded)
 	}
 }
 
@@ -314,7 +319,6 @@ func TestDragonflyManager_Tick_SelfHealsStaleDragonflyActiveSite(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.ActiveSite = "dc2"
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: "dc1",
 	}
 	cb, key := newDragonflyFakeClient(fg)
@@ -357,7 +361,6 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
-		Enabled:    true,
 		ActiveSite: "dc2",
 	}
 	cb, key := newDragonflyFakeClient(fg)
@@ -396,11 +399,11 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 		t.Errorf("lastPromotionTarget = %q, want dc1", got.Status.Dragonfly.LastPromotionTarget)
 	}
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, ReasonDragonflyPromotionStarted) {
-		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionStarted)
+	if !eventsContain(events, v1alpha1.EventDragonflyPromotionStarted) {
+		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionStarted)
 	}
-	if !eventsContain(events, ReasonDragonflyPromotionCompleted) {
-		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionCompleted)
+	if !eventsContain(events, v1alpha1.EventDragonflyPromotionSucceeded) {
+		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionSucceeded)
 	}
 }
 
@@ -421,6 +424,7 @@ func TestDragonflyManager_Tick_ReplicaNeverSyncedNotReady(t *testing.T) {
 			MasterPort:             6379,
 			MasterLinkStatus:       "up",
 			MasterLastIOSecondsAgo: -1,
+			MasterLastIOReported:   true,
 			SlaveReplOffset:        100,
 		},
 	})
@@ -440,8 +444,8 @@ func TestDragonflyManager_Tick_ReplicaNeverSyncedNotReady(t *testing.T) {
 			if s.Ready {
 				t.Fatal("dc2 Ready = true, want false for never-synced replica")
 			}
-			if s.LastIOSecondsAgo != -1 {
-				t.Fatalf("dc2 LastIOSecondsAgo = %d, want -1", s.LastIOSecondsAgo)
+			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo != -1 {
+				t.Fatalf("dc2 LastIOSecondsAgo = %v, want -1", s.LastIOSecondsAgo)
 			}
 			return
 		}
@@ -480,10 +484,10 @@ func TestDragonflyManager_Tick_StaleMasterEmitsEvent(t *testing.T) {
 	foundStale := false
 	foundReconfigured := false
 	for _, ev := range events {
-		if contains(ev, ReasonDragonflyStaleMasterDetected) {
+		if contains(ev, v1alpha1.EventDragonflyStaleMasterDetected) {
 			foundStale = true
 		}
-		if contains(ev, ReasonDragonflyOldSiteReconfigured) {
+		if contains(ev, v1alpha1.EventDragonflyOldSiteReconfigured) {
 			foundReconfigured = true
 		}
 	}
@@ -527,7 +531,7 @@ func TestDragonflyManager_Tick_StaleMasterAutoReconfigures(t *testing.T) {
 	events := drainEventsCh(rec.Events, 8, 100*time.Millisecond)
 	foundReconfigured := false
 	for _, ev := range events {
-		if contains(ev, ReasonDragonflyOldSiteReconfigured) {
+		if contains(ev, v1alpha1.EventDragonflyOldSiteReconfigured) {
 			foundReconfigured = true
 		}
 	}
@@ -688,11 +692,11 @@ func TestDragonflyManager_TryEmergencyPromote_Success(t *testing.T) {
 
 	select {
 	case ev := <-rec.Events:
-		if !contains(ev, ReasonDragonflyPromotionCompleted) {
-			t.Errorf("event = %q, want %q", ev, ReasonDragonflyPromotionCompleted)
+		if !contains(ev, v1alpha1.EventDragonflyPromotionSucceeded) {
+			t.Errorf("event = %q, want %q", ev, v1alpha1.EventDragonflyPromotionSucceeded)
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("no DragonflyPromotionCompleted event emitted")
+		t.Fatal("no DragonflyPromotionSucceeded event emitted")
 	}
 }
 
@@ -715,7 +719,7 @@ func TestDragonflyManager_TryEmergencyPromote_TakeoverFailsFallsBack(t *testing.
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
 
-	// Drain at most 4 events; we expect a Warning DragonflyPromotionCompleted
+	// Drain at most 4 events; we expect a Warning DragonflyPromotionSucceeded
 	// (best-effort fallback path).
 	got := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
 	found := false
@@ -816,7 +820,7 @@ func TestDragonflyManager_TryEmergencyPromote_RedialsAfterTakeoverError(t *testi
 // TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTraffic
 // regression-tests B5: applyEmergencyPromotionLabels used to log-and-
 // continue on demote failure, then restore the source's traffic
-// label — leaving a pod with role=master+traffic=enabled selectable by
+// label — leaving a pod with role=master+traffic=true selectable by
 // the active Service alongside the new master. Split-brain at the
 // routing layer.
 //
@@ -834,7 +838,7 @@ func TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTr
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
-					if pod.Labels[labelDragonflyRole] == "replica" {
+					if pod.Labels[v1alpha1.DragonflyRoleLabel] == "replica" {
 						return errors.New("simulated demote-patch failure")
 					}
 				}
@@ -859,8 +863,8 @@ func TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTr
 	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
 		t.Fatalf("get source: %v", err)
 	}
-	if _, has := gotSource.Labels[labelDragonflyTraffic]; has {
-		t.Errorf("emergency: source traffic label = %q, want absent (demote failed → must not restore traffic)", gotSource.Labels[labelDragonflyTraffic])
+	if _, has := gotSource.Labels[v1alpha1.DragonflyTrafficLabel]; has {
+		t.Errorf("emergency: source traffic label = %q, want absent (demote failed → must not restore traffic)", gotSource.Labels[v1alpha1.DragonflyTrafficLabel])
 	}
 }
 
@@ -907,11 +911,11 @@ func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T
 	if err := c.Get(context.Background(), types.NamespacedName{Name: targetPod.Name, Namespace: targetPod.Namespace}, &gotTarget); err != nil {
 		t.Fatalf("get target: %v", err)
 	}
-	if gotTarget.Labels[labelDragonflyRole] != "master" {
-		t.Errorf("target role = %q, want master", gotTarget.Labels[labelDragonflyRole])
+	if gotTarget.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+		t.Errorf("target role = %q, want master", gotTarget.Labels[v1alpha1.DragonflyRoleLabel])
 	}
-	if gotTarget.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
-		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[labelDragonflyTraffic])
+	if gotTarget.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[v1alpha1.DragonflyTrafficLabel])
 	}
 	var gotSource corev1.Pod
 	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); client.IgnoreNotFound(err) != nil {

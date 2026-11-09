@@ -607,7 +607,7 @@ func TestSiblingPrincipalClaimIn(t *testing.T) {
 		{
 			name: "a sibling on another group does not claim it",
 			item: sibling(func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.GroupRef.Name = "other-group"
+				m.Spec.FailoverGroupRef.Name = "other-group"
 				m.Status.OwnerUser = "acme_support"
 			}),
 			want: false,

@@ -44,7 +44,7 @@ func holdVerification(name string, phase v1alpha1.VerificationPhase, refUID stri
 	v.UID = types.UID("uid-" + name)
 	v.Status.Phase = phase
 	if refUID != "" {
-		v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "held", UID: refUID, Location: "lion/nightly/held/", StorageType: v1alpha1.BackupStorageS3}
+		v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "held", UID: refUID, ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/nightly/held/")}
 	}
 	return v
 }
@@ -60,7 +60,7 @@ func holdJob(verification string, condition batchv1.JobConditionType) *batchv1.J
 func holdPod(verification string, phase corev1.PodPhase) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: verification + "-pod-" + strings.ToLower(string(phase)), Namespace: "ns",
-			Labels: map[string]string{labelMysqlBackupVerification: verification}},
+			Labels: map[string]string{v1alpha1.MysqlBackupVerificationLabel: verification}},
 		Status: corev1.PodStatus{Phase: phase},
 	}
 }
@@ -97,7 +97,7 @@ func TestArtifactReaders(t *testing.T) {
 		}()}, want: ""},
 		{name: "not yet pinned to another backup by name", objs: []client.Object{heldBackup(), func() client.Object {
 			v := holdVerification("pending", "", "")
-			v.Spec.BackupRef = &corev1.LocalObjectReference{Name: "another"}
+			v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "another"}
 			return v
 		}()}, want: ""},
 	}
@@ -157,7 +157,7 @@ func TestPruneSuccessful_SkipsBackupsBeingRead(t *testing.T) {
 	reader := holdVerification("reader", v1alpha1.VerificationPhaseRestoring, "uid-b-b")
 	objs := append(asClientObjects(backups), reader)
 	r, _ := newBackupReconciler(t, objs...)
-	if err := r.pruneSuccessful(context.Background(), backups, 1, 0, 0); err != nil {
+	if err := r.pruneSuccessful(context.Background(), backups, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	// b-b is out of the count window but is being verified; b-c is not.
@@ -178,7 +178,7 @@ func TestPruneSuccessful_DoesNotDeleteSameNameReplacement(t *testing.T) {
 	// incarnation with another UID.
 	stale := backups
 	stale[1].UID = "uid-b-b-previous"
-	if err := r.pruneSuccessful(context.Background(), stale, 1, 0, 0); err != nil {
+	if err := r.pruneSuccessful(context.Background(), stale, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	var live v1alpha1.MysqlBackup
@@ -194,11 +194,11 @@ func TestResolveBackup_SkipsTerminatingBackups(t *testing.T) {
 	newer.Status.CompletionTime = &metav1.Time{Time: older.Status.CompletionTime.Add(time.Hour)}
 	now := metav1.Now()
 	newer.DeletionTimestamp = &now
-	newer.Finalizers = []string{mysqlBackupFinalizer}
+	newer.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 
 	latest := verifyCR("latest", fg.Name, "nightly-s3")
 	explicit := verifyCR("explicit", fg.Name, "nightly-s3")
-	explicit.Spec.BackupRef = &corev1.LocalObjectReference{Name: "newer"}
+	explicit.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "newer"}
 	r, _ := newVerificationReconciler(t, fg, older, newer)
 
 	got, err := r.resolveBackup(context.Background(), latest)
@@ -216,7 +216,7 @@ func TestVerificationHold_StampedOnLaunchAndReleasedWhenStopped(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("hold", fg.Name, "nightly-s3")
 	v.UID = "uid-hold"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
 		t.Fatal(err)
@@ -271,15 +271,15 @@ func TestVerificationHold_RefusesTerminatingBackupAtLaunch(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	now := metav1.Now()
 	b.DeletionTimestamp = &now
-	b.Finalizers = []string{mysqlBackupFinalizer}
+	b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 	v := verifyCR("late", fg.Name, "nightly-s3")
-	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: b.Name}
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: b.Name}
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
 	}
-	cond := apiMeta.FindStatusCondition(v.Status.Conditions, ConditionVerified)
+	cond := apiMeta.FindStatusCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
 	if v.Status.Phase != v1alpha1.VerificationPhaseFailed || cond == nil || cond.Reason != "BackupNotAvailable" {
 		t.Fatalf("status %+v, want Failed/BackupNotAvailable", v.Status)
 	}
@@ -295,7 +295,7 @@ func TestVerificationHold_DeletionWaitsForPods(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("deleting", fg.Name, "nightly-s3")
 	v.UID = "uid-deleting"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	pod := holdPod(v.Name, corev1.PodRunning)
 	if err := c.Create(ctx, pod); err != nil {
@@ -333,7 +333,7 @@ func TestFinalize_DefersWhileVerificationReads(t *testing.T) {
 	f := newCleanupFixture(t)
 	reader := verifyCR("reader", "lion", "nightly-s3")
 	reader.Status.Phase = v1alpha1.VerificationPhaseRestoring
-	reader.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), Location: f.mb.Status.Location, StorageType: v1alpha1.BackupStorageS3}
+	reader.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, testArtifactLocation(f.mb))}
 	if err := f.c.Create(context.Background(), reader); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestFinalize_DefersWhileVerificationReads(t *testing.T) {
 		t.Fatal("cleanup started while a verification reads the artifact")
 	}
 	cond := cleanupCondition(t, f)
-	if cond == nil || cond.Reason != cleanupReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
+	if cond == nil || cond.Reason != v1alpha1.ReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
 		t.Fatalf("condition %+v", cond)
 	}
 	if n := countEvents(f.rec, "ArtifactCleanupDeferred"); n != 1 {
@@ -376,7 +376,7 @@ func TestVerificationHold_StampedAfterCrashBetweenPinAndStamp(t *testing.T) {
 	v.UID = "uid-crashed"
 	v.Status.Phase = v1alpha1.VerificationPhaseProvisioning
 	v.Status.BackupRef = verificationBackupSnapshot(pinned)
-	r, c := newVerificationReconciler(t, fg, pinned, newer, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, pinned, newer, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	for _, b := range []*v1alpha1.MysqlBackup{pinned, newer} {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
@@ -395,7 +395,7 @@ func TestVerificationHold_ReleaseConflictIsRetried(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("conflict", fg.Name, "nightly-s3")
 	v.UID = "uid-conflict"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
@@ -447,7 +447,7 @@ func TestVerificationHold_StampedOnObserveAfterCrash(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("observe", fg.Name, "nightly-s3")
 	v.UID = "uid-observe"
-	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	// Rewind to the crash point: Job exists, status and hold do not.
 	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
@@ -489,7 +489,7 @@ func TestPruneSuccessful_LogsHeldBackup(t *testing.T) {
 	var lines []string
 	logger := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
 	ctx := log.IntoContext(context.Background(), logger)
-	if err := r.pruneSuccessful(ctx, backups, 1, 0, 0); err != nil {
+	if err := r.pruneSuccessful(ctx, backups, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, line := range lines {
@@ -514,7 +514,7 @@ func TestArtifactReaders_UnpinnedIgnoresUnpickableBackups(t *testing.T) {
 		{name: "terminating", mutate: func(b *v1alpha1.MysqlBackup) {
 			now := metav1.Now()
 			b.DeletionTimestamp = &now
-			b.Finalizers = []string{mysqlBackupFinalizer}
+			b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
 		}},
 		{name: "failed", mutate: func(b *v1alpha1.MysqlBackup) { b.Status.Phase = v1alpha1.BackupPhaseFailed }},
 	} {

@@ -205,12 +205,12 @@ func TestUnsettledEarlierQueueIsHeldWhenNextRunEndsWithoutJob(t *testing.T) {
 	site, peerName := fg.Spec.Sites[0].Name, fg.Spec.Sites[1].Name
 	no := false
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", ConfirmTokenUsed: confirmA, RunConfirm: confirmB, RunID: "run-b",
+		Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: confirmA, RunConfirm: confirmB, RunID: "run-b",
 		StartTime: ptrTime(time.Now()),
 	}
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{peerName}}
 	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: confirmA, RunID: "run-a", PriorOfflineMode: &no, SessionsEvicted: true}
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret(), primaryFencedPod(fg.Name, site))
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 	_, mocks := withFenceRunner(r, c, fg)
 	r.Recorder = record.NewFakeRecorder(100)
 	mocks[site].gtidExecuted = peerGTID("1-10")
@@ -247,7 +247,7 @@ func TestArmRestoreReclones_CarriesUnsettledArmedQueueAsHeld(t *testing.T) {
 	fg := fgThreeSiteRestore()
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx"},
 		Superseded: &v1alpha1.RestoreReclonesCarryover{ConfirmToken: "2026-04-16T00:00:00Z", Pending: []string{"sea"}}}
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	if err := r.armRestoreReclones(context.Background(), fg, "iad", "2026-04-18T10:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func restorePod(phase corev1.PodPhase) *corev1.Pod {
 func TestSettle_JobLostWaitsForRestorePodsBeforeDiscarding(t *testing.T) {
 	fg := jobLostFG(time.Now())
 	pod := restorePod(corev1.PodRunning)
-	r, c := newReconciler(fg, dsnSecret(), pod)
+	r, c := newReconciler(fg, operatorCredsSecret(), pod)
 	_, mocks := withFenceRunner(r, c, fg)
 	primary := mocks["iad"]
 	primary.offlineMode, primary.gtidExecuted = true, peerGTID("1-10")
@@ -312,7 +312,7 @@ func TestSettle_JobLostWaitsForRestorePodsBeforeDiscarding(t *testing.T) {
 // unchanged primary: the peers are held.
 func TestSettle_JobLostWithPodsAliveBeyondBoundHolds(t *testing.T) {
 	fg := jobLostFG(time.Now().Add(-restoreSettleBound - time.Minute))
-	r, c := newReconciler(fg, dsnSecret(), restorePod(corev1.PodRunning))
+	r, c := newReconciler(fg, operatorCredsSecret(), restorePod(corev1.PodRunning))
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].gtidExecuted = peerGTID("1-10")
 	if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
@@ -327,7 +327,7 @@ func TestSettle_JobLostWithPodsAliveBeyondBoundHolds(t *testing.T) {
 // the peers are held.
 func TestSettle_GTIDReadFailureRetriesBeforeHolding(t *testing.T) {
 	fg := jobLostFG(time.Now())
-	r, c := newReconciler(fg, dsnSecret())
+	r, c := newReconciler(fg, operatorCredsSecret())
 	_, mocks := withFenceRunner(r, c, fg)
 	mocks["iad"].gtidExecuted, mocks["iad"].gtidExecutedErr = peerGTID("1-10"), errors.New("connection reset")
 	wait, err := r.settleArmedRestoreReclones(context.Background(), fg)
@@ -347,7 +347,7 @@ func TestSettle_GTIDReadFailureRetriesBeforeHolding(t *testing.T) {
 	}
 
 	late := jobLostFG(time.Now().Add(-restoreGTIDReadBound - time.Second))
-	r2, c2 := newReconciler(late, dsnSecret())
+	r2, c2 := newReconciler(late, operatorCredsSecret())
 	_, mocks2 := withFenceRunner(r2, c2, late)
 	mocks2["iad"].gtidExecutedErr = errors.New("connection reset")
 	backdateGTIDReadFailure(r2, late, restoreGTIDReadBound+time.Second)
@@ -364,7 +364,7 @@ type noStopperChecker struct{ mysql.Checker }
 
 func TestReconcileInPlaceRestore_PreflightRejectsPeerWithoutStopper(t *testing.T) {
 	fg := fgInPlaceRestore("")
-	r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 	cfg := testTopologyConfig()
 	cfg.Sites = []SiteTopologyConfig{
 		{Name: fg.Spec.Sites[0].Name, Role: state.SiteRolePrimaryCandidate, Host: "mysql-a"},
@@ -392,7 +392,7 @@ func TestInitiateRecovery_HeldSiteNotMarkedInProgress(t *testing.T) {
 	tm.mu.RLock()
 	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
-	if rec != nil && rec.state == recoveryStateInProgress {
+	if rec != nil && rec.state == v1alpha1.RecoveryStateInProgress {
 		t.Fatal("a held site was marked RecoveryInProgress")
 	}
 }

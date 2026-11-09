@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/controller"
 )
 
 var (
@@ -32,6 +33,9 @@ var (
 
 func TestMain(m *testing.M) {
 	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	// The chart's BLOODRAVEN_SIDECAR_IMAGE: groups without
+	// spec.sidecar.image render this image.
+	controller.SetSidecarImageDefault("bloodraven-sidecar:envtest")
 
 	ctx, cancel = context.WithCancel(context.Background())
 

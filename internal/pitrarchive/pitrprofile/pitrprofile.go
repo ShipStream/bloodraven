@@ -65,7 +65,7 @@ func EncryptionIdentityFor(p *v1alpha1.BackupProfile) pitrarchive.EncryptionIden
 	if !p.EncryptionEnabled() {
 		return pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}
 	}
-	return pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: p.Encryption.AlgorithmOrDefault()}
+	return pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: string(p.Encryption.AlgorithmOrDefault())}
 }
 
 // OwnedBackupPVCName is the name of the PVC the operator provisions for a

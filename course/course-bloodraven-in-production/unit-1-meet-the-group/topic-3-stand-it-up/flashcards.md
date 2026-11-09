@@ -11,13 +11,13 @@
 
 **Front:** How a site's `status.sites[].state` is decided
 
-**Back:** From one query per poll, `SELECT @@read_only`: `0` gives `writable`, `1` gives `read-only`, a failed connection gives `unreachable`, and a site not yet polled is `unknown`.
+**Back:** From one query per poll, `SELECT @@read_only`: `0` gives `Writable`, `1` gives `ReadOnly`, a failed connection gives `Unreachable`, and a site not yet polled is `Unknown`.
 
 ---
 
-**Front:** `status.sites[].replicating`
+**Front:** `status.sites[].replication`
 
-**Back:** The operator's verdict on whether replication is healthy on that follower — populated only for sites currently in `read-only` state, never for the writable primary.
+**Back:** The operator's verdict on that site's replication: `Healthy` or `Lagging` (past `spec.replication.maxLagSeconds`) once both threads have run with a source set for consecutive polls, `Broken` when a thread is stopped or no source is set, `Unknown` when it could not be read or the healthy streak is still building, and `NotApplicable` on the writable primary.
 
 ---
 
@@ -27,9 +27,9 @@
 
 ---
 
-**Front:** A site entry that carries no `replicating`, no `secondsBehindSource` and no `gtidExecuted` key at all
+**Front:** A site entry that reads `replication: NotApplicable` and carries no `secondsBehindSource` and no `gtidExecuted` key at all
 
-**Back:** It is the writable primary. The operator only probes replication on `read-only` sites, so those keys are absent rather than zero or false.
+**Back:** It is the writable primary. The operator only probes replication on `ReadOnly` sites, so it marks the primary `NotApplicable` and leaves the lag and GTID keys absent rather than zero.
 
 ---
 
@@ -39,7 +39,7 @@
 
 ---
 
-**Front:** Condition reason `Degraded`
+**Front:** Condition reason `SiteUnhealthy`
 
 **Back:** Any shape short of healthy that is not split brain, no primary or total loss — including a live primary with an unreachable peer.
 

@@ -30,24 +30,24 @@ Applications get two of the four Service kinds: `-primary` for writes, `-replica
 
 pdx has been promoted. `kubectl get dnsendpoint bloodraven-playground -o yaml` shows `recordType: A`, `recordTTL: 60`, and `targets` already holding pdx's IP; the operator logged `failover complete` fifty seconds ago. Clients resolving the hostname are still being sent to iad. Which reading of the situation is correct?
 
-- `recordTTL` is the cadence at which Bloodraven re-applies the record, so lowering `spec.dns.ttl` would have made the operator publish the new target sooner.
+- `recordTTL` is the cadence at which Bloodraven re-applies the record, so lowering `spec.dns.ttlSeconds` would have made the operator publish the new target sooner.
 - The record moves only on a create-or-update transition, so an apply that was rejected once stays stale until somebody re-applies it by hand.
 - Bloodraven has already finished: the desired target is re-derived from live topology and server-side applied on every poll. The TTL is the floor on how long a cached stale answer can survive, and everything past the CR — external-dns, your resolver, your client's cache — is outside the operator's reach.
-- Lowering `spec.dns.ttl` from 60 to 10 would also have shortened the window in which the application's existing connections kept talking to iad.
+- Lowering `spec.dns.ttlSeconds` from 60 to 10 would also have shortened the window in which the application's existing connections kept talking to iad.
 
 **Correct option index:** 2
 
 **Explanation:**
 
-Writing the `DNSEndpoint` is where Bloodraven's authority ends. The operator cannot accelerate DNS propagation; chaos scenario 38 makes the point by denying the operator write verbs on `dnsendpoints` and watching the CR promote perfectly while the record stays stale. Option 1 confuses the record's TTL with the operator's write cadence — there is no such cadence to tune, because `reconcileDNS` runs on every poll regardless of the TTL. Option 2 assumes a create/update split that does not exist: the write is one idempotent server-side apply with forced field ownership, and because nothing is memoized, a rejected apply self-heals on a later poll with no human involved. Option 4 is the one that will actually cost you an incident — a TTL governs the *next* lookup. An established socket never performs one, so `spec.dns.ttl` (60 shipped, 10 in the playground) does nothing at all for the connections already open against the demoted site. (objective 2)
+Writing the `DNSEndpoint` is where Bloodraven's authority ends. The operator cannot accelerate DNS propagation; chaos scenario 38 makes the point by denying the operator write verbs on `dnsendpoints` and watching the CR promote perfectly while the record stays stale. Option 1 confuses the record's TTL with the operator's write cadence — there is no such cadence to tune, because `reconcileDNS` runs on every poll regardless of the TTL. Option 2 assumes a create/update split that does not exist: the write is one idempotent server-side apply with forced field ownership, and because nothing is memoized, a rejected apply self-heals on a later poll with no human involved. Option 4 is the one that will actually cost you an incident — a TTL governs the *next* lookup. An established socket never performs one, so `spec.dns.ttlSeconds` (60 shipped, 10 in the playground) does nothing at all for the connections already open against the demoted site. (objective 2)
 
 ## Question 3
 
 **Type:** MULTIPLE_CHOICE
 
-After promoting pdx, Bloodraven taints iad's nodes with `shipstream.io/db-readonly-playground=true:NoExecute`. On one of those nodes sit a batch worker with no tolerations and a metrics agent that tolerates the key with `tolerationSeconds: 600`. The `reader` site's MySQL pod sits on a third node. What happens?
+After promoting pdx, Bloodraven taints iad's nodes with `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground=true:NoExecute`. On one of those nodes sit a batch worker with no tolerations and a metrics agent that tolerates the key with `tolerationSeconds: 600`. The `reader` site's MySQL pod sits on a third node. What happens?
 
-- The batch worker is evicted immediately. The metrics agent stays bound for its 600 s, after which the node lifecycle controller evicts it. The reader's node is never tainted at all — a `role: read-only` site is already read-only, so there is nothing to demote.
+- The batch worker is evicted immediately. The metrics agent stays bound for its 600 s, after which the node lifecycle controller evicts it. The reader's node is never tainted at all — a `role: ReadOnly` site is already read-only, so there is nothing to demote.
 - All three go immediately: `NoExecute` evicts every pod on a tainted node, and `tolerationSeconds` only has meaning under `NoSchedule`.
 - Nothing already running is touched. The taint stops new pods being scheduled onto iad's nodes; the existing ones leave only when you cordon and drain.
 - The batch worker is evicted, the metrics agent runs indefinitely because a toleration on the key is unbounded, and the reader's node is tainted too since it belongs to the same failover group.
@@ -78,7 +78,7 @@ The counter app's pods run on the cluster's general application nodes, not on ia
 
 - The `-primary` selector flip removed iad from the Service's endpoint list, and kube-proxy resets flows whose backend it no longer has.
 - Fencing did it — `SET GLOBAL super_read_only = ON` terminates client sessions on the demoted site, so the pool reopened through `-primary`.
-- DNS did it — the playground runs `spec.dns.ttl` at 10, so the pool re-resolved the hostname and landed on pdx within about ten seconds.
+- DNS did it — the playground runs `spec.dns.ttlSeconds` at 10, so the pool re-resolved the hostname and landed on pdx within about ten seconds.
 - None of them. A selector flip routes new connections only, a DNS record governs only the next lookup, and the `NoExecute` taint is the one surface that removes a running process — and it reaches only pods on the demoted site's nodes, which these were not.
 
 **Correct option index:** 3
@@ -93,10 +93,10 @@ Every mechanism fired correctly and every one of them missed, which is the whole
 
 A long-running JVM service talks to `playground`. It runs in a third site with no MySQL in it, and restarting it is expensive — a cold instance takes a long warm-up before it serves at rate. Cross-site write latency is comfortably within budget. Which approach gets it across a primary move?
 
-- Taint-based: drop the service's toleration for `shipstream.io/db-readonly-playground` so the `NoExecute` taint evicts it at a promotion and it returns with a fresh pool.
+- Taint-based: drop the service's toleration for `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` so the `NoExecute` taint evicts it at a promotion and it returns with a fresh pool.
 - Service-based: keep it up, bound the pool's connection lifetime, retry specifically on the read-only write errors 1290 and 1792, and split reads to `mysql-playground-replicas` while writes resolve through `mysql-playground-primary`.
 - Site-local warm standby: run an instance at every site and let only the one co-located with the current primary take writes.
-- Service-based, tuned for the failure: raise the pool size so a promotion has spare connections, set `reconnect=true`, and drop `spec.dns.ttl` to 10.
+- Service-based, tuned for the failure: raise the pool size so a promotion has spare connections, set `reconnect=true`, and drop `spec.dns.ttlSeconds` to 10.
 
 **Correct option index:** 1
 
@@ -112,7 +112,7 @@ You annotate `playground` with `bloodraven.shipstream.io/planned-failover=pdx`. 
 
 **Sample answer:**
 
-At `Fencing` the operator set `super_read_only = ON` on iad, read it back, then read iad's `GTID_EXECUTED` and recorded it in `status.plannedFailover.fence.gtidSet`. Fence first, snapshot second. It also stripped iad's primary role label to `fenced`, so the pod matches neither the `-primary` nor the `-replicas` selector and new connections stop arriving. At `Draining` it repeatedly killed the connections already open, under a 30 s `drainTimeout`. In `WaitingForLag` it polls pdx's `GTID_EXECUTED` and asks one question: does that set *contain* `fence.gtidSet`? It is a genuine GTID-set superset test, not a lag-seconds heuristic — `spec.replication.maxLagSeconds` drives only the `ReplicationLagging` Degraded condition and is never consulted here, and `Seconds_Behind_Source` would be a bad gate anyway because it compares last-executed against last-downloaded and reads 0 when the IO thread has stalled. Nothing can be lost because of the ordering: the source was fenced before the snapshot was taken, so the set pdx must catch up to cannot grow underneath the gate, and the pre-write gate promotes pdx only holding exactly that set. On success `status.promotionGtidExecuted` equals `fence.gtidSet`; there is no lost-transaction counter to read, because a clean switchover cannot produce a number. For the stuck gate: let it fail. `maxLagWait` defaults to 5m, and nothing has been written to pdx yet, so a `LagTimeout` rolls back: the run ends `RolledBack` with iad writable again and nothing lost but the fenced window. Raising `maxLagWait` does not make pdx catch up any faster; it only lengthens the interval in which the source is fenced and writes are refused. Fix the lag first, then re-annotate.
+At `Fencing` the operator set `super_read_only = ON` on iad, read it back, then read iad's `GTID_EXECUTED` and recorded it in `status.plannedFailover.fence.gtidSet`. Fence first, snapshot second. It also stripped iad's primary role label to `fenced`, so the pod matches neither the `-primary` nor the `-replicas` selector and new connections stop arriving. At `Draining` it repeatedly killed the connections already open, under a 30 s `drainTimeout`. In `WaitingForLag` it polls pdx's `GTID_EXECUTED` and asks one question: does that set *contain* `fence.gtidSet`? It is a genuine GTID-set superset test, not a lag-seconds heuristic — `spec.replication.maxLagSeconds` drives only the `ReplicationLagging` Degraded condition and is never consulted here, and `Seconds_Behind_Source` would be a bad gate anyway because it compares last-executed against last-downloaded and reads 0 when the IO thread has stalled. Nothing can be lost because of the ordering: the source was fenced before the snapshot was taken, so the set pdx must catch up to cannot grow underneath the gate, and the pre-write gate promotes pdx only holding exactly that set. On success `status.lastFailover.promotionGtidExecuted` equals `fence.gtidSet`; there is no lost-transaction counter to read, because a clean switchover cannot produce a number. For the stuck gate: let it fail. `maxLagWait` defaults to 5m, and nothing has been written to pdx yet, so a `LagTimeout` rolls back: the run ends `RolledBack` with iad writable again and nothing lost but the fenced window. Raising `maxLagWait` does not make pdx catch up any faster; it only lengthens the interval in which the source is fenced and writes are refused. Fix the lag first, then re-annotate.
 
 **A full-credit answer shows:**
 
@@ -167,7 +167,7 @@ While Bloodraven moves the Dragonfly master, both the old and the new instance b
 
 **Explanation:**
 
-False — and the mechanism that prevents it is deliberate. The active Service AND-gates two labels the operator stamps on Dragonfly pods, `shipstream.io/dragonfly-role=master` and `shipstream.io/dragonfly-traffic=enabled`, and a pod is an endpoint only when both match. To shed an endpoint the operator *deletes* the traffic key rather than stamping some disabled value, because the selector is an exists-and-equals check on `enabled` and an absent key cannot match. The takeover strips the source's traffic key before it promotes the target and stamps the target's key only afterwards, so there is no instant at which both carry it; the steady-state label sweep honours the same window by skipping the source mid-takeover, since re-stamping it would re-attach the old master to the active Service — exactly the bug the strip prevents. Had the operator written `dragonfly-traffic=disabled` instead, correctness would depend on the selector and the writer agreeing about a magic string. Deletion needs no agreement. (objective 12)
+False — and the mechanism that prevents it is deliberate. The active Service AND-gates two labels the operator stamps on Dragonfly pods, `bloodraven.shipstream.io/dragonfly-role=master` and `bloodraven.shipstream.io/dragonfly-traffic=true`, and a pod is an endpoint only when both match. To shed an endpoint the operator *deletes* the traffic key rather than stamping some disabled value, because the selector is an exists-and-equals check on `true` and an absent key cannot match. The takeover strips the source's traffic key before it promotes the target and stamps the target's key only afterwards, so there is no instant at which both carry it; the steady-state label sweep honours the same window by skipping the source mid-takeover, since re-stamping it would re-attach the old master to the active Service — exactly the bug the strip prevents. Had the operator written `dragonfly-traffic=disabled` instead, correctness would depend on the selector and the writer agreeing about a magic string. Deletion needs no agreement. (objective 12)
 
 ## Question 11
 

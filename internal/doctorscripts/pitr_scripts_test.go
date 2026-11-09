@@ -232,7 +232,7 @@ func TestTriageArchiverStatusAndVerificationEvents(t *testing.T) {
 	e.rule(t, "get pod mysql-lion-dc1-0 -n orders -o jsonpath=*", "sidecar mysql", false)
 	e.rule(t, "exec -n orders mysql-lion-dc1-0 -c mysql -- curl *", `{"site":"dc1","archive":{"state":"Verified"},"divergentRows":2}`, false)
 	e.rule(t, "exec *", "", true)
-	e.rule(t, "get mysqlbackupverifications -n orders -l shipstream.io/failover-group=lion -o jsonpath=*", "verify-1", false)
+	e.rule(t, "get mysqlbackupverifications -n orders -l bloodraven.shipstream.io/failover-group=lion -o jsonpath=*", "verify-1", false)
 	e.rule(t, "get events -n orders --field-selector involvedObject.kind=MysqlBackupVerification,involvedObject.name=verify-1 *",
 		"2026-11-05T10:00:00Z   Warning   PITROnHistoryTransactionsExcluded   1   excluded 3 transactions on the target history\n", false)
 	out, err := e.run(t, scriptPath("triage.sh"), "-n", "orders", "lion")

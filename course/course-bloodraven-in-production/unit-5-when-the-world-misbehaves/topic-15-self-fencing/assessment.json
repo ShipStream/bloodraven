@@ -22,7 +22,7 @@
     },
     {
       "front": "The three CEL invariants on spec.sidecar",
-      "back": "peerCheckInterval >= 1s, leaseTimeout >= 3s, and leaseTimeout >= 3 x peerCheckInterval.",
+      "back": "peerCheckInterval between 1s and 1m, leaseTimeout between 3s and 10m, and leaseTimeout >= 3 x peerCheckInterval.",
       "orderIndex": 4
     },
     {
@@ -92,7 +92,7 @@
       "explanation": "`read_only` is the weaker of the pair — the server 'permits no client updates except from users who have the CONNECTION_ADMIN privilege (or the deprecated SUPER privilege)'. `super_read_only` is the actual barrier, prohibiting client updates 'even from users who have CONNECTION_ADMIN or SUPER'. So a SUPER write landing means the stronger flag is not set. The second option invents a grandfathering rule that does not exist: the variable is evaluated per statement, not per session, which is exactly why fencing does not need to close sockets. The third option is backwards — the restriction is on client updates by privilege, not on binlog generation. The fourth confuses direction: replication threads apply what the source sent, they do not resurrect a locally rejected statement. (objective 1)"
     },
     {
-      "question": "Adding a `role: read-only` reader site to `playground` makes the lease-expiry fence more likely to fire, because there is now one more peer whose silence the monitor must account for.",
+      "question": "Adding a `role: ReadOnly` reader site to `playground` makes the lease-expiry fence more likely to fire, because there is now one more peer whose silence the monitor must account for.",
       "type": "TRUE_FALSE",
       "orderIndex": 3,
       "correctAnswer": false,

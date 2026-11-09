@@ -24,7 +24,7 @@ Usage:
 Flags:
   --profile string       profile name from spec.backup.profiles (required)
   --source-site string   force a specific site as the dump source
-  --triggered-by string  free-form label recorded on the CR (default: "manual")
+  --triggered-by string  free-form value of the CR's triggered-by annotation (default: "manual")
   --wait                 block until the backup reaches Succeeded or Failed
   --timeout DURATION     timeout for --wait (default: 2h)
   --kubeconfig string    path to kubeconfig
@@ -46,7 +46,7 @@ func runBackup(args []string, stdout, stderr *os.File) error {
 	registerCommonFlags(fs, &cf)
 	fs.StringVar(&profile, "profile", "", "backup profile name (required)")
 	fs.StringVar(&sourceSite, "source-site", "", "force a specific site as the dump source")
-	fs.StringVar(&triggeredBy, "triggered-by", "manual", "free-form label recorded on the CR")
+	fs.StringVar(&triggeredBy, "triggered-by", "manual", "free-form value of the CR's triggered-by annotation")
 	fs.BoolVar(&wait, "wait", false, "block until the backup reaches Succeeded or Failed")
 	fs.DurationVar(&timeout, "timeout", 2*time.Hour, "timeout for --wait")
 	fs.Usage = func() { fmt.Fprint(stderr, backupUsage) }
@@ -115,17 +115,17 @@ func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: backupGenerateName(group, profile),
 			Namespace:    ns,
+			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: triggeredBy},
 			Labels: map[string]string{
-				"shipstream.io/failover-group": group,
-				"shipstream.io/backup-profile": profile,
+				v1alpha1.FailoverGroupLabel:    group,
+				v1alpha1.BackupProfileLabel:    profile,
 				"app.kubernetes.io/managed-by": "bloodraven",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef:   v1alpha1.LocalGroupRef{Name: group},
-			ProfileName:        profile,
-			SourceSiteOverride: sourceSite,
-			TriggeredBy:        triggeredBy,
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
+			ProfileName:      profile,
+			SourceSite:       sourceSite,
 		},
 	}
 }
@@ -220,7 +220,11 @@ func waitForBackup(stdout, stderr io.Writer, cl client.Client, ns, name string, 
 		}
 		switch b.Status.Phase {
 		case v1alpha1.BackupPhaseSucceeded:
-			fmt.Fprintf(stdout, "Backup succeeded: %s (size: %s)\n", emptyDash(b.Status.Location), emptyDash(b.Status.Size))
+			location := ""
+			if b.Status.ArtifactStorage != nil {
+				location = b.Status.ArtifactStorage.Location
+			}
+			fmt.Fprintf(stdout, "Backup succeeded: %s (size: %s)\n", emptyDash(location), emptyDash(b.Status.Size))
 			return nil
 		case v1alpha1.BackupPhaseFailed:
 			fmt.Fprintf(stderr, "Backup failed: %s\n", b.Status.Message)

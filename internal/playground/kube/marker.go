@@ -14,12 +14,12 @@ import (
 // ChaosInProgressAnnotation is the MFG annotation the chaos runner sets
 // while a scenario is running. The domain is intentionally distinct
 // from operator annotations so it is unmistakably tooling-side.
-const ChaosInProgressAnnotation = "chaos.playground.bloodraven.io/in-progress"
+const ChaosInProgressAnnotation = "playground.bloodraven.shipstream.io/in-progress"
 
 // inProgressJSONPointer is the JSON-Pointer-escaped form of
 // ChaosInProgressAnnotation. The "/" in the annotation key must be
 // escaped as "~1" per RFC 6901.
-const inProgressJSONPointer = "/metadata/annotations/chaos.playground.bloodraven.io~1in-progress"
+const inProgressJSONPointer = "/metadata/annotations/playground.bloodraven.shipstream.io~1in-progress"
 
 // ChaosMarker is the payload of the in-progress annotation. It lets
 // preflight on a future run identify the owner: same host + live pid =

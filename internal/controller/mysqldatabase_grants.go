@@ -193,7 +193,7 @@ func (r *MysqlDatabaseReconciler) repairTenantRestrictions(ctx context.Context, 
 		return
 	}
 	warn := func(err error) {
-		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "TenantPrivilegeRestriction",
+		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventTenantPrivilegeRestriction,
 			"legacy tenant restriction repair incomplete: %v; continuing tenant reconciliation; see bloodraven-doctor playbook 10", err)
 	}
 	var grantor mysqlAccount
@@ -230,12 +230,12 @@ func (r *MysqlDatabaseReconciler) repairTenantRestrictions(ctx context.Context, 
 			continue
 		}
 		if i == 0 {
-			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "TenantPrivilegeRestriction",
+			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventTenantPrivilegeRestriction,
 				"grantor %s has a restriction on real schema %q; normal tenant SQL may be denied; use an unrestricted administrator (bloodraven-doctor playbook 10)", grantor, restriction.Database)
 			continue
 		}
 		blocked[name] = true
-		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "TenantPrivilegeRestriction",
+		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventTenantPrivilegeRestriction,
 			"grantor %s is restricted on %q; skipping legacy repairs there for every account; use an unrestricted administrator (bloodraven-doctor playbook 10)", grantor, restriction.Database)
 	}
 	for _, account := range recordedTenantAccounts(&mdb.Status) {
@@ -266,7 +266,7 @@ func (r *MysqlDatabaseReconciler) repairTenantRestrictions(ctx context.Context, 
 				continue
 			}
 			if i == 0 || self {
-				r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "TenantPrivilegeRestriction",
+				r.Recorder.Eventf(mdb, corev1.EventTypeWarning, v1alpha1.EventTenantPrivilegeRestriction,
 					"%s has a restriction on %q; desired tenant grants may lift their own privileges, but other restrictions require review by the privilege owner (bloodraven-doctor playbook 10)", account, restriction.Database)
 				continue
 			}
@@ -284,7 +284,7 @@ func (r *MysqlDatabaseReconciler) repairTenantRestrictions(ctx context.Context, 
 				warn(fmt.Errorf("lift legacy escaped restriction for %s: %w", account, err))
 				continue
 			}
-			r.Recorder.Eventf(mdb, corev1.EventTypeNormal, "PartialRevokeLifted", "removed legacy escaped-schema restriction on %q for %s", forms[i], account)
+			r.Recorder.Eventf(mdb, corev1.EventTypeNormal, v1alpha1.EventPartialRevokeLifted, "removed legacy escaped-schema restriction on %q for %s", forms[i], account)
 		}
 	}
 }

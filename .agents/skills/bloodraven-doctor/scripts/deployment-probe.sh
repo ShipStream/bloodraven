@@ -49,19 +49,26 @@ kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jso
 }'
 
 echo "Degraded reason RestoreReclonePending (restoreReclones.pending non-empty) keeps the deployment API unstable until the post-restore reclones finish or a Held queue is resolved (playbook 20)."
-echo "A non-terminal plannedFailover phase, a planned-failover claim, or a hold (plannedHold non-null: automaticFailoverHeld status=True, status.plannedFailoverHold, or a ManualRecoveryRequired terminal marker) keeps it unstable (unstableReason PlannedFailover); a hold needs a human acknowledgement (playbook 38)."
+echo "A non-terminal plannedFailover phase, a planned-failover claim, or a hold (plannedHold non-null: automaticFailoverHeld status=True, status.plannedFailoverHold, or a ManualRecoveryRequired terminal marker) keeps it unstable: unstableReason PlannedFailover for a run in flight or its claim, AutomaticFailoverHeld for a hold; a hold needs a human acknowledgement (playbook 38)."
+echo "Degraded reason BootstrapFailed (a failed clone whose target does not replicate yet) keeps it unstable (unstableReason BootstrapFailed) until the site replicates or a new clone starts."
 
 echo "--- Declared deployment callers ---"
 kubectl get mysqldatabases.shipstream.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" '
-    [.items[] | select(.spec.groupRef.name == $group) |
+    [.items[] | select(.spec.failoverGroupRef.name == $group) |
     {instance: .metadata.name, deploymentClients: (.spec.deploymentClients // [])}]'
 
+# The deployment Lease record schemaVersion this release's operator reads
+# (deploymentLeaseRecordSchemaVersion in internal/controller/deployment_leases.go).
+LEASE_RECORD_SCHEMA_VERSION=1
+
 echo "--- Durable deployment Lease records (not leader election) ---"
-kubectl get leases.coordination.k8s.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" '
+kubectl get leases.coordination.k8s.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" --argjson supported "$LEASE_RECORD_SCHEMA_VERSION" '
     [.items[] | select(any(.metadata.ownerReferences[]?; .kind == "MysqlFailoverGroup" and .name == $group)) |
     select(.metadata.annotations["bloodraven.shipstream.io/deployment-lease"] != null) |
     {name: .metadata.name, record: (.metadata.annotations["bloodraven.shipstream.io/deployment-lease"] |
-        (try fromjson catch {state: "invalid_record"}) | {kind, operationId, instance, namespace, serviceAccount, expiresAt,
+        (try fromjson catch {state: "invalid_record"}) |
+        {schemaVersion, readable: (.schemaVersion == $supported), kind, operationId, instance, namespace, serviceAccount, expiresAt,
                     topologyGeneration, createdAt, state, reason})}]'
 
-echo "Lease records are observations; expiry is enforced by the operator clock. Do not delete or edit them."
+echo "Lease records are observations; expiry is enforced by the operator clock. Do not delete or edit a readable one (readable=true)."
+echo "A record with readable=false has a schemaVersion this operator does not read (it reads $LEASE_RECORD_SCHEMA_VERSION): lease requests for the group are refused (Degraded=True/MetadataVersionUnsupported) until it is gone. Run the operator release that wrote it, or, once no deployment client uses it, delete that Lease (playbook 44)."

@@ -100,8 +100,8 @@ func TestUpdateCRStatus_DeniedWriteReturnsErrorThenHeals(t *testing.T) {
 	if healed.Status.ActiveSite != "dc1" {
 		t.Errorf("status did not heal: ActiveSite=%q want dc1", healed.Status.ActiveSite)
 	}
-	if healed.Status.LastFailoverTarget != "dc1" {
-		t.Errorf("lastFailoverTarget did not heal: got %q want dc1", healed.Status.LastFailoverTarget)
+	if healed.Status.LastFailoverTarget() != "dc1" {
+		t.Errorf("lastFailoverTarget did not heal: got %q want dc1", healed.Status.LastFailoverTarget())
 	}
 }
 
@@ -159,7 +159,7 @@ func TestPoll_StatusRetryPreservesRejectedSnapshot(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		pollN(tm, 1)
 	}
-	want := TopologySnapshot{ActiveSite: "dc1", Alert: "full rejected alert", DegradedReason: "Degraded"}
+	want := TopologySnapshot{ActiveSite: "dc1", Alert: "full rejected alert", DegradedReason: v1alpha1.ReasonSiteUnhealthy}
 	tm.mu.Lock()
 	tm.statusRetrySnapshot = &want
 	tm.statusWriteFailed = true

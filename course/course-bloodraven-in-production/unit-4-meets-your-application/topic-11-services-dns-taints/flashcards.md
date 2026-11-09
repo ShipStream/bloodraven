@@ -17,13 +17,13 @@
 
 **Front:** Which labels are in the `mysql-<group>-primary` selector?
 
-**Back:** Two: `app.kubernetes.io/instance=<group>` and `shipstream.io/role=primary`. No `healthy` key, and `publishNotReadyAddresses` is false.
+**Back:** Two: `app.kubernetes.io/instance=<group>` and `bloodraven.shipstream.io/role=primary`. No `healthy` key, and `publishNotReadyAddresses` is false.
 
 ---
 
 **Front:** Which labels are in the `mysql-<group>-replicas` selector?
 
-**Back:** Three: `app.kubernetes.io/instance=<group>`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.
+**Back:** Three: `app.kubernetes.io/instance=<group>`, `bloodraven.shipstream.io/role=replica`, and `bloodraven.shipstream.io/healthy=true`.
 
 ---
 
@@ -33,9 +33,9 @@
 
 ---
 
-**Front:** Name the five conjuncts a `role: read-only` site must satisfy to be labelled `healthy=yes`.
+**Front:** Name the five conjuncts a `role: ReadOnly` site must satisfy to be labelled `healthy=true`.
 
-**Back:** Source convergence `converged`; `replicating` true; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.
+**Back:** Source convergence `converged`; `replication` `Healthy` or `Lagging`; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.
 
 ---
 
@@ -57,7 +57,7 @@
 
 ---
 
-**Front:** Default value of `spec.dns.ttl`?
+**Front:** Default value of `spec.dns.ttlSeconds`?
 
 **Back:** 60 seconds. The playground overrides it to 10.
 
@@ -65,10 +65,10 @@
 
 **Front:** Give the full taint Bloodraven applies to a demoted site's nodes in group `playground`.
 
-**Back:** `shipstream.io/db-readonly-playground=true:NoExecute` — prefix `shipstream.io/db-readonly-`, group suffix, constant value `true`, effect `NoExecute`.
+**Back:** `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground=true:NoExecute` — the group's namespace, the fixed `.db-readonly.bloodraven.shipstream.io/` part, the group name, constant value `true`, effect `NoExecute`.
 
 ---
 
 **Front:** Which site role is never tainted?
 
-**Back:** `read-only`. A reader is already read-only, so there is no demotion to enforce; the tainter returns early for it (and for an empty taint selector).
+**Back:** `ReadOnly`. A reader is already read-only, so there is no demotion to enforce; the tainter returns early for it (and for an empty taint selector).

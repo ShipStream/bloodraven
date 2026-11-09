@@ -129,7 +129,7 @@ fi
 # The site's MySQL pod, selected as its Deployment selects it (Dragonfly and
 # backup Job pods carry the site label too). One line per Running pod:
 # name, deletionTimestamp, the mysql container's ready flag.
-SELECTOR="app.kubernetes.io/name=mysql,app.kubernetes.io/instance=$GROUP,shipstream.io/site=$SITE"
+SELECTOR="app.kubernetes.io/name=mysql,app.kubernetes.io/instance=$GROUP,bloodraven.shipstream.io/site=$SITE"
 PODS=$(kubectl get pod -n "$NAMESPACE" -l "$SELECTOR" --field-selector=status.phase=Running \
     -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.status.containerStatuses[?(@.name=="mysql")].ready}{"\n"}{end}') \
     || die "cannot list the site's pods"
@@ -198,11 +198,11 @@ CREATED=$(secret_digest "$SECRET") || die "created $SECRET but cannot read it ba
 kubectl label secret "$SECRET" -n "$NAMESPACE" \
     app.kubernetes.io/name=mysql-keyring \
     app.kubernetes.io/managed-by=bloodraven \
-    "shipstream.io/failover-group=$GROUP" "shipstream.io/site=$SITE" \
-    "shipstream.io/keyring-version=$VERSION" \
+    "bloodraven.shipstream.io/failover-group=$GROUP" "bloodraven.shipstream.io/site=$SITE" \
+    "bloodraven.shipstream.io/keyring-version=$VERSION" \
     || die "created $SECRET (digest verified) but could not label it; label it by hand as above, do not delete it"
-kubectl annotate secret "$SECRET" -n "$NAMESPACE" "shipstream.io/keyring-digest=$DIGEST" \
-    || die "created $SECRET (digest verified) but could not annotate it; add shipstream.io/keyring-digest=$DIGEST by hand, do not delete it"
+kubectl annotate secret "$SECRET" -n "$NAMESPACE" "bloodraven.shipstream.io/keyring-digest=$DIGEST" \
+    || die "created $SECRET (digest verified) but could not annotate it; add bloodraven.shipstream.io/keyring-digest=$DIGEST by hand, do not delete it"
 kubectl patch secret "$SECRET" -n "$NAMESPACE" --type=merge -p="{
   \"metadata\":{\"ownerReferences\":[{
     \"apiVersion\":\"shipstream.io/v1alpha1\",\"kind\":\"MysqlFailoverGroup\",

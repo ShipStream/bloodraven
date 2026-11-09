@@ -66,16 +66,42 @@ func TestWSMaxClientsChart(t *testing.T) {
 			if err != nil {
 				t.Fatalf("helm template: %v: %s", err, out)
 			}
-			if got := wsMaxClientsEnv(t, out); got != tt.want {
+			if got := operatorEnv(t, out, "BLOODRAVEN_WS_MAX_CLIENTS"); got != tt.want {
 				t.Fatalf("BLOODRAVEN_WS_MAX_CLIENTS = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-// wsMaxClientsEnv returns the operator container's BLOODRAVEN_WS_MAX_CLIENTS
-// from rendered chart output.
-func wsMaxClientsEnv(t *testing.T, rendered []byte) string {
+// TestOperatorEndpointChart pins the env name the controller reads for the
+// default spec.sidecar.operatorEndpoint (defaultOperatorEndpoint in
+// internal/controller) and its value: the auxiliary Service FQDN and port.
+func TestOperatorEndpointChart(t *testing.T) {
+	requireHelm(t)
+	for _, tt := range []struct {
+		name, values, want string
+	}{
+		{name: "default", want: "bloodraven.operator-system.svc.cluster.local:8082"},
+		{name: "renamed service and port", values: "auxiliary:\n  service:\n    name: bloodraven-aux\n    port: 9090\n",
+			want: "bloodraven-aux.operator-system.svc.cluster.local:9090"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("helm", "template", "test", ".", "--namespace", "operator-system", "--values", "-")
+			cmd.Stdin = strings.NewReader(tt.values)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("helm template: %v: %s", err, out)
+			}
+			if got := operatorEnv(t, out, "BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT"); got != tt.want {
+				t.Fatalf("BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// operatorEnv returns the value of the named env var on the operator
+// Deployment's containers from rendered chart output.
+func operatorEnv(t *testing.T, rendered []byte, name string) string {
 	t.Helper()
 	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(rendered), 4096)
 	for {
@@ -98,12 +124,12 @@ func wsMaxClientsEnv(t *testing.T, rendered []byte) string {
 		}
 		for _, c := range deployment.Spec.Template.Spec.Containers {
 			for _, env := range c.Env {
-				if env.Name == "BLOODRAVEN_WS_MAX_CLIENTS" {
+				if env.Name == name {
 					return env.Value
 				}
 			}
 		}
 	}
-	t.Fatal("BLOODRAVEN_WS_MAX_CLIENTS not found in the rendered Deployment")
+	t.Fatalf("%s not found in the rendered Deployment", name)
 	return ""
 }

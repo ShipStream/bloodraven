@@ -64,7 +64,7 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 						return err
 					}
 					env.Capture.Note(fmt.Sprintf("pre-injection: activeSite=%s peer=%s lastFailoverTarget=%q promotionGtid=%q ready=%s",
-						activeSite, peerSite, mfg.Status.LastFailoverTarget, mfg.Status.PromotionGtidExecuted, readyOf(mfg)))
+						activeSite, peerSite, mfg.Status.LastFailoverTarget(), mfg.Status.PromotionGtidExecuted(), readyOf(mfg)))
 
 					// Open the operator tailer before the injection so the
 					// SinceTime window covers the forbidden status-write log.
@@ -129,7 +129,7 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 						return err
 					}
 					env.Capture.Note(fmt.Sprintf("CR status during denial (may be stale): activeSite=%q lastFailoverTarget=%q ready=%s",
-						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, readyOf(mfg)))
+						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), readyOf(mfg)))
 					return nil
 				},
 			},
@@ -151,15 +151,15 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 						fmt.Sprintf("status.activeSite==%s with lastFailoverTarget and promotionGtid populated", peerSite),
 						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 							msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q promotionGtid=%q ready=%s",
-								mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, truncGtid(mfg.Status.PromotionGtidExecuted), readyOf(mfg))
+								mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), truncGtid(mfg.Status.PromotionGtidExecuted()), readyOf(mfg))
 							for _, s := range mfg.Status.Sites {
-								if s.RecoveryState == "RecoveryBlocked" {
+								if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 									return false, msg, fmt.Errorf("site %s RecoveryBlocked during status heal", s.Name)
 								}
 							}
 							done := mfg.Status.ActiveSite == peerSite &&
-								mfg.Status.LastFailoverTarget == peerSite &&
-								mfg.Status.PromotionGtidExecuted != "" &&
+								mfg.Status.LastFailoverTarget() == peerSite &&
+								mfg.Status.PromotionGtidExecuted() != "" &&
 								readyOf(mfg) == "True"
 							return done, msg, nil
 						})
@@ -191,13 +191,13 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 							if old == nil {
 								return false, "old primary not in status yet", nil
 							}
-							msg := fmt.Sprintf("old=%s state=%s replicating=%v recovery=%q ready=%s",
-								old.Name, old.State, old.Replicating, old.RecoveryState, readyOf(mfg))
-							if old.RecoveryState == "RecoveryBlocked" {
+							msg := fmt.Sprintf("old=%s state=%s replication=%s recovery=%q ready=%s",
+								old.Name, old.State, old.Replication, old.RecoveryState, readyOf(mfg))
+							if old.RecoveryState == v1alpha1.RecoveryStateBlocked {
 								return false, msg, fmt.Errorf("old primary %s RecoveryBlocked", activeSite)
 							}
-							healthyReplica := old.State == "read-only" && old.Replicating && readyOf(mfg) == "True"
-							recovering := old.RecoveryState == "RecoveryInProgress"
+							healthyReplica := old.State == v1alpha1.SiteStateReadOnly && old.Replication.Running() && readyOf(mfg) == "True"
+							recovering := old.RecoveryState == v1alpha1.RecoveryStateInProgress
 							return healthyReplica || recovering, msg, nil
 						})
 					return err
@@ -235,7 +235,7 @@ func precheckHealthyWithOperatorRole(ctx context.Context, env *runner.Env) error
 
 func readyOf(mfg *v1alpha1.MysqlFailoverGroup) string {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			return string(c.Status)
 		}
 	}

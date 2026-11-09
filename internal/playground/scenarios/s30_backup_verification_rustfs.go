@@ -81,7 +81,7 @@ func s30EnsureBucket(v s30Variant) runner.Step {
 		Phase: runner.PhasePrecheck,
 		Name:  "ensure RustFS backup bucket exists",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			env.Capture.Note(fmt.Sprintf("RustFS endpoint=%s bucket=%s credentialsSecret=%s", backupE2EEndpoint, backupE2EBucket, backupE2ECredsSecret))
+			env.Capture.Note(fmt.Sprintf("RustFS endpoint=%s bucket=%s credentialsSecretName=%s", backupE2EEndpoint, backupE2EBucket, backupE2ECredsSecret))
 			if err := env.Chaos.EnsureRustFSBucket(ctx, backupE2EBucket); err != nil {
 				return err
 			}
@@ -198,17 +198,25 @@ func s30WaitBackupSucceeded(v s30Variant) runner.Step {
 				// full s3:// URL (cmd/bloodraven storageConfigFromEnv).
 				wantLocation = "s3://" + backupE2EBucket + "/" + prefix + "/" + name + "/"
 			}
-			if b.Status.Location != wantLocation {
-				return fmt.Errorf("backup location %q, want %q", b.Status.Location, wantLocation)
+			storage := b.Status.ArtifactStorage
+			if storage == nil {
+				return fmt.Errorf("backup status.artifactStorage is unset")
 			}
-			if b.Status.StorageType != v1alpha1.BackupStorageS3 {
-				return fmt.Errorf("backup storageType=%q, want S3", b.Status.StorageType)
+			if storage.Location != wantLocation {
+				return fmt.Errorf("backup artifactStorage.location %q, want %q", storage.Location, wantLocation)
+			}
+			if storage.Type != v1alpha1.BackupStorageS3 {
+				return fmt.Errorf("backup artifactStorage.type=%q, want S3", storage.Type)
 			}
 			if b.Status.JobName == "" {
 				return fmt.Errorf("backup status.jobName is empty")
 			}
-			if b.Status.Encrypted != v.encrypted {
-				return fmt.Errorf("backup status.encrypted=%v, want %v", b.Status.Encrypted, v.encrypted)
+			wantMode := v1alpha1.EncryptionModeNone
+			if v.encrypted {
+				wantMode = v1alpha1.EncryptionModePassphrase
+			}
+			if b.Status.Encryption == nil || b.Status.Encryption.Mode != wantMode {
+				return fmt.Errorf("backup status.encryption=%+v, want mode %s", b.Status.Encryption, wantMode)
 			}
 			if err := ctxStash(ctx, env, "backupUID", string(b.UID)); err != nil {
 				return err
@@ -255,10 +263,10 @@ func s30WaitVerificationSucceeded(v s30Variant) runner.Step {
 			if backupUID != "" && vr.Status.BackupRef.UID != "" && vr.Status.BackupRef.UID != backupUID {
 				return fmt.Errorf("verification backupRef UID=%q, want %q", vr.Status.BackupRef.UID, backupUID)
 			}
-			if vr.Status.SanityCheck == nil || !vr.Status.SanityCheck.Ran || vr.Status.SanityCheck.ResultRow != "2" {
-				return fmt.Errorf("verification sanity=%v, want ran=true resultRow=2", vr.Status.SanityCheck)
+			if vr.Status.SanityCheck == nil || vr.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || vr.Status.SanityCheck.Result != "2" {
+				return fmt.Errorf("verification sanity=%v, want outcome=Passed result=2", vr.Status.SanityCheck)
 			}
-			if !conditionTrue(vr.Status.Conditions, "Verified") {
+			if !conditionTrue(vr.Status.Conditions, v1alpha1.ConditionVerified) {
 				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(vr.Status.Conditions))
 			}
 			env.Capture.Note("verification succeeded: " + verificationStatusSummary(vr))
@@ -286,7 +294,7 @@ func s30Cleanup(ctx context.Context, env *runner.Env, v s30Variant) error {
 	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s30 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		ready := false
 		for _, c := range mfg.Status.Conditions {
-			if c.Type == "Ready" {
+			if c.Type == v1alpha1.ConditionReady {
 				ready = c.Status == metav1.ConditionTrue
 			}
 		}

@@ -191,12 +191,12 @@ func s16VerifyNoSplitBrain() runner.Step {
 					var writable, readOnly, blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}

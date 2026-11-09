@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -26,10 +27,10 @@ func encryptedBackupFixture(t *testing.T, extra ...client.Object) (*MysqlBackupR
 	fg := fgWithEncryptedBackup()
 	fg.UID = "lion-uid"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	mb := backupCR("dk", fg.Name, "nightly-s3")
 	mb.UID = "0123abcd-dk-uid"
-	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, dsnSecret()}, extra...)...)
+	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, operatorCredsSecret()}, extra...)...)
 	return r, c, fg, mb
 }
 
@@ -44,7 +45,7 @@ func getBackup(t *testing.T, c client.Client, mb *v1alpha1.MysqlBackup) *v1alpha
 
 // I-17, Δ1, Δ24: an encrypted backup's Job mounts its own immutable,
 // ownerless dump-key snapshot holding the trimmed live bytes, created
-// before the Job and recorded in status.artifactStorage.passphraseSecret.
+// before the Job and recorded in status.artifactStorage.passphraseSecretKeyRef.
 func TestDumpKeySnapshotCreatedBeforeJob(t *testing.T) {
 	ctx := context.Background()
 	r, c, fg, mb := encryptedBackupFixture(t)
@@ -64,8 +65,8 @@ func TestDumpKeySnapshotCreatedBeforeJob(t *testing.T) {
 	if string(snap.Data[pitrKeySnapshotDataKey]) != testPassphrase {
 		t.Fatalf("snapshot bytes %q, want the trimmed live bytes", snap.Data[pitrKeySnapshotDataKey])
 	}
-	for k, v := range map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(mb.UID),
-		labelFailoverGroupUID: string(fg.UID), labelFailoverGroup: fg.Name, labelMysqlBackup: mb.Name} {
+	for k, v := range map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(mb.UID),
+		v1alpha1.FailoverGroupUIDLabel: string(fg.UID), v1alpha1.FailoverGroupLabel: fg.Name, v1alpha1.MysqlBackupLabel: mb.Name} {
 		if snap.Labels[k] != v {
 			t.Fatalf("label %s = %q, want %q", k, snap.Labels[k], v)
 		}
@@ -77,7 +78,7 @@ func TestDumpKeySnapshotCreatedBeforeJob(t *testing.T) {
 	if got := backupJobPassphrase(&job); got == nil || got.Name != name || got.Key != pitrKeySnapshotDataKey {
 		t.Fatalf("Job mounts %+v, want the snapshot", got)
 	}
-	if got := getBackup(t, c, mb).Status.ArtifactStorage; got == nil || got.PassphraseSecret == nil || got.PassphraseSecret.Name != name {
+	if got := getBackup(t, c, mb).Status.ArtifactStorage; got == nil || got.PassphraseSecretKeyRef == nil || got.PassphraseSecretKeyRef.Name != name {
 		t.Fatalf("recorded dump key %+v, want %s", got, name)
 	}
 }
@@ -96,14 +97,14 @@ func TestDumpKeySnapshotAdoptConflictMissing(t *testing.T) {
 	}{
 		{name: "row 50: adopted without a byte comparison", existing: func(mb *v1alpha1.MysqlBackup) *corev1.Secret {
 			return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb),
-				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(mb.UID)}},
+				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(mb.UID)}},
 				Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("bytes-at-snapshot-time")}}
 		}},
 		{name: "another backup's Secret", existing: func(mb *v1alpha1.MysqlBackup) *corev1.Secret {
 			return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb),
-				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: "someone-else"}}}
-		}, wantReason: backupReasonDumpKeySnapshotConflict},
-		{name: "live Secret missing", dropSecret: true, wantReason: backupReasonPassphraseSecretMissing},
+				Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: "someone-else"}}}
+		}, wantReason: v1alpha1.ReasonDumpKeySnapshotConflict},
+		{name: "live Secret missing", dropSecret: true, wantReason: v1alpha1.ReasonPassphraseSecretMissing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var extra []client.Object
@@ -158,7 +159,7 @@ func TestBackupWaitsForPITRRollout(t *testing.T) {
 	fg := fgWithBackup()
 	fg.UID = "lion-uid"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 	mb := backupCR("rollout", fg.Name, "nightly-s3")
 	mb.UID = "rollout-uid"
@@ -175,11 +176,11 @@ func TestBackupWaitsForPITRRollout(t *testing.T) {
 	if !render.Enabled {
 		t.Fatal("fixture: the group renders no archive")
 	}
-	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, dsnSecret()}, deps...)...)
+	r, c := newBackupReconciler(t, append([]client.Object{fg, mb, operatorCredsSecret()}, deps...)...)
 	reconcileUntilStable(t, r, mb.Name)
 	got := getBackup(t, c, mb)
-	if got.Status.Phase != v1alpha1.BackupPhasePending || !strings.Contains(conditionReasons(got.Status.Conditions), backupReasonPITRArchiveRolloutPending) {
-		t.Fatalf("phase %s conditions %v, want Pending/%s", got.Status.Phase, got.Status.Conditions, backupReasonPITRArchiveRolloutPending)
+	if got.Status.Phase != v1alpha1.BackupPhasePending || !strings.Contains(conditionReasons(got.Status.Conditions), v1alpha1.ReasonPITRArchiveRolloutPending) {
+		t.Fatalf("phase %s conditions %v, want Pending/%s", got.Status.Phase, got.Status.Conditions, v1alpha1.ReasonPITRArchiveRolloutPending)
 	}
 
 	// Once they agree, the stamp names the rendered archive.
@@ -187,7 +188,7 @@ func TestBackupWaitsForPITRRollout(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: resourceName(fg.Name, fg.Spec.Sites[1].Name)}, &d); err != nil {
 		t.Fatal(err)
 	}
-	d.Annotations[annotationPITRRender] = render.Canonical()
+	d.Annotations[v1alpha1.PITRRenderAnnotation] = render.Canonical()
 	if err := c.Update(context.Background(), &d); err != nil {
 		t.Fatal(err)
 	}
@@ -202,15 +203,15 @@ func TestBackupOfReadOnlyProfileFails(t *testing.T) {
 	fg := fgWithBackup()
 	fg.UID = "lion-uid"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	e := bindTestPITRArchive(t, fg, "nightly-s3")
 	e.Source.UID = "another-group"
 	mb := backupCR("ro", fg.Name, "nightly-s3")
-	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, mb.Name)
 	got := getBackup(t, c, mb)
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(conditionReasons(got.Status.Conditions), backupReasonProfileReadOnly) {
-		t.Fatalf("phase %s conditions %v, want Failed/%s", got.Status.Phase, got.Status.Conditions, backupReasonProfileReadOnly)
+	if got.Status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(conditionReasons(got.Status.Conditions), v1alpha1.ReasonProfileReadOnly) {
+		t.Fatalf("phase %s conditions %v, want Failed/%s", got.Status.Phase, got.Status.Conditions, v1alpha1.ReasonProfileReadOnly)
 	}
 }
 
@@ -220,7 +221,7 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 	ctx := context.Background()
 	snapFor := func(mb *v1alpha1.MysqlBackup) *corev1.Secret {
 		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: mb.Namespace, Name: dumpKeySnapshotName(mb),
-			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(mb.UID)}}}
+			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(mb.UID)}}}
 	}
 	exists := func(t *testing.T, c client.Client, mb *v1alpha1.MysqlBackup) bool {
 		var s corev1.Secret
@@ -256,7 +257,7 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 	t.Run("group gone: skipped, kept and named", func(t *testing.T) {
 		f := newCleanupFixture(t)
 		recordTestDumpKey(f.mb)
-		f.mb.Status.ArtifactStorage.PassphraseSecret.Name = dumpKeySnapshotName(f.mb)
+		f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef.Name = dumpKeySnapshotName(f.mb)
 		if err := f.c.Status().Update(ctx, f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -281,7 +282,7 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 	t.Run("another backup's same-name Secret is never deleted", func(t *testing.T) {
 		f := newCleanupFixture(t)
 		s := snapFor(f.mb)
-		s.Labels[labelMysqlBackupUID] = "predecessor"
+		s.Labels[v1alpha1.MysqlBackupUIDLabel] = "predecessor"
 		if err := f.c.Create(ctx, s); err != nil {
 			t.Fatal(err)
 		}
@@ -300,16 +301,16 @@ func TestDumpKeySnapshotDeletedOnlyAfterCleanup(t *testing.T) {
 func TestAbandonedCleanupRecordedKeyMissing(t *testing.T) {
 	r, _ := newBackupReconciler(t)
 	mb := backupCR("ab", "lion", "nightly-s3")
-	storage := &v1alpha1.BackupArtifactStorage{PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "gone", Key: "passphrase"}}
+	storage := &v1alpha1.BackupArtifactStorage{PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "gone", Key: "passphrase"}}
 	profile := fgWithEncryptedBackup().Spec.Backup.Profiles[0]
 	vol, missing, err := r.abandonedCleanupPassphrase(context.Background(), mb, &profile, storage, nil)
 	if err != nil || vol != nil || !strings.Contains(missing, `"gone"`) {
 		t.Fatalf("got %v %q %v, want a missing report naming the recorded Secret", vol, missing, err)
 	}
 	// No attribution at all: the profile's Secret is the only fallback.
-	mb.Status.Encrypted = true
+	mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
 	vol, missing, err = r.abandonedCleanupPassphrase(context.Background(), mb, &profile, nil, nil)
-	if err != nil || missing != "" || vol == nil || vol.SecretName != profile.Encryption.PassphraseSecret.Name {
+	if err != nil || missing != "" || vol == nil || vol.SecretName != profile.Encryption.PassphraseSecretKeyRef.Name {
 		t.Fatalf("no-attribution fallback: %v %q %v", vol, missing, err)
 	}
 }
@@ -360,7 +361,7 @@ func TestDumpKeySnapshotKeptWithoutProducerAttribution(t *testing.T) {
 
 // F-B: backups never pend on a disagreement that only the user can end,
 // and a dump-only profile never pends on PITR at all. Each case runs the
-// backup Job without an archive stamp and says so (PITRArchiveNotStamped);
+// backup Job without an archive stamp and says so (PITRArchiveStampSkipped);
 // only a PITR-profile backup during a roll waits (TestBackupWaitsForPITRRollout).
 func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 	for _, tc := range []struct {
@@ -380,11 +381,11 @@ func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 			fg := fgWithBackup()
 			fg.UID = "lion-uid"
 			fg.Status.ActiveSite = "iad"
-			fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+			fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 			mb := backupCR("unstamped", fg.Name, tc.profile)
 			mb.UID = "unstamped-uid"
-			objs := []client.Object{fg, mb, dsnSecret()}
+			objs := []client.Object{fg, mb, operatorCredsSecret()}
 			for i, render := range tc.renders(fg) {
 				d := siteDeploy(fg, fg.Spec.Sites[i].Name, render)
 				objs = append(objs, &d)
@@ -400,9 +401,74 @@ func TestBackupRunsUnstampedWhenWaitingCannotHelp(t *testing.T) {
 			if got.Status.PITRArchiveID != "" {
 				t.Fatalf("stamped archive %q, want none", got.Status.PITRArchiveID)
 			}
-			if countEvents(rec, eventReasonPITRArchiveNotStamped) != 1 {
-				t.Fatal("no PITRArchiveNotStamped Event")
+			if countEvents(rec, v1alpha1.EventPITRArchiveStampSkipped) != 1 {
+				t.Fatal("no PITRArchiveStampSkipped Event")
 			}
 		})
+	}
+}
+
+// A-55: a backup that retention prunes goes through the same finalizer as
+// a manual delete: its artifacts are removed first, then the dump-key
+// snapshot that decrypts them.
+func TestRetentionPrunedEncryptedBackupReleasesDumpKey(t *testing.T) {
+	ctx := context.Background()
+	f := newCleanupFixture(t)
+	f.fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 1}
+	if err := f.c.Update(ctx, f.fg); err != nil {
+		t.Fatal(err)
+	}
+	f.mb.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	if err := f.c.Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	snapKey := types.NamespacedName{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb)}
+	if err := f.c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: snapKey.Namespace, Name: snapKey.Name,
+		Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(f.mb.UID)}}}); err != nil {
+		t.Fatal(err)
+	}
+	newer := backupCR("art-newer", f.fg.Name, f.mb.Spec.ProfileName)
+	newer.UID = "art-newer-uid"
+	if err := f.c.Create(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	later := metav1.NewTime(f.mb.Status.CompletionTime.Add(time.Hour))
+	newer.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &later}
+	if err := f.c.Status().Update(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.r.pruneRetention(ctx, newer); err != nil {
+		t.Fatalf("pruneRetention: %v", err)
+	}
+	if got := getBackup(t, f.c, f.mb); got.DeletionTimestamp.IsZero() {
+		t.Fatal("retention did not delete the backup outside keepLast")
+	}
+	if getBackup(t, f.c, newer).DeletionTimestamp != nil {
+		t.Fatal("retention deleted the newest backup")
+	}
+
+	f.finalize(t)
+	job, ok := f.cleanupJob(t)
+	if !ok {
+		t.Fatal("the pruned backup started no cleanup Job")
+	}
+	var snap corev1.Secret
+	if err := f.c.Get(ctx, snapKey, &snap); err != nil {
+		t.Fatalf("dump-key snapshot deleted before its artifacts: %v", err)
+	}
+	job.UID = "cleanup-ok"
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := f.c.Status().Update(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Create(ctx, cleanupPodFor(job, corev1.PodSucceeded, 0, backupmeta.FormatCleanupComplete(3))); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); !done {
+		t.Fatal("cleanup did not finish")
+	}
+	if err := f.c.Get(ctx, snapKey, &snap); err == nil {
+		t.Fatal("dump-key snapshot kept after retention pruned the backup and its artifacts")
 	}
 }

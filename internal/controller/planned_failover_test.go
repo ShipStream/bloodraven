@@ -14,7 +14,7 @@ import (
 // the planned-failover parser + validator. Sites are declared as
 // primary-candidate by default; the drOnly set overrides specific
 // names. statusStates and replicating configure status.sites entries.
-func plannedFG(sites, drOnly []string, active string, statusStates map[string]string, replicating map[string]bool) *v1alpha1.MysqlFailoverGroup {
+func plannedFG(sites, drOnly []string, active string, statusStates map[string]v1alpha1.SiteState, replicating map[string]bool) *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
 	}
@@ -22,26 +22,29 @@ func plannedFG(sites, drOnly []string, active string, statusStates map[string]st
 	for _, n := range drOnly {
 		drSet[n] = true
 	}
-	for _, name := range sites {
+	for i, name := range sites {
 		role := v1alpha1.SiteRolePrimaryCandidate
 		if drSet[name] {
-			role = v1alpha1.SiteRoleDROnly
+			role = v1alpha1.SiteRoleDisasterRecovery
 		}
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, Role: role})
+		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: role})
 		st := v1alpha1.SiteStatus{Name: name}
 		if s, ok := statusStates[name]; ok {
 			st.State = s
 		} else {
-			st.State = "read-only"
+			st.State = v1alpha1.SiteStateReadOnly
 		}
-		if r, ok := replicating[name]; ok {
-			st.Replicating = r
-		} else {
-			st.Replicating = st.State == "read-only"
+		running, ok := replicating[name]
+		if !ok {
+			running = st.State == v1alpha1.SiteStateReadOnly
+		}
+		st.Replication = v1alpha1.SiteReplicationBroken
+		if running {
+			st.Replication = v1alpha1.SiteReplicationHealthy
 		}
 		if name == active {
-			st.State = "writable"
-			st.Replicating = false
+			st.State = v1alpha1.SiteStateWritable
+			st.Replication = v1alpha1.SiteReplicationNotApplicable
 		}
 		fg.Status.Sites = append(fg.Status.Sites, st)
 	}
@@ -72,7 +75,14 @@ func TestParsePlannedFailoverAnnotation(t *testing.T) {
 		{"pdx:foo=bar", "", 0, "unknown key"},
 		{"pdx:maxLagWait=", "", 0, "the value must match"},
 		{"pdx:maxLagWait=soon", "", 0, "not a valid duration"},
-		{"pdx:maxLagWait=0s", "", 0, "must be positive"},
+		// WE-Q3: the override takes spec.plannedFailover.maxLagWait's 1s..1h.
+		{"pdx:maxLagWait=0s", "", 0, "maxLagWait must be between 1s and 1h (got 0s)"},
+		{"pdx:maxLagWait=-5s", "", 0, "maxLagWait must be between 1s and 1h"},
+		{"pdx:maxLagWait=999ms", "", 0, "maxLagWait must be between 1s and 1h"},
+		{"pdx:maxLagWait=1s", "pdx", time.Second, ""},
+		{"pdx:maxLagWait=1h", "pdx", time.Hour, ""},
+		{"pdx:maxLagWait=1h0m1s", "", 0, "maxLagWait must be between 1s and 1h"},
+		{"pdx:maxLagWait=24h", "", 0, "maxLagWait must be between 1s and 1h"},
 		{"pdx:abcdef", "", 0, "must be key=value"},
 	}
 	for _, tc := range cases {
@@ -134,8 +144,8 @@ func TestValidatePlannedFailover_DROnlyTargetRejected(t *testing.T) {
 	if result != PlannedFailoverReject || reason != v1alpha1.PlannedFailoverReasonTargetNotPromotable {
 		t.Fatalf("expected TargetNotPromotable reject for dr-only target, got result=%v reason=%q err=%v", result, reason, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "primary-candidate") {
-		t.Errorf("err = %v, want to mention primary-candidate", err)
+	if err == nil || !strings.Contains(err.Error(), "PrimaryCandidate") {
+		t.Errorf("err = %v, want to mention PrimaryCandidate", err)
 	}
 }
 
@@ -166,7 +176,7 @@ func TestValidatePlannedFailover_TargetMidRotation(t *testing.T) {
 
 func TestValidatePlannedFailover_TargetMidRotationBeatsUnhealthy(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]string{"pdx": "unreachable"},
+		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateUnreachable},
 		map[string]bool{"pdx": false})
 	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
@@ -182,7 +192,7 @@ func TestValidatePlannedFailover_TargetMidRotationBeatsUnhealthy(t *testing.T) {
 
 func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]string{"pdx": "unreachable"},
+		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateUnreachable},
 		map[string]bool{"pdx": false})
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {
@@ -192,7 +202,7 @@ func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 
 func TestValidatePlannedFailover_TargetNotReplicating(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]string{"pdx": "read-only"},
+		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateReadOnly},
 		map[string]bool{"pdx": false})
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {
@@ -248,12 +258,12 @@ func TestValidatePlannedFailover_Cooldown(t *testing.T) {
 			fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 			fg.Spec.FailoverCooldown = &metav1.Duration{Duration: cooldown}
 			last := metav1.NewTime(now.Add(-tc.statusAgo))
-			fg.Status.LastFailover = &last
-			fg.Status.LastFailoverTarget = "iad"
+			fg.Status.SetLastFailover(&last, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
+			fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "iad", fg.Status.PromotionGtidExecuted())
 			if tc.annotation != nil {
 				fg.Annotations = map[string]string{
-					LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
-					LastFailoverTargetAnnotation: tc.annotation.LastFailoverTarget,
+					v1alpha1.LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
+					v1alpha1.LastFailoverTargetAnnotation: tc.annotation.LastFailoverTarget,
 				}
 			}
 
@@ -299,13 +309,13 @@ func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 			fg.Annotations = map[string]string{
-				LastFailoverAnnotation:       "not-a-timestamp",
-				LastFailoverTargetAnnotation: "iad",
+				v1alpha1.LastFailoverAnnotation:       "not-a-timestamp",
+				v1alpha1.LastFailoverTargetAnnotation: "iad",
 			}
 			if tc.withStatus {
 				last := metav1.NewTime(now.Add(-time.Minute))
-				fg.Status.LastFailover = &last
-				fg.Status.LastFailoverTarget = "iad"
+				fg.Status.SetLastFailover(&last, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
+				fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "iad", fg.Status.PromotionGtidExecuted())
 			}
 
 			result, reason, err := validatePlannedFailoverRequest(
@@ -356,7 +366,7 @@ func TestValidatePlannedFailover_InFlightPlannedFailoverRejected(t *testing.T) {
 	}
 	// A run the terminal marker ended does not block a new one.
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false); result != PlannedFailoverAccept {
 		t.Fatalf("marked run blocks a new request: %v %v", result, err)
 	}
@@ -423,7 +433,7 @@ func TestPlannedFailoverFencedSite(t *testing.T) {
 			if got := plannedFailoverFencedSite(fg); got != tc.want {
 				t.Errorf("fenced site = %q, want %q", got, tc.want)
 			}
-			fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 			if got := plannedFailoverFencedSite(fg); got != "" {
 				t.Errorf("marked run fences %q", got)
 			}
@@ -447,12 +457,12 @@ func TestPlannedFailoverPredicates_MarkerIsTerminal(t *testing.T) {
 			t.Errorf("%s: unmarked run not active", phase)
 		}
 		for _, other := range []string{`{"schemaVersion":1,"runID":"run-2","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, `{"schemaVersion":1,"runID":"run-1","outcome":"Bogus","reason":"StatusStalled"}`, "garbage"} {
-			fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: other}
+			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: other}
 			if !plannedFailoverActive(fg) {
 				t.Errorf("%s: marker %q ended the run", phase, other)
 			}
 		}
-		fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+		fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 		if plannedFailoverActive(fg) || plannedFailoverOwnsSites(fg) || plannedFailoverPending(fg) || plannedFailoverFencedSite(fg) != "" ||
 			plannedFailoverDragonflyStripActive(fg) || plannedDragonflyTakeoverSucceeded(fg) {
 			t.Errorf("%s: a marked run is still live to a predicate", phase)

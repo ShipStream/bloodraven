@@ -154,3 +154,77 @@ func TestTriageReportsHolds(t *testing.T) {
 		}
 	}
 }
+
+// triage.sh reads the current status shape: the lastFailover record, the
+// sites[].replication enum, the EncryptionAtRestReady condition and the
+// backups' status.artifactStorage. Each rule matches only the new path, so
+// a script still reading an old field prints nothing for it.
+func TestTriageReadsCurrentStatusShape(t *testing.T) {
+	e := newRuleEnv(t)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o json", "{}", false)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.status.lastFailover.time}{\" target=\"}{.status.lastFailover.target}", "2026-11-05T10:00:00Z target=dc2", false)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath=*Replication: {.replication}*", "Site: dc1\n  Replication: Lagging\n", false)
+	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath=*EncryptionAtRestReady*", "True AllSitesSealed: all sites sealed", false)
+	e.rule(t, "get mysqlbackups -n orders -l bloodraven.shipstream.io/failover-group=lion -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,POLICY:.spec.deletionPolicy,CLEANUP_START:.status.cleanupStartTime,LOCATION:.status.artifactStorage.location,BUCKET:*",
+		"NAME   DELETING   LOCATION\nb1     <none>     s3://bucket/lion/b1\n", false)
+	out, err := e.run(t, scriptPath("triage.sh"), "-n", "orders", "lion")
+	if err != nil {
+		t.Fatalf("triage.sh failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"Last Failover:       2026-11-05T10:00:00Z target=dc2",
+		"Replication: Lagging",
+		"EncryptionAtRestReady: True AllSitesSealed",
+		"s3://bucket/lion/b1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("triage output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestTriageReportsAppliedGeneration pins that triage.sh compares
+// status.observedGeneration with metadata.generation, and explains a
+// Degraded=True/BootstrapFailed verdict.
+func TestTriageReportsAppliedGeneration(t *testing.T) {
+	const gap = "The topology manager has not applied the latest spec yet"
+	for _, c := range []struct {
+		name, spec, observed string
+		wantGap              bool
+	}{
+		{name: "applied", spec: "7", observed: "7"},
+		{name: "behind", spec: "8", observed: "7", wantGap: true},
+		{name: "never applied", spec: "3", wantGap: true},
+		{name: "no generation", observed: "2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newRuleEnv(t)
+			e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o json", "{}", false)
+			e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.metadata.generation}", c.spec, false)
+			e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.status.observedGeneration}", c.observed, false)
+			e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath=*type==\"Degraded\"*",
+				"True BootstrapFailed: Reclone into dc2 failed: clone_status has no new Completed row", false)
+			out, err := e.run(t, scriptPath("triage.sh"), "-n", "orders", "lion")
+			if err != nil {
+				t.Fatalf("triage.sh failed: %v\n%s", err, out)
+			}
+			observed := c.observed
+			if observed == "" {
+				observed = "none"
+			}
+			spec := c.spec
+			if spec == "" {
+				spec = "unavailable"
+			}
+			if want := "Spec generation:     " + spec + " (applied by the topology manager: " + observed + ")"; !strings.Contains(out, want) {
+				t.Errorf("triage output lacks %q:\n%s", want, out)
+			}
+			if got := strings.Contains(out, gap); got != c.wantGap {
+				t.Errorf("generation gap reported = %v, want %v:\n%s", got, c.wantGap, out)
+			}
+			if !strings.Contains(out, "The last clone (bootstrap, reclone or auto-clone) failed") {
+				t.Errorf("triage output does not explain BootstrapFailed:\n%s", out)
+			}
+		})
+	}
+}

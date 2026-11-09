@@ -84,7 +84,7 @@ func scenario58HungReader() runner.Scenario {
 							if rs == nil {
 								return false, "reader missing from status", nil
 							}
-							return rs.State == "unreachable", "reader state=" + rs.State, nil
+							return rs.State == v1alpha1.SiteStateUnreachable, "reader state=" + string(rs.State), nil
 						}); err != nil {
 						return err
 					}

@@ -21,7 +21,7 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 	fg.Spec.Backup.Schedules = append(fg.Spec.Backup.Schedules, v1alpha1.BackupSchedule{Name: "later", ProfileName: "nightly-s3", Schedule: "0 3 * * *"})
 	first := failedRetryRun("first", "first-uid", 1, time.Now().Add(-time.Hour))
 	later := failedRetryRun("later", "later-uid", 1, time.Now().Add(-time.Hour))
-	later.Labels[labelBackupSchedule] = "later"
+	later.Labels[v1alpha1.BackupScheduleLabel] = "later"
 	br, c := newBackupReconciler(t, fg, first, later)
 	recorder := record.NewFakeRecorder(100)
 	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: br.Scheme, Recorder: recorder}
@@ -35,7 +35,7 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 			t.Fatal(err)
 		}
 		originals = append(originals, successor.DeepCopy())
-		successor.Labels[labelFailoverGroup] = "foreign-group"
+		successor.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
 		if err := c.Update(ctx, &successor); err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +91,7 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 	}
 	reconcile()
 	assertWarnings(0)
-	firstSuccessor.Labels[labelFailoverGroup] = "foreign-again"
+	firstSuccessor.Labels[v1alpha1.FailoverGroupLabel] = "foreign-again"
 	if err := c.Update(ctx, &firstSuccessor); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKey{Namespace: newFailure.Namespace, Name: retryBackupName(newFailure, 2)}, &next); err != nil {
 		t.Fatal(err)
 	}
-	next.Labels[labelFailoverGroup] = "foreign-group"
+	next.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
 	if err := c.Update(ctx, &next); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestBackupRetryReview_ConflictWarningFollowsStatusPersistence(t *testing.T)
 	if err := c.Get(ctx, client.ObjectKey{Namespace: failed.Namespace, Name: retryBackupName(failed, 2)}, &successor); err != nil {
 		t.Fatal(err)
 	}
-	successor.Labels[labelFailoverGroup] = "foreign-group"
+	successor.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
 	if err := c.Update(ctx, &successor); err != nil {
 		t.Fatal(err)
 	}
@@ -180,9 +180,9 @@ func TestBackupRetryReview_LocalIssuesDoNotBlockOtherSchedules(t *testing.T) {
 			now := time.Now().Truncate(time.Second)
 			first := failedRetryRun("first", "first-uid", 1, now.Add(-time.Hour))
 			later := failedRetryRun("later", "later-uid", 1, now.Add(-time.Hour))
-			later.Labels[labelBackupSchedule] = "later"
+			later.Labels[v1alpha1.BackupScheduleLabel] = "later"
 			pending := failedRetryRun("pending", "pending-uid", 1, now.Add(-time.Hour))
-			pending.Labels[labelBackupSchedule] = "pending"
+			pending.Labels[v1alpha1.BackupScheduleLabel] = "pending"
 			pending.Status.CompletionTime = &metav1.Time{Time: now}
 			old := failedRetryRun("old-success", "old-uid", 1, now.Add(-24*time.Hour))
 			old.Status.Phase = v1alpha1.BackupPhaseSucceeded
@@ -197,7 +197,7 @@ func TestBackupRetryReview_LocalIssuesDoNotBlockOtherSchedules(t *testing.T) {
 				t.Fatal(err)
 			}
 			if mode == "lineage-conflict" {
-				existing.Labels[labelFailoverGroup] = "foreign-group"
+				existing.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
 				if err := c.Update(ctx, &existing); err != nil {
 					t.Fatal(err)
 				}

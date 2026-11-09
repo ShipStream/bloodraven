@@ -768,7 +768,7 @@ func newMockTainter() *mockTainter {
 	return &mockTainter{taints: make(map[string]bool)}
 }
 
-func (m *mockTainter) SetTaint(_ context.Context, selector string, _ string, taint bool) error {
+func (m *mockTainter) SetTaint(_ context.Context, selector, _, _ string, taint bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.taints[selector] = taint
@@ -851,7 +851,8 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
-		FailoverCooldown:  0, // no cooldown by default
+		// The API default; the manager uses the config as given (A-37).
+		FailoverCooldown: int64(5 * time.Minute),
 	}
 
 	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2}, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
@@ -880,7 +881,7 @@ func defaultTwoSiteConfig() []controller.SiteTopologyConfig {
 }
 
 func taintSelector(siteName string) string {
-	return "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=" + siteName
+	return "bloodraven.shipstream.io/failover-group.lion=true,bloodraven.shipstream.io/site.lion=" + siteName
 }
 
 // newTestHarnessWithPriorities creates a harness where both sites start

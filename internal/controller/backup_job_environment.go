@@ -54,17 +54,9 @@ func expandBackupEnvironment(value string, previous map[string]backupEnvironment
 	return backupEnvironmentValue{value: out.String(), known: known}
 }
 
+// backupJobDestination is the storage type and artifact location job's main
+// container writes, with its env expanded as the kubelet would.
 func backupJobDestination(job *batchv1.Job) (v1alpha1.BackupStorageType, string, error) {
-	return backupJobEnvironmentDestination(job, true)
-}
-
-// backupJobRawDestination is only used to recognize previously persisted
-// templates that need repair; its result is never treated as a known path.
-func backupJobRawDestination(job *batchv1.Job) (v1alpha1.BackupStorageType, string, error) {
-	return backupJobEnvironmentDestination(job, false)
-}
-
-func backupJobEnvironmentDestination(job *batchv1.Job, expand bool) (v1alpha1.BackupStorageType, string, error) {
 	c := backupJobMainContainer(job)
 	if c == nil {
 		return "", "", fmt.Errorf("backup Job has no dump or uploader container")
@@ -72,13 +64,13 @@ func backupJobEnvironmentDestination(job *batchv1.Job, expand bool) (v1alpha1.Ba
 	env := make(map[string]backupEnvironmentValue)
 	for _, v := range c.Env {
 		entry := backupEnvironmentValue{value: v.Value, known: v.ValueFrom == nil}
-		if expand && entry.known {
+		if entry.known {
 			entry = expandBackupEnvironment(v.Value, env)
 		}
 		env[v.Name] = entry
 	}
 	storage := v1alpha1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value)
-	encrypted, _ := backupJobEncryption(job)
+	encrypted, _ := backupJobEncryptionChoice(job)
 	required := []string{"BLOODRAVEN_STORAGE_TYPE", "BLOODRAVEN_OUTPUT_URL"}
 	if encrypted && storage == v1alpha1.BackupStorageS3 {
 		required = append(required, "BLOODRAVEN_S3_BUCKET")

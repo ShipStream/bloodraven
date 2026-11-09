@@ -30,13 +30,13 @@ func TestEvalCrossSite_TwoSite(t *testing.T) {
 			name:           "primary unreachable emits replica as candidate",
 			observations:   []SiteObservation{obs("iad", pc, StateUnreachable), obs("pdx", pc, StateReadOnly)},
 			wantCandidates: []string{"pdx"},
-			wantReason:     "Degraded",
+			wantReason:     "SiteUnhealthy",
 		},
 		{
 			name:         "replica unreachable alerts only",
 			observations: []SiteObservation{obs("iad", pc, StateWritable), obs("pdx", pc, StateUnreachable)},
 			wantAlert:    true,
-			wantReason:   "Degraded",
+			wantReason:   "SiteUnhealthy",
 		},
 		{
 			name:         "split brain flagged",
@@ -152,7 +152,7 @@ func TestEvalCrossSite_ThreeSite(t *testing.T) {
 			obs("pdx", pc, StateUnreachable),
 			obs("fra", pc, StateUnreachable),
 		}, nil)
-		if a.Reason != "Degraded" {
+		if a.Reason != "SiteUnhealthy" {
 			t.Fatalf("expected Degraded, got %+v", a)
 		}
 		if !strings.Contains(a.Alert, "pdx") || !strings.Contains(a.Alert, "fra") {
@@ -184,7 +184,7 @@ func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
 			obs: []SiteObservation{
 				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
 			},
-			wantReason: "Degraded",
+			wantReason: "SiteUnhealthy",
 			wantFence:  []string{"reader"},
 		},
 		{
@@ -192,7 +192,7 @@ func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
 			obs: []SiteObservation{
 				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("dr", dr, StateWritable),
 			},
-			wantReason: "Degraded",
+			wantReason: "SiteUnhealthy",
 			wantFence:  []string{"dr"},
 		},
 		{
@@ -200,7 +200,7 @@ func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
 			obs: []SiteObservation{
 				obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
 			},
-			wantReason: "Degraded",
+			wantReason: "SiteUnhealthy",
 			wantFence:  []string{"reader"},
 		},
 		{
@@ -208,7 +208,7 @@ func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
 			obs: []SiteObservation{
 				obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("dr", dr, StateWritable),
 			},
-			wantReason: "Degraded",
+			wantReason: "SiteUnhealthy",
 			wantFence:  []string{"dr"},
 		},
 		{
@@ -216,7 +216,7 @@ func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
 			obs: []SiteObservation{
 				obs("iad", pc, StateUnreachable), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
 			},
-			wantReason: "Degraded",
+			wantReason: "SiteUnhealthy",
 			wantFence:  []string{"reader"},
 		},
 	}
@@ -290,7 +290,7 @@ func TestEvalCrossSite_Unclassified(t *testing.T) {
 		{
 			name:           "an unclassified site that never answered does not delay failover",
 			obs:            []SiteObservation{obs("iad", pc, StateUnreachable), obs("pdx", pc, StateReadOnly), obs("fra", pc, StateUnknown)},
-			wantReason:     "Degraded",
+			wantReason:     "SiteUnhealthy",
 			wantCandidates: []string{"pdx"},
 		},
 		{
@@ -350,7 +350,7 @@ func TestEvalCrossSite_Unclassified(t *testing.T) {
 		{
 			name:       "writable reader is still fenced first",
 			obs:        []SiteObservation{pendingObs("iad"), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable)},
-			wantReason: "Degraded",
+			wantReason: "SiteUnhealthy",
 			wantAlert:  "requires fencing (reader)",
 			wantFence:  []string{"reader"},
 		},
@@ -428,7 +428,7 @@ func TestEvalCrossSite_PromotionBlocked(t *testing.T) {
 			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true},
 			obs("fra", pc, StateReadOnly),
 		}, nil)
-		if got.Reason != "Degraded" {
+		if got.Reason != "SiteUnhealthy" {
 			t.Fatalf("reason = %q, want Degraded", got.Reason)
 		}
 		if !equalStrings(got.PromotionCandidates, []string{"fra"}) {

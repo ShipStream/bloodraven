@@ -66,7 +66,7 @@ func TestRestoreReclonesHeldAfterFailedRestoreAcrossRestarts(t *testing.T) {
 	now := metav1.Now()
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: "full", JobName: "mysql-lion-dc1-inplace-restore",
+		Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, JobName: "mysql-lion-dc1-inplace-restore",
 		ConfirmTokenUsed: "2026-04-17T14:00:00Z", StartTime: &now, CompletionTime: &now,
 	}
 	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{

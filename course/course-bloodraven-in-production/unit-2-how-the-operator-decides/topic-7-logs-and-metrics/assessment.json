@@ -2,7 +2,7 @@
   "flashcards": [
     {
       "front": "The `state transition` log event — which four fields does it carry?",
-      "back": "`site`, `from`, `to`, `fg`. `from`/`to` are one of `unknown`, `unreachable`, `read-only`, `writable`.",
+      "back": "`site`, `from`, `to`, `fg`. `from`/`to` are one of `Unknown`, `Unreachable`, `ReadOnly`, `Writable`.",
       "orderIndex": 0
     },
     {
@@ -27,7 +27,7 @@
     },
     {
       "front": "Which metric increments exactly once per `state transition` log line, with the same labels?",
-      "back": "`bloodraven_state_transitions_total{site, from, to}`.",
+      "back": "`bloodraven_state_transitions_total{site, from, to}`. Same fields, different spelling: the log's `from`/`to` carry the API values (`ReadOnly`), the counter's labels their kebab-case (`read-only`).",
       "orderIndex": 5
     },
     {
@@ -73,7 +73,7 @@
       "explanation": "The reversal: `-1` is the worst reading on this gauge, not the best. The operator sets `-1` when `Seconds_Behind_Source` comes back NULL, which means the site is not replicating at all — no stream, no lag to measure. `0` means an active stream reporting itself caught up. Treating them alike, as a naive dashboard or an `avg()` over the series will, hides a dead replica behind a green tile. (objective 11)"
     },
     {
-      "question": "In `playground`, `bloodraven_replication_lag_seconds{site=\"reader\"}` reads 45. `playground` sets `maxLagSeconds: 30` and `readOnlyMaxLagSeconds: 10`; `reader` is the `role: read-only` site. What follows?",
+      "question": "In `playground`, `bloodraven_replication_lag_seconds{site=\"reader\"}` reads 45. `playground` sets `maxLagSeconds: 30` and `readOnlyMaxLagSeconds: 10`; `reader` is the `role: ReadOnly` site. What follows?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -83,7 +83,7 @@
         "Nothing changes anywhere — a reader is expected to lag, so no threshold applies to it at all"
       ],
       "correctOptionIndex": 1,
-      "explanation": "The lag gauge carries only a `site` label, so you must join it against the site's role yourself. `reader` is `role: read-only`, so its lag is judged against `readOnlyMaxLagSeconds` (30), and breaching it costs the site its reader-endpoint eligibility — nothing more. `ReplicationLagging` is driven by `maxLagSeconds` against the group's core sites, and 45 is nowhere near 300, so the group's condition is untouched. \"Ineligible for promotion\" mistakes cause for effect: a `read-only` site can *never* be promoted and is excluded from `coreCount` entirely, whatever its lag. And \"nothing changes\" is the failure of the join itself — applying the group threshold to a site that has its own. (objective 12)"
+      "explanation": "The lag gauge carries only a `site` label, so you must join it against the site's role yourself. `reader` is `role: ReadOnly`, so its lag is judged against `readOnlyMaxLagSeconds` (30), and breaching it costs the site its reader-endpoint eligibility — nothing more. `ReplicationLagging` is driven by `maxLagSeconds` against the group's core sites, and 45 is nowhere near 300, so the group's condition is untouched. \"Ineligible for promotion\" mistakes cause for effect: a `ReadOnly` site can *never* be promoted and is excluded from `coreCount` entirely, whatever its lag. And \"nothing changes\" is the failure of the join itself — applying the group threshold to a site that has its own. (objective 12)"
     },
     {
       "question": "On `playground`, `bloodraven_state_transitions_total` has been flat for ten minutes while `bloodraven_poll_latency_seconds_count` keeps climbing and the observed latencies are rising. What is the most defensible reading?",
@@ -99,7 +99,7 @@
       "explanation": "A climbing `_count` is the loop's heartbeat: cycles are finishing, so the readings are current. Rising latency says the probes are slow — worth investigating — and a flat transition counter says nothing has changed state, which for a healthy group is the normal, boring case. The frozen-loop signature is the opposite of what you were given: in issue #93 the `_count` stopped advancing entirely, for every site, because the operator writes its gauges only after waiting on all probes. A failover would show up as transitions, not their absence. And the state-set gauges are re-emitted every poll cycle, not only on a transition, so a turning loop keeps them fresh. (objectives 10, 11)"
     },
     {
-      "question": "In issue #93 the operator reported `activeSite=iad`, `state=writable` and `Ready=True` for two minutes while the `iad` sidecar had already self-fenced under a deny-all NetworkPolicy. The first fix attempted was `SetConnMaxLifetime(10s)` on the MySQL pool. Explain why that could not have worked, and what the artefacts should have pointed at instead.",
+      "question": "In issue #93 the operator reported `activeSite=iad`, `state=Writable` and `Ready=True` for two minutes while the `iad` sidecar had already self-fenced under a deny-all NetworkPolicy. The first fix attempted was `SetConnMaxLifetime(10s)` on the MySQL pool. Explain why that could not have worked, and what the artefacts should have pointed at instead.",
       "type": "SHORT_ANSWER",
       "orderIndex": 4,
       "sampleAnswer": "`SetConnMaxLifetime` only recycles connections the pool holds. The connection in question was parked in a blocked read on a blackholed socket, so it was never returned to the pool and therefore never became eligible for recycling — the setting could not reach it. The real failure was that `Poll()` waits on every site's probe before doing anything, and `database/sql` context cancellation does not reliably abort a read already parked on such a socket, so one hung probe froze the whole loop. Since the state-set gauges, the transition counter and the status conditions are all written after that wait returns, the operator kept republishing its last known state with full confidence. The artefact that names it is `bloodraven_poll_latency_seconds_count` flatlining across every site — no cycle completed — not the site-state gauges, which look perfectly healthy precisely because they are frozen. The fix has to bound the I/O itself so a blackholed read returns and the site trips `failureThreshold`.",

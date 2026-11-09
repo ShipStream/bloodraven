@@ -13,7 +13,7 @@
 
 You need a completed emergency failover on `playground` that stays completed: `iad` must go down and stay down while you walk an auditor through `status.activeSite`, the failover record and the counter application. Which injection gives you that, deterministically?
 
-- `kubectl delete pod -l shipstream.io/site=iad --grace-period=0 --force`
+- `kubectl delete pod -l bloodraven.shipstream.io/site=iad --grace-period=0 --force`
 - `kubectl scale deployment mysql-playground-iad --replicas=0`
 - SQL `SHUTDOWN` inside the mysql container, leaving the pod and PVC in place
 - Killing the mysqld process so the pod crashes with its PVC intact
@@ -45,7 +45,7 @@ Only the four statements that change the candidate's own replication and read-on
 
 **Type:** TRUE_FALSE
 
-During the failover you watch a `shipstream.io/db-readonly-*:NoExecute` taint land on `iad`'s node before `pdx` is writable. You conclude the taint is one of the ordered steps of the promotion sequence.
+During the failover you watch a `<namespace>.db-readonly.bloodraven.shipstream.io/<group>:NoExecute` taint land on `iad`'s node before `pdx` is writable. You conclude the taint is one of the ordered steps of the promotion sequence.
 
 **Correct answer:** false
 
@@ -142,13 +142,13 @@ The 36 s is the tell: 6 s of detection plus a drain that spent its whole 30 s bu
 
 **Explanation:**
 
-The direction is the other way: the test is whether the **new** primary's set contains the **old** primary's — new contains old. The stated test is the inverted one, and it fails in both directions of usefulness. It goes false the moment `pdx` accepts its first write after promotion, so it would block every rejoin that ought to be automatic; and it passes precisely when the old primary is *ahead*, the one case that must never proceed. Get this backwards and you predict every outcome backwards. Note too what the gate is not: recovery is deliberately not gated on `lastFailoverTarget`, because a primary can change hands with no failover recorded at all — safety comes from a unique, directly confirmed, promotable writable primary observed right now. (objective 7)
+The direction is the other way: the test is whether the **new** primary's set contains the **old** primary's — new contains old. The stated test is the inverted one, and it fails in both directions of usefulness. It goes false the moment `pdx` accepts its first write after promotion, so it would block every rejoin that ought to be automatic; and it passes precisely when the old primary is *ahead*, the one case that must never proceed. Get this backwards and you predict every outcome backwards. Note too what the gate is not: recovery is deliberately not gated on the recorded failover target (`lastFailover.target`), because a primary can change hands with no failover recorded at all — safety comes from a unique, directly confirmed, promotable writable primary observed right now. (objective 7)
 
 ## Question 9
 
 **Type:** MULTIPLE_CHOICE
 
-`iad` is blocked with `divergentGtid` starting `589f4b67`. You annotate `bloodraven.shipstream.io/reclone-site=iad:deadbeef`, and moments later `kubectl get mfg playground -o yaml` shows no such annotation at all. What happened?
+`iad` is blocked with `divergentGtid` starting `589f4b67`. You annotate `bloodraven.shipstream.io/reclone-site=iad:confirm=playground:uid=<uid>:gtidPrefix=deadbeef`, and moments later `kubectl get mfg playground -o yaml` shows no such annotation at all. What happened?
 
 - The reconciler accepted it and cleared the annotation as the clone started
 - It was rejected; the operator emitted a `RecloneRejected` warning event and deleted the annotation
@@ -167,7 +167,7 @@ A rejected reclone annotation emits a `RecloneRejected` warning event and is the
 
 `iad` is `RecoveryBlocked` with three divergent transactions. You have extracted them and applied them to `pdx`, so `pdx`'s executed set now contains everything `iad` holds. What is the correct next action?
 
-- Annotate `reclone-site=iad:<8-char prefix>` to rebuild `iad` from `pdx` anyway
+- Reclone `iad` with `kubectl bloodraven reclone playground iad` to rebuild it from `pdx` anyway
 - Nothing — containment now holds, and rejoin proceeds at the next 30 s re-verification
 - Clear `divergentGtid` on the CR so the interlock stops blocking the rejoin
 - Repoint `iad` at `pdx` by hand with `SOURCE_AUTO_POSITION=1` and start replication

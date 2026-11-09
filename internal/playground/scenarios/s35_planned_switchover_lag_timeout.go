@@ -35,7 +35,7 @@ func scenario35PlannedSwitchoverLagTimeout() runner.Scenario {
 		Title: "Planned switchover rolls back on lag timeout, source stays active",
 		Hypothesis: "With SOURCE_DELAY=60 on the target and maxLagWait=5s, a planned switchover fences the source, " +
 			"waits for the target GTID to cover the fenced GTID, times out, and rolls back: plannedFailover.phase=Failed " +
-			"outcome=RolledBack reason=LagTimeout, planned_failovers_total{result=failed_timeout} increments, status.activeSite stays the " +
+			"outcome=RolledBack reason=LagTimeout, planned_failovers_total{result=rolled-back} increments, status.activeSite stays the " +
 			"source, and the failover history does not advance to the target.",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#35-planned-switchover-lag-timeout-rollback",
@@ -71,11 +71,11 @@ func s35InjectDelayMarkerAndAnnotate() runner.Step {
 			if err := ctxStash(ctx, env, "target", target); err != nil {
 				return err
 			}
-			if err := ctxStash(ctx, env, "lastFailoverTargetBefore", mfg.Status.LastFailoverTarget); err != nil {
+			if err := ctxStash(ctx, env, "lastFailoverTargetBefore", mfg.Status.LastFailoverTarget()); err != nil {
 				return err
 			}
 			if err := stashMetricCounter(ctx, env, "plannedFailedTimeoutBefore", "bloodraven_planned_failovers_total",
-				map[string]string{"target_site": target, "result": "failed_timeout"}); err != nil {
+				map[string]string{"target_site": target, "result": "rolled-back"}); err != nil {
 				return err
 			}
 
@@ -89,6 +89,11 @@ func s35InjectDelayMarkerAndAnnotate() runner.Step {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("SOURCE_DELAY=%ds applied on target %s", s35SourceDelay, target))
+			// The delay restarted replication; admission refuses a target
+			// the operator last saw stopped.
+			if err := waitOperatorSeesReplicating(ctx, env, target, 10*time.Second, 90*time.Second); err != nil {
+				return err
+			}
 
 			// 2) Write a marker on the source AFTER the delay is active.
 			sourceClient, err := env.MySQL(source)
@@ -198,18 +203,18 @@ func s35VerifySourceStaysActive() runner.Step {
 			if _, err := env.Wait.UntilCR(activeCtx, env.Namespace,
 				fmt.Sprintf("status.activeSite==%s restored as sole writer/active after rollback", source),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					return s35RollbackConverged(mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, source, target)
+					return s35RollbackConverged(mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), source, target)
 				}); err != nil {
 				return fmt.Errorf("source %s not restored as active after rollback: %w", source, err)
 			}
 
-			// failed_timeout metric increments.
+			// rolled-back metric increments.
 			metricCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			defer cancel()
 			if err := env.Wait.UntilMetric(metricCtx, env.Metrics,
-				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="failed_timeout"} increments from %g`, target, before),
+				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="rolled-back"} increments from %g`, target, before),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
-					v, _ := snap.Counter("bloodraven_planned_failovers_total", map[string]string{"target_site": target, "result": "failed_timeout"})
+					v, _ := snap.Counter("bloodraven_planned_failovers_total", map[string]string{"target_site": target, "result": "rolled-back"})
 					return v > before, fmt.Sprintf("counter=%g before=%g", v, before)
 				}); err != nil {
 				return err
@@ -240,7 +245,7 @@ func s35VerifySourceStaysActive() runner.Step {
 			if !rs.Configured || !rs.IORunning || !rs.SQLRunning {
 				return fmt.Errorf("target %s replication not running after rollback (configured=%v io=%v sql=%v)", target, rs.Configured, rs.IORunning, rs.SQLRunning)
 			}
-			env.Capture.Note(fmt.Sprintf("source %s stayed active & writable; target %s read-only & replicating; failed_timeout metric incremented", source, target))
+			env.Capture.Note(fmt.Sprintf("source %s stayed active & writable; target %s read-only & replicating; rolled-back metric incremented", source, target))
 			return nil
 		},
 	}
@@ -269,7 +274,7 @@ func s35Cleanup(ctx context.Context, env *runner.Env) error {
 	}
 	readOnly := map[string]bool{}
 	for _, s := range mfg.Status.Sites {
-		if s.State == "read-only" {
+		if s.State == v1alpha1.SiteStateReadOnly {
 			readOnly[s.Name] = true
 			if !stringsContain(delayed, s.Name) {
 				delayed = append(delayed, s.Name)
@@ -299,7 +304,7 @@ func s35Cleanup(ctx context.Context, env *runner.Env) error {
 	}
 	// Drop the marker schema from the writable site.
 	for _, s := range mfg.Status.Sites {
-		if s.State != "writable" {
+		if s.State != v1alpha1.SiteStateWritable {
 			continue
 		}
 		c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, s.Name, env.Creds)

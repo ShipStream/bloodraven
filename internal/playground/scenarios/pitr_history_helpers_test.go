@@ -20,7 +20,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -36,7 +35,7 @@ func mustMicro(t *testing.T, s string) time.Time {
 }
 
 // TestPITRFenceTargetIsWholeSecondAfterNow pins the fence's T: a whole
-// second (stopDatetime admits no fraction, A-39) strictly after the clock
+// second (stopTime admits no fraction, A-39) strictly after the clock
 // read under the lock, and at most one second after it.
 func TestPITRFenceTargetIsWholeSecondAfterNow(t *testing.T) {
 	for _, now := range []string{
@@ -101,13 +100,14 @@ func TestPITRCheckTargetAfterBackup(t *testing.T) {
 	env := &runner.Env{}
 	stashSet(env, "backupClear:b2", "2026-11-05T10:00:06.250000Z")
 	cases := []struct {
-		name, mode, backup, target string
-		wantErr                    string
+		name                    string
+		mode                    v1alpha1.PointInTimeMode
+		backup, target, wantErr string
 	}{
-		{"after clear", "timestamp", "b2", "2026-11-05T10:00:07Z", ""},
-		{"before clear", "timestamp", "b2", "2026-11-05T10:00:06Z", "before backup b2's clear time"},
-		{"latest needs no target", "latest", "b2", "", ""},
-		{"untracked backup", "timestamp", "b9", "2026-11-05T10:00:07Z", "no recorded clear time"},
+		{"after clear", v1alpha1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:07Z", ""},
+		{"before clear", v1alpha1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:06Z", "before backup b2's clear time"},
+		{"latest needs no target", v1alpha1.PointInTimeModeLatest, "b2", "", ""},
+		{"untracked backup", v1alpha1.PointInTimeModeTimestamp, "b9", "2026-11-05T10:00:07Z", "no recorded clear time"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -356,37 +356,40 @@ func TestPITRRecloneRequest(t *testing.T) {
 		ready     bool
 		value     string
 	}{
-		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only"}, true, false, ""},
-		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only", DivergentGtid: div}, true, false, ""},
-		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: "read-only", RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, true, "iad:3e11fa47"},
-		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: "unreachable", RecoveryState: "RecoveryBlocked", DivergentGtid: div}, true, false, ""},
-		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: "read-only", Replicating: true}, false, true, "iad:confirm=mfg"},
-		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: "read-only", DivergentGtid: div}, false, false, ""},
-		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: "read-only", RecoveryState: "RecoveryBlocked"}, false, false, ""},
+		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly}, true, false, ""},
+		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, true, false, ""},
+		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: div}, true, true, "iad:confirm=mfg:uid=u-1:gtidPrefix=3e11fa47"},
+		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateUnreachable, RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: div}, true, false, ""},
+		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}, false, true, "iad:confirm=mfg:uid=u-1"},
+		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, false, false, ""},
+		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked}, false, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ready, value, msg := pitrRecloneRequest([]v1alpha1.SiteStatus{{Name: "pdx", State: "writable"}, c.site}, "iad", "mfg", c.divergent)
+			mfg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "mfg", UID: "u-1"},
+				Status: v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{{Name: "pdx", State: v1alpha1.SiteStateWritable}, c.site}}}
+			ready, value, msg := pitrRecloneRequest(mfg, "iad", c.divergent)
 			if ready != c.ready || value != c.value {
 				t.Fatalf("ready=%v value=%q, want %v %q (%s)", ready, value, c.ready, c.value, msg)
 			}
 		})
 	}
-	if ready, _, _ := pitrRecloneRequest(nil, "iad", "mfg", false); ready {
+	if ready, _, _ := pitrRecloneRequest(&v1alpha1.MysqlFailoverGroup{}, "iad", false); ready {
 		t.Error("an absent site is not ready")
 	}
 }
 
 // TestPITRRecloneWatch pins F188: an attempt that fails again while the
 // earlier failure's LastTransitionTime is kept is still reported, and an
-// earlier attempt's outcome is never taken for this one's.
+// earlier attempt's outcome (False/BootstrapFailed or
+// False/NotBootstrapping) is never taken for this one's.
 func TestPITRRecloneWatch(t *testing.T) {
 	t0 := metav1.NewTime(mustMicro(t, "2026-11-05T10:00:00.000000Z").Truncate(time.Second))
 	t1 := metav1.NewTime(t0.Add(time.Minute))
 	cond := func(status metav1.ConditionStatus, reason, msg string, ltt metav1.Time) *metav1.Condition {
 		return &metav1.Condition{Type: "Bootstrapping", Status: status, Reason: reason, Message: msg, LastTransitionTime: ltt}
 	}
-	oldFail := cond(metav1.ConditionTrue, "Failed", "Reclone failed: donor gone", t0)
+	oldFail := cond(metav1.ConditionFalse, "BootstrapFailed", "Reclone failed: donor gone", t0)
 	t.Run("old failure is not this attempt's", func(t *testing.T) {
 		w := newPitrRecloneWatch(oldFail)
 		if done, _, err := w.observe(oldFail, false); done || err != nil {
@@ -404,23 +407,23 @@ func TestPITRRecloneWatch(t *testing.T) {
 	})
 	t.Run("failure with a new message", func(t *testing.T) {
 		w := newPitrRecloneWatch(oldFail)
-		if _, _, err := w.observe(cond(metav1.ConditionTrue, "Failed", "Reclone failed: clone plugin error", t0), false); err == nil {
+		if _, _, err := w.observe(cond(metav1.ConditionFalse, "BootstrapFailed", "Reclone failed: clone plugin error", t0), false); err == nil {
 			t.Fatal("a changed failure message is this attempt's failure")
 		}
 	})
-	t.Run("old Done is not this attempt's", func(t *testing.T) {
-		oldDone := cond(metav1.ConditionFalse, "Done", "Reclone completed successfully", t0)
+	t.Run("old completion is not this attempt's", func(t *testing.T) {
+		oldDone := cond(metav1.ConditionFalse, "NotBootstrapping", "Reclone completed successfully", t0)
 		w := newPitrRecloneWatch(oldDone)
 		if done, _, _ := w.observe(oldDone, true); done {
-			t.Fatal("the previous reclone's Done must not complete this one")
+			t.Fatal("the previous reclone's completion must not complete this one")
 		}
-		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "Done", "Reclone completed successfully", t1), true); !done {
-			t.Fatal("a Done with a new transition time completes the attempt")
+		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "NotBootstrapping", "Reclone completed successfully", t1), true); !done {
+			t.Fatal("a completion with a new transition time completes the attempt")
 		}
 	})
 	t.Run("done needs replication", func(t *testing.T) {
 		w := newPitrRecloneWatch(nil)
-		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "Done", "", t1), false); done {
+		if done, _, _ := w.observe(cond(metav1.ConditionFalse, "NotBootstrapping", "", t1), false); done {
 			t.Fatal("done before the site replicates")
 		}
 	})
@@ -479,14 +482,14 @@ func TestPITRWriterAwaitFirst(t *testing.T) {
 
 // TestPITRScenarioTargetsAreAdmissible pins F068: every target the PITR
 // scenarios generate (pitrFenceTarget, used by s31 and every fence) passes
-// the CRDs' admission patterns for verification timestamps and
-// stopDatetime, which refuse fractional seconds.
+// the admission pattern of both stopTime fields, which refuse fractional
+// seconds.
 func TestPITRScenarioTargetsAreAdmissible(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "config", "crd", "bases")
 	var patterns []*regexp.Regexp
 	for _, f := range []struct{ file, field string }{
-		{"shipstream.io_mysqlbackupverifications.yaml", "timestamp"},
-		{"shipstream.io_mysqlfailovergroups.yaml", "stopDatetime"},
+		{"shipstream.io_mysqlbackupverifications.yaml", "stopTime"},
+		{"shipstream.io_mysqlfailovergroups.yaml", "stopTime"},
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, f.file))
 		if err != nil {
@@ -498,7 +501,9 @@ func TestPITRScenarioTargetsAreAdmissible(t *testing.T) {
 			if strings.TrimSpace(l) != f.field+":" {
 				continue
 			}
-			for j := i + 1; j < len(lines) && j < i+30; j++ {
+			indent := len(l) - len(strings.TrimLeft(l, " "))
+			// Only this property's own keys: stop at the next sibling.
+			for j := i + 1; j < len(lines) && len(lines[j])-len(strings.TrimLeft(lines[j], " ")) > indent; j++ {
 				if v, ok := strings.CutPrefix(strings.TrimSpace(lines[j]), "pattern: "); ok {
 					patterns = append(patterns, regexp.MustCompile(strings.Trim(v, `'"`)))
 					found++
@@ -537,7 +542,7 @@ func TestPITRAssertResultReplayCount(t *testing.T) {
 		Archive:      &v1alpha1.PITRArchiveIdentity{ArchiveID: "ar1-abc"},
 		GtidExecuted: u + ":1-15:18-20", ReplayedTransactionCount: 8,
 	}
-	e := pitrExpectation{Backup: "b1", Mode: "latest", Fence: pitrFence{GTID: u + ":1-20"}, Exclude: u + ":16-17", Outcome: v1alpha1.PointInTimeArchiveHead}
+	e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: pitrFence{GTID: u + ":1-20"}, Exclude: u + ":16-17", Outcome: v1alpha1.PointInTimeArchiveHead}
 	if err := assertPITRResult(env, "t", res, e); err != nil {
 		t.Fatal(err)
 	}
@@ -679,21 +684,21 @@ func TestPITRDecryptObjectReadsEncryptedManifest(t *testing.T) {
 func TestPITRSiteReplicating(t *testing.T) {
 	mfg := &v1alpha1.MysqlFailoverGroup{}
 	mfg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: "writable"},
-		{Name: "pdx", State: "read-only"},
+		{Name: "iad", State: v1alpha1.SiteStateWritable},
+		{Name: "pdx", State: v1alpha1.SiteStateReadOnly},
 	}
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
 		t.Fatal("a read-only site that is not replicating counted as replicating")
 	}
-	mfg.Status.Sites[1].Replicating = true
+	mfg.Status.Sites[1].Replication = v1alpha1.SiteReplicationHealthy
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replicating read-only site was not accepted")
 	}
-	mfg.Status.Sites[1].RecoveryState = "RecoveryBlocked"
+	mfg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateBlocked
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
 		t.Fatal("a RecoveryBlocked replica counted as a planned-failover target")
 	}
-	mfg.Status.Sites[1].RecoveryState = "RecoveryInProgress"
+	mfg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateInProgress
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replica in RecoveryInProgress (not refused by validation) was not accepted")
 	}
@@ -738,7 +743,7 @@ func TestPITRObservedArchiveIDMatchesPrefix(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			mfg := &v1alpha1.MysqlFailoverGroup{}
 			if c.obs != nil {
-				mfg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, Archive: c.obs}
+				mfg.Status.PITR = &v1alpha1.PITRStatus{Archive: c.obs}
 			}
 			if got := pitrObservedArchiveID(mfg, c.prefix); got != c.want {
 				t.Errorf("pitrObservedArchiveID=%q, want %q", got, c.want)
@@ -775,7 +780,7 @@ func TestPITRArchiveBoundReady(t *testing.T) {
 			Status: v1alpha1.MysqlFailoverGroupStatus{
 				ActiveSite: "iad",
 				Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 10}},
-				PITR: &v1alpha1.PITRStatus{Enabled: true, Archive: &v1alpha1.PITRArchiveObservation{
+				PITR: &v1alpha1.PITRStatus{Archive: &v1alpha1.PITRArchiveObservation{
 					Destination: newDest, ArchiveID: newID, State: v1alpha1.PITRArchiveVerified,
 				}},
 				PITRArchiveBindings: []v1alpha1.PITRArchiveBinding{
@@ -855,7 +860,7 @@ func TestPITRWithdrawRelease(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			mfg := testBaselineMFG(false)
 			if c.current != "" {
-				mfg.Annotations = map[string]string{brcontroller.ReleasePITRArchiveBindingAnnotation: c.current}
+				mfg.Annotations = map[string]string{v1alpha1.ReleasePITRArchiveBindingAnnotation: c.current}
 			}
 			env := testScenarioEnv(t, mfg)
 			env.Capture = &runner.Capture{}
@@ -884,7 +889,7 @@ func TestPITRWithdrawRelease(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if left := got.Annotations[brcontroller.ReleasePITRArchiveBindingAnnotation]; left != c.wantLeft {
+			if left := got.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]; left != c.wantLeft {
 				t.Errorf("release annotation=%q, want %q", left, c.wantLeft)
 			}
 		})
@@ -904,7 +909,7 @@ func TestPITRSnapshotsUnderPrefixes(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := func(name, dest string) corev1.Secret {
-		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{pitrDestinationAnnotation: dest}}}
+		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{v1alpha1.PITRDestinationAnnotation: dest}}}
 	}
 	got := pitrSnapshotsUnderPrefixes([]corev1.Secret{snap("k-b", in), snap("k-x", out), snap("k-a", in), snap("k-none", "")}, []string{mine})
 	if strings.Join(got, ",") != "k-a,k-b" {
@@ -941,9 +946,9 @@ func TestGTIDOverlap(t *testing.T) {
 func TestPITRReaderSites(t *testing.T) {
 	mfg := &v1alpha1.MysqlFailoverGroup{}
 	mfg.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", Role: v1alpha1.SiteRolePrimaryCandidate},
-		{Name: "pdx", Role: v1alpha1.SiteRolePrimaryCandidate},
-		{Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
+		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
+		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
+		{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
 	}
 	if got := pitrReaderSites(mfg); len(got) != 1 || got[0] != "reader" {
 		t.Fatalf("pitrReaderSites=%v, want [reader]", got)
@@ -992,8 +997,8 @@ func TestPITRBindingIDsUnderPrefixes(t *testing.T) {
 	}
 	snap := func(id, destination string) corev1.Secret {
 		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-			Labels:      map[string]string{pitrBindingIDLabel: id},
-			Annotations: map[string]string{pitrDestinationAnnotation: destination},
+			Labels:      map[string]string{v1alpha1.PITRBindingIDLabel: id},
+			Annotations: map[string]string{v1alpha1.PITRDestinationAnnotation: destination},
 		}}
 	}
 	snaps := []corev1.Secret{
@@ -1010,8 +1015,8 @@ func TestPITRBindingIDsUnderPrefixes(t *testing.T) {
 	if got := pitrBindingIDsUnderPrefixes(mfg, nil, nil); len(got) != 0 {
 		t.Errorf("no prefix must select nothing, got %v", got)
 	}
-	if pitrReleaseValue("pab-0000000000000001", "playground") != "pab-0000000000000001:confirm=playground" {
-		t.Error("the release value must be <id>:confirm=<group>")
+	if pitrReleaseValue("pab-0000000000000001", "playground", "u-1") != "pab-0000000000000001:confirm=playground:uid=u-1" {
+		t.Error("the release value must be <id>:confirm=<group>:uid=<uid>")
 	}
 	if !strings.Contains(pitrGroupSnapshotSelector("u-1"), "bloodraven.shipstream.io/failover-group-uid=u-1") ||
 		!strings.Contains(pitrGroupSnapshotSelector("u-1"), "mysql-pitr-key") || !strings.Contains(pitrGroupSnapshotSelector("u-1"), "mysql-dump-key") {

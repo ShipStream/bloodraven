@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -113,12 +114,12 @@ func verifyActivePrimaryUnchanged() runner.Step {
 			}
 			if mfg.Status.ActiveSite != original {
 				return fmt.Errorf("activeSite changed during replica partition: was %q, now %q (lastFailoverTarget=%q)",
-					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 			}
 			// The primary should still be writable; the replica's state
 			// may be "unreachable" — that's the expected, correct
 			// classification while the partition holds.
-			var primaryState, replicaState string
+			var primaryState, replicaState v1alpha1.SiteState
 			for _, s := range mfg.Status.Sites {
 				switch s.Name {
 				case original:
@@ -127,16 +128,16 @@ func verifyActivePrimaryUnchanged() runner.Step {
 					replicaState = s.State
 				}
 			}
-			if primaryState != "writable" {
+			if primaryState != v1alpha1.SiteStateWritable {
 				return fmt.Errorf("expected primary %s state=writable, got %q", original, primaryState)
 			}
-			if replicaState != "unreachable" {
+			if replicaState != v1alpha1.SiteStateUnreachable {
 				return fmt.Errorf("replica partition did not take effect: site %s state=%q, want unreachable", replica, replicaState)
 			}
 			env.Capture.Note(fmt.Sprintf("primary %s state=%s, replica %s state=%s", original, primaryState, replica, replicaState))
 			// Sanity check: the operator must not have flipped the
 			// failover-target field as if it were preparing one.
-			if mfg.Status.LastFailoverTarget == replica {
+			if mfg.Status.LastFailoverTarget() == replica {
 				return fmt.Errorf("operator set lastFailoverTarget=%q (the partitioned replica) — implies an attempted promotion", replica)
 			}
 			return nil

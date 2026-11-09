@@ -132,9 +132,9 @@ func observeClusterReconvergence() runner.Step {
 					var blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
@@ -142,7 +142,7 @@ func observeClusterReconvergence() runner.Step {
 						if s.DivergentTransactionCount != nil {
 							divergent += *s.DivergentTransactionCount
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}
@@ -200,7 +200,7 @@ func verifyReplicaThreadsRunning() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "read-only" {
+				if s.State == v1alpha1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}

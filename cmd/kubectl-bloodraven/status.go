@@ -155,7 +155,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	fmt.Fprintf(out, "  Active site: %s\n", emptyDash(fg.Status.ActiveSite))
 	fmt.Fprintf(out, "  Ready: %s\n", readyString(fg))
 	if fg.Spec.DNS.Hostname != "" {
-		fmt.Fprintf(out, "  DNS: %s (TTL %ds)\n", fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
+		fmt.Fprintf(out, "  DNS: %s (TTL %ds)\n", fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds)
 	}
 	if failoverRecord, _, _ := brcontroller.EffectiveFailoverRecord(fg, time.Now()); !failoverRecord.LastFailover.IsZero() {
 		target := failoverRecord.LastFailoverTarget
@@ -167,7 +167,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	if fg.Status.UpdatePhase != "" {
 		fmt.Fprintf(out, "  Update phase: %s\n", fg.Status.UpdatePhase)
 	}
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, "Updating"); c != nil && c.Reason == brcontroller.ReasonOrderedUpdateStalled {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating); c != nil && c.Reason == v1alpha1.ReasonOrderedUpdateStalled {
 		fmt.Fprintf(out, "  Update stalled: %s\n", c.Message)
 	}
 
@@ -185,11 +185,11 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 			site.Name,
 			string(site.EffectiveRole()),
 			site.Zone,
-			emptyDash(st.State),
-			boolYesNo(st.Replicating),
+			emptyDash(string(st.State)),
+			emptyDash(string(st.Replication)),
 			lagString(st.SecondsBehindSource),
-			emptyDash(st.RecoveryState),
-			timeAge(st.LastSeen),
+			emptyDash(string(st.RecoveryState)),
+			timeAge(st.LastSeenTime),
 		)
 	}
 	if err := siteTw.Flush(); err != nil {
@@ -212,9 +212,10 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 		fmt.Fprintln(out)
 		printBackupSchedules(out, fg.Status.BackupSchedules)
 	}
-	if fg.Status.PITR != nil && fg.Status.PITR.Enabled {
+	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled && fg.Status.PITR != nil {
+		pitr := fg.Spec.Backup.PITR
 		fmt.Fprintln(out)
-		printPITRStatus(out, fg.Status.PITR)
+		printPITRStatus(out, pitr.ProfileName, fg.Status.PITR)
 	}
 	if len(fg.Status.Conditions) > 0 {
 		fmt.Fprintln(out)
@@ -291,16 +292,20 @@ func printRestore(out io.Writer, r *v1alpha1.RestoreStatus) {
 	if r.CompletionTime != nil {
 		fmt.Fprintf(out, "  Completed: %s ago\n", age(r.CompletionTime.Time))
 	}
-	if r.SourceSizeBytes > 0 {
-		fmt.Fprintf(out, "  Source size: %s\n", humanBytes(r.SourceSizeBytes))
+	if p := r.Provenance; p != nil && p.Source != nil && p.Source.SizeBytes != nil && *p.Source.SizeBytes > 0 {
+		fmt.Fprintf(out, "  Source size: %s\n", humanBytes(*p.Source.SizeBytes))
 	}
 }
 
 func printRestoreInPlace(out io.Writer, r *v1alpha1.RestoreInPlaceStatus) {
 	fmt.Fprintln(out, "In-place restore:")
 	fmt.Fprintf(out, "  Phase: %s\n", emptyDash(string(r.Phase)))
-	if r.Scope != "" {
-		fmt.Fprintf(out, "  Scope: %s\n", r.Scope)
+	if r.Scope != nil {
+		scope := string(r.Scope.Type)
+		if r.Scope.Schema != "" {
+			scope += " " + r.Scope.Schema
+		}
+		fmt.Fprintf(out, "  Scope: %s\n", scope)
 	}
 	if r.TargetSite != "" {
 		fmt.Fprintf(out, "  Target site: %s\n", r.TargetSite)
@@ -325,7 +330,7 @@ func printBackupSchedules(out io.Writer, ss []v1alpha1.BackupScheduleStatus) {
 			s.Name,
 			timeAge(s.LastScheduleTime),
 			timeAge(s.LastSuccessfulTime),
-			emptyDash(s.LastBackupPhase),
+			emptyDash(string(s.LastBackupPhase)),
 			emptyDash(s.LastBackupName),
 			s.LastRetryAttempt,
 		)
@@ -333,9 +338,9 @@ func printBackupSchedules(out io.Writer, ss []v1alpha1.BackupScheduleStatus) {
 	_ = tw.Flush()
 }
 
-func printPITRStatus(out io.Writer, p *v1alpha1.PITRStatus) {
+func printPITRStatus(out io.Writer, profileName string, p *v1alpha1.PITRStatus) {
 	fmt.Fprintln(out, "PITR archive:")
-	fmt.Fprintf(out, "  Profile: %s\n", p.ProfileName)
+	fmt.Fprintf(out, "  Profile: %s\n", profileName)
 	if p.OldestArchivedTime != nil && p.NewestArchivedTime != nil {
 		fmt.Fprintf(out, "  Window: %s -> %s (%s)\n",
 			p.OldestArchivedTime.Time.UTC().Format(time.RFC3339),

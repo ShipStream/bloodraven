@@ -19,21 +19,31 @@ func init() {
 
 const (
 	s20InventoryGroup         = "inventory"
-	s20InventoryGroupLabel    = "shipstream.io/failover-group.inventory"
-	s20InventorySiteLabel     = "shipstream.io/site.inventory"
-	s20PlaygroundReadOnly     = "shipstream.io/db-readonly-playground"
-	s20InventoryReadOnly      = "shipstream.io/db-readonly-inventory"
+	s20InventoryGroupLabel    = "bloodraven.shipstream.io/failover-group.inventory"
+	s20InventorySiteLabel     = "bloodraven.shipstream.io/site.inventory"
 	s20InventoryCanaryName    = "inventory-shared-node-canary"
 	s20PostFailoverWaitWindow = 60 * time.Second
 )
+
+// s20PlaygroundReadOnly is the read-only taint key of the group under
+// test, scoped to the run's namespace and group (--namespace, --fg).
+func s20PlaygroundReadOnly(env *runner.Env) string {
+	return v1alpha1.ReadOnlyTaintKey(env.Namespace, env.FG)
+}
+
+// s20InventoryReadOnly is the key the operator would use for the
+// unrelated inventory group in the same namespace.
+func s20InventoryReadOnly(env *runner.Env) string {
+	return v1alpha1.ReadOnlyTaintKey(env.Namespace, s20InventoryGroup)
+}
 
 // scenario20SharedNodeSelectorIsolation locks down the per-failover-
 // group taint scoping that lets one physical node serve multiple
 // failover groups without their failovers spilling into each other's
 // workloads. Concretely: a playground failover taints the playground
-// site's node with `shipstream.io/db-readonly-playground:NoExecute`,
+// site's node with `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground:NoExecute`,
 // and the operator must NOT also apply
-// `shipstream.io/db-readonly-inventory:NoExecute` even though the same
+// `bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory:NoExecute` even though the same
 // node also advertises membership in an `inventory` failover group.
 //
 // We simulate the multi-tenant deployment by labeling the active
@@ -48,8 +58,8 @@ func scenario20SharedNodeSelectorIsolation() runner.Scenario {
 		ID:    "20-shared-node-selector-isolation",
 		Title: "Shared-node selector isolation: per-FG taint scope respects label keys",
 		Hypothesis: "A node serving both `playground` and a fictional `inventory` failover group is " +
-			"tainted ONLY with `shipstream.io/db-readonly-playground` after a playground failover; " +
-			"`shipstream.io/db-readonly-inventory` is NOT applied; an inventory-tolerating canary stays Running.",
+			"tainted ONLY with `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` after a playground failover; " +
+			"`bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory` is NOT applied; an inventory-tolerating canary stays Running.",
 		Risk:     "low",
 		DocLink:  "playground/chaos-scenarios.md#20-shared-node-selector-isolation",
 		Timeout:  4 * time.Minute,
@@ -112,7 +122,7 @@ func s20InjectMultiTenantTopology() runner.Step {
 						s20InventorySiteLabel:  active,
 					},
 					Tolerations: []corev1.Toleration{{
-						Key:      s20PlaygroundReadOnly,
+						Key:      s20PlaygroundReadOnly(env),
 						Operator: corev1.TolerationOpExists,
 						Effect:   corev1.TaintEffectNoExecute,
 					}},
@@ -186,7 +196,7 @@ func s20ObserveTaintApplied() runner.Step {
 						keys = append(keys, t.Key)
 					}
 					last = fmt.Sprintf("taintKeys=%v", keys)
-					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly) {
+					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly(env)) {
 						env.Capture.Note(fmt.Sprintf("playground taint applied on %s; %s", node, last))
 						return nil
 					}
@@ -215,12 +225,12 @@ func s20VerifyTaintScopedToPlayground() runner.Step {
 			if err != nil {
 				return err
 			}
-			if !pgkube.NodeHasTaint(n, s20PlaygroundReadOnly) {
-				return fmt.Errorf("expected %s taint on %s, taints=%v", s20PlaygroundReadOnly, node, n.Spec.Taints)
+			if !pgkube.NodeHasTaint(n, s20PlaygroundReadOnly(env)) {
+				return fmt.Errorf("expected %s taint on %s, taints=%v", s20PlaygroundReadOnly(env), node, n.Spec.Taints)
 			}
-			if pgkube.NodeHasTaint(n, s20InventoryReadOnly) {
+			if pgkube.NodeHasTaint(n, s20InventoryReadOnly(env)) {
 				return fmt.Errorf("operator leaked %s onto %s — taint scoping regression (taints=%v)",
-					s20InventoryReadOnly, node, n.Spec.Taints)
+					s20InventoryReadOnly(env), node, n.Spec.Taints)
 			}
 			env.Capture.Note(fmt.Sprintf("node %s correctly tainted only for playground", node))
 			return nil

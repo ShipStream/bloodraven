@@ -16,13 +16,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// conditionS3CredentialsReady reports whether every S3 credentialsSecret the
-// group references holds the keys backup, restore and cleanup Jobs require.
-// Those Jobs fail rather than fall back to ambient (IRSA, Workload Identity,
-// instance-profile) credentials, so a Secret that relied on the fallback
-// would otherwise surface only when the next scheduled Job fails.
-const conditionS3CredentialsReady = "S3CredentialsReady"
-
 // requiredS3CredentialKeys are the Secret keys the Job scripts and the
 // sidecar's PITR store refuse to run without.
 var requiredS3CredentialKeys = []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
@@ -32,24 +25,24 @@ type s3CredentialRef struct {
 	secret string
 }
 
-// s3CredentialRefs lists the S3 credentialsSecret references on fg's spec.
+// s3CredentialRefs lists the S3 credentialsSecretName references on fg's spec.
 func s3CredentialRefs(fg *v1alpha1.MysqlFailoverGroup) []s3CredentialRef {
 	var refs []s3CredentialRef
 	if fg.Spec.Backup != nil {
 		for _, p := range fg.Spec.Backup.Profiles {
 			if s3 := p.Storage.S3; s3 != nil {
 				refs = append(refs, s3CredentialRef{
-					field:  fmt.Sprintf("spec.backup.profiles[%s].storage.s3.credentialsSecret", p.Name),
-					secret: s3.CredentialsSecret,
+					field:  fmt.Sprintf("spec.backup.profiles[%s].storage.s3.credentialsSecretName", p.Name),
+					secret: s3.CredentialsSecretName,
 				})
 			}
 		}
 	}
 	if in := fg.Spec.InitFromBackup; in != nil && in.Source.S3 != nil {
-		refs = append(refs, s3CredentialRef{field: "spec.initFromBackup.source.s3.credentialsSecret", secret: in.Source.S3.CredentialsSecret})
+		refs = append(refs, s3CredentialRef{field: "spec.initFromBackup.source.s3.credentialsSecretName", secret: in.Source.S3.CredentialsSecretName})
 	}
 	if in := fg.Spec.RestoreInPlace; in != nil && in.Source.S3 != nil {
-		refs = append(refs, s3CredentialRef{field: "spec.restoreInPlace.source.s3.credentialsSecret", secret: in.Source.S3.CredentialsSecret})
+		refs = append(refs, s3CredentialRef{field: "spec.restoreInPlace.source.s3.credentialsSecretName", secret: in.Source.S3.CredentialsSecretName})
 	}
 	return refs
 }
@@ -97,20 +90,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileS3CredentialsCondition(ctx conte
 			return err
 		}
 		cond = &metav1.Condition{
-			Type:               conditionS3CredentialsReady,
+			Type:               v1alpha1.ConditionS3CredentialsReady,
 			Status:             metav1.ConditionTrue,
-			Reason:             "CredentialsComplete",
-			Message:            "every S3 credentialsSecret has AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
+			Reason:             v1alpha1.ReasonCredentialsComplete,
+			Message:            "every S3 credentialsSecretName has AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
 			ObservedGeneration: fg.Generation,
 			LastTransitionTime: metav1.Now(),
 		}
 		if len(problems) > 0 {
 			cond.Status = metav1.ConditionFalse
-			cond.Reason = "CredentialsIncomplete"
+			cond.Reason = v1alpha1.ReasonCredentialsIncomplete
 			cond.Message = "backup, restore and cleanup Jobs will fail; they do not fall back to ambient credentials: " +
 				strings.Join(problems, "; ")
 			if r.Recorder != nil {
-				r.Recorder.Event(fg, corev1.EventTypeWarning, "S3CredentialsIncomplete", cond.Message)
+				r.Recorder.Event(fg, corev1.EventTypeWarning, v1alpha1.EventS3CredentialsIncomplete, cond.Message)
 			}
 		}
 	}
@@ -124,7 +117,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileS3CredentialsCondition(ctx conte
 		if cond != nil {
 			setCondition(&fresh.Status.Conditions, *cond)
 		} else {
-			removeCondition(&fresh.Status.Conditions, conditionS3CredentialsReady)
+			removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionS3CredentialsReady)
 		}
 		if equality.Semantic.DeepEqual(before, &fresh.Status) {
 			return nil

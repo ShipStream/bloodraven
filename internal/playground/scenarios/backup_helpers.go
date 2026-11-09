@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -20,6 +21,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
+	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -60,25 +62,24 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 	consistent := true
 	spec := v1alpha1.BackupSpec{
 		Image:                  v1alpha1.DefaultBackupImage,
-		MaxLagSecondsForSource: 60,
+		MaxLagSecondsForSource: new(int64(60)),
 		ActiveDeadlineSeconds:  1800,
-		BackoffLimit:           0,
+		BackoffLimit:           new(int32(0)),
 		Profiles: []v1alpha1.BackupProfile{{
 			Name: backupE2EProfile,
-			RetentionPolicy: &v1alpha1.RetentionPolicy{
-				Count:         2,
-				MaxAgeDays:    1,
-				MinKeep:       1,
-				MaxFailedKeep: 2,
+			Retention: v1alpha1.BackupRetention{
+				KeepLast:       2,
+				KeepWithinDays: new(int32(1)),
+				KeepFailed:     new(int32(2)),
 			},
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
 				S3: &v1alpha1.S3Storage{
-					Bucket:            backupE2EBucket,
-					Prefix:            prefix,
-					EndpointURL:       backupE2EEndpoint,
-					CredentialsSecret: backupE2ECredsSecret,
-					Region:            "us-east-1",
+					Bucket:                backupE2EBucket,
+					Prefix:                prefix,
+					EndpointURL:           backupE2EEndpoint,
+					CredentialsSecretName: backupE2ECredsSecret,
+					Region:                "us-east-1",
 				},
 			},
 			Dump: &v1alpha1.DumpOptions{
@@ -94,7 +95,7 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 			Enabled:             true,
 			ProfileName:         backupE2EProfile,
 			MaxBinlogSize:       "1M",
-			ArchivePollInterval: &metav1.Duration{Duration: 2 * time.Second},
+			ArchivePollInterval: &metav1.Duration{Duration: 5 * time.Second},
 		}
 	}
 	return spec
@@ -102,8 +103,8 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 
 func backupE2EEncryption(secretName string) *v1alpha1.BackupEncryptionSpec {
 	return &v1alpha1.BackupEncryptionSpec{
-		Algorithm:        "AES-256-GCM",
-		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secretName},
+		Algorithm:              "AES-256-GCM",
+		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secretName},
 	}
 }
 
@@ -121,10 +122,10 @@ func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string,
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
-			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
+			Labels: map[string]string{"playground.bloodraven.shipstream.io/created-by-e2e": "true"},
 		},
 		StringData: map[string]string{
-			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): text,
+			backupE2EEncryption(name).PassphraseSecretKeyRef.PassphraseSecretKeyOrDefault(): text,
 		},
 	}
 	created, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Create(ctx, sec, metav1.CreateOptions{})
@@ -290,16 +291,16 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  profile,
-				"chaos.playground.bloodraven.io/scenario":       scenarioID,
-				"chaos.playground.bloodraven.io/created-by-e2e": "true",
+				v1alpha1.FailoverGroupLabel:                          env.FG,
+				v1alpha1.BackupProfileLabel:                          profile,
+				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
+				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
+			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: env.FG},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:      profile,
-			TriggeredBy:      "chaos/" + scenarioID,
 		},
 	}
 	if err := env.Kube.Controller.Create(ctx, b); err != nil {
@@ -309,33 +310,31 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 	return nil
 }
 
-func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1alpha1.PointInTimeVerificationSpec, query string, minRows int64) error {
+func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1alpha1.PointInTimeVerificationSpec, query string, minResult int64) error {
 	keep := true
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				"shipstream.io/failover-group":                  env.FG,
-				"shipstream.io/backup-profile":                  backupE2EProfile,
-				"chaos.playground.bloodraven.io/scenario":       scenarioID,
-				"chaos.playground.bloodraven.io/created-by-e2e": "true",
+				v1alpha1.FailoverGroupLabel:                          env.FG,
+				v1alpha1.BackupProfileLabel:                          backupE2EProfile,
+				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
+				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
+			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef:        v1alpha1.LocalGroupRef{Name: env.FG},
+			FailoverGroupRef:        v1alpha1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:             backupE2EProfile,
-			BackupRef:               &corev1.LocalObjectReference{Name: backupName},
+			BackupRef:               &v1alpha1.LocalMysqlBackupRef{Name: backupName},
 			KeepOnFailure:           &keep,
-			TTLSecondsAfterFinished: 0,
-			TriggeredBy:             "chaos/" + scenarioID,
+			TTLSecondsAfterFinished: new(int32(0)),
 			PointInTime:             pit,
 			SanityCheck: &v1alpha1.SanityCheckSpec{
-				Query: query,
-				Expect: &v1alpha1.SanityCheckExpectation{
-					MinRows:            minRows,
-					MaxDurationSeconds: 30,
-				},
+				Query:     query,
+				MinResult: new(minResult),
+				Timeout:   &metav1.Duration{Duration: 30 * time.Second},
 			},
 		},
 	}
@@ -531,14 +530,18 @@ func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, nam
 
 // backupArtifactPrefix returns the bucket and object-key prefix (ending in
 // "/") of an S3 backup's artifact, from the recorded destination. ok is
-// false for a backup with no S3 artifact to check.
+// false for a backup with no S3 artifact to check: one that did not
+// succeed, one recorded on a PVC, or one with no recorded destination at
+// all (a Succeeded backup whose destination could not be recovered, which
+// the finalizer releases with ArtifactCleanupSkipped). An S3 destination
+// that is recorded but lacks its location or bucket is an error.
 func backupArtifactPrefix(b *v1alpha1.MysqlBackup) (bucket, prefix string, ok bool, err error) {
-	if b.Status.StorageType != v1alpha1.BackupStorageS3 || b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+	storage := b.Status.ArtifactStorage
+	if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || storage == nil || storage.Type != v1alpha1.BackupStorageS3 {
 		return "", "", false, nil
 	}
-	storage := b.Status.ArtifactStorage
-	if storage == nil || storage.Location == "" || storage.Bucket == "" {
-		return "", "", false, fmt.Errorf("succeeded S3 backup has no recorded status.artifactStorage")
+	if storage.Location == "" || storage.Bucket == "" {
+		return "", "", false, fmt.Errorf("succeeded S3 backup records status.artifactStorage without a location or bucket")
 	}
 	locBucket, key, inBucket := backupmeta.SplitS3Location(storage.Location)
 	if inBucket && locBucket != storage.Bucket {
@@ -580,7 +583,7 @@ func deleteAndWait(ctx context.Context, env *runner.Env, obj ctrlclient.Object, 
 				// the operator's reason, then unstick the CR so later
 				// scenarios start clean.
 				cause := "no ArtifactCleanup condition"
-				if c := apimeta.FindStatusCondition(backup.Status.Conditions, "ArtifactCleanup"); c != nil {
+				if c := apimeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup); c != nil {
 					cause = c.Reason + ": " + c.Message
 				}
 				if err := forceRemoveFinalizers(ctx, env, fresh, kind, name); err != nil {
@@ -743,9 +746,177 @@ func originalPITRExpected(env *runner.Env) (enabled bool, profile string, err er
 	return true, original.PITR.ProfileName, nil
 }
 
+// pitrBaselineRestored is the PITR scenarios' cleanup predicate after
+// restoreOriginalBackupSpec: the operator has reconciled the restored spec
+// and finished rolling it out, and its PITR observation matches it.
+//
+// Reconciled: Ready=True at the current generation, an active site, no
+// update phase, and Updating=False/NotUpdating at the current generation.
+// A stalled ordered update (Updating=True/OrderedUpdateStalled, a pod that
+// is not Ready) clears updatePhase while the rollout is unfinished, and
+// MySQL can stay healthy throughout, so Ready alone does not end it.
+//
+// Rolled out (pitrRolloutRestored): every site Deployment renders the
+// restored PITR state and has finished its rollout. Updating=False does not
+// prove that on its own: drift the ordered updater has not started on yet
+// (it waits for a standby, a stall retry, a bootstrap) has no phase either.
+//
+// PITR: with PITR restored off, status.pitr is gone (the operator removes
+// it once PITR is disabled). With PITR restored on, the spec names the
+// original profile and status.pitr.archive observes that profile's archive
+// destination, not one the scenario left behind. Spec reads alone are true
+// as soon as the patch lands, before the operator has acted on it.
+//
+// deployments maps each spec.sites name to its Deployment, nil when it
+// could not be found.
+func pitrBaselineRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
+	ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+	idle, updating := orderedUpdateIdleAtGeneration(mfg)
+	settled := backupProfileRolloutReady(mfg)
+	observed, why := pitrObservationRestored(mfg, wantPITR, wantProfile)
+	rolled, rollout := pitrRolloutRestored(mfg, deployments, wantPITR, wantProfile)
+	return ready && idle && settled && observed && rolled, fmt.Sprintf("readyAtGeneration=%v generation=%d active=%q updatePhase=%q updating=%s pitr=%v (%s) rollout=%v (%s) wantPITR=%v wantProfile=%q",
+		ready, mfg.Generation, mfg.Status.ActiveSite, mfg.Status.UpdatePhase, updating, observed, why, rolled, rollout, wantPITR, wantProfile)
+}
+
+// pitrBaselineRestoredLive is pitrBaselineRestored with the site
+// Deployments read from the cluster. A failed read is a wait, not an
+// error: the cleanup retries it.
+func pitrBaselineRestoredLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+	deployments := make(map[string]*appsv1.Deployment, len(mfg.Spec.Sites))
+	for _, site := range mfg.Spec.Sites {
+		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, fmt.Sprintf("mysql-%s-%s", mfg.Name, site.Name))
+		if err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Sprintf("read Deployment of site %s: %v", site.Name, err)
+		}
+		if err != nil {
+			dep = nil
+		}
+		deployments[site.Name] = dep
+	}
+	return pitrBaselineRestored(mfg, deployments, wantPITR, wantProfile)
+}
+
+// orderedUpdateIdleAtGeneration reports Updating=False/NotUpdating for the
+// current generation, with a summary of the condition.
+func orderedUpdateIdleAtGeneration(mfg *v1alpha1.MysqlFailoverGroup) (bool, string) {
+	c := apimeta.FindStatusCondition(mfg.Status.Conditions, v1alpha1.ConditionUpdating)
+	if c == nil {
+		return false, "<none>"
+	}
+	summary := fmt.Sprintf("%s/%s@%d", c.Status, c.Reason, c.ObservedGeneration)
+	return c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonNotUpdating && c.ObservedGeneration == mfg.Generation, summary
+}
+
+// pitrRolloutRestored reports whether every spec.sites Deployment renders
+// the restored PITR state (its pitr-render annotation: enabled as wanted
+// and, when on, the restored profile's destination) and has finished
+// rolling it out: the Deployment controller observed its generation and
+// every replica is updated, ready and available.
+func pitrRolloutRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
+	wantDest := ""
+	if wantPITR {
+		dest, err := pitrRestoredDestination(mfg, wantProfile)
+		if err != nil {
+			return false, err.Error()
+		}
+		wantDest = dest
+	}
+	var pending []string
+	for _, site := range mfg.Spec.Sites {
+		dep := deployments[site.Name]
+		if dep == nil {
+			pending = append(pending, site.Name+": no Deployment")
+			continue
+		}
+		var render struct {
+			Enabled     bool   `json:"enabled"`
+			Destination string `json:"destination"`
+		}
+		if err := json.Unmarshal([]byte(dep.Annotations[v1alpha1.PITRRenderAnnotation]), &render); err != nil {
+			pending = append(pending, fmt.Sprintf("%s: %s does not decode", site.Name, v1alpha1.PITRRenderAnnotation))
+			continue
+		}
+		if render.Enabled != wantPITR || render.Destination != wantDest {
+			pending = append(pending, fmt.Sprintf("%s: renders enabled=%v destination=%q", site.Name, render.Enabled, render.Destination))
+			continue
+		}
+		want := int32(1)
+		if dep.Spec.Replicas != nil {
+			want = *dep.Spec.Replicas
+		}
+		st := dep.Status
+		if st.ObservedGeneration < dep.Generation || st.UpdatedReplicas != want || st.ReadyReplicas != want ||
+			st.AvailableReplicas != want || st.Replicas != want || st.UnavailableReplicas != 0 {
+			pending = append(pending, fmt.Sprintf("%s: rollout observed=%d/%d updated=%d ready=%d available=%d replicas=%d want=%d",
+				site.Name, st.ObservedGeneration, dep.Generation, st.UpdatedReplicas, st.ReadyReplicas, st.AvailableReplicas, st.Replicas, want))
+		}
+	}
+	if len(pending) > 0 {
+		return false, strings.Join(pending, "; ")
+	}
+	return true, "rolled out"
+}
+
+// pitrRestoredDestination is the normalized archive destination of the
+// restored PITR profile.
+func pitrRestoredDestination(mfg *v1alpha1.MysqlFailoverGroup, wantProfile string) (string, error) {
+	var profile *v1alpha1.BackupProfile
+	if mfg.Spec.Backup != nil {
+		for i := range mfg.Spec.Backup.Profiles {
+			if mfg.Spec.Backup.Profiles[i].Name == wantProfile {
+				profile = &mfg.Spec.Backup.Profiles[i]
+			}
+		}
+	}
+	if profile == nil {
+		return "", fmt.Errorf("profile %q not in spec", wantProfile)
+	}
+	dest, err := pitrprofile.DestinationFor(mfg, profile)
+	if err != nil {
+		return "", fmt.Errorf("restored profile destination: %v", err)
+	}
+	return dest.String(), nil
+}
+
+// pitrObservationRestored is the PITR half of pitrBaselineRestored.
+func pitrObservationRestored(mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+	if !wantPITR {
+		if pitrSpecProfile(mfg) != "" {
+			return false, "spec still enables PITR"
+		}
+		if mfg.Status.PITR != nil {
+			return false, "status.pitr not yet removed"
+		}
+		return true, "disabled"
+	}
+	if got := pitrSpecProfile(mfg); got != wantProfile {
+		return false, fmt.Sprintf("spec PITR profile %q", got)
+	}
+	dest, err := pitrRestoredDestination(mfg, wantProfile)
+	if err != nil {
+		return false, err.Error()
+	}
+	if mfg.Status.PITR == nil || mfg.Status.PITR.Archive == nil {
+		return false, "no status.pitr.archive observation yet"
+	}
+	if got := mfg.Status.PITR.Archive.Destination; got != dest {
+		return false, fmt.Sprintf("status.pitr.archive observes %s, want %s", got, dest)
+	}
+	return true, "archive=" + pitrArchiveSummary(mfg)
+}
+
 func backupStatusSummary(b *v1alpha1.MysqlBackup) string {
-	return fmt.Sprintf("name=%s phase=%s message=%q job=%q source=%q location=%q storage=%s sizeBytes=%d gtid=%q binlog=%s:%d conditions=%s",
-		b.Name, b.Status.Phase, b.Status.Message, b.Status.JobName, b.Status.SourceSite, b.Status.Location, b.Status.StorageType, b.Status.SizeBytes, b.Status.GtidExecuted, b.Status.BinlogFile, b.Status.BinlogPos, conditionsSummary(b.Status.Conditions))
+	location, storageType := "", v1alpha1.BackupStorageType("")
+	if st := b.Status.ArtifactStorage; st != nil {
+		location, storageType = st.Location, st.Type
+	}
+	binlog := "-"
+	if bp := b.Status.BinlogPosition; bp != nil {
+		binlog = fmt.Sprintf("%s:%d", bp.File, bp.Position)
+	}
+	return fmt.Sprintf("name=%s phase=%s message=%q job=%q source=%q location=%q storage=%s sizeBytes=%d gtid=%q binlog=%s conditions=%s",
+		b.Name, b.Status.Phase, b.Status.Message, b.Status.JobName, b.Status.SourceSite, location, storageType, b.Status.SizeBytes, b.Status.GtidExecuted, binlog, conditionsSummary(b.Status.Conditions))
 }
 
 func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
@@ -753,8 +924,8 @@ func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
 	if v.Status.BackupRef != nil {
 		backupRef = fmt.Sprintf("%s/%s", v.Status.BackupRef.Name, v.Status.BackupRef.UID)
 	}
-	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q pod=%q pvc=%q replay=%v sanity=%v conditions=%s",
-		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.PodName, v.Status.PVCName, v.Status.ReplayedThroughBinlog, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
+	return fmt.Sprintf("name=%s phase=%s message=%q backupRef=%s job=%q pointInTime=%v sanity=%v conditions=%s",
+		v.Name, v.Status.Phase, v.Status.Message, backupRef, v.Status.JobName, v.Status.PointInTime, v.Status.SanityCheck, conditionsSummary(v.Status.Conditions))
 }
 
 func conditionsSummary(conds []metav1.Condition) string {

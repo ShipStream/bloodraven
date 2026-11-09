@@ -1,6 +1,10 @@
 package component
 
-import "testing"
+import (
+	"testing"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+)
 
 func TestNormalOperation_DC1Primary(t *testing.T) {
 	// Site 0 (dc1) writable (read_only=0), Site 1 (dc2) read-only (read_only=1).
@@ -13,10 +17,10 @@ func TestNormalOperation_DC1Primary(t *testing.T) {
 	h.pollN(2)
 
 	s := h.tm.Status()
-	if s.Sites[0].State != "writable" {
+	if s.Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Errorf("dc1 state: got %s, want writable", s.Sites[0].State)
 	}
-	if s.Sites[1].State != "read-only" {
+	if s.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Errorf("dc2 state: got %s, want read-only", s.Sites[1].State)
 	}
 
@@ -49,10 +53,10 @@ func TestNormalOperation_DC2Primary(t *testing.T) {
 	h.pollN(2)
 
 	s := h.tm.Status()
-	if s.Sites[0].State != "read-only" {
+	if s.Sites[0].State != v1alpha1.SiteStateReadOnly {
 		t.Errorf("dc1 state: got %s, want read-only", s.Sites[0].State)
 	}
-	if s.Sites[1].State != "writable" {
+	if s.Sites[1].State != v1alpha1.SiteStateWritable {
 		t.Errorf("dc2 state: got %s, want writable", s.Sites[1].State)
 	}
 

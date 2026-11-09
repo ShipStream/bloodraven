@@ -29,7 +29,8 @@
 #                                         reads (see restore_script.py)
 #   BLOODRAVEN_VERIFY_SANITY_QUERY        scalar SELECT to run post-load
 #   BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS  sanity client-side timeout (s)
-#   BLOODRAVEN_VERIFY_SANITY_MIN_ROWS     fail if scalar < this value
+#   BLOODRAVEN_VERIFY_SANITY_MIN_ROWS     fail if an integer scalar < this
+#                                         value (spec.sanityCheck.minResult)
 #
 # All other env forwarded to restore.py (BLOODRAVEN_INPUT_URL,
 # BLOODRAVEN_LOAD_OPTIONS, BLOODRAVEN_MYSQL_CREDS_DIR, BLOODRAVEN_S3_*,
@@ -80,6 +81,31 @@ escape_sentinel_token() {
         esac
     done
     printf '%s' "$out"
+}
+
+# int_lt A B succeeds when the signed decimal integer A is less than B.
+# It compares digit strings, so a BIGINT UNSIGNED result beyond the shell's
+# 64-bit arithmetic is still ordered correctly.
+int_lt() {
+    local a="$1" b="$2" sa=1 sb=1
+    [[ "$a" == -* ]] && { sa=-1; a="${a#-}"; }
+    [[ "$b" == -* ]] && { sb=-1; b="${b#-}"; }
+    a="${a#"${a%%[!0]*}"}"; b="${b#"${b%%[!0]*}"}"
+    [[ -z "$a" ]] && sa=1
+    [[ -z "$b" ]] && sb=1
+    if (( sa != sb )); then
+        (( sa < sb ))
+        return
+    fi
+    local cmp=0
+    if (( ${#a} != ${#b} )); then
+        (( ${#a} < ${#b} )) && cmp=-1 || cmp=1
+    elif [[ "$a" < "$b" ]]; then
+        cmp=-1
+    elif [[ "$a" > "$b" ]]; then
+        cmp=1
+    fi
+    (( cmp * sa < 0 ))
 }
 
 cleanup_mysqld() {
@@ -285,16 +311,25 @@ fi
 SANITY_Q="${BLOODRAVEN_VERIFY_SANITY_QUERY:-}"
 if [[ -n "$SANITY_Q" ]]; then
     SANITY_MAX="${BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS:-60}"
-    SANITY_MIN="${BLOODRAVEN_VERIFY_SANITY_MIN_ROWS:-0}"
+    # Unset when spec.sanityCheck.minResult is unset: no floor applies.
+    SANITY_MIN="${BLOODRAVEN_VERIFY_SANITY_MIN_ROWS:-}"
 
-    log "running sanity query (timeout=${SANITY_MAX}s, minRows=${SANITY_MIN})"
+    log "running sanity query (timeout=${SANITY_MAX}s, minResult=${SANITY_MIN:-unset})"
     # mysql -B -N renders tab-separated, no header, no pretty borders —
     # ideal for single-column scalar capture. -e escapes `"` in the query
     # via printf %q to avoid tripping on user-quoted literals. timeout
-    # wraps mysql so a runaway query can't hold the Job forever.
+    # wraps mysql so a runaway query can't hold the Job forever. Without
+    # --preserve-status, timeout exits 124 when the query ran out of time
+    # and mysql's own status otherwise, which is what tells the two apart.
+    # Durable evidence that the query started: if the container is killed
+    # while it runs (the Job's deadline, an eviction), no completion
+    # sentinel is printed, and the controller must not report the query as
+    # never run. Every later exit replaces this message: fail() with its
+    # reason, success with the PITR verdict or an empty message.
+    printf '%s' "SanityCheckInterrupted: the verification ended while the sanity query ran" >"$TERMINATION_LOG" 2>/dev/null || true
     set +e
     START_NS=$(date +%s%N)
-    SANITY_OUT=$(timeout --preserve-status "${SANITY_MAX}" \
+    SANITY_OUT=$(timeout "${SANITY_MAX}" \
         mysql --socket="$SOCKET" --user=root -B -N -e "$SANITY_Q" 2>&1)
     SANITY_RC=$?
     END_NS=$(date +%s%N)
@@ -321,16 +356,19 @@ if [[ -n "$SANITY_Q" ]]; then
     fi
 
     SCALAR_ESC=$(escape_sentinel_token "$SCALAR")
+
+    # Apply the minResult floor whenever it is set and the scalar parses as
+    # a (signed) integer. Non-integer scalars (strings, decimals) pass
+    # through unconditionally. The sentinel carries the floor failure so
+    # status.sanityCheck reports outcome Failed with the scalar it compared.
+    if [[ -n "$SANITY_MIN" ]] && [[ "$SCALAR" =~ ^-?[0-9]+$ ]] && int_lt "$SCALAR" "$SANITY_MIN"; then
+        FLOOR_ERR="sanity scalar $SCALAR < minResult $SANITY_MIN"
+        printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s resultRow=%s error=%s\n' \
+            "$DURATION_MS" "$SCALAR_ESC" "$(escape_sentinel_token "$FLOOR_ERR")"
+        fail 1 "SanityCheckFailed: $FLOOR_ERR"
+    fi
     printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s resultRow=%s\n' \
         "$DURATION_MS" "$SCALAR_ESC"
-
-    # Only apply the minRows floor when the scalar parses as an integer.
-    # Non-integer scalars (strings, decimals) pass through unconditionally.
-    if [[ "$SANITY_MIN" -gt 0 ]] && [[ "$SCALAR" =~ ^[0-9]+$ ]]; then
-        if [[ "$SCALAR" -lt "$SANITY_MIN" ]]; then
-            fail 1 "SanityCheckFailed: sanity scalar $SCALAR < minRows $SANITY_MIN"
-        fi
-    fi
 fi
 
 # Publishing the verdict is the last action. restore.py builds it within
@@ -347,6 +385,8 @@ if [[ -s "$PITR_VERDICT" ]]; then
         fail 1 "PITRCoverageInvalid: restore.py's verdict is $verdict_bytes bytes, over the $verdict_limit-byte termination message"
     fi
     cat "$PITR_VERDICT" >"$TERMINATION_LOG"
+else
+    : >"$TERMINATION_LOG" 2>/dev/null || true
 fi
 log "verification succeeded"
 exit 0

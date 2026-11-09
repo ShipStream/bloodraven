@@ -8,9 +8,10 @@ first time anyone sees your production group’s problems is before it is applie
 incident.</p>
 <h2 id="how-this-works">How this works</h2>
 <p>Topic 1 of this unit drew the line that matters on day 0: <strong>admission validates the object, and
-nothing validates the object against the cluster.</strong> A manifest that sets both credential modes is
-refused in milliseconds. A manifest whose <code>taintNodeSelector</code> names labels no node carries is
-accepted, applied, and silently does nothing for the rest of its life.</p>
+nothing validates the object against the cluster.</strong> A manifest that still carries the removed
+<code>spec.secretName</code> beside <code>spec.credentials</code> is refused in milliseconds. A manifest whose
+<code>taintNodeSelector</code> names labels no node carries is accepted, applied, and silently does nothing for
+the rest of its life.</p>
 <p><code>brprep</code> makes that line executable. It reads a manifest as JSON and prints three kinds of line:</p>
 
 
@@ -52,15 +53,16 @@ grader first, before you change anything:</p>
 is measured against.</p>
 <p><strong>TODO A — <code>check_admission</code>.</strong> Print one <code>REJECT &#x3C;rule></code> line per admission rule the manifest
 violates, in the order the <code>RULE_*</code> constants are declared. A clean manifest prints nothing at all. The nine rules
-are documented in the script — seven CEL rules on the CRD plus the <code>MinItems</code>/<code>MaxItems</code> bound on
-<code>spec.sites</code>, all of them refusals at <code>kubectl apply</code> — and two are worth flagging here.</p>
+are documented in the script — CEL rules on the CRD, the <code>MinItems</code>/<code>MaxItems</code> bound and the name
+key on <code>spec.sites</code> and the required <code>spec.credentials</code>, all of them refusals at <code>kubectl apply</code> — and two
+are worth flagging here.</p>
 <p><em>The role default is load-bearing.</em> <code>spec.sites[].role</code> is optional and defaults to
-<code>primary-candidate</code>, so a site with no <code>role</code> key counts toward the two-candidate minimum and is
+<code>PrimaryCandidate</code>, so a site with no <code>role</code> key counts toward the two-candidate minimum and is
 required to carry <code>lbIP</code> and <code>taintNodeSelector</code>. Reading a missing role as “not a candidate” fails
 half the fixtures.</p>
 <p><em>The reader exemption is the discriminator.</em> <code>taintNodeSelector</code> and <code>lbIP</code> are required <strong>unless</strong>
-the role is <code>read-only</code> — because a reader is never promoted and never tainted, so it needs neither.
-<code>tests/fixtures/reader-lbip.json</code> has a legitimate reader without them <em>and</em> a <code>primary-candidate</code>
+the role is <code>ReadOnly</code> — because a reader is never promoted and never tainted, so it needs neither.
+<code>tests/fixtures/reader-lbip.json</code> has a legitimate reader without them <em>and</em> a <code>PrimaryCandidate</code>
 missing both. A check that demands them unconditionally fails it; a check that never demands them
 fails too.</p>
 <p><strong>TODO B — <code>check_silent</code>.</strong> Print one <code>WARN &#x3C;finding></code> line per day-0 mistake nothing validates, using
@@ -72,7 +74,7 @@ the <code>WARN_*</code> templates verbatim. Six findings, documented in the scri
 evict your primary first</li>
 <li><code>readOnlyMaxLagSeconds</code> above <code>maxLagSeconds</code></li>
 <li><code>encryptionAtRest</code> enabled with no backup profile at all</li>
-<li><code>updateStrategy: Recreate</code></li>
+<li><code>updateStrategy.type: Recreate</code></li>
 </ul>
 <p>None of these may change the exit code.</p>
 <p><strong>TODO C — <code>plan_upgrade</code>.</strong> Turn <code>--target-image</code> into a written plan: which standby is upgraded
@@ -116,7 +118,7 @@ valid setting and therefore always reads as “violates the minimum”</li>
 <span class="line"><span>WARN backup profile nightly uses storage.type PVC; a backup sharing a failure domain with the data is an assumption, not a backup</span></span>
 <span class="line"><span>WARN site iad sets resources.requests != resources.limits; without Guaranteed QoS the kubelet may evict this MySQL first</span></span>
 <span class="line"><span>WARN replication.readOnlyMaxLagSeconds (300) is above maxLagSeconds (30); the reader endpoint is now looser than the group threshold</span></span>
-<span class="line"><span>WARN updateStrategy Recreate patches every site Deployment in one pass; both sites can restart at once</span></span>
+<span class="line"><span>WARN updateStrategy.type Recreate patches every site Deployment in one pass; both sites can restart at once</span></span>
 <span class="line"><span>verdict: APPLYABLE (5 finding(s))</span></span>
 <span class="line"><span>$ echo $?</span></span>
 <span class="line"><span>0</span></span></code></pre>
@@ -140,7 +142,7 @@ structural check looks for them.</li>
 <li>Output must be stable and diffable: no timestamps, no absolute paths, no colour.</li>
 <li>Do not edit anything under <code>tests/</code>. The fixtures and expectations are the grader’s copy; changing
 them changes the question rather than the answer.</li>
-</ul></section> <section> <h2>Steps</h2> <ul class="checklist" data-checklist="u7p1"> <li> <input type="checkbox" id="step-u7p1-0"> <label for="step-u7p1-0">  <strong>Run the pre-flight before changing anything</strong> <p><code>./tests/run.sh</code> drives <code>starter/brprep.sh</code> over eight fixtures. It runs as given and gets every one of them wrong in the same way: <code>check_admission</code> and <code>check_silent</code> return nothing, and <code>plan_upgrade</code> prints a placeholder. Read the expected output beside the actual for <code>fixtures/good.json</code> first — that is the shape everything else is measured against.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> exits non-zero and reports 9 failing fixtures.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-1"> <label for="step-u7p1-1">  <strong>Implement check_admission (TODO A)</strong> <p>Emit one <code>REJECT &#x3C;rule></code> line per CEL rule the manifest violates, in the fixed order given in the script. The nine rules are listed in the brief; each maps to a <code>jq</code> expression over the manifest. A manifest that violates none produces no output at all.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> reports <code>admission</code> matching for all nine cases, including <code>both-credentials.json</code>, <code>one-candidate.json</code>, <code>reader-lbip.json</code> and <code>lease-too-short.json</code>.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-2"> <label for="step-u7p1-2">  <strong>Implement check_silent (TODO B)</strong> <p>Emit one <code>WARN &#x3C;finding></code> line per day-0 mistake that admission does not catch: a floating image tag, a PVC-only backup profile, requests not equal to limits on a MySQL container, a <code>readOnlyMaxLagSeconds</code> above <code>maxLagSeconds</code>, a group with <code>encryptionAtRest</code> and no verified backup profile, and <code>updateStrategy: Recreate</code>. These are findings, not errors — they never change the exit code on their own.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> reports <code>silent</code> matching for all nine cases, and <code>fixtures/silently-wrong.json</code> produces exactly five WARN lines.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-3"> <label for="step-u7p1-3">  <strong>Implement plan_upgrade (TODO C)</strong> <p>Given <code>--target-image</code>, print the ordered-update plan: the standby site that goes first, the promotion that follows, the site that ends up active, and the three observable consequences — a <code>bloodraven_failovers_total</code> increment, a <code>lastFailover</code> stamp that consumes the anti-flap budget, and a DNS flip. Print <code>no change</code> when the target image already matches <code>spec.image</code>.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> exits 0 with <code>ALL 9 FIXTURES MATCH</code>.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-4"> <label for="step-u7p1-4">  <strong>Run it against a manifest you wrote</strong> <p>Write a <code>MysqlFailoverGroup</code> for a group of your own — a real one if you have it, the <code>ledger</code> shape from topic 1 of this unit otherwise — convert it with <code>yq -o json</code> or by hand, and run <code>brprep</code> over it. Fix what it finds. Keep the output; it is the first page of a change record.</p> <span class="criteria">Done when: <code>starter/brprep.sh &#x3C;your-manifest>.json</code> runs and reports zero REJECT lines.</span> </label> </li> </ul> </section><section id="project-rubric"> <h2>How it is graded</h2> <div class="scroll-x"><table><thead><tr><th scope="col">Criterion</th><th scope="col">What earns it</th><th scope="col">Weight</th></tr></thead><tbody><tr><th scope="row">Admission rules reproduced faithfully</th><td>All nine admission rules are checked, each against the manifest rather than against a hard-coded fixture name, and each emits the exact <code>REJECT &#x3C;rule></code> token in the fixed order. A manifest violating several produces several lines. <code>reader-lbip.json</code> is the discriminator: <code>lbIP</code> and <code>taintNodeSelector</code> are required <em>unless</em> the role is <code>read-only</code>, so a check that demands them unconditionally fails it, and a check that never demands them fails <code>good.json</code>'s mutation.</td><td>35</td></tr><tr><th scope="row">Silent findings separated from rejections</th><td><code>check_silent</code> reports the six documented findings as <code>WARN</code> and never as <code>REJECT</code>, and never changes the exit code by itself. The floating-tag check catches <code>mysql:9</code> and <code>mysql:latest</code> but not <code>mysql:9.7</code>. The QoS check compares requests to limits for both CPU and memory rather than checking that limits merely exist.</td><td>30</td></tr><tr><th scope="row">The change plan is specific and correct</th><td><code>plan_upgrade</code> names the standby that is upgraded first, states that a real promotion follows, names the site that ends up active, and lists the three observable consequences. It prints <code>no change</code> when the target already matches. A plan that says 'the pods will restart' without naming the promotion or the moved primary does not earn this.</td><td>25</td></tr><tr><th scope="row">Shell discipline</th><td><code>set -euo pipefail</code> retained, <code>jq</code> used for every field read rather than <code>grep</code>/<code>sed</code> over JSON, no <code>eval</code>, and the script exits 0 with findings but non-zero with rejections. Output is stable and diffable — no timestamps, no absolute paths.</td><td>10</td></tr><tr><th scope="row">Total</th><td></td><td><strong>100</strong></td></tr></tbody></table></div> </section><section id="project-test-cases"> <h2>Test cases</h2> <div class="scroll-x"> <table> <thead> <tr> <th scope="col">Test</th> <th scope="col">Checks</th> <th scope="col">Expected</th> <th scope="col">Weight</th> </tr> </thead> <tbody> <tr> <th scope="row">good_manifest_is_clean</th> <td> A production-shaped manifest with a reader produces no REJECT and no WARN. Catches a shortcut: a checker that emits findings unconditionally. </td> <td> <code>PASS</code> </td> <td>15</td> </tr><tr> <th scope="row">admission_rules_all_nine</th> <td> Each fixture violates one rule and must produce exactly that one REJECT line. Catches a shortcut: reporting every rule whenever any rule fails. </td> <td> <code>PASS</code> </td> <td>30</td> </tr><tr> <th scope="row">reader_exemption</th> <td> Adversarial: the reader legitimately has no <code>lbIP</code> and no <code>taintNodeSelector</code>, while a <code>primary-candidate</code> in the same manifest is missing both. Exactly one REJECT. Catches both a check that demands them unconditionally and one that never demands them. </td> <td> <code>PASS</code> </td> <td>20</td> </tr><tr> <th scope="row">silent_findings_do_not_reject</th> <td> Five WARN lines, zero REJECT lines, exit code 0. Catches a shortcut: treating findings as errors so the fixture 'fails' for the wrong reason. </td> <td> <code>PASS</code> </td> <td>20</td> </tr><tr> <th scope="row">change_plan_names_the_promotion</th> <td> The plan for <code>good.json</code> at a new image names the standby first, the promotion, the resulting active site and the three consequences; the plan at the current image prints <code>no change</code>. </td> <td> <code>PASS</code> </td> <td>15</td> </tr> </tbody> </table> </div>  </section><section id="project-starter"> <h2>Starter files</h2> <details class="filelist card"> <summary>1 files</summary>  <h3>brprep.sh</h3> <pre>                    <code>#!/usr/bin/env bash
+</ul></section> <section> <h2>Steps</h2> <ul class="checklist" data-checklist="u7p1"> <li> <input type="checkbox" id="step-u7p1-0"> <label for="step-u7p1-0">  <strong>Run the pre-flight before changing anything</strong> <p><code>./tests/run.sh</code> drives <code>starter/brprep.sh</code> over eight fixtures. It runs as given and gets every one of them wrong in the same way: <code>check_admission</code> and <code>check_silent</code> return nothing, and <code>plan_upgrade</code> prints a placeholder. Read the expected output beside the actual for <code>fixtures/good.json</code> first — that is the shape everything else is measured against.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> exits non-zero and reports 9 failing fixtures.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-1"> <label for="step-u7p1-1">  <strong>Implement check_admission (TODO A)</strong> <p>Emit one <code>REJECT &#x3C;rule></code> line per CEL rule the manifest violates, in the fixed order given in the script. The nine rules are listed in the brief; each maps to a <code>jq</code> expression over the manifest. A manifest that violates none produces no output at all.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> reports <code>admission</code> matching for all nine cases, including <code>both-credentials.json</code>, <code>one-candidate.json</code>, <code>reader-lbip.json</code> and <code>lease-too-short.json</code>.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-2"> <label for="step-u7p1-2">  <strong>Implement check_silent (TODO B)</strong> <p>Emit one <code>WARN &#x3C;finding></code> line per day-0 mistake that admission does not catch: a floating image tag, a PVC-only backup profile, requests not equal to limits on a MySQL container, a <code>readOnlyMaxLagSeconds</code> above <code>maxLagSeconds</code>, a group with <code>encryptionAtRest</code> and no verified backup profile, and <code>updateStrategy.type: Recreate</code>. These are findings, not errors — they never change the exit code on their own.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> reports <code>silent</code> matching for all nine cases, and <code>fixtures/silently-wrong.json</code> produces exactly five WARN lines.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-3"> <label for="step-u7p1-3">  <strong>Implement plan_upgrade (TODO C)</strong> <p>Given <code>--target-image</code>, print the ordered-update plan: the standby site that goes first, the promotion that follows, the site that ends up active, and the three observable consequences — a <code>bloodraven_failovers_total</code> increment, a <code>lastFailover</code> stamp that consumes the anti-flap budget, and a DNS flip. Print <code>no change</code> when the target image already matches <code>spec.image</code>.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> exits 0 with <code>ALL 9 FIXTURES MATCH</code>.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-4"> <label for="step-u7p1-4">  <strong>Run it against a manifest you wrote</strong> <p>Write a <code>MysqlFailoverGroup</code> for a group of your own — a real one if you have it, the <code>ledger</code> shape from topic 1 of this unit otherwise — convert it with <code>yq -o json</code> or by hand, and run <code>brprep</code> over it. Fix what it finds. Keep the output; it is the first page of a change record.</p> <span class="criteria">Done when: <code>starter/brprep.sh &#x3C;your-manifest>.json</code> runs and reports zero REJECT lines.</span> </label> </li> </ul> </section><section id="project-rubric"> <h2>How it is graded</h2> <div class="scroll-x"><table><thead><tr><th scope="col">Criterion</th><th scope="col">What earns it</th><th scope="col">Weight</th></tr></thead><tbody><tr><th scope="row">Admission rules reproduced faithfully</th><td>All nine admission rules are checked, each against the manifest rather than against a hard-coded fixture name, and each emits the exact <code>REJECT &#x3C;rule></code> token in the fixed order. A manifest violating several produces several lines. <code>reader-lbip.json</code> is the discriminator: <code>lbIP</code> and <code>taintNodeSelector</code> are required <em>unless</em> the role is <code>ReadOnly</code>, so a check that demands them unconditionally fails it, and a check that never demands them fails <code>good.json</code>'s mutation.</td><td>35</td></tr><tr><th scope="row">Silent findings separated from rejections</th><td><code>check_silent</code> reports the six documented findings as <code>WARN</code> and never as <code>REJECT</code>, and never changes the exit code by itself. The floating-tag check catches <code>mysql:9</code> and <code>mysql:latest</code> but not <code>mysql:9.7</code>. The QoS check compares requests to limits for both CPU and memory rather than checking that limits merely exist.</td><td>30</td></tr><tr><th scope="row">The change plan is specific and correct</th><td><code>plan_upgrade</code> names the standby that is upgraded first, states that a real promotion follows, names the site that ends up active, and lists the three observable consequences. It prints <code>no change</code> when the target already matches. A plan that says 'the pods will restart' without naming the promotion or the moved primary does not earn this.</td><td>25</td></tr><tr><th scope="row">Shell discipline</th><td><code>set -euo pipefail</code> retained, <code>jq</code> used for every field read rather than <code>grep</code>/<code>sed</code> over JSON, no <code>eval</code>, and the script exits 0 with findings but non-zero with rejections. Output is stable and diffable — no timestamps, no absolute paths.</td><td>10</td></tr><tr><th scope="row">Total</th><td></td><td><strong>100</strong></td></tr></tbody></table></div> </section><section id="project-test-cases"> <h2>Test cases</h2> <div class="scroll-x"> <table> <thead> <tr> <th scope="col">Test</th> <th scope="col">Checks</th> <th scope="col">Expected</th> <th scope="col">Weight</th> </tr> </thead> <tbody> <tr> <th scope="row">good_manifest_is_clean</th> <td> A production-shaped manifest with a reader produces no REJECT and no WARN. Catches a shortcut: a checker that emits findings unconditionally. </td> <td> <code>PASS</code> </td> <td>15</td> </tr><tr> <th scope="row">admission_rules_all_nine</th> <td> Each fixture violates one rule and must produce exactly that one REJECT line. Catches a shortcut: reporting every rule whenever any rule fails. </td> <td> <code>PASS</code> </td> <td>30</td> </tr><tr> <th scope="row">reader_exemption</th> <td> Adversarial: the reader legitimately has no <code>lbIP</code> and no <code>taintNodeSelector</code>, while a <code>PrimaryCandidate</code> in the same manifest is missing both. Exactly one REJECT. Catches both a check that demands them unconditionally and one that never demands them. </td> <td> <code>PASS</code> </td> <td>20</td> </tr><tr> <th scope="row">silent_findings_do_not_reject</th> <td> Five WARN lines, zero REJECT lines, exit code 0. Catches a shortcut: treating findings as errors so the fixture 'fails' for the wrong reason. </td> <td> <code>PASS</code> </td> <td>20</td> </tr><tr> <th scope="row">change_plan_names_the_promotion</th> <td> The plan for <code>good.json</code> at a new image names the standby first, the promotion, the resulting active site and the three consequences; the plan at the current image prints <code>no change</code>. </td> <td> <code>PASS</code> </td> <td>15</td> </tr> </tbody> </table> </div>  </section><section id="project-starter"> <h2>Starter files</h2> <details class="filelist card"> <summary>1 files</summary>  <h3>brprep.sh</h3> <pre>                    <code>#!/usr/bin/env bash
 # brprep — day-0 pre-flight for a MysqlFailoverGroup manifest.
 #
 #   ./brprep.sh &lt;manifest.json&gt; [--target-image &lt;tag&gt;]
@@ -203,18 +205,20 @@ secs() {
   echo &quot;$total&quot;
 }
 
-# The nine admission rules, in the fixed order brprep reports them. Seven are
+# The nine admission rules, in the fixed order brprep reports them. Most are
 # CEL rules on the CRD; the site-count one is a MinItems/MaxItems constraint on
-# the schema. Both are refusals at `kubectl apply`, which is all brprep claims.
+# the schema, the site-names one is the name key of the spec.sites list map, and
+# the credentials one is a required field plus kubectl&#39;s strict field
+# validation. All are refusals at `kubectl apply`, which is all brprep claims.
 # The grader matches these tokens exactly, so do not reword them.
-RULE_CREDENTIALS=&quot;exactly one of secretName or credentials must be set&quot;
+RULE_CREDENTIALS=&quot;spec.credentials.operatorSecretName is required and spec.secretName is not a field&quot;
 RULE_SITE_COUNT=&quot;spec.sites must contain between 2 and 16 entries&quot;
 RULE_SITE_NAMES=&quot;spec.sites[].name must be unique&quot;
-RULE_TWO_CANDIDATES=&quot;spec.sites must contain at least two sites with role primary-candidate&quot;
-RULE_PRIORITIES=&quot;splitBrainPolicy.sitePriorities entries must match the names of sites with role primary-candidate&quot;
-RULE_SITE_FIELDS=&quot;taintNodeSelector and lbIP are required unless role is read-only&quot;
-RULE_PEER_INTERVAL=&quot;sidecar.peerCheckInterval must be at least 1s&quot;
-RULE_LEASE_MIN=&quot;sidecar.leaseTimeout must be at least 3s&quot;
+RULE_TWO_CANDIDATES=&quot;spec.sites must contain at least two sites with role PrimaryCandidate&quot;
+RULE_PRIORITIES=&quot;splitBrainPolicy.sitePriorities entries must match the names of sites with role PrimaryCandidate&quot;
+RULE_SITE_FIELDS=&quot;taintNodeSelector and lbIP are required unless role is ReadOnly&quot;
+RULE_PEER_INTERVAL=&quot;sidecar.peerCheckInterval must be between 1s and 1m&quot;
+RULE_LEASE_RANGE=&quot;sidecar.leaseTimeout must be between 3s and 10m&quot;
 RULE_LEASE_RATIO=&quot;sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval&quot;
 
 # The six silent findings, in the fixed order brprep reports them.
@@ -223,7 +227,7 @@ WARN_PVC_BACKUP=&quot;backup profile %s uses storage.type PVC; a backup sharing 
 WARN_QOS=&quot;site %s sets resources.requests != resources.limits; without Guaranteed QoS the kubelet may evict this MySQL first&quot;
 WARN_READER_GATE=&quot;replication.readOnlyMaxLagSeconds (%s) is above maxLagSeconds (%s); the reader endpoint is now looser than the group threshold&quot;
 WARN_UNVERIFIED_ENCRYPTION=&quot;encryptionAtRest is enabled but no backup profile is configured; an encrypted group with no verified restore path is one keyring away from unrecoverable&quot;
-WARN_RECREATE=&quot;updateStrategy Recreate patches every site Deployment in one pass; both sites can restart at once&quot;
+WARN_RECREATE=&quot;updateStrategy.type Recreate patches every site Deployment in one pass; both sites can restart at once&quot;
 
 # ---------------------------------------------------------------- TODO A
 #
@@ -233,23 +237,27 @@ WARN_RECREATE=&quot;updateStrategy Recreate patches every site Deployment in one
 #
 # The nine rules, and what each one actually checks:
 #
-#   RULE_CREDENTIALS    exactly one of .spec.secretName and .spec.credentials
-#                       is present and non-empty. Both, or neither, is a
-#                       rejection.
+#   RULE_CREDENTIALS    .spec.credentials.operatorSecretName is present and
+#                       non-empty, and .spec.secretName is absent. A missing
+#                       credentials block is a required-field error; the
+#                       single-Secret secretName mode was removed in v1.7.0,
+#                       so kubectl&#39;s strict field validation refuses it as
+#                       an unknown field.
 #   RULE_SITE_COUNT     2 &lt;= (.spec.sites | length) &lt;= 16.
 #   RULE_SITE_NAMES     every .spec.sites[].name is distinct.
-#   RULE_TWO_CANDIDATES at least two sites have role &quot;primary-candidate&quot;.
+#   RULE_TWO_CANDIDATES at least two sites have role &quot;PrimaryCandidate&quot;.
 #                       Remember the CRD default: an omitted role *is*
-#                       primary-candidate, so count a missing role as one.
+#                       PrimaryCandidate, so count a missing role as one.
 #   RULE_PRIORITIES     every entry of .spec.splitBrainPolicy.sitePriorities
 #                       names a site whose effective role is
-#                       primary-candidate. An absent list is fine.
-#   RULE_SITE_FIELDS    every site whose effective role is NOT &quot;read-only&quot; has
-#                       both .lbIP and .taintNodeSelector. A read-only site
+#                       PrimaryCandidate. An absent list is fine.
+#   RULE_SITE_FIELDS    every site whose effective role is NOT &quot;ReadOnly&quot; has
+#                       both .lbIP and .taintNodeSelector. A ReadOnly site
 #                       needs neither — it is never promoted and never tainted.
 #                       This is the one the fixtures try hardest to break.
-#   RULE_PEER_INTERVAL  secs(.spec.sidecar.peerCheckInterval) &gt;= 1, when set.
-#   RULE_LEASE_MIN      secs(.spec.sidecar.leaseTimeout) &gt;= 3, when set.
+#   RULE_PEER_INTERVAL  1 &lt;= secs(.spec.sidecar.peerCheckInterval) &lt;= 60,
+#                       when set.
+#   RULE_LEASE_RANGE    3 &lt;= secs(.spec.sidecar.leaseTimeout) &lt;= 600, when set.
 #   RULE_LEASE_RATIO    secs(leaseTimeout) &gt;= 3 * secs(peerCheckInterval),
 #                       when both are set.
 #
@@ -278,7 +286,7 @@ check_admission() {
 #                              and strictly greater than maxLagSeconds.
 #   WARN_UNVERIFIED_ENCRYPTION .spec.encryptionAtRest.enabled is true and
 #                              .spec.backup.profiles is absent or empty.
-#   WARN_RECREATE              .spec.updateStrategy == &quot;Recreate&quot;.
+#   WARN_RECREATE              .spec.updateStrategy.type == &quot;Recreate&quot;.
 #
 # These are findings, never errors: they must not change the exit code.
 check_silent() {
@@ -306,7 +314,7 @@ check_silent() {
 #     expect: lastFailover is stamped and consumes the anti-flap cooldown
 #     expect: the DNSEndpoint A record flips
 #
-# The standby is the *second* site whose effective role is primary-candidate,
+# The standby is the *second* site whose effective role is PrimaryCandidate,
 # in `spec.sites` order; the former active is the first. This manifest carries
 # no status, so declaration order is the only signal available — say so in
 # your own runbook, and read `status.activeSite` when you have a live group.

@@ -89,7 +89,7 @@ func TestConsumeRequestFailureIsRetried(t *testing.T) {
 	if len(r.Violations) != 0 {
 		t.Fatalf("violations: %v", r.Violations)
 	}
-	if _, ok := r.Planned.Object.GetAnnotations()[controller.PlannedFailoverAnnotation]; ok {
+	if _, ok := r.Planned.Object.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the request annotation outlived its failed consumption")
 	}
 	forbidden := false
@@ -140,7 +140,7 @@ func TestStalledClaimWithinDeadline(t *testing.T) {
 		t.Fatal("claim held without a stall-since: not stalled")
 	}
 	if err := pl.store.PatchAnnotations("test", map[string]string{
-		controller.PlannedFailoverStallSinceAnnotation: controller.FormatDeadlineStart("r1", r.clk.Now()),
+		v1alpha1.PlannedFailoverStallSinceAnnotation: controller.FormatDeadlineStart("r1", r.clk.Now()),
 	}); err != nil {
 		t.Fatal(err)
 	}

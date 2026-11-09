@@ -82,9 +82,9 @@ func TestEngine_SucceededWriteMergesManagerAuthority(t *testing.T) {
 		Result:    &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded}}
 	st := &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", TopologyGeneration: 7}
 	e.terminalMutate(&v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fg"}}, next, nil)(st)
-	if st.ActiveSite != "pdx" || st.TopologyGeneration != 8 || st.LastFailoverTarget != "pdx" || st.PromotionGtidExecuted != gtid {
+	if st.ActiveSite != "pdx" || st.TopologyGeneration != 8 || st.LastFailoverTarget() != "pdx" || st.PromotionGtidExecuted() != gtid {
 		t.Fatalf("status = activeSite %q gen %d target %q watermark %q; want pdx/8/pdx/F",
-			st.ActiveSite, st.TopologyGeneration, st.LastFailoverTarget, st.PromotionGtidExecuted)
+			st.ActiveSite, st.TopologyGeneration, st.LastFailoverTarget(), st.PromotionGtidExecuted())
 	}
 	stale := &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", TopologyGeneration: 9}
 	if MergePlannedAuthority(stale, PlannedAuthority{ActiveSite: "iad", TopologyGeneration: 8}) || stale.ActiveSite != "pdx" {
@@ -99,9 +99,9 @@ func TestEngine_SucceededWriteMergesManagerAuthority(t *testing.T) {
 func TestPlannedFailover_EngineOverRealFacadeSucceeds(t *testing.T) {
 	f := newOpsFixture(t, "")
 	fg := newTestFG()
-	fg.Annotations = map[string]string{PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}, {Name: "dc2", State: "read-only", Replicating: true}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
 	faults := &pfFaults{}
 	c := newPFFakeClient(faults, fg)
 	clk := clock.NewFakeClock(f.clk.Now())
@@ -119,9 +119,9 @@ func TestPlannedFailover_EngineOverRealFacadeSucceeds(t *testing.T) {
 		}
 		last = cur.Status.PlannedFailover
 		if last != nil && last.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
-			if cur.Status.ActiveSite != "dc2" || cur.Status.LastFailoverTarget != "dc2" || cur.Status.PromotionGtidExecuted != opsF {
+			if cur.Status.ActiveSite != "dc2" || cur.Status.LastFailoverTarget() != "dc2" || cur.Status.PromotionGtidExecuted() != opsF {
 				t.Fatalf("status after Succeeded = activeSite %q lastFailoverTarget %q watermark %q",
-					cur.Status.ActiveSite, cur.Status.LastFailoverTarget, cur.Status.PromotionGtidExecuted)
+					cur.Status.ActiveSite, cur.Status.LastFailoverTarget(), cur.Status.PromotionGtidExecuted())
 			}
 			if f.reg.slot.Held() {
 				t.Fatal("the claim is still held after Succeeded")

@@ -57,7 +57,7 @@ func newTestReconcilerWithSecret(t *testing.T, objs []client.Object, storeFunc f
 // standbyCRWithCredsSecret returns a CR that references a credentials secret.
 func standbyCRWithCredsSecret(name, ns, secretName string) *v1alpha1.MysqlStandbyCluster {
 	cr := minimalStandbyCR(name, ns)
-	cr.Spec.Source.Storage.S3.CredentialsSecret = secretName
+	cr.Spec.Source.S3.CredentialsSecretName = secretName
 	return cr
 }
 
@@ -372,7 +372,7 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 	if skc3 == nil || skc3.Status != metav1.ConditionFalse || skc3.Reason != "ArchiveUnreadable" {
 		t.Fatalf("step3: SourceConfigKnown want False/ArchiveUnreadable, got %v", skc3)
 	}
-	if cr3.Status.Discovered == nil || cr3.Status.Discovered.Archive != nil || cr3.Status.Discovered.ManifestCount != 0 {
+	if cr3.Status.Discovered == nil || cr3.Status.Discovered.BinlogArchive != nil || discoveredArchive(cr3.Status.Discovered).ManifestCount != 0 {
 		t.Fatalf("step3: a refused archive must not publish its identity or window: %+v", cr3.Status.Discovered)
 	}
 	// SourceConfigKnown flipped True→False — verify it's not the same as before.
@@ -393,44 +393,35 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 }
 
 // TestStandbyCluster_BuildStoreCfg_Errors is a table-driven test that verifies
-// buildStoreCfg returns a ConfigError for invalid storage configurations.
+// buildStoreCfg returns a ConfigError, without constructing a store, for a
+// source.s3 the CRD would refuse (the fake client bypasses admission).
 func TestStandbyCluster_BuildStoreCfg_Errors(t *testing.T) {
 	cases := []struct {
 		name       string
-		storage    v1alpha1.BackupStorage
+		s3         v1alpha1.StandbyS3Source
 		wantErrSub string
 	}{
 		{
-			name: "S3 with nil s3 field",
-			storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3,
-				S3:   nil,
-			},
-			wantErrSub: "source.storage.s3 is not set",
+			name:       "empty bucket",
+			s3:         v1alpha1.StandbyS3Source{Prefix: "orders"},
+			wantErrSub: "s3 bucket is empty",
 		},
 		{
-			name: "unknown storage type",
-			storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageType("UnknownType"),
-			},
-			wantErrSub: "unknown storage type",
+			name:       "bucket-root prefix",
+			s3:         v1alpha1.StandbyS3Source{Bucket: "my-bucket", Prefix: "/"},
+			wantErrSub: "the standby does not scan a bucket root",
 		},
 		{
-			name: "PVC storage",
-			storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC,
-				PVC: &v1alpha1.PVCStorage{
-					ClaimName: "my-pvc",
-				},
-			},
-			wantErrSub: "PVC storage is not supported",
+			name:       "empty prefix",
+			s3:         v1alpha1.StandbyS3Source{Bucket: "my-bucket"},
+			wantErrSub: "the standby does not scan a bucket root",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cr := minimalStandbyCR("test-sc", "default")
-			cr.Spec.Source.Storage = tc.storage
+			cr.Spec.Source.S3 = tc.s3
 
 			scheme := newStandbyScheme(t)
 			fakeClient := fake.NewClientBuilder().
@@ -550,11 +541,11 @@ func TestStandbyCluster_DumpSelectionByEndTime(t *testing.T) {
 		t.Fatal("status.discovered is nil")
 		return
 	}
-	if d.DumpName != "a-dump-NEWER" {
-		t.Errorf("DumpName: want a-dump-NEWER (newer end time), got %q", d.DumpName)
+	if discoveredDump(d).Name != "a-dump-NEWER" {
+		t.Errorf("latestDump.name: want a-dump-NEWER (newer end time), got %q", discoveredDump(d).Name)
 	}
-	if d.DumpGtidExecuted != "new:1-200" {
-		t.Errorf("DumpGtidExecuted: want new:1-200, got %q", d.DumpGtidExecuted)
+	if discoveredDump(d).GtidExecuted != "new:1-200" {
+		t.Errorf("latestDump.gtidExecuted: want new:1-200, got %q", discoveredDump(d).GtidExecuted)
 	}
 }
 
@@ -591,6 +582,9 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 		// §3.1: "/orders/" and "orders" are one destination.
 		{name: "prefix normalizes", prefix: "/orders/", objects: map[string][]byte{"orders/binlogs/archive.json": standbyTestDescriptor(), "orders/binlogs/manifest-dc1.json": v2(standbyTestArchiveID)}, wantReason: "DumpFound", wantArchive: true},
 		{name: "no archive is dump-only", objects: map[string][]byte{}, wantReason: "NoBinlogManifests"},
+		// A verified descriptor with no manifest yet publishes the identity
+		// with an empty window: the two are published together.
+		{name: "descriptor without manifests", objects: map[string][]byte{"orders/binlogs/archive.json": standbyTestDescriptor()}, wantReason: "NoBinlogManifests", wantArchive: true},
 		{name: "descriptor missing (replication lag)", objects: map[string][]byte{"orders/binlogs/manifest-dc1.json": v2(standbyTestArchiveID)}, wantReason: "ArchiveDescriptorMissing"},
 		{name: "legacy v1 manifests", objects: map[string][]byte{"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`)}, wantReason: "ArchiveLegacy"},
 		{name: "manifest of another archive", objects: map[string][]byte{"orders/binlogs/archive.json": standbyTestDescriptor(), "orders/binlogs/manifest-dc1.json": v2("ar1-bbbbbbbbbbbbbbbbbbbbbbbbbb")}, wantReason: "ArchiveIdentityMismatch"},
@@ -602,10 +596,10 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 			cr := minimalStandbyCR("test-sc", "default")
 			objs := []client.Object{cr}
 			if tt.prefix != "" {
-				cr.Spec.Source.Storage.S3.Prefix = tt.prefix
+				cr.Spec.Source.S3.Prefix = tt.prefix
 			}
 			if tt.decrypt {
-				cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
+				cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pp"}}
 				objs = append(objs, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"}, Data: map[string][]byte{"passphrase": []byte("k")}})
 			}
 			store := &fakeStore{Objects: tt.objects}
@@ -617,11 +611,11 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 				t.Fatalf("SourceConfigKnown = %v, want reason %s", skc, tt.wantReason)
 			}
 			d := got.Status.Discovered
-			if d == nil || d.DumpName != "d1" {
+			if d == nil || discoveredDump(d).Name != "d1" {
 				t.Fatalf("the dump must be published regardless of the archive: %+v", d)
 			}
 			if !tt.wantArchive {
-				if d.Archive != nil || d.ManifestCount != 0 || d.ArchivedBinlogCount != 0 {
+				if d.BinlogArchive != nil || discoveredArchive(d).ManifestCount != 0 || discoveredArchive(d).FileCount != 0 {
 					t.Fatalf("no verified archive, but discovered carries one: %+v", d)
 				}
 				if strings.HasPrefix(tt.wantReason, "Archive") && !standbyContainsEvent(standbyDrainEvents(recorder), "PITRArchiveRefused") {
@@ -633,13 +627,17 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 				ArchiveID:      standbyTestArchiveID,
 				Destination:    "s3://my-bucket/orders/binlogs?endpoint=aws",
 				Source:         v1alpha1.PITRArchiveSource{Namespace: "prod", Name: "orders", UID: "source-uid"},
-				EncryptionMode: v1alpha1.PITRArchiveEncryptionNone,
+				EncryptionMode: v1alpha1.EncryptionModeNone,
 			}
-			if d.Archive == nil || *d.Archive != *want {
-				t.Fatalf("discovered.archive = %+v, want %+v", d.Archive, want)
+			if d.BinlogArchive == nil || d.BinlogArchive.Identity != *want {
+				t.Fatalf("discovered.binlogArchive = %+v, want identity %+v", d.BinlogArchive, want)
 			}
-			if d.ManifestCount != 1 || d.ArchivedBinlogCount != 1 {
-				t.Fatalf("window not published: %+v", d)
+			wantCount := int32(1)
+			if tt.wantReason == "NoBinlogManifests" {
+				wantCount = 0
+			}
+			if d.BinlogArchive.ManifestCount != wantCount || d.BinlogArchive.FileCount != wantCount {
+				t.Fatalf("window = %+v, want %d manifest(s) and file(s)", d.BinlogArchive, wantCount)
 			}
 		})
 	}
@@ -653,7 +651,7 @@ func TestStandbyCluster_PassphraseUsesTrimPassphrase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"},
 		Data:       map[string][]byte{"passphrase": []byte("\vkey  \n")},
 	}}, &fakeStore{Objects: map[string][]byte{}})
-	file, dir, err := r.resolvePassphraseToFile(context.Background(), "default", v1alpha1.PassphraseSecretRef{Name: "pp"}, "")
+	file, dir, err := r.resolvePassphraseToFile(context.Background(), "default", v1alpha1.PassphraseSecretKeyRef{Name: "pp"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,12 +740,12 @@ func TestStandbyCluster_ManifestRefusalsAndMarks(t *testing.T) {
 			}
 			d := got.Status.Discovered
 			if tt.wantReason == "DumpFound" {
-				if d == nil || d.Archive == nil || d.ArchivedBinlogCount != tt.wantFiles {
+				if d == nil || d.BinlogArchive == nil || discoveredArchive(d).FileCount != tt.wantFiles {
 					t.Fatalf("discovered %+v, want a window of %d files", d, tt.wantFiles)
 				}
 				return
 			}
-			if d == nil || d.Archive != nil || d.ArchivedBinlogCount != 0 {
+			if d == nil || d.BinlogArchive != nil || discoveredArchive(d).FileCount != 0 {
 				t.Fatalf("refused archive, but discovered carries a window: %+v", d)
 			}
 		})

@@ -1,0 +1,13 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: bloodraven
+  generation: 6
+status:
+  observedGeneration: 5
+  activeSite: iad
+  conditions:
+  - {type: Ready, status: "True", reason: Healthy, observedGeneration: 5, message: At least one site is writable and replication is healthy}
+  - {type: Degraded, status: "False", reason: Healthy, observedGeneration: 5, message: No cross-site alerts}
+  - {type: AutomaticFailoverHeld, status: "True", reason: PlannedFailoverManualRecoveryRequired, observedGeneration: 5, message: "planned failover run r1 ended ManualRecoveryRequired (ForeignWritable)"}

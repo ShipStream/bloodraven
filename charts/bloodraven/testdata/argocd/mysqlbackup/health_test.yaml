@@ -1,0 +1,13 @@
+tests:
+- inputPath: succeeded.yaml
+  healthStatus: {status: Healthy, message: backup completed}
+- inputPath: failed.yaml
+  healthStatus: {status: Degraded, message: "pending for 30m0s (BackupJobConflict): Job nightly-1 is not this backup's"}
+- inputPath: running.yaml
+  healthStatus: {status: Progressing, message: "running (source=pdx, reason=replica)"}
+- inputPath: pending.yaml
+  healthStatus: {status: Progressing, message: no healthy source}
+- inputPath: spec-not-applied.yaml
+  healthStatus: {status: Progressing, message: Controller processing updated spec}
+- inputPath: succeeded-spec-edit-acknowledged.yaml
+  healthStatus: {status: Healthy, message: backup completed}

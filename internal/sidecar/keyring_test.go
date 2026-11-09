@@ -179,7 +179,7 @@ func newAgentFixture(t *testing.T, mutate func(*KeyringConfig)) *agentFixture {
 	}
 	my := &fakeKeyringMySQL{
 		component: &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"},
-		coverage:  &KeyringCoverage{SystemTablespaceEncrypted: true},
+		coverage:  &KeyringCoverage{SystemTablespaceEncrypted: new(true)},
 	}
 	agent, err := NewKeyringAgent(cfg, &Config{
 		PodNamespace:  "shared-lion",
@@ -268,7 +268,7 @@ func TestKeyringAgent_EscrowEligibility(t *testing.T) {
 			name: "populated keyring after primary encryption is escrowed",
 			cfg:  func(c *KeyringConfig) { c.EncryptSystemTablespace = true },
 			setup: func(t *testing.T, f *agentFixture) {
-				f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+				f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 				f.mysql.readOnly = true
 				if err := os.WriteFile(f.keyring, emptyDoc, 0o600); err != nil {
 					t.Fatalf("write: %v", err)
@@ -547,7 +547,7 @@ func TestKeyringAgent_NoRotationWhenDisarmed(t *testing.T) {
 
 func TestKeyringAgent_EncryptsSystemTablespaceOnPrimary(t *testing.T) {
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = false
 	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -564,7 +564,7 @@ func TestKeyringAgent_BootstrapsMasterKeyOnEmptyKeyring(t *testing.T) {
 	// with no master key; ROTATE is what seeds it so later DDL works.
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
 	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = false
 	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
 	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
@@ -586,7 +586,7 @@ func TestKeyringAgent_KeyringWriteDDLUsesIndependentDeadlines(t *testing.T) {
 		c.EncryptSystemTablespace = true
 	})
 	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = false
 	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
 	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
@@ -637,7 +637,7 @@ func assertKeyringWriteDeadline(t *testing.T, ctx context.Context) {
 func TestKeyringAgent_SkipsMasterKeyBootstrapOnReplica(t *testing.T) {
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
 	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = true
 	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
 	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
@@ -656,7 +656,7 @@ func TestKeyringAgent_SkipsSystemTablespaceOnReplica(t *testing.T) {
 	// ALTER TABLESPACE is replicated DDL; running it on a read-only
 	// replica just fails, and the primary's statement will reach it.
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = true
 	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -674,7 +674,7 @@ func TestKeyringAgent_SkipsSystemTablespaceWhenNotAuthoritativePrimary(t *testin
 	// already knows /active-site names someone else. Issuing ALTER
 	// TABLESPACE there plants a GTID the real primary does not have.
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = false
 	f.agent.topology.Set("pdx", time.Now())
 	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
@@ -693,7 +693,7 @@ func TestKeyringAgent_SkipsSystemTablespaceWhenNotAuthoritativePrimary(t *testin
 func TestKeyringAgent_SkipsMasterKeyBootstrapWhenNotAuthoritativePrimary(t *testing.T) {
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
 	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = false
 	f.agent.topology.Set("pdx", time.Now())
 	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
@@ -712,7 +712,7 @@ func TestKeyringAgent_SkipsMasterKeyBootstrapWhenNotAuthoritativePrimary(t *test
 
 func TestKeyringAgent_SkipsSystemTablespaceWithoutTopology(t *testing.T) {
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	f.mysql.readOnly = false
 	f.agent.topology = nil
 	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
@@ -727,7 +727,7 @@ func TestKeyringAgent_SkipsSystemTablespaceWithoutTopology(t *testing.T) {
 
 func TestKeyringAgent_SkipsSystemTablespaceWhenAlreadyEncrypted(t *testing.T) {
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: true}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(true)}
 	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -740,7 +740,7 @@ func TestKeyringAgent_SkipsSystemTablespaceWhenAlreadyEncrypted(t *testing.T) {
 func TestKeyringAgent_ComponentFailureDoesNotSkipCoverage(t *testing.T) {
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
 	f.mysql.componentErr = errors.New("component unavailable")
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: new(false)}
 	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}

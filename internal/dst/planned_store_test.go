@@ -72,10 +72,10 @@ func TestSimStore_ConditionedWrite(t *testing.T) {
 
 	// mutate applies to the same write.
 	out, err = s.Write(ctx, cur, block("r1", 2, v1alpha1.PlannedFailoverPhaseSucceeded), func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.LastFailoverTarget = "beta"
+		st.SetLastFailover(st.LastFailoverTime(), "beta", st.PromotionGtidExecuted())
 	})
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if got := mustLoad(t, s); got.Status.LastFailoverTarget != "beta" || got.Status.PlannedFailover.Revision != 2 {
+	if got := mustLoad(t, s); got.Status.LastFailoverTarget() != "beta" || got.Status.PlannedFailover.Revision != 2 {
 		t.Fatalf("mutate not applied: %+v", got.Status)
 	}
 }
@@ -103,7 +103,7 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		if obj.Status.PlannedFailover != nil {
 			t.Fatal("a lost write committed")
 		}
-		if obj.GetAnnotations()[controller.PlannedFailoverStatusFenceAnnotation] == "" || s.ResourceVersion() != 2 {
+		if obj.GetAnnotations()[v1alpha1.PlannedFailoverStatusFenceAnnotation] == "" || s.ResourceVersion() != 2 {
 			t.Fatalf("settlement did not fence (rv %d, annotations %v)", s.ResourceVersion(), obj.GetAnnotations())
 		}
 	})
@@ -112,7 +112,7 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		s.AmbiguousWrites(1)
 		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteCommitted, err)
-		if mustLoad(t, s).GetAnnotations()[controller.PlannedFailoverStatusFenceAnnotation] != "" {
+		if mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
 			t.Fatal("a committed write was fenced")
 		}
 	})
@@ -216,7 +216,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	base := mustLoad(t, s)
 	out, err := s.ConsumeRequest(ctx, base)
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if _, ok := mustLoad(t, s).GetAnnotations()[controller.PlannedFailoverAnnotation]; ok {
+	if _, ok := mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("request not consumed")
 	}
 	// Conditioned: the old base now conflicts.
@@ -233,7 +233,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	rv := s.ResourceVersion()
 	out, err = s.ClearTerminalMarker(ctx, mustLoad(t, s), "r2")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if s.ResourceVersion() != rv || markerRunID(mustLoad(t, s).GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) != "r1" {
+	if s.ResourceVersion() != rv || markerRunID(mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) != "r1" {
 		t.Fatal("another run cleared the marker")
 	}
 	out, err = s.ClearTerminalMarker(ctx, mustLoad(t, s), "r1")
@@ -257,7 +257,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	}
 	out, err = s.ClearDeadlineStart(ctx, mustLoad(t, s), controller.DeadlineStatusStall, "r1")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if v := mustLoad(t, s).GetAnnotations()[controller.PlannedFailoverStallSinceAnnotation]; !strings.HasPrefix(v, "r2:since=") {
+	if v := mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation]; !strings.HasPrefix(v, "r2:since=") {
 		t.Fatalf("r1 cleared r2's deadline: %q", v)
 	}
 	if _, out, _ := s.MarkDeadlineStart(ctx, mustLoad(t, s), controller.DeadlineKind("bogus"), "r1", clk.Now()); out == controller.WriteCommitted {
@@ -266,16 +266,16 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 
 	// Hold acknowledgement.
 	s.mu.Lock()
-	s.patchAnnotationsLocked("ack", map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: "r1"})
+	s.patchAnnotationsLocked("ack", map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: "r1"})
 	s.mu.Unlock()
 	out, err = s.DeleteHoldAck(ctx, mustLoad(t, s), "r9")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if mustLoad(t, s).GetAnnotations()[controller.AcknowledgePlannedFailoverHoldAnnotation] != "r1" {
+	if mustLoad(t, s).GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation] != "r1" {
 		t.Fatal("a non-matching ack delete removed the ack")
 	}
 	out, err = s.DeleteHoldAck(ctx, mustLoad(t, s), "r1")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if _, ok := mustLoad(t, s).GetAnnotations()[controller.AcknowledgePlannedFailoverHoldAnnotation]; ok {
+	if _, ok := mustLoad(t, s).GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Fatal("ack not deleted")
 	}
 }
@@ -429,13 +429,13 @@ func TestMetadataNoOpsAreDecidedFromBase(t *testing.T) {
 		t.Fatalf("the scripted conflict was consumed by a no-op ClearHold (next write: %s)", out)
 	}
 
-	if err := s.PatchAnnotations("ack", map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: " r1 \n"}); err != nil {
+	if err := s.PatchAnnotations("ack", map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: " r1 \n"}); err != nil {
 		t.Fatal(err)
 	}
 	if out, _ := s.DeleteHoldAck(ctx, mustLoad(t, s), "r1"); out != controller.WriteCommitted {
 		t.Fatalf("delete ack: %s", out)
 	}
-	if _, ok := s.Object().GetAnnotations()[controller.AcknowledgePlannedFailoverHoldAnnotation]; ok {
+	if _, ok := s.Object().GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Fatal("a whitespace-padded acknowledgement survived its deletion")
 	}
 }
@@ -469,7 +469,7 @@ func TestMergeSnapshot_TwoStepWrite(t *testing.T) {
 		t.Fatal("the snapshot write did not yield between its read and its commit")
 	}
 	st := s.Object().Status
-	if st.ActiveSite != "alpha" || st.LastFailoverTarget != "alpha" {
+	if st.ActiveSite != "alpha" || st.LastFailoverTarget() != "alpha" {
 		t.Fatalf("computed fields not written: %+v", st)
 	}
 	if st.PlannedFailover == nil || st.PlannedFailover.RunID != "r1" || st.PlannedFailoverHold == nil ||

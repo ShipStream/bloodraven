@@ -21,7 +21,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.groupRef.name
+    - jsonPath: .spec.failoverGroupRef.name
       name: Group
       type: string
     - jsonPath: .spec.databaseName
@@ -120,10 +120,11 @@ spec:
                 pattern: ^[A-Za-z0-9_]{1,64}$
                 type: string
               collation:
-                default: utf8mb4_unicode_ci
                 description: |-
-                  Collation is the database default collation. Defaults to
-                  utf8mb4_unicode_ci when empty.
+                  Collation is the database default collation. Unset means the
+                  character set's default collation (utf8mb4_0900_ai_ci for utf8mb4 on
+                  MySQL 8.0 and later): the operator renders no COLLATE clause. Set
+                  utf8mb4_unicode_ci explicitly to keep the older UCA 4.0 ordering.
                 maxLength: 64
                 pattern: ^[A-Za-z0-9_]{1,64}$
                 type: string
@@ -159,7 +160,16 @@ spec:
                 default: Retain
                 description: |-
                   DeletionPolicy controls what happens in MySQL when this CR is
-                  deleted. Defaults to Retain.
+                  deleted:
+                    - Retain (default) leaves MySQL untouched. The alternative failure
+                      mode, dropping a live tenant database because a CR was
+                      garbage-collected by a GitOps prune or a namespace delete, is
+                      unrecoverable.
+                    - Delete drops the database, the owner user and the spec.users[]
+                      principals this CR created (per the status.appliedUsers ledger),
+                      and revokes the spec.grants[] entries on that database. It never
+                      drops a spec.grants[] user; those are shared principals this CRD
+                      did not create.
                 enum:
                 - Retain
                 - Delete
@@ -167,7 +177,8 @@ spec:
               deploymentClients:
                 description: |-
                   DeploymentClients authorizes ServiceAccounts to use the deployment
-                  companion API for this database. Each namespace has one client.
+                  companion API for this database, keyed by (namespace,
+                  serviceAccount). A namespace may list several ServiceAccounts.
                 items:
                   description: DeploymentClient identifies a ServiceAccount allowed
                     to deploy this database.
@@ -191,10 +202,37 @@ spec:
                   - namespace
                   - serviceAccount
                   type: object
+                maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
                 - namespace
+                - serviceAccount
                 x-kubernetes-list-type: map
+              failoverGroupRef:
+                description: |-
+                  FailoverGroupRef identifies the MysqlFailoverGroup in the same namespace
+                  that owns the MySQL instance this database lives on. Cross-namespace
+                  and cross-group references are deliberately not expressible.
+
+                  The field is immutable for the same reason databaseName is: the
+                  reconciler has no way to move a schema between groups, so retargeting
+                  would apply the database and owner to the new group, orphan them on
+                  the old one, and aim any later deletionPolicy: Delete cleanup at the
+                  wrong MySQL. Changing groups is a migration, not a spec edit.
+                properties:
+                  name:
+                    description: Name of the MysqlFailoverGroup.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: spec.failoverGroupRef is immutable; moving a database between
+                    groups is a migration, not a spec edit
+                  rule: self == oldSelf
               grants:
                 description: |-
                   Grants are additional, already-existing principals to grant on this
@@ -274,29 +312,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - username
                 x-kubernetes-list-type: map
-              groupRef:
-                description: |-
-                  GroupRef identifies the MysqlFailoverGroup in the same namespace
-                  that owns the MySQL instance this database lives on. Cross-namespace
-                  and cross-group references are deliberately not expressible.
-
-                  The field is immutable for the same reason databaseName is: the
-                  reconciler has no way to move a schema between groups, so retargeting
-                  would apply the database and owner to the new group, orphan them on
-                  the old one, and aim any later deletionPolicy: Delete cleanup at the
-                  wrong MySQL. Changing groups is a migration, not a spec edit.
-                properties:
-                  name:
-                    description: Name of the MysqlFailoverGroup.
-                    minLength: 1
-                    type: string
-                required:
-                - name
-                type: object
-                x-kubernetes-validations:
-                - message: spec.groupRef is immutable; moving a database between groups
-                    is a migration, not a spec edit
-                  rule: self == oldSelf
               owner:
                 description: |-
                   Owner is the user that owns this database. It is the only principal
@@ -387,7 +402,7 @@ spec:
                     description: |-
                       SecretName references a Secret in the same namespace with keys
                       `username` and `password` — the same contract as
-                      spec.credentials.*Secret on MysqlFailoverGroup. The Secret is
+                      spec.credentials.*SecretName on MysqlFailoverGroup. The Secret is
                       desired state for the MySQL user, not a credential to a user that
                       already exists: Bloodraven runs CREATE USER IF NOT EXISTS followed
                       by ALTER USER, so rotating the password is a Secret write and
@@ -396,6 +411,7 @@ spec:
                       Bloodraven never generates, returns, or stores a password.
                     maxLength: 253
                     minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                     type: string
                 required:
                 - secretName
@@ -519,6 +535,7 @@ spec:
                         USER, so rotating the password is a Secret write and nothing else.
                       maxLength: 253
                       minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                       type: string
                   required:
                   - privileges
@@ -531,7 +548,7 @@ spec:
                 x-kubernetes-list-type: map
             required:
             - databaseName
-            - groupRef
+            - failoverGroupRef
             - owner
             type: object
             x-kubernetes-validations:
@@ -571,6 +588,7 @@ spec:
                   next apply, and deletion revokes the union of the current list and
                   this record. spec.users[] principals are tracked separately in
                   AppliedUsers, which pairs each username with its Secret.
+                  Durable: a grant missing from it is never revoked.
                 items:
                   type: string
                 type: array
@@ -587,6 +605,7 @@ spec:
                   created. Entries whose secretName has left the spec are dropped from
                   MySQL and then removed here. Usernames only; never any credential
                   material.
+                  Durable: it is what authorizes DROP USER for spec.users[] accounts.
                 items:
                   description: |-
                     MysqlDatabaseUserState is one spec.users[] ledger entry — the users[]
@@ -720,6 +739,7 @@ spec:
                   CR that failed before any SQL (invalid spec, reserved owner,
                   ownership conflict, unreachable primary) must not drop a database
                   something else created under the same name.
+                  Durable: a lost record makes deletion leave the database behind.
                 type: boolean
               lastAppliedHash:
                 description: |-
@@ -755,6 +775,8 @@ spec:
                   its hosts) — and settled to the current list by the Ready stamp. Host
                   removal and deletion drop OwnerUser off exactly these hosts. Empty
                   means the pre-hosts default, ["%"].
+                  Durable: host removal and deletion drop the owner only on these
+                  hosts.
                 items:
                   type: string
                 type: array
@@ -766,6 +788,8 @@ spec:
                   applies. During a username rotation it keeps the previous name until
                   the old account has actually been dropped. The password is never
                   echoed anywhere.
+                  Durable: it is the only attribution of the owner account; a lost
+                  record leaves the account behind at deletion.
                 type: string
               pendingOwnerHosts:
                 description: |-
@@ -776,6 +800,7 @@ spec:
                   drop an unrelated same-named account. Non-empty only while
                   PendingOwnerUser is set; empty with PendingOwnerUser set is the
                   shape an older operator wrote, and falls back to OwnerHosts.
+                  Durable: see OwnerHosts.
                 items:
                   type: string
                 type: array
@@ -792,17 +817,20 @@ spec:
                   gate would see an account it cannot attribute and wedge the CR on
                   PreExistingOwnerUser for a user it created itself. Deletion treats
                   it as an owner candidate for the same reason.
+                  Durable: see OwnerUser.
                 type: string
               phase:
                 description: Phase is the lifecycle phase of this database.
                 enum:
                 - Pending
-                - Creating
+                - Applying
                 - Ready
                 - Failed
                 - Deleting
                 type: string
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Defaults applied when the corresponding EncryptionAtRestSpec fields
@@ -12,11 +14,11 @@ import (
 // standby-cluster template path see the same effective values as
 // objects that went through admission.
 const (
-	DefaultKeyringDataFileDir      = "/run/mysql-keyring"
-	DefaultKeyringMysqldDir        = "/usr/sbin"
-	DefaultKeyringPluginDir        = "/usr/lib64/mysql/plugin"
-	DefaultKeyringRetainVersions   = int32(5)
-	DefaultKeyringEscrowTimeoutSec = int32(600)
+	DefaultKeyringDataFileDir    = "/run/mysql-keyring"
+	DefaultKeyringMysqldDir      = "/usr/sbin"
+	DefaultKeyringPluginDir      = "/usr/lib64/mysql/plugin"
+	DefaultKeyringRetainVersions = int32(5)
+	DefaultKeyringEscrowTimeout  = 10 * time.Minute
 
 	// KeyringDataFileName is the basename of the keyring data file
 	// inside DataFileDir. It is also the key under which the keyring
@@ -40,11 +42,11 @@ func (s *MysqlFailoverGroupSpec) EncryptionEnabled() bool {
 // nil; the caller gets the default shape.
 func (s *MysqlFailoverGroupSpec) EffectiveKeyring() KeyringSpec {
 	out := KeyringSpec{
-		DataFileDir:          DefaultKeyringDataFileDir,
-		MysqldDir:            DefaultKeyringMysqldDir,
-		PluginDir:            DefaultKeyringPluginDir,
-		RetainVersions:       DefaultKeyringRetainVersions,
-		EscrowTimeoutSeconds: DefaultKeyringEscrowTimeoutSec,
+		DataFileDir:    DefaultKeyringDataFileDir,
+		MysqldDir:      DefaultKeyringMysqldDir,
+		PluginDir:      DefaultKeyringPluginDir,
+		RetainVersions: DefaultKeyringRetainVersions,
+		EscrowTimeout:  &metav1.Duration{Duration: DefaultKeyringEscrowTimeout},
 	}
 	if s.EncryptionAtRest == nil || s.EncryptionAtRest.Keyring == nil {
 		return out
@@ -62,8 +64,8 @@ func (s *MysqlFailoverGroupSpec) EffectiveKeyring() KeyringSpec {
 	if k.RetainVersions > 0 {
 		out.RetainVersions = k.RetainVersions
 	}
-	if k.EscrowTimeoutSeconds > 0 {
-		out.EscrowTimeoutSeconds = k.EscrowTimeoutSeconds
+	if k.EscrowTimeout != nil {
+		out.EscrowTimeout = &metav1.Duration{Duration: k.EscrowTimeout.Duration}
 	}
 	return out
 }
@@ -74,9 +76,9 @@ func (s *MysqlFailoverGroupSpec) KeyringDataFilePath() string {
 	return path.Join(s.EffectiveKeyring().DataFileDir, KeyringDataFileName)
 }
 
-// EscrowTimeout returns keyring.escrowTimeoutSeconds as a Duration.
+// EscrowTimeout returns the effective keyring.escrowTimeout.
 func (s *MysqlFailoverGroupSpec) EscrowTimeout() time.Duration {
-	return time.Duration(s.EffectiveKeyring().EscrowTimeoutSeconds) * time.Second
+	return s.EffectiveKeyring().EscrowTimeout.Duration
 }
 
 // EffectiveEncryptionCoverage returns spec.encryptionAtRest.coverage

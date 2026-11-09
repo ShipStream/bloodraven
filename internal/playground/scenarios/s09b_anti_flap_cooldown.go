@@ -242,17 +242,17 @@ func s09bObserveFirstFailover() runner.Step {
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"activeSite changed AND lastFailover stamped",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					hasStamp := mfg.Status.LastFailover != nil && !mfg.Status.LastFailover.IsZero()
+					hasStamp := mfg.Status.LastFailoverTime() != nil && !mfg.Status.LastFailoverTime().IsZero()
 					flipped := mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original
 					msg := fmt.Sprintf("activeSite=%q stamp=%v target=%q",
-						mfg.Status.ActiveSite, hasStamp, mfg.Status.LastFailoverTarget)
+						mfg.Status.ActiveSite, hasStamp, mfg.Status.LastFailoverTarget())
 					return flipped && hasStamp, msg, nil
 				},
 			)
 			if err != nil {
 				return err
 			}
-			first := mfg.Status.LastFailover.Time
+			first := mfg.Status.LastFailoverTime().Time
 			env.Capture.Note(fmt.Sprintf("first failover complete at %s, new primary=%s",
 				first.Format(time.RFC3339), mfg.Status.ActiveSite))
 			if err := ctxStash(ctx, env, "firstFailoverAt", first.UTC().Format(time.RFC3339Nano)); err != nil {
@@ -288,11 +288,11 @@ func s09bObserveOriginalPrimaryReadOnly() runner.Step {
 					if s == nil {
 						return false, "site missing from status", nil
 					}
-					caughtUp := s.State == "read-only" && s.Replicating && s.RecoveryState == "" &&
+					caughtUp := s.State == v1alpha1.SiteStateReadOnly && s.Replication.Running() && s.RecoveryState == "" &&
 						s.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
 						s.SecondsBehindSource != nil && *s.SecondsBehindSource == 0
-					return caughtUp, fmt.Sprintf("site %s state=%q replicating=%v recovery=%q convergence=%q lag=%s",
-						original, s.State, s.Replicating, s.RecoveryState, s.SourceConvergenceState,
+					return caughtUp, fmt.Sprintf("site %s state=%q replication=%s recovery=%q convergence=%q lag=%s",
+						original, s.State, s.Replication, s.RecoveryState, s.SourceConvergenceState,
 						formatLag(s.SecondsBehindSource)), nil
 				},
 			)
@@ -358,9 +358,9 @@ func s09bVerifyBlockedDuringCooldown() runner.Step {
 				if err != nil {
 					return err
 				}
-				if lf := mfg.Status.LastFailover; lf != nil && lf.Time.After(firstAt.Add(time.Second)) {
+				if lf := mfg.Status.LastFailoverTime(); lf != nil && lf.Time.After(firstAt.Add(time.Second)) {
 					return fmt.Errorf("anti-flap bypassed: a second failover to %q completed at %s, %s before the cooldown expired",
-						mfg.Status.LastFailoverTarget, lf.Time.Format(time.RFC3339), expiry.Sub(lf.Time).Round(time.Second))
+						mfg.Status.LastFailoverTarget(), lf.Time.Format(time.RFC3339), expiry.Sub(lf.Time).Round(time.Second))
 				}
 				select {
 				case <-holdCtx.Done():
@@ -396,9 +396,9 @@ func s09bVerifyRetriedAtExpiry() runner.Step {
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("second failover back to %s after cooldown expiry", original),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					lf := mfg.Status.LastFailover
+					lf := mfg.Status.LastFailoverTime()
 					second := lf != nil && lf.Time.After(firstAt.Add(time.Second))
-					msg := fmt.Sprintf("activeSite=%q lastFailover=%v target=%q", mfg.Status.ActiveSite, lf, mfg.Status.LastFailoverTarget)
+					msg := fmt.Sprintf("activeSite=%q lastFailover=%v target=%q", mfg.Status.ActiveSite, lf, mfg.Status.LastFailoverTarget())
 					return second && mfg.Status.ActiveSite == original, msg, nil
 				},
 			)
@@ -406,7 +406,7 @@ func s09bVerifyRetriedAtExpiry() runner.Step {
 				return fmt.Errorf("no failover after cooldown expiry at %s; the refused failover was never retried: %w",
 					expiry.Format(time.RFC3339), err)
 			}
-			second := mfg.Status.LastFailover.Time
+			second := mfg.Status.LastFailoverTime().Time
 			env.Capture.Note(fmt.Sprintf("second failover at %s, %s after cooldown expiry",
 				second.Format(time.RFC3339), second.Sub(expiry).Round(time.Second)))
 			// status.lastFailover is second-granular; allow that much.

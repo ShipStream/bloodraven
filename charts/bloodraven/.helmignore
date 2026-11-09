@@ -8,3 +8,4 @@
 .vscode/
 .idea/
 *_test.go
+testdata/

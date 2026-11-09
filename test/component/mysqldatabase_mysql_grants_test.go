@@ -70,7 +70,7 @@ func TestMysqlDatabaseGlobalGrantsMySQL(t *testing.T) {
 				if lowerCaseNames != 0 {
 					m.Spec.DatabaseName = "Acme_Wms"
 				}
-				m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+				m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: username, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
 			})
 			h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())

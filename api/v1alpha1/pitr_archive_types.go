@@ -5,17 +5,19 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// PITRArchiveEncryptionMode is the encryption mode recorded in a PITR
-// archive's descriptor (<prefix>/binlogs/archive.json).
+// EncryptionMode is how an artifact the operator writes is encrypted: a
+// backup dump (MysqlBackup status.encryption.mode) or a PITR archive (the
+// mode its descriptor, <prefix>/binlogs/archive.json, records).
 // +kubebuilder:validation:Enum=None;Passphrase
-type PITRArchiveEncryptionMode string
+type EncryptionMode string
 
 const (
-	// PITRArchiveEncryptionNone means the archive is stored in plaintext.
-	PITRArchiveEncryptionNone PITRArchiveEncryptionMode = "None"
-	// PITRArchiveEncryptionPassphrase means every archive object except the
-	// descriptor is BRV1-encrypted with a passphrase-derived key.
-	PITRArchiveEncryptionPassphrase PITRArchiveEncryptionMode = "Passphrase"
+	// EncryptionModeNone means the artifact is stored in plaintext.
+	EncryptionModeNone EncryptionMode = "None"
+	// EncryptionModePassphrase means the artifact is BRV1-encrypted with a
+	// passphrase-derived key (for an archive, every object except the
+	// descriptor).
+	EncryptionModePassphrase EncryptionMode = "Passphrase"
 )
 
 // EncryptionAlgorithm is a typed encryption algorithm identifier.
@@ -62,7 +64,7 @@ type PITRArchiveIdentity struct {
 	Source PITRArchiveSource `json:"source"`
 	// EncryptionMode is the archive's encryption mode.
 	// +required
-	EncryptionMode PITRArchiveEncryptionMode `json:"encryptionMode"`
+	EncryptionMode EncryptionMode `json:"encryptionMode"`
 	// Algorithm is the encryption algorithm; empty for None.
 	// +optional
 	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`
@@ -112,7 +114,7 @@ type PITRArchiveObservation struct {
 	// archive is refused (ArchiveEncryptionMismatch, say) it is still the
 	// configured mode, not the descriptor's.
 	// +optional
-	EncryptionMode PITRArchiveEncryptionMode `json:"encryptionMode,omitempty"`
+	EncryptionMode EncryptionMode `json:"encryptionMode,omitempty"`
 	// State summarizes the sidecars' reports.
 	// +required
 	State PITRArchiveObservedState `json:"state"`
@@ -175,9 +177,10 @@ type ReplayedBinlogRef struct {
 }
 
 // PointInTimeResult is the certified outcome of a point-in-time replay,
-// read from the replay's verdict. Restores (status.restore.pointInTime and
-// status.restoreInPlace.pointInTime) and verifications
-// (status.pointInTime) share it.
+// read from the replay's verdict. Restores
+// (status.restore.provenance.pointInTime; it stays unset in
+// status.restoreInPlace.provenance) and verifications (status.pointInTime)
+// share it.
 type PointInTimeResult struct {
 	// Mode is the replay mode.
 	// +required
@@ -185,7 +188,7 @@ type PointInTimeResult struct {
 	// StopTime is the requested target (a whole second; commit times are
 	// compared against it to the microsecond). Unset in Latest mode.
 	// +optional
-	StopTime *metav1.MicroTime `json:"stopTime,omitempty"`
+	StopTime *metav1.Time `json:"stopTime,omitempty"`
 	// Outcome is how the end point was reached.
 	// +required
 	Outcome PointInTimeOutcome `json:"outcome"`
@@ -331,7 +334,7 @@ type PITRArchiveBinding struct {
 type PITRArchiveBindingEncryption struct {
 	// Mode is the archive's encryption mode.
 	// +required
-	Mode PITRArchiveEncryptionMode `json:"mode"`
+	Mode EncryptionMode `json:"mode"`
 	// Algorithm is empty for None.
 	// +optional
 	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`

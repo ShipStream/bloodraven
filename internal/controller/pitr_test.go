@@ -21,7 +21,7 @@ func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
 				fg := newTestFG()
 				storage := v1alpha1.BackupStorage{Type: storageType}
 				if storageType == v1alpha1.BackupStorageS3 {
-					storage.S3 = &v1alpha1.S3Storage{Bucket: "backups", CredentialsSecret: "aws-creds"}
+					storage.S3 = &v1alpha1.S3Storage{Bucket: "backups", CredentialsSecretName: "aws-creds"}
 				} else {
 					storage.PVC = &v1alpha1.PVCStorage{ClaimName: "backups"}
 				}
@@ -30,7 +30,7 @@ func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
 					Profiles: []v1alpha1.BackupProfile{{
 						Name: "encrypted", Storage: storage,
 						Encryption: &v1alpha1.BackupEncryptionSpec{
-							PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "archive-key", Key: "selected-key"},
+							PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "archive-key", Key: "selected-key"},
 						},
 					}},
 				}
@@ -140,11 +140,11 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStorageS3,
 				S3: &v1alpha1.S3Storage{
-					Bucket:            "lion",
-					Prefix:            "dumps",
-					Region:            "us-east-1",
-					EndpointURL:       "https://s3.example.com",
-					CredentialsSecret: "aws-creds",
+					Bucket:                "lion",
+					Prefix:                "dumps",
+					Region:                "us-east-1",
+					EndpointURL:           "https://s3.example.com",
+					CredentialsSecretName: "aws-creds",
 				},
 			},
 		},
@@ -273,7 +273,7 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 func TestBuildRestorePITRFragments_RequiresSourceArchive(t *testing.T) {
 	fg := withBackup(nil)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"},
+		PointInTime: &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z")},
 	}
 	_, err := buildRestorePITRFragments(fg)
 	if err == nil || !strings.HasPrefix(err.Error(), string(pitrarchive.TokenTargetInvalid)+": pointInTime.archiveProfileName is required") {
@@ -350,16 +350,16 @@ func TestCanonicalExcludeGtidsBounds(t *testing.T) {
 // both the AWS creds secret and the shared emptyDir are mounted.
 func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "primary"})
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "us-east-1a"}, {Name: "us-east-1b"}}
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "us-east-1a", ServerID: 101}, {Name: "us-east-1b", ServerID: 102}}
 	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{{
 		Name: "primary",
 		Storage: v1alpha1.BackupStorage{
 			Type: v1alpha1.BackupStorageS3,
 			S3: &v1alpha1.S3Storage{
-				Bucket:            "lion",
-				Prefix:            "dumps",
-				Region:            "us-east-1",
-				CredentialsSecret: "aws-creds",
+				Bucket:                "lion",
+				Prefix:                "dumps",
+				Region:                "us-east-1",
+				CredentialsSecretName: "aws-creds",
 			},
 		},
 	}}
@@ -370,7 +370,7 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	source.Storage.S3.Prefix = "source-dumps"
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source"},
+		PointInTime: &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source"},
 	}
 	bindTestPITRArchive(t, fg, "source")
 
@@ -455,7 +455,7 @@ func TestValidateRestoreArchiveProfile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := withBackup(tt.pitr)
 			fg.Spec.Backup.Profiles = tt.profiles
-			err := validateRestoreArchiveProfile(fg, &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: tt.archive})
+			err := validateRestoreArchiveProfile(fg, &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: tt.archive})
 			if tt.want == "" {
 				if err != nil {
 					t.Fatalf("unexpected refusal: %v", err)
@@ -511,11 +511,11 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 		{name: "unparsable", in: u + ":9-2", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			restore, rerr := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopDatetime: "2030-01-01T00:00:00Z", ExcludeGtids: tc.in})
-			verify, verr := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: "latest", ExcludeGtids: tc.in})
+			restore, rerr := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:00Z"), ExcludeGtids: tc.in})
+			verify, verr := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ExcludeGtids: tc.in})
 			for name, err := range map[string]error{"restore": rerr, "verification": verr} {
 				if tc.wantErr {
-					if err == nil || pitrFailureReason(err.Error()) != string(pitrarchive.TokenTargetInvalid) {
+					if err == nil || string(pitrFailureReason(err.Error())) != string(pitrarchive.TokenTargetInvalid) {
 						t.Fatalf("%s: err = %v, want %s", name, err, pitrarchive.TokenTargetInvalid)
 					}
 					continue
@@ -532,8 +532,8 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 			}
 		})
 	}
-	if req, err := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: "none", ExcludeGtids: "not a set:x-y"}); err != nil || req != nil {
-		t.Fatalf("mode none = %+v, %v; want no replay and no error", req, err)
+	if req, err := verificationPITRRequest(nil); err != nil || req != nil {
+		t.Fatalf("no pointInTime block = %+v, %v; want no replay and no error", req, err)
 	}
 }
 

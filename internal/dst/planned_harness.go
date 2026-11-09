@@ -133,7 +133,7 @@ func (pl *plannedHarness) tickAcks(p int) {
 		if a.padded {
 			v = " " + v + "\n"
 		}
-		if err := pl.store.PatchAnnotations("holdAck", map[string]string{controller.AcknowledgePlannedFailoverHoldAnnotation: v}); err == nil {
+		if err := pl.store.PatchAnnotations("holdAck", map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: v}); err == nil {
 			pl.counts["holdAcks"]++
 		}
 	}
@@ -230,15 +230,14 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	nn := types.NamespacedName{Namespace: r.cfg.Namespace, Name: r.cfg.Name}
 	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: nn.Namespace, Name: nn.Name}}
 	for i, name := range t.SiteNames {
-		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: name, Role: v1alpha1.SiteRole(t.Roles[i])})
+		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: controller.APISiteRole(t.Roles[i])})
 	}
 	cooldown := metav1.Duration{Duration: time.Duration(t.CooldownSec) * time.Second}
 	obj.Spec.FailoverCooldown = &cooldown
 	obj.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{MaxLagWait: &simMaxLagWait, DrainTimeout: &simDrainTimeout}
 	if p := r.persisted; p != nil && !p.LastFailover.IsZero() {
 		lf := metav1.NewTime(p.LastFailover.UTC().Truncate(time.Second))
-		obj.Status.LastFailover = &lf
-		obj.Status.LastFailoverTarget = p.LastFailoverTarget
+		obj.Status.SetLastFailover(&lf, p.LastFailoverTarget, "")
 	}
 	if f := r.persistedFailover; f != nil {
 		if a, err := controller.FailoverRecordAnnotations(*f); err == nil {
@@ -775,7 +774,7 @@ func (pl *plannedHarness) fireRestart() {
 // the run's durable stall-since time is a stallMarker2m, otherwise (the 10s
 // released-run deadline) a stallMarkerReleased.
 func (pl *plannedHarness) noteCommit(before, after *v1alpha1.MysqlFailoverGroup) {
-	key := controller.PlannedFailoverTerminalAnnotation
+	key := v1alpha1.PlannedFailoverTerminalAnnotation
 	v := after.GetAnnotations()[key]
 	if v == "" || v == before.GetAnnotations()[key] {
 		return
@@ -784,7 +783,7 @@ func (pl *plannedHarness) noteCommit(before, after *v1alpha1.MysqlFailoverGroup)
 	if !ok {
 		return
 	}
-	id, since, ok := parseDeadlineStart(before.GetAnnotations()[controller.PlannedFailoverStallSinceAnnotation])
+	id, since, ok := parseDeadlineStart(before.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation])
 	if !ok || id != m.RunID {
 		return
 	}
@@ -1194,7 +1193,7 @@ func (pl *plannedHarness) stalledClaimWithinDeadline() bool {
 	if obj == nil {
 		return false
 	}
-	run, since, ok := parseDeadlineStart(obj.GetAnnotations()[controller.PlannedFailoverStallSinceAnnotation])
+	run, since, ok := parseDeadlineStart(obj.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation])
 	if !ok || run != id {
 		return false
 	}

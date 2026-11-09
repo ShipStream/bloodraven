@@ -400,7 +400,7 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 		m.violate("PlannedMutationWithoutRun", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 			"the planned path sent %s %s to %s with no run recorded", e.Kind, e.Detail, e.Site))
 		return
-	case r.marked || markerRunID(m.cur.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == r.id:
+	case r.marked || markerRunID(m.cur.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) == r.id:
 		m.violate("MarkedRunResumed", r.id, fmt.Sprintf("run %s sent %s %s to %s after its terminal marker",
 			r.id, e.Kind, e.Detail, e.Site))
 		return
@@ -531,8 +531,8 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 	// The status failover record is timestamp-monotonic: no writer moves it
 	// to an older failover, the runner's two-step snapshot write included
 	// (K042).
-	if b := before.Status.LastFailover; b != nil {
-		if a := after.Status.LastFailover; a == nil || a.Before(b) {
+	if b := before.Status.LastFailoverTime(); b != nil {
+		if a := after.Status.LastFailoverTime(); a == nil || a.Before(b) {
 			m.violate("StatusRecordRegressed", fmt.Sprintf("%s|%d", kind, m.c.Seq()), fmt.Sprintf(
 				"a %s write moved status.lastFailover from %s to %v", kind, b.UTC().Format(time.RFC3339), a))
 		}
@@ -558,7 +558,7 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 			r.fenceSet = *pf.Fence.GtidSet
 		}
 	}
-	if markerRunID(after.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]) == r.id {
+	if markerRunID(after.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) == r.id {
 		r.marked = true
 	}
 	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && r.promotingGen < 0 {
@@ -596,7 +596,7 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 // ManualRecoveryRequired marker is a hold on its own (PlannedHoldFrom), so
 // its justification is judged then too (K077).
 func (m *plannedMonitor) onMarker(before, after *v1alpha1.MysqlFailoverGroup) {
-	key := controller.PlannedFailoverTerminalAnnotation
+	key := v1alpha1.PlannedFailoverTerminalAnnotation
 	v := after.GetAnnotations()[key]
 	if v == "" || v == before.GetAnnotations()[key] {
 		return
@@ -875,12 +875,12 @@ func (m *plannedMonitor) checkWatermarks(obj *v1alpha1.MysqlFailoverGroup) {
 		if !r.published || r.watermarkFlags {
 			continue
 		}
-		if lf := obj.Status.LastFailover; lf != nil && !r.confirmedAt.IsZero() &&
+		if lf := obj.Status.LastFailoverTime(); lf != nil && !r.confirmedAt.IsZero() &&
 			lf.UTC().Truncate(time.Second).After(r.confirmedAt) {
 			r.watermarkFlags = true // a later promotion record supersedes it
 			continue
 		}
-		have := obj.Status.PromotionGtidExecuted
+		have := obj.Status.PromotionGtidExecuted()
 		w, err := mysql.ParseGTIDSet(r.fenceSet)
 		if err != nil {
 			continue
@@ -890,8 +890,8 @@ func (m *plannedMonitor) checkWatermarks(obj *v1alpha1.MysqlFailoverGroup) {
 		// The status record carrying the run's own promotion (lastFailover
 		// at its confirmation) must carry its watermark from the first
 		// write on (K038), not only keep one it once showed.
-		ownRecord := !r.confirmedAt.IsZero() && obj.Status.LastFailover != nil &&
-			obj.Status.LastFailover.UTC().Truncate(time.Second).Equal(r.confirmedAt)
+		ownRecord := !r.confirmedAt.IsZero() && obj.Status.LastFailoverTime() != nil &&
+			obj.Status.LastFailoverTime().UTC().Truncate(time.Second).Equal(r.confirmedAt)
 		switch {
 		case contains:
 			r.watermarkSeen = true
@@ -1058,7 +1058,7 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 	}
 	lastTarget := ""
 	if m.cur != nil {
-		lastTarget = m.cur.Status.LastFailoverTarget
+		lastTarget = m.cur.Status.LastFailoverTarget()
 	}
 	ids := append([]string(nil), m.order...)
 	sort.Strings(ids)
@@ -1093,7 +1093,7 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 	// A request annotation nobody consumed after heal and settle never
 	// produced a run, so no run entry can report it (K182).
 	if m.cur != nil {
-		if v, ok := m.cur.GetAnnotations()[controller.PlannedFailoverAnnotation]; ok {
+		if v, ok := m.cur.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
 			m.violate("PlannedRunStuck", "request", fmt.Sprintf(
 				"the planned-failover request %q is still unconsumed after heal and settle", v))
 		}

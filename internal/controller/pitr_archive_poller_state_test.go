@@ -33,7 +33,7 @@ func countPITREvents(events []string) (warnings, normals int) {
 		switch {
 		case strings.HasPrefix(e, "Warning PITRArchiveNotReady"):
 			warnings++
-		case strings.HasPrefix(e, "Normal PITRArchiveReady"):
+		case strings.HasPrefix(e, "Normal PITRArchiveRecovered"):
 			normals++
 		}
 	}
@@ -46,7 +46,7 @@ func countPITREvents(events []string) (warnings, normals int) {
 // re-fire the Warning) nor certify True after one clean round.
 func TestPITRArchiveReplacementPollerSeesNewerPersistedFalse(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	persistedTrue := &metav1.Condition{Type: conditionPITRArchiveReady, Status: cTrue, Reason: reasonPITRArchiving,
+	persistedTrue := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cTrue, Reason: v1alpha1.ReasonArchiving,
 		Message: pitrArchiveArchivingText, ObservedGeneration: 3, LastTransitionTime: metav1.NewTime(t0.Add(-time.Hour))}
 	initFail := pitrRound{iad: pitrInitFailed("boom"), pdx: pitrClean()}
 	seeds := []string{"handoff from stopped poller", "authoritative read", "old poller did not stop", "seed read failed, then recovers"}
@@ -89,7 +89,7 @@ func TestPITRArchiveReplacementPollerSeesNewerPersistedFalse(t *testing.T) {
 				}
 				observeAndWrite(t, r, p, nn, t0.Add(30*time.Second), round.results())
 				cond, _ := pitrCondition(t, c, nn)
-				if cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRArchiveStoreInitFailed {
+				if cond == nil || cond.Status != cFalse || cond.Reason != v1alpha1.ReasonArchiveStoreInitFailed {
 					t.Fatalf("after the replacement's first round: %+v, want the persisted False kept", cond)
 				}
 				r.apiReader = nil
@@ -173,30 +173,30 @@ func TestPITRArchiveErrorDebouncesOnScans(t *testing.T) {
 		rounds []pitrRound
 	}{
 		{"one failed scan seen by two polls stays True", []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 10 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 40 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 70 * time.Second, iad: scanObs(at(60*time.Second), pitrInt(0), ""), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 10 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 40 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 70 * time.Second, iad: scanObs(at(60*time.Second), pitrInt(0), ""), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{"two failed scans are ArchiverError", []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 10 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 40 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 70 * time.Second, iad: scanObs(at(60*time.Second), pitrInt(2), errText), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiverError},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 10 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 40 * time.Second, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 70 * time.Second, iad: scanObs(at(60*time.Second), pitrInt(2), errText), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiverError},
 		}},
 		{"older sidecar: a later lastScanAt with an error confirms", []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 10 * time.Second, iad: scanObs(at(0), nil, errText), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 40 * time.Second, iad: scanObs(at(0), nil, errText), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 50 * time.Second, iad: scanObs(at(0), nil, errText), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 70 * time.Second, iad: scanObs(at(60*time.Second), nil, errText), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiverError},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 10 * time.Second, iad: scanObs(at(0), nil, errText), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 40 * time.Second, iad: scanObs(at(0), nil, errText), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 50 * time.Second, iad: scanObs(at(0), nil, errText), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 70 * time.Second, iad: scanObs(at(60*time.Second), nil, errText), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiverError},
 		}},
 	}
-	stuck := []pitrRound{{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving}}
+	stuck := []pitrRound{{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving}}
 	for d := 30 * time.Second; d <= pitrArchiveErrorStuckAfter+30*time.Second; d += 30 * time.Second {
-		want, reason := cTrue, reasonPITRArchiving
+		want, reason := cTrue, v1alpha1.ReasonArchiving
 		if d-30*time.Second >= pitrArchiveErrorStuckAfter {
-			want, reason = cFalse, reasonPITRArchiverError
+			want, reason = cFalse, v1alpha1.ReasonArchiverError
 		}
 		stuck = append(stuck, pitrRound{at: d, iad: scanObs(at(0), pitrInt(1), errText), pdx: ok, wantStatus: want, wantReason: reason})
 	}
@@ -230,8 +230,8 @@ func TestPITRArchiveNeverAnsweredSiteGetsLongerGrace(t *testing.T) {
 		if d < pitrArchiveFirstAnswerGrace && v.Status != cUnknown {
 			t.Fatalf("t+%v: %s/%s, want Unknown while pdx has never answered", d, v.Status, v.Reason)
 		}
-		if d == pitrArchiveFirstAnswerGrace && (v.Status != cFalse || v.Reason != reasonPITRSidecarUnreachable) {
-			t.Fatalf("t+%v: %s/%s, want False/%s after the grace", d, v.Status, v.Reason, reasonPITRSidecarUnreachable)
+		if d == pitrArchiveFirstAnswerGrace && (v.Status != cFalse || v.Reason != v1alpha1.ReasonSidecarUnreachable) {
+			t.Fatalf("t+%v: %s/%s, want False/%s after the grace", d, v.Status, v.Reason, v1alpha1.ReasonSidecarUnreachable)
 		}
 	}
 }
@@ -264,8 +264,8 @@ func TestPITRArchiveDisabledDuringPendingRolloutIsAwaitingRollout(t *testing.T) 
 	_ = r
 	p.round(context.Background())
 	cond, _ := pitrCondition(t, c, nn)
-	if cond == nil || cond.Status != cUnknown || cond.Reason != reasonPITRAwaitingRollout || !strings.Contains(cond.Message, "pdx") {
-		t.Fatalf("condition = %+v, want Unknown/%s naming pdx", cond, reasonPITRAwaitingRollout)
+	if cond == nil || cond.Status != cUnknown || cond.Reason != v1alpha1.ReasonAwaitingRollout || !strings.Contains(cond.Message, "pdx") {
+		t.Fatalf("condition = %+v, want Unknown/%s naming pdx", cond, v1alpha1.ReasonAwaitingRollout)
 	}
 	if w, _ := countPITREvents(drainEventsPITR(rec)); w != 0 {
 		t.Fatalf("%d Warnings during a pending rollout, want none", w)
@@ -280,8 +280,8 @@ func TestPITRArchiveDisabledDuringPendingRolloutIsAwaitingRollout(t *testing.T) 
 	}
 	p.round(context.Background())
 	cond, _ = pitrCondition(t, c, nn)
-	if cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRArchiverDisabled {
-		t.Fatalf("condition = %+v, want False/%s once no rollout is pending", cond, reasonPITRArchiverDisabled)
+	if cond == nil || cond.Status != cFalse || cond.Reason != v1alpha1.ReasonArchiverDisabled {
+		t.Fatalf("condition = %+v, want False/%s once no rollout is pending", cond, v1alpha1.ReasonArchiverDisabled)
 	}
 	if w, _ := countPITREvents(drainEventsPITR(rec)); w != 1 {
 		t.Fatalf("%d Warnings, want 1", w)
@@ -296,7 +296,7 @@ func TestPITRArchiveAwaitingRolloutKeepsKnownFalse(t *testing.T) {
 	round := pitrRound{iad: pitrClean(), pdx: pitrDisabled()}.results()
 	round[1].awaitingRollout = true
 	tr.observe(t0.Add(30*time.Second), round)
-	if v := tr.current(); v.Status != cFalse || v.Reason != reasonPITRArchiveStoreInitFailed {
+	if v := tr.current(); v.Status != cFalse || v.Reason != v1alpha1.ReasonArchiveStoreInitFailed {
 		t.Fatalf("verdict = %+v, want the known False kept", v)
 	}
 }
@@ -359,8 +359,8 @@ func TestPITRArchiveHandoffCarriesSiteHistory(t *testing.T) {
 			[]archiverPollResult{{site: "iad", err: errors.New("connection refused")}, {site: "pdx", status: pitrClean().status}})
 	}
 	cond, pitr := pitrCondition(t, c, nn)
-	if cond == nil || cond.Reason != reasonPITRSidecarUnreachable {
-		t.Fatalf("condition = %+v, want False/%s after 3 misses over 60s", cond, reasonPITRSidecarUnreachable)
+	if cond == nil || cond.Reason != v1alpha1.ReasonSidecarUnreachable {
+		t.Fatalf("condition = %+v, want False/%s after 3 misses over 60s", cond, v1alpha1.ReasonSidecarUnreachable)
 	}
 	if pitr == nil || pitr.ArchivedFileCount != 7 || !strings.Contains(pitr.Message, "last-known for: iad") {
 		t.Fatalf("status.pitr = %+v, want iad's handed-over coverage marked last-known", pitr)
@@ -372,7 +372,7 @@ func TestPITRArchiveHandoffCarriesSiteHistory(t *testing.T) {
 // the False (and a Warning) back.
 func TestPITRArchiveReplacementIgnoresStaleListedFalse(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	persistedFalse := &metav1.Condition{Type: conditionPITRArchiveReady, Status: cFalse, Reason: reasonPITRArchiveStoreInitFailed,
+	persistedFalse := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiveStoreInitFailed,
 		Message: "iad: archive store init: boom", ObservedGeneration: 3, LastTransitionTime: metav1.NewTime(t0.Add(-time.Hour))}
 	fg := pitrArchiveFG(persistedFalse)
 	fg.UID = "uid-1"
@@ -413,7 +413,7 @@ func TestPITRArchiveDisabledBeforeDriftIsNoticed(t *testing.T) {
 	round := pitrRound{iad: pitrClean(), pdx: pitrDisabled()}.results()
 	round[1].awaitingRollout = true
 	tr.observe(t0.Add(60*time.Second), round)
-	if v := tr.current(); v.Status != cUnknown || v.Reason != reasonPITRAwaitingRollout {
-		t.Fatalf("after drift is noticed: %+v, want Unknown/%s", v, reasonPITRAwaitingRollout)
+	if v := tr.current(); v.Status != cUnknown || v.Reason != v1alpha1.ReasonAwaitingRollout {
+		t.Fatalf("after drift is noticed: %+v, want Unknown/%s", v, v1alpha1.ReasonAwaitingRollout)
 	}
 }

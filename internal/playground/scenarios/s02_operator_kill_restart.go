@@ -106,14 +106,14 @@ func verifyActiveSiteUnchanged() runner.Step {
 			}
 			if mfg.Status.ActiveSite != original {
 				return fmt.Errorf("activeSite changed during operator restart: was %q, now %q (lastFailoverTarget=%q)",
-					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					original, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 			}
 			// Defense-in-depth: also confirm the cluster still reports
 			// exactly one writable site so an in-flight unrelated
 			// promotion doesn't slip past the activeSite check.
 			var writable []string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "writable" {
+				if s.State == v1alpha1.SiteStateWritable {
 					writable = append(writable, s.Name)
 				}
 			}
@@ -149,7 +149,7 @@ func verifyNoSelfFenceAcrossSites() runner.Step {
 
 func ensureMFGReady(mfg *v1alpha1.MysqlFailoverGroup) error {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == "Ready" {
+		if c.Type == v1alpha1.ConditionReady {
 			if c.Status != "True" {
 				return fmt.Errorf("Ready condition is %q (reason=%s message=%q)", c.Status, c.Reason, c.Message)
 			}

@@ -39,11 +39,11 @@ type cleanupStore interface {
 //
 //	BLOODRAVEN_BACKUP_NAME           MysqlBackup name; must be the location's last segment
 //	BLOODRAVEN_STORAGE_TYPE          S3 | PVC
-//	BLOODRAVEN_OUTPUT_URL            MysqlBackup.status.location
+//	BLOODRAVEN_OUTPUT_URL            MysqlBackup.status.artifactStorage.location
 //	BLOODRAVEN_S3_BUCKET             bucket from status.artifactStorage (S3)
 //	BLOODRAVEN_S3_ENDPOINT_OVERRIDE  endpoint from status.artifactStorage (S3, optional)
 //	AWS_REGION                       region from status.artifactStorage (S3, optional)
-//	BLOODRAVEN_AWS_CREDS_DIR         mounted credentialsSecret (S3)
+//	BLOODRAVEN_AWS_CREDS_DIR         the mounted s3.credentialsSecretName Secret (S3)
 //	BLOODRAVEN_PVC_MOUNT_PATH        mount of the claim from status.artifactStorage (PVC)
 //
 // A backup that never succeeded is cleaned up in abandoned mode
@@ -379,7 +379,7 @@ func abandonedStampOwned(raw []byte, found bool, passphrase []byte, uid, key str
 	return string(stamp.Backup.UID) == uid, nil
 }
 
-// cleanupS3Prefix turns a status.location into the object-key prefix that
+// cleanupS3Prefix turns a status.artifactStorage.location into the object-key prefix that
 // holds exactly this artifact. Plain dumps record a bucket-relative prefix;
 // encrypted dumps record s3://<bucket>/<prefix>/. The result always ends in
 // "/" so "x/backup-1" can never match "x/backup-10/...".

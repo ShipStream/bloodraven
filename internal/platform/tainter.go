@@ -13,25 +13,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	k8sretry "k8s.io/client-go/util/retry"
-)
 
-const (
-	LegacyTaintKey = "shipstream.io/db-readonly"
-	TaintKeyPrefix = "shipstream.io/db-readonly-"
-	TaintValue     = "true"
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
-
-func TaintKeyForGroup(group string) string {
-	return TaintKeyPrefix + group
-}
 
 // NodeTainter manages node taints for failover group site failover.
 // The selector parameter is a Kubernetes label selector string, usually
 // produced from spec.sites[].taintNodeSelector.
-// The group parameter is the failover group name, used to derive the
-// per-group taint key (e.g. "shipstream.io/db-readonly-orders").
+// The namespace and group parameters name the failover group, from which
+// the taint key is derived (v1alpha1.ReadOnlyTaintKey).
 type NodeTainter interface {
-	SetTaint(ctx context.Context, selector string, group string, taint bool) error
+	SetTaint(ctx context.Context, selector, namespace, group string, taint bool) error
 }
 
 type nodeTainter struct {
@@ -43,12 +35,12 @@ func NewNodeTainter(client kubernetes.Interface, logger *slog.Logger) NodeTainte
 	return &nodeTainter{client: client, logger: logger}
 }
 
-func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group string, taint bool) error {
+func (t *nodeTainter) SetTaint(ctx context.Context, selector, namespace, group string, taint bool) error {
 	if strings.TrimSpace(selector) == "" {
 		return fmt.Errorf("refusing to update node taints for empty selector")
 	}
 
-	taintKey := TaintKeyForGroup(group)
+	taintKey := v1alpha1.ReadOnlyTaintKey(namespace, group)
 	nodes, err := t.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -75,14 +67,14 @@ func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group strin
 func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, taintKey string, apply bool) error {
 	desiredTaint := corev1.Taint{
 		Key:    taintKey,
-		Value:  TaintValue,
+		Value:  v1alpha1.ReadOnlyTaintValue,
 		Effect: corev1.TaintEffectNoExecute,
 	}
 
 	var removedTaints, desiredTaints int
 	newTaints := make([]corev1.Taint, 0, len(node.Spec.Taints)+1)
 	for _, taint := range node.Spec.Taints {
-		if taint.Key == taintKey || taint.Key == LegacyTaintKey {
+		if taint.Key == taintKey {
 			removedTaints++
 			if taint == desiredTaint {
 				desiredTaints++

@@ -39,7 +39,7 @@ get)
       *dataFileDir*) ;;
     esac ;;
   pod)
-    if [[ "$*" == *"-l app.kubernetes.io/name=mysql,app.kubernetes.io/instance=lion,shipstream.io/site=dc2 "* &&
+    if [[ "$*" == *"-l app.kubernetes.io/name=mysql,app.kubernetes.io/instance=lion,bloodraven.shipstream.io/site=dc2 "* &&
           "$*" == *"--field-selector=status.phase=Running"* ]]; then
       if [[ -f "$STATE/pods" ]]; then cat "$STATE/pods"; else printf 'mysql-lion-dc2-0		true
 '; fi

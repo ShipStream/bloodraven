@@ -10,7 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 func TestShortDuration(t *testing.T) {
@@ -107,10 +106,10 @@ func TestSiteCountSummary(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
-				{Name: "pdx", State: "read-only"},
-				{Name: "lhr", State: "unreachable"},
-				{Name: "fra", State: "unknown"},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly},
+				{Name: "lhr", State: v1alpha1.SiteStateUnreachable},
+				{Name: "fra", State: v1alpha1.SiteStateUnknown},
 			},
 		},
 	}
@@ -146,7 +145,7 @@ func TestPlannedFailoverSummary(t *testing.T) {
 	}
 	fg.Status.Conditions = nil
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if got := plannedFailoverSummary(fg); got != "Ended(SourceLeftFenced:StatusStalled)" {
 		t.Errorf("marked planned failover -> %q, want Ended(SourceLeftFenced:StatusStalled)", got)
 	}
@@ -170,7 +169,7 @@ func TestPrintGroupList(t *testing.T) {
 	items := []v1alpha1.MysqlFailoverGroup{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-			Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+			Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 			// Leave ActiveSite empty to assert the emptyDash fallback.
 		},
 	}
@@ -224,16 +223,16 @@ func TestPrintGroupStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default", CreationTimestamp: now},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", Zone: "us-east-1a"},
-				{Name: "pdx", Zone: "us-west-2a"},
+				{Name: "iad", ServerID: 101, Zone: "us-east-1a"},
+				{Name: "pdx", ServerID: 102, Zone: "us-west-2a"},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "orders.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "orders.example.com", TTLSeconds: 60},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable", LastSeen: &now},
-				{Name: "pdx", State: "read-only", LastSeen: &now, Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable, LastSeenTime: &now, Replication: v1alpha1.SiteReplicationNotApplicable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, LastSeenTime: &now, Replication: v1alpha1.SiteReplicationHealthy},
 			},
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
 		},
@@ -248,8 +247,8 @@ func TestPrintGroupStatus(t *testing.T) {
 		"Active site: iad",
 		"DNS: orders.example.com",
 		// Per-site row contents:
-		"writable",
-		"read-only",
+		"Writable",
+		"ReadOnly",
 		// Confirm both site names land in the table.
 		"iad",
 		"pdx",
@@ -268,9 +267,9 @@ func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 	msg := "Ordered update stalled: site pdx was updated but its pod mysql-orders-pdx-1 is not Ready (sidecar not ready: crash looping, last exit code 1 (Error))"
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 		Status: v1alpha1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{
-			Type: "Updating", Status: metav1.ConditionFalse, Reason: "OrderedUpdateStalled", Message: msg,
+			Type: "Updating", Status: metav1.ConditionTrue, Reason: "OrderedUpdateStalled", Message: msg,
 		}}},
 	}
 	var buf bytes.Buffer
@@ -297,7 +296,7 @@ func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 func TestPrintGroupStatus_EmptyActiveRendersDash(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "fresh", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}}},
+		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}}},
 	}
 	var buf bytes.Buffer
 	if err := printGroupStatus(&buf, fg, "table"); err != nil {
@@ -348,7 +347,7 @@ func TestSiteCountSummaryBucketsUnknownStateAsUnhealthy(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
 				{Name: "pdx", State: ""},
 				{Name: "lhr", State: "weird-future-value"},
 			},

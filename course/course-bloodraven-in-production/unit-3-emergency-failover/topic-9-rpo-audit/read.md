@@ -100,7 +100,7 @@ window.
 
 Now count what you actually lost. At step 6 of the failover sequence the operator runs
 `SELECT @@global.gtid_executed` on the candidate — before it accepts a single write — and records the
-answer in `status.promotionGtidExecuted`. That is the high-water mark of everything `pdx` had
+answer in `status.lastFailover.promotionGtidExecuted`. That is the high-water mark of everything `pdx` had
 received. When the old primary comes back and is compared against it, the operator subtracts one set
 from the other and publishes the difference as `status.sites[].divergentGtid`, with its cardinality on
 the `bloodraven_divergent_transactions` gauge.
@@ -132,10 +132,11 @@ and everything else elided:
 ```yaml
 status:
   activeSite: pdx                                     # was iad
-  lastFailoverTarget: pdx
-  promotionGtidExecuted: |-                           # new since topic 1: pdx's set at promotion
-    a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,
-    a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7
+  lastFailover:
+    target: pdx
+    promotionGtidExecuted: |-                         # new since topic 1: pdx's set at promotion
+      a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,
+      a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7
   sites:
   - name: iad
     divergentGtid: a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:20-23

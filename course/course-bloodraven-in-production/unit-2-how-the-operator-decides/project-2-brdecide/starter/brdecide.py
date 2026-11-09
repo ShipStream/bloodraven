@@ -24,16 +24,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 # --- Grounded constants -----------------------------------------------------
-# Site roles: api/v1alpha1/types.go — enum primary-candidate;dr-only;read-only.
-ROLE_PRIMARY_CANDIDATE = "primary-candidate"
-ROLE_DR_ONLY = "dr-only"
-ROLE_READ_ONLY = "read-only"
+# Site roles: api/v1alpha1/types.go — enum PrimaryCandidate;DisasterRecovery;ReadOnly.
+ROLE_PRIMARY_CANDIDATE = "PrimaryCandidate"
+ROLE_DISASTER_RECOVERY = "DisasterRecovery"
+ROLE_READ_ONLY = "ReadOnly"
 
-# The four per-site states: internal/state/machine.go.
-STATE_UNKNOWN = "unknown"
-STATE_WRITABLE = "writable"
-STATE_READ_ONLY = "read-only"
-STATE_UNREACHABLE = "unreachable"
+# The four per-site states as status.sites[].state reports them: api/v1alpha1/types.go.
+STATE_UNKNOWN = "Unknown"
+STATE_WRITABLE = "Writable"
+STATE_READ_ONLY = "ReadOnly"
+STATE_UNREACHABLE = "Unreachable"
 
 # spec.failoverCooldown default "5m"; the operator falls back to the same value
 # when the pointer is nil.
@@ -83,14 +83,14 @@ def tally(observations: list[Observation]) -> dict:
     Three rules, in this order, for every observation:
 
       1. ``coreCount`` increments for every site whose role is **not**
-         ``read-only``. A ``dr-only`` site counts. An ``unknown`` state still
-         counts — the site is part of the topology.
-      2. A site that is ``writable`` while its role is **not**
-         ``primary-candidate`` goes to ``fenceSites`` and is skipped: it never
+         ``ReadOnly``. A ``DisasterRecovery`` site counts. An ``Unknown`` state
+         still counts — the site is part of the topology.
+      2. A site that is ``Writable`` while its role is **not**
+         ``PrimaryCandidate`` goes to ``fenceSites`` and is skipped: it never
          reaches a tally.
-      3. A site whose role is ``read-only`` is skipped entirely.
+      3. A site whose role is ``ReadOnly`` is skipped entirely.
 
-    Everything that survives lands in the tally for its state. ``unknown``
+    Everything that survives lands in the tally for its state. ``Unknown``
     sites land in no tally at all.
     """
     action = new_action()
@@ -112,7 +112,7 @@ def evaluate_cross_site(observations: list[Observation], site_priorities: list[s
 
       1. fence-first — ``fenceSites`` non-empty:
          alert ``writable non-promotable site requires fencing (<sites>)``
-         (comma-space joined), reason ``Degraded``.
+         (comma-space joined), reason ``SiteUnhealthy``.
       2. TotalLoss — ``len(unreachable) == coreCount``:
          alert ``TOTAL LOSS: all sites are unreachable``, reason ``TotalLoss``.
       3. SplitBrain — ``len(writable) > 1``: ``splitBrain`` True,
@@ -120,14 +120,14 @@ def evaluate_cross_site(observations: list[Observation], site_priorities: list[s
          reason ``SplitBrain``.
       4. Failover — ``len(writable) == 0`` and ``len(unreachable) > 0`` and
          ``len(readOnly) > 0`` and ranking yields at least one candidate:
-         set ``promotionCandidates``, reason ``Degraded``, **no alert**.
+         set ``promotionCandidates``, reason ``SiteUnhealthy``, **no alert**.
       5. NoPrimary — still no writable site: reason ``NoPrimary``, alert
          ``NO PRIMARY: both sites are read-only`` when exactly two read-only
          sites and zero unreachable, otherwise
          ``NO PRIMARY: no writable site available``.
-      6. Degraded — exactly one writable and at least one unreachable:
+      6. SiteUnhealthy — exactly one writable and at least one unreachable:
          alert ``<unreachable sites> unreachable while <writable site> is primary``,
-         reason ``Degraded``.
+         reason ``SiteUnhealthy``.
       7. Healthy — reason ``Healthy``, no alert.
 
     Use rank_promotion_candidates() for row 4; it is already written.
@@ -243,7 +243,7 @@ def load_group(path: str) -> dict:
 def observations_from(group: dict) -> list[Observation]:
     """Join spec.sites (role) to status.sites (state), in declared site order.
 
-    A site the operator has not reported on yet is `unknown`, not missing.
+    A site the operator has not reported on yet is `Unknown`, not missing.
     """
     states = {
         site.get("name"): site.get("state") or STATE_UNKNOWN
@@ -268,11 +268,11 @@ def observations_from(group: dict) -> list[Observation]:
 
 def read_history(group: dict):
     """Return the two durable copies as ((ts, target), (ts, target))."""
-    status = group.get("status", {})
+    record = group.get("status", {}).get("lastFailover") or {}
     annotations = group.get("metadata", {}).get("annotations", {}) or {}
     status_record = (
-        parse_rfc3339(status.get("lastFailover")),
-        status.get("lastFailoverTarget") or None,
+        parse_rfc3339(record.get("time")),
+        record.get("target") or None,
     )
     annotation_record = (
         parse_rfc3339(annotations.get(LAST_FAILOVER_ANNOTATION)),
@@ -283,10 +283,10 @@ def read_history(group: dict):
 
 def rank_promotion_candidates(read_only: list[str], observations: list[Observation],
                               site_priorities: list[str]) -> list[str]:
-    """Order the read-only primary-candidates: sitePriorities first, then declared order.
+    """Order the ReadOnly PrimaryCandidate sites: sitePriorities first, then declared order.
 
-    Mirrors RankPromotionCandidates. Non-primary-candidate sites are dropped, so a
-    `dr-only` replica is never returned. This list is the **tiebreaker** only:
+    Mirrors RankPromotionCandidates. Sites that are not PrimaryCandidate are dropped,
+    so a `DisasterRecovery` replica is never returned. This list is the **tiebreaker** only:
     the operator ranks it by GTID freshness before promoting anything.
     """
     roles = {obs.name: obs.role for obs in observations}

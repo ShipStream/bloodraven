@@ -21,8 +21,8 @@ func init() {
 const (
 	s21EvictCanary             = "noexecute-evict-canary"
 	s21TolerateCanary          = "noexecute-tolerate-canary"
-	s21PlaygroundGroupLabel    = "shipstream.io/failover-group.playground"
-	s21PlaygroundSiteLabel     = "shipstream.io/site.playground"
+	s21PlaygroundGroupLabel    = "bloodraven.shipstream.io/failover-group.playground"
+	s21PlaygroundSiteLabel     = "bloodraven.shipstream.io/site.playground"
 	s21EvictionObservationTime = 90 * time.Second
 )
 
@@ -30,7 +30,7 @@ const (
 // of the playground site's NoExecute taint: pods with the matching
 // toleration survive a failover; pods without it are evicted by the
 // kubelet. This pins down the operator's promise that the
-// `db-readonly-<fg>:NoExecute` taint is the *only* mechanism gating
+// `<namespace>.db-readonly.bloodraven.shipstream.io/<fg>:NoExecute` taint is the *only* mechanism gating
 // non-MySQL workload placement on a read-only site, which lets
 // downstream teams design tolerations against a stable contract.
 //
@@ -43,7 +43,7 @@ func scenario21NoExecuteEvictionSemantics() runner.Scenario {
 	return runner.Scenario{
 		ID:    "21-noexecute-eviction-semantics",
 		Title: "NoExecute eviction semantics: tolerating pods survive, others are evicted",
-		Hypothesis: "After a playground failover, the old-primary node's `db-readonly-playground:NoExecute` " +
+		Hypothesis: "After a playground failover, the old-primary node's `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground:NoExecute` " +
 			"taint evicts a non-tolerating canary (DeletionTimestamp set or pod gone) while a canary that " +
 			"tolerates the same taint stays Running.",
 		Risk:     "low",
@@ -96,7 +96,7 @@ func s21InjectCanaries() runner.Step {
 				return err
 			}
 			tolerantPod := s21CanaryPod(env.Namespace, s21TolerateCanary, selector, []corev1.Toleration{{
-				Key:      s20PlaygroundReadOnly,
+				Key:      s20PlaygroundReadOnly(env),
 				Operator: corev1.TolerationOpExists,
 				Effect:   corev1.TaintEffectNoExecute,
 			}})
@@ -161,7 +161,7 @@ func s21ObserveTaintApplied() runner.Step {
 				n, err := env.Kube.GetNode(ctx, node)
 				if err == nil {
 					last = fmt.Sprintf("taintCount=%d", len(n.Spec.Taints))
-					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly) {
+					if pgkube.NodeHasTaint(n, s20PlaygroundReadOnly(env)) {
 						env.Capture.Note(fmt.Sprintf("playground taint applied on %s", node))
 						return nil
 					}

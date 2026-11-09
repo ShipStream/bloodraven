@@ -17,7 +17,7 @@
 
 **Front:** Where does authorization for the deployment API live, and what is the lease's `instance`?
 
-**Back:** On the `MysqlDatabase`: `spec.deploymentClients[]` lists one `namespace` + `serviceAccount` pair per namespace, and `spec.groupRef.name` names the group. `instance` is the `MysqlDatabase` resource name, not the SQL schema.
+**Back:** On the `MysqlDatabase`: `spec.deploymentClients[]` lists one `namespace` + `serviceAccount` pair per namespace, and `spec.failoverGroupRef.name` names the group. `instance` is the `MysqlDatabase` resource name, not the SQL schema.
 
 ---
 
@@ -65,10 +65,10 @@
 
 **Front:** What increments `status.topologyGeneration`, and what does a bump do to leases?
 
-**Back:** Every authoritative active-site change — planned promotion, emergency failover, ordered-update failover, restore-in-place promotion, bootstrap completion. A bump revokes every lease in the group with `topology_changed` and raises a `DeploymentLeaseRevoked` event.
+**Back:** Every authoritative active-site change — planned promotion, emergency failover, ordered-update failover, restore-in-place promotion, bootstrap completion. A bump revokes every lease in the group with `TopologyChanged` and raises a `DeploymentLeaseRevoked` event.
 
 ---
 
 **Front:** How do you revoke every deployment lease by hand, and what must you never do instead?
 
-**Back:** Annotate the group with `bloodraven.shipstream.io/revoke-deployment-leases`; renewals then report `operator_revoked`. Never delete the leader-election Lease or edit `topologyGeneration` to clear a hold.
+**Back:** Annotate the group with `bloodraven.shipstream.io/revoke-deployment-leases`; renewals then report `OperatorRevoked`. Never delete the leader-election Lease or edit `topologyGeneration` to clear a hold.

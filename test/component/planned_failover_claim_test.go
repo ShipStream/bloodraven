@@ -340,8 +340,8 @@ func newPFHarness(t *testing.T, o pfOpts) *pfHarness {
 	}
 
 	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: h.nn.Namespace, Name: h.nn.Name}}
-	for _, s := range sites {
-		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: s.Name, Role: v1alpha1.SiteRole(s.Role)})
+	for i, s := range sites {
+		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: s.Name, ServerID: int64(101 + i), Role: controller.APISiteRole(s.Role)})
 	}
 	obj.Spec.FailoverCooldown = &metav1.Duration{Duration: o.cooldown}
 	obj.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
@@ -405,7 +405,7 @@ func pfOwnsSites(obj *v1alpha1.MysqlFailoverGroup) bool {
 	if pf == nil || pf.RunID == "" || pf.Result != nil {
 		return false
 	}
-	if m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]); ok && m.RunID == pf.RunID {
+	if m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && m.RunID == pf.RunID {
 		return false
 	}
 	switch pf.Phase {
@@ -543,8 +543,8 @@ func TestPF_HappyPath_TwoSite(t *testing.T) {
 		t.Fatalf("records %+v", pf)
 	}
 	obj := h.store.Object()
-	if obj.Status.LastFailoverTarget != "dc2" || obj.Status.PromotionGtidExecuted != pfF {
-		t.Fatalf("status record target=%q watermark=%q", obj.Status.LastFailoverTarget, obj.Status.PromotionGtidExecuted)
+	if obj.Status.LastFailoverTarget() != "dc2" || obj.Status.PromotionGtidExecuted() != pfF {
+		t.Fatalf("status record target=%q watermark=%q", obj.Status.LastFailoverTarget(), obj.Status.PromotionGtidExecuted())
 	}
 }
 
@@ -969,7 +969,7 @@ func TestPF_I22_WatermarkRestoredAfterRestart(t *testing.T) {
 	h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
 	h.newProcess()
 	h.tick()
-	if got := h.tm.Status().PromotionGtidExecuted; got != pfF {
+	if got := h.tm.Status().PromotionGtidExecuted(); got != pfF {
 		t.Fatalf("restored watermark %q, want F %q", got, pfF)
 	}
 	if rec, err := controller.FailoverRecordFromAnnotations(h.store.Object().GetAnnotations()); err != nil ||
@@ -1043,10 +1043,10 @@ func TestPF_I26_WatermarkFromFenceNotStatus(t *testing.T) {
 	h.request("dc2")
 	h.runToPromotingIntent()
 	h.store.MutateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.PromotionGtidExecuted = pfUUIDA + ":1-7"
+		st.SetLastFailover(st.LastFailoverTime(), st.LastFailoverTarget(), pfUUIDA+":1-7")
 	})
 	h.wantOutcome(h.runUntil(40, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
-	if got := h.store.Object().Status.PromotionGtidExecuted; got != pfF {
+	if got := h.store.Object().Status.PromotionGtidExecuted(); got != pfF {
 		t.Fatalf("watermark %q, want F", got)
 	}
 	if rec, _ := controller.FailoverRecordFromAnnotations(h.store.Object().GetAnnotations()); rec.PromotionGtidExecuted != pfF {
@@ -1472,7 +1472,7 @@ func TestPF_RestartedUnconfirmedRunNeverNamesOverNewerFailover(t *testing.T) {
 	// A newer failover lands elsewhere before the restarted process decides.
 	newer := metav1.NewTime(h.clk.Now().Add(time.Second))
 	h.store.MutateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
-		st.LastFailover, st.LastFailoverTarget = &newer, "dc1"
+		st.SetLastFailover(&newer, "dc1", st.PromotionGtidExecuted())
 	})
 	h.newProcess()
 	pf := h.runUntil(200, terminal)
@@ -1485,7 +1485,7 @@ func TestPF_RestartedUnconfirmedRunNeverNamesOverNewerFailover(t *testing.T) {
 	for range 2 {
 		h.tick()
 	}
-	if got := h.store.Object().Status.LastFailoverTarget; got != "dc1" {
+	if got := h.store.Object().Status.LastFailoverTarget(); got != "dc1" {
 		t.Fatalf("lastFailoverTarget %q: the unconfirmed run named over the newer failover", got)
 	}
 }
@@ -1514,7 +1514,7 @@ func TestPF_OversizedWatermarkKeepsClaimOnStall(t *testing.T) {
 	if id, _, ok := h.held(); !ok || id != h.pf().RunID {
 		t.Fatal("an oversized-watermark run released its claim on a status stall")
 	}
-	if strings.Contains(h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation], h.pf().RunID) {
+	if strings.Contains(h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation], h.pf().RunID) {
 		t.Fatal("an oversized-watermark run ended with a terminal marker")
 	}
 }
@@ -1685,7 +1685,7 @@ func TestPF_StatusStallWritesTerminalMarker(t *testing.T) {
 		h.clk.Advance(15 * time.Second)
 		h.pass()
 	}
-	marker := h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]
+	marker := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]
 	if m, ok := controller.ParseTerminalMarker(marker); !ok || m.RunID != pf.RunID {
 		t.Fatalf("no terminal marker for %s after the stall deadline: %q", pf.RunID, marker)
 	}
@@ -1720,7 +1720,7 @@ func TestPF_LateStatusCommitFencedByMarker(t *testing.T) {
 		h.clk.Advance(15 * time.Second)
 		h.pass()
 	}
-	if m := h.store.Object().GetAnnotations()[controller.PlannedFailoverTerminalAnnotation]; m == "" {
+	if m := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]; m == "" {
 		t.Fatal("setup: no terminal marker")
 	}
 	h.clk.Advance(10 * time.Minute)

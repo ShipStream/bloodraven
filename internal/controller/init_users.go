@@ -28,10 +28,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileInitUsersConfigMap(ctx context.C
 			return err
 		}
 		cm.Labels = map[string]string{
-			labelAppName:       "mysql",
-			labelInstance:      fg.Name,
-			labelFailoverGroup: fg.Name,
-			labelManagedBy:     managerName,
+			labelAppName:                "mysql",
+			labelInstance:               fg.Name,
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:              managerName,
 		}
 		cm.Data = map[string]string{
 			"01-bloodraven-users.sh": generateInitUsersScript(fg),
@@ -39,13 +39,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileInitUsersConfigMap(ctx context.C
 		return nil
 	})
 	return err
-}
-
-func generateInitUsersScript(fg *v1alpha1.MysqlFailoverGroup) string {
-	if fg.Spec.UsesCredentials() {
-		return generateCredentialsModeInitScript(fg)
-	}
-	return generateSecretNameModeInitScript()
 }
 
 // initScriptSocketPreamble resolves the Unix socket the *temporary* server
@@ -86,50 +79,11 @@ run_mysql() {
 }
 `
 
-// generateSecretNameModeInitScript creates the replication user from env vars
-// injected by the legacy secretName secret (MYSQL_REPLICATION_USER/PASSWORD).
-func generateSecretNameModeInitScript() string {
-	return `#!/bin/bash
-set -euo pipefail
-
-escape_sql() {
-    local val="$1"
-    val="${val//\\/\\\\}"
-    val="${val//\'/\'\'}"
-    printf '%s' "$val"
-}
-
-if [ -z "${MYSQL_REPLICATION_USER:-}" ] || [ -z "${MYSQL_REPLICATION_PASSWORD:-}" ]; then
-    echo "bloodraven-init: MYSQL_REPLICATION_USER/PASSWORD not set, skipping replication user"
-    exit 0
-fi
-` + initScriptSocketPreamble + `
-install_clone_plugin() {
-    local installed
-    installed=$(run_mysql -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
-    if [ "$installed" = "0" ]; then
-        echo "bloodraven-init: installing MySQL clone plugin"
-        run_mysql -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
-    fi
-}
-
-install_clone_plugin
-
-REPL_USER=$(escape_sql "$MYSQL_REPLICATION_USER")
-REPL_PASS=$(escape_sql "$MYSQL_REPLICATION_PASSWORD")
-
-echo "bloodraven-init: creating replication user '${REPL_USER}'"
-run_mysql <<EOSQL
-CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
-ALTER USER '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
-GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%';
-FLUSH PRIVILEGES;
-EOSQL
-echo "bloodraven-init: replication user setup complete"
-`
-}
-
-func generateCredentialsModeInitScript(fg *v1alpha1.MysqlFailoverGroup) string {
+// generateInitUsersScript installs the clone plugin and creates the operator
+// user, the dedicated replication user when the operator Secret names one,
+// and the configured role users, from the credential Secrets mounted under
+// /etc/mysql/creds. Every statement is idempotent.
+func generateInitUsersScript(fg *v1alpha1.MysqlFailoverGroup) string {
 	script := `#!/bin/bash
 set -euo pipefail
 
@@ -169,29 +123,64 @@ FLUSH PRIVILEGES;
 EOSQL
 }
 
+# The replication account resolves as the topology manager resolves it:
+# MYSQL_REPLICATION_USER / MYSQL_REPLICATION_PASSWORD (mounted as
+# replication/username and replication/password) are set together, and with
+# neither the operator account replicates. The operator refuses a Secret that
+# sets only one, so nothing is created for it here. The operator account
+# already holds every privilege, so only a dedicated account is created.
+create_replication_user() {
+    local op_user repl_user repl_pass
+    op_user=$(read_cred operator username)
+    repl_user=$(read_cred replication username)
+    repl_pass=$(read_cred replication password)
+    if [ -z "$repl_user" ] && [ -z "$repl_pass" ]; then
+        echo "bloodraven-init: replication uses the operator account"
+        return
+    fi
+    if [ -z "$repl_user" ] || [ -z "$repl_pass" ]; then
+        echo "bloodraven-init: skipping replication (MYSQL_REPLICATION_USER and MYSQL_REPLICATION_PASSWORD must be set together)"
+        return
+    fi
+    if [ "$repl_user" = "$op_user" ]; then
+        echo "bloodraven-init: replication uses the operator account"
+        return
+    fi
+    repl_user=$(escape_sql "$repl_user")
+    repl_pass=$(escape_sql "$repl_pass")
+    echo "bloodraven-init: creating replication user '${repl_user}'"
+    run_mysql <<EOSQL
+CREATE USER IF NOT EXISTS '${repl_user}'@'%' IDENTIFIED BY '${repl_pass}';
+ALTER USER '${repl_user}'@'%' IDENTIFIED BY '${repl_pass}';
+GRANT ` + replicationGrants + ` ON *.* TO '${repl_user}'@'%';
+FLUSH PRIVILEGES;
+EOSQL
+}
+
 `
 	// Operator user — full admin for topology management, replication, cloning.
 	script += `install_clone_plugin
 
 create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%' WITH GRANT OPTION;"
+create_replication_user
 `
 
-	if fg.Spec.Credentials.AppSecret != "" {
+	if fg.Spec.Credentials.AppSecretName != "" {
 		script += `create_user_with_grants app "GRANT ` + appGlobalPrivileges + ` ON *.* TO '__USER__'@'%';"
 `
 	}
 
-	if fg.Spec.Credentials.ReadOnlySecret != "" {
+	if fg.Spec.Credentials.ReadOnlySecretName != "" {
 		script += `create_user_with_grants readonly "GRANT SELECT, SHOW VIEW, SHOW DATABASES, PROCESS ON *.* TO '__USER__'@'%';"
 `
 	}
 
-	if fg.Spec.Credentials.MonitorSecret != "" {
+	if fg.Spec.Credentials.MonitorSecretName != "" {
 		script += `create_user_with_grants monitor "GRANT PROCESS, REPLICATION CLIENT ON *.* TO '__USER__'@'%'; GRANT SELECT ON performance_schema.* TO '__USER__'@'%';"
 `
 	}
 
-	if fg.Spec.Credentials.BackupSecret != "" {
+	if fg.Spec.Credentials.BackupSecretName != "" {
 		script += `create_user_with_grants backup "GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT ON *.* TO '__USER__'@'%';"
 `
 	}

@@ -330,7 +330,7 @@ func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d
 		return claimDecisionReject(v1alpha1.PlannedFailoverReasonUnknownSite, "site %q is not in the topology", req.Target), "", true
 	case !target.isPromotable():
 		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetNotPromotable,
-			"site %q has role %q; only primary-candidate sites may be promoted", req.Target, target.role), "", true
+			"site %q has role %s; only PrimaryCandidate sites may be promoted", req.Target, APISiteRole(target.role)), "", true
 	case !tm.ready:
 		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerNotReady, "the topology manager has not completed a poll"), "", true
 	case tm.retired:
@@ -351,7 +351,7 @@ func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d
 	case slices.Contains(tm.keyringRotationReserved, req.Target):
 		return claimDecisionWait(v1alpha1.PlannedFailoverWaitKeyringRotation, "a keyring rotation of %q is being admitted", req.Target), "", true
 	}
-	if rec := tm.recovery[req.Target]; rec != nil && rec.state == recoveryStateBlocked {
+	if rec := tm.recovery[req.Target]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
 		return claimDecisionReject(v1alpha1.PlannedFailoverReasonDivergentTarget,
 			"site %q has %d transactions the primary lacks (%s)", req.Target, rec.divergentCount, truncateGtidSet(rec.divergentGtid)), "", true
 	}
@@ -730,7 +730,7 @@ func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.
 		}
 		reason = pf.Result.Reason
 	case marked:
-		m, _ := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+		m, _ := ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
 		if m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
 			slices.Contains(m.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
 			return nil, false
@@ -774,7 +774,7 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 		// A confirmed tail that released its claim before Publishing
 		// committed left its confirmation in the planned-failover-confirmed
 		// annotation (K014): the run's record may not be durable yet.
-		if at, ok := parseDeadlineStart(view.GetAnnotations()[PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
+		if at, ok := parseDeadlineStart(view.GetAnnotations()[v1alpha1.PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
 			tm.applyPlannedPromotionLocked(at, pf.TargetSite, *pf.Fence.GtidSet)
 		}
 	}

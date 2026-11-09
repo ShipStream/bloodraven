@@ -43,7 +43,7 @@ func TestLoadPassword(t *testing.T) {
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
 					Dragonfly: &v1alpha1.DragonflySpec{
 						Enabled: true,
-						Auth:    &v1alpha1.DragonflyAuthSpec{SecretName: "dragonfly-auth", PasswordKey: "pw"},
+						Auth:    &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth", Key: "pw"}},
 					},
 				},
 			},
@@ -68,7 +68,7 @@ func TestLoadPassword(t *testing.T) {
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
 					Dragonfly: &v1alpha1.DragonflySpec{
 						Enabled: true,
-						Auth:    &v1alpha1.DragonflyAuthSpec{SecretName: "dragonfly-auth"},
+						Auth:    &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth"}},
 					},
 				},
 			},

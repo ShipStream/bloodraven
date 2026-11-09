@@ -5,7 +5,7 @@
 
 **Front:** `spec.splitBrainPolicy.sitePriorities`
 
-**Back:** An ordered list of site names. During split-brain auto-resolution the operator promotes the first entry that is currently writable and `primary-candidate`, and fences every other writable site.
+**Back:** An ordered list of site names. During split-brain auto-resolution the operator promotes the first entry that is currently writable and `PrimaryCandidate`, and fences every other writable site.
 
 ---
 
@@ -21,7 +21,7 @@
 
 ---
 
-**Front:** Tier 1's guard — the three conditions the recorded `lastFailoverTarget` must satisfy
+**Front:** Tier 1's guard — the three conditions the recorded `lastFailover.target` must satisfy
 
 **Back:** The site must exist (`keepSite != nil`), be currently `StateWritable`, and be `isPromotable()`. All three, as a conjunction.
 
@@ -29,7 +29,7 @@
 
 **Front:** `state.ResolveSplitBrain(writable, sitePriorities)`
 
-**Back:** Walks `sitePriorities` in order and returns the earliest entry that is currently writable and `primary-candidate` as `winner`; every other writable site is returned as a loser for the caller to fence.
+**Back:** Walks `sitePriorities` in order and returns the earliest entry that is currently writable and `PrimaryCandidate` as `winner`; every other writable site is returned as a loser for the caller to fence.
 
 ---
 
@@ -41,7 +41,7 @@
 
 **Front:** The CEL rule guarding `sitePriorities`
 
-**Back:** Every entry must match the name of a site whose `role` is `primary-candidate`; the group is rejected at admission otherwise.
+**Back:** Every entry must match the name of a site whose `role` is `PrimaryCandidate`; the group is rejected at admission otherwise.
 
 ---
 

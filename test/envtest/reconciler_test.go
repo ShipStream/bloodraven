@@ -32,9 +32,10 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name:              "dc1",
+					ServerID:          101,
 					Zone:              "lion-dc1",
 					LBIP:              "203.0.113.1",
-					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "standard",
 						Size:             resource.MustParse("10Gi"),
@@ -42,19 +43,20 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 				},
 				{
 					Name:              "dc2",
+					ServerID:          102,
 					Zone:              "lion-dc2",
 					LBIP:              "203.0.113.2",
-					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "standard",
 						Size:             resource.MustParse("10Gi"),
 					},
 				},
 			},
-			SecretName: "mysql-credentials",
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			DNS: v1alpha1.DNSSpec{
-				Hostname: "lion.az.example.com",
-				TTL:      60,
+				Hostname:   "lion.az.example.com",
+				TTLSeconds: 60,
 			},
 			PollInterval:      &metav1.Duration{Duration: 2 * time.Second},
 			FailureThreshold:  3,
@@ -82,7 +84,9 @@ func ensureSecret(t *testing.T, namespace string) {
 			Namespace: namespace,
 		},
 		Data: map[string][]byte{
-			"dsn": []byte("root:password@tcp(localhost:3306)/mysql"),
+			"username":            []byte("bloodraven"),
+			"password":            []byte("password"),
+			"MYSQL_ROOT_PASSWORD": []byte("root-password"),
 		},
 	}
 	if err := k8sClient.Create(ctx, secret); err != nil {
@@ -119,7 +123,7 @@ func TestEnvtest_CRCreationAndSchemaAcceptance(t *testing.T) {
 func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
 	readerSite := func() v1alpha1.SiteSpec {
 		return v1alpha1.SiteSpec{
-			Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+			Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
 			Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 		}
 	}
@@ -137,7 +141,7 @@ func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
 		}, wantOK: true},
 		{name: "candidate requires lb ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].LBIP = "" }},
 		{name: "dr only requires selector", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Sites[0].Role = v1alpha1.SiteRoleDROnly
+			fg.Spec.Sites[0].Role = v1alpha1.SiteRoleDisasterRecovery
 			fg.Spec.Sites[0].TaintNodeSelector = nil
 		}},
 		{name: "reader does not satisfy candidate minimum", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
@@ -186,20 +190,20 @@ func TestEnvtest_ReadOnlyRoleTransitions(t *testing.T) {
 	ensureNamespace(t, ns)
 	fg := newTestFG(ns)
 	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{
-		Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
 		Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
 	})
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDROnly
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDisasterRecovery
 	if err := k8sClient.Update(ctx, fg); err == nil {
 		t.Fatal("reader to dr-only transition without placement was accepted")
 	}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: ns}, fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDROnly
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDisasterRecovery
 	fg.Spec.Sites[2].LBIP = "203.0.113.3"
 	fg.Spec.Sites[2].TaintNodeSelector = map[string]string{"site": "reader"}
 	if err := k8sClient.Update(ctx, fg); err != nil {
@@ -225,12 +229,11 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	// Update status subresource
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: "writable"},
-		{Name: "dc2", State: "read-only"},
+		{Name: "dc1", State: v1alpha1.SiteStateWritable},
+		{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
 	}
 	now := metav1.Now()
-	fg.Status.LastFailover = &now
-	fg.Status.LastFailoverTarget = "dc1"
+	fg.Status.SetLastFailover(&now, "dc1", "")
 
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatalf("failed to update status: %v", err)
@@ -245,14 +248,14 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	if fetched.Status.ActiveSite != "dc1" {
 		t.Errorf("expected ActiveSite 'dc1', got %q", fetched.Status.ActiveSite)
 	}
-	if fetched.Status.Sites[0].State != "writable" {
+	if fetched.Status.Sites[0].State != v1alpha1.SiteStateWritable {
 		t.Errorf("expected Sites[0] state 'writable', got %q", fetched.Status.Sites[0].State)
 	}
-	if fetched.Status.Sites[1].State != "read-only" {
+	if fetched.Status.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Errorf("expected Sites[1] state 'read-only', got %q", fetched.Status.Sites[1].State)
 	}
-	if fetched.Status.LastFailoverTarget != "dc1" {
-		t.Errorf("expected LastFailoverTarget 'dc1', got %q", fetched.Status.LastFailoverTarget)
+	if fetched.Status.LastFailoverTarget() != "dc1" {
+		t.Errorf("expected LastFailoverTarget 'dc1', got %q", fetched.Status.LastFailoverTarget())
 	}
 }
 
@@ -653,8 +656,8 @@ func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: none.Name, Namespace: nsNone}, &afterNone); err != nil {
 		t.Fatal(err)
 	}
-	if afterInvalid.Status.LastFailoverTarget != afterNone.Status.LastFailoverTarget {
+	if afterInvalid.Status.LastFailoverTarget() != afterNone.Status.LastFailoverTarget() {
 		t.Fatalf("invalid license must not change failover status: invalid=%q none=%q",
-			afterInvalid.Status.LastFailoverTarget, afterNone.Status.LastFailoverTarget)
+			afterInvalid.Status.LastFailoverTarget(), afterNone.Status.LastFailoverTarget())
 	}
 }

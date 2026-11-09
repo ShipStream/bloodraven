@@ -29,14 +29,14 @@ func encryptedAbandonedFixture(t *testing.T, withKey bool) *cleanupFixture {
 	t.Helper()
 	f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
 	ctx := context.Background()
-	f.mb.Status.Encrypted = true
-	f.mb.Status.ArtifactStorage.PassphraseSecret = &v1alpha1.BackupArtifactPassphrase{Name: dumpKeySnapshotName(f.mb), Key: pitrKeySnapshotDataKey}
+	f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: dumpKeySnapshotName(f.mb), Key: pitrKeySnapshotDataKey}
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
 	if withKey {
 		snap := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb),
-			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, labelMysqlBackupUID: string(f.mb.UID)}},
+			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(f.mb.UID)}},
 			Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("k")}}
 		if err := f.c.Create(ctx, snap); err != nil {
 			t.Fatal(err)
@@ -101,9 +101,9 @@ func TestFinalize_AbandonedRecordedKeyMissingBlocks(t *testing.T) {
 	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	c := apiMeta.FindStatusCondition(f.mb.Status.Conditions, ConditionArtifactCleanup)
-	if c == nil || c.Reason != backupReasonPassphraseSecretMissing {
-		t.Fatalf("condition %+v, want %s", c, backupReasonPassphraseSecretMissing)
+	c := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
+	if c == nil || c.Reason != v1alpha1.ReasonPassphraseSecretMissing {
+		t.Fatalf("condition %+v, want %s", c, v1alpha1.ReasonPassphraseSecretMissing)
 	}
 	// Restoring the Secret lets the cleanup run.
 	if err := f.c.Create(context.Background(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb)},
@@ -124,12 +124,12 @@ func TestVerificationRecordedDumpKeyGone(t *testing.T) {
 	defer SetOperatorImageDefaults("", "")
 	fg := fgWithEncryptedBackup()
 	backup := successfulBackup("seed", "lion", "nightly-s3")
-	backup.Status.Location = "s3://bloodraven-backups/lion/seed/"
-	backup.Status.StorageType = v1alpha1.BackupStorageS3
-	backup.Status.Encrypted = true
-	backup.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{PassphraseSecret: &v1alpha1.BackupArtifactPassphrase{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}}
+	setTestArtifactLocation(backup, "s3://bloodraven-backups/lion/seed/")
+	setTestArtifactType(backup, v1alpha1.BackupStorageS3)
+	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	ensureTestArtifact(backup).PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}
 	v := verifyCR("verify-gone", "lion", "nightly-s3")
-	r, c := newVerificationReconciler(t, fg, backup, v, dsnSecret())
+	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	got := getVerification(t, c, v)
 	if got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(pitrarchive.TokenBackupDumpKeyMissing) {
@@ -158,13 +158,13 @@ func TestCRDDecryptionHelpIsCurrent(t *testing.T) {
 	if !strings.Contains(flat, "else the restore is refused (PITRBackupDumpKeyMissing)") {
 		t.Error("CRD help lacks the dump-key resolution order")
 	}
-	// The PassphraseSecretRef type doc (Go API reference) names the one
+	// The PassphraseSecretKeyRef type doc (Go API reference) names the one
 	// Job that still mounts a profile's Secret.
 	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "backup_types.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(strings.Join(strings.Fields(strings.ReplaceAll(string(src), "//", "")), " "), "runs its abandoned-artifact cleanup Job with this Secret") {
-		t.Error("PassphraseSecretRef doc does not qualify the legacy abandoned cleanup")
+		t.Error("PassphraseSecretKeyRef doc does not qualify the legacy abandoned cleanup")
 	}
 }

@@ -4,42 +4,6 @@ import (
 	"testing"
 )
 
-func TestUsesCredentials(t *testing.T) {
-	t.Run("legacy mode", func(t *testing.T) {
-		spec := MysqlFailoverGroupSpec{SecretName: "my-secret"}
-		if spec.UsesCredentials() {
-			t.Error("expected legacy mode")
-		}
-	})
-
-	t.Run("credentials mode", func(t *testing.T) {
-		spec := MysqlFailoverGroupSpec{
-			Credentials: &CredentialsSpec{OperatorSecret: "op"},
-		}
-		if !spec.UsesCredentials() {
-			t.Error("expected credentials mode")
-		}
-	})
-}
-
-func TestEffectiveOperatorSecretName(t *testing.T) {
-	t.Run("legacy", func(t *testing.T) {
-		spec := MysqlFailoverGroupSpec{SecretName: "legacy-secret"}
-		if got := spec.EffectiveOperatorSecretName(); got != "legacy-secret" {
-			t.Errorf("got %q, want %q", got, "legacy-secret")
-		}
-	})
-
-	t.Run("credentials", func(t *testing.T) {
-		spec := MysqlFailoverGroupSpec{
-			Credentials: &CredentialsSpec{OperatorSecret: "op-secret"},
-		}
-		if got := spec.EffectiveOperatorSecretName(); got != "op-secret" {
-			t.Errorf("got %q, want %q", got, "op-secret")
-		}
-	})
-}
-
 func TestEffectiveBackupSecretName(t *testing.T) {
 	tests := []struct {
 		name string
@@ -47,24 +11,19 @@ func TestEffectiveBackupSecretName(t *testing.T) {
 		want string
 	}{
 		{
-			name: "legacy",
-			spec: MysqlFailoverGroupSpec{SecretName: "legacy"},
-			want: "legacy",
-		},
-		{
-			name: "credentials with dedicated backup",
+			name: "dedicated backup secret",
 			spec: MysqlFailoverGroupSpec{
-				Credentials: &CredentialsSpec{
-					OperatorSecret: "op",
-					BackupSecret:   "backup",
+				Credentials: CredentialsSpec{
+					OperatorSecretName: "op",
+					BackupSecretName:   "backup",
 				},
 			},
 			want: "backup",
 		},
 		{
-			name: "credentials without backup falls back to operator",
+			name: "without backup secret falls back to operator",
 			spec: MysqlFailoverGroupSpec{
-				Credentials: &CredentialsSpec{OperatorSecret: "op"},
+				Credentials: CredentialsSpec{OperatorSecretName: "op"},
 			},
 			want: "op",
 		},
@@ -79,22 +38,14 @@ func TestEffectiveBackupSecretName(t *testing.T) {
 }
 
 func TestAllReferencedSecretNames(t *testing.T) {
-	t.Run("legacy", func(t *testing.T) {
-		spec := MysqlFailoverGroupSpec{SecretName: "s"}
-		names := spec.AllReferencedSecretNames()
-		if len(names) != 1 || names[0] != "s" {
-			t.Errorf("got %v", names)
-		}
-	})
-
-	t.Run("credentials all set", func(t *testing.T) {
+	t.Run("all set", func(t *testing.T) {
 		spec := MysqlFailoverGroupSpec{
-			Credentials: &CredentialsSpec{
-				OperatorSecret: "op",
-				AppSecret:      "app",
-				ReadOnlySecret: "ro",
-				MonitorSecret:  "mon",
-				BackupSecret:   "bak",
+			Credentials: CredentialsSpec{
+				OperatorSecretName: "op",
+				AppSecretName:      "app",
+				ReadOnlySecretName: "ro",
+				MonitorSecretName:  "mon",
+				BackupSecretName:   "bak",
 			},
 		}
 		names := spec.AllReferencedSecretNames()
@@ -105,9 +56,9 @@ func TestAllReferencedSecretNames(t *testing.T) {
 
 	t.Run("deduplication", func(t *testing.T) {
 		spec := MysqlFailoverGroupSpec{
-			Credentials: &CredentialsSpec{
-				OperatorSecret: "shared",
-				BackupSecret:   "shared",
+			Credentials: CredentialsSpec{
+				OperatorSecretName: "shared",
+				BackupSecretName:   "shared",
 			},
 		}
 		names := spec.AllReferencedSecretNames()
@@ -116,11 +67,11 @@ func TestAllReferencedSecretNames(t *testing.T) {
 		}
 	})
 
-	t.Run("credentials partial", func(t *testing.T) {
+	t.Run("partial", func(t *testing.T) {
 		spec := MysqlFailoverGroupSpec{
-			Credentials: &CredentialsSpec{
-				OperatorSecret: "op",
-				AppSecret:      "app",
+			Credentials: CredentialsSpec{
+				OperatorSecretName: "op",
+				AppSecretName:      "app",
 			},
 		}
 		names := spec.AllReferencedSecretNames()

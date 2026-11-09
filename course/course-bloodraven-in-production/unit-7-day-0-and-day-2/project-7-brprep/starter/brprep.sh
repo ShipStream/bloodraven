@@ -61,18 +61,20 @@ secs() {
   echo "$total"
 }
 
-# The nine admission rules, in the fixed order brprep reports them. Seven are
+# The nine admission rules, in the fixed order brprep reports them. Most are
 # CEL rules on the CRD; the site-count one is a MinItems/MaxItems constraint on
-# the schema. Both are refusals at `kubectl apply`, which is all brprep claims.
+# the schema, the site-names one is the name key of the spec.sites list map, and
+# the credentials one is a required field plus kubectl's strict field
+# validation. All are refusals at `kubectl apply`, which is all brprep claims.
 # The grader matches these tokens exactly, so do not reword them.
-RULE_CREDENTIALS="exactly one of secretName or credentials must be set"
+RULE_CREDENTIALS="spec.credentials.operatorSecretName is required and spec.secretName is not a field"
 RULE_SITE_COUNT="spec.sites must contain between 2 and 16 entries"
 RULE_SITE_NAMES="spec.sites[].name must be unique"
-RULE_TWO_CANDIDATES="spec.sites must contain at least two sites with role primary-candidate"
-RULE_PRIORITIES="splitBrainPolicy.sitePriorities entries must match the names of sites with role primary-candidate"
-RULE_SITE_FIELDS="taintNodeSelector and lbIP are required unless role is read-only"
-RULE_PEER_INTERVAL="sidecar.peerCheckInterval must be at least 1s"
-RULE_LEASE_MIN="sidecar.leaseTimeout must be at least 3s"
+RULE_TWO_CANDIDATES="spec.sites must contain at least two sites with role PrimaryCandidate"
+RULE_PRIORITIES="splitBrainPolicy.sitePriorities entries must match the names of sites with role PrimaryCandidate"
+RULE_SITE_FIELDS="taintNodeSelector and lbIP are required unless role is ReadOnly"
+RULE_PEER_INTERVAL="sidecar.peerCheckInterval must be between 1s and 1m"
+RULE_LEASE_RANGE="sidecar.leaseTimeout must be between 3s and 10m"
 RULE_LEASE_RATIO="sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval"
 
 # The six silent findings, in the fixed order brprep reports them.
@@ -81,7 +83,7 @@ WARN_PVC_BACKUP="backup profile %s uses storage.type PVC; a backup sharing a fai
 WARN_QOS="site %s sets resources.requests != resources.limits; without Guaranteed QoS the kubelet may evict this MySQL first"
 WARN_READER_GATE="replication.readOnlyMaxLagSeconds (%s) is above maxLagSeconds (%s); the reader endpoint is now looser than the group threshold"
 WARN_UNVERIFIED_ENCRYPTION="encryptionAtRest is enabled but no backup profile is configured; an encrypted group with no verified restore path is one keyring away from unrecoverable"
-WARN_RECREATE="updateStrategy Recreate patches every site Deployment in one pass; both sites can restart at once"
+WARN_RECREATE="updateStrategy.type Recreate patches every site Deployment in one pass; both sites can restart at once"
 
 # ---------------------------------------------------------------- TODO A
 #
@@ -91,23 +93,27 @@ WARN_RECREATE="updateStrategy Recreate patches every site Deployment in one pass
 #
 # The nine rules, and what each one actually checks:
 #
-#   RULE_CREDENTIALS    exactly one of .spec.secretName and .spec.credentials
-#                       is present and non-empty. Both, or neither, is a
-#                       rejection.
+#   RULE_CREDENTIALS    .spec.credentials.operatorSecretName is present and
+#                       non-empty, and .spec.secretName is absent. A missing
+#                       credentials block is a required-field error; the
+#                       single-Secret secretName mode was removed in v1.7.0,
+#                       so kubectl's strict field validation refuses it as
+#                       an unknown field.
 #   RULE_SITE_COUNT     2 <= (.spec.sites | length) <= 16.
 #   RULE_SITE_NAMES     every .spec.sites[].name is distinct.
-#   RULE_TWO_CANDIDATES at least two sites have role "primary-candidate".
+#   RULE_TWO_CANDIDATES at least two sites have role "PrimaryCandidate".
 #                       Remember the CRD default: an omitted role *is*
-#                       primary-candidate, so count a missing role as one.
+#                       PrimaryCandidate, so count a missing role as one.
 #   RULE_PRIORITIES     every entry of .spec.splitBrainPolicy.sitePriorities
 #                       names a site whose effective role is
-#                       primary-candidate. An absent list is fine.
-#   RULE_SITE_FIELDS    every site whose effective role is NOT "read-only" has
-#                       both .lbIP and .taintNodeSelector. A read-only site
+#                       PrimaryCandidate. An absent list is fine.
+#   RULE_SITE_FIELDS    every site whose effective role is NOT "ReadOnly" has
+#                       both .lbIP and .taintNodeSelector. A ReadOnly site
 #                       needs neither — it is never promoted and never tainted.
 #                       This is the one the fixtures try hardest to break.
-#   RULE_PEER_INTERVAL  secs(.spec.sidecar.peerCheckInterval) >= 1, when set.
-#   RULE_LEASE_MIN      secs(.spec.sidecar.leaseTimeout) >= 3, when set.
+#   RULE_PEER_INTERVAL  1 <= secs(.spec.sidecar.peerCheckInterval) <= 60,
+#                       when set.
+#   RULE_LEASE_RANGE    3 <= secs(.spec.sidecar.leaseTimeout) <= 600, when set.
 #   RULE_LEASE_RATIO    secs(leaseTimeout) >= 3 * secs(peerCheckInterval),
 #                       when both are set.
 #
@@ -136,7 +142,7 @@ check_admission() {
 #                              and strictly greater than maxLagSeconds.
 #   WARN_UNVERIFIED_ENCRYPTION .spec.encryptionAtRest.enabled is true and
 #                              .spec.backup.profiles is absent or empty.
-#   WARN_RECREATE              .spec.updateStrategy == "Recreate".
+#   WARN_RECREATE              .spec.updateStrategy.type == "Recreate".
 #
 # These are findings, never errors: they must not change the exit code.
 check_silent() {
@@ -164,7 +170,7 @@ check_silent() {
 #     expect: lastFailover is stamped and consumes the anti-flap cooldown
 #     expect: the DNSEndpoint A record flips
 #
-# The standby is the *second* site whose effective role is primary-candidate,
+# The standby is the *second* site whose effective role is PrimaryCandidate,
 # in `spec.sites` order; the former active is the first. This manifest carries
 # no status, so declaration order is the only signal available — say so in
 # your own runbook, and read `status.activeSite` when you have a live group.

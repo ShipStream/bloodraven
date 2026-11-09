@@ -10,7 +10,7 @@
 A migration is running under a live `failover-hold` when `iad`'s node dies. Three polls later the operator promotes `pdx`. What happened to the hold, and what does the pipeline see on its next `PUT`?
 
 - The hold deferred the promotion; the pipeline keeps renewing with `200` until it releases the hold, then `pdx` is promoted.
-- The hold was not consulted; the promotion bumped `topologyGeneration` and revoked both leases, so the `PUT` returns `409 revoked` with reason `topology_changed`.
+- The hold was not consulted; the promotion bumped `topologyGeneration` and revoked both leases, so the `PUT` returns `409 revoked` with reason `TopologyChanged`.
 - The hold was honoured for its remaining TTL; when it expired the promotion ran and the `PUT` returns `404` because the lease had lapsed.
 - The operator waited for `admission.retryTime`, then promoted; the `PUT` returns `423 unstable` until the pipeline re-POSTs the migration lease.
 
@@ -18,7 +18,7 @@ A migration is running under a live `failover-hold` when `iad`'s node dies. Thre
 
 **Explanation:**
 
-Emergency failover never reads deployment leases — a hold that could pause it would let a stuck pipeline keep a dead primary in charge. The promotion increments `status.topologyGeneration`, which revokes every lease in the group with `topology_changed`, and the client learns it on the next heartbeat as `409 revoked`. (objectives 14, 15)
+Emergency failover never reads deployment leases — a hold that could pause it would let a stuck pipeline keep a dead primary in charge. The promotion increments `status.topologyGeneration`, which revokes every lease in the group with `TopologyChanged`, and the client learns it on the next heartbeat as `409 revoked`. (objectives 14, 15)
 
 ## Question 2
 
@@ -75,7 +75,7 @@ During a deploy the operator pod is restarted. When the new leader comes up, is 
 
 - No — leases live in operator memory, so the restart cleared them and the planned failover proceeds on the next reconcile.
 - Yes, until its unrenewed TTL expires — leases are `coordination.k8s.io/Lease` objects in the API server, and an operator restart neither releases nor resets them.
-- No — a restart increments `topologyGeneration`, which revokes every lease with `topology_changed`.
+- No — a restart increments `topologyGeneration`, which revokes every lease with `TopologyChanged`.
 - Yes, but only if the pipeline re-POSTs the hold within `retryAfterSeconds`, because the new leader has no record of it.
 
 **Correct option index:** 1

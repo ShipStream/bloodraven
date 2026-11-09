@@ -106,7 +106,7 @@ ASSUMED_REQUIRED = {
 
 BACKUP_SOURCE_REASONS = {"override", "replica-preferred", "primary-fallback"}
 
-# `playground` runs three sites. `reader` carries role: read-only, so it can
+# `playground` runs three sites. `reader` carries role: ReadOnly, so it can
 # neither be promoted nor source a backup.
 READ_ONLY_SITES = {"reader"}
 

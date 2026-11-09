@@ -160,27 +160,32 @@ func minimalStandbyCR(name, ns string) *v1alpha1.MysqlStandbyCluster {
 		Spec: v1alpha1.MysqlStandbyClusterSpec{
 			Transport: v1alpha1.StandbyTransportObjectStore,
 			Source: v1alpha1.StandbySource{
-				FailoverGroupName: "orders",
-				ProfileName:       "nightly",
-				Storage: v1alpha1.BackupStorage{
-					Type: v1alpha1.BackupStorageS3,
-					S3: &v1alpha1.S3Storage{
-						Bucket: "my-bucket",
-						Prefix: "orders",
-						// No CredentialsSecret: tests bypass store construction
-						// via newStoreFunc injection.
-					},
-				},
-			},
-			Template: v1alpha1.StandbyFailoverGroupTemplate{
-				Name: "orders-dr",
-				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Image:      "mysql:9.7",
-					SecretName: "mysql-creds",
+				S3: v1alpha1.StandbyS3Source{
+					Bucket: "my-bucket",
+					Prefix: "orders",
+					// No CredentialsSecret: tests bypass store construction
+					// via newStoreFunc injection.
 				},
 			},
 		},
 	}
+}
+
+// discoveredDump is d.latestDump, or the zero dump when either is absent.
+func discoveredDump(d *v1alpha1.StandbyDiscovered) v1alpha1.StandbyDump {
+	if d == nil || d.LatestDump == nil {
+		return v1alpha1.StandbyDump{}
+	}
+	return *d.LatestDump
+}
+
+// discoveredArchive is d.binlogArchive, or the zero archive when either is
+// absent.
+func discoveredArchive(d *v1alpha1.StandbyDiscovered) v1alpha1.StandbyBinlogArchive {
+	if d == nil || d.BinlogArchive == nil {
+		return v1alpha1.StandbyBinlogArchive{}
+	}
+	return *d.BinlogArchive
 }
 
 // newTestReconciler builds a MysqlStandbyClusterReconciler backed by the
@@ -275,15 +280,14 @@ func standbyFindCondition(cr *v1alpha1.MysqlStandbyCluster, condType string) *me
 // --- TestMysqlStandbyCluster_UnsupportedTransport ---------------------------
 
 // TestMysqlStandbyCluster_UnsupportedTransport verifies that a CR whose
-// spec.transport is set to "Network" (reserved, unimplemented) gets
-// BucketReadable=False with Reason=ConfigError and is requeued.
+// spec.transport is not ObjectStore gets BucketReadable=False with
+// Reason=ConfigError and is requeued.
 func TestMysqlStandbyCluster_UnsupportedTransport(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
-	cr.Spec.Transport = v1alpha1.StandbyTransportNetwork
+	cr.Spec.Transport = v1alpha1.StandbyTransport("Network")
 
-	// Spec-level XValidation prevents this in a real cluster, but we test
-	// the reconciler's in-depth defense here.
-	// The fake client bypasses admission webhooks.
+	// The CRD enum admits only ObjectStore, but the fake client bypasses
+	// admission, so this exercises the reconciler's guard.
 	store := &fakeStore{Objects: map[string][]byte{}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
 
@@ -354,41 +358,53 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 		t.Errorf("SourceConfigKnown: want True, got %v", skc)
 	}
 
+	// Ready summarises the two (A-70).
+	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionTrue ||
+		ready.Reason != v1alpha1.ReasonSourceDiscovered || ready.ObservedGeneration != updated.Generation {
+		t.Errorf("Ready: want True/SourceDiscovered at generation %d, got %v", updated.Generation, ready)
+	}
+
 	// status.discovered populated.
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
 		return
 	}
-	if d.DumpName != "orders-nightly-20260520" {
-		t.Errorf("DumpName: want orders-nightly-20260520, got %q", d.DumpName)
+	if discoveredDump(d).Name != "orders-nightly-20260520" {
+		t.Errorf("latestDump.name: want orders-nightly-20260520, got %q", discoveredDump(d).Name)
 	}
-	if d.DumpGtidExecuted != "abc:1-100" {
-		t.Errorf("DumpGtidExecuted: want abc:1-100, got %q", d.DumpGtidExecuted)
+	if discoveredDump(d).GtidExecuted != "abc:1-100" {
+		t.Errorf("latestDump.gtidExecuted: want abc:1-100, got %q", discoveredDump(d).GtidExecuted)
 	}
-	if d.DumpSizeBytes != 1073741824 {
-		t.Errorf("DumpSizeBytes: want 1073741824, got %d", d.DumpSizeBytes)
+	if size := discoveredDump(d).SizeBytes; size == nil || *size != 1073741824 {
+		t.Errorf("latestDump.sizeBytes: want 1073741824, got %v", size)
 	}
-	if d.ManifestCount != 1 {
-		t.Errorf("ManifestCount: want 1, got %d", d.ManifestCount)
+	if discoveredArchive(d).ManifestCount != 1 {
+		t.Errorf("binlogArchive.manifestCount: want 1, got %d", discoveredArchive(d).ManifestCount)
 	}
-	if d.ArchivedBinlogCount != 1 {
-		t.Errorf("ArchivedBinlogCount: want 1, got %d", d.ArchivedBinlogCount)
+	if discoveredArchive(d).FileCount != 1 {
+		t.Errorf("binlogArchive.fileCount: want 1, got %d", discoveredArchive(d).FileCount)
 	}
-	if d.ArchivedBinlogBytes != 4096 {
-		t.Errorf("ArchivedBinlogBytes: want 4096, got %d", d.ArchivedBinlogBytes)
+	if discoveredArchive(d).SizeBytes != 4096 {
+		t.Errorf("binlogArchive.sizeBytes: want 4096, got %d", discoveredArchive(d).SizeBytes)
 	}
-	if d.OldestArchivedBinlogTime == nil {
-		t.Error("OldestArchivedBinlogTime is nil")
+	if discoveredArchive(d).OldestEventTime == nil {
+		t.Error("binlogArchive.oldestEventTime is nil")
 	}
-	if d.NewestArchivedBinlogTime == nil {
-		t.Error("NewestArchivedBinlogTime is nil")
+	if discoveredArchive(d).NewestEventTime == nil {
+		t.Error("binlogArchive.newestEventTime is nil")
 	}
-	if d.LastScanAt == nil {
-		t.Error("LastScanAt is nil")
+	if d.LastScanTime == nil {
+		t.Error("LastScanTime is nil")
 	}
-	if d.DumpCompletionTime == nil {
-		t.Error("DumpCompletionTime is nil")
+	if discoveredDump(d).CompletionTime == nil {
+		t.Error("latestDump.completionTime is nil")
+	}
+	if got := discoveredDump(d).Location; got != "orders/orders-nightly-20260520/" {
+		t.Errorf("latestDump.location: want orders/orders-nightly-20260520/, got %q", got)
+	}
+	if got := discoveredArchive(d).Identity.ArchiveID; got != standbyTestArchiveID {
+		t.Errorf("binlogArchive.identity.archiveID: want %s, got %q", standbyTestArchiveID, got)
 	}
 
 	// Event emitted.
@@ -399,6 +415,38 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 		}
 	default:
 		t.Error("expected BucketScanned event but none emitted")
+	}
+}
+
+// --- TestMysqlStandbyCluster_DumpMetadataUnrecorded -----------------------
+
+// TestMysqlStandbyCluster_DumpMetadataUnrecorded verifies that a dump whose
+// @.json records no end time and no size publishes latestDump with
+// completionTime and sizeBytes absent (unknown), not a zero value.
+func TestMysqlStandbyCluster_DumpMetadataUnrecorded(t *testing.T) {
+	cr := minimalStandbyCR("test-sc", "default")
+	store := &fakeStore{Objects: map[string][]byte{
+		"orders/orders-nightly-20260520/@.json": []byte(`{"gtidExecuted":"abc:1-100"}`),
+	}}
+	r, _ := newTestReconciler(t, []client.Object{cr}, store)
+
+	updated, _ := reconcileStandby(t, r, "test-sc", "default")
+
+	d := updated.Status.Discovered
+	if d == nil || d.LatestDump == nil {
+		t.Fatalf("latestDump not published: %+v", d)
+	}
+	if d.LatestDump.SizeBytes != nil {
+		t.Errorf("latestDump.sizeBytes: want absent, got %d", *d.LatestDump.SizeBytes)
+	}
+	if d.LatestDump.CompletionTime != nil {
+		t.Errorf("latestDump.completionTime: want absent, got %v", d.LatestDump.CompletionTime)
+	}
+	if d.LatestDump.GtidExecuted != "abc:1-100" {
+		t.Errorf("latestDump.gtidExecuted: want abc:1-100, got %q", d.LatestDump.GtidExecuted)
+	}
+	if d.BinlogArchive != nil {
+		t.Errorf("binlogArchive: want absent without an archive, got %+v", d.BinlogArchive)
 	}
 }
 
@@ -427,6 +475,10 @@ func TestMysqlStandbyCluster_ListError(t *testing.T) {
 	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse {
 		t.Errorf("SourceConfigKnown: want False, got %v", skc)
+	}
+	// Ready names BucketReadable's failure first.
+	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ListFailed" {
+		t.Errorf("Ready: want False/ListFailed, got %v", ready)
 	}
 	// Warning event emitted.
 	select {
@@ -461,6 +513,11 @@ func TestMysqlStandbyCluster_NoDumpFound(t *testing.T) {
 	}
 	if skc.Reason != "NoDumpFound" {
 		t.Errorf("Reason: want NoDumpFound, got %q", skc.Reason)
+	}
+	// Ready carries the first failing condition's reason.
+	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse ||
+		ready.Reason != v1alpha1.ReasonNoDumpFound || ready.Message != skc.Message {
+		t.Errorf("Ready: want False/NoDumpFound with SourceConfigKnown's message, got %v", ready)
 	}
 }
 
@@ -500,8 +557,8 @@ func TestMysqlStandbyCluster_NoBinlogManifests(t *testing.T) {
 		t.Errorf("Message: want it to mention %q (dump-only semantics), got %q", "no point-in-time window", skc.Message)
 	}
 	// Dump name should still be populated even when manifests are missing.
-	if updated.Status.Discovered == nil || updated.Status.Discovered.DumpName == "" {
-		t.Error("DumpName should be populated even when manifests are missing")
+	if updated.Status.Discovered == nil || discoveredDump(updated.Status.Discovered).Name == "" {
+		t.Error("latestDump should be populated even when manifests are missing")
 	}
 }
 
@@ -544,40 +601,6 @@ func TestMysqlStandbyCluster_DefaultRequeueCadence(t *testing.T) {
 	}
 }
 
-// --- TestMysqlStandbyCluster_PVCStorageConfigError --------------------------
-
-// TestMysqlStandbyCluster_PVCStorageConfigError verifies that a PVC-backed
-// MysqlStandbyCluster gets BucketReadable=False with Reason=ConfigError since
-// the operator pod cannot mount a remote PVC.
-func TestMysqlStandbyCluster_PVCStorageConfigError(t *testing.T) {
-	cr := minimalStandbyCR("test-sc", "default")
-	cr.Spec.Source.Storage = v1alpha1.BackupStorage{
-		Type: v1alpha1.BackupStoragePVC,
-		PVC: &v1alpha1.PVCStorage{
-			ClaimName: "my-backup-pvc",
-		},
-	}
-	// The newStoreFunc is not called when buildStoreCfg fails, but we
-	// need to provide one so the reconciler struct is fully wired.
-	store := &fakeStore{Objects: map[string][]byte{}}
-	r, _ := newTestReconciler(t, []client.Object{cr}, store)
-	// Override newStoreFunc so it never gets reached (test the config-error path).
-	r.newStoreFunc = func(_ context.Context, _ *sidecar.PITRConfig) (sidecar.ArchiveStore, error) {
-		t.Error("newStoreFunc should not be called for PVC storage")
-		return nil, errors.New("unexpected call")
-	}
-
-	updated, _ := reconcileStandby(t, r, "test-sc", "default")
-
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
-	if brc == nil || brc.Status != metav1.ConditionFalse {
-		t.Errorf("BucketReadable: want False, got %v", brc)
-	}
-	if brc.Reason != "ConfigError" {
-		t.Errorf("Reason: want ConfigError, got %q", brc.Reason)
-	}
-}
-
 // --- TestMysqlStandbyCluster_MultiSiteManifests -----------------------------
 
 // TestMysqlStandbyCluster_MultiSiteManifests verifies that binlog stats are
@@ -604,29 +627,29 @@ func TestMysqlStandbyCluster_MultiSiteManifests(t *testing.T) {
 		t.Fatal("status.discovered is nil")
 		return
 	}
-	if d.ManifestCount != 2 {
-		t.Errorf("ManifestCount: want 2, got %d", d.ManifestCount)
+	if discoveredArchive(d).ManifestCount != 2 {
+		t.Errorf("binlogArchive.manifestCount: want 2, got %d", discoveredArchive(d).ManifestCount)
 	}
-	if d.ArchivedBinlogCount != 2 {
-		t.Errorf("ArchivedBinlogCount: want 2, got %d", d.ArchivedBinlogCount)
+	if discoveredArchive(d).FileCount != 2 {
+		t.Errorf("binlogArchive.fileCount: want 2, got %d", discoveredArchive(d).FileCount)
 	}
-	if d.ArchivedBinlogBytes != 300 {
-		t.Errorf("ArchivedBinlogBytes: want 300, got %d", d.ArchivedBinlogBytes)
+	if discoveredArchive(d).SizeBytes != 300 {
+		t.Errorf("binlogArchive.sizeBytes: want 300, got %d", discoveredArchive(d).SizeBytes)
 	}
 	// Oldest from dc1 (00:00), newest from dc2 (03:59:59).
-	if d.OldestArchivedBinlogTime == nil {
-		t.Fatal("OldestArchivedBinlogTime nil")
+	if discoveredArchive(d).OldestEventTime == nil {
+		t.Fatal("binlogArchive.oldestEventTime nil")
 	}
 	wantOldest := time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC)
-	if !d.OldestArchivedBinlogTime.Time.Equal(wantOldest) {
-		t.Errorf("OldestArchivedBinlogTime: want %v, got %v", wantOldest, d.OldestArchivedBinlogTime.Time)
+	if !discoveredArchive(d).OldestEventTime.Time.Equal(wantOldest) {
+		t.Errorf("binlogArchive.oldestEventTime: want %v, got %v", wantOldest, discoveredArchive(d).OldestEventTime.Time)
 	}
-	if d.NewestArchivedBinlogTime == nil {
-		t.Fatal("NewestArchivedBinlogTime nil")
+	if discoveredArchive(d).NewestEventTime == nil {
+		t.Fatal("binlogArchive.newestEventTime nil")
 	}
 	wantNewest := time.Date(2026, 5, 20, 3, 59, 59, 0, time.UTC)
-	if !d.NewestArchivedBinlogTime.Time.Equal(wantNewest) {
-		t.Errorf("NewestArchivedBinlogTime: want %v, got %v", wantNewest, d.NewestArchivedBinlogTime.Time)
+	if !discoveredArchive(d).NewestEventTime.Time.Equal(wantNewest) {
+		t.Errorf("binlogArchive.newestEventTime: want %v, got %v", wantNewest, discoveredArchive(d).NewestEventTime.Time)
 	}
 }
 
@@ -654,11 +677,11 @@ func TestMysqlStandbyCluster_NewestDumpSelected(t *testing.T) {
 		t.Fatal("status.discovered is nil")
 		return
 	}
-	if d.DumpName != "orders-2026-05-20" {
-		t.Errorf("DumpName: want orders-2026-05-20, got %q", d.DumpName)
+	if discoveredDump(d).Name != "orders-2026-05-20" {
+		t.Errorf("latestDump.name: want orders-2026-05-20, got %q", discoveredDump(d).Name)
 	}
-	if d.DumpGtidExecuted != "newest:1-999" {
-		t.Errorf("GtidExecuted: want newest:1-999, got %q", d.DumpGtidExecuted)
+	if discoveredDump(d).GtidExecuted != "newest:1-999" {
+		t.Errorf("latestDump.gtidExecuted: want newest:1-999, got %q", discoveredDump(d).GtidExecuted)
 	}
 }
 
@@ -691,17 +714,17 @@ func TestMysqlStandbyCluster_NewestDumpSelectedBeyondLexicographicTail(t *testin
 		t.Fatal("status.discovered is nil")
 		return
 	}
-	if d.DumpName != "a-newest" {
-		t.Errorf("DumpName: want a-newest, got %q", d.DumpName)
+	if discoveredDump(d).Name != "a-newest" {
+		t.Errorf("latestDump.name: want a-newest, got %q", discoveredDump(d).Name)
 	}
-	if d.DumpGtidExecuted != "newest:1-999" {
-		t.Errorf("GtidExecuted: want newest:1-999, got %q", d.DumpGtidExecuted)
+	if discoveredDump(d).GtidExecuted != "newest:1-999" {
+		t.Errorf("latestDump.gtidExecuted: want newest:1-999, got %q", discoveredDump(d).GtidExecuted)
 	}
 }
 
 func TestMysqlStandbyCluster_SlashBoundedPrefix(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
-	cr.Spec.Source.Storage.S3.Prefix = "orders/west"
+	cr.Spec.Source.S3.Prefix = "orders/west"
 
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/west-old/other/@.json":        []byte(`{"end":"2026-05-21T04:00:00Z"}`),
@@ -718,18 +741,18 @@ func TestMysqlStandbyCluster_SlashBoundedPrefix(t *testing.T) {
 		t.Fatal("status.discovered is nil")
 		return
 	}
-	if d.DumpName != "current" {
-		t.Errorf("DumpName: want current, got %q", d.DumpName)
+	if discoveredDump(d).Name != "current" {
+		t.Errorf("latestDump.name: want current, got %q", discoveredDump(d).Name)
 	}
-	if d.DumpGtidExecuted != "current:1-100" {
-		t.Errorf("GtidExecuted: want current:1-100, got %q", d.DumpGtidExecuted)
+	if discoveredDump(d).GtidExecuted != "current:1-100" {
+		t.Errorf("latestDump.gtidExecuted: want current:1-100, got %q", discoveredDump(d).GtidExecuted)
 	}
 }
 
 func TestMysqlStandbyCluster_DecryptionConfiguresPassphraseFile(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{
-		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "backup-passphrase", Key: "secret"},
+		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "secret"},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-passphrase", Namespace: "default"},
@@ -1029,11 +1052,11 @@ func TestMysqlStandbyCluster_ColdStartManyDumpsCorrect(t *testing.T) {
 		t.Fatal("status.discovered is nil")
 		return
 	}
-	if d.DumpName != wantNewestDir {
-		t.Errorf("DumpName: want timestamp-newest %q, got %q", wantNewestDir, d.DumpName)
+	if discoveredDump(d).Name != wantNewestDir {
+		t.Errorf("latestDump.name: want timestamp-newest %q, got %q", wantNewestDir, discoveredDump(d).Name)
 	}
-	if d.DumpGtidExecuted != wantNewestGtid {
-		t.Errorf("DumpGtidExecuted: want %q, got %q", wantNewestGtid, d.DumpGtidExecuted)
+	if discoveredDump(d).GtidExecuted != wantNewestGtid {
+		t.Errorf("latestDump.gtidExecuted: want %q, got %q", wantNewestGtid, discoveredDump(d).GtidExecuted)
 	}
 	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionTrue || skc.Reason != "DumpFound" {
@@ -1068,7 +1091,7 @@ func TestMysqlStandbyCluster_DeadlineDuringReads(t *testing.T) {
 
 	// First reconcile succeeds and stamps a known last-known-good discovered.
 	good, _ := reconcileStandby(t, r, "test-sc", "default")
-	if good.Status.Discovered == nil || good.Status.Discovered.DumpName != "orders-nightly-20260520" {
+	if good.Status.Discovered == nil || discoveredDump(good.Status.Discovered).Name != "orders-nightly-20260520" {
 		t.Fatalf("first scan did not establish last-known-good: %+v", good.Status.Discovered)
 	}
 	wantDiscovered := good.Status.Discovered.DeepCopy()
@@ -1093,14 +1116,14 @@ func TestMysqlStandbyCluster_DeadlineDuringReads(t *testing.T) {
 		t.Errorf("SourceConfigKnown: want False/ScanIncomplete, got %v", skc)
 	}
 
-	// Last-known-good discovered preserved (compare ignoring LastScanAt, which
+	// Last-known-good discovered preserved (compare ignoring LastScanTime, which
 	// stampConditionsAndRequeue does not touch when discovered==nil anyway).
 	if updated.Status.Discovered == nil {
 		t.Fatal("status.discovered was cleared on an incomplete scan; must be preserved")
 	}
-	if updated.Status.Discovered.DumpName != wantDiscovered.DumpName ||
-		updated.Status.Discovered.DumpGtidExecuted != wantDiscovered.DumpGtidExecuted ||
-		updated.Status.Discovered.ArchivedBinlogCount != wantDiscovered.ArchivedBinlogCount {
+	if discoveredDump(updated.Status.Discovered).Name != discoveredDump(wantDiscovered).Name ||
+		discoveredDump(updated.Status.Discovered).GtidExecuted != discoveredDump(wantDiscovered).GtidExecuted ||
+		discoveredArchive(updated.Status.Discovered).FileCount != discoveredArchive(wantDiscovered).FileCount {
 		t.Errorf("status.discovered changed on incomplete scan: want %+v, got %+v",
 			wantDiscovered, updated.Status.Discovered)
 	}
@@ -1133,7 +1156,7 @@ func TestMysqlStandbyCluster_DeadlineDuringManifestLoop(t *testing.T) {
 	// First reconcile succeeds: warms dumpMetaCache for the @.json AND stamps a
 	// known last-known-good discovered.
 	good, _ := reconcileStandby(t, r, "test-sc", "default")
-	if good.Status.Discovered == nil || good.Status.Discovered.DumpName != "orders-nightly-20260520" {
+	if good.Status.Discovered == nil || discoveredDump(good.Status.Discovered).Name != "orders-nightly-20260520" {
 		t.Fatalf("first scan did not establish last-known-good: %+v", good.Status.Discovered)
 	}
 	wantDiscovered := good.Status.Discovered.DeepCopy()
@@ -1173,13 +1196,13 @@ func TestMysqlStandbyCluster_DeadlineDuringManifestLoop(t *testing.T) {
 			"manifest-phase stall, got %q", skc.Message)
 	}
 
-	// status.discovered preserved byte-identical (ignoring LastScanAt).
+	// status.discovered preserved byte-identical (ignoring LastScanTime).
 	if updated.Status.Discovered == nil {
 		t.Fatal("status.discovered was cleared on an incomplete scan; must be preserved")
 	}
-	if updated.Status.Discovered.DumpName != wantDiscovered.DumpName ||
-		updated.Status.Discovered.DumpGtidExecuted != wantDiscovered.DumpGtidExecuted ||
-		updated.Status.Discovered.ArchivedBinlogCount != wantDiscovered.ArchivedBinlogCount {
+	if discoveredDump(updated.Status.Discovered).Name != discoveredDump(wantDiscovered).Name ||
+		discoveredDump(updated.Status.Discovered).GtidExecuted != discoveredDump(wantDiscovered).GtidExecuted ||
+		discoveredArchive(updated.Status.Discovered).FileCount != discoveredArchive(wantDiscovered).FileCount {
 		t.Errorf("status.discovered changed on incomplete manifest scan: want %+v, got %+v",
 			wantDiscovered, updated.Status.Discovered)
 	}
@@ -1207,10 +1230,10 @@ func TestMysqlStandbyCluster_DeadlineDuringList(t *testing.T) {
 
 	// First reconcile succeeds (establish last-known-good).
 	good, _ := reconcileStandby(t, r, "test-sc", "default")
-	if good.Status.Discovered == nil || good.Status.Discovered.DumpName == "" {
+	if good.Status.Discovered == nil || discoveredDump(good.Status.Discovered).Name == "" {
 		t.Fatalf("first scan did not establish last-known-good: %+v", good.Status.Discovered)
 	}
-	wantDumpName := good.Status.Discovered.DumpName
+	wantDumpName := discoveredDump(good.Status.Discovered).Name
 	_ = standbyDrainEvents(recorder)
 
 	// Force List to block until the (short-deadline) ctx fires.
@@ -1228,8 +1251,8 @@ func TestMysqlStandbyCluster_DeadlineDuringList(t *testing.T) {
 	if skc == nil || skc.Status != metav1.ConditionFalse || skc.Reason != "ScanIncomplete" {
 		t.Errorf("SourceConfigKnown: want False/ScanIncomplete, got %v", skc)
 	}
-	if updated.Status.Discovered == nil || updated.Status.Discovered.DumpName != wantDumpName {
-		t.Errorf("status.discovered not preserved on incomplete List: want DumpName=%q, got %+v",
+	if updated.Status.Discovered == nil || discoveredDump(updated.Status.Discovered).Name != wantDumpName {
+		t.Errorf("status.discovered not preserved on incomplete List: want latestDump.name=%q, got %+v",
 			wantDumpName, updated.Status.Discovered)
 	}
 	// No ListFailed warning event on a deadline (it is not a genuine failure).
@@ -1310,9 +1333,9 @@ func TestMysqlStandbyCluster_AllCandidatesMalformed(t *testing.T) {
 // reconciles (the prune is scoped one level deep under each scan's prefix).
 func TestMysqlStandbyCluster_TwoCRPruneIsolation(t *testing.T) {
 	west := minimalStandbyCR("sc-west", "default")
-	west.Spec.Source.Storage.S3.Prefix = "orders/west"
+	west.Spec.Source.S3.Prefix = "orders/west"
 	east := minimalStandbyCR("sc-east", "default")
-	east.Spec.Source.Storage.S3.Prefix = "orders/east"
+	east.Spec.Source.S3.Prefix = "orders/east"
 
 	westKey := "orders/west/dump-w/@.json"
 	eastKey := "orders/east/dump-e/@.json"
@@ -1426,11 +1449,11 @@ func TestMysqlStandbyCluster_DeterministicAcrossListOrder(t *testing.T) {
 			t.Fatalf("iter %d: status.discovered nil", i)
 			continue
 		}
-		if d.DumpName != "aaa-tie" {
-			t.Errorf("iter %d: tie-break: want lex-smallest aaa-tie, got %q", i, d.DumpName)
+		if discoveredDump(d).Name != "aaa-tie" {
+			t.Errorf("iter %d: tie-break: want lex-smallest aaa-tie, got %q", i, discoveredDump(d).Name)
 		}
-		if d.DumpGtidExecuted != "aaa" {
-			t.Errorf("iter %d: want gtid aaa, got %q", i, d.DumpGtidExecuted)
+		if discoveredDump(d).GtidExecuted != "aaa" {
+			t.Errorf("iter %d: want gtid aaa, got %q", i, discoveredDump(d).GtidExecuted)
 		}
 	}
 }

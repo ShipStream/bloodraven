@@ -25,12 +25,12 @@ func TestEnvtest_UnrecoverableHistoricalBackupCanBeDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup := newSucceededBackup(ns, fg.Name, "nightly-s3")
-	backup.Finalizers = []string{"shipstream.io/mysqlbackup"}
+	backup.Finalizers = []string{"bloodraven.shipstream.io/mysqlbackup"}
 	if err := k8sClient.Create(ctx, backup); err != nil {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
-	backup.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &now, StorageType: v1alpha1.BackupStorageS3}
+	backup.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &now}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestEnvtest_UnrecoverableHistoricalBackupCanBeDeleted(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, controller.ConditionBackupMetadataComplete)
+	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
 	if condition == nil || condition.Reason != "DestinationUnavailable" {
 		t.Fatalf("missing durable repair outcome: %+v", backup.Status)
 	}

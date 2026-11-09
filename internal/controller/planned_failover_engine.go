@@ -398,7 +398,7 @@ func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1alpha1.MysqlFail
 	ctx, cancel := context.WithDeadline(ctx, start.Add(e.passBound(pf)))
 	defer cancel()
 
-	if ack := strings.TrimSpace(fg.GetAnnotations()[AcknowledgePlannedFailoverHoldAnnotation]); ack != "" {
+	if ack := strings.TrimSpace(fg.GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]); ack != "" {
 		if d, done := e.ackPass(ctx, fg, hold, ack); done {
 			return d, nil
 		}
@@ -419,7 +419,7 @@ func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1alpha1.MysqlFail
 
 	switch {
 	case pf == nil || plannedFailoverTerminal(pf):
-		if _, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]; ok && admit {
+		if _, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok && admit {
 			return e.admitNew(ctx, fg)
 		}
 		return 0, nil
@@ -638,7 +638,7 @@ func (e *PlannedFailoverEngine) afterCommit(ctx context.Context, nn types.Namesp
 	m.writtenPhase = next.Phase
 	m.stallSince = time.Time{}
 	m.unsettled = nil
-	if _, ok := parseDeadlineStart(base.GetAnnotations()[PlannedFailoverStallSinceAnnotation], next.RunID); !ok {
+	if _, ok := parseDeadlineStart(base.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation], next.RunID); !ok {
 		return
 	}
 	if fresh, err := e.store.Load(ctx, nn); err == nil && fresh != nil {
@@ -655,7 +655,7 @@ func (e *PlannedFailoverEngine) noteStall(ctx context.Context, base *v1alpha1.My
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	m := e.runMemo(runID)
-	if start, ok := parseDeadlineStart(base.GetAnnotations()[PlannedFailoverStallSinceAnnotation], runID); ok {
+	if start, ok := parseDeadlineStart(base.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation], runID); ok {
 		m.stallSince = start
 		return
 	}
@@ -776,7 +776,7 @@ func (e *PlannedFailoverEngine) newRunBlock(fg *v1alpha1.MysqlFailoverGroup, req
 // admitNew handles a request annotation with no live run.
 func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	raw := fg.GetAnnotations()[PlannedFailoverAnnotation]
+	raw := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
 	req, perr := parsePlannedFailoverAnnotation(raw)
 	if perr != nil {
 		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, perr.Error())
@@ -861,7 +861,7 @@ func plannedFencedSourceAwaitingHeal(fg *v1alpha1.MysqlFailoverGroup, now time.T
 		return nil, false
 	}
 	for i := range fg.Status.Sites {
-		if fg.Status.Sites[i].Name == src.SourceSite && fg.Status.Sites[i].State == "writable" {
+		if fg.Status.Sites[i].Name == src.SourceSite && fg.Status.Sites[i].State == v1alpha1.SiteStateWritable {
 			return nil, false
 		}
 	}
@@ -950,9 +950,9 @@ func plannedAdmissionWaitReason(fg *v1alpha1.MysqlFailoverGroup, err error) (v1a
 	var le *DeploymentLeaseError
 	if errors.As(err, &le) {
 		switch le.Reason {
-		case deploymentReasonTopologyPersistencePending:
+		case v1alpha1.UnstableReasonTopologyPersistencePending:
 			return v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "the last topology change is not yet persisted"
-		case deploymentReasonConcurrentOperation:
+		case v1alpha1.UnstableReasonConcurrentOperation:
 			if inPlaceRestoreInFlight(fg) {
 				return v1alpha1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"
 			}
@@ -1005,7 +1005,7 @@ func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1
 	if fg == nil {
 		return plannedRequeuePoll
 	}
-	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
+	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
 	if !ok {
 		return 0
 	}
@@ -1015,7 +1015,7 @@ func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1
 	if fresh == nil {
 		return plannedRequeuePoll
 	}
-	if cur, ok := fresh.GetAnnotations()[PlannedFailoverAnnotation]; !ok || cur != raw {
+	if cur, ok := fresh.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; !ok || cur != raw {
 		if !ok {
 			return 0
 		}
@@ -1043,7 +1043,7 @@ func plannedRequestIsRuns(req PlannedFailoverRequest, pf *v1alpha1.PlannedFailov
 // its validation accepts the run, so a cooldown deferral can still retain
 // it (K050). Any other request is refused with a Warning and consumed.
 func (e *PlannedFailoverEngine) consumeStaleRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) {
-	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
+	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
 	if !ok {
 		return
 	}
@@ -1061,7 +1061,7 @@ func (e *PlannedFailoverEngine) consumeStaleRequest(ctx context.Context, fg *v1a
 
 // ownRequestPresent reports whether fg still carries pf's own request.
 func ownRequestPresent(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) bool {
-	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
+	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
 	if !ok {
 		return false
 	}
@@ -1150,7 +1150,7 @@ func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1alpha1.
 func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	reason v1alpha1.PlannedFailoverReason, msg string, why ClaimReleaseReason, consume bool) (time.Duration, error) {
 	d, err := e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, msg: msg,
-		why: why, eventReason: v1alpha1.EventPlannedFailoverRejected})
+		why: why, failedReason: v1alpha1.EventPlannedFailoverRejected})
 	if consume && d == 0 && err == nil {
 		d = e.consumeRequest(ctx, fg, "rejected")
 	}
@@ -1200,8 +1200,8 @@ func (e *PlannedFailoverEngine) reloadAfterReservation(ctx context.Context, fg *
 	if fresh == nil {
 		return nil, false
 	}
-	before, hadReq := fg.GetAnnotations()[PlannedFailoverAnnotation]
-	after, hasReq := fresh.GetAnnotations()[PlannedFailoverAnnotation]
+	before, hadReq := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+	after, hasReq := fresh.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
 	if hadReq != hasReq || before != after {
 		return nil, false
 	}
@@ -1226,7 +1226,7 @@ func plannedStaticRejection(reason v1alpha1.PlannedFailoverReason) bool {
 
 // deferredPass re-validates a Deferred run.
 func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
-	raw, ok := fg.GetAnnotations()[PlannedFailoverAnnotation]
+	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
 	if !ok {
 		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonCanceled,
 			"planned-failover annotation removed while deferred; run cancelled", ReleaseTerminal, false)
@@ -2295,7 +2295,7 @@ func (e *PlannedFailoverEngine) publishingPass(ctx context.Context, fg *v1alpha1
 	// claim hydrated again in between (a restart), harmless to repeat.
 	e.release(ctx, nn, pf.RunID, ReleasePublishing, "")
 	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded,
-		msg: fmt.Sprintf("promoted %q", pf.TargetSite), why: ReleasePublishing, eventReason: v1alpha1.EventPlannedFailoverSucceeded})
+		msg: fmt.Sprintf("promoted %q", pf.TargetSite), why: ReleasePublishing})
 }
 
 // toRollingBack writes the rollback intent.
@@ -2376,7 +2376,7 @@ func plannedRollbackMessage(pf *v1alpha1.PlannedFailoverStatus, outcome v1alpha1
 func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	m := e.runMemo(pf.RunID)
-	start, ok := parseDeadlineStart(fg.GetAnnotations()[PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID)
+	start, ok := parseDeadlineStart(fg.GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID)
 	if !ok {
 		var out WriteOutcome
 		var err error
@@ -2412,7 +2412,7 @@ func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, confirmedAt: m.promote.confirmedAt,
 			msg: fmt.Sprintf("promoted %q; no topology manager for %s, so the failover record is applied by this terminal write and DNS is left to the next manager",
 				pf.TargetSite, plannedFailoverManagerAbsentDeadline),
-			why: ReleaseManagerAbsent, noNaming: true, eventReason: v1alpha1.EventPlannedFailoverSucceeded})
+			why: ReleaseManagerAbsent, noNaming: true})
 	}
 	reason := v1alpha1.PlannedFailoverReasonManagerUnavailable
 	if pf.Phase == v1alpha1.PlannedFailoverPhaseRollingBack && pf.Rollback != nil {
@@ -2427,7 +2427,7 @@ func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.
 func (e *PlannedFailoverEngine) clearAbsence(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) {
 	m := e.runMemo(pf.RunID)
 	m.absentWarned = false
-	if _, ok := parseDeadlineStart(fg.GetAnnotations()[PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID); !ok {
+	if _, ok := parseDeadlineStart(fg.GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID); !ok {
 		return
 	}
 	if out, err := e.store.ClearDeadlineStart(ctx, fg, DeadlineManagerAbsent, pf.RunID); out != WriteCommitted {
@@ -2457,8 +2457,9 @@ type plannedEnd struct {
 	msg      string
 	// why is the release reason (default terminal).
 	why ClaimReleaseReason
-	// eventReason overrides the terminal Event's reason.
-	eventReason string
+	// failedReason replaces PlannedFailoverFailed as the terminal Event's
+	// reason when the run did not succeed.
+	failedReason string
 	// noNaming skips the topology-manager naming (no manager to name in).
 	noNaming  bool
 	holdSites []string
@@ -2474,7 +2475,7 @@ func (e *PlannedFailoverEngine) endManualRecovery(ctx context.Context, fg *v1alp
 	reason v1alpha1.PlannedFailoverReason, why string, observed ...string) (time.Duration, error) {
 	sites := plannedHoldSites(pf, observed...)
 	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, reason: reason,
-		msg: fmt.Sprintf("%s (%s); automatic failover is held until %s=%s", why, reason, AcknowledgePlannedFailoverHoldAnnotation, pf.RunID),
+		msg: fmt.Sprintf("%s (%s); automatic failover is held until %s=%s", why, reason, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, pf.RunID),
 		why: ReleaseToHold, holdSites: sites})
 }
 
@@ -2608,16 +2609,14 @@ func (e *PlannedFailoverEngine) terminalMutate(base *v1alpha1.MysqlFailoverGroup
 // (second precision) only the target and watermark may change.
 func applyPlannedFailoverRecord(st *v1alpha1.MysqlFailoverGroupStatus, confirmedAt time.Time, target, watermark string, now time.Time) {
 	rec := newFailoverRecordRef(confirmedAt, target)
-	if st.LastFailover != nil {
-		stored := st.LastFailover.UTC().Truncate(time.Second)
+	if lf := st.LastFailoverTime(); lf != nil {
+		stored := lf.UTC().Truncate(time.Second)
 		if stored.After(rec.LastFailover) && !failoverStampFutureDated(stored, now) {
 			return
 		}
 	}
 	t := metav1.NewTime(rec.LastFailover)
-	st.LastFailover = &t
-	st.LastFailoverTarget = target
-	st.PromotionGtidExecuted = watermark
+	st.SetLastFailover(&t, target, watermark)
 }
 
 // finish writes the terminal record and, once it has committed, releases
@@ -2665,7 +2664,7 @@ func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1alpha1.MysqlFa
 		// failover record and make the run's own later check 1 fail.
 		e.nameForOutcome(ctx, fg, pf, ref, end)
 	}
-	e.afterTerminal(ctx, nn, fg, written, end.why, end.eventReason)
+	e.afterTerminal(ctx, nn, fg, written, end.why, end.failedReason)
 	return 0, nil
 }
 
@@ -2709,7 +2708,7 @@ func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1alpha1
 // run has committed: release or hold, report, and clean the durable
 // deadline annotations.
 func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup,
-	final *v1alpha1.PlannedFailoverStatus, why ClaimReleaseReason, eventReason string) {
+	final *v1alpha1.PlannedFailoverStatus, why ClaimReleaseReason, failedReason string) {
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	m := e.runMemo(final.RunID)
@@ -2724,7 +2723,7 @@ func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.Name
 	}
 	if !m.reported {
 		m.reported = true
-		e.reportTerminal(nn, fg, final, eventReason)
+		e.reportTerminal(nn, fg, final, failedReason)
 	}
 	fresh := e.reload(ctx, fg)
 	if fresh == nil {
@@ -2772,29 +2771,30 @@ func (e *PlannedFailoverEngine) clearStaleRunAnnotations(ctx context.Context, fg
 var plannedRunAnnotationKinds = []DeadlineKind{DeadlineManagerAbsent, DeadlineStatusStall, DeadlinePromotionConfirmed}
 
 // reportTerminal emits the run's metrics and its terminal Event.
+// failedReason, when set, replaces PlannedFailoverFailed as the Event
+// reason of a run that did not succeed (PlannedFailoverRejected for a run
+// that never started).
 func (e *PlannedFailoverEngine) reportTerminal(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup,
-	final *v1alpha1.PlannedFailoverStatus, eventReason string) {
+	final *v1alpha1.PlannedFailoverStatus, failedReason string) {
 	e.sink.RunTerminal(nn, final)
 	r := final.Result
 	switch {
 	case r.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded:
-		if eventReason == "" {
-			eventReason = v1alpha1.EventPlannedFailoverSucceeded
-		}
-		e.sink.Event(fg, corev1.EventTypeNormal, eventReason,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSucceeded,
 			fmt.Sprintf("planned failover to %q complete (warnings: %s)", final.TargetSite, plannedWarningList(r.Warnings)))
 	case r.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
 		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverManualRecoveryRequired,
 			fmt.Sprintf("planned failover %s ended ManualRecoveryRequired (%s): resolve the split brain by hand, then annotate %s=%s",
-				final.RunID, r.Reason, AcknowledgePlannedFailoverHoldAnnotation, final.RunID))
+				final.RunID, r.Reason, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, final.RunID))
 	default:
-		if eventReason == "" {
-			eventReason = v1alpha1.EventPlannedFailoverFailed
+		reason := v1alpha1.EventPlannedFailoverFailed
+		if failedReason != "" {
+			reason = failedReason
 		}
 		if r.Outcome == v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed {
 			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverPromotionConfirmationFailed, final.Message)
 		}
-		e.sink.Event(fg, corev1.EventTypeWarning, eventReason,
+		e.sink.Event(fg, corev1.EventTypeWarning, reason,
 			fmt.Sprintf("planned failover %s (%s): %s", r.Outcome, r.Reason, final.Message))
 	}
 }
@@ -2866,7 +2866,7 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 	defer cancel()
 	fresh := e.reload(sctx, fg)
 	if fresh != nil {
-		if start, ok := parseDeadlineStart(fresh.GetAnnotations()[PlannedFailoverStallSinceAnnotation], pf.RunID); ok {
+		if start, ok := parseDeadlineStart(fresh.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation], pf.RunID); ok {
 			m.stallSince = start
 		}
 	}
@@ -2958,7 +2958,7 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 		"fg", nn.String(), "runId", cur.RunID, "outcome", string(final.Result.Outcome), "reason", string(final.Result.Reason))
 	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStatusStalled,
 		fmt.Sprintf("status writes for planned failover %s failed for %s; the run ended %s (%s) with the %s annotation",
-			cur.RunID, deadline, final.Result.Outcome, final.Result.Reason, PlannedFailoverTerminalAnnotation))
+			cur.RunID, deadline, final.Result.Outcome, final.Result.Reason, v1alpha1.PlannedFailoverTerminalAnnotation))
 	why := ReleaseStatusStalled
 	e.afterTerminal(sctx, nn, fg, final, why, "")
 	return plannedFailoverMarkerRetryInterval, true
@@ -3016,7 +3016,7 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 // step 4). The claim is released (or held) whatever status says.
 func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	marker, _ := ParseTerminalMarker(fg.GetAnnotations()[PlannedFailoverTerminalAnnotation])
+	marker, _ := ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
 	m := e.runMemo(pf.RunID)
 	e.markTerminated(pf.RunID)
 	isHold := marker.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
@@ -3150,7 +3150,7 @@ func plannedOwnRecordTime(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedF
 		return pf.Promotion.ConfirmationTime.Time
 	}
 	if pf.Promotion != nil && pf.RunID != "" {
-		if t, ok := parseDeadlineStart(fg.GetAnnotations()[PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
+		if t, ok := parseDeadlineStart(fg.GetAnnotations()[v1alpha1.PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
 			return t
 		}
 	}

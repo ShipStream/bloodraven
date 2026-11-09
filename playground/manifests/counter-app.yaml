@@ -9,7 +9,7 @@ metadata:
   namespace: bloodraven-playground
   labels:
     app: counter-app
-    shipstream.io/failover-group: playground
+    bloodraven.shipstream.io/failover-group: playground
 spec:
   replicas: 1
   selector:
@@ -19,9 +19,9 @@ spec:
     metadata:
       labels:
         app: counter-app
-        shipstream.io/failover-group: playground
+        bloodraven.shipstream.io/failover-group: playground
     spec:
-      # NO toleration for shipstream.io/db-readonly-playground — the pod gets evicted
+      # NO toleration for bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground — the pod gets evicted
       # from the old-primary site and rescheduled to the new-primary site.
       # Tolerate disk-pressure so playground works on low-disk local clusters.
       tolerations:
@@ -55,7 +55,7 @@ spec:
               value: ":8090"
             # Dragonfly active Service — Bloodraven re-routes this Service's
             # endpoints to whichever site's Dragonfly pod currently holds
-            # dragonfly-role=master AND dragonfly-traffic=enabled. Empty when
+            # dragonfly-role=master AND dragonfly-traffic=true. Empty when
             # spec.dragonfly.enabled is false; the counter-app handles that.
             - name: REDIS_HOST
               value: "playground-dragonfly.bloodraven-playground.svc.cluster.local"

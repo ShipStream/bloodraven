@@ -28,26 +28,9 @@ import (
 const (
 	dragonflyAppName = "dragonfly"
 
-	// labelDragonflyRole identifies the operator-assigned Dragonfly role
-	// on a pod. Values: "master", "replica". The active Service AND-gates
-	// this with labelDragonflyTraffic, so the role label alone is not
-	// enough to attract client traffic.
-	labelDragonflyRole = "shipstream.io/dragonfly-role"
-
-	// labelDragonflyTraffic gates whether a pod is eligible for the
-	// active app-facing Service. Default value "enabled" is set by the
-	// StatefulSet template; the planned-failover sequence transiently
-	// removes it from the source pod before issuing REPLTAKEOVER so the
-	// Service atomically sheds the old endpoint without depending on
-	// label-flip ordering. Restored once the new master is in place.
-	//
-	// Only "enabled" is recognized by the active-Service selector;
-	// "disabled" or absent both shed traffic.
-	labelDragonflyTraffic = "shipstream.io/dragonfly-traffic"
-
-	// dragonflyTrafficEnabled is the only meaningful value of
-	// labelDragonflyTraffic. Centralized so we don't repeat the literal.
-	dragonflyTrafficEnabled = "enabled"
+	// dragonflyTrafficEnabled is the only value of
+	// v1alpha1.DragonflyTrafficLabel; an ineligible pod has no label.
+	dragonflyTrafficEnabled = v1alpha1.LabelValueTrue
 
 	dragonflyDefaultPort      = int32(6379)
 	dragonflyDefaultAdminPort = int32(9999)
@@ -87,11 +70,11 @@ func dragonflyActiveServiceName(fgName string) string {
 // distinct app.kubernetes.io/name so client tooling can list them.
 func dragonflyCommonLabels(fgName, siteName string) map[string]string {
 	return map[string]string{
-		labelAppName:       dragonflyAppName,
-		labelInstance:      fgName,
-		labelFailoverGroup: fgName,
-		labelSite:          siteName,
-		labelManagedBy:     managerName,
+		labelAppName:                dragonflyAppName,
+		labelInstance:               fgName,
+		v1alpha1.FailoverGroupLabel: fgName,
+		v1alpha1.SiteLabel:          siteName,
+		labelManagedBy:              managerName,
 	}
 }
 
@@ -141,6 +124,22 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSet(ctx context
 	return err
 }
 
+// dragonflyRenderImage is the image the ordinary render gives a site's
+// Dragonfly container. Under upgradeStrategy Rolling it is
+// spec.dragonfly.image. Under SnapshotRestore the render never moves an
+// image: an existing StatefulSet (sts as read back) keeps its live image,
+// including while a run waits for admission and after a run failed, and
+// only the snapshot upgrade's own phases change it. A StatefulSet being
+// created starts on spec.dragonfly.image.
+func dragonflyRenderImage(spec *v1alpha1.DragonflySpec, sts *appsv1.StatefulSet) string {
+	if dragonflyUpgradeStrategy(spec) == v1alpha1.DragonflyUpgradeStrategySnapshotRestore {
+		if live := dragonflyTemplateImage(sts); live != "" {
+			return live
+		}
+	}
+	return spec.Image
+}
+
 func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, sts *appsv1.StatefulSet) error {
 	spec := fg.Spec.Dragonfly
 	if err := controllerutil.SetControllerReference(fg, sts, r.Scheme); err != nil {
@@ -159,7 +158,7 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 
 	container := corev1.Container{
 		Name:  dragonflyContainerName,
-		Image: spec.Image,
+		Image: dragonflyRenderImage(spec, sts),
 		Args:  args,
 		Env:   env,
 		Ports: []corev1.ContainerPort{
@@ -199,19 +198,16 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 		SecurityContext: spec.ContainerSecurityContext.DeepCopy(),
 	}
 
-	// Selector is immutable on a StatefulSet. Only set it on create.
+	// Selector is immutable on a StatefulSet: set it on create, and refuse
+	// a live one that differs (workload_selector.go).
 	if sts.Spec.Selector == nil {
-		sts.Spec.Selector = &metav1.LabelSelector{
-			MatchLabels: map[string]string{
-				labelAppName:  dragonflyAppName,
-				labelInstance: fg.Name,
-				labelSite:     site.Name,
-			},
-		}
+		sts.Spec.Selector = dragonflyStatefulSetSelector(fg, site.Name)
+	} else if mismatch := statefulSetSelectorMismatch(sts, fg, site.Name); mismatch != nil {
+		return mismatch
 	}
 
 	// Pod labels include the operator-assigned dragonfly-role (default
-	// "replica") and dragonfly-traffic=enabled. The DragonflyManager /
+	// "replica") and dragonfly-traffic=true. The DragonflyManager /
 	// planned-failover handlers rewrite these on the active site during
 	// promotion. Static labels here must not depend on mutable status,
 	// otherwise every status change would trigger a rollout.
@@ -219,8 +215,8 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 	for k, v := range labels {
 		podLabels[k] = v
 	}
-	podLabels[labelDragonflyRole] = "replica"
-	podLabels[labelDragonflyTraffic] = dragonflyTrafficEnabled
+	podLabels[v1alpha1.DragonflyRoleLabel] = "replica"
+	podLabels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 
 	sts.Spec.Replicas = &replicas
 	sts.Spec.ServiceName = dragonflySiteServiceName(fg.Name, site.Name)
@@ -233,7 +229,7 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 			NodeSelector: map[string]string{
 				"topology.kubernetes.io/zone": site.Zone,
 			},
-			Tolerations: groupReadOnlyTolerations(fg.Name),
+			Tolerations: groupReadOnlyTolerations(fg),
 			Containers:  []corev1.Container{container},
 			Volumes: []corev1.Volume{
 				{
@@ -276,20 +272,18 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 		// DragonflyManager re-issue REPLICAOF on the next tick.
 		"--break_replication_on_master_restart",
 	}
-	if spec.MaxMemoryMb > 0 {
-		args = append(args, fmt.Sprintf("--maxmemory=%dmb", spec.MaxMemoryMb))
+	// Admission requires maxMemory > 0 and proactorThreads >= 1; unset leaves
+	// Dragonfly's defaults. --maxmemory takes bytes; Value rounds a
+	// fractional quantity up to the next byte.
+	if spec.MaxMemory != nil && spec.MaxMemory.Sign() > 0 {
+		args = append(args, fmt.Sprintf("--maxmemory=%d", spec.MaxMemory.Value()))
 	}
-	if spec.ProactorThreads > 0 {
-		args = append(args, fmt.Sprintf("--proactor_threads=%d", spec.ProactorThreads))
+	if spec.ProactorThreads != nil && *spec.ProactorThreads > 0 {
+		args = append(args, fmt.Sprintf("--proactor_threads=%d", *spec.ProactorThreads))
 	}
 	if spec.Snapshot != nil && spec.Snapshot.Dir != "" {
 		args = append(args, "--dir="+spec.Snapshot.Dir)
-		if spec.Snapshot.S3Endpoint != "" {
-			args = append(args, "--s3_endpoint="+spec.Snapshot.S3Endpoint)
-		}
-		if spec.Snapshot.S3UseHTTPS != nil {
-			args = append(args, "--s3_use_https="+strconv.FormatBool(*spec.Snapshot.S3UseHTTPS))
-		}
+		args = append(args, dragonflyS3EndpointArgs(spec.Snapshot.S3EndpointURL)...)
 		if spec.Snapshot.S3SignPayload != nil {
 			args = append(args, "--s3_sign_payload="+strconv.FormatBool(*spec.Snapshot.S3SignPayload))
 		}
@@ -298,6 +292,69 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 	// buildDragonflyEnv, not here, so the password stays off argv.
 	args = append(args, filterDragonflyUserArgs(spec.Args)...)
 	return args
+}
+
+// dragonflyS3EndpointArgs adapts spec.dragonfly.snapshot.s3EndpointURL to
+// Dragonfly's two flags: --s3_endpoint takes host[:port] without a scheme,
+// and --s3_use_https takes the scheme as a boolean. An empty URL means AWS
+// S3 with Dragonfly's defaults, so neither flag is emitted. Admission only
+// admits an http:// or https:// URL with a host, an optional port from 1 to
+// 65535 and no path; anything else (reachable only through a client that
+// skips admission) also emits nothing rather than a flag Dragonfly would
+// misread.
+func dragonflyS3EndpointArgs(endpointURL string) []string {
+	var useHTTPS bool
+	var hostPort string
+	switch {
+	case strings.HasPrefix(endpointURL, "https://"):
+		useHTTPS, hostPort = true, strings.TrimPrefix(endpointURL, "https://")
+	case strings.HasPrefix(endpointURL, "http://"):
+		useHTTPS, hostPort = false, strings.TrimPrefix(endpointURL, "http://")
+	default:
+		return nil
+	}
+	hostPort = strings.TrimSuffix(hostPort, "/")
+	if hostPort == "" || strings.ContainsAny(hostPort, "/?#@ \t\r\n") || !validDragonflyEndpointHostPort(hostPort) {
+		return nil
+	}
+	return []string{
+		"--s3_endpoint=" + hostPort,
+		"--s3_use_https=" + strconv.FormatBool(useHTTPS),
+	}
+}
+
+// validDragonflyEndpointHostPort reports whether hostPort is a host (a
+// name, an IPv4 address, or an IPv6 address in brackets) with an optional
+// port from 1 to 65535: no empty or non-numeric port.
+func validDragonflyEndpointHostPort(hostPort string) bool {
+	host, port := hostPort, ""
+	if strings.HasPrefix(hostPort, "[") {
+		end := strings.Index(hostPort, "]")
+		if end < 0 {
+			return false
+		}
+		host, port = hostPort[:end+1], hostPort[end+1:]
+		if port != "" && !strings.HasPrefix(port, ":") {
+			return false
+		}
+		port = strings.TrimPrefix(port, ":")
+		if len(host) <= 2 || port == "" && strings.HasSuffix(hostPort, ":") {
+			return false
+		}
+	} else if i := strings.IndexByte(hostPort, ':'); i >= 0 {
+		host, port = hostPort[:i], hostPort[i+1:]
+		if port == "" {
+			return false
+		}
+	}
+	if host == "" || strings.ContainsAny(strings.Trim(host, "[]"), "[]") {
+		return false
+	}
+	if port == "" {
+		return true
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535 && strconv.Itoa(n) == port
 }
 
 func dragonflyServiceAccountName(spec *v1alpha1.DragonflySpec) string {
@@ -363,25 +420,23 @@ func filterDragonflyUserArgs(in []string) []string {
 
 // buildDragonflyEnv wires the auth password into the container's env from
 // the configured Secret, leaving env empty when auth is not set or when
-// the SecretName is empty (CRD validation typically catches the latter
-// but partial in-place patches can still produce it; emitting an
-// EnvVar with an empty SecretName makes the pod fail to start with a
-// secret-not-found event rather than a clean reconcile error).
+// the Secret name is empty (CRD validation catches the latter, but a
+// typed client that skips admission, such as a fake client, can still
+// produce it; emitting an EnvVar with an empty Secret name makes the pod
+// fail to start with a secret-not-found event rather than a clean
+// reconcile error).
 func buildDragonflyEnv(spec *v1alpha1.DragonflySpec) []corev1.EnvVar {
-	if spec.Auth == nil || spec.Auth.SecretName == "" {
+	if spec.Auth == nil || spec.Auth.PasswordSecretKeyRef.Name == "" {
 		return buildDragonflySnapshotEnv(spec)
 	}
-	key := spec.Auth.PasswordKey
-	if key == "" {
-		key = "password"
-	}
+	ref := spec.Auth.PasswordSecretKeyRef
 	secretRef := func(name string) corev1.EnvVar {
 		return corev1.EnvVar{
 			Name: name,
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: spec.Auth.SecretName},
-					Key:                  key,
+					LocalObjectReference: corev1.LocalObjectReference{Name: ref.Name},
+					Key:                  ref.KeyOrDefault(),
 				},
 			},
 		}
@@ -450,9 +505,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySiteService(ctx context
 			// service name from outside the StatefulSet.
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
-				labelAppName:  dragonflyAppName,
-				labelInstance: fg.Name,
-				labelSite:     site.Name,
+				labelAppName:       dragonflyAppName,
+				labelInstance:      fg.Name,
+				v1alpha1.SiteLabel: site.Name,
 			},
 			Ports: []corev1.ServicePort{
 				{Name: "client", Port: port, TargetPort: intstr.FromInt32(port), Protocol: corev1.ProtocolTCP},
@@ -485,10 +540,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 			return err
 		}
 		svc.Labels = map[string]string{
-			labelAppName:       dragonflyAppName,
-			labelInstance:      fg.Name,
-			labelFailoverGroup: fg.Name,
-			labelManagedBy:     managerName,
+			labelAppName:                dragonflyAppName,
+			labelInstance:               fg.Name,
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:              managerName,
 		}
 		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
 		svc.Spec = corev1.ServiceSpec{
@@ -500,10 +555,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 			// old and new master would match the selector during a
 			// REPLTAKEOVER.
 			Selector: map[string]string{
-				labelAppName:          dragonflyAppName,
-				labelInstance:         fg.Name,
-				labelDragonflyRole:    "master",
-				labelDragonflyTraffic: dragonflyTrafficEnabled,
+				labelAppName:                   dragonflyAppName,
+				labelInstance:                  fg.Name,
+				v1alpha1.DragonflyRoleLabel:    "master",
+				v1alpha1.DragonflyTrafficLabel: dragonflyTrafficEnabled,
 			},
 			Ports: []corev1.ServicePort{
 				{Name: "client", Port: port, TargetPort: intstr.FromInt32(port), Protocol: corev1.ProtocolTCP},
@@ -526,19 +581,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context
 			return err
 		}
 		pdb.Labels = map[string]string{
-			labelAppName:       dragonflyAppName,
-			labelInstance:      fg.Name,
-			labelFailoverGroup: fg.Name,
-			labelSite:          site.Name,
-			labelManagedBy:     managerName,
+			labelAppName:                dragonflyAppName,
+			labelInstance:               fg.Name,
+			v1alpha1.FailoverGroupLabel: fg.Name,
+			v1alpha1.SiteLabel:          site.Name,
+			labelManagedBy:              managerName,
 		}
 		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
 			MinAvailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					labelAppName:  dragonflyAppName,
-					labelInstance: fg.Name,
-					labelSite:     site.Name,
+					labelAppName:       dragonflyAppName,
+					labelInstance:      fg.Name,
+					v1alpha1.SiteLabel: site.Name,
 				},
 			},
 		}
@@ -559,6 +614,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context
 // traffic to a Dragonfly the operator no longer manages.
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	if !dragonflyEnabled(fg) {
+		r.clearDragonflySelectorRefusals(fg)
 		return 0, r.teardownDragonflyResources(ctx, fg)
 	}
 	for _, site := range fg.Spec.Sites {
@@ -569,6 +625,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.C
 	requeue, err := r.reconcileDragonflyStatefulSetsSerial(ctx, fg)
 	if err != nil {
 		return 0, err
+	}
+	if err := r.observeDragonflyImage(ctx, fg); err != nil {
+		return 0, fmt.Errorf("record dragonfly image: %w", err)
 	}
 	if err := r.reconcileDragonflyActiveService(ctx, fg); err != nil {
 		return 0, fmt.Errorf("reconcile dragonfly active service: %w", err)
@@ -582,6 +641,31 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.C
 		}
 	}
 	return requeue, nil
+}
+
+// observeDragonflyImage records status.dragonfly.image: the Dragonfly
+// container image of the active Dragonfly site's StatefulSet. It is an
+// observation only; nothing compares spec.dragonfly.image with it.
+func (r *MysqlFailoverGroupReconciler) observeDragonflyImage(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	master := effectiveDragonflyMasterSite(fg)
+	if master == "" {
+		return nil
+	}
+	var sts appsv1.StatefulSet
+	key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, master)}
+	if err := r.Get(ctx, key, &sts); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	image := dragonflyTemplateImage(&sts)
+	if image == "" || (fg.Status.Dragonfly != nil && fg.Status.Dragonfly.Image == image) {
+		return nil
+	}
+	patch := client.MergeFrom(fg.DeepCopy())
+	if fg.Status.Dragonfly == nil {
+		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{}
+	}
+	fg.Status.Dragonfly.Image = image
+	return client.IgnoreNotFound(r.Status().Patch(ctx, fg, patch))
 }
 
 func (r *MysqlFailoverGroupReconciler) deleteLegacyDragonflyGroupPDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
@@ -611,6 +695,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
 		if err := reader.Get(ctx, key, &current); err != nil {
 			if apierrors.IsNotFound(err) {
+				r.noteWorkloadSelector(fg, "StatefulSet", key.Name, nil)
 				if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
 					return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
 				}
@@ -618,8 +703,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 			}
 			return 0, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
 		}
+		// A StatefulSet whose immutable selector differs is refused: the
+		// site is skipped, not updated, and not retried in a loop.
+		mismatch := statefulSetSelectorMismatch(&current, fg, site.Name)
+		r.noteWorkloadSelector(fg, "StatefulSet", key.Name, mismatch)
+		if mismatch != nil {
+			continue
+		}
 
-		desired, err := r.desiredDragonflyStatefulSet(fg, site)
+		desired, err := r.desiredDragonflyStatefulSet(fg, site, &current)
 		if err != nil {
 			return 0, fmt.Errorf("build desired dragonfly statefulset %s: %w", site.Name, err)
 		}
@@ -849,12 +941,18 @@ func minInt(a, b int) int {
 	return b
 }
 
-func (r *MysqlFailoverGroupReconciler) desiredDragonflyStatefulSet(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (*appsv1.StatefulSet, error) {
+// desiredDragonflyStatefulSet renders site's StatefulSet as the ordinary
+// render would update current (nil when it does not exist yet): the same
+// mutation CreateOrUpdate applies to the object it reads back.
+func (r *MysqlFailoverGroupReconciler) desiredDragonflyStatefulSet(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, current *appsv1.StatefulSet) (*appsv1.StatefulSet, error) {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dragonflyStatefulSetName(fg.Name, site.Name),
 			Namespace: fg.Namespace,
 		},
+	}
+	if current != nil {
+		sts = current.DeepCopy()
 	}
 	if err := r.applyDragonflyStatefulSetSpec(fg, site, sts); err != nil {
 		return nil, err
@@ -1017,22 +1115,74 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 		connector = realDragonflyConnector
 	}
 	password := ""
-	if auth := fg.Spec.Dragonfly.Auth; auth != nil && auth.SecretName != "" {
-		key := auth.PasswordKey
-		if key == "" {
-			key = "password"
-		}
+	if auth := fg.Spec.Dragonfly.Auth; auth != nil && auth.PasswordSecretKeyRef.Name != "" {
+		ref := auth.PasswordSecretKeyRef
+		key := ref.KeyOrDefault()
 		var s corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: auth.SecretName}, &s); err != nil {
-			return nil, fmt.Errorf("dragonfly: read auth secret %s: %w", auth.SecretName, err)
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &s); err != nil {
+			return nil, fmt.Errorf("dragonfly: read auth secret %s: %w", ref.Name, err)
 		}
 		raw, ok := s.Data[key]
 		if !ok {
-			return nil, fmt.Errorf("dragonfly: auth secret %s missing key %q", auth.SecretName, key)
+			return nil, fmt.Errorf("dragonfly: auth secret %s missing key %q", ref.Name, key)
 		}
 		password = string(raw)
 	}
 	addr := dragonflyAddr(fg, siteName)
+	return connector(ctx, addr, password)
+}
+
+// dragonflyDialPod is dragonflyDial with the connection settings pod was
+// started with rather than spec.dragonfly's: its client container port
+// and the password its DFLY_requirepass env carries. A snapshot-restore
+// run holds the render, so while it runs (and until the render rolls a new
+// template out after it) the live pod and its site Service can keep a port
+// or auth Secret that spec.dragonfly has since replaced; dialing them with
+// the spec's settings would fail against a pod that is fine. A pod with no
+// client port uses the spec port, and one with no password env is dialed
+// without a password, as it was rendered.
+func (r *MysqlFailoverGroupReconciler) dragonflyDialPod(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string, pod *corev1.Pod) (DragonflyConnection, error) {
+	connector := r.dragonflyConnector
+	if connector == nil {
+		connector = realDragonflyConnector
+	}
+	port := dragonflyPort(fg.Spec.Dragonfly)
+	var container *corev1.Container
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == dragonflyContainerName {
+			container = &pod.Spec.Containers[i]
+			break
+		}
+	}
+	password := ""
+	if container != nil {
+		for _, p := range container.Ports {
+			if p.Name == "client" && p.ContainerPort > 0 {
+				port = p.ContainerPort
+			}
+		}
+		for _, env := range container.Env {
+			if env.Name != DragonflyAuthEnvVar {
+				continue
+			}
+			switch {
+			case env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil:
+				ref := env.ValueFrom.SecretKeyRef
+				var s corev1.Secret
+				if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &s); err != nil {
+					return nil, fmt.Errorf("dragonfly: read auth secret %s of pod %s: %w", ref.Name, pod.Name, err)
+				}
+				raw, ok := s.Data[ref.Key]
+				if !ok {
+					return nil, fmt.Errorf("dragonfly: auth secret %s of pod %s missing key %q", ref.Name, pod.Name, ref.Key)
+				}
+				password = string(raw)
+			case env.ValueFrom == nil:
+				password = env.Value
+			}
+		}
+	}
+	addr := fmt.Sprintf("%s.%s.svc.cluster.local:%d", dragonflySiteServiceName(fg.Name, siteName), fg.Namespace, port)
 	return connector(ctx, addr, password)
 }
 

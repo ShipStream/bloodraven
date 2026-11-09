@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 )
@@ -138,7 +139,7 @@ func pitrBindingTargets(fg *v1alpha1.MysqlFailoverGroup, mbvs []v1alpha1.MysqlBa
 			continue
 		}
 		pit := v.Spec.PointInTime
-		if pit == nil || (pit.Mode != "latest" && pit.Mode != "timestamp") {
+		if pit == nil || (pit.Mode != v1alpha1.PointInTimeModeLatest && pit.Mode != v1alpha1.PointInTimeModeTimestamp) {
 			continue
 		}
 		name := pit.ArchiveProfileName
@@ -286,7 +287,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRArchiveBindings(ctx context.
 	for i := range beforeEntries {
 		beforeEntries[i] = *beforeEntries[i].DeepCopy()
 	}
-	beforeCond := meta.FindStatusCondition(fg.Status.Conditions, conditionPITRArchiveBindingReady).DeepCopy()
+	beforeCond := meta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady).DeepCopy()
 
 	mbvs, err := r.listPITRVerifications(ctx, fg)
 	if err != nil {
@@ -297,7 +298,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePITRArchiveBindings(ctx context.
 	if p.snaps, err = r.listPITRKeySnapshots(ctx, fg); err != nil {
 		return 0, err
 	}
-	_, releaseRequested := fg.Annotations[ReleasePITRArchiveBindingAnnotation]
+	_, releaseRequested := fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]
 	if len(p.targets) == 0 && len(beforeEntries) == 0 && beforeCond == nil && !releaseRequested && len(p.snaps) == 0 {
 		return 0, nil
 	}
@@ -465,7 +466,7 @@ func (p *pitrBindingPass) confirmRecovered(ctx context.Context, before []v1alpha
 		if err != nil && !apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("confirm recovered pitr key snapshot %s: %w", e.Encryption.KeySecretName, err)
 		}
-		ok := err == nil && s.DeletionTimestamp == nil && s.Labels[labelFailoverGroupUID] == string(p.fg.UID)
+		ok := err == nil && s.DeletionTimestamp == nil && s.Labels[v1alpha1.FailoverGroupUIDLabel] == string(p.fg.UID)
 		if ok {
 			a, verr := verifyPITRAcceptance(&s)
 			ok = verr == nil && a.Destination == e.Destination && a.ArchiveID == e.ArchiveID
@@ -499,7 +500,7 @@ func (p *pitrBindingPass) confirmRecovered(ctx context.Context, before []v1alpha
 func (p *pitrBindingPass) accept(ctx context.Context, before []v1alpha1.PITRArchiveBinding) {
 	for i := range p.entries {
 		e := &p.entries[i]
-		if !p.newlyBound[e.ID] || e.Encryption.Mode != v1alpha1.PITRArchiveEncryptionPassphrase {
+		if !p.newlyBound[e.ID] || e.Encryption.Mode != v1alpha1.EncryptionModePassphrase {
 			continue
 		}
 		err := p.r.acceptPITRKeySnapshot(ctx, p.fg, e, p.checkedSnapshot[e.ID], p.now)
@@ -509,7 +510,7 @@ func (p *pitrBindingPass) accept(ctx context.Context, before []v1alpha1.PITRArch
 		log.FromContext(ctx).Error(err, "accept pitr key snapshot; the binding is not recorded Bound", "fg", p.fg.Name, "bindingID", e.ID)
 		switch prev := findBindingIn(before, e.ID); {
 		case errors.Is(err, errPITRCheckedSnapshotReplaced):
-			p.setState(e, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, err.Error()+"; checking it again", pitrBindingCauseCheck)
+			p.setState(e, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, err.Error()+"; checking it again", pitrBindingCauseCheck)
 			e.ArchiveID, e.Source, e.Check = "", nil, nil
 		case prev != nil:
 			*e = *prev.DeepCopy()
@@ -520,7 +521,7 @@ func (p *pitrBindingPass) accept(ctx context.Context, before []v1alpha1.PITRArch
 		default:
 			// A new entry whose binding could not be recorded: net, the
 			// pass only added it.
-			p.setState(e, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "accepting the key snapshot failed: "+err.Error(), pitrBindingCauseInput)
+			p.setState(e, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, "accepting the key snapshot failed: "+err.Error(), pitrBindingCauseInput)
 			e.ArchiveID, e.Source = "", nil
 		}
 		delete(p.newlyBound, e.ID)
@@ -548,7 +549,7 @@ func (p *pitrBindingPass) unconsume(check *v1alpha1.PITRArchiveBindingCheck) {
 func (p *pitrBindingPass) reclaimCheckJobs(ctx context.Context) {
 	var jobs batchv1.JobList
 	if err := p.r.List(ctx, &jobs, client.InNamespace(p.fg.Namespace), client.MatchingLabels{
-		labelResourceKind: resourcePITRArchiveCheck, labelFailoverGroup: p.fg.Name,
+		v1alpha1.ResourceLabel: resourcePITRArchiveCheck, v1alpha1.FailoverGroupLabel: p.fg.Name,
 	}); err != nil {
 		log.FromContext(ctx).Error(err, "list pitr check jobs", "fg", p.fg.Name)
 		return
@@ -619,7 +620,7 @@ func (r *MysqlFailoverGroupReconciler) listPITRVerifications(ctx context.Context
 func (p *pitrBindingPass) checkIntegrity(ctx context.Context) error {
 	for i := range p.entries {
 		e := &p.entries[i]
-		if e.State != v1alpha1.PITRArchiveBindingBound || e.Encryption.Mode != v1alpha1.PITRArchiveEncryptionPassphrase || e.ID == p.releasePending {
+		if e.State != v1alpha1.PITRArchiveBindingBound || e.Encryption.Mode != v1alpha1.EncryptionModePassphrase || e.ID == p.releasePending {
 			continue
 		}
 		res, why, err := p.r.checkPITRKeySnapshotIntegrity(ctx, p.fg, e, p.byName[e.Encryption.KeySecretName])
@@ -628,8 +629,8 @@ func (p *pitrBindingPass) checkIntegrity(ctx context.Context) error {
 		}
 		switch res {
 		case pitrIntegrityOK:
-			if e.Reason == pitrBindingKeyMaterialLost {
-				p.setState(e, v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "", pitrBindingCauseIntegrity)
+			if e.Reason == v1alpha1.PITRArchiveBindingReasonKeyMaterialLost {
+				p.setState(e, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "", pitrBindingCauseIntegrity)
 			}
 		case pitrIntegrityNotFound:
 			outcome, err := p.recreate(ctx, e)
@@ -640,8 +641,8 @@ func (p *pitrBindingPass) checkIntegrity(ctx context.Context) error {
 			case pitrRecreated:
 				p.recreated = append(p.recreated, e.Encryption.KeySecretName)
 				p.causes[e.ID] = pitrBindingCauseC3
-				if e.Reason == pitrBindingKeyMaterialLost {
-					p.setState(e, v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "", pitrBindingCauseC3)
+				if e.Reason == v1alpha1.PITRArchiveBindingReasonKeyMaterialLost {
+					p.setState(e, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "", pitrBindingCauseC3)
 				}
 				continue
 			case pitrRecreateRaced:
@@ -650,12 +651,12 @@ func (p *pitrBindingPass) checkIntegrity(ctx context.Context) error {
 				p.requeueAfter(pitrCheckPollInterval)
 				continue
 			}
-			if msg := pitrKeyMaterialLostMessage(e, res, why); e.Reason != pitrBindingKeyMaterialLost || e.Message != msg {
-				p.setState(e, v1alpha1.PITRArchiveBindingBound, pitrBindingKeyMaterialLost, msg, pitrBindingCauseC3)
+			if msg := pitrKeyMaterialLostMessage(e, res, why); e.Reason != v1alpha1.PITRArchiveBindingReasonKeyMaterialLost || e.Message != msg {
+				p.setState(e, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost, msg, pitrBindingCauseC3)
 			}
 		case pitrIntegrityInvalid:
-			if msg := pitrKeyMaterialLostMessage(e, res, why); e.Reason != pitrBindingKeyMaterialLost || e.Message != msg {
-				p.setState(e, v1alpha1.PITRArchiveBindingBound, pitrBindingKeyMaterialLost, msg, pitrBindingCauseIntegrity)
+			if msg := pitrKeyMaterialLostMessage(e, res, why); e.Reason != v1alpha1.PITRArchiveBindingReasonKeyMaterialLost || e.Message != msg {
+				p.setState(e, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost, msg, pitrBindingCauseIntegrity)
 			}
 		}
 	}
@@ -739,7 +740,7 @@ func pitrProfileNames(ps []*v1alpha1.BackupProfile) string {
 // identityOf is the candidate encryption (mode, algorithm) of profile p.
 func identityOf(p *v1alpha1.BackupProfile) v1alpha1.PITRArchiveBindingEncryption {
 	id := pitrprofile.EncryptionIdentityFor(p)
-	return v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionMode(id.Mode), Algorithm: v1alpha1.EncryptionAlgorithm(id.Algorithm)}
+	return v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionMode(id.Mode), Algorithm: v1alpha1.EncryptionAlgorithm(id.Algorithm)}
 }
 
 // sameIdentity compares mode, algorithm and key snapshot.
@@ -752,7 +753,7 @@ func sameIdentity(a, b v1alpha1.PITRArchiveBindingEncryption) bool { return a ==
 // (nil when the Secret or key is missing, missing says why).
 func (p *pitrBindingPass) candidates(ctx context.Context, t *pitrBindingTarget) (cands []pitrCandidate, live *pitrCandidate, missing string, err error) {
 	ident := identityOf(t.profile)
-	if ident.Mode == v1alpha1.PITRArchiveEncryptionNone {
+	if ident.Mode == v1alpha1.EncryptionModeNone {
 		c := pitrCandidate{enc: ident}
 		return []pitrCandidate{c}, &c, "", nil
 	}
@@ -859,7 +860,7 @@ func (p *pitrBindingPass) acceptedConflict(dest, archiveID string) string {
 // bind makes entry Bound to archiveID created by source (proof or check).
 func (p *pitrBindingPass) bind(entry *v1alpha1.PITRArchiveBinding, archiveID string, source v1alpha1.PITRArchiveSource, cause string) {
 	if conflict := p.acceptedConflict(entry.Destination, archiveID); conflict != "" {
-		p.setState(entry, v1alpha1.PITRArchiveBindingRefused, pitrBindingArchiveForeign, conflict, cause)
+		p.setState(entry, v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveForeign, conflict, cause)
 		entry.Check = nil
 		return
 	}
@@ -867,7 +868,7 @@ func (p *pitrBindingPass) bind(entry *v1alpha1.PITRArchiveBinding, archiveID str
 	src := source
 	entry.Source = &src
 	entry.Check = nil
-	p.setState(entry, v1alpha1.PITRArchiveBindingBound, pitrBindingBound, "", cause)
+	p.setState(entry, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound, "", cause)
 	p.newlyBound[entry.ID] = true
 }
 
@@ -928,7 +929,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 		}
 		p.entries = append(p.entries, v1alpha1.PITRArchiveBinding{ID: pitrBindingID(t.dest), Destination: dest, Encryption: enc})
 		entry = &p.entries[len(p.entries)-1]
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "", pitrBindingCauseInput)
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, "", pitrBindingCauseInput)
 	}
 
 	// Consumer proof (write targets) wins over everything, also over a
@@ -949,7 +950,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 	// would describe an identity the group no longer renders, so the
 	// check is dropped and the entry starts over with the current
 	// candidate. The renderer holds the previous writer render meanwhile.
-	if entry.State == v1alpha1.PITRArchiveBindingPending && (entry.Check != nil || entry.Reason == pitrBindingEstablishing) &&
+	if entry.State == v1alpha1.PITRArchiveBindingPending && (entry.Check != nil || entry.Reason == v1alpha1.PITRArchiveBindingReasonEstablishing) &&
 		!pitrCandidateOffered(entry.Encryption, ident, cands) {
 		old := pitrCandidateLabel(entry.Encryption)
 		if entry.Check != nil {
@@ -960,7 +961,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 		if preferred != nil {
 			entry.Encryption = preferred.enc
 		}
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating,
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating,
 			fmt.Sprintf("%s was superseded by a change of profile %s's encryption; authenticating %s", old, t.profile.Name, pitrCandidateLabel(entry.Encryption)),
 			pitrBindingCauseInput)
 	}
@@ -969,8 +970,8 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 	// destination is no longer written (the profile switched away while a
 	// reader still uses it), nothing will prove it, so it is authenticated
 	// as a read (U04).
-	if !t.write && entry.State == v1alpha1.PITRArchiveBindingPending && entry.Reason == pitrBindingEstablishing {
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating,
+	if !t.write && entry.State == v1alpha1.PITRArchiveBindingPending && entry.Reason == v1alpha1.PITRArchiveBindingReasonEstablishing {
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating,
 			"the destination is no longer written; authenticating it for its readers", pitrBindingCauseInput)
 	}
 
@@ -997,7 +998,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 		entry.Encryption = enc
 		entry.Source = nil
 		entry.ArchiveID = ""
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "retrying after an input change", pitrBindingCauseInput)
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, "retrying after an input change", pitrBindingCauseInput)
 	}
 
 	// Correlated sidecar refusal (write targets, non-Bound only).
@@ -1014,13 +1015,13 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 
 	// Pending/Establishing: the check said Absent; the renderer renders the
 	// candidate and the writer's proof binds it (row 4b).
-	if entry.Reason == pitrBindingEstablishing {
+	if entry.Reason == v1alpha1.PITRArchiveBindingReasonEstablishing {
 		return nil
 	}
 
 	if preferred == nil {
 		entry.Encryption = ident
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, missing, pitrBindingCauseInput)
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, missing, pitrBindingCauseInput)
 		return nil
 	}
 
@@ -1032,7 +1033,7 @@ func (p *pitrBindingPass) advance(ctx context.Context, t *pitrBindingTarget) err
 			entry.Encryption = preferred.enc
 			p.causes[entry.ID] = pitrBindingCauseInput
 		}
-		if entry.Message != "" && entry.Reason == pitrBindingAuthenticating && entry.State == v1alpha1.PITRArchiveBindingPending {
+		if entry.Message != "" && entry.Reason == v1alpha1.PITRArchiveBindingReasonAuthenticating && entry.State == v1alpha1.PITRArchiveBindingPending {
 			entry.Message = ""
 		}
 		return nil
@@ -1107,7 +1108,7 @@ func (p *pitrBindingPass) startCheck(ctx context.Context, t *pitrBindingTarget, 
 	}
 	if err != nil {
 		if errors.Is(err, errOperatorImageUnset) {
-			p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, "check Job could not start: "+err.Error(), pitrBindingCauseCheck)
+			p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, "check Job could not start: "+err.Error(), pitrBindingCauseCheck)
 			p.requeueAfter(pitrCheckRetryAfter)
 			return nil
 		}
@@ -1120,12 +1121,12 @@ func (p *pitrBindingPass) startCheck(ctx context.Context, t *pitrBindingTarget, 
 	} else {
 		p.requeueAfter(2 * time.Second)
 	}
-	p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, msg, pitrBindingCauseCheck)
+	p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, msg, pitrBindingCauseCheck)
 	return nil
 }
 
 func pitrCandidateLabel(enc v1alpha1.PITRArchiveBindingEncryption) string {
-	if enc.Mode == v1alpha1.PITRArchiveEncryptionNone {
+	if enc.Mode == v1alpha1.EncryptionModeNone {
 		return "the plaintext identity"
 	}
 	return "key snapshot " + enc.KeySecretName
@@ -1145,7 +1146,7 @@ func (p *pitrBindingPass) observeCheck(ctx context.Context, t *pitrBindingTarget
 		if role := pitrCheckJobRole(out.job); role != pitrCheckRole(t) {
 			p.consumed = append(p.consumed, out.job)
 			entry.Check = nil
-			p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating,
+			p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating,
 				fmt.Sprintf("check Job %s ran as %s, but the destination is now checked as %s; checking again", out.job.Name, role, pitrCheckRole(t)), pitrBindingCauseInput)
 			p.requeueAfter(2 * time.Second)
 			return nil
@@ -1161,7 +1162,7 @@ func (p *pitrBindingPass) observeCheck(ctx context.Context, t *pitrBindingTarget
 	entry.Check = nil
 	if out.failure != "" {
 		pitrCheckRetryGate.Store(pitrCheckRetryKey(p.fg, entry.ID), p.now.Add(pitrCheckRetryAfter))
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, out.failure+"; retrying in "+pitrCheckRetryAfter.String(), pitrBindingCauseCheck)
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, out.failure+"; retrying in "+pitrCheckRetryAfter.String(), pitrBindingCauseCheck)
 		p.requeueAfter(pitrCheckRetryAfter)
 		return nil
 	}
@@ -1179,28 +1180,28 @@ func (p *pitrBindingPass) observeCheck(ctx context.Context, t *pitrBindingTarget
 			detail = "check Job's verdict names another destination than the one it was given"
 		}
 		pitrCheckRetryGate.Store(pitrCheckRetryKey(p.fg, entry.ID), p.now.Add(pitrCheckRetryAfter))
-		p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating, detail+"; retrying", pitrBindingCauseCheck)
+		p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating, detail+"; retrying", pitrBindingCauseCheck)
 		p.requeueAfter(pitrCheckRetryAfter)
 		return nil
 	}
 	switch res.State {
 	case PITRArchiveCheckStateVerified:
 		p.bind(entry, res.ArchiveID, res.Source, pitrBindingCauseCheck)
-		if uid := types.UID(out.job.Annotations[annotationPITRCheckedSnapshotUID]); uid != "" && entry.State == v1alpha1.PITRArchiveBindingBound {
+		if uid := types.UID(out.job.Annotations[v1alpha1.PITRKeySecretUIDAnnotation]); uid != "" && entry.State == v1alpha1.PITRArchiveBindingBound {
 			p.checkedSnapshot[entry.ID] = uid
 		}
 	case PITRArchiveCheckStateAbsent:
 		if t.write {
-			p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingEstablishing,
+			p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonEstablishing,
 				fmt.Sprintf("the prefix is empty; the group's writer creates the archive with %s", pitrCandidateLabel(entry.Encryption)), pitrBindingCauseCheck)
 			return nil
 		}
-		p.refuseByCheck(t, entry, live, pitrBindingArchiveNotFound, "the prefix holds no archive, reported by the "+pitrCheckRoleMarker(t))
+		p.refuseByCheck(t, entry, live, v1alpha1.PITRArchiveBindingReasonArchiveNotFound, "the prefix holds no archive, reported by the "+pitrCheckRoleMarker(t))
 	case PITRArchiveCheckStateRefused:
 		reason, ok := pitrBindingReasonForToken(res.Reason)
 		if !ok {
 			pitrCheckRetryGate.Store(pitrCheckRetryKey(p.fg, entry.ID), p.now.Add(pitrCheckRetryAfter))
-			p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating,
+			p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating,
 				fmt.Sprintf("check Job reported %s; retrying in %s", res.Reason, pitrCheckRetryAfter), pitrBindingCauseCheck)
 			p.requeueAfter(pitrCheckRetryAfter)
 			return nil
@@ -1209,15 +1210,15 @@ func (p *pitrBindingPass) observeCheck(ctx context.Context, t *pitrBindingTarget
 		// or bucket-policy edit, which no input this engine watches
 		// reflects: it is retried like a check that could not start,
 		// never recorded as a sticky refusal (U02).
-		if reason == pitrBindingArchiveListFailed {
+		if reason == v1alpha1.PITRArchiveBindingReasonArchiveListFailed {
 			pitrCheckRetryGate.Store(pitrCheckRetryKey(p.fg, entry.ID), p.now.Add(pitrCheckRetryAfter))
-			p.setState(entry, v1alpha1.PITRArchiveBindingPending, pitrBindingAuthenticating,
+			p.setState(entry, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating,
 				p.refusalMessage(t, reason, fmt.Sprintf("the check of %s could not list the prefix", pitrCandidateLabel(entry.Encryption)))+"; retrying in "+pitrCheckRetryAfter.String(),
 				pitrBindingCauseCheck)
 			p.requeueAfter(pitrCheckRetryAfter)
 			return nil
 		}
-		if reason == pitrBindingKeyMismatch {
+		if reason == v1alpha1.PITRArchiveBindingReasonKeyMismatch {
 			for i, c := range cands {
 				if sameIdentity(c.enc, entry.Encryption) && i+1 < len(cands) {
 					return p.startCheck(ctx, t, entry, cands[i+1])
@@ -1269,7 +1270,7 @@ func (p *pitrBindingPass) retry(t *pitrBindingTarget, entry *v1alpha1.PITRArchiv
 	}
 	// A stored ArchiveListFailed (it is no longer recorded as a refusal,
 	// U02) is retried through the check retry gate.
-	if entry.Reason == pitrBindingArchiveListFailed {
+	if entry.Reason == v1alpha1.PITRArchiveBindingReasonArchiveListFailed {
 		return true
 	}
 	if live != nil && live.enc.KeySecretName != entry.Encryption.KeySecretName {
@@ -1287,23 +1288,23 @@ func (p *pitrBindingPass) retry(t *pitrBindingTarget, entry *v1alpha1.PITRArchiv
 func (p *pitrBindingPass) refusalMessage(t *pitrBindingTarget, reason v1alpha1.PITRArchiveBindingReason, detail string) string {
 	msg := fmt.Sprintf("%s: %s at %s", reason, detail, t.dest)
 	switch reason {
-	case pitrBindingKeyMismatch:
+	case v1alpha1.PITRArchiveBindingReasonKeyMismatch:
 		if t.profile.EncryptionEnabled() {
-			ref := t.profile.Encryption.PassphraseSecret
+			ref := t.profile.Encryption.PassphraseSecretKeyRef
 			msg += fmt.Sprintf("; no candidate key opens the archive: recover the archive's original passphrase into Secret %s key %s (profile %s), or point the profile at a new prefix",
 				ref.Name, ref.PassphraseSecretKeyOrDefault(), t.profile.Name)
 		}
-	case pitrBindingArchiveEncryptionMismatch:
+	case v1alpha1.PITRArchiveBindingReasonArchiveEncryptionMismatch:
 		msg += fmt.Sprintf("; profile %s's encryption does not match the archive's: restore the profile's original encryption settings or use a new prefix", t.profile.Name)
-	case pitrBindingArchiveForeign, pitrBindingArchiveCopy, pitrBindingArchiveLegacy:
+	case v1alpha1.PITRArchiveBindingReasonArchiveForeign, v1alpha1.PITRArchiveBindingReasonArchiveCopy, v1alpha1.PITRArchiveBindingReasonArchiveLegacy:
 		msg += "; point the profile at a new prefix and take a full backup"
-	case pitrBindingArchiveDescriptorMissing:
+	case v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing:
 		msg += "; restore the descriptor, or point the profile at a new prefix and take a full backup"
-	case pitrBindingArchiveNotFound:
+	case v1alpha1.PITRArchiveBindingReasonArchiveNotFound:
 		msg += "; check the archive profile, or wait for the first archived binlog"
-	case pitrBindingArchiveListFailed:
+	case v1alpha1.PITRArchiveBindingReasonArchiveListFailed:
 		msg += "; grant list permission on the prefix (s3:ListBucket) or make the volume readable"
-	case pitrBindingArchiveVersionUnsupported:
+	case v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported:
 		msg += "; upgrade bloodraven, or repair archive.json"
 	}
 	if t.write && len(p.unannotated) > 0 {
@@ -1344,14 +1345,14 @@ func (p *pitrBindingPass) evaluate(ctx context.Context) (eligibility []pitrRefus
 		for _, prof := range t.uses {
 			got := identityOf(prof)
 			if got.Mode != entry.Encryption.Mode || got.Algorithm != entry.Encryption.Algorithm {
-				refusals = append(refusals, pitrRefusal{reason: reasonPITREncryptionChangeRefused, text: fmt.Sprintf(
+				refusals = append(refusals, pitrRefusal{reason: v1alpha1.ReasonEncryptionChangeRefused, text: fmt.Sprintf(
 					"profile %s configures %s, but archive %s at %s was accepted as %s (profiles resolving there: %s)",
 					prof.Name, pitrIdentityLabel(got), entry.ArchiveID, entry.Destination, pitrIdentityLabel(entry.Encryption), aliases)})
 				continue
 			}
 			// With the key material lost the accepted bytes are unknown, so
 			// a key change cannot be judged (row 18 reports the loss).
-			if got.Mode != v1alpha1.PITRArchiveEncryptionPassphrase || entry.Reason == pitrBindingKeyMaterialLost {
+			if got.Mode != v1alpha1.EncryptionModePassphrase || entry.Reason == v1alpha1.PITRArchiveBindingReasonKeyMaterialLost {
 				continue
 			}
 			live, err := p.r.readPITRLiveKey(ctx, p.fg, prof)
@@ -1369,7 +1370,7 @@ func (p *pitrBindingPass) evaluate(ctx context.Context) (eligibility []pitrRefus
 				changed = pitrKeySnapshotName(p.fg.Name, p.digestKey, entry.Destination, live.trimmed) != entry.Encryption.KeySecretName
 			}
 			if changed {
-				refusals = append(refusals, pitrRefusal{reason: reasonPITRKeyChangeRefused, text: fmt.Sprintf(
+				refusals = append(refusals, pitrRefusal{reason: v1alpha1.ReasonKeyChangeRefused, text: fmt.Sprintf(
 					"profile %s's passphrase (Secret %s key %s) is not the key accepted for archive %s at %s, kept in key snapshot %s (profiles resolving there: %s)",
 					prof.Name, live.secret, live.key, entry.ArchiveID, entry.Destination, entry.Encryption.KeySecretName, aliases)})
 			}
@@ -1409,12 +1410,12 @@ func (p *pitrBindingPass) condition(ctx context.Context) (*metav1.Condition, err
 	if err != nil {
 		return nil, fmt.Errorf("evaluate pitr archive bindings: %w", err)
 	}
-	cond := &metav1.Condition{Type: conditionPITRArchiveBindingReady, ObservedGeneration: p.fg.Generation}
+	cond := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveBindingReady, ObservedGeneration: p.fg.Generation}
 	set := func(status metav1.ConditionStatus, reason, msg string) {
 		cond.Status, cond.Reason, cond.Message = status, reason, msg
 	}
 	var (
-		refused []string
+		refused *pitrRefusal
 		pending []string
 		lost    []string
 		pReason string
@@ -1423,9 +1424,9 @@ func (p *pitrBindingPass) condition(ctx context.Context) (*metav1.Condition, err
 		e := &p.entries[i]
 		switch {
 		case e.State == v1alpha1.PITRArchiveBindingRefused && refused == nil:
-			refused = append(refused, string(e.Reason), fmt.Sprintf("binding %s: %s", e.ID, e.Message))
+			refused = &pitrRefusal{reason: string(e.Reason), text: fmt.Sprintf("binding %s: %s", e.ID, e.Message)}
 		case e.State == v1alpha1.PITRArchiveBindingPending:
-			if pReason == "" || e.Reason == pitrBindingAuthenticating {
+			if pReason == "" || e.Reason == v1alpha1.PITRArchiveBindingReasonAuthenticating {
 				pReason = string(e.Reason)
 			}
 			msg := e.Message
@@ -1433,7 +1434,7 @@ func (p *pitrBindingPass) condition(ctx context.Context) (*metav1.Condition, err
 				msg = "waiting for the group's sidecars to verify " + pitrCandidateLabel(e.Encryption)
 			}
 			pending = append(pending, fmt.Sprintf("binding %s (%s) is %s: %s", e.ID, e.Destination, e.Reason, msg))
-		case e.State == v1alpha1.PITRArchiveBindingBound && e.Reason == pitrBindingKeyMaterialLost:
+		case e.State == v1alpha1.PITRArchiveBindingBound && e.Reason == v1alpha1.PITRArchiveBindingReasonKeyMaterialLost:
 			lost = append(lost, fmt.Sprintf("binding %s: %s", e.ID, e.Message))
 		}
 	}
@@ -1455,21 +1456,21 @@ func (p *pitrBindingPass) condition(ctx context.Context) (*metav1.Condition, err
 		if len(p.overflow) > 0 {
 			parts = append(parts, fmt.Sprintf("accepted bindings %s could not be rebuilt (at most %d bindings)", strings.Join(p.overflow, ", "), pitrArchiveBindingsMax))
 		}
-		set(metav1.ConditionFalse, reasonPITRBindingLimitReached, strings.Join(parts, "; ")+"; release bindings that are no longer needed (bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>)")
+		set(metav1.ConditionFalse, v1alpha1.ReasonBindingLimitReached, strings.Join(parts, "; ")+"; release bindings that are no longer needed ("+v1alpha1.ReleasePITRArchiveBindingAnnotation+"="+actionvalue.Format("<id>", actionvalue.ConfirmPairs(p.fg.Name, string(p.fg.UID))...)+")")
 	case refused != nil:
-		set(metav1.ConditionFalse, refused[0], refused[1])
+		set(metav1.ConditionFalse, refused.reason, refused.text)
 	case len(eligibility) > 0:
 		set(metav1.ConditionFalse, eligibility[0].reason, eligibility[0].text)
-	case len(byReason(reasonPITREncryptionChangeRefused)) > 0:
-		set(metav1.ConditionFalse, reasonPITREncryptionChangeRefused, pitrJoinRefusals(append(byReason(reasonPITREncryptionChangeRefused), byReason(reasonPITRKeyChangeRefused)...)))
-	case len(byReason(reasonPITRKeyChangeRefused)) > 0:
-		set(metav1.ConditionFalse, reasonPITRKeyChangeRefused, pitrJoinRefusals(byReason(reasonPITRKeyChangeRefused)))
+	case len(byReason(v1alpha1.ReasonEncryptionChangeRefused)) > 0:
+		set(metav1.ConditionFalse, v1alpha1.ReasonEncryptionChangeRefused, pitrJoinRefusals(append(byReason(v1alpha1.ReasonEncryptionChangeRefused), byReason(v1alpha1.ReasonKeyChangeRefused)...)))
+	case len(byReason(v1alpha1.ReasonKeyChangeRefused)) > 0:
+		set(metav1.ConditionFalse, v1alpha1.ReasonKeyChangeRefused, pitrJoinRefusals(byReason(v1alpha1.ReasonKeyChangeRefused)))
 	case len(lost) > 0:
-		set(metav1.ConditionFalse, string(pitrBindingKeyMaterialLost), strings.Join(lost, "; "))
+		set(metav1.ConditionFalse, string(v1alpha1.PITRArchiveBindingReasonKeyMaterialLost), strings.Join(lost, "; "))
 	case len(pending) > 0:
 		set(metav1.ConditionUnknown, pReason, strings.Join(pending, "; "))
 	default:
-		set(metav1.ConditionTrue, string(pitrBindingBound), p.boundMessage(ctx))
+		set(metav1.ConditionTrue, string(v1alpha1.PITRArchiveBindingReasonBound), p.boundMessage(ctx))
 	}
 	var notes []string
 	for _, k := range p.keySourceRemoved {
@@ -1576,13 +1577,13 @@ func (r *MysqlFailoverGroupReconciler) writePITRArchiveBindings(ctx context.Cont
 			changed = true
 		}
 		if cond == nil {
-			if meta.FindStatusCondition(st.Conditions, conditionPITRArchiveBindingReady) != nil {
-				meta.RemoveStatusCondition(&st.Conditions, conditionPITRArchiveBindingReady)
+			if meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionPITRArchiveBindingReady) != nil {
+				meta.RemoveStatusCondition(&st.Conditions, v1alpha1.ConditionPITRArchiveBindingReady)
 				changed = true
 			}
 			return changed
 		}
-		if !pitrBindingCondEqual(meta.FindStatusCondition(st.Conditions, conditionPITRArchiveBindingReady), cond) {
+		if !pitrBindingCondEqual(meta.FindStatusCondition(st.Conditions, v1alpha1.ConditionPITRArchiveBindingReady), cond) {
 			meta.SetStatusCondition(&st.Conditions, *cond)
 			changed = true
 		}
@@ -1599,7 +1600,7 @@ func (r *MysqlFailoverGroupReconciler) writePITRArchiveBindings(ctx context.Cont
 			return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), fg.Name)
 		}
 		if !pitrBindingsEqual(fresh.Status.PITRArchiveBindings, base) ||
-			!pitrBindingCondEqual(meta.FindStatusCondition(fresh.Status.Conditions, conditionPITRArchiveBindingReady), baseCond) {
+			!pitrBindingCondEqual(meta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady), baseCond) {
 			return errPITRBindingStatusMoved
 		}
 		if !apply(&fresh.Status) {
@@ -1626,13 +1627,13 @@ func (r *MysqlFailoverGroupReconciler) finishPITRRelease(ctx context.Context, fg
 	logger := log.FromContext(ctx)
 	switch {
 	case out.rejected != "":
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveBindingReleaseRejected,
-			"release annotation %s rejected and removed: %s", ReleasePITRArchiveBindingAnnotation, out.rejected)
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveBindingReleaseRejected,
+			"release annotation %s rejected and removed: %s", v1alpha1.ReleasePITRArchiveBindingAnnotation, out.rejected)
 		if err := r.removePITRReleaseAnnotation(ctx, fg, out.value); err != nil {
 			logger.Error(err, "remove rejected pitr release annotation", "fg", fg.Name)
 		}
 	case out.refused != "":
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveBindingReleaseRefused,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveBindingReleaseRefused,
 			"release of binding %s refused, retrying: %s", out.id, out.refused)
 	case out.conflict:
 		// A snapshot changed between the in-use read and the delete (an
@@ -1643,7 +1644,7 @@ func (r *MysqlFailoverGroupReconciler) finishPITRRelease(ctx context.Context, fg
 			return
 		}
 		logger.Info(logMsgPITRBindingReleased, "fg", fg.Name, "bindingID", out.id, "destination", out.destination)
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, eventReasonPITRArchiveBindingReleased,
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventPITRArchiveBindingReleased,
 			"binding %s (%s) released; its key snapshots were deleted", out.id, out.destination)
 	}
 }
@@ -1671,20 +1672,20 @@ func (p *pitrBindingPass) emit(ctx context.Context, before []v1alpha1.PITRArchiv
 				"archiveID", e.ArchiveID, "state", string(e.State), "reason", string(e.Reason),
 				"keySecretName", e.Encryption.KeySecretName, "cause", cause)
 		}
-		becameBound := e.State == v1alpha1.PITRArchiveBindingBound && e.Reason == pitrBindingBound &&
+		becameBound := e.State == v1alpha1.PITRArchiveBindingBound && e.Reason == v1alpha1.PITRArchiveBindingReasonBound &&
 			(prev == nil || prev.State != v1alpha1.PITRArchiveBindingBound) && cause != pitrBindingCauseRecovery
 		switch {
 		case becameBound:
-			rec.Eventf(fg, corev1.EventTypeNormal, eventReasonPITRArchiveBound, "binding %s for %s is Bound to archive %s (%s) by %s",
+			rec.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventPITRArchiveBound, "binding %s for %s is Bound to archive %s (%s) by %s",
 				e.ID, e.Destination, e.ArchiveID, pitrCandidateLabel(e.Encryption), cause)
 		case e.State == v1alpha1.PITRArchiveBindingRefused && (prev == nil || prev.State != e.State || prev.Reason != e.Reason):
-			rec.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveBindingRefused, "binding %s refused: %s", e.ID, e.Message)
-		case e.Reason == pitrBindingKeyMaterialLost && (prev == nil || prev.Reason != e.Reason):
-			rec.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveKeyMaterialLost, "binding %s: %s", e.ID, e.Message)
+			rec.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveBindingRefused, "binding %s refused: %s", e.ID, e.Message)
+		case e.Reason == v1alpha1.PITRArchiveBindingReasonKeyMaterialLost && (prev == nil || prev.Reason != e.Reason):
+			rec.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveKeyMaterialLost, "binding %s: %s", e.ID, e.Message)
 		}
 	}
 	for _, name := range p.recreated {
-		rec.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveKeySnapshotRecreated,
+		rec.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveKeySnapshotRecreated,
 			"key snapshot %s was missing and was re-created from the profile's passphrase (same name; no roll)", name)
 	}
 	if cond == nil {
@@ -1693,16 +1694,16 @@ func (p *pitrBindingPass) emit(ctx context.Context, before []v1alpha1.PITRArchiv
 	edge := beforeCond == nil || beforeCond.Reason != cond.Reason || beforeCond.Message != cond.Message
 	if edge && cond.Status == metav1.ConditionFalse {
 		switch cond.Reason {
-		case reasonPITREncryptionChangeRefused:
-			rec.Event(fg, corev1.EventTypeWarning, eventReasonPITRArchiveEncryptionChangeRefused, cond.Message)
-		case reasonPITRKeyChangeRefused:
-			rec.Event(fg, corev1.EventTypeWarning, eventReasonPITRArchiveKeyChangeRefused, cond.Message)
-		case reasonPITRBindingLimitReached:
-			rec.Event(fg, corev1.EventTypeWarning, eventReasonPITRArchiveBindingLimitReached, cond.Message)
-		case string(pitrBindingArchiveForeign), string(pitrBindingArchiveCopy):
+		case v1alpha1.ReasonEncryptionChangeRefused:
+			rec.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveEncryptionChangeRefused, cond.Message)
+		case v1alpha1.ReasonKeyChangeRefused:
+			rec.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveKeyChangeRefused, cond.Message)
+		case v1alpha1.ReasonBindingLimitReached:
+			rec.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveBindingLimitReached, cond.Message)
+		case string(v1alpha1.PITRArchiveBindingReasonArchiveForeign), string(v1alpha1.PITRArchiveBindingReasonArchiveCopy):
 			// Writer eligibility (K6) has no entry transition of its own.
 			if !p.entryRefused(cond.Reason) {
-				rec.Event(fg, corev1.EventTypeWarning, eventReasonPITRArchiveBindingRefused, cond.Message)
+				rec.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveBindingRefused, cond.Message)
 			}
 		}
 	}
@@ -1712,12 +1713,12 @@ func (p *pitrBindingPass) emit(ctx context.Context, before []v1alpha1.PITRArchiv
 	}
 	for _, k := range p.keySourceRemoved {
 		if !strings.Contains(old, "key source removed: "+k) {
-			rec.Event(fg, corev1.EventTypeWarning, eventReasonPITRArchiveKeySourceRemoved, k)
+			rec.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveKeySourceRemoved, k)
 		}
 	}
 	for _, n := range p.notes {
 		if !strings.Contains(old, "key snapshot "+n.secret+" is unreadable") {
-			rec.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveKeySnapshotUnreadable,
+			rec.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveKeySnapshotReadFailed,
 				"key snapshot %s is unreadable: %s; it is never used for recovery and never deleted by the operator", n.secret, n.detail)
 		}
 	}

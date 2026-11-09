@@ -28,7 +28,7 @@ func TestInitRestoreReadyStale(t *testing.T) {
 		reason, message := initRestoreReadyCondition(withRestore(phase, nil))
 		return &metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: reason, Message: message}
 	}
-	topologyReady := &metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "TopologyPolled", Message: "ok"}
+	topologyReady := &metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", Message: "ok"}
 	for _, tc := range []struct {
 		name string
 		fg   *v1alpha1.MysqlFailoverGroup
@@ -104,7 +104,7 @@ func TestInitRestoreReady_FollowsRestorePhaseWithoutTopologyEvent(t *testing.T) 
 			if err := c.Get(ctx, nn, &cur); err != nil {
 				t.Fatal(err)
 			}
-			cfg := CRConfigToTopologyConfig(&cur)
+			cfg := mustTopologyConfig(&cur)
 			hash, err := connectionMaterialHash(ctx, c, &cur)
 			if err != nil {
 				t.Fatal(err)
@@ -153,28 +153,28 @@ func TestInitRestoreReady_FollowsRestorePhaseWithoutTopologyEvent(t *testing.T) 
 			for i := 0; i < 6; i++ {
 				tm.Poll(ctx)
 			}
-			if r := ready(); r == nil || r.Reason != readyReasonInitRestoreInProgress {
-				t.Fatalf("settled Ready = %+v, want %s", r, readyReasonInitRestoreInProgress)
+			if r := ready(); r == nil || r.Reason != v1alpha1.ReasonInitFromBackupInProgress {
+				t.Fatalf("settled Ready = %+v, want %s", r, v1alpha1.ReasonInitFromBackupInProgress)
 			}
 
 			// The load fails. The topology does not move, so polling alone
 			// writes nothing.
 			setRestorePhase(v1alpha1.BackupPhaseFailed)
 			tm.Poll(ctx)
-			if r := ready(); r.Reason != readyReasonInitRestoreInProgress {
+			if r := ready(); r.Reason != v1alpha1.ReasonInitFromBackupInProgress {
 				t.Fatalf("Ready moved to %s without a refresh; the test no longer isolates the restore-only change", r.Reason)
 			}
 			observe()
 			tm.Poll(ctx)
-			if r := ready(); r.Status != metav1.ConditionFalse || r.Reason != readyReasonInitRestoreFailed {
-				t.Fatalf("after the restore failed Ready = %+v, want False/%s", r, readyReasonInitRestoreFailed)
+			if r := ready(); r.Status != metav1.ConditionFalse || r.Reason != v1alpha1.ReasonInitFromBackupFailed {
+				t.Fatalf("after the restore failed Ready = %+v, want False/%s", r, v1alpha1.ReasonInitFromBackupFailed)
 			}
 
 			// Retried and succeeded: Ready returns to the topology's verdict.
 			setRestorePhase(v1alpha1.BackupPhaseSucceeded)
 			observe()
 			tm.Poll(ctx)
-			if r := ready(); r.Reason == readyReasonInitRestoreFailed || r.Reason == readyReasonInitRestoreInProgress {
+			if r := ready(); r.Reason == v1alpha1.ReasonInitFromBackupFailed || r.Reason == v1alpha1.ReasonInitFromBackupInProgress {
 				t.Fatalf("after the restore succeeded Ready = %+v, want the topology's verdict", r)
 			}
 

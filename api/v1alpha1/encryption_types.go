@@ -41,10 +41,26 @@ type EncryptionAtRestSpec struct {
 	// Encryption can only be enabled on a group that has not yet
 	// bootstrapped, or adopted by an existing group via the replica-first
 	// reclone procedure documented in https://bloodraven.dev/docs/configuration/encryption-at-rest.
-	// The operator rejects flipping this flag on a group whose sites
-	// already hold unencrypted data.
+	// On a group whose sites already hold unencrypted data, ExistingData
+	// decides.
 	// +kubebuilder:default=false
-	Enabled bool `json:"enabled"`
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ExistingData decides what happens when encryption is enabled on a
+	// group that is already serving, whose existing tablespaces MySQL
+	// does not rewrite:
+	//   - Refuse (default): encryption is not started, and
+	//     EncryptionAtRestReady is False with reason AdoptionRefused. Move
+	//     onto an encrypted replica with a planned failover instead.
+	//   - LeavePlaintext: encryption starts and covers data written from
+	//     then on; the existing tablespaces stay plaintext until they are
+	//     rebuilt (status.encryptionAtRest.sites[].coverage reports how
+	//     much is still exposed).
+	// It is read only when encryption is first turned on.
+	// +kubebuilder:default=Refuse
+	// +optional
+	ExistingData EncryptionExistingDataPolicy `json:"existingData,omitempty"`
 
 	// Coverage selects which MySQL encryption settings the operator
 	// enforces in the generated my.cnf. Every field defaults to true;
@@ -58,6 +74,19 @@ type EncryptionAtRestSpec struct {
 	// +optional
 	Keyring *KeyringSpec `json:"keyring,omitempty"`
 }
+
+// EncryptionExistingDataPolicy is spec.encryptionAtRest.existingData.
+// +kubebuilder:validation:Enum=Refuse;LeavePlaintext
+type EncryptionExistingDataPolicy string
+
+const (
+	// EncryptionExistingDataRefuse refuses to enable encryption on a
+	// group that already holds data.
+	EncryptionExistingDataRefuse EncryptionExistingDataPolicy = "Refuse"
+	// EncryptionExistingDataLeavePlaintext enables encryption and leaves
+	// the existing tablespaces plaintext.
+	EncryptionExistingDataLeavePlaintext EncryptionExistingDataPolicy = "LeavePlaintext"
+)
 
 // EncryptionCoverageSpec selects the MySQL encryption settings the
 // operator writes into the generated my.cnf. These are operator-owned
@@ -156,20 +185,20 @@ type KeyringSpec struct {
 	// +optional
 	RetainVersions int32 `json:"retainVersions,omitempty"`
 
-	// EscrowTimeoutSeconds is how long the operator waits for a freshly
-	// unsealed site to escrow its keyring before reporting the site as
-	// failed on status. The site is not sealed and not admitted to
-	// service until escrow succeeds; the timeout only controls when the
-	// condition flips to a loud failure.
-	// +kubebuilder:default=600
-	// +kubebuilder:validation:Minimum=30
+	// EscrowTimeout is how long the operator waits for a freshly unsealed
+	// site to escrow its keyring before reporting the site as failed on
+	// status. The site is not sealed and not admitted to service until
+	// escrow succeeds; the timeout only controls when the condition flips
+	// to a loud failure. Default: 10m. Bounds: 30s to 1h.
+	// +kubebuilder:default="10m0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('1h')",message="keyring.escrowTimeout must be between 30s and 1h"
 	// +optional
-	EscrowTimeoutSeconds int32 `json:"escrowTimeoutSeconds,omitempty"`
+	EscrowTimeout *metav1.Duration `json:"escrowTimeout,omitempty"`
 }
 
 // SiteKeyringPhase is the per-site keyring lifecycle state. It drives
 // how the operator renders that site's MySQL Deployment.
-// +kubebuilder:validation:Enum="";Pending;Unsealed;Escrowed;Sealed;Failed
+// +kubebuilder:validation:Enum=Pending;Unsealed;Escrowed;Sealed;Failed
 type SiteKeyringPhase string
 
 const (
@@ -198,11 +227,11 @@ const (
 	KeyringPhaseFailed SiteKeyringPhase = "Failed"
 )
 
-// KeyringUnsealReason records why a site is currently unsealed. Empty
+// KeyringUnsealReason records why a site is currently unsealed. Absent
 // when the site is sealed, or when a clone hold has been released and
 // reseal is in progress. Clone is a control signal: the operator must
 // not advance that site to Escrowed until the clone bootstrap finishes.
-// +kubebuilder:validation:Enum="";Bootstrap;Clone;Rotation
+// +kubebuilder:validation:Enum=Bootstrap;Clone;Rotation
 type KeyringUnsealReason string
 
 const (
@@ -222,13 +251,6 @@ const (
 // EncryptionAtRestStatus is the observed state of the encryption
 // subsystem, reported on MysqlFailoverGroup.status.
 type EncryptionAtRestStatus struct {
-	// Sealed is true when encryption is enabled and every site in the
-	// group is in the Sealed phase. It is the single field to alert on:
-	// false means at least one site is running with a writable keyring
-	// or has failed to escrow.
-	// +optional
-	Sealed bool `json:"sealed,omitempty"`
-
 	// Sites is the per-site keyring lifecycle state.
 	// +optional
 	// +listType=map
@@ -236,7 +258,8 @@ type EncryptionAtRestStatus struct {
 	Sites []SiteEncryptionStatus `json:"sites,omitempty"`
 
 	// ObservedGeneration is the CR generation the encryption subsystem
-	// last reconciled.
+	// last reconciled. It is the encryption reconcile's own and can lag or
+	// lead status.observedGeneration, the topology manager's.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
@@ -244,6 +267,7 @@ type EncryptionAtRestStatus struct {
 // SiteEncryptionStatus is the per-site keyring lifecycle state.
 type SiteEncryptionStatus struct {
 	// Name is the site identifier, mirrored from spec.sites[].name.
+	// +required
 	Name string `json:"name"`
 
 	// Phase is the keyring lifecycle phase for this site.
@@ -275,10 +299,10 @@ type SiteEncryptionStatus struct {
 	// +optional
 	LastEscrowTime *metav1.Time `json:"lastEscrowTime,omitempty"`
 
-	// UnsealedSince is when the site entered the Unsealed phase. Used to
-	// evaluate keyring.escrowTimeoutSeconds.
+	// UnsealTime is when the site entered the Unsealed phase. Used to
+	// evaluate keyring.escrowTimeout.
 	// +optional
-	UnsealedSince *metav1.Time `json:"unsealedSince,omitempty"`
+	UnsealTime *metav1.Time `json:"unsealTime,omitempty"`
 
 	// Message is a human-readable explanation of the current phase,
 	// populated on Failed and on transient waits.
@@ -294,7 +318,9 @@ type SiteEncryptionStatus struct {
 // SiteEncryptionCoverage is what the operator actually observed on the
 // live instance, as opposed to what the spec asked for. A site can be
 // Sealed and still have incomplete coverage — for example when an
-// existing schema was adopted and its tables were never rebuilt.
+// existing schema was adopted and its tables were never rebuilt. Each flag
+// is unset when the probe did not report it; an unknown value is never
+// reported as false.
 type SiteEncryptionCoverage struct {
 	// KeyringComponent is the Component_name reported by
 	// performance_schema.keyring_component_status.
@@ -304,12 +330,12 @@ type SiteEncryptionCoverage struct {
 	// KeyringReadOnly mirrors the component's Read_only status. In the
 	// Sealed phase this must be true.
 	// +optional
-	KeyringReadOnly bool `json:"keyringReadOnly,omitempty"`
+	KeyringReadOnly *bool `json:"keyringReadOnly,omitempty"`
 
 	// SystemTablespaceEncrypted reports whether the `mysql` tablespace
 	// is encrypted.
 	// +optional
-	SystemTablespaceEncrypted bool `json:"systemTablespaceEncrypted,omitempty"`
+	SystemTablespaceEncrypted *bool `json:"systemTablespaceEncrypted,omitempty"`
 
 	// UnencryptedTablespaces counts user tablespaces reporting
 	// ENCRYPTION='N'. Non-zero on an adopted cluster whose pre-existing
@@ -319,15 +345,15 @@ type SiteEncryptionCoverage struct {
 
 	// RedoLogEncrypted mirrors @@innodb_redo_log_encrypt.
 	// +optional
-	RedoLogEncrypted bool `json:"redoLogEncrypted,omitempty"`
+	RedoLogEncrypted *bool `json:"redoLogEncrypted,omitempty"`
 
 	// UndoLogEncrypted mirrors @@innodb_undo_log_encrypt.
 	// +optional
-	UndoLogEncrypted bool `json:"undoLogEncrypted,omitempty"`
+	UndoLogEncrypted *bool `json:"undoLogEncrypted,omitempty"`
 
 	// BinlogEncrypted mirrors @@binlog_encryption.
 	// +optional
-	BinlogEncrypted bool `json:"binlogEncrypted,omitempty"`
+	BinlogEncrypted *bool `json:"binlogEncrypted,omitempty"`
 
 	// LastCheckTime is when coverage was last sampled.
 	// +optional

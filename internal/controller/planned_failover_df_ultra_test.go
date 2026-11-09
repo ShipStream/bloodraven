@@ -109,10 +109,10 @@ func TestPlannedFailoverDragonfly_RestartedTargetIsNotATakeover(t *testing.T) {
 			if len(source.clientKillTypes) != 0 || pfDFPodGone(t, c, sourcePod) {
 				t.Errorf("source evicted (CLIENT KILL %v) or deleted after a takeover that never happened", source.clientKillTypes)
 			}
-			if l := pfDFPodLabels(t, c, sourcePod); l[labelDragonflyRole] != "master" || l[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+			if l := pfDFPodLabels(t, c, sourcePod); l[v1alpha1.DragonflyRoleLabel] != "master" || l[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 				t.Errorf("source labels = %v, want it kept as the serving master", l)
 			}
-			if l := pfDFPodLabels(t, c, targetPod); l[labelDragonflyRole] == "master" {
+			if l := pfDFPodLabels(t, c, targetPod); l[v1alpha1.DragonflyRoleLabel] == "master" {
 				t.Errorf("empty target relabelled master: %v", l)
 			}
 			if got := effectiveDragonflyMasterSite(got); got != "iad" {
@@ -334,7 +334,7 @@ func TestPlannedFailoverDragonfly_RefusesWhenDragonflyMasterIsAThirdSite(t *test
 	third := *fg.Spec.Sites[1].DeepCopy()
 	third.Name = "ord"
 	fg.Spec.Sites = append(fg.Spec.Sites, third)
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "ord"}
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "ord"}
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "replica", true)
 	ordPod := makeDragonflyPod(fg.Name, "ord", "master", true)
 	r, c, _ := pfDFReconciler(t, fg, sourcePod, ordPod, makeDragonflyPod(fg.Name, "pdx", "replica", true))
@@ -349,7 +349,7 @@ func TestPlannedFailoverDragonfly_RefusesWhenDragonflyMasterIsAThirdSite(t *test
 	if target.takeovers != 0 {
 		t.Errorf("REPLTAKEOVER sent %d times", target.takeovers)
 	}
-	if l := pfDFPodLabels(t, c, ordPod); l[labelDragonflyRole] != "master" || l[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+	if l := pfDFPodLabels(t, c, ordPod); l[v1alpha1.DragonflyRoleLabel] != "master" || l[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 		t.Errorf("the real Dragonfly master was touched: %v", l)
 	}
 }
@@ -382,7 +382,7 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 	t.Run("superseded by a later promotion", func(t *testing.T) {
 		fg := fg.DeepCopy()
 		later := metav1.NewTime(completed.Add(5 * time.Second))
-		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "iad", LastPromotionTarget: "iad", LastPromotionTime: &later}
+		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "iad", LastPromotionTarget: "iad", LastPromotionTime: &later}
 		if got := effectiveDragonflyMasterSite(fg); got != "iad" {
 			t.Errorf("label master = %q after an emergency promotion to iad, want iad", got)
 		}
@@ -404,7 +404,7 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 	})
 	t.Run("marker-ended run keeps its takeover", func(t *testing.T) {
 		fg := fg.DeepCopy()
-		fg.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+		fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 		if got := effectiveDragonflyMasterSite(fg); got != "pdx" {
 			t.Errorf("label master = %q for a marker-ended run whose takeover succeeded, want pdx", got)
 		}
@@ -428,8 +428,8 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 }
 
 // K089: with no hydrated slot, a durable hold owns the group's Dragonfly:
-// a snapshot upgrade requested during the hold is rejected.
-func TestDragonflySnapshotUpgrade_RejectedDuringUnhydratedHold(t *testing.T) {
+// a snapshot upgrade that spec drift wants during the hold waits.
+func TestDragonflySnapshotUpgrade_WaitsDuringUnhydratedHold(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
 	setPlannedHold(&fg.Status, v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged,
 		SourceSite: "dc1", TargetSite: "dc2", HoldTime: metav1.Now()}, fg.Generation)
@@ -437,12 +437,14 @@ func TestDragonflySnapshotUpgrade_RejectedDuringUnhydratedHold(t *testing.T) {
 		t.Fatal("a durable hold does not own the group's Dragonfly")
 	}
 	r, c := newReconciler(fg)
-	if _, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg); err != nil {
-		t.Fatal(err)
+	seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
+	step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg)
+	if err != nil || step.wait != dragonflyUpgradeDeferRetry || step.hold != 0 {
+		t.Fatalf("= (%+v, %v), want a wait", step, err)
 	}
 	got := getFGByKey(t, c, fgNN(fg))
 	if got.Status.Dragonfly.Upgrade != nil {
-		t.Fatalf("upgrade accepted during a hold: %+v", got.Status.Dragonfly.Upgrade)
+		t.Fatalf("upgrade started during a hold: %+v", got.Status.Dragonfly.Upgrade)
 	}
 }
 
@@ -451,7 +453,6 @@ func TestDragonflySnapshotUpgrade_RejectedDuringUnhydratedHold(t *testing.T) {
 // upgrade ended nor leaves a stale pause in place.
 func TestDragonflySnapshotUpgrade_PauseFollowsUncachedState(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
-	fg.Annotations = nil
 	start := metav1.Now()
 	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseFailed, Reason: "ActiveSiteChanged",
 		ActiveSite: "dc1", StartTime: &start, CompletionTime: &start}
@@ -477,22 +478,30 @@ func TestDragonflySnapshotUpgrade_PauseFollowsUncachedState(t *testing.T) {
 // K122: a snapshot upgrade is not admitted while the Dragonfly master
 // differs from the MySQL active site (a planned takeover failed after MySQL
 // moved, before drift repair): it would save and restart a replica. The
-// request is kept.
+// run waits, and starts once they match.
 func TestDragonflySnapshotUpgrade_DeferredWhileDragonflyMasterDiffers(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
 	fg.Status.ActiveSite = "dc2"
 	fg.Status.Dragonfly.ActiveSite = "dc1"
 	r, c := newReconciler(fg)
-	requeue, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg)
-	if err != nil || requeue != dragonflyUpgradeDeferRetry {
-		t.Fatalf("= (%s, %v), want a %s deferral", requeue, err, dragonflyUpgradeDeferRetry)
+	seedDragonflyStatefulSets(t, r, c, fg, bothSites(dfSourceImage))
+	step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg)
+	if err != nil || step.wait != dragonflyUpgradeDeferRetry || step.hold != 0 {
+		t.Fatalf("= (%+v, %v), want a %s wait", step, err, dragonflyUpgradeDeferRetry)
 	}
 	got := getFGByKey(t, c, fgNN(fg))
 	if got.Status.Dragonfly.Upgrade != nil {
 		t.Fatalf("upgrade admitted against the wrong site: %+v", got.Status.Dragonfly.Upgrade)
 	}
-	if _, ok := got.Annotations[DragonflySnapshotUpgradeAnnotation]; !ok {
-		t.Fatal("the deferred request was dropped")
+	got.Status.Dragonfly.ActiveSite = "dc2"
+	if err := c.Status().Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	if step, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, fgNN(fg))); err != nil || step.hold == 0 {
+		t.Fatalf("once they match = (%+v, %v), want a started run", step, err)
+	}
+	if up := getFGByKey(t, c, fgNN(fg)).Status.Dragonfly.Upgrade; up == nil || up.ActiveSite != "dc2" {
+		t.Fatalf("upgrade = %+v, want a run retaining dc2", up)
 	}
 }
 
@@ -504,7 +513,7 @@ func TestPlannedFailoverDragonfly_DemoteFailsDoesNotRestoreSourceTraffic(t *test
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	funcs := interceptor.Funcs{
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name && pod.Labels[labelDragonflyRole] == "replica" {
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name && pod.Labels[v1alpha1.DragonflyRoleLabel] == "replica" {
 				return errors.New("simulated demote-patch failure")
 			}
 			return c.Update(ctx, obj, opts...)
@@ -517,8 +526,8 @@ func TestPlannedFailoverDragonfly_DemoteFailsDoesNotRestoreSourceTraffic(t *test
 	if target.takeovers != 1 {
 		t.Fatalf("REPLTAKEOVER sent %d times", target.takeovers)
 	}
-	if l := pfDFPodLabels(t, c, sourcePod); l[labelDragonflyTraffic] == dragonflyTrafficEnabled {
-		t.Errorf("source traffic restored after a failed demote (it still reads role=%q): %v", l[labelDragonflyRole], l)
+	if l := pfDFPodLabels(t, c, sourcePod); l[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
+		t.Errorf("source traffic restored after a failed demote (it still reads role=%q): %v", l[v1alpha1.DragonflyRoleLabel], l)
 	}
 }
 
@@ -535,7 +544,7 @@ func (c *pfHookTakeoverConn) ReplTakeover(ctx context.Context, d time.Duration) 
 }
 
 // K065 (ported): during strip -> REPLTAKEOVER -> relabel, the active Service
-// selector (role=master AND traffic=enabled) never matches a pod that is
+// selector (role=master AND traffic=true) never matches a pod that is
 // not the real Dragonfly master at that instant.
 func TestPlannedFailoverDragonfly_NoReadOnlyMidFlight(t *testing.T) {
 	fg := pfDFIntended("Proceed", time.Now())
@@ -548,7 +557,7 @@ func TestPlannedFailoverDragonfly_NoReadOnlyMidFlight(t *testing.T) {
 	check := func(c client.Reader, label string) {
 		var pods corev1.PodList
 		if err := c.List(context.Background(), &pods, client.InNamespace(fg.Namespace), client.MatchingLabels{
-			labelAppName: dragonflyAppName, labelInstance: fg.Name, labelDragonflyRole: "master", labelDragonflyTraffic: dragonflyTrafficEnabled,
+			labelAppName: dragonflyAppName, labelInstance: fg.Name, v1alpha1.DragonflyRoleLabel: "master", v1alpha1.DragonflyTrafficLabel: dragonflyTrafficEnabled,
 		}); err != nil {
 			return
 		}
@@ -556,7 +565,7 @@ func TestPlannedFailoverDragonfly_NoReadOnlyMidFlight(t *testing.T) {
 		defer mu.Unlock()
 		checks++
 		for _, p := range pods.Items {
-			if site := p.Labels[labelSite]; site != realMaster {
+			if site := p.Labels[v1alpha1.SiteLabel]; site != realMaster {
 				violations = append(violations, fmt.Sprintf("after %s: pod %s (site %s) is in the active Service but the real master is %s", label, p.Name, site, realMaster))
 			}
 		}
@@ -599,10 +608,10 @@ func pfDFAssertSourceKept(t *testing.T, c client.Client, source *fakeDragonflyCo
 	if len(source.clientKillTypes) != 0 || pfDFPodGone(t, c, sourcePod) {
 		t.Errorf("source evicted (CLIENT KILL %v) or deleted after a takeover that never happened", source.clientKillTypes)
 	}
-	if l := pfDFPodLabels(t, c, sourcePod); l[labelDragonflyRole] != "master" || l[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+	if l := pfDFPodLabels(t, c, sourcePod); l[v1alpha1.DragonflyRoleLabel] != "master" || l[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 		t.Errorf("source labels = %v, want it kept as the serving master", l)
 	}
-	if l := pfDFPodLabels(t, c, targetPod); l[labelDragonflyRole] == "master" {
+	if l := pfDFPodLabels(t, c, targetPod); l[v1alpha1.DragonflyRoleLabel] == "master" {
 		t.Errorf("empty target relabelled master: %v", l)
 	}
 }

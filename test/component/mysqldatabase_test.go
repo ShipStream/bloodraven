@@ -159,10 +159,10 @@ func mdbGroup(activeSite string) *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: mdbGroupName, Namespace: mdbNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", Role: "primary-candidate"},
-				{Name: "dc2", Role: "primary-candidate"},
+				{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
+				{Name: "dc2", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
 			},
 		},
 	}
@@ -197,20 +197,41 @@ func mdbCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
 			Name:       mdbName,
 			Namespace:  mdbNamespace,
 			Generation: 1,
-			Finalizers: []string{controller.MysqlDatabaseFinalizer},
+			Finalizers: []string{v1alpha1.MysqlDatabaseFinalizer},
 		},
 		Spec: v1alpha1.MysqlDatabaseSpec{
-			GroupRef:     v1alpha1.LocalGroupRef{Name: mdbGroupName},
-			DatabaseName: mdbDatabase,
-			CharacterSet: "utf8mb4",
-			Collation:    "utf8mb4_unicode_ci",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: mdbOwnerSecretName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: mdbGroupName},
+			DatabaseName:     mdbDatabase,
+			CharacterSet:     "utf8mb4",
+			Collation:        "utf8mb4_unicode_ci",
+			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: mdbOwnerSecretName},
 		},
 	}
 	for _, m := range mutate {
 		m(mdb)
 	}
 	return mdb
+}
+
+// TestMysqlDatabaseUnsetCollation pins A-53 end to end: with no
+// spec.collation the statements carry no COLLATE clause and the schema gets
+// the character set's default collation, not the legacy utf8mb4_unicode_ci.
+func TestMysqlDatabaseUnsetCollation(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.Collation = "" })
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	before := h.server.statementCount()
+
+	h.reconcile()
+
+	h.requireReady()
+	if spec, ok := h.server.database(mdbDatabase); !ok || spec != "utf8mb4/utf8mb4_0900_ai_ci" {
+		t.Fatalf("database %q = %q (present=%v), want utf8mb4/utf8mb4_0900_ai_ci", mdbDatabase, spec, ok)
+	}
+	for _, stmt := range h.server.statementsSince(before) {
+		if strings.Contains(stmt, "DATABASE") && strings.Contains(stmt, "COLLATE") {
+			t.Fatalf("statement %q names a collation; an unset spec.collation must render none", stmt)
+		}
+	}
 }
 
 // TestMysqlDatabaseCreateAndGrant is the happy path the ShipStream
@@ -431,7 +452,7 @@ func TestMysqlDatabaseDeleteRetainLeavesMySQLIntact(t *testing.T) {
 // opt-in destructive path, including the rule that shared principals survive.
 func TestMysqlDatabaseDeletePolicyDropsDatabaseButNotSharedUsers(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
 			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
 		}
@@ -546,7 +567,7 @@ func TestMysqlDatabasePendingDuringPlannedFailover(t *testing.T) {
 //     SQL runs.
 func TestMysqlDatabaseDeleteAfterPartialApplyCleansUp(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
 			{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
 		}
@@ -743,7 +764,7 @@ func TestMysqlDatabaseRemovingGrantRevokesIt(t *testing.T) {
 // schema name is ever recreated.
 func TestMysqlDatabaseDeleteRevokesRemovedGrants(t *testing.T) {
 	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
 			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
 		}
@@ -798,7 +819,7 @@ func TestMysqlDatabaseRefusesPreExistingSchema(t *testing.T) {
 
 	// Deletion under Delete must release without touching the foreign
 	// schema.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if _, ok := h.server.database(mdbDatabase); !ok {
@@ -836,7 +857,7 @@ func TestMysqlDatabaseRefusesPreExistingOwnerUser(t *testing.T) {
 	}
 
 	// Deletion under Delete never drops the foreign account.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if !h.server.hasUser(mdbOwnerUser) {
@@ -932,12 +953,12 @@ func TestMysqlDatabaseRotationSurvivesFailedReadyStamp(t *testing.T) {
 
 	// Simulate the state after that rotation ran its MySQL work but crashed
 	// before the Ready stamp persisted: the new account exists, the old one
-	// is gone, and status still shows Creating with the old owner plus the
-	// write-ahead pending record from the Creating stamp.
+	// is gone, and status still shows Applying with the old owner plus the
+	// write-ahead pending record from the Applying stamp.
 	h.server.removeUser(mdbOwnerUser)
 	h.server.addUser("acme_app_v2", "owner-pw-2")
 	mdb := h.get()
-	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
 	mdb.Status.PendingOwnerUser = "acme_app_v2"
 	mdb.Status.LastAppliedHash = ""
 	if err := h.client.Status().Update(context.Background(), mdb); err != nil {

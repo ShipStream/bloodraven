@@ -168,14 +168,14 @@ func s34ObserveReplacementCompletes() runner.Step {
 					var writable, readOnly, other []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during update", s.Name)
 						}
 					}
@@ -271,12 +271,12 @@ func s34RestoreMemory() runner.Step {
 					writable, readOnly := 0, 0
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable++
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly++
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during revert roll", s.Name)
 						}
 					}

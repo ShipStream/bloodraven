@@ -15,6 +15,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -22,9 +23,10 @@ import (
 //
 // The restore drops every user schema on the primary with binlogged DROP
 // DATABASE statements. A peer whose replication receiver is running pulls
-// them: in credentials mode the peers replicate as the operator account,
-// which offline_mode does not disconnect, and a legacy replicator that
-// offline_mode did disconnect reconnects once the fence is released. So:
+// them: by default the peers replicate as the operator account, which
+// offline_mode does not disconnect, and a dedicated replication user
+// (MYSQL_REPLICATION_USER) that offline_mode did disconnect reconnects once
+// the fence is released. So:
 //
 //   - Fencing stops every queued peer's receiver (STOP REPLICA IO_THREAD;
 //     the applier keeps applying what it already received) and verifies
@@ -642,7 +644,7 @@ func emitRestoreReclonePendingMetric(fg *v1alpha1.MysqlFailoverGroup) {
 		metrics.SetRestoreReclonePending(fg.Namespace, fg.Name, "", nil)
 		return
 	}
-	metrics.SetRestoreReclonePending(fg.Namespace, fg.Name, string(q.Phase), q.Pending)
+	metrics.SetRestoreReclonePending(fg.Namespace, fg.Name, labels.RestoreReclonePhase(q.Phase), q.Pending)
 }
 
 // --- reconciler: the Fencing step ---
@@ -703,7 +705,7 @@ func (r *MysqlFailoverGroupReconciler) cancelOnPeerSetChange(ctx context.Context
 	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
 		fmt.Sprintf("cancelled: the peer set changed after the restore was accepted (%s not in status.restoreReclones.pending); nothing was restored. "+
 			"The restore re-runs with the current peers", strings.Join(added, ", ")),
-		"RestoreInPlaceCancelled")
+		v1alpha1.EventRestoreInPlaceCanceled)
 	return true
 }
 
@@ -757,7 +759,7 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 		} else if cur.RunConfirm != "" {
 			confirm = cur.RunConfirm
 		}
-		r.stampTerminalFailure(ctx, fg, target, cur.Scope, confirm, msg, "RestoreInPlacePeerStopFailed")
+		r.stampTerminalFailure(ctx, fg, target, cur.Scope, confirm, msg, v1alpha1.EventRestoreInPlacePeerStopFailed)
 		return "", errInPlaceRunEnded
 	}
 
@@ -826,11 +828,11 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 		return wait, nil
 	}
 	if len(incomplete) > 0 {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestorePeerReplicationIncomplete",
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestorePeerReplicationStoppedBehind,
 			"stopped the replication receiver of %s before it received every transaction the primary had committed before the fence; "+
 				"the peer keeps its pre-restore data without those transactions", strings.Join(incomplete, ", "))
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestorePeerReplicationStopped",
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestorePeerReplicationStopped,
 		"stopped the replication receiver of %s; they keep their data until they are recloned from the restored primary",
 		strings.Join(stopped, ", "))
 	r.restorePeerStopMu.Lock()
@@ -852,7 +854,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePeerStopRejection(ctx context.Cont
 			return fmt.Sprintf("%s%v on %s. A full-instance restore stops the replication receiver of every peer so the restore's DROP statements "+
 				"do not reach them; grant it ON *.* to the operator account (%s). The restore is retried with the same confirm about once a minute",
 				restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), site,
-				fg.Spec.EffectiveOperatorSecretName()), nil
+				fg.Spec.Credentials.OperatorSecretName), nil
 		}
 		if errors.Is(err, errReplicaIOStopUnsupported) {
 			return fmt.Sprintf("restoreInPlace rejected: the operator cannot stop the replication receiver of peer %s (its MySQL checker does not "+

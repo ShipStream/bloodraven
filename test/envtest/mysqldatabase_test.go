@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -32,9 +33,9 @@ func newMysqlDatabaseCR(namespace, name string) *v1alpha1.MysqlDatabase {
 	return &v1alpha1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: v1alpha1.MysqlDatabaseSpec{
-			GroupRef:     v1alpha1.LocalGroupRef{Name: "main"},
-			DatabaseName: "acme_wms",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+			DatabaseName:     "acme_wms",
+			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 		},
 	}
 }
@@ -92,13 +93,15 @@ func TestMysqlDatabase_EnvtestDefaults(t *testing.T) {
 	if got.Spec.CharacterSet != "utf8mb4" {
 		t.Errorf("spec.characterSet = %q, want utf8mb4", got.Spec.CharacterSet)
 	}
-	if got.Spec.Collation != "utf8mb4_unicode_ci" {
-		t.Errorf("spec.collation = %q, want utf8mb4_unicode_ci", got.Spec.Collation)
+	// No persisted collation default (A-53): unset means the character
+	// set's default collation, resolved by MySQL.
+	if got.Spec.Collation != "" {
+		t.Errorf("spec.collation = %q, want unset", got.Spec.Collation)
 	}
 	// The default that matters. Dropping a tenant database because a CR was
 	// garbage-collected is an unrecoverable data-loss incident, so the API
 	// server must default this to Retain without the caller saying so.
-	if got.Spec.DeletionPolicy != v1alpha1.MysqlDatabaseRetain {
+	if got.Spec.DeletionPolicy != v1alpha1.DeletionPolicyRetain {
 		t.Errorf("spec.deletionPolicy = %q, want Retain", got.Spec.DeletionPolicy)
 	}
 	if len(got.Spec.Owner.Privileges) != 1 || got.Spec.Owner.Privileges[0] != v1alpha1.PrivilegeAllPrivileges {
@@ -276,7 +279,7 @@ func TestMysqlDatabase_EnvtestSchemaRejections(t *testing.T) {
 		},
 		{
 			name:   "empty group ref",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.GroupRef.Name = "" },
+			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.FailoverGroupRef.Name = "" },
 		},
 		{
 			name:   "system schema mysql",
@@ -354,8 +357,8 @@ func TestMysqlDatabase_EnvtestExplicitEmptyOwnerPrivilegesRejected(t *testing.T)
 		"kind":       "MysqlDatabase",
 		"metadata":   map[string]any{"name": "tenant-empty", "namespace": ns},
 		"spec": map[string]any{
-			"groupRef":     map[string]any{"name": "main"},
-			"databaseName": "acme_wms",
+			"failoverGroupRef": map[string]any{"name": "main"},
+			"databaseName":     "acme_wms",
 			"owner": map[string]any{
 				"secretName": "acme-mysql-owner",
 				"privileges": []any{},
@@ -369,11 +372,11 @@ func TestMysqlDatabase_EnvtestExplicitEmptyOwnerPrivilegesRejected(t *testing.T)
 	}
 }
 
-// TestMysqlDatabase_EnvtestGroupRefIsImmutable pins the groupRef transition
+// TestMysqlDatabase_EnvtestFailoverGroupRefIsImmutable pins the failoverGroupRef transition
 // rule: the reconciler cannot move a schema between groups, so retargeting
 // would orphan the database on the old group and aim any later cleanup at
 // the wrong MySQL. The API server must refuse the edit outright.
-func TestMysqlDatabase_EnvtestGroupRefIsImmutable(t *testing.T) {
+func TestMysqlDatabase_EnvtestFailoverGroupRefIsImmutable(t *testing.T) {
 	ns := createNamespace(t, "mydb-group-immutable")
 
 	cr := newMysqlDatabaseCR(ns, "tenant-group")
@@ -382,9 +385,13 @@ func TestMysqlDatabase_EnvtestGroupRefIsImmutable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
 
-	cr.Spec.GroupRef.Name = "other-group"
-	if err := k8sClient.Update(ctx, cr); err == nil {
-		t.Fatal("API server accepted a groupRef change; the field must be immutable")
+	cr.Spec.FailoverGroupRef.Name = "other-group"
+	err := k8sClient.Update(ctx, cr)
+	if err == nil {
+		t.Fatal("API server accepted a failoverGroupRef change; the field must be immutable")
+	}
+	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.failoverGroupRef is immutable") {
+		t.Fatalf("failoverGroupRef change: want the immutability rule's message, got %v", err)
 	}
 }
 
@@ -435,7 +442,7 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if err := k8sClient.Get(ctx, nn, &afterFinalizer); err != nil {
 		t.Fatalf("get after finalizer reconcile: %v", err)
 	}
-	if !controllerutil.ContainsFinalizer(&afterFinalizer, controller.MysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(&afterFinalizer, v1alpha1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer was not added")
 	}
 
@@ -461,8 +468,8 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if cond == nil {
 		t.Fatal("Ready condition missing; it is part of the polling contract")
 	}
-	if cond.Status != metav1.ConditionFalse || cond.Reason != "GroupNotFound" {
-		t.Errorf("Ready = %s/%s, want False/GroupNotFound", cond.Status, cond.Reason)
+	if cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ReasonGroupNotYetCreated {
+		t.Errorf("Ready = %s/%s, want False/GroupNotYetCreated", cond.Status, cond.Reason)
 	}
 	if cond.ObservedGeneration != got.Generation {
 		t.Errorf("Ready condition observedGeneration = %d, want %d", cond.ObservedGeneration, got.Generation)
@@ -564,7 +571,7 @@ func TestMysqlDatabase_EnvtestRetainDeletionReleasesFinalizer(t *testing.T) {
 func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 	ns := createNamespace(t, "mydb-delete-optin")
 	cr := newMysqlDatabaseCR(ns, "tenant-acme")
-	cr.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+	cr.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 	if err := k8sClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create with deletionPolicy=Delete: %v", err)
 	}
@@ -574,7 +581,7 @@ func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "tenant-acme"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Spec.DeletionPolicy != v1alpha1.MysqlDatabaseDelete {
+	if got.Spec.DeletionPolicy != v1alpha1.DeletionPolicyDelete {
 		t.Fatalf("spec.deletionPolicy = %q, want Delete", got.Spec.DeletionPolicy)
 	}
 
@@ -590,10 +597,10 @@ func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 // TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed keeps the no-credential
 // -in-status rule honest at the API boundary. The group exists and names an
 // active site that does not resolve to a promotable site, so the reconciler
-// reads the owner Secret, validates it, stamps Creating and then fails the
+// reads the owner Secret, validates it, stamps Applying and then fails the
 // admin connection *before* dialing — every status-writing path that could
 // echo Secret bytes executes, while the no-dial invariant still holds.
-// Without the group, reconciliation would stop at Pending(GroupNotFound)
+// Without the group, reconciliation would stop at Pending(GroupNotYetCreated)
 // before ever reading the Secret, and the test would prove nothing.
 func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	ns := createNamespace(t, "mydb-nosecret")
@@ -622,16 +629,16 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: ns},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Credentials: &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", Zone: "main-dc1", LBIP: "203.0.113.1",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc1"},
+				{Name: "dc1", ServerID: 101, Zone: "main-dc1", LBIP: "203.0.113.1",
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.main": "dc1"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
-				{Name: "dc2", Zone: "main-dc2", LBIP: "203.0.113.2",
-					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc2"},
+				{Name: "dc2", ServerID: 102, Zone: "main-dc2", LBIP: "203.0.113.2",
+					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.main": "dc2"},
 					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "main.az.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "main.az.example.com", TTLSeconds: 60},
 		},
 	}
 	if err := k8sClient.Create(ctx, fg); err != nil {

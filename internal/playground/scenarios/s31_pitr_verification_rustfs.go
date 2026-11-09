@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -62,7 +60,7 @@ func s31EnsureBucket() runner.Step {
 		Phase: runner.PhasePrecheck,
 		Name:  "ensure RustFS backup bucket exists",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			env.Capture.Note(fmt.Sprintf("RustFS endpoint=%s bucket=%s credentialsSecret=%s", backupE2EEndpoint, backupE2EBucket, backupE2ECredsSecret))
+			env.Capture.Note(fmt.Sprintf("RustFS endpoint=%s bucket=%s credentialsSecretName=%s", backupE2EEndpoint, backupE2EBucket, backupE2ECredsSecret))
 			return env.Chaos.EnsureRustFSBucket(ctx, backupE2EBucket)
 		},
 	}
@@ -100,7 +98,7 @@ func s31WaitArchiverReady() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR spec rollout", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-				ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
+				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
 				pitrSpec := mfg.Spec.Backup != nil && mfg.Spec.Backup.PITR != nil && mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile
 				return pitrSpec && ready && mfg.Status.UpdatePhase == "" && mfg.Status.ActiveSite != "", fmt.Sprintf("pitrSpec=%v ready=%v updatePhase=%q active=%q", pitrSpec, ready, mfg.Status.UpdatePhase, mfg.Status.ActiveSite), nil
 			})
@@ -260,11 +258,15 @@ func s31WaitBackupSucceeded() runner.Step {
 				return err
 			}
 			wantLocation := prefix + "/" + name
-			if b.Status.Location != wantLocation {
-				return fmt.Errorf("backup location %q, want %q", b.Status.Location, wantLocation)
+			storage := b.Status.ArtifactStorage
+			if storage == nil {
+				return fmt.Errorf("backup status.artifactStorage is unset")
 			}
-			if b.Status.StorageType != v1alpha1.BackupStorageS3 {
-				return fmt.Errorf("backup storageType=%q, want S3", b.Status.StorageType)
+			if storage.Location != wantLocation {
+				return fmt.Errorf("backup artifactStorage.location %q, want %q", storage.Location, wantLocation)
+			}
+			if storage.Type != v1alpha1.BackupStorageS3 {
+				return fmt.Errorf("backup artifactStorage.type=%q, want S3", storage.Type)
 			}
 			if b.Status.JobName == "" {
 				return fmt.Errorf("backup status.jobName is empty")
@@ -302,7 +304,7 @@ func s31InsertPITRMarkers() runner.Step {
 				return ctx.Err()
 			case <-time.After(2 * time.Second):
 			}
-			// The verification timestamp admits no fraction (A-39): the
+			// The verification stopTime admits no fraction (A-39): the
 			// target is the next whole second on the server clock, and the
 			// after-target row is written only once the clock has passed
 			// it (F068).
@@ -381,15 +383,15 @@ func s31ForceBinlogArchive() runner.Step {
 				}
 				p := mfg.Status.PITR
 				covered := p.NewestArchivedTime != nil && !p.NewestArchivedTime.Time.Before(target.Add(-time.Second))
-				ok := p.Enabled && p.ProfileName == backupE2EProfile && p.ArchivedFileCount > 0 && covered && p.Message == ""
-				return ok, fmt.Sprintf("enabled=%v profile=%s files=%d newest=%v covered=%v message=%q", p.Enabled, p.ProfileName, p.ArchivedFileCount, p.NewestArchivedTime, covered, p.Message), nil
+				ok := pitrSpecProfile(mfg) == backupE2EProfile && p.ArchivedFileCount > 0 && covered && p.Message == ""
+				return ok, fmt.Sprintf("profile=%s files=%d newest=%v covered=%v message=%q", pitrSpecProfile(mfg), p.ArchivedFileCount, p.NewestArchivedTime, covered, p.Message), nil
 			})
 			if err != nil {
 				env.Capture.Note("MFG PITR status did not catch up after sidecar coverage; continuing with verification proof: " + err.Error())
 				return nil
 			}
 			if mfg.Status.PITR != nil {
-				env.Capture.Note(fmt.Sprintf("MFG PITR status: enabled=%v profile=%s files=%d newest=%v message=%q", mfg.Status.PITR.Enabled, mfg.Status.PITR.ProfileName, mfg.Status.PITR.ArchivedFileCount, mfg.Status.PITR.NewestArchivedTime, mfg.Status.PITR.Message))
+				env.Capture.Note(fmt.Sprintf("MFG PITR status: profile=%s files=%d newest=%v message=%q", pitrSpecProfile(mfg), mfg.Status.PITR.ArchivedFileCount, mfg.Status.PITR.NewestArchivedTime, mfg.Status.PITR.Message))
 			}
 			return nil
 		},
@@ -431,7 +433,11 @@ func s31CreateVerification() runner.Step {
 			}
 			runStem := ctxFetch(env, "backupRunStem")
 			query := "SELECT IF(SUM(phase='baseline') = 1 AND SUM(phase='before-target') = 1 AND SUM(phase='after-target') = 0, 1, 0) FROM " + s31DBName + ".marker WHERE run_id=" + quoteSQLString(runStem)
-			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: ctxFetch(env, "pitrTargetTimestamp")}
+			stop, err := pitrTargetTime(ctxFetch(env, "pitrTargetTimestamp"))
+			if err != nil {
+				return err
+			}
+			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop}
 			return createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), s31ID, pit, query, 1)
 		},
 	}
@@ -457,13 +463,13 @@ func s31WaitVerificationSucceeded() runner.Step {
 			if backupUID != "" && v.Status.BackupRef.UID != "" && v.Status.BackupRef.UID != backupUID {
 				return fmt.Errorf("verification backupRef UID=%q, want %q", v.Status.BackupRef.UID, backupUID)
 			}
-			if v.Status.SanityCheck == nil || !v.Status.SanityCheck.Ran || v.Status.SanityCheck.ResultRow != "1" {
-				return fmt.Errorf("verification sanity=%v, want ran=true resultRow=1", v.Status.SanityCheck)
+			if v.Status.SanityCheck == nil || v.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || v.Status.SanityCheck.Result != "1" {
+				return fmt.Errorf("verification sanity=%v, want outcome=Passed result=1", v.Status.SanityCheck)
 			}
-			if v.Status.ReplayedThroughBinlog == nil {
-				return fmt.Errorf("verification replay mark is nil for PITR run")
+			if v.Status.PointInTime == nil || v.Status.PointInTime.NewestReplayedCommitTime == nil {
+				return fmt.Errorf("verification pointInTime.newestReplayedCommitTime is unset for a PITR run")
 			}
-			if !conditionTrue(v.Status.Conditions, "Verified") {
+			if !conditionTrue(v.Status.Conditions, v1alpha1.ConditionVerified) {
 				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(v.Status.Conditions))
 			}
 			env.Capture.Note("PITR verification succeeded: " + verificationStatusSummary(v))
@@ -484,21 +490,12 @@ func s31Cleanup(ctx context.Context, env *runner.Env) error {
 		errs = append(errs, err)
 	}
 	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s31 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready := false
-		for _, c := range mfg.Status.Conditions {
-			if c.Type == "Ready" {
-				ready = c.Status == metav1.ConditionTrue
-			}
-		}
 		wantPITR, wantProfile, err := originalPITRExpected(env)
 		if err != nil {
 			return false, "", err
 		}
-		pitrRestored := mfg.Status.PITR == nil || (!mfg.Status.PITR.Enabled && !wantPITR)
-		if wantPITR {
-			pitrRestored = mfg.Status.PITR != nil && mfg.Status.PITR.Enabled && mfg.Status.PITR.ProfileName == wantProfile
-		}
-		return ready && mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == "" && pitrRestored, fmt.Sprintf("ready=%v active=%q updatePhase=%q pitrRestored=%v wantPITR=%v wantProfile=%q pitr=%v", ready, mfg.Status.ActiveSite, mfg.Status.UpdatePhase, pitrRestored, wantPITR, wantProfile, mfg.Status.PITR), nil
+		done, msg := pitrBaselineRestoredLive(ctx, env, mfg, wantPITR, wantProfile)
+		return done, msg, nil
 	}); err != nil {
 		errs = append(errs, err)
 	} else if prefix := ctxFetch(env, "backupPrefix"); prefix != "" {

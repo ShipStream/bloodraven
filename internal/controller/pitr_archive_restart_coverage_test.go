@@ -27,7 +27,7 @@ func TestPITRArchiveCoverageKeptWhenASiteHasNoSampleAfterRestart(t *testing.T) {
 	oldest, newest, last := metav1.NewTime(t0.Add(-48*time.Hour)), metav1.NewTime(t0.Add(-time.Minute)), metav1.NewTime(t0.Add(-30*time.Second))
 	fg := pitrArchiveFG(nil)
 	fg.Status.PITR = &v1alpha1.PITRStatus{
-		Enabled: true, ProfileName: "nightly", ArchivedFileCount: 10, ArchivedBytes: 100,
+		ArchivedFileCount: 10, ArchivedBytes: 100,
 		OldestArchivedTime: &oldest, NewestArchivedTime: &newest, LastArchivedTime: &last,
 	}
 	nn := FailoverGroupNamespacedName(fg)
@@ -82,8 +82,8 @@ func TestPITRArchiveMessageOnlyChangesAreRateLimited(t *testing.T) {
 	step(0, s3err("A1"), pitrClean())
 	step(30*time.Second, s3err("A2"), pitrClean())
 	cond, _ := pitrCondition(t, c, nn)
-	if cond == nil || cond.Reason != reasonPITRArchiverError {
-		t.Fatalf("condition = %+v, want False/%s", cond, reasonPITRArchiverError)
+	if cond == nil || cond.Reason != v1alpha1.ReasonArchiverError {
+		t.Fatalf("condition = %+v, want False/%s", cond, v1alpha1.ReasonArchiverError)
 	}
 	written := rv()
 
@@ -184,7 +184,7 @@ func TestPITRArchiveTopologyWriterInterleavedWithPollerWrite(t *testing.T) {
 		switch {
 		case strings.HasPrefix(e, "Warning PITRArchiveNotReady"):
 			warnings++
-		case strings.HasPrefix(e, "Normal PITRArchiveReady"):
+		case strings.HasPrefix(e, "Normal PITRArchiveRecovered"):
 			normals++
 		}
 	}

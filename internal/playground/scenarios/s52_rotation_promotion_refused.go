@@ -14,7 +14,6 @@ func init() {
 }
 
 const (
-	s52RotateKeyringAnnotation     = "bloodraven.shipstream.io/rotate-keyring"
 	s52PlannedFailoverRejectReason = "KeyringRotation"
 )
 
@@ -113,7 +112,7 @@ func s52StartReplicaRotation(state *s52RunState) runner.Step {
 			}
 
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				s52RotateKeyringAnnotation, state.replicaSite); err != nil {
+				v1alpha1.RotateKeyringAnnotation, state.replicaSite); err != nil {
 				return fmt.Errorf("annotate for replica rotation: %w", err)
 			}
 			state.rotated = true
@@ -152,7 +151,7 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 			var err error
 			state.plannedRejectedBefore, err = metricCounter(ctx, env, "bloodraven_planned_failovers_total", map[string]string{
 				"target_site": state.replicaSite,
-				"result":      "rejected",
+				"result":      "not-started",
 			})
 			if err != nil {
 				return err
@@ -216,19 +215,19 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 			if got.Status.ActiveSite != state.activeSite {
 				return fmt.Errorf("activeSite=%q after planned reject, want %q", got.Status.ActiveSite, state.activeSite)
 			}
-			if _, present := got.GetAnnotations()["bloodraven.shipstream.io/planned-failover"]; present {
+			if _, present := got.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; present {
 				return fmt.Errorf("planned-failover annotation was not consumed after KeyringRotation reject")
 			}
 
 			after, err := metricCounter(ctx, env, "bloodraven_planned_failovers_total", map[string]string{
 				"target_site": state.replicaSite,
-				"result":      "rejected",
+				"result":      "not-started",
 			})
 			if err != nil {
 				return err
 			}
 			if after < state.plannedRejectedBefore+1 {
-				return fmt.Errorf("bloodraven_planned_failovers_total{result=rejected} did not increment (before=%v after=%v)",
+				return fmt.Errorf("bloodraven_planned_failovers_total{result=not-started} did not increment (before=%v after=%v)",
 					state.plannedRejectedBefore, after)
 			}
 			env.Logger.Info("planned failover rejected mid-rotation",
@@ -305,7 +304,7 @@ func s52RefuseEmergencyPromotion(state *s52RunState) runner.Step {
 					if berr != nil {
 						last = berr.Error()
 					} else {
-						_, evOK, evErr := findMFGEvent(ctx, env, eventBefore, "KeyringPromotionRefused", state.replicaSite)
+						_, evOK, evErr := findMFGEvent(ctx, env, eventBefore, v1alpha1.EventKeyringPromotionRefused, state.replicaSite)
 						if evErr != nil {
 							return evErr
 						}
@@ -458,7 +457,7 @@ func s52RestoreAndReseal(state *s52RunState) runner.Step {
 			_, err = env.Wait.UntilCR(rollCtx, env.Namespace, "ordered update idle after rotation reseal",
 				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.UpdatePhase != "" {
-						return false, "updatePhase=" + m.Status.UpdatePhase, nil
+						return false, "updatePhase=" + string(m.Status.UpdatePhase), nil
 					}
 					return true, "", nil
 				})
@@ -484,12 +483,12 @@ func s52Cleanup(state *s52RunState) func(context.Context, *runner.Env) error {
 		if err != nil {
 			return fmt.Errorf("read MFG to clear leftover rotate annotation: %w", err)
 		}
-		if _, present := mfg.GetAnnotations()[s52RotateKeyringAnnotation]; !present {
+		if _, present := mfg.GetAnnotations()[v1alpha1.RotateKeyringAnnotation]; !present {
 			state.rotated = false
 			return nil
 		}
 		if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-			s52RotateKeyringAnnotation, ""); err != nil {
+			v1alpha1.RotateKeyringAnnotation, ""); err != nil {
 			return fmt.Errorf("clear rotate annotation: %w", err)
 		}
 		state.rotated = false
@@ -500,7 +499,7 @@ func s52Cleanup(state *s52RunState) func(context.Context, *runner.Env) error {
 func s52SiteWritable(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == name {
-			return s.State == "writable"
+			return s.State == v1alpha1.SiteStateWritable
 		}
 	}
 	return false
@@ -509,7 +508,7 @@ func s52SiteWritable(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 func s52WritableCandidates(mfg *v1alpha1.MysqlFailoverGroup) []string {
 	var out []string
 	for _, s := range mfg.Status.Sites {
-		if s.State == "writable" && isPromotableSite(mfg, s.Name) {
+		if s.State == v1alpha1.SiteStateWritable && isPromotableSite(mfg, s.Name) {
 			out = append(out, s.Name)
 		}
 	}
@@ -518,7 +517,7 @@ func s52WritableCandidates(mfg *v1alpha1.MysqlFailoverGroup) []string {
 
 func s52Degraded(mfg *v1alpha1.MysqlFailoverGroup) (reason, message string) {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == "Degraded" {
+		if c.Type == v1alpha1.ConditionDegraded {
 			return c.Reason, c.Message
 		}
 	}

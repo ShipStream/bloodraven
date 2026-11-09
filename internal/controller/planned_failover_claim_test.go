@@ -309,7 +309,7 @@ func TestEnsureClaim(t *testing.T) {
 	pf := opsRun(v1alpha1.PlannedFailoverPhaseWaitingForLag)
 	fg := opsGroup(pf)
 	marked := fg.DeepCopy()
-	marked.Annotations = map[string]string{PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
+	marked.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
 		Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}.String()}
 	if _, err := f.topo.EnsureClaim(context.Background(), f.ref, marked); err != errClaimLost {
 		t.Fatalf("EnsureClaim on a marked run = %v; want errClaimLost", err)

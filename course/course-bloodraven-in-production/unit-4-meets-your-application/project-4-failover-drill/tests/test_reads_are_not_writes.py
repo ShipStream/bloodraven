@@ -52,7 +52,7 @@ check(gap["oldSite"] == "pdx", "oldSite should be pdx in this drill, got %r" % (
 check(gap["newSite"] == "iad", "newSite should be iad in this drill, got %r" % (gap["newSite"],))
 
 # The stale-read window: successful reads served by the demoted site at or
-# after status.lastFailover (2026-08-12T10:00:38Z), ending when the NoExecute
+# after status.lastFailover.time (2026-08-12T10:00:38Z), ending when the NoExecute
 # taint's tolerationSeconds expired and the pod was evicted.
 stale = brdrill.stale_read_window(samples, drill)
 check(stale is not None, "stale_read_window returned None — TODO C is unimplemented")

@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,7 +27,7 @@ whether the dump loads cleanly.
 Flags:
   --profile string       backup profile name (required)
   --backup string        pin to a specific MysqlBackup (default: latest Succeeded)
-  --triggered-by string  label recorded on the CR (default: "manual")
+  --triggered-by string  free-form value of the CR's triggered-by annotation (default: "manual")
   --wait                 block until the verification reaches Succeeded or Failed
   --timeout DURATION     timeout for --wait (default: 30m)
   --kubeconfig string    path to kubeconfig
@@ -50,7 +49,7 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 	registerCommonFlags(fs, &cf)
 	fs.StringVar(&profile, "profile", "", "backup profile name (required)")
 	fs.StringVar(&backupName, "backup", "", "pin to a specific MysqlBackup (default: latest Succeeded)")
-	fs.StringVar(&triggeredBy, "triggered-by", "manual", "label recorded on the CR")
+	fs.StringVar(&triggeredBy, "triggered-by", "manual", "free-form value of the CR's triggered-by annotation")
 	fs.BoolVar(&wait, "wait", false, "block until the verification reaches Succeeded or Failed")
 	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "timeout for --wait")
 	fs.Usage = func() { fmt.Fprint(stderr, verifyUsage) }
@@ -137,26 +136,32 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: generateNameWithInfix(group, profile, "verify"),
 			Namespace:    ns,
+			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: triggeredBy},
 			Labels: map[string]string{
-				"shipstream.io/failover-group": group,
-				"shipstream.io/backup-profile": profile,
+				v1alpha1.FailoverGroupLabel:    group,
+				v1alpha1.BackupProfileLabel:    profile,
 				"app.kubernetes.io/managed-by": "bloodraven",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: group},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
 			ProfileName:      profile,
-			TriggeredBy:      triggeredBy,
 		},
 	}
 	if backupName != "" {
-		cr.Spec.BackupRef = &corev1.LocalObjectReference{Name: backupName}
+		cr.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: backupName}
 	}
 	if vs := profileVerificationSpec(fg, profile); vs != nil {
-		cr.Spec.KeepOnFailure = vs.KeepOnFailure
-		cr.Spec.TTLSecondsAfterFinished = vs.TTLSecondsAfterFinished
-		if vs.Storage != nil {
-			cr.Spec.Storage = vs.Storage.DeepCopy()
+		// Copy the pointers so an unset field stays unset on the CR
+		// (ttlSecondsAfterFinished: unset keeps resources until
+		// retention, 0 cleans up at once).
+		if vs.KeepOnFailure != nil {
+			keep := *vs.KeepOnFailure
+			cr.Spec.KeepOnFailure = &keep
+		}
+		if vs.TTLSecondsAfterFinished != nil {
+			ttl := *vs.TTLSecondsAfterFinished
+			cr.Spec.TTLSecondsAfterFinished = &ttl
 		}
 		if vs.PointInTime != nil {
 			cr.Spec.PointInTime = vs.PointInTime.DeepCopy()

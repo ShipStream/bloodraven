@@ -86,8 +86,8 @@ const (
 )
 
 func TestPITRArchiveTrackerStateMachine(t *testing.T) {
-	persistedTrue := &metav1.Condition{Type: conditionPITRArchiveReady, Status: cTrue, Reason: reasonPITRArchiving}
-	persistedFalse := &metav1.Condition{Type: conditionPITRArchiveReady, Status: cFalse, Reason: reasonPITRArchiveStoreInitFailed, Message: "iad: archive store init: boom"}
+	persistedTrue := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cTrue, Reason: v1alpha1.ReasonArchiving}
+	persistedFalse := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiveStoreInitFailed, Message: "iad: archive store init: boom"}
 	ok := pitrClean()
 
 	cases := []struct {
@@ -96,88 +96,88 @@ func TestPITRArchiveTrackerStateMachine(t *testing.T) {
 		rounds    []pitrRound
 	}{
 		{name: "startup is Unknown, first clean round certifies", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "startup with a missed poll stays Unknown", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: reasonPITRAwaitingFirstPoll},
-			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: v1alpha1.ReasonAwaitingFirstPoll},
+			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "one missed poll keeps True", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "three misses over 60s are SidecarUnreachable", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 60 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 90 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cFalse, wantReason: reasonPITRSidecarUnreachable},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 60 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 90 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cFalse, wantReason: v1alpha1.ReasonSidecarUnreachable},
 		}},
 		{name: "three quick misses are not yet unreachable", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 10 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 20 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 70 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cFalse, wantReason: reasonPITRSidecarUnreachable},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 10 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 20 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 70 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cFalse, wantReason: v1alpha1.ReasonSidecarUnreachable},
 		}},
 		{name: "init failure is immediate, on any role", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: ok, pdx: pitrInitFailed("read passphrase: permission denied"), wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: ok, pdx: pitrInitFailed("read passphrase: permission denied"), wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
 		}},
 		{name: "a miss never clears a known init failure", rounds: []pitrRound{
-			{at: 0, iad: pitrInitFailed("boom"), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 30 * time.Second, iad: pitrMiss(), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 90 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: pitrInitFailed("boom"), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 30 * time.Second, iad: pitrMiss(), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 90 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "store init in progress is not a failure", rounds: []pitrRound{
-			{at: 0, iad: pitrInitPending(), pdx: ok, wantStatus: cUnknown, wantReason: reasonPITRAwaitingFirstPoll},
-			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: pitrInitPending(), pdx: ok, wantStatus: cUnknown, wantReason: v1alpha1.ReasonAwaitingFirstPoll},
+			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "single lastError blip keeps True", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: pitrRunError("role check: i/o timeout"), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: pitrRunError("role check: i/o timeout"), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "two consecutive errors are ArchiverError, recovery needs two clean rounds", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: pitrRunError("load manifest: 403"), pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 60 * time.Second, iad: pitrRunError("load manifest: 403"), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiverError},
-			{at: 90 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiverError},
-			{at: 120 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: pitrRunError("load manifest: 403"), pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 60 * time.Second, iad: pitrRunError("load manifest: 403"), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiverError},
+			{at: 90 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiverError},
+			{at: 120 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "a miss or error resets recovery progress", rounds: []pitrRound{
-			{at: 0, iad: pitrInitFailed("boom"), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 60 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 90 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 120 * time.Second, iad: pitrRunError("blip"), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 150 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 180 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: pitrInitFailed("boom"), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 60 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 90 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 120 * time.Second, iad: pitrRunError("blip"), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 150 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 180 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "old sidecar without storeReady is not an init failure", rounds: []pitrRound{
-			{at: 0, iad: pitrOldClean(), pdx: pitrOldClean(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: pitrOldError("upload: 500"), pdx: pitrOldClean(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 60 * time.Second, iad: pitrOldError("upload: 500"), pdx: pitrOldClean(), wantStatus: cFalse, wantReason: reasonPITRArchiverError},
+			{at: 0, iad: pitrOldClean(), pdx: pitrOldClean(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: pitrOldError("upload: 500"), pdx: pitrOldClean(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 60 * time.Second, iad: pitrOldError("upload: 500"), pdx: pitrOldClean(), wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiverError},
 		}},
 		{name: "enabled:false while PITR is on is ArchiverDisabled on the second poll", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 30 * time.Second, iad: ok, pdx: pitrDisabled(), wantStatus: cTrue, wantReason: reasonPITRArchiving},
-			{at: 60 * time.Second, iad: ok, pdx: pitrDisabled(), wantStatus: cFalse, wantReason: reasonPITRArchiverDisabled},
+			{at: 0, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 30 * time.Second, iad: ok, pdx: pitrDisabled(), wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
+			{at: 60 * time.Second, iad: ok, pdx: pitrDisabled(), wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiverDisabled},
 		}},
 		{name: "restart with persisted True needs a fresh observation", persisted: persistedTrue, rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: reasonPITRAwaitingFirstPoll},
-			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: v1alpha1.ReasonAwaitingFirstPoll},
+			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "restart with persisted False keeps it until two clean rounds", persisted: persistedFalse, rounds: []pitrRound{
-			{at: 0, iad: pitrMiss(), pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
-			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: reasonPITRArchiving},
+			{at: 0, iad: pitrMiss(), pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 30 * time.Second, iad: ok, pdx: ok, wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
+			{at: 60 * time.Second, iad: ok, pdx: ok, wantStatus: cTrue, wantReason: v1alpha1.ReasonArchiving},
 		}},
 		{name: "init failure outranks unreachable", rounds: []pitrRound{
-			{at: 0, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: reasonPITRAwaitingFirstPoll},
-			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: reasonPITRAwaitingFirstPoll},
-			{at: 60 * time.Second, iad: pitrInitFailed("boom"), pdx: pitrMiss(), wantStatus: cFalse, wantReason: reasonPITRArchiveStoreInitFailed},
+			{at: 0, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: v1alpha1.ReasonAwaitingFirstPoll},
+			{at: 30 * time.Second, iad: ok, pdx: pitrMiss(), wantStatus: cUnknown, wantReason: v1alpha1.ReasonAwaitingFirstPoll},
+			{at: 60 * time.Second, iad: pitrInitFailed("boom"), pdx: pitrMiss(), wantStatus: cFalse, wantReason: v1alpha1.ReasonArchiveStoreInitFailed},
 		}},
 	}
 
@@ -186,8 +186,8 @@ func TestPITRArchiveTrackerStateMachine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := newPITRArchiveTracker(tc.persisted)
 			if tc.persisted == nil || tc.persisted.Status != cFalse {
-				if v := tr.current(); v.Status != cUnknown || v.Reason != reasonPITRAwaitingFirstPoll {
-					t.Fatalf("before any poll: %+v, want Unknown/%s", v, reasonPITRAwaitingFirstPoll)
+				if v := tr.current(); v.Status != cUnknown || v.Reason != v1alpha1.ReasonAwaitingFirstPoll {
+					t.Fatalf("before any poll: %+v, want Unknown/%s", v, v1alpha1.ReasonAwaitingFirstPoll)
 				}
 			}
 			for i, r := range tc.rounds {
@@ -213,8 +213,8 @@ func TestPITRArchiveTrackerMessageListsEverySiteSorted(t *testing.T) {
 		tr.observe(t0.Add(time.Duration(i)*30*time.Second), round)
 	}
 	v := tr.current()
-	if v.Reason != reasonPITRArchiveStoreInitFailed {
-		t.Fatalf("reason = %s, want %s (init failure outranks disabled)", v.Reason, reasonPITRArchiveStoreInitFailed)
+	if v.Reason != v1alpha1.ReasonArchiveStoreInitFailed {
+		t.Fatalf("reason = %s, want %s (init failure outranks disabled)", v.Reason, v1alpha1.ReasonArchiveStoreInitFailed)
 	}
 	iad, pdx := strings.Index(v.Message, "iad: "), strings.Index(v.Message, "pdx: archive store init: read passphrase: permission denied")
 	if iad < 0 || pdx < 0 || iad > pdx || strings.Contains(v.Message, "dfw") {
@@ -255,7 +255,7 @@ func pitrArchiveTestPoller(t *testing.T, r *TopologyManagerRunner, fg *v1alpha1.
 func pitrArchiveFG(persisted *metav1.Condition) *v1alpha1.MysqlFailoverGroup {
 	fg := pitrEnabledFG("default", "orders")
 	fg.Generation = 3
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	// A profile the PITR spec can render, so rollout suppression applies.
 	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{{Name: "nightly", Storage: v1alpha1.BackupStorage{
 		Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive"},
@@ -284,7 +284,7 @@ func pitrCondition(t *testing.T, c client.Client, nn types.NamespacedName) (*met
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	return apimeta.FindStatusCondition(got.Status.Conditions, conditionPITRArchiveReady), got.Status.PITR
+	return apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionPITRArchiveReady), got.Status.PITR
 }
 
 // observeAndWrite feeds one poll round to the poller's tracker and runs
@@ -313,16 +313,16 @@ func TestPITRArchiveConditionEventsOnlyOnEdges(t *testing.T) {
 		wantReason string
 		wantEvents []string
 	}{
-		{ok, cTrue, reasonPITRArchiving, nil},
-		{ok, cTrue, reasonPITRArchiving, nil},
-		{initFail, cFalse, reasonPITRArchiveStoreInitFailed, []string{"Warning PITRArchiveNotReady"}},
-		{initFail, cFalse, reasonPITRArchiveStoreInitFailed, nil},
-		{initFail2, cFalse, reasonPITRArchiveStoreInitFailed, nil},
-		{disabled, cFalse, reasonPITRArchiveStoreInitFailed, nil},
-		{ok, cFalse, reasonPITRArchiveStoreInitFailed, nil},
-		{ok, cTrue, reasonPITRArchiving, []string{"Normal PITRArchiveReady"}},
-		{ok, cTrue, reasonPITRArchiving, nil},
-		{initFail, cFalse, reasonPITRArchiveStoreInitFailed, []string{"Warning PITRArchiveNotReady"}},
+		{ok, cTrue, v1alpha1.ReasonArchiving, nil},
+		{ok, cTrue, v1alpha1.ReasonArchiving, nil},
+		{initFail, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, []string{"Warning PITRArchiveNotReady"}},
+		{initFail, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, nil},
+		{initFail2, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, nil},
+		{disabled, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, nil},
+		{ok, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, nil},
+		{ok, cTrue, v1alpha1.ReasonArchiving, []string{"Normal PITRArchiveRecovered"}},
+		{ok, cTrue, v1alpha1.ReasonArchiving, nil},
+		{initFail, cFalse, v1alpha1.ReasonArchiveStoreInitFailed, []string{"Warning PITRArchiveNotReady"}},
 	}
 	for i, s := range steps {
 		observeAndWrite(t, r, p, nn, t0.Add(time.Duration(i)*30*time.Second), s.round.results())
@@ -333,7 +333,7 @@ func TestPITRArchiveConditionEventsOnlyOnEdges(t *testing.T) {
 		if cond.ObservedGeneration != fg.Generation {
 			t.Fatalf("step %d: observedGeneration = %d, want %d", i, cond.ObservedGeneration, fg.Generation)
 		}
-		if pitr == nil || !pitr.Enabled {
+		if pitr == nil {
 			t.Fatalf("step %d: status.pitr = %+v", i, pitr)
 		}
 		events := drainEventsPITR(rec)
@@ -354,7 +354,7 @@ func TestPITRArchiveConditionEventsOnlyOnEdges(t *testing.T) {
 func TestPITRArchiveConditionRestartDoesNotRefire(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	persisted := &metav1.Condition{
-		Type: conditionPITRArchiveReady, Status: cFalse, Reason: reasonPITRArchiveStoreInitFailed,
+		Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiveStoreInitFailed,
 		Message: "iad: archive store init: boom", ObservedGeneration: 3, LastTransitionTime: metav1.NewTime(t0),
 	}
 	fg := pitrArchiveFG(persisted)
@@ -374,13 +374,13 @@ func TestPITRArchiveConditionRestartDoesNotRefire(t *testing.T) {
 	// A restart with a persisted True and a first round that misses a
 	// site must not re-certify True, and Unknown fires no Event.
 	persistedTrue := persisted.DeepCopy()
-	persistedTrue.Status, persistedTrue.Reason, persistedTrue.Message = cTrue, reasonPITRArchiving, "ok"
+	persistedTrue.Status, persistedTrue.Reason, persistedTrue.Message = cTrue, v1alpha1.ReasonArchiving, "ok"
 	fg2 := pitrArchiveFG(persistedTrue)
 	r2, c2, rec2, p2 := pitrArchiveRunner(t, fg2, nil)
 	observeAndWrite(t, r2, p2, nn, t0, pitrRound{iad: pitrClean(), pdx: pitrMiss()}.results())
 	cond, _ = pitrCondition(t, c2, nn)
-	if cond == nil || cond.Status != cUnknown || cond.Reason != reasonPITRAwaitingFirstPoll {
-		t.Fatalf("condition = %+v, want Unknown/%s", cond, reasonPITRAwaitingFirstPoll)
+	if cond == nil || cond.Status != cUnknown || cond.Reason != v1alpha1.ReasonAwaitingFirstPoll {
+		t.Fatalf("condition = %+v, want Unknown/%s", cond, v1alpha1.ReasonAwaitingFirstPoll)
 	}
 	if ev := drainEventsPITR(rec2); len(ev) != 0 {
 		t.Fatalf("events = %q, want none", ev)
@@ -388,10 +388,10 @@ func TestPITRArchiveConditionRestartDoesNotRefire(t *testing.T) {
 }
 
 func TestPITRArchiveConditionRemovedWhenPITRDisabled(t *testing.T) {
-	persisted := &metav1.Condition{Type: conditionPITRArchiveReady, Status: cFalse, Reason: reasonPITRArchiverError, Message: "iad: x"}
+	persisted := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiverError, Message: "iad: x"}
 	fg := pitrArchiveFG(persisted)
 	fg.Spec.Backup.PITR.Enabled = false
-	fg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ArchivedFileCount: 4}
+	fg.Status.PITR = &v1alpha1.PITRStatus{ArchivedFileCount: 4}
 	nn := FailoverGroupNamespacedName(fg)
 	r, c, rec, p := pitrArchiveRunner(t, fg, nil)
 	observeAndWrite(t, r, p, nn, time.Now(), pitrRound{iad: pitrDisabled(), pdx: pitrDisabled()}.results())
@@ -423,8 +423,8 @@ func TestPITRArchiveUnreachableMarksCoverageLastKnown(t *testing.T) {
 			[]archiverPollResult{{site: "iad", err: errors.New("connection refused")}, {site: "pdx", status: pitrClean().status}})
 	}
 	cond, pitr := pitrCondition(t, c, nn)
-	if cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRSidecarUnreachable {
-		t.Fatalf("condition = %+v, want False/%s", cond, reasonPITRSidecarUnreachable)
+	if cond == nil || cond.Status != cFalse || cond.Reason != v1alpha1.ReasonSidecarUnreachable {
+		t.Fatalf("condition = %+v, want False/%s", cond, v1alpha1.ReasonSidecarUnreachable)
 	}
 	if pitr == nil || pitr.ArchivedFileCount != 7 {
 		t.Fatalf("status.pitr = %+v, want the last-known coverage kept", pitr)
@@ -475,7 +475,7 @@ func TestPITRArchiveConditionTopologyWriteDoesNotClobberOrRefire(t *testing.T) {
 		t.Fatalf("PITRArchiveNotReady events = %d, want exactly 1", warnings)
 	}
 	cond, _ = pitrCondition(t, c, nn)
-	if cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRArchiveStoreInitFailed {
+	if cond == nil || cond.Status != cFalse || cond.Reason != v1alpha1.ReasonArchiveStoreInitFailed {
 		t.Fatalf("final condition = %+v", cond)
 	}
 }
@@ -573,8 +573,8 @@ func testPITRArchiveInitFailureThroughPoller(t *testing.T, pitrCfg *sidecar.PITR
 	}
 
 	cond, pitr := pitrCondition(t, c, nn)
-	if cond == nil || cond.Status != cFalse || cond.Reason != reasonPITRArchiveStoreInitFailed {
-		t.Fatalf("condition = %+v, want False/%s", cond, reasonPITRArchiveStoreInitFailed)
+	if cond == nil || cond.Status != cFalse || cond.Reason != v1alpha1.ReasonArchiveStoreInitFailed {
+		t.Fatalf("condition = %+v, want False/%s", cond, v1alpha1.ReasonArchiveStoreInitFailed)
 	}
 	if !strings.HasPrefix(cond.Message, wantPrefix) || !strings.Contains(cond.Message, wantText) {
 		t.Fatalf("message = %q, want prefix %q containing %q", cond.Message, wantPrefix, wantText)
@@ -591,7 +591,7 @@ func testPITRArchiveInitFailureThroughPoller(t *testing.T, pitrCfg *sidecar.PITR
 	if len(warnings) != 1 {
 		t.Fatalf("Warning events = %q, want exactly one", warnings)
 	}
-	if !strings.Contains(warnings[0], reasonPITRArchiveStoreInitFailed) {
+	if !strings.Contains(warnings[0], v1alpha1.ReasonArchiveStoreInitFailed) {
 		t.Fatalf("event = %q, want the reason", warnings[0])
 	}
 	_ = r

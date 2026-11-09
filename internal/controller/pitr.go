@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
@@ -320,27 +321,18 @@ type pitrReplayRequest struct {
 	Verification bool
 }
 
-// pitrStopPattern is the stopDatetime/timestamp CRD pattern (§6.1). The
-// controller enforces it again because objects admitted before the pattern
-// existed, and every caller of the builders, must not reach a Job.
-var pitrStopPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$`)
-
-// parsePITRTarget parses a point-in-time target, a whole second: RFC 3339
-// with an optional zone, or the MySQL form, neither with a fraction (A-39:
-// the v1beta1 field is a second-precision metav1.Time); no zone means UTC.
-// Callers refuse any other spelling with PITRTargetInvalid. The planner
-// still compares µs commit times against it (commit < T).
-func parsePITRTarget(value string) (time.Time, error) {
-	if len(value) > 40 || !pitrStopPattern.MatchString(value) {
-		return time.Time{}, fmt.Errorf("%q is not a target instant (YYYY-MM-DDTHH:MM:SS[Z|±HH:MM], whole seconds; fractional seconds are not accepted)", value)
+// pitrTarget checks a point-in-time target. The CRD pattern admits only
+// RFC 3339 with an explicit zone and whole seconds (A-39), and metav1.Time
+// carries second precision, so an object read from the API always passes;
+// the check guards objects built in memory, which must not reach a Job with
+// a sub-second or missing target. The planner still compares µs commit times
+// against it (commit < T).
+func pitrTarget(field string, t *metav1.Time) (time.Time, error) {
+	if t == nil || t.IsZero() {
+		return time.Time{}, fmt.Errorf("%s: %s is required", pitrarchive.TokenTargetInvalid, field)
 	}
-	normalized := strings.Replace(value, " ", "T", 1)
-	if !strings.HasSuffix(normalized, "Z") && !strings.ContainsAny(normalized[19:], "+-") {
-		normalized += "Z"
-	}
-	t, err := time.Parse(time.RFC3339Nano, normalized)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("%q: %v", value, err)
+	if t.Nanosecond() != 0 {
+		return time.Time{}, fmt.Errorf("%s: %s %s has a fractional second; targets are whole seconds", pitrarchive.TokenTargetInvalid, field, t.UTC().Format(time.RFC3339Nano))
 	}
 	return t.UTC(), nil
 }
@@ -356,19 +348,16 @@ func pitrRequestFromSpec(pit *v1alpha1.PointInTimeSpec) (*pitrReplayRequest, err
 	if pit == nil {
 		return nil, nil
 	}
-	if pit.StopDatetime == "" {
-		return nil, fmt.Errorf("%s: pointInTime.stopDatetime is required", pitrarchive.TokenTargetInvalid)
-	}
-	stop, err := parsePITRTarget(pit.StopDatetime)
+	stop, err := pitrTarget("pointInTime.stopTime", &pit.StopTime)
 	if err != nil {
-		return nil, fmt.Errorf("%s: pointInTime.stopDatetime: %v", pitrarchive.TokenTargetInvalid, err)
+		return nil, err
 	}
 	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", pit.ExcludeGtids)
 	if err != nil {
 		return nil, err
 	}
 	return &pitrReplayRequest{
-		Mode:               "timestamp",
+		Mode:               string(pitrplan.ModeTimestamp),
 		Stop:               canonicalPITRTarget(stop),
 		AllowPartial:       pit.AllowPartial,
 		ExcludeGtids:       exclude,
@@ -489,7 +478,7 @@ type restorePITRFragments struct {
 	PodVolumes []corev1.Volume
 	// KeySecretName is the read binding's archive key snapshot the init
 	// container mounts ("" for a plaintext archive). Callers label the Job
-	// with it (labelPITRKeySecret, Δ18) and a verification holds it (K9).
+	// with it (v1alpha1.PITRKeySecretLabel, Δ18) and a verification holds it (K9).
 	KeySecretName string
 }
 
@@ -509,9 +498,8 @@ type restorePITRFragments struct {
 // The bootstrap restore (spec.initFromBackup.pointInTime) and verification
 // share buildRestorePITRFragmentsFor. Both load the dump with its GTID set
 // installed (updateGtidSet "replace"), which restore.py proves equals the
-// plan's baseline before replaying. In-place restores reject pointInTime
-// (errInPlacePointInTimeUnsupported): a live primary's gtid_executed cannot
-// be the dump's.
+// plan's baseline before replaying. In-place restores have no pointInTime:
+// a live primary's gtid_executed cannot be the dump's.
 func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
 	if fg.Spec.InitFromBackup == nil {
 		return restorePITRFragments{}, nil
@@ -551,6 +539,36 @@ func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha
 			pitrarchive.TokenArchiveDestinationShared, pit.ArchiveProfileName, src.String(), fg.Spec.Backup.PITR.ProfileName)
 	}
 	return nil
+}
+
+// pitrReplayRequestEnv renders the replay request env that pitr-download
+// and restore.py both read.
+func pitrReplayRequestEnv(req *pitrReplayRequest) []corev1.EnvVar {
+	env := []corev1.EnvVar{{Name: "BLOODRAVEN_PITR_MODE", Value: req.Mode}}
+	if req.Mode == string(pitrplan.ModeTimestamp) {
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: req.Stop})
+	}
+	env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(req.AllowPartial)})
+	if req.ExcludeGtids != "" {
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: req.ExcludeGtids})
+	}
+	return env
+}
+
+// VerificationPITRRequestEnvForTest renders the replay request env a
+// verification Job carries for spec (nil for no replay), so the
+// cmd/bloodraven tests can feed it to the download planner. Not for
+// production use.
+func VerificationPITRRequestEnvForTest(spec *v1alpha1.PointInTimeVerificationSpec) (map[string]string, error) {
+	req, err := verificationPITRRequest(spec)
+	if err != nil || req == nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, e := range pitrReplayRequestEnv(req) {
+		out[e.Name] = e.Value
+	}
+	return out, nil
 }
 
 // buildRestorePITRFragmentsFor renders req's pitr-download init container
@@ -627,14 +645,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	}
 	// The replay request, rendered identically on pitr-download and the
 	// main container (contracts: "WP-B2 assumptions").
-	requestEnv := []corev1.EnvVar{{Name: "BLOODRAVEN_PITR_MODE", Value: req.Mode}}
-	if req.Mode == "timestamp" {
-		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: req.Stop})
-	}
-	requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(req.AllowPartial)})
-	if req.ExcludeGtids != "" {
-		requestEnv = append(requestEnv, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: req.ExcludeGtids})
-	}
+	requestEnv := pitrReplayRequestEnv(req)
 	initEnv := append(append([]corev1.EnvVar{}, requestEnv...),
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_DUMP_META", Value: restorePITRDumpMetaDir + "/dump.json"},
 		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
@@ -670,7 +681,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 				Name: "BLOODRAVEN_PITR_S3_REGION", Value: literalArtifactEnvValue(s3.Region),
 			})
 		}
-		if s3.CredentialsSecret != "" {
+		if s3.CredentialsSecretName != "" {
 			// Mount profile S3 creds at a dedicated path inside the
 			// init container. Kept distinct from the main
 			// backupAWSCredsMountPath so the dump source and PITR
@@ -680,7 +691,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 				Name: "pitr-aws-creds",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName:  s3.CredentialsSecret,
+						SecretName:  s3.CredentialsSecretName,
 						DefaultMode: ptr32(0o400),
 					},
 				},
@@ -732,7 +743,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	// verified this pass). The path is the conventional one backup and
 	// restore Jobs use, so env var names stay consistent.
 	keySecret := ""
-	if binding.Encryption.Mode == v1alpha1.PITRArchiveEncryptionPassphrase {
+	if binding.Encryption.Mode == v1alpha1.EncryptionModePassphrase {
 		keySecret = binding.Encryption.KeySecretName
 		if keySecret == "" {
 			return out, fmt.Errorf("internal error: Bound passphrase binding %s has no key snapshot", binding.ID)

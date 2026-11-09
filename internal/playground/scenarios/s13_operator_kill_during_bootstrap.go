@@ -38,15 +38,18 @@ func init() {
 // condition disappearing or restarting from "Cloning" again — the new
 // operator may legitimately decide to start a fresh clone if it cannot
 // safely resume the previous one. We therefore wait on the *terminal*
-// signal (Bootstrapping=False, Reason=Done) rather than tracking
-// individual phase transitions.
+// signal (Bootstrapping=False, Reason=NotBootstrapping after the wipe,
+// with the wiped site replicating) rather than tracking individual phase
+// transitions. A restarted operator writes False/NotBootstrapping before
+// it starts a clone, so the replication check is what tells completion
+// apart.
 func scenario13OperatorKillDuringBootstrap() runner.Scenario {
 	return runner.Scenario{
 		ID:    "13-operator-kill-during-bootstrap",
 		Title: "Operator kill mid-bootstrap converges to healthy replica",
 		Hypothesis: "Killing the operator while the Bootstrapping condition is True must NOT wedge the " +
 			"clone: the restarted operator either resumes the in-flight clone or starts a fresh one, the " +
-			"Bootstrapping condition eventually reaches Status=False Reason=Done, and the wiped site rejoins " +
+			"Bootstrapping condition eventually reaches Status=False Reason=NotBootstrapping, and the wiped site rejoins " +
 			"as a replica with replica_io_running && replica_sql_running.",
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#13-operator-kill-during-bootstrap",
@@ -79,7 +82,7 @@ func s13InjectWipePVC() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "read-only" {
+				if s.State == v1alpha1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}
@@ -92,6 +95,7 @@ func s13InjectWipePVC() runner.Step {
 			if err := ctxStash(ctx, env, "wipedSite", replica); err != nil {
 				return err
 			}
+			stashTime(env, "bootstrapRequested", time.Now())
 			if _, err := env.Logs("operator"); err != nil {
 				return fmt.Errorf("open operator tailer: %w", err)
 			}
@@ -124,7 +128,7 @@ func s13ObserveBootstrapStarted() runner.Step {
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"Bootstrapping condition Status=True",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					c := findCondition(mfg.Status.Conditions, "Bootstrapping")
+					c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
 					if c == nil {
 						return false, "no Bootstrapping condition yet", nil
 					}
@@ -158,30 +162,28 @@ func s13InjectKillOperator() runner.Step {
 // budget 7 minutes of headroom.
 //
 // Failure mode we explicitly catch: Bootstrapping settles at
-// Status=False Reason=Failed. Without the explicit Reason check, the
-// ConditionFalse predicate would consider Failed a successful match.
+// Status=False Reason=BootstrapFailed after the wipe.
 func s13ObserveBootstrapEventuallyDone() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "Bootstrapping settles at Status=False Reason=Done",
+		Name:  "Bootstrapping settles at Status=False Reason=NotBootstrapping",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			since, err := fetchTime(env, "bootstrapRequested")
+			if err != nil {
+				return err
+			}
+			replica := ctxFetch(env, "wipedSite")
 			waitCtx, cancel := context.WithTimeout(ctx, 7*time.Minute)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				"Bootstrapping done after operator restart",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					c := findCondition(mfg.Status.Conditions, "Bootstrapping")
-					if c == nil {
-						return false, "no Bootstrapping condition yet", nil
+					c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
+					if bootstrapFailed(c) && !c.LastTransitionTime.Time.Before(since.Truncate(time.Second)) {
+						return false, c.Message, fmt.Errorf("bootstrap failed after operator restart: %s", c.Message)
 					}
-					msg := fmt.Sprintf("status=%s reason=%s message=%q", c.Status, c.Reason, c.Message)
-					if c.Reason == "Failed" {
-						return false, msg, fmt.Errorf("bootstrap failed after operator restart: %s", c.Message)
-					}
-					if c.Status == metav1.ConditionFalse && c.Reason == "Done" {
-						return true, msg, nil
-					}
-					return false, msg, nil
+					done, msg := bootstrapCompletedSince(mfg, since, replica)
+					return done, msg, nil
 				},
 			)
 			return err
@@ -202,14 +204,14 @@ func s13ObserveClusterReconverged() runner.Step {
 					var writable, readOnly, other, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == "RecoveryBlocked" {
+						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 						if s.DivergentGtid != "" {
@@ -241,7 +243,7 @@ func s13VerifyReplicaThreadsRunning() runner.Step {
 			if err != nil {
 				return err
 			}
-			var wipedState string
+			var wipedState v1alpha1.SiteState
 			for _, s := range mfg.Status.Sites {
 				if s.Name == wiped {
 					wipedState = s.State
@@ -251,7 +253,7 @@ func s13VerifyReplicaThreadsRunning() runner.Step {
 			if wipedState == "" {
 				return fmt.Errorf("wiped site %q missing at verify time (sites=%+v)", wiped, mfg.Status.Sites)
 			}
-			if wipedState != "read-only" {
+			if wipedState != v1alpha1.SiteStateReadOnly {
 				return fmt.Errorf("wiped site %s state=%q, want read-only replicating replica", wiped, wipedState)
 			}
 			env.Capture.Note(fmt.Sprintf("probing wiped read-only site %s", wiped))

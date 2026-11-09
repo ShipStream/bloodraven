@@ -19,7 +19,7 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 	m, fg, now := deploymentLeaseFixture(t)
 	grantDeploymentLease(t, m, fg, "migration", "op1", 120)
 	hold := grantDeploymentLease(t, m, fg, "failover-hold", "op1", 30)
-	fg.Annotations = map[string]string{PlannedFailoverAnnotation: "pdx:maxLagWait=45s"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx:maxLagWait=45s"}
 	if err := m.client.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -46,10 +46,10 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 	}
 	// The deferral is recorded in status only: the user's annotation is
 	// kept byte for byte, never rewritten (A-50 item 4).
-	if v := fresh.Annotations[PlannedFailoverAnnotation]; v != "pdx:maxLagWait=45s" {
+	if v := fresh.Annotations[v1alpha1.PlannedFailoverAnnotation]; v != "pdx:maxLagWait=45s" {
 		t.Fatalf("request annotation = %q, want it unchanged", v)
 	}
-	req, err := parsePlannedFailoverAnnotation(fresh.Annotations[PlannedFailoverAnnotation])
+	req, err := parsePlannedFailoverAnnotation(fresh.Annotations[v1alpha1.PlannedFailoverAnnotation])
 	if err != nil || req.Site != "pdx" || req.MaxLagWait != 45*time.Second {
 		t.Fatalf("request not retained: %+v, %v", req, err)
 	}

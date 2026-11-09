@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/testutil"
 )
@@ -561,10 +562,10 @@ func TestUpdateController_PhaseProgression(t *testing.T) {
 	if len(phases) != 2 {
 		t.Fatalf("expected 2 phase captures, got %d: %v", len(phases), phases)
 	}
-	if phases[0] != UpdatePhaseUpdateReplica {
+	if phases[0] != v1alpha1.UpdatePhaseUpdateReplica {
 		t.Errorf("first apply should be in UpdateReplica phase, got %s", phases[0])
 	}
-	if phases[1] != UpdatePhaseUpdateOldPrimary {
+	if phases[1] != v1alpha1.UpdatePhaseUpdateOldPrimary {
 		t.Errorf("second apply should be in UpdateOldPrimary phase, got %s", phases[1])
 	}
 
@@ -1323,5 +1324,84 @@ func TestWaitForReplicaReadyWatchingReportsCancellationNotPrimaryLoss(t *testing
 	err := uc.waitForReplicaReadyWatching(ctx, follower, "primary-internal", primary, 5*time.Second)
 	if !errors.Is(err, context.Canceled) || errors.Is(err, errActivePrimaryLost) {
 		t.Fatalf("error = %v, want context.Canceled and not errActivePrimaryLost", err)
+	}
+}
+
+// A-29: status.updatePhase only ever carries an API enum value. Every phase
+// the updater stores (the snapshot copies Phase() verbatim) is one, and a
+// finished update stores the empty phase itself rather than a Complete
+// value the deferred reset clears later, so a snapshot taken between the
+// last step and the reset has no updatePhase either.
+func TestUpdateController_PhasesAreAPIEnumValues(t *testing.T) {
+	enum := apiEnumValues(t, "UpdatePhase")
+	logger := testutil.TestLogger()
+	check := func(t *testing.T, uc *UpdateController, run func() error) {
+		t.Helper()
+		var phases []UpdatePhase
+		uc.onPhase = func(p UpdatePhase) { phases = append(phases, p) }
+		if err := run(); err != nil {
+			t.Fatal(err)
+		}
+		if len(phases) == 0 || phases[len(phases)-1] != UpdatePhaseNone {
+			t.Fatalf("phases = %v, want the update to end by storing no phase", phases)
+		}
+		for _, p := range phases[:len(phases)-1] {
+			if !slices.Contains(enum, string(p)) {
+				t.Errorf("phase %q is not in the status.updatePhase enum %v", p, enum)
+			}
+		}
+	}
+	t.Run("Execute", func(t *testing.T) {
+		replica := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+			IORunning: true, SQLRunning: true, SourceHost: "dc1", SecondsBehindSource: int64Ptr(0)}}
+		uc := NewUpdateController(NewFailoverController(logger), logger)
+		check(t, uc, func() error {
+			return uc.Execute(context.Background(), "dc1", "dc2", replica, &testutil.FakeMySQL{ReadOnlyVal: false},
+				func(context.Context, string) error { return nil })
+		})
+	})
+	t.Run("ExecuteTargets", func(t *testing.T) {
+		uc := NewUpdateController(NewFailoverController(logger), logger)
+		follower := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+			IORunning: true, SQLRunning: true, SourceHost: "primary-internal"}}
+		check(t, uc, func() error {
+			_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{Name: "primary", Checker: &testutil.FakeMySQL{ReadOnlyVal: false}},
+				[]UpdateTarget{{Name: "candidate", Checker: follower, Promotable: true, Drifted: true, ExpectedSource: "primary-internal"}},
+				func(context.Context, string) error { return nil }, nil)
+			return err
+		})
+	})
+}
+
+// K016: a follower whose Deployment is refused for its selector has no
+// drift only because it cannot be updated. It is not taken as running the
+// new template (no pod-readiness evidence is asked of it) and is never the
+// handoff target, so the active is not fenced for it.
+func TestUpdateController_ExecuteTargetsNeverHandsOffToSelectorRefusedFollower(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	refused := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	probed := false
+	promoted := false
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Checker: active, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "refused", Host: "refused-internal", Checker: refused, Promotable: true, SelectorRefused: true, ExpectedSource: "primary-internal",
+			PodReady: func(context.Context) (PodReadiness, error) { probed = true; return PodReadiness{Ready: true}, nil }},
+	}, func(context.Context, string) error { return nil }, func(string, string) { promoted = true })
+	if err == nil || !strings.Contains(err.Error(), "WorkloadSelectorMismatch") {
+		t.Fatalf("err = %v, want the selector refusal", err)
+	}
+	if promoted || !refused.ReadOnlyVal || slices.Contains(active.Calls, "SetSuperReadOnly(ON)") {
+		t.Fatal("the active was handed off to a refused follower")
+	}
+	if probed {
+		t.Fatal("a refused follower's pod was taken as evidence of the new template")
+	}
+	if got := sitesOnTemplate(UpdateTarget{Name: "a", SelectorRefused: true}, []UpdateTarget{{Name: "b"}, {Name: "c", SelectorRefused: true}}); len(got) != 1 || got[0].Name != "b" {
+		t.Fatalf("sitesOnTemplate = %+v, want only b", got)
 	}
 }

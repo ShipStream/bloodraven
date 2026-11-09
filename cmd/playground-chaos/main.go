@@ -209,7 +209,7 @@ func check(kubeconfig, kctx, namespace, fg string) int {
 	fmt.Printf("activeSite: %s\n", mfg.Status.ActiveSite)
 	fmt.Printf("ready:      %s\n", pgkube.ReadyCondition(mfg))
 	for _, s := range mfg.Status.Sites {
-		fmt.Printf("  site %-6s state=%s replicating=%v\n", s.Name, s.State, s.Replicating)
+		fmt.Printf("  site %-6s state=%s replication=%s\n", s.Name, s.State, s.Replication)
 	}
 
 	// inProgress: <yes/no + summary>. Read the marker even before we

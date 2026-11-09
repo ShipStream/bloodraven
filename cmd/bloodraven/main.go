@@ -182,6 +182,8 @@ func main() {
 	// Admission and stability also exclude a held planned-failover claim
 	// (a provisional grant or an automation hold) that status does not show.
 	deploymentLeases.SetPlannedClaimHeld(runner.PlannedClaimHeld)
+	deploymentLeases.SetPlannedHoldHeld(runner.PlannedHoldHeld)
+	deploymentLeases.SetGroupRefusals(runner)
 
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)
@@ -273,6 +275,15 @@ func main() {
 		operatorImage = "bloodraven:latest"
 	}
 	controller.SetOperatorImageDefaults(operatorImage, "")
+
+	// The sidecar image a group runs when spec.sidecar.image is empty. The
+	// chart renders it from sidecar.image.repository and sidecar.image.tag.
+	// Without it, only groups that pin spec.sidecar.image can render.
+	sidecarImage := os.Getenv("BLOODRAVEN_SIDECAR_IMAGE")
+	if sidecarImage == "" {
+		logger.Warn("BLOODRAVEN_SIDECAR_IMAGE is not set; groups without spec.sidecar.image cannot render their Deployments")
+	}
+	controller.SetSidecarImageDefault(sidecarImage)
 
 	if err := mgr.Add(runner); err != nil {
 		logger.Error("unable to add topology manager runner", "error", err)

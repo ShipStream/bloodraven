@@ -16,29 +16,15 @@ package controller
 
 import (
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 )
 
 const (
-	// PlannedFailoverAnnotation triggers a graceful, cooldown-respecting
-	// switchover to the named primary-candidate site. The engine removes
-	// it once the request is decided: accepted (Admitting), rejected, or
-	// skipped. A request that is deferred (onCooldown=Defer, a deployment
-	// hold), or that waits in Admitting before its validation, keeps it
-	// until then; removing it cancels a deferred run. The
-	// annotation value is either a bare site name or a site followed by
-	// key=value overrides separated by ':'.
-	//
-	// Examples:
-	//   bloodraven.shipstream.io/planned-failover=pdx
-	//   bloodraven.shipstream.io/planned-failover=pdx:maxLagWait=30s
-	PlannedFailoverAnnotation = "bloodraven.shipstream.io/planned-failover"
 
 	// defaultPlannedFailoverMaxLagWait is the fallback maxLagWait when
 	// neither spec.plannedFailover.maxLagWait nor the annotation
@@ -57,86 +43,52 @@ type PlannedFailoverRequest struct {
 	Site string
 
 	// MaxLagWait is the per-request override for the zero-lag wait
-	// timeout, or zero when the annotation did not include one. The
-	// effective timeout applied by the state machine is the first
-	// non-zero value among: this field, spec.plannedFailover.maxLagWait,
-	// defaultPlannedFailoverMaxLagWait.
+	// timeout, or zero when the annotation did not include one (the
+	// parser refuses an override outside
+	// v1alpha1.PlannedFailoverMaxLagWait{Min,Max}). The effective timeout
+	// is this override when present, else spec.plannedFailover.maxLagWait
+	// when set, else defaultPlannedFailoverMaxLagWait.
 	MaxLagWait time.Duration
 }
 
-// annotationValueRE is A-78's value charset for one-shot action
-// annotations: a value never contains ':' or '=', so the pair split is
-// unambiguous.
-var annotationValueRE = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
+// plannedFailoverGrammar is the planned-failover annotation's A-78
+// grammar: the target site, optionally with a maxLagWait override.
+var plannedFailoverGrammar = actionvalue.Grammar{Keys: []string{"maxLagWait"}}
 
 // parsePlannedFailoverAnnotation parses a planned-failover annotation
-// value. The grammar is A-78's <subject>(:<key>=<value>)*:
+// value. The grammar is A-78's <subject>(:<key>=<value>)*
+// (internal/actionvalue):
 //
 //	<siteName>
 //	<siteName>:maxLagWait=<duration>
 //
-// The subject is the target site. Each pair splits at its first '=', its
-// value matches ^[A-Za-z0-9._/+-]+$, and a key appears at most once.
-// Whitespace around the whole value is trimmed (a shell heredoc's trailing
-// newline). Unknown keys are rejected so typos do not silently accept a
-// request with default knobs. Returns a PlannedFailoverRequest on success;
-// an error on an empty pair, an unknown or repeated key, or a malformed
-// value.
+// The subject is the target site. Unknown keys are rejected so typos do
+// not silently accept a request with default knobs. Returns a
+// PlannedFailoverRequest on success; an error on an empty value or pair,
+// an unknown or repeated key, or a malformed value.
 func parsePlannedFailoverAnnotation(raw string) (PlannedFailoverRequest, error) {
-	v := strings.TrimSpace(raw)
-	if v == "" {
+	v, err := actionvalue.Parse(raw, plannedFailoverGrammar)
+	if err != nil {
+		// ":maxLagWait=5s" (overrides with no target) is rejected here,
+		// so every caller's parse-error path consumes it; a run must
+		// never be built with an empty targetSite.
 		return PlannedFailoverRequest{}, fmt.Errorf(
-			"planned-failover annotation is empty; expected <site>[:maxLagWait=<duration>]")
+			"planned-failover annotation %w; expected <site>[:maxLagWait=<duration>]", err)
 	}
-
-	parts := strings.Split(v, ":")
-	req := PlannedFailoverRequest{Site: parts[0]}
-	if req.Site == "" {
-		// ":maxLagWait=5s": overrides with no target. Rejected here, so
-		// every caller's parse-error path consumes it; a run must never
-		// be built with an empty targetSite.
-		return PlannedFailoverRequest{}, fmt.Errorf(
-			"planned-failover annotation %q names no site; expected <site>[:maxLagWait=<duration>]", v)
+	req := PlannedFailoverRequest{Site: v.Subject()}
+	if val, ok := v.Get("maxLagWait"); ok {
+		d, err := time.ParseDuration(val)
+		if err != nil {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: maxLagWait=%q is not a valid duration: %w", val, err)
+		}
+		if d < v1alpha1.PlannedFailoverMaxLagWaitMin || d > v1alpha1.PlannedFailoverMaxLagWaitMax {
+			return PlannedFailoverRequest{}, fmt.Errorf(
+				"planned-failover annotation: maxLagWait must be between %s and %s (got %s)",
+				compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMin), compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMax), d)
+		}
+		req.MaxLagWait = d
 	}
-	if !annotationValueRE.MatchString(req.Site) {
-		return PlannedFailoverRequest{}, fmt.Errorf(
-			"planned-failover annotation: site %q contains characters outside [A-Za-z0-9._/+-]", req.Site)
-	}
-
-	seen := map[string]bool{}
-	for _, kv := range parts[1:] {
-		key, val, ok := strings.Cut(kv, "=")
-		if !ok || key == "" {
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation override %q must be key=value", kv)
-		}
-		if seen[key] {
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation: key %q appears more than once", key)
-		}
-		seen[key] = true
-		if !annotationValueRE.MatchString(val) {
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation: %s=%q: the value must match [A-Za-z0-9._/+-]+", key, val)
-		}
-		switch key {
-		case "maxLagWait":
-			d, err := time.ParseDuration(val)
-			if err != nil {
-				return PlannedFailoverRequest{}, fmt.Errorf(
-					"planned-failover annotation: maxLagWait=%q is not a valid duration: %w", val, err)
-			}
-			if d <= 0 {
-				return PlannedFailoverRequest{}, fmt.Errorf(
-					"planned-failover annotation: maxLagWait must be positive (got %s)", d)
-			}
-			req.MaxLagWait = d
-		default:
-			return PlannedFailoverRequest{}, fmt.Errorf(
-				"planned-failover annotation: unknown key %q (supported: maxLagWait)", key)
-		}
-	}
-
 	return req, nil
 }
 
@@ -200,7 +152,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 	}
 	if !targetSpec.IsPromotable() {
 		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetNotPromotable, fmt.Errorf(
-			"planned-failover: site %q has role %q; only primary-candidate sites may be promoted",
+			"planned-failover: site %q has role %s; only PrimaryCandidate sites may be promoted",
 			req.Site, targetSpec.EffectiveRole())
 	}
 
@@ -248,7 +200,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 			"planned-failover: site %q is divergent (%d transactions the primary lacks: %s); reclone it or make the primary contain them before it can be promoted",
 			req.Site, count, truncateGtidSet(targetStatus.DivergentGtid))
 	}
-	if targetStatus.State != "read-only" {
+	if targetStatus.State != v1alpha1.SiteStateReadOnly {
 		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetUnhealthy, fmt.Errorf(
 			"planned-failover: site %q is in state %q; target must be a healthy read-only replica",
 			req.Site, targetStatus.State)
@@ -261,7 +213,7 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 			"planned-failover: site %q awaits its post-restore reclone (status.restoreReclones.pending) and its replication is held stopped; refusing to promote it",
 			req.Site)
 	}
-	if !targetStatus.Replicating {
+	if !targetStatus.Replication.Running() {
 		return PlannedFailoverReject, v1alpha1.PlannedFailoverReasonTargetUnhealthy, fmt.Errorf(
 			"planned-failover: site %q is read-only but not replicating; refusing to promote a non-replicating target",
 			req.Site)
@@ -319,23 +271,26 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 }
 
 // failoverCooldownFromSpec returns the effective anti-flap cooldown for
-// the CR: spec.failoverCooldown when set, otherwise the default 5m. The
-// topology manager applies the same default at startup.
+// the CR: spec.failoverCooldown when set (admission bounds it to 30s..24h),
+// otherwise the API default 5m. The topology manager receives the same
+// value through CRConfigToTopologyConfig.
 func failoverCooldownFromSpec(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if fg.Spec.FailoverCooldown != nil && fg.Spec.FailoverCooldown.Duration > 0 {
+	if fg.Spec.FailoverCooldown != nil {
 		return fg.Spec.FailoverCooldown.Duration
 	}
-	return 5 * time.Minute
+	return defaultFailoverCooldown
 }
 
 // effectiveMaxLagWait returns the max-lag-wait for a planned failover,
 // honoring the annotation override first, then
-// spec.plannedFailover.maxLagWait, then the package default.
+// spec.plannedFailover.maxLagWait, then the package default. Only an absent
+// value falls through; admission and the annotation parser bound a present
+// one to 1s..1h, so a zero is never rewritten to the default (A-37).
 func effectiveMaxLagWait(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest) time.Duration {
-	if req.MaxLagWait > 0 {
+	if req.MaxLagWait != 0 {
 		return req.MaxLagWait
 	}
-	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.MaxLagWait != nil && fg.Spec.PlannedFailover.MaxLagWait.Duration > 0 {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.MaxLagWait != nil {
 		return fg.Spec.PlannedFailover.MaxLagWait.Duration
 	}
 	return defaultPlannedFailoverMaxLagWait
@@ -343,9 +298,9 @@ func effectiveMaxLagWait(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverReq
 
 // effectiveDrainTimeout returns the drain timeout for a planned
 // failover, honoring spec.plannedFailover.drainTimeout first, then the
-// package default.
+// package default. Only an unset field takes the default.
 func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.DrainTimeout != nil && fg.Spec.PlannedFailover.DrainTimeout.Duration > 0 {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.DrainTimeout != nil {
 		return fg.Spec.PlannedFailover.DrainTimeout.Duration
 	}
 	return defaultPlannedFailoverDrainTimeout
@@ -354,11 +309,9 @@ func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
 // effectiveOnCooldown returns the spec.plannedFailover.onCooldown
 // policy, defaulting to Reject. An empty value or any unknown value
 // falls back to Reject so a malformed spec does not accidentally
-// enable the defer path. The comparison ignores case: releases before
-// v1beta1 wrote the lower-case `defer`, which CRD ratcheting keeps on an
-// object updated without touching the field.
+// enable the defer path.
 func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.PlannedFailoverCooldownPolicy {
-	if fg.Spec.PlannedFailover != nil && strings.EqualFold(string(fg.Spec.PlannedFailover.OnCooldown), string(v1alpha1.PlannedFailoverCooldownDefer)) {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.OnCooldown == v1alpha1.PlannedFailoverCooldownDefer {
 		return v1alpha1.PlannedFailoverCooldownDefer
 	}
 	return v1alpha1.PlannedFailoverCooldownReject
@@ -414,7 +367,7 @@ func plannedSettings(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailove
 		if dd.MaxSyncWait.Duration <= 0 {
 			dd.MaxSyncWait.Duration = defaultDragonflySyncWait
 		}
-		dd.OnSyncTimeout = normalizeDragonflySyncTimeout(dd.OnSyncTimeout)
+		dd.OnSyncTimeout = dragonflySyncTimeoutPolicy(dd.OnSyncTimeout)
 		s.Dragonfly = &dd
 	}
 	return s

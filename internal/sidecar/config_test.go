@@ -10,20 +10,6 @@ import (
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
-func TestConfigFromEnv_MYSQL_DSN(t *testing.T) {
-	t.Setenv("MYSQL_DSN", "root:pass@tcp(127.0.0.1:3306)/")
-	t.Setenv("MYSQL_USER", "")
-	t.Setenv("MYSQL_PASSWORD", "")
-
-	cfg, err := ConfigFromEnv()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.MysqlDSN != "root:pass@tcp(127.0.0.1:3306)/" {
-		t.Errorf("unexpected DSN: %s", cfg.MysqlDSN)
-	}
-}
-
 func TestNormalizeFenceDurations(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -61,7 +47,8 @@ func TestFencingEffectiveTimeoutBeforeDNSExpiry(t *testing.T) {
 		{"configured reaches DNS TTL", "60s", "5s", 60 * time.Second, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("MYSQL_DSN", "root:pass@tcp(127.0.0.1:3306)/")
+			t.Setenv("MYSQL_USER", "root")
+			t.Setenv("MYSQL_PASSWORD", "pass")
 			t.Setenv("LEASE_TIMEOUT", tt.lease)
 			t.Setenv("PEER_CHECK_INTERVAL", tt.peer)
 			cfg, err := ConfigFromEnv()
@@ -79,7 +66,6 @@ func TestFencingEffectiveTimeoutBeforeDNSExpiry(t *testing.T) {
 }
 
 func TestConfigFromEnv_MYSQL_USER_PASSWORD(t *testing.T) {
-	t.Setenv("MYSQL_DSN", "")
 	t.Setenv("MYSQL_USER", "operator")
 	t.Setenv("MYSQL_PASSWORD", "secret")
 
@@ -102,7 +88,6 @@ func TestConfigFromEnv_MYSQL_CREDS_DIRKeepsExactBytes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "password"), []byte(" secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("MYSQL_DSN", "")
 	t.Setenv("MYSQL_CREDS_DIR", dir)
 
 	cfg, err := ConfigFromEnv()
@@ -114,14 +99,17 @@ func TestConfigFromEnv_MYSQL_CREDS_DIRKeepsExactBytes(t *testing.T) {
 	}
 }
 
+// The sidecar no longer reads a whole DSN (the removed spec.secretName
+// mode): MYSQL_DSN alone is not a credential.
 func TestConfigFromEnv_NeitherSet(t *testing.T) {
-	t.Setenv("MYSQL_DSN", "")
+	t.Setenv("MYSQL_DSN", "root:pass@tcp(127.0.0.1:3306)/")
+	t.Setenv("MYSQL_CREDS_DIR", "")
 	t.Setenv("MYSQL_USER", "")
 	t.Setenv("MYSQL_PASSWORD", "")
 
 	_, err := ConfigFromEnv()
 	if err == nil {
-		t.Fatal("expected error when neither MYSQL_DSN nor MYSQL_USER is set")
+		t.Fatal("expected error when neither MYSQL_CREDS_DIR nor MYSQL_USER is set")
 	}
 }
 

@@ -77,7 +77,7 @@ func TestDecodeDeploymentClientRecords(t *testing.T) {
 		bad         bool
 	}{
 		{"empty", "\n", 0, false},
-		{"grant and fence", "{\"action\":\"grant\",\"kind\":\"migration\",\"status\":201,\"body\":{\"expiresAt\":\"2026-09-09T12:00:30Z\",\"topologyGeneration\":7}}\n{\"action\":\"renew\",\"status\":409,\"body\":{\"error\":\"revoked\",\"reason\":\"topology_changed\",\"topologyGeneration\":8}}\n", 2, false},
+		{"grant and fence", "{\"action\":\"grant\",\"kind\":\"migration\",\"status\":201,\"body\":{\"expiresAt\":\"2026-09-09T12:00:30Z\",\"topologyGeneration\":7}}\n{\"action\":\"renew\",\"status\":409,\"body\":{\"error\":\"revoked\",\"reason\":\"TopologyChanged\",\"topologyGeneration\":8}}\n", 2, false},
 		{"traceback fails closed", "Traceback (most recent call last):\n  File \"<string>\", line 46\nssl.SSLCertVerificationError: CA cert does not include key usage extension\n", 0, true},
 		{"invalid expiry", "{\"body\":{\"expiresAt\":\"tomorrow\"}}", 0, true},
 	} {

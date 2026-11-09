@@ -63,7 +63,7 @@ func scenario48KeyringSealAndRotation() runner.Scenario {
 		Hypothesis: "Every site reports phase=Sealed with a read-only keyring component; ALTER INSTANCE ROTATE " +
 			"INNODB MASTER KEY fails on a sealed site; annotating the replica for rotation mints escrow version " +
 			"N+1 and returns it to Sealed with data intact; annotating the active primary is refused with a " +
-			"KeyringRotationRefused event.",
+			"KeyringRotationRejected event.",
 		Risk:    "medium",
 		DocLink: "playground/chaos-scenarios.md#48-keyring-seal-and-rotation",
 		Timeout: 20 * time.Minute,
@@ -134,7 +134,7 @@ func s48VerifySealedState(state *s48RunState) runner.Step {
 					if st == nil {
 						return false, "status.encryptionAtRest not populated yet", nil
 					}
-					if !st.Sealed {
+					if !encryptionAllSitesSealed(m) {
 						return false, s48UnsealedSummary(st), nil
 					}
 					return true, "", nil
@@ -285,12 +285,12 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 			}
 
 			// Capture notBefore before the annotation so a leftover
-			// KeyringRotationRefused from a previous run cannot satisfy
+			// KeyringRotationRejected from a previous run cannot satisfy
 			// this one. LastTimestamp is second-granularity; matchMFGEvent
 			// allows 2s of slack.
 			before := time.Now()
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				"bloodraven.shipstream.io/rotate-keyring", state.activeSite); err != nil {
+				v1alpha1.RotateKeyringAnnotation, state.activeSite); err != nil {
 				return fmt.Errorf("annotate for primary rotation: %w", err)
 			}
 			state.rotated = true
@@ -317,7 +317,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 					return err
 				}
 				if eventSeenAt.IsZero() {
-					ev, ok, err := findMFGEvent(ctx, env, before, "KeyringRotationRefused", snippet)
+					ev, ok, err := findMFGEvent(ctx, env, before, v1alpha1.EventKeyringRotationRejected, snippet)
 					if err != nil {
 						return fmt.Errorf("list events: %w", err)
 					}
@@ -325,7 +325,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 						eventSeenAt = time.Now()
 						env.Logger.Info("operator refused primary rotation", "message", ev.Message)
 					} else if !time.Now().Before(eventDeadline) {
-						return fmt.Errorf("no KeyringRotationRefused event was emitted for the active primary %s", state.activeSite)
+						return fmt.Errorf("no KeyringRotationRejected event was emitted for the active primary %s", state.activeSite)
 					}
 				}
 				return nil
@@ -391,7 +391,7 @@ func s48RefusalHoldDone(eventSeenAt, now time.Time, hold time.Duration) bool {
 
 func s48ClearRotateAnnotation(ctx context.Context, env *runner.Env, state *s48RunState) error {
 	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-		"bloodraven.shipstream.io/rotate-keyring", ""); err != nil {
+		v1alpha1.RotateKeyringAnnotation, ""); err != nil {
 		return fmt.Errorf("clear rotate annotation: %w", err)
 	}
 	state.rotated = false
@@ -417,7 +417,7 @@ func s48RotateReplica(state *s48RunState) runner.Step {
 			state.sealedVersion = before.KeyringVersion
 
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				"bloodraven.shipstream.io/rotate-keyring", state.replicaSite); err != nil {
+				v1alpha1.RotateKeyringAnnotation, state.replicaSite); err != nil {
 				return fmt.Errorf("annotate for replica rotation: %w", err)
 			}
 			state.rotated = true

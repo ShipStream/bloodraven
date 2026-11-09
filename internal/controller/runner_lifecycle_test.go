@@ -19,15 +19,20 @@ import (
 	"github.com/shipstream/bloodraven/internal/platform"
 )
 
+// lifecycleSecretData is the operator Secret of lifecycleRunner's group.
+func lifecycleSecretData() map[string][]byte {
+	return map[string][]byte{"username": []byte("op"), "password": []byte("pw")}
+}
+
 // lifecycleRunner returns a runner over a fake API server holding fg and its
-// DSN-mode operator secret. The DSN points at a closed local port; the
-// managers it starts poll MySQL in the background and fail to connect, which
-// is all these tests need.
+// operator secret. The site Services do not resolve; the managers it starts
+// poll MySQL in the background and fail to connect, which is all these tests
+// need.
 func lifecycleRunner(t *testing.T) (*TopologyManagerRunner, client.Client, *v1alpha1.MysqlFailoverGroup, *corev1.Secret) {
 	t.Helper()
 	fg := newTestFG()
 	secret := newTestSecret()
-	secret.Data = map[string][]byte{"dsn": []byte("op:pw@tcp(127.0.0.1:1)/mysql")}
+	secret.Data = lifecycleSecretData()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
 		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
 		WithObjects(fg, secret).Build()
@@ -83,9 +88,9 @@ func TestSync_FailedRestartThenRevertStartsLiveManager(t *testing.T) {
 	}
 
 	// Readable but unusable material: the hash changes, the old manager is
-	// stopped, and the replacement fails on the missing dsn key.
+	// stopped, and the replacement fails on the missing username key.
 	original := secret.Data
-	secret.Data = map[string][]byte{"not-dsn": []byte("x")}
+	secret.Data = map[string][]byte{"password": []byte("pw")}
 	if err := c.Update(ctx, secret); err != nil {
 		t.Fatalf("break secret: %v", err)
 	}
@@ -242,7 +247,7 @@ func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
 	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
 		RunID: "run-restart", Revision: 4, Phase: v1alpha1.PlannedFailoverPhasePromoting, TargetSite: "dc2", SourceSite: "dc1",
 	}
-	live.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: recoveryStateInProgress}}
+	live.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateInProgress}}
 	if err := c.Status().Update(context.Background(), live); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}
@@ -250,7 +255,7 @@ func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
 	cached := fg.DeepCopy() // the sync's cached copy predates the run
 	cached.Status.Sites = live.Status.Sites
 
-	cfg := CRConfigToTopologyConfig(cached)
+	cfg := mustTopologyConfig(cached)
 	if err := r.startManager(context.Background(), cached, cfg, nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}
@@ -275,7 +280,7 @@ func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
 func TestStartManager_PlannedViewReadErrorFailsFirstStart(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	r.SetAPIReader(failingReader{})
-	cfg := CRConfigToTopologyConfig(fg)
+	cfg := mustTopologyConfig(fg)
 	if err := r.startManager(context.Background(), fg, cfg, nil); err == nil {
 		t.Fatal("startManager succeeded without an uncached read of the planned-failover claim")
 	}
@@ -295,7 +300,7 @@ func TestRotationReservationSurvivesManagerReplacement(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
 	ctx := context.Background()
-	cfg := CRConfigToTopologyConfig(fg)
+	cfg := mustTopologyConfig(fg)
 
 	if ok, why := r.ReserveKeyringRotation(nn, "dc2"); ok || why != rotationRefusedNoManager {
 		t.Fatalf("reservation with no manager = %v, %q; want refused until a manager runs", ok, why)
@@ -342,7 +347,7 @@ func TestRotationReservationSurvivesManagerReplacement(t *testing.T) {
 func TestRefusedRotationReservationIsNotCarried(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
-	cfg := CRConfigToTopologyConfig(fg)
+	cfg := mustTopologyConfig(fg)
 	if err := r.startManager(context.Background(), fg, cfg, nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}

@@ -53,15 +53,15 @@ The opposite is true: MySQL failover is never delayed by cache. MySQL only queue
 
 **Type:** SHORT_ANSWER
 
-During a takeover the operator sheds an endpoint from the active Dragonfly Service by deleting the `shipstream.io/dragonfly-traffic` key rather than setting it to a disabled value. Explain why deletion is the safer mechanism, and what property of the takeover it buys.
+During a takeover the operator sheds an endpoint from the active Dragonfly Service by deleting the `bloodraven.shipstream.io/dragonfly-traffic` key rather than setting it to a disabled value. Explain why deletion is the safer mechanism, and what property of the takeover it buys.
 
 **Sample answer:**
 
-The active Service selector is an exists-and-equals check on the value "enabled", so removing the key removes the endpoint immediately and unambiguously. Writing something like traffic=disabled would only work if the selector and the writer agreed on what "disabled" means — the selector does not test for a disabled value, it tests for enabled, so any other value happens to work by accident rather than by contract. Because the sequence strips the source's key before promoting the target and stamps the target's key only afterwards, and an absent key can never match, there is no window in which both instances satisfy the active selector. No moment where the Service load-balances session writes across two masters.
+The active Service selector is an exists-and-equals check on the value "true", so removing the key removes the endpoint immediately and unambiguously. Writing something like traffic=disabled would only work if the selector and the writer agreed on what "disabled" means — the selector does not test for a disabled value, it tests for true, so any other value happens to work by accident rather than by contract. Because the sequence strips the source's key before promoting the target and stamps the target's key only afterwards, and an absent key can never match, there is no window in which both instances satisfy the active selector. No moment where the Service load-balances session writes across two masters.
 
 **A full-credit answer shows:**
 
-A strong answer covers: (1) the selector is an exists-and-equals check on "enabled", so a missing key cannot match; (2) a written "disabled" value would depend on selector and writer agreeing on a magic string, i.e. correctness by convention rather than by mechanism; (3) the consequence — strip-before-promote plus an unmatched absent key means no window where both pods are endpoints of the active Service. Credit an answer that names the role label as the other half of the AND-gate. Do not credit an answer that only says "deletion is atomic" without saying what the selector actually tests.
+A strong answer covers: (1) the selector is an exists-and-equals check on "true", so a missing key cannot match; (2) a written "disabled" value would depend on selector and writer agreeing on a magic string, i.e. correctness by convention rather than by mechanism; (3) the consequence — strip-before-promote plus an unmatched absent key means no window where both pods are endpoints of the active Service. Credit an answer that names the role label as the other half of the AND-gate. Do not credit an answer that only says "deletion is atomic" without saying what the selector actually tests.
 
 **Explanation:**
 

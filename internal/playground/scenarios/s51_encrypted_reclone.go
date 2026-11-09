@@ -163,9 +163,12 @@ func s51RequestReclone(state *s51RunState) runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "annotate the sealed replica for a cold reclone",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			value := fmt.Sprintf("%s:confirm=%s", state.replicaSite, env.FG)
+			value, err := recloneValueFor(ctx, env, state.replicaSite)
+			if err != nil {
+				return err
+			}
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				"bloodraven.shipstream.io/reclone-site", value); err != nil {
+				v1alpha1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("set reclone annotation: %w", err)
 			}
 			state.annotated = true
@@ -293,7 +296,7 @@ func s51VerifyResealedAfterClone(state *s51RunState) runner.Step {
 					// the replica starts sealed, so a never-consumed
 					// annotation plus rows arriving via replication would
 					// otherwise false-pass.
-					if _, present := m.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]; present {
+					if _, present := m.GetAnnotations()[v1alpha1.RecloneAnnotation]; present {
 						return false, "reclone annotation still present (clone not completed)", nil
 					}
 					return true, "", nil
@@ -387,12 +390,12 @@ func s51Cleanup(state *s51RunState) func(context.Context, *runner.Env) error {
 		if err != nil {
 			return fmt.Errorf("read MFG to clear leftover reclone annotation: %w", err)
 		}
-		if _, present := mfg.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]; !present {
+		if _, present := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]; !present {
 			state.annotated = false
 			return nil
 		}
 		if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-			"bloodraven.shipstream.io/reclone-site", ""); err != nil {
+			v1alpha1.RecloneAnnotation, ""); err != nil {
 			return fmt.Errorf("clear reclone annotation: %w", err)
 		}
 		state.annotated = false

@@ -20,8 +20,8 @@ func failedRetryRun(name, uid string, attempt int32, created time.Time) *v1alpha
 	completed := metav1.NewTime(created.Add(time.Minute))
 	return &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", UID: types.UID(uid), CreationTimestamp: metav1.NewTime(created),
-			Labels: map[string]string{labelFailoverGroup: "lion", labelBackupProfile: "nightly-s3", labelBackupSchedule: "nightly"}},
-		Spec:   v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+			Labels: map[string]string{v1alpha1.FailoverGroupLabel: "lion", v1alpha1.BackupProfileLabel: "nightly-s3", v1alpha1.BackupScheduleLabel: "nightly"}},
+		Spec:   v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 		Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed, Attempt: attempt, CompletionTime: &completed},
 	}
 }
@@ -42,7 +42,7 @@ func TestBackupRetry_HistoryDoesNotSuppressNewRun(t *testing.T) {
 			failed := failedRetryRun("today", "today-uid", 1, now.Add(-time.Hour))
 			old := failedRetryRun("yesterday", "yesterday-uid", tc.attempt, now.Add(-24*time.Hour))
 			old.Status.Phase = tc.phase
-			old.Labels[labelBackupSchedule] = tc.schedule
+			old.Labels[v1alpha1.BackupScheduleLabel] = tc.schedule
 			br, c := newBackupReconciler(t, fg, old, failed)
 			r := &MysqlFailoverGroupReconciler{Client: c, Scheme: br.Scheme, Recorder: record.NewFakeRecorder(10)}
 			if _, err := r.updateBackupStatus(context.Background(), fg); err != nil {
@@ -53,8 +53,8 @@ func TestBackupRetry_HistoryDoesNotSuppressNewRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, b := range backups.Items {
-				if b.Spec.TriggeredBy == "retry/nightly/attempt-2" {
-					if b.Labels["shipstream.io/backup-retry-of"] != string(failed.UID) || b.Annotations["shipstream.io/backup-attempt"] != "2" {
+				if b.Annotations[v1alpha1.TriggeredByAnnotation] == "retry/nightly/attempt-2" {
+					if b.Labels["bloodraven.shipstream.io/backup-retry-of"] != string(failed.UID) || b.Annotations["bloodraven.shipstream.io/backup-attempt"] != "2" {
 						t.Fatalf("retry lacks durable predecessor/attempt: %+v", b.ObjectMeta)
 					}
 					return
@@ -98,7 +98,7 @@ func TestBackupRetry_CreateConvergesAfterLostStatusAndStaleList(t *testing.T) {
 		t.Fatalf("created duplicate successors after lost status/stale list: backups=%d", len(backups.Items))
 	}
 	for _, b := range backups.Items {
-		if b.Name != failed.Name && b.Annotations["shipstream.io/backup-attempt"] != "2" {
+		if b.Name != failed.Name && b.Annotations["bloodraven.shipstream.io/backup-attempt"] != "2" {
 			t.Fatalf("retry attempt was lost with status: %+v", b)
 		}
 	}
@@ -107,10 +107,10 @@ func TestBackupRetry_CreateConvergesAfterLostStatusAndStaleList(t *testing.T) {
 func TestBackupRetry_AttemptSurvivesLaunchStatusLoss(t *testing.T) {
 	fg := fgWithRetrySpec(3, 1)
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
 	backup := backupCR("retry-launch", fg.Name, "nightly-s3")
-	backup.Annotations = map[string]string{annotationBackupAttempt: "2"}
-	r, c := newBackupReconciler(t, fg, backup, dsnSecret())
+	backup.Annotations = map[string]string{v1alpha1.BackupAttemptAnnotation: "2"}
+	r, c := newBackupReconciler(t, fg, backup, operatorCredsSecret())
 	reconcileUntilStable(t, r, backup.Name)
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(backup), backup); err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func TestBackupRetry_AttemptSurvivesLaunchStatusLoss(t *testing.T) {
 func TestBackupRetry_PropagatesRootAndHonorsDurableLimit(t *testing.T) {
 	fg := fgWithRetrySpec(3, 1)
 	failed := failedRetryRun("second-attempt", "second-uid", 1, time.Now().Add(-time.Hour))
-	failed.Annotations = map[string]string{annotationBackupAttempt: "2", annotationBackupRetryRoot: "original", annotationBackupRetryRootUID: "original-uid"}
+	failed.Annotations = map[string]string{v1alpha1.BackupAttemptAnnotation: "2", v1alpha1.BackupRetryRootAnnotation: "original", v1alpha1.BackupRetryRootUIDAnnotation: "original-uid"}
 	br, c := newBackupReconciler(t, fg, failed)
 	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: br.Scheme, Recorder: record.NewFakeRecorder(10)}
 	if _, err := r.updateBackupStatus(context.Background(), fg); err != nil {
@@ -136,7 +136,7 @@ func TestBackupRetry_PropagatesRootAndHonorsDurableLimit(t *testing.T) {
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: failed.Namespace, Name: retryBackupName(failed, 3)}, &successor); err != nil {
 		t.Fatal(err)
 	}
-	if successor.Labels[labelBackupRetryOf] != "second-uid" || successor.Annotations[annotationBackupAttempt] != "3" || successor.Annotations[annotationBackupRetryRootUID] != "original-uid" || successor.Annotations[annotationBackupRetryRoot] != "original" {
+	if successor.Labels[v1alpha1.BackupRetryOfLabel] != "second-uid" || successor.Annotations[v1alpha1.BackupAttemptAnnotation] != "3" || successor.Annotations[v1alpha1.BackupRetryRootUIDAnnotation] != "original-uid" || successor.Annotations[v1alpha1.BackupRetryRootAnnotation] != "original" {
 		t.Fatalf("retry lineage changed: %+v", successor.ObjectMeta)
 	}
 	successor.Status.Attempt = 1
@@ -168,15 +168,15 @@ func TestBackupRetry_ExistingNameRequiresMatchingLineage(t *testing.T) {
 			}
 			switch mode {
 			case "predecessor":
-				existing.Labels[labelBackupRetryOf] = "different-uid"
+				existing.Labels[v1alpha1.BackupRetryOfLabel] = "different-uid"
 			case "attempt":
-				existing.Annotations[annotationBackupAttempt] = "3"
+				existing.Annotations[v1alpha1.BackupAttemptAnnotation] = "3"
 			case "root":
-				existing.Annotations[annotationBackupRetryRootUID] = "different-root"
+				existing.Annotations[v1alpha1.BackupRetryRootUIDAnnotation] = "different-root"
 			case "profile":
 				existing.Spec.ProfileName = "different-profile"
 			case "schedule":
-				existing.Labels[labelBackupSchedule] = "different-schedule"
+				existing.Labels[v1alpha1.BackupScheduleLabel] = "different-schedule"
 			}
 			if err := c.Update(context.Background(), &existing); err != nil {
 				t.Fatal(err)

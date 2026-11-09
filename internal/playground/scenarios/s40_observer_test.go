@@ -140,7 +140,7 @@ func TestS40ObserveOnceIgnoresTerminatingServingEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusSiteByName(mfg, "reader").Replicating = false
+	statusSiteByName(mfg, "reader").Replication = v1alpha1.SiteReplicationBroken
 	if err := env.Kube.Controller.Update(context.Background(), mfg); err != nil {
 		t.Fatal(err)
 	}
@@ -179,21 +179,21 @@ func s40ObserverTestEnv(t *testing.T, clientset *k8sfake.Clientset) (*runner.Env
 		ObjectMeta: metav1.ObjectMeta{Name: pgkube.FailoverGroupName, Namespace: pgkube.PlaygroundNamespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "pdx", Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
+				{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
+				{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
+				{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
 			},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
 			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: "writable"},
-				{Name: "pdx", State: "read-only", Replicating: true},
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
 				{
 					Name:                   "reader",
-					State:                  "read-only",
-					Replicating:            true,
+					State:                  v1alpha1.SiteStateReadOnly,
+					Replication:            v1alpha1.SiteReplicationHealthy,
 					SecondsBehindSource:    &lag,
 					SourceHost:             playgroundInternalSiteHost(pgkube.FailoverGroupName, "iad", pgkube.PlaygroundNamespace),
 					SourceConvergenceState: v1alpha1.SourceConvergenceConverged,
@@ -219,9 +219,9 @@ func s40ReplacementTestPod() *corev1.Pod {
 			Namespace: pgkube.PlaygroundNamespace,
 			UID:       types.UID("replacement-pod"),
 			Labels: map[string]string{
-				"app.kubernetes.io/name":     "mysql",
-				"app.kubernetes.io/instance": pgkube.FailoverGroupName,
-				"shipstream.io/site":         "reader",
+				"app.kubernetes.io/name":        "mysql",
+				"app.kubernetes.io/instance":    pgkube.FailoverGroupName,
+				"bloodraven.shipstream.io/site": "reader",
 			},
 		},
 	}

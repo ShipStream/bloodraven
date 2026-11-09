@@ -14,10 +14,10 @@
   .panel h2 { font-size: 1rem; color: #94a3b8; margin-bottom: 12px; font-weight: 500; }
   .site { display: flex; align-items: center; gap: 12px; padding: 12px; background: #0f172a; border-radius: 8px; margin-bottom: 8px; }
   .site-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-  .site-dot.writable { background: #22c55e; box-shadow: 0 0 8px rgba(34,197,94,0.4); }
-  .site-dot.read-only { background: #3b82f6; }
-  .site-dot.unreachable { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,0.4); animation: pulse 1.5s infinite; }
-  .site-dot.unknown { background: #64748b; }
+  .site-dot.Writable { background: #22c55e; box-shadow: 0 0 8px rgba(34,197,94,0.4); }
+  .site-dot.ReadOnly { background: #3b82f6; }
+  .site-dot.Unreachable { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,0.4); animation: pulse 1.5s infinite; }
+  .site-dot.Unknown { background: #64748b; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
   .site-name { font-weight: 600; font-size: 1.1rem; }
   .site-state { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -55,8 +55,8 @@
 <p class="subtitle">Real-time MySQL failover group dashboard. WebSocket updates from the operator.</p>
 
 <div class="toolbar" id="toolbar">
-  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l shipstream.io/site=iad')">Kill IAD MySQL</button>
-  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l shipstream.io/site=pdx')">Kill PDX MySQL</button>
+  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l bloodraven.shipstream.io/site=iad')">Kill IAD MySQL</button>
+  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l bloodraven.shipstream.io/site=pdx')">Kill PDX MySQL</button>
   <button class="danger" onclick="copyCmd('kubectl cordon $(kubectl get nodes -l topology.kubernetes.io/zone=zone-iad -o name)')">Cordon IAD Node</button>
   <button class="danger" onclick="copyCmd('kubectl cordon $(kubectl get nodes -l topology.kubernetes.io/zone=zone-pdx -o name)')">Cordon PDX Node</button>
   <button onclick="copyCmd('kubectl uncordon $(kubectl get nodes -o name | tr \\'\\n\\' \\' \\')')">Uncordon All</button>
@@ -83,6 +83,12 @@
 const $ = id => document.getElementById(id);
 let ws = null;
 let lastState = {};
+// The last failover record from /ws/status. Only /ws/status messages (they
+// carry group) set or clear it. The REST /status fallback carries the same
+// record, but it runs only while the WebSocket is down, so the record from
+// the last WS frame is kept rather than logged again.
+let lastFailover = null;
+let wsStatusSeen = false;
 const logEntries = [];
 
 function connectWS() {
@@ -116,10 +122,28 @@ function connectWS() {
 
 function handleMessage(msg) {
   // Expected structure: { namespace, group, activeSite, sites: [...],
-  //   lastFailover, lastFailoverTarget, alert, updatePhase, pollTime }
+  //   lastFailover: { time, target, promotionGtidExecuted }, alert,
+  //   updatePhase, pollTime }
+  // Each site: { name, role, state, lastSeenTime, replication,
+  //   secondsBehindSource, gtidExecuted, recoveryState, divergentGtid,
+  //   divergentTransactionCount }. replication is the CR's
+  //   status.sites[].replication enum: Healthy, Lagging, Broken, Unknown, or
+  //   NotApplicable on the writable primary. lastFailover is omitted when
+  //   there is no failover record.
   // The operator's /ws/status broadcasts this shape on every poll cycle.
-  // The REST /status fallback uses snake_case and is mapped via normalizeStatus().
+  // The REST /status fallback carries lastFailover but no replication. It
+  // is used only while the WebSocket is down (pollStatus), and a replica it
+  // reports has unknown replication: the banner says so instead of
+  // reporting the group healthy.
   if (msg.sites) {
+    if ('group' in msg) {
+      const prev = lastFailover && lastFailover.time;
+      lastFailover = msg.lastFailover || null;
+      if (wsStatusSeen && lastFailover && lastFailover.time && lastFailover.time !== prev) {
+        addLog('failover', `Operator recorded a failover to ${lastFailover.target || '?'} at ${new Date(lastFailover.time).toLocaleTimeString()}`);
+      }
+      wsStatusSeen = true;
+    }
     renderSites(msg);
     detectChanges(msg);
     lastState = msg;
@@ -128,19 +152,19 @@ function handleMessage(msg) {
 
 function renderSites(msg) {
   const sites = msg.sites || [];
-  const writableCount = sites.filter(s => s.state === 'writable').length;
-  const unreachableCount = sites.filter(s => s.state === 'unreachable').length;
+  const writableCount = sites.filter(s => s.state === 'Writable').length;
+  const unreachableCount = sites.filter(s => s.state === 'Unreachable').length;
 
   let healthClass = 'healthy', healthText = 'Healthy';
   const alert = msg.alert || '';
   if (writableCount > 1 || alert.startsWith('SPLIT BRAIN')) {
     // The alert also covers a second writable answer the operator has not
-    // confirmed yet (that site's state is still unknown).
+    // confirmed yet (that site's state is still Unknown).
     healthClass = 'critical';
     healthText = 'SPLIT BRAIN \u2014 multiple sites writable';
-  } else if (writableCount === 0 && !alert && sites.some(s => (s.state || 'unknown') === 'unknown' && (s.role || 'primary-candidate') === 'primary-candidate')) {
+  } else if (writableCount === 0 && !alert && sites.some(s => (s.state || 'Unknown') === 'Unknown' && (s.role || 'PrimaryCandidate') === 'PrimaryCandidate')) {
     // The operator reports Initializing, not NoPrimary, until it has
-    // classified every primary-candidate since it started. Initializing
+    // classified every PrimaryCandidate site since it started. Initializing
     // never carries an alert; a promotion refusal with an unclassified
     // site does, and is a real NoPrimary.
     healthClass = 'warning';
@@ -155,37 +179,68 @@ function renderSites(msg) {
     healthClass = 'warning';
     healthText = 'NO ACTIVE SITE \u2014 awaiting primary election';
   } else if (sites.length > 0) {
-    const replica = sites.find(s => s.name !== msg.activeSite);
-    if (replica && !replica.replicating) {
+    // A replica is healthy when replication is Healthy or Lagging (a
+    // lagging replica stays acceptable). Broken and Unknown are not.
+    const notReplicating = sites.filter(s => s.name !== msg.activeSite &&
+      s.replication && !replicationRunning(s.replication));
+    const unreported = sites.filter(s => s.name !== msg.activeSite && !s.replication);
+    if (notReplicating.length > 0) {
       healthClass = 'warning';
-      healthText = 'DEGRADED \u2014 replica not replicating';
+      healthText = 'DEGRADED \u2014 replica not replicating: ' +
+        notReplicating.map(s => s.name + ' (' + s.replication + ')').join(', ');
+    } else if (unreported.length > 0) {
+      // Only the REST fallback omits replication: say what is not known
+      // rather than call the group healthy.
+      healthClass = 'warning';
+      healthText = 'REPLICATION UNKNOWN \u2014 WebSocket down, REST status has no replication for: ' +
+        unreported.map(s => s.name).join(', ');
     }
   }
 
+  const lf = lastFailover;
+  const lastFailoverLine = lf && (lf.time || lf.target)
+    ? `<div class="site-meta" style="text-align:left;margin:-6px 0 12px 2px">Last failover: ${lf.target || '?'}${lf.time ? ' at ' + new Date(lf.time).toLocaleString() : ''}${lf.promotionGtidExecuted ? ' (GTID ' + lf.promotionGtidExecuted.substring(0, 24) + '...)' : ''}</div>`
+    : '';
   $('health').innerHTML = sites.length > 0
-    ? `<div class="health-banner ${healthClass}">${healthText}</div>`
+    ? `<div class="health-banner ${healthClass}">${healthText}</div>${lastFailoverLine}`
     : '';
 
   let html = '';
   for (const site of sites) {
     const isActive = site.name === msg.activeSite;
-    const stateClass = (site.state || 'unknown').replace('-', '-');
+    // The CSS classes are the CR state values (Writable, ReadOnly, ...).
+    const stateClass = site.state || 'Unknown';
     html += `
       <div class="site">
         <div class="site-dot ${stateClass}"></div>
         <div>
           <div class="site-name">${site.name}${isActive ? '<span class="active-badge">active</span>' : ''}</div>
-          <div class="site-state">${site.state || 'unknown'}</div>
+          <div class="site-state">${site.state || 'Unknown'}</div>
         </div>
         <div class="site-meta">
           ${site.gtidExecuted ? 'GTID: ' + site.gtidExecuted.substring(0, 24) + '...<br>' : ''}
-          ${site.replicating ? 'Replicating' : 'Not replicating'}
+          ${replicationLabel(site.replication)}
           ${site.secondsBehindSource != null ? '<br>Lag: ' + site.secondsBehindSource + 's' : ''}
-          ${site.lastSeen ? '<br>Seen: ' + new Date(site.lastSeen).toLocaleTimeString() : ''}
+          ${site.lastSeenTime ? '<br>Seen: ' + new Date(site.lastSeenTime).toLocaleTimeString() : ''}
         </div>
       </div>`;
   }
   $('sites').innerHTML = html || '<div class="empty">No sites</div>';
+}
+
+// replicationRunning is the old replicating=true: Healthy or Lagging.
+function replicationRunning(replication) {
+  return replication === 'Healthy' || replication === 'Lagging';
+}
+
+function replicationLabel(replication) {
+  switch (replication) {
+    case 'Healthy': return 'Replicating';
+    case 'Lagging': return 'Replicating (lagging)';
+    case 'Broken': return 'Not replicating';
+    case 'Unknown': return 'Replication unknown';
+    default: return ''; // NotApplicable (the primary) or not reported
+  }
 }
 
 function detectChanges(msg) {
@@ -310,8 +365,11 @@ function copyCmd(cmd) {
 
 // Poll the REST status endpoint as a fallback when the WebSocket isn't
 // connected. The WS broadcast (/ws/status) is the primary source of live
-// topology and fires on every operator poll cycle.
+// topology and fires on every operator poll cycle. While it is open the REST
+// frame is skipped: it carries no replication, and rendering it would
+// overwrite the last WS frame's Broken or Unknown replica every 3s.
 async function pollStatus() {
+  if (ws && ws.readyState === WebSocket.OPEN && wsStatusSeen) return;
   try {
     const r = await fetch('/api/operator/status');
     if (!r.ok) return;

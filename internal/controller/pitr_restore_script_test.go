@@ -691,13 +691,13 @@ func TestPITRVerifyScriptPublishesVerdictLast(t *testing.T) {
 	dir := t.TempDir()
 	term := filepath.Join(dir, "termination-log")
 	script := fail + `log() { :; }
-fail 3 "SanityCheckFailed: scalar 0 < minRows 1"
+fail 3 "SanityCheckFailed: scalar 0 < minResult 1"
 `
 	cmd := execBash(t, script, "BLOODRAVEN_TERMINATION_LOG="+term)
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("fail did not exit: %s", out)
 	}
-	if recorded, _ := os.ReadFile(term); string(recorded) != "SanityCheckFailed: scalar 0 < minRows 1" {
+	if recorded, _ := os.ReadFile(term); string(recorded) != "SanityCheckFailed: scalar 0 < minResult 1" {
 		t.Fatalf("failure not recorded: %q", recorded)
 	}
 	if !strings.Contains(verifyScript, `cat "$PITR_VERDICT" >"$TERMINATION_LOG"`) || strings.Index(verifyScript, `cat "$PITR_VERDICT" >"$TERMINATION_LOG"`) < strings.Index(verifyScript, "# ---- Sanity check") {

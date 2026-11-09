@@ -1,6 +1,10 @@
 package component
 
-import "testing"
+import (
+	"testing"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+)
 
 // MySQL 8.4+ prints tagged transactions in the compact
 // uuid:intervals:tag:intervals form. One SET gtid_next='AUTOMATIC:<tag>'
@@ -13,7 +17,7 @@ func TestFailover_CompactTaggedGTIDCandidateIsPromoted(t *testing.T) {
 	h := newTestHarnessWithMySQL(t, dc1, dc2)
 
 	h.pollN(2)
-	if s := h.tm.Status(); s.Sites[0].State != "writable" || s.Sites[1].State != "read-only" {
+	if s := h.tm.Status(); s.Sites[0].State != v1alpha1.SiteStateWritable || s.Sites[1].State != v1alpha1.SiteStateReadOnly {
 		t.Fatalf("setup: states = %s/%s, want writable/read-only", s.Sites[0].State, s.Sites[1].State)
 	}
 
@@ -26,7 +30,7 @@ func TestFailover_CompactTaggedGTIDCandidateIsPromoted(t *testing.T) {
 	if got := h.dns.getLastIP(); got != "2.2.2.2" {
 		t.Errorf("DNS = %q, want 2.2.2.2 after promotion", got)
 	}
-	if got := h.tm.Status().PromotionGtidExecuted; got != gtid {
+	if got := h.tm.Status().PromotionGtidExecuted(); got != gtid {
 		t.Errorf("PromotionGtidExecuted = %q, want %q", got, gtid)
 	}
 }

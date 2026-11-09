@@ -7,7 +7,9 @@ stops that flap is memory: `spec.failoverCooldown`. Almost everyone overestimate
 ## One guard, and only one
 
 `spec.failoverCooldown` defaults to `5m`, both in the CRD and in the operator's own fallback when the
-pointer is nil. The playground overrides it to `30s` so you can experiment without waiting.
+pointer is nil. The playground overrides it to `30s` so you can experiment without waiting. It cannot
+be switched off: admission accepts 30s to 24h and refuses `0` outright, rather than reading it as the
+default.
 
 It is enforced in exactly one place: immediately before the promotion call, after the table has
 already chosen a candidate.
@@ -24,7 +26,7 @@ if !lastFailover.IsZero() && tm.clock.Since(lastFailover) < tm.failoverCooldown 
 
 One `if`, one `msg` with three fields, one retry armed, one `return`. That is the entire mechanism.
 The table still evaluated, the candidate was still ranked, the status condition still says
-`Degraded` — the operator simply declined to promote *yet*.
+`SiteUnhealthy` — the operator simply declined to promote *yet*.
 
 The armed retry is what makes it a delay rather than a veto. Cross-site actions fire on state
 transitions, and a dead primary that stays dead produces no new transition, so without the retry a
@@ -55,9 +57,9 @@ relevant. If you alert on that counter, alert on the ordered-update log lines to
 
 ## The history, written twice
 
-`lastFailover` and `lastFailoverTarget` go to two durable places on every promotion: the CR **status
-subresource**, and two annotations on the object's own metadata, written together in a single JSON
-merge patch.
+The failover record — its time and target — goes to two durable places on every promotion: the CR
+**status subresource** (`status.lastFailover.time` and `.target`), and two annotations on the object's
+own metadata, written together in a single JSON merge patch.
 
 ```widget
 {"type":"anatomy","title":"bloodraven.shipstream.io/last-failover-target","parts":[{"text":"bloodraven.shipstream.io/","label":"domain prefix","note":"Namespaces the key to this operator. Everything Bloodraven stamps on an object — planned failover, reclone, chaos markers — shares it."},{"text":"last-failover","label":"record noun","note":"Names the promotion event. On its own this is the sibling key bloodraven.shipstream.io/last-failover, whose value is the promotion instant as RFC3339 UTC at second precision."},{"text":"-target","label":"target qualifier","note":"Switches the value from the instant to the promoted site name, verbatim. Never written alone — both keys go in one JSON merge patch, so a reader never sees a timestamp without its target."}]}
@@ -118,10 +120,10 @@ the same promotion produces an exact tie rather than an annotation that always l
 
 There is a wedge the pure table cannot escape. Every site is read-only, none is unreachable, so the
 table refuses to elect and raises `NoPrimary`. But the operator holds history the table refuses to
-consult: `lastFailoverTarget` names the site it already made authoritative. If that site is still
+consult: `status.lastFailover.target` names the site it already made authoritative. If that site is still
 GTID-complete, restoring its writability cannot lose a transaction or create a second primary.
 
-A group that has never failed over has no `lastFailoverTarget`, so the operator falls back to
+A group that has never failed over has no `lastFailover.target`, so the operator falls back to
 `lastActiveSite`: the last site it saw as the group's unique writable primary, restored from
 `status.activeSite` after an operator restart. How far it trusts that site depends on how it got
 there. A site the operator made primary itself — a fresh-deploy seed — is re-asserted from any
@@ -135,10 +137,10 @@ Every one of these must hold:
 - No subsystem gate active — bootstrap blocking cross-site, ordered update, topology frozen, planned
   failover in flight.
 - The re-assert rate limit is satisfied, and no promotion is still pending confirmation.
-- Every non-target peer is `read-only` — not writable, not unreachable, not unknown — both in the
+- Every non-target peer is `ReadOnly` — not writable, not unreachable, not unknown — both in the
   operator's debounced state and on a live `@@read_only` read just before the re-assert, so a peer
   that has only just turned writable cannot become a second primary.
-- The target is `read-only` **and** promotable (`role: primary-candidate`).
+- The target is `ReadOnly` **and** promotable (`role: PrimaryCandidate`).
 - The target's `GTID_EXECUTED` contains the recorded promotion GTID set **and** every peer's
   `GTID_EXECUTED`.
 
@@ -173,7 +175,7 @@ same asymmetry compresses: automatic promotion is blocked until T+30s (leaving 3
 block after a 12.0 s failover), while the first re-assert is available immediately.
 
 One last field while you are here, because its history is a lesson in itself. `spec.updateStrategy`
-takes `OrderedUpdate` (the default) or `Recreate`, and it does two different things to the same spec
+is an object whose `type` takes `OrderedUpdate` (the default) or `Recreate`, and it does two different things to the same spec
 change. Under `OrderedUpdate` the reconciler deliberately leaves existing site Deployments alone; the
 runner then notices the drift between the desired spec hash and the live Deployment annotation and
 hands the rollout to the ordered updater, one site at a time. Under `Recreate` the runner clears the

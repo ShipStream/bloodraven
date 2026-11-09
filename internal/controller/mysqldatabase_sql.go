@@ -156,20 +156,35 @@ func quoteAccountsIdentifiedBy(kind, username string, hosts []string, escapedPas
 // renderCreateDatabase builds the idempotent CREATE DATABASE statement.
 // The reconciler separately refuses to run it against a schema it did not
 // create (schemaExistsQuery); IF NOT EXISTS stays so the create itself is
-// idempotent across retries.
+// idempotent across retries. An empty collation renders no COLLATE clause,
+// so MySQL uses the character set's default collation.
 func renderCreateDatabase(database, characterSet, collation string) (string, error) {
 	dbIdent, err := quoteIdentifier("spec.databaseName", database)
 	if err != nil {
 		return "", err
 	}
+	options, err := renderDatabaseOptions(characterSet, collation)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s %s", dbIdent, options), nil
+}
+
+// renderDatabaseOptions renders "CHARACTER SET <cs>[ COLLATE <coll>]". With
+// no collation MySQL applies the character set's default collation, on
+// CREATE and on ALTER alike, so clearing spec.collation resets an existing
+// schema to that default.
+func renderDatabaseOptions(characterSet, collation string) (string, error) {
 	if err := v1alpha1.ValidateMysqlIdentifier("spec.characterSet", characterSet); err != nil {
 		return "", err
+	}
+	if collation == "" {
+		return "CHARACTER SET " + characterSet, nil
 	}
 	if err := v1alpha1.ValidateMysqlIdentifier("spec.collation", collation); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s CHARACTER SET %s COLLATE %s",
-		dbIdent, characterSet, collation), nil
+	return fmt.Sprintf("CHARACTER SET %s COLLATE %s", characterSet, collation), nil
 }
 
 // renderAlterDatabase builds ALTER DATABASE ... CHARACTER SET ... COLLATE ...
@@ -184,14 +199,11 @@ func renderAlterDatabase(database, characterSet, collation string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	if err := v1alpha1.ValidateMysqlIdentifier("spec.characterSet", characterSet); err != nil {
+	options, err := renderDatabaseOptions(characterSet, collation)
+	if err != nil {
 		return "", err
 	}
-	if err := v1alpha1.ValidateMysqlIdentifier("spec.collation", collation); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("ALTER DATABASE %s CHARACTER SET %s COLLATE %s",
-		dbIdent, characterSet, collation), nil
+	return fmt.Sprintf("ALTER DATABASE %s %s", dbIdent, options), nil
 }
 
 // renderOwnerUserStatements builds the CREATE USER IF NOT EXISTS + ALTER USER

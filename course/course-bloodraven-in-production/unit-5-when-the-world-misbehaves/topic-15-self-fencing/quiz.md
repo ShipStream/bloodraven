@@ -58,7 +58,7 @@ An engineer reports that a site Bloodraven considers fenced still accepted a wri
 
 **Type:** TRUE_FALSE
 
-Adding a `role: read-only` reader site to `playground` makes the lease-expiry fence more likely to fire, because there is now one more peer whose silence the monitor must account for.
+Adding a `role: ReadOnly` reader site to `playground` makes the lease-expiry fence more likely to fire, because there is now one more peer whose silence the monitor must account for.
 
 **Correct answer:** false
 

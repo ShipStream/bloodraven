@@ -1,6 +1,7 @@
 # Proposal: API audit and cleanup before `shipstream.io/v1beta1`
 
-**Status:** Draft, revision 5 (after critique rounds 1, 2 and 3 and the ultra review of PR #242; see section 8.1)
+**Status:** Draft, revision 6 (WS-E step 0 and re-triage at `8067420`, B.5; revision 5 followed critique rounds 1, 2
+and 3 and the ultra review of PR #242, section 8.1)
 **Branch:** `docs/api-v1beta1-audit`
 **Tracking:** #237
 **Audited at:** `3fa1900` (origin/main after #232). **Re-checked at** `2340f6b` (this branch with origin/main
@@ -10,7 +11,8 @@ moved were re-mapped line by line, and citations whose content changed were re-o
 1-4 (B.4). Revision 4's citations were checked at `b543405`. Outside `proposals/`, that commit differs from
 `2340f6b` only in `site/app/` and `site/content/index.md`, so the `2340f6b` line numbers still hold, and the
 `site/app/` citations refer to `b543405`. Revision 5's citations were checked at `a5f155d`, which differs from
-`b543405` only in `proposals/`.
+`b543405` only in `proposals/`. Revision 6's additions, each marked "(revision 6, WS-E)", cite `8067420` (origin/main
+after #246, #247 and #259); older citations were not re-mapped (B.5).
 **Appendix:** [`20-api-v1beta1-inventory.md`](20-api-v1beta1-inventory.md) (generated field inventory)
 
 ## Summary
@@ -39,9 +41,9 @@ proposed amendment to D6 that needs sign-off (C-8).
 | should-fix | 50 |
 | leave | 15 (revision 5 withdraws A-111, F-39) |
 | Breaking findings (one of them, A-50, owned by #235) | 81 (revision 3 adds A-33) |
-| Migration-table rows | 110 (revision 3 added five: A-33 and four served-surface rows; revision 4 added two: A-28's `""` values and A-40's three timestamp names; revision 5 adds two: the restore-reclone metric `phase` values and the lease revocation reasons) |
+| Migration-table rows | 118 (revision 6, WS-E, adds eight from the re-triage at `8067420`, B.5; 110 before: revision 3 added five: A-33 and four served-surface rows; revision 4 added two: A-28's `""` values and A-40's three timestamp names; revision 5 adds two: the restore-reclone metric `phase` values and the lease revocation reasons) |
 | Raw findings dropped entirely / partially rejected | 1 / 22 |
-| Code and docs defects (Appendix A) | 15 |
+| Code and docs defects (Appendix A) | 16 (revision 6, WS-E, adds D-16) |
 | Critique points, round 1 (GPT 19, Opus 28) | 47: all verified; none rejected as wrong; 9 suggested fixes replaced by another fix (section 8.1) |
 | Critique points, round 2 (GPT 9: 4 Major, 5 Minor; Opus 14: 4 Major, 10 Minor) | 23: all verified and applied; none rejected; one citation corrected and 4 suggested fixes, or parts of them, not taken (section 8.1) |
 | Critique points, round 3 (GPT 4: 4 Major; Opus 10: 5 Major, 5 Minor) | 14: all verified at `b543405` and applied; none rejected; one set of citations corrected and one suggested fix not taken; the v1.6.0 procedure split into a WS-F follow-up issue (section 8.1) |
@@ -111,7 +113,7 @@ Notes that drive findings:
 
 | Kind | Condition type | Status values | Reasons (current) | Set at |
 |---|---|---|---|---|
-| MFG | `Ready` | T/F/U | `TopologyPolled` (both T and F), `Initializing` (U) | `internal/controller/runner.go:1484-1508` |
+| MFG | `Ready` | T/F/U | `TopologyPolled` (both T and F), `Initializing` (U); revision 6, WS-E: `InitFromBackupInProgress`, `InitFromBackupFailed` (F, #206) | `internal/controller/runner.go:1484-1508`; `restore.go:158-159` at `8067420` |
 | MFG | `Degraded` | F/T/U | `Healthy`, `Initializing`, `Degraded`, `TotalLoss`, `SplitBrain`, `NoPrimary`, `Alert`, plus overlays `ReplicationSourceMismatch`, `ReplicationBroken`, `ReplicationLagging`, `ReplicationError`, `DivergentTransactions`, `RestoreReclonePending` (new in #233, `runner.go:1599`) | `runner.go:1511-1617` |
 | MFG | `DivergentPromotion` | T only | `DivergentSitePromoted` (never cleared by the operator) | `runner.go:1637` |
 | MFG | `Bootstrapping` | T/F | `Cloning`, `WaitingForRestart`, `SetupReplication` (T); `NotBootstrapping`, `Done` (F); `Failed` (T) | `runner.go:2378-2414` |
@@ -119,12 +121,15 @@ Notes that drive findings:
 | MFG | `RecoveryPending` | T/F | `RecoveryInProgress`, `DivergentTransactions`, `NoRecoveryPending` | `runner.go:1682-1710` |
 | MFG | `EncryptionAtRestReady` | T/F | `AllSitesSealed`, `KeyringFailed`, `KeyringNotSealed`, `AdoptionRefused` | `encryption_reconcile.go:1027`, `:1136-1139` |
 | MFG | `S3CredentialsReady` | T/F/absent | `CredentialsComplete`, `CredentialsIncomplete` | `s3_credentials_check.go` |
-| MFG | `PITRArchiveReady` | T/F/U/absent | `Archiving`, `ArchiveStoreInitFailed`, `ArchiverError`, `ArchiverDisabled`, `SidecarUnreachable`, `AwaitingFirstPoll`, `AwaitingRollout` | `pitr_archive_condition.go` |
-| MBK | `JobCreated`, `Ready`, `MetadataComplete` | T/F (`Ready` absent while Running) | `Succeeded`, `Failed`, `GroupNotFound`, `ProfileNotFound`, `NoHealthySource` (both Pending and terminal), `BuildJobFailed`, `DestinationUnavailable`, `Collected`, `Sentinel*`, `LocationMismatch` | `backup_reconciler.go`, `backup_completion_metadata.go` |
-| MBK | `ArtifactCleanup` | F/absent | `CleanupPending`, `CleanupFailed`, `CleanupRejected`, `DestinationUnverified`, `DestinationMismatch`, `CredentialsUnavailable`, `OperatorImageUnset`, `CleanupJobConflict`, `HeldByVerification`, `ForegroundDeletion` | `backup_cleanup.go:19-32`, `backup_reconciler.go:590-596` |
-| MBV | `Verified`, `ResourcesCleanedUp` | T/F | `Succeeded`, `Failed`, `SanityCheck*`, `PITR*` (8 values), `GroupNotFound`, `ProfileNotFound`, `BlockedByActiveVerification`, `BackupNotAvailable`, `BuildJobFailed`, `BackupIdentityMismatch`, `CleanedUp` | `backup_verification_reconciler.go` |
+| MFG | `PITRArchiveReady` | T/F/U/absent | `Archiving`, `ArchiveStoreInitFailed`, `ArchiverError`, `ArchiverDisabled`, `SidecarUnreachable`, `AwaitingFirstPoll`, `AwaitingRollout`; revision 6, WS-E: `SidecarOutdated` and the nine archive refusals `ArchiveForeign`, `ArchiveCopy`, `ArchiveLegacy`, `ArchiveDescriptorMissing`, `ArchiveEncryptionMismatch`, `ArchiveKeyMismatch`, `ArchiveVersionUnsupported`, `ArchiveStoreUnsupported`, `ArchiveUnsafeHistory` (#206) | `pitr_archive_condition.go`; `internal/pitrarchive/tokens.go:95-111` |
+| MFG | `PITRArchiveBindingReady` (revision 6, WS-E; #203) | T/F/U/absent | `Bound` (T); `Authenticating`, `Establishing` (U); `KeyMaterialLost`, `KeyMismatch`, `ArchiveForeign`, `ArchiveCopy`, `ArchiveLegacy`, `ArchiveDescriptorMissing`, `ArchiveNotFound`, `ArchiveEncryptionMismatch`, `ArchiveVersionUnsupported`, `ArchiveListFailed`, `BindingLimitReached`, `EncryptionChangeRefused`, `KeyChangeRefused` (F); absent with no binding | `pitr_binding_contract.go:127-162`, `pitr_binding.go:1404-1484` |
+| MFG | `PITRMysqlConfAccepted` (revision 6, WS-E; #206) | T/F/absent | `Accepted` (T), `PITRUnsafeSettingRefused` (F); removed while PITR is off | `pitr_mysqlconf.go:26-31,121` |
+| MFG | `AutomaticFailoverHeld` (revision 6, WS-E; #235) | T/F/absent | `PlannedFailoverManualRecoveryRequired` (T), `PlannedFailoverHoldAcknowledged` (F); absent on a group never held. Summarises `status.plannedFailoverHold` | `api/v1alpha1/conditions.go:14-27`; `planned_failover_contract.go:327-358` |
+| MBK | `JobCreated`, `Ready`, `MetadataComplete` | T/F (`Ready` absent while Running) | `Succeeded`, `Failed`, `GroupNotFound`, `ProfileNotFound`, `NoHealthySource` (both Pending and terminal), `BuildJobFailed`, `DestinationUnavailable`, `Collected`, `Sentinel*`, `LocationMismatch`; revision 6, WS-E (#203): `ProfileReadOnly`, `PITRArchiveRolloutPending`, `DumpKeySnapshotConflict`, `PassphraseSecretMissing` (the last three through `pendBackup`) | `backup_reconciler.go`, `backup_completion_metadata.go`; `pitr_binding_contract.go:189-192` |
+| MBK | `ArtifactCleanup` | F/absent | `CleanupPending`, `CleanupFailed`, `CleanupRejected`, `DestinationUnverified`, `DestinationMismatch`, `CredentialsUnavailable`, `OperatorImageUnset`, `CleanupJobConflict`, `HeldByVerification`, `ForegroundDeletion`; revision 6, WS-E: `ProducerStopStuck` (#206), `PassphraseSecretMissing` (#203) | `backup_cleanup.go:19-32`, `backup_reconciler.go:590-596`; `backup_cleanup.go:35` |
+| MBV | `Verified`, `ResourcesCleanedUp` | T/F | `Succeeded`, `Failed`, `SanityCheck*`, `PITR*` (8 values; revision 6, WS-E: #206 replaced them with the 39-token catalog `PITRArchive*`, `PITRBackup*`, `PITR{ExcludeIntersectsBackup, StopAmbiguous, TargetNotCovered, TargetInvalid, NoArchivedReplay, ReplayUnsupported, PlanTooLarge, CoverageInvalid, ReplayMismatch}` in `internal/pitrarchive/tokens.go:14-52`, plus the script sentinel `BLOODRAVEN_PITR_FAILED` (`:53`), which E7 serves as `PITRReplayFailed` (WE-Q7, B.5); `PITRArchiveSiteOmitted`, `PITRBackupBoundUnknown` and `PITRCrossSiteOrder` are gone), `GroupNotFound`, `ProfileNotFound`, `BlockedByActiveVerification`, `BackupNotAvailable`, `BuildJobFailed`, `BackupIdentityMismatch`, `CleanedUp` | `backup_verification_reconciler.go` |
 | MDB | `Ready` | T/F | `DatabaseReconciled`, `Applying`, `Deleting`, 13 Pending reasons, 11 Failed reasons | `mysqldatabase_reconciler.go` |
-| MSC | `BucketReadable`, `SourceConfigKnown` | T/F | `ListSucceeded`, `DumpFound`, `ConfigError`, `AuthFailed`, `ScanIncomplete`, `ListFailed`, `MetadataUnreadable`, `NoDumpFound`, `NoBinlogManifests` | `standbycluster_reconciler.go` |
+| MSC | `BucketReadable`, `SourceConfigKnown` | T/F | `ListSucceeded`, `DumpFound`, `ConfigError`, `AuthFailed`, `ScanIncomplete`, `ListFailed`, `MetadataUnreadable`, `NoDumpFound`, `NoBinlogManifests`; revision 6, WS-E (#206): `SourceConfigKnown` False `ArchiveDescriptorMissing`, `ArchiveLegacy`, `ArchiveVersionUnsupported`, `ArchiveObjectInvalid`, `ArchiveEncryptionMismatch`, `ArchiveKeyMismatch`, `ArchiveIdentityMismatch`, `ArchiveHistoryReset`, `ArchiveUnsafeHistory`, `ArchiveUnreadable` (dump still published) | `standbycluster_reconciler.go`; `mysqlstandbycluster_types.go:450-461` |
 | MSC | `Restorable`, `ActivationInProgress`, `Active` | none | constants only, never written | `api/v1alpha1/mysqlstandbycluster_types.go` |
 
 | Phase enum | Field | Values | Typed | Finding |
@@ -133,7 +138,11 @@ Notes that drive findings:
 | `VerificationPhase` | MBV `status.phase` | `Pending;Provisioning;Restoring;Checking;Cleaning;Succeeded;Failed` | yes | A-31 |
 | `MysqlDatabasePhase` | MDB `status.phase` | `Pending;Creating;Ready;Failed;Deleting` | yes | A-32 |
 | `StandbyActivationPhase` | MSC `status.activation.phase` | `"";Validating;Restoring;Replaying;Provisioning;Activated;Failed` | yes, never written | A-61 |
-| `PlannedFailoverPhase` | MFG `status.plannedFailover.phase` | 12 values | yes | A-50 (#235) |
+| `PlannedFailoverPhase` | MFG `status.plannedFailover.phase` | 12 values; revision 6, WS-E, as #246 merged it: `Admitting;Deferred;Fencing;Draining;WaitingForLag;WaitingForDragonflySync;PromotingDragonfly;Promoting;Publishing;RollingBack;Succeeded;Failed`, no `""` | yes | A-50 (#235) |
+| `PlannedFailoverOutcome` (revision 6, WS-E) | MFG `status.plannedFailover.result.outcome` | `Succeeded;NotStarted;RolledBack;SourceLeftFenced;PromotedUnconfirmed;ManualRecoveryRequired`, beside a 32-value `PlannedFailoverReason` | yes | A-50; WE-Q4 (B.5) |
+| `PITRArchiveBindingState` (revision 6, WS-E) | MFG `status.pitrArchiveBindings[].state` | `Pending;Bound;Refused` | yes | A-28 (compliant) |
+| `PITRArchiveObservedState` (revision 6, WS-E) | MFG `status.pitr.archive.state` | `AwaitingDescriptor;Verified;Refused` | yes | A-28 (compliant) |
+| `PointInTimeOutcome` (revision 6, WS-E) | `PointInTimeResult.outcome` (MFG restore records, MBV) | `TargetCovered;Partial;ArchiveHead` | yes | A-97 |
 | `RestoreInPlacePhase` | MFG `status.restoreInPlace.phase` | `"";Preflight;Fencing;Restoring;Resuming;Succeeded;Failed` | yes | A-28 (`""`), A-59 (#205 phases) |
 | `RestoreReclonesPhase` | MFG `status.restoreReclones.phase` | `Armed;Draining;Held` | yes, admin-written in runbooks | A-85 |
 | `DragonflyPhase`, `DragonflyUpgradePhase` | MFG `status.dragonfly.phase`, `.upgrade.phase` | CamelCase | yes | — |
@@ -151,23 +160,32 @@ Writers: U = user, P = kubectl plugin, O = operator, C = chaos runner and playgr
 | Key | On | Writer → reader | Value grammar | Evidence | Finding |
 |---|---|---|---|---|---|
 | `bloodraven.shipstream.io/reclone-site` | MFG | U, P, O → O (consumed) | `<site>:confirm=<group>` or `<site>:<gtid-prefix>` | `internal/controller/reconciler.go:90`, `reclone.go:15-21,97,118` | A-78 |
-| `bloodraven.shipstream.io/planned-failover` | MFG | U, P, O (re-writes it on deferral) → O | `<site>[:maxLagWait=<dur>]` | `planned_failover.go:32`, `planned_failover_deployment.go:33-48` | A-50 (#235) |
+| `bloodraven.shipstream.io/planned-failover` | MFG | U, P, O (re-writes it on deferral) → O. Revision 6, WS-E: since #246 the operator only removes it (`planned_failover_store.go:281-287`) | `<site>[:maxLagWait=<dur>]`; since #246 `<site>(:<key>=<value>)*` with the A-78 charset, unknown and repeated keys rejected | `planned_failover.go:32`, `planned_failover_deployment.go:33-48`; at `8067420` `planned_failover.go:41,66-140` | A-50 (#235) |
+| `bloodraven.shipstream.io/acknowledge-planned-failover-hold` (revision 6, WS-E) | MFG | U, P (`ack-planned-failover-hold`) → O (consumed) | `<runID>` (UUID) | `planned_failover_contract.go:48` | A-50, A-78 (operation-id subject) |
+| `bloodraven.shipstream.io/planned-failover-terminal` (revision 6, WS-E) | MFG | O → O, doctor | versioned JSON `{schemaVersion, runID, outcome, reason, warnings}` | `planned_failover_contract.go:42,145-230` | A-79 (Internal), A-80; WE-Q11d (B.5) |
+| `bloodraven.shipstream.io/planned-failover-status-fence`, `…/planned-failover-stall-since`, `…/planned-failover-manager-absent-since`, `…/planned-failover-confirmed` (revision 6, WS-E) | MFG | O → O | basic-form UTC instant with nanoseconds (fence, read by nobody); `<runID>:since=<YYYYMMDDThhmmssZ>` (the other three) | `planned_failover_contract.go:35,64,69,78,366-372` | A-79 (Internal) |
 | `bloodraven.shipstream.io/rotate-keyring` | MFG | U → O | `<site>` | `encryption_escrow.go:46` | A-81 |
 | `bloodraven.shipstream.io/dragonfly-snapshot-upgrade` | MFG | U → O, and the operator then writes `spec.dragonfly.image` | image reference | `dragonfly_upgrade.go:22,401-402` | A-48 |
 | `bloodraven.shipstream.io/revoke-deployment-leases` | MFG | U → O | presence | `deployment_leases.go:32` | A-79, A-81 |
 | `bloodraven.shipstream.io/encryption-adopt` | MFG | U → O, never cleared | literal `confirm` | `encryption_escrow.go:58` | A-51 |
 | `bloodraven.shipstream.io/last-failover`, `…/last-failover-target` | MFG | O → O | RFC 3339 seconds; site | `failover_state.go:40-41` | A-104 (leave) |
+| `bloodraven.shipstream.io/promotion-gtid-executed`, `…/promotion-gtid-executed-for` (revision 6, WS-E; #235) | MFG | O → O | raw GTID set; `<RFC 3339 last-failover> <last-failover-target>` (a space). Not action annotations, so A-78 does not apply; grammar as-is | `planned_failover_contract.go:53,59`, `failover_state.go:307` | A-104 (leave; Operator-owned read-only, A-50 item 6) |
+| `bloodraven.shipstream.io/release-pitr-archive-binding` (revision 6, WS-E; #203) | MFG | U → O (consumed) | `<pab-id>:confirm=<group name>`; destructive (deletes key snapshots), and the id is derived from the destination, so it can recur | `pitr_binding_contract.go:66,899-914` | A-78, A-79 (Public), A-81; WE-Q9 (B.5) adds `:uid=<group uid>` |
+| `bloodraven.shipstream.io/pitr-render` (revision 6, WS-E; #203) | site Deployment | O → O | sorted versioned JSON (`schemaVersion` 1, unknown keys rejected) | `pitr_binding_contract.go:36,390-409,542-574` | A-79 (Internal), A-80 |
+| `bloodraven.shipstream.io/pitr-destination`, `…/pitr-accepted` (revision 6, WS-E; #203) | PITR key Secret | O → O, doctor | normalized destination; versioned JSON acceptance | `pitr_binding_contract.go:39,42,740-781` | A-79 (Internal), A-80 |
+| labels `bloodraven.shipstream.io/pitr-binding-id`, `…/failover-group-uid`, `…/mysqlbackup-uid`, `…/pitr-key-secret`; annotation `…/pitr-key-secret-uid` (revision 6, WS-E; #203) | key Secrets, check, restore and verification Jobs | O → O, doctor `support-bundle.sh` | `pab-<16hex>`; UID; Secret name; UID | `pitr_binding_contract.go:46-61` | A-79 (Internal) |
+| annotations `bloodraven.shipstream.io/failover-group-uid`, `…/pitr-archive-id` (revision 6, WS-E; #206) | backup Job and Pod template | O → O (recovered into MBK status) | UID; `ar1-…`, or `""` while PITR is off | `backup_job.go:66,70,569-583` | A-79 (Internal); the same `failover-group-uid` key is also a label above |
 | `bloodraven.shipstream.io/restore-confirm` | Job | O → O | confirm token | `restore_inplace.go:133` | A-79 (Internal) |
 | `bloodraven.shipstream.io/deployment-lease` | Lease | O → O | JSON | `deployment_leases.go:30` | A-80 |
 | `shipstream.io/failover-group`, `/site`, `/role`, `/healthy` (`yes`/`no`) | owned objects, Pods; `failover-group` also on MBK and MBV | O, and P for `failover-group` on the MBKs and MBVs it creates → O, U (selectors) | names; `primary`/`replica`; `yes`/`no` | `reconciler.go:54-57` | A-77 |
 | `shipstream.io/dragonfly-role`, `/dragonfly-traffic` (`enabled`) | Dragonfly Pods | O → O | `master`/`replica`; `enabled` | `dragonfly_resources.go:35,46` | A-77 |
 | `shipstream.io/spec-hash`, `/managed-service-annotations`, `/credential-hash`, `/system-schema-restriction` | Deployments, Services, Secrets | O → O | hash, JSON | `reconciler.go:61-62`, `credentials.go:24,30` | A-79 (Internal) |
 | `shipstream.io/keyring-version` (label), `/keyring-digest` | escrow Secret | O, and U in a runbook → O | int; `sha256:…` | `encryption_escrow.go:27,32` | A-84 |
-| `shipstream.io/mysqlbackup`, `/backup-profile`, `/backup-schedule`, `/resource`, `/backup-encrypted` | Job, CronJob, PVC, MBK, MBV | O, and P for `backup-profile` on the MBKs and MBVs it creates → O (the schedule rollup reads `backup-schedule`) | names, bool | `backup.go:19-23` | A-106 (leave) |
+| `shipstream.io/mysqlbackup`, `/backup-profile`, `/backup-schedule`, `/resource`, `/backup-encrypted` | Job, CronJob, PVC, MBK, MBV; revision 6, WS-E: `resource=pitr-archive-check` on #203's check Jobs, which also carry `app.kubernetes.io/name=mysql-backup` (key snapshots: `mysql-pitr-key`, `mysql-dump-key`), so `mysql-backup` selectors must exclude them | O, and P for `backup-profile` on the MBKs and MBVs it creates → O (the schedule rollup reads `backup-schedule`) | names, bool | `backup.go:19-23` | A-106 (leave) |
 | `shipstream.io/backup-retry-of`, `/backup-retry-root`, `/backup-retry-root-uid`, `/backup-attempt` | MBK | O → O | UID, name, int | `backup_retry.go:12-15` | A-106 (leave) |
 | `shipstream.io/cleanup-failure-recorded` (new in #232) | MBK | O → O | marker | `backup_cleanup.go:42` | A-79 (Internal) |
 | `shipstream.io/encryption-status-fence` (new in #234, missed in revision 2) | MFG | O → nobody reads the value | opaque RFC 3339 timestamp; the write is what matters: it advances `resourceVersion`, so any status write conditioned on an older version, such as one whose response was lost, can no longer commit | `encryption_reconcile.go:292-307` | A-79 (Internal); E1 exports the constant, E14 moves it to `bloodraven.shipstream.io/` |
-| `hold.verification.shipstream.io/<verification UID>` | MBK | O → O (retention, the artifact-cleanup finalizer and the PITR binlog cutoff honour it); doctor `triage.sh`, `support-bundle.sh` read it | verification name | `backup_verification_hold.go:29`, `cmd/bloodraven/pitr_retention.go:53`, `.agents/skills/bloodraven-doctor/scripts/support-bundle.sh:110` | A-77 (hold family), A-79 (Operator-owned) |
+| `hold.verification.shipstream.io/<verification UID>` | MBK; revision 6, WS-E: also PITR key Secrets (#203, `backup_verification_hold.go:466-492`) | O → O (retention, the artifact-cleanup finalizer and the PITR binlog cutoff honour it); doctor `triage.sh`, `support-bundle.sh` read it | verification name | `backup_verification_hold.go:29`, `cmd/bloodraven/pitr_retention.go:53`, `.agents/skills/bloodraven-doctor/scripts/support-bundle.sh:110` | A-77 (hold family), A-79 (Operator-owned) |
 | `bloodraven.shipstream.io/deployment-kind`, `…/deployment-state` (labels) | Lease | O → O (lease selection) | `failover-hold`; `active` | `deployment_leases.go:154-155,226-227` | A-79 (Internal) |
 | `shipstream.io/mysqlbackup-verification`, `/verification-schedule`, `/verification-backup` | Job, CronJob | O → O | names; JSON | `backup_verification.go:14-15`, `backup_verification_source.go:17` | A-80 |
 | Finalizers `shipstream.io/graceful-shutdown`, `/mysqlbackup`, `/mysqlbackup-verification`, `/mysqldatabase` | MFG, MBK, MBV, MDB | O | — | `reconciler.go:48`, `backup.go:28`, `backup_verification.go:17`, `mysqldatabase_reconciler.go:44` | A-77 |
@@ -180,6 +198,9 @@ match" comment (`cmd/kubectl-bloodraven/promote.go:21`, `reclone.go:18`). It als
 `shipstream.io/failover-group` and `shipstream.io/backup-profile`, as string literals on the MBKs and MBVs it
 creates (`cmd/kubectl-bloodraven/backup.go:119-120`, `verify.go:141-142`). Revision 4 said the plugin wrote only
 the two annotations (revision 5, F-52); E1 moves `backup.go` and `verify.go` onto the constants with the rest.
+Revision 6, WS-E: #246 added a third written annotation, `acknowledge-planned-failover-hold`, whose wrapper
+already imports the controller constant; `promote.go:22-26` still copies the request key. None of the keys above
+was renamed or removed since `2340f6b`, and every new key uses `bloodraven.shipstream.io/`.
 
 ### 1.4 Event reasons that runbooks, alerts, the doctor skill and the chaos runner key on
 
@@ -194,11 +215,39 @@ No PrometheusRule keys on Events. These are the reasons consumers depend on:
 | Chaos runner assertions (`internal/playground/scenarios/mfg_event.go`) | `RecloneRequested`, `RecloneRejected` (s19), `KeyringPromotionRefused` (s52), `KeyringRotationRefused` (s48), `DeploymentLeaseRevoked` (s53) |
 | Doctor `SKILL.md` and `alert_runbook_matrix.md` | `DataLossDetected`, `DivergentReplicaDetected`, `DivergentSitePromoted`, `OrderedUpdateStalled`, `NoPrimaryDetected`, `PromotionRefusedPendingReclone`, `PITRArchiveNotReady`, `PITRSharedArchivePrefix`, `PointInTimePartial`, `PointInTimeCrossSiteUnverified`, `DeploymentLeaseRevoked`, `PlannedFailoverDeferred`, `S3CredentialsIncomplete`, `CredentialReconcileFailed`, `KeyringEscrowMissing`, `KeyringEscrowCorrupt`, `DragonflySessionsLost`, `DragonflyPromotionFailed`, `DragonflyPromotionWaiting`, `BackupRetryConflict`, `BackupMetadataIncomplete`, `EncryptionAttributionCorrected`, `BlockedByActiveVerification`, `BackupNotAvailable`, `BackupIdentityMismatch`, `RestoreFailed`, `RestoreInPlaceRejected`, `RestoreInPlaceSpecRemoved`, `RestoreInPlaceCancelled`, `RestoreInPlaceJobLost`, `RestoreReclone*`, `RestoreOfflineFence*`, `PartialRevokesOff`, `TenantPrivilegeRestriction`, MDB `fail()` reasons |
 | Log-schema contract (`8.observability/7.log-schema.md`) | failover, divergence, keyring, Dragonfly, license and PITR reasons listed in its Event reference |
-| Status fields that reuse Event reason tokens | `status.restore.reason` (`PointInTimePartial`, `PointInTimeCrossSiteUnverified`), `status.plannedFailover.dragonfly.reason` (`DragonflySyncTimeout`, `DragonflyPromotionFailed`) |
-| Deploy API `unstableReason` | raw `Degraded`, `RecoveryPending` and `Bootstrapping` condition reasons (`DeploymentUnstableReason`, `internal/controller/deployment_leases.go:270`) |
+| Status fields that reuse Event reason tokens | `status.restore.reason` (`PointInTimePartial`, `PointInTimeCrossSiteUnverified`), `status.plannedFailover.dragonfly.reason` (`DragonflySyncTimeout`, `DragonflyPromotionFailed`). Revision 6, WS-E: at `8067420` only `PointInTimePartial` remains in `status.restore.reason` (`restore.go:244-246`; WE-Q5 drops it), and `DragonflySyncTimeout` is a `PlannedFailoverReason` and `DragonflyPlannedReason` value (`api/v1alpha1/planned_failover_types.go:177,605`), whose noun A-74 keeps (WE-Q7) |
+| Deploy API `unstableReason` | raw `Degraded`, `RecoveryPending` and `Bootstrapping` condition reasons (`DeploymentUnstableReason`, `internal/controller/deployment_leases.go:270`). Revision 6, WS-E: `DeploymentLeaseManager.UnstableReason` also returns `PlannedFailover` for a held claim and for a standing automation hold (`deployment_leases.go:136-150` at `8067420`); WE-Q8 gives the hold its own token |
 
 The STATUS audit's full reason table is not published. A-76 replaces the hand-maintained registry with a
 generated one, which then becomes the full table.
+
+**Changed since `2340f6b` (revision 6, WS-E; B.5).**
+
+- Removed: `PITRSharedArchivePrefix` and `PointInTimeCrossSiteUnverified`, which the doctor row above still names
+  (#206; #247 updated the doctor), and `PlannedFailoverCompleted`, `PlannedFailoverDraining` and
+  `PlannedFailoverLagOK` (#235).
+- Added by #246 (`api/v1alpha1/events.go:9-35`):
+  - `PlannedFailover{Started, Skipped, Rejected, Deferred, AdmissionDelayed, ClaimGranted, DrainStarted,
+    TargetCaughtUp, DNSUpdateFailed, RollbackStarted, Succeeded, Failed, PromotionConfirmationFailed,
+    StalledManagerAbsent, StatusStalled, LegacyRunRefused, ManualRecoveryRequired}`;
+  - `PlannedFailover{HoldPersisted, HoldAcknowledged, HoldAcknowledgementIgnored}`;
+  - `DragonflyUpgradeDeferred`.
+
+  The planned path still emits `DragonflyPromotionCompleted`, `DragonflySyncTimeout` and
+  `DragonflyPromotionWaiting`.
+- Added by #206:
+  - `PITRArchiveUnsafeHistoryDetected`, `PITRArchiveReissueRiskDetected`, `PITRMysqlConfRefused`,
+    `PITRDivergentHistoryExcluded`, `PITROnHistoryTransactionsExcluded`, `PITRArchiveRefused` (MSC, a literal),
+    `ArtifactCleanupProducerStuck` (a literal);
+  - `PointInTimePartial`, now also on MBV.
+- Added by #203 (`pitr_binding_contract.go:166-184`):
+  - `PITRArchive{Bound, BindingReleased, EncryptionChangeRefused, KeyChangeRefused, BindingRefused,
+    KeySourceRemoved, KeySnapshotRecreated, KeyMaterialLost, KeySnapshotUnreadable, BindingReleaseRefused,
+    BindingReleaseRejected, BindingLimitReached, NotStamped}`;
+  - `BackupScheduleRefused`.
+- Condition mirrors: MBK and MBV Events reuse the new condition reasons (`ProfileReadOnly`,
+  `PITRBackupDumpKeyMissing`, the catalog tokens), as `fail()` reasons already do.
+- A-74 (amended) settles the names.
 
 ### 1.5 Served contracts outside the CRD schema that carry API tokens
 
@@ -212,9 +261,12 @@ adds the second (OPUS-R3-06), and revision 5 the third (F-17). A-114 decides the
 | Prometheus labels `phase` on `bloodraven_keyring_phase`, `state` on `bloodraven_replication_source_state`, and `from`/`to` on `bloodraven_state_transitions_total` (revision 4, OPUS-R3-06) | `strings.ToLower` of `SiteKeyringPhase` (`sealed`, …) and `SourceConvergenceState` (`converged`, `pending`, `blocked`); `SiteState.String()` (`writable`, …) | `internal/controller/encryption_reconcile.go:993`, `source_convergence.go:304`, `topology.go:1440`; `internal/metrics/metrics.go:406,421` | `6.operations/4.runbooks.md:156` (`phase="sealed"`), `2.monitoring.md:150` (`to="writable"`), `charts/bloodraven/dashboards/failover.json:163`, user alert rules |
 | Prometheus label `phase` on `bloodraven_restore_reclone_pending` (new in #233; revision 5, F-17) | `string(q.Phase)`, the raw API enum `RestoreReclonesPhase`: `Armed`, `Draining`, `Held` (`api/v1alpha1/backup_types.go:886-913`) | `internal/controller/restore_peer_replication.go:645`; `internal/metrics/restore_reclones.go:15-18` | `8.observability/2.monitoring.md:70` (metric table) and `:212-213` (alert `BloodravenRestoreReclonesHeld`, `{phase="Held"}`), `3.monitoring-prometheus.md:134`, `7.backup-and-restore/2.backup-restore.md:790`, doctor `SKILL.md:171` |
 | Prometheus `reason` labels on `bloodraven_planned_failovers_deferred_total`, `bloodraven_deploy_lease_revocations_total` and `bloodraven_backup_artifact_cleanup_failures_total` | reason tokens: `DeploymentHold`, `CleanupFailed` and `CleanupRejected` in CamelCase, but the lease revocation reasons in snake_case, `operator_revoked` and `topology_changed` (`deployment_leases.go:193-199,263`), which the `/deploy/v1` 409 body also returns (`:630,636`). Revision 4 called them all CamelCase (revision 5, F-18) | `internal/metrics/metrics.go:51-65,366-372`; written at `planned_failover_deployment.go:60`, `deployment_leases.go:263`, `backup_reconciler.go:809` | user alert rules and dashboards |
-| `/deploy/v1` status JSON | `health.degradedReason`, `health.replicationRunning` (computed from `status.sites[].replicating`, which A-43 removes), `operations.updatePhase`, `operations.plannedFailover.{phase, reason}`, `operations.restoreInPlace`, `operations.dragonflyUpgrade`, `unstableReason` | `cmd/bloodraven/deploy_api.go:337-362`, `deployment_leases.go:270` | CI pipelines that gate deploys on the API (`4.configuration/11.deployment-api.md`) |
+| Prometheus label `result` on `bloodraven_planned_failovers_total` (revision 6, WS-E) | snake_case `success`, `rejected`, `failed_timeout`, `failed_other`, mapped lossily from the run's outcome and reason (`AdmissionTimeout`, a `NotStarted` run, counts as `failed_timeout`). Also new since `2340f6b`: `CooldownActive` on `bloodraven_planned_failovers_deferred_total{reason}`; the planned path no longer emits `skipped` on `bloodraven_dragonfly_promotions_total{result}` | `internal/metrics/metrics.go:67-78`; `planned_failover_reconciler.go:288-312` at `8067420` | user alert rules and dashboards; WE-Q4 (B.5) |
+| `/deploy/v1` status JSON | `health.degradedReason`, `health.replicationRunning` (computed from `status.sites[].replicating`, which A-43 removes), `operations.updatePhase`, `operations.plannedFailover.{phase, reason}` (revision 6, WS-E: `{phase, outcome, reason}` since #246, with `reason` drawn from `PlannedFailoverReason`, `…WaitReason` and `…DeferReason`, `cmd/bloodraven/deploy_api.go:369-400` at `8067420`), `operations.restoreInPlace`, `operations.dragonflyUpgrade`, `unstableReason` | `cmd/bloodraven/deploy_api.go:337-362`, `deployment_leases.go:270` | CI pipelines that gate deploys on the API (`4.configuration/11.deployment-api.md`) |
 | Operator `GET /status` JSON | per site `role` (`string(role)`, so the API spec value), `state` (`state.String()`, the internal lowercase form), `sourceConvergenceState`, `sourceConvergenceReason`, `recoveryState` | `cmd/bloodraven/main.go:490`; `internal/controller/topology.go:1124-1140` | `8.observability/2.monitoring.md:543-590` (documented with `"state": "writable"`), user scripts |
 | Operator `GET /ws/status` WebSocket broadcast | `TopologyMessage`: `activeSite`, `lastFailover`, `lastFailoverTarget`, `promotionGtidExecuted` (the flat record A-40 restructures), `updatePhase`, `alert`; per site `role`, `state`, `replicating` (the bool A-43 replaces), `recoveryState`, `divergentGtid` | `cmd/bloodraven/main.go:608`; `internal/controller/topology.go:2136-2140`; `internal/platform/websocket.go:19-44` | the playground dashboard, which compares `state === 'writable'` and `role === 'primary-candidate'` and uses the state as a CSS class (`playground/dashboard/index.html:17-18,131-150`); `2.monitoring.md:593-651` |
+| **Internal** (revision 6, WS-E; WE-Q10): sidecar `GET /archiver/status` | new since `2340f6b`: `archive{destination, archiveID, encryptionMode, state, reason, keyRevision}`, `divergentRows`, `quarantinedRows`, `promotionRecordedAt`, `historyIntegrity{violation, detail, at}` | `internal/sidecar/binlog_archiver.go:810-875`, `internal/mysql/sidecar_client.go:27-62`, `internal/pitrarchive/status.go` | the operator (same image and release), doctor `lib-sidecar-http.sh`. Not a served contract: no rename, no A-40 projection |
+| **Internal** (revision 6, WS-E): operator `GET /pitr-cutoff?archive=` (was `profile=`), sidecar env `BLOODRAVEN_FAILOVER_GROUP_UID`, `BLOODRAVEN_PITR_{ARCHIVE_ID, DESTINATION, ENCRYPTION_MODE, KEY_REVISION, STATE_DIR}` (`BLOODRAVEN_PITR_PROFILE_NAME` removed); the versioned archive descriptor, manifest v2, backup stamp and coverage verdict | archive identity and replay protocol | `cmd/bloodraven/main.go:560-603`, `internal/controller/pitr.go:133-147`, `internal/pitrarchive/descriptor.go`, `internal/backupmeta/stamp.go` | operator and sidecar of one release; on-disk bytes are authenticated, so no rename (WE-R1) |
 
 `role` on both operator endpoints carries the API spelling today only by accident. The reconciler casts the API value
 straight into the internal enum (`state.SiteRole(s.EffectiveRole())`, `internal/controller/reconciler.go:2383`), and
@@ -1094,6 +1146,8 @@ algorithm id).
   | `sidecar.leaseTimeout` | `3s` (kept) | `10m` (the 3× rule at `types.go:459` stays) |
   | MSC `freshness.discoveryInterval` | `30s` (kept) | `24h` |
   | `plannedFailover.*` timers | owned by #235: lower `1s` and an upper bound are expected | |
+  | `plannedFailover.maxLagWait` (revision 6, WS-E; #235 set no bound) | `1s` | `1h` |
+  | `plannedFailover.drainTimeout` (revision 6, WS-E) | `1s` | `10m` |
 
   - `Minimum=0` on both `startingDeadlineSeconds` fields.
   - Every rule's operands are bounded so the CEL cost check passes.
@@ -1105,6 +1159,16 @@ algorithm id).
     `+kubebuilder:validation:Format=duration` marker is added: CEL would then type the field as `duration`, and
     the OpenAPI duration format accepts spellings that `time.ParseDuration` rejects.
   - Admission tests for the bounds run on envtest assets at the supported floor (A-115).
+  - **Planned-failover bounds (revision 6, WS-E, decision WE-Q3, B.5).**
+    - The `planned-failover` annotation's `maxLagWait=` override (`planned_failover.go:124-133` at `8067420`,
+      which today checks only `> 0`) takes the same `1s..1h` bound, from one shared constant pair.
+    - A zero spec value no longer falls through to the default (A-37).
+    - The frozen `status.plannedFailover.settings` durations get no CEL, and the reflection test exempts them by
+      path. They are operator-written copies of inputs that were already bounded, and a refused status write while
+      the source is fenced would wedge the run.
+    - Rejected:
+      - the same CEL on the status copies;
+      - a `24h` `maxLagWait`. The source is fenced while the run waits, so this bound limits a write outage.
 - **Disagreement:** MFGSPEC floated allowing a zero cooldown. Rejected: the cooldown is anti-flap safety, and
   zero cannot disable it today either. The playground's smallest value is 30s.
 
@@ -1284,6 +1348,30 @@ algorithm id).
   - #203 merges before WS-E (C-10) and writes its attribution fields wherever it chooses. E10 moves whatever
     #203 left (key selector, keyed fingerprint) inside this struct, not as siblings. WS-D is not asked to create
     `status.encryption` early, because that would collide with E10 (OPUS-15).
+- **Amended (revision 6, WS-E, decisions WE-R1 and WE-Q1, B.5).** This amendment replaces the decision bullets above where
+  they differ.
+  - **Mode spelling.** The mode is `None|Passphrase`, not `None|Encrypted`. It uses one shared API type, renamed
+    from `PITRArchiveEncryptionMode` (`pitr_archive_types.go:8-19` at `8067420`). The same type is used by
+    `status.pitrArchiveBindings[].encryption.mode`, `status.pitr.archive.encryptionMode` and every
+    `PITRArchiveIdentity.encryptionMode`. The descriptor, sidecar and env bytes, already `None|Passphrase`, do not
+    change.
+    - Rejected: `Encrypted`. It is a second spelling for the same passphrase mechanism, a boolean in disguise
+      once a KMS mode exists, and it would change authenticated descriptor bytes.
+  - **Where the key lives.** #203 recorded the dump key in `status.artifactStorage.passphraseSecret{name, key}`.
+    It stays there:
+    - E5 renames it `passphraseSecretKeyRef` and adds bounds;
+    - the root rule (`mysqlbackup_types.go:19`) keeps guarding it with the destination.
+
+    The sentence above that "moves whatever #203 left inside this struct" does not apply to this field. It is
+    launch-time storage, not attribution.
+    - Rejected: the key under `status.encryption` with a second immutability rule. That puts a field-level rule
+      inside a correctable struct, adds a block-removal case, and uses two rules over two structs for one
+      invariant.
+    - Cost: a pinned key with `mode: None` is representable. It is informative (the correction path), not invalid.
+  - **When it is written.** `status.encryption{mode, algorithm}` is written at launch from the owned Job, as
+    `encrypted`/`encryptionAlgorithm` are today (`backup_reconciler.go:326`). Abandoned cleanup reads it. It is
+    re-derived at completion, and stays correctable (`EncryptionAttributionCorrected`). "Absent until
+    `MetadataComplete`" is replaced: absent means no owned producing-Job attribution.
 
 #### A-46 Encryption coverage observations are optional
 
@@ -1473,6 +1561,31 @@ algorithm id).
   7. **Event reasons follow A-74** (`PlannedFailoverSucceeded` for completion). Metric `reason` labels and the
      `/deploy/v1` `plannedFailover` fields carry the typed constants verbatim (A-114).
   8. **The trigger grammar follows A-78.**
+- **Step 0 result (revision 6, WS-E, at `8067420`; B.5).** #246 merged the claim. The evidence and the
+  revision 3 branch description above are historical. Checklist items 1, 2, 4 and 8 comply in full. The gaps in
+  items 3, 5, 6 and 7, and in the cross-cutting rules, are listed below with their commits:
+  - **3 (baseline).** `claimBaseline` is a deliberate `FailoverRecordRef{time, target}`; the watermark is the
+    run's `fence.gtidSet`. E10 (WE-Q2): A-40's `FailoverRecord` embeds `FailoverRecordRef` inline, so the two fields
+    have one Go definition. The claim comparison does not change.
+  - **3 (bounds).** Status site fields are bounded only by `MinLength`. E6 adds A-15's bound (low priority).
+  - **5.** The hold condition is stamped with the generation of the object the terminal write was built on.
+    E11 (WE-Q11c): that generation stays, documented as the hold's provenance, and is not replaced by the topology
+    generation.
+  - **5 (docs).** `4.runbooks.md:116` removes an orphan `True` condition with `--subresource=status`. Section 4
+    row; E18.
+  - **6.** The keys are defined in `internal/controller`, and the plugin copies the request key. E1 moves them;
+    E14 adds the generated A-79 rows.
+  - **6 (A-80).** An unknown terminal-marker version is silently "no marker" outside the fail-closed hold reader.
+    E14 (WE-Q11d).
+  - **6 (watermark keys).** `promotion-gtid-executed` and `…-for` are in 1.3, Operator-owned read-only, with
+    their grammar kept.
+  - **7.** `DragonflyPromotionCompleted`, `DragonflySyncTimeout`, `DragonflyPromotionWaiting` and
+    `…HoldAcknowledgementIgnored`: E12 (WE-Q7). `planned_failovers_total{result}`: E7 (WE-Q4). The hold's
+    `unstableReason`: E11 (WE-Q8).
+  - **Timers.** No CEL bounds on the three planned timers: E8 (A-38 as amended, WE-Q3).
+  - **Durable markers.** `// Durable:` markers on `plannedFailover` and `plannedFailoverHold`: E10 (A-89).
+  - **Shrinks.** E5, E7's planned enum work, E14's trigger grammar and E15's `ack-planned-failover-hold` verb are
+    already done.
 
 #### A-51 Encryption adoption is a spec policy, not an annotation
 
@@ -1806,6 +1919,14 @@ algorithm id).
   - Drop `message`.
   - Printer columns: `Dump`, `NewestBinlog` (date) and `Age`. The `Ready` column is added in E11 with A-70's
     condition (A-94); revision 2 listed it here, in E2, before anything writes it (OPUS-R2-14).
+  - **Amended (revision 6, WS-E, decision WE-R3, B.5).** #206 added `status.discovered.archive *PITRArchiveIdentity`
+    (`mysqlstandbycluster_types.go:252` at `8067420`). It moves to `binlogArchive.identity`:
+    `binlogArchive{identity, manifestCount, fileCount, sizeBytes, oldestEventTime, newestEventTime}`.
+    - The scan publishes the identity and the window together or not at all
+      (`standbycluster_reconciler.go:1036-1051`), so `binlogArchive` is absent while the descriptor is missing or
+      refused. `SourceConfigKnown` says why, with its new `Archive*` reasons (1.2), and `latestDump` is still
+      published.
+    - Rejected: the identity as a third `discovered` sibling, which would make two optional structs for one object.
 
 #### A-65 `spec.triggeredBy` moves to metadata
 
@@ -2041,6 +2162,30 @@ algorithm id).
   - The six reasons added since `3fa1900` (section 1.4) go through the same rule in E12. Today
     `RestorePeerReplicationIncomplete` and `RestoreInPlaceWaitingForPreviousQueue` are not `<Subject><PastTenseVerb>`.
   - Release notes carry the old → new table.
+  - **Amended (revision 6, WS-E, decisions WE-Q5 and WE-Q7, B.5).**
+    - **Condition mirrors.** Events whose reason mirrors a condition reason are exempt from the verb rule, as MDB
+      `fail()` reasons already are: `ProfileReadOnly`, `PITRArchiveRolloutPending`, `DumpKeySnapshotConflict`,
+      `PassphraseSecretMissing`, `PITRArchiveBindingNotReady`, `PITRBackupDumpKeyMissing` and the PITR catalog
+      tokens. The A-76 registry classifies them as mirrors.
+      - Rejected: renaming the mirrors, which would create a second vocabulary for one observation.
+    - **Standalone noun Events are renamed. Only the Event changes; the status reason keeps its noun**, an
+      exception to "E12 renames the Event, the status writer and its constant together" above:
+      - `DragonflySyncTimeout` → `DragonflySyncTimedOut` (the status reason stays `DragonflySyncTimeout`)
+      - `DragonflyPromotionWaiting` → `DragonflyPromotionDeferred`
+      - `PITRArchiveKeySnapshotUnreadable` → `PITRArchiveKeySnapshotReadFailed`
+      - `ArtifactCleanupProducerStuck` → an `ArtifactCleanupStalled…` name that E12 chooses from its meaning and
+        records in its PR
+      - `PlannedFailoverHoldAcknowledgementIgnored` → `PlannedFailoverHoldAcknowledgmentIgnored` (US spelling).
+        Any key or condition reason that spells "Acknowledgement" would change the same way. At `8067420` there
+        is none.
+    - **`PointInTimePartial`.** The row `PointInTimePartial` → `PITRReplayTruncated` renames the Event only (WE-Q5).
+      E10 drops the `status.restore.reason` copy, which duplicates `provenance.pointInTime.outcome: Partial`.
+    - **Served PITR fallback.** The fallback restore and verification reason, the script sentinel
+      `BLOODRAVEN_PITR_FAILED`, is served as `PITRReplayFailed`. The raw sentinel stays a wire token (WE-Q6, WE-Q7).
+    - **Void rows.** The `PointInTimeCrossSiteUnverified` row is void: #206 removed it, and
+      `PITRSharedArchivePrefix` too. `PlannedFailoverCompleted` is done (#246).
+    - **Not settled.** `PITRArchiveNotStamped`, a standalone Normal Event (`backup_reconciler.go:264` at
+      `8067420`), has no verb. WE-Q7 did not name it, so E12 applies this rule and records the name in its PR.
 - Settled (Event reasons are not schema, but v1.7.0 is the cheap moment).
 
 #### A-75 One reason, one Event type, one emission
@@ -2396,6 +2541,21 @@ Section 4 lists every documented status write with its replacement.
       unique writable primary, and fences deployment leases meanwhile.
     - **True fresh deploy.** No status, no annotations and no replication metadata. Bootstrap proceeds as today
       (`isFreshDeploy`).
+- **Revision 6 (WS-E, PR #272): the promotion wait is narrowed out to #274.** E10 added the lost-status wait
+  (refuse automatic promotion until a unique writable primary is observed, fence deployment leases meanwhile).
+  Three consecutive review rounds found High defects in it, and liveness wedges beside a healthy primary, so it
+  was removed under program rule 7 before PR1 merged. It never shipped. What PR1 keeps of A-89:
+  - the `// Durable:` markers and their list in `crd-reference.md`;
+  - rehydration of the failover record from its annotation copy (A-104);
+  - a lost status on a running group is not taken for a fresh deploy (no bootstrap clone), and a true fresh
+    deploy still bootstraps (the R11 component tests);
+  - control tests pinning the shipped behaviour that #274 must preserve: a lost status beside a healthy primary
+    fails over, and a restore seed is made writable.
+
+  Not shipped in v1.7.0 unless #274 lands first: refusing promotion and fencing deployment leases after a lost
+  status. Promotion after a lost status behaves as before WS-E. #274 owns the redesign (a UID-scoped internal
+  marker that gates writability and leases only); it is additive and not freeze-critical (**Brk** no). The
+  release notes, the WS-F inputs and the v1beta1 checklist must not cite the wait as shipped.
 
 ### 2.15 Validation bounds and CEL cost
 
@@ -2548,6 +2708,27 @@ Section 4 lists every documented status write with its replacement.
     int32, sites []string (atomic), partial bool, …}`.
   - WS-E reshapes this after #206 merges. #206 is expected to replace `pitrCrossSiteUnverified bool` with an
     enum such as `crossSiteContinuity: Proven|Unverified|NotApplicable`.
+- **Amended (revision 6, WS-E, decision WE-R2, B.5).** #206 removed every flat `pitr*` field and the cross-site
+  boolean. It added `PointInTimeResult` (`pitr_archive_types.go:181-252` at `8067420`): `mode`, `stopTime`,
+  `outcome: TargetCovered|Partial|ArchiveHead`, `archive`, `replaySites`, `replaySitesOmitted`, segment, binlog
+  and transaction counts, `lastReplayedBinlog{site, name}`, `newestReplayedCommitTime` (MicroTime), the
+  exclusion diagnostics, `gtidExecuted` and its digest.
+  - **The shape.** That certified verdict replaces `PointInTimeReplayStatus`:
+    `provenance{source{sizeBytes?, gtidExecuted?, binlogPosition?}, target{gtidExecuted?, binlogPosition?},
+    pointInTime?: PointInTimeResult}` on `status.restore` and on `status.restoreInPlace`. The type's fields and
+    semantics are unchanged.
+  - **In-place restore.** `restoreInPlace.pointInTime` moves under `provenance` and stays nil, because
+    `restore_inplace.go:305,1459` refuse the spec field (A-59). No replay is enabled.
+  - **MBV.** MBV keeps its root `status.pointInTime`. MBV `spec.pointInTime.mode`, and the profile's
+    verification mirror, reuse `PointInTimeMode` (`Timestamp|Latest`, required inside a present block). An
+    exhaustive adapter maps it to the lowercase wire, so `pitr_download.go`, `restore_script.py` and
+    `internal/pitrplan` do not change.
+  - **Duplicates dropped (WE-Q5).** E10 drops MBV `status.replayedThroughBinlog`, whose `position` is never written;
+    the replay-lag metric reads `pointInTime.newestReplayedCommitTime`. E10 also drops
+    `status.restore.reason=PointInTimePartial`.
+  - **Rejected:**
+    - `PointInTimeReplayStatus{partial bool, …}`, which loses #206's certified outcome and proof fields;
+    - a second `PointInTimeVerificationMode` type with identical values.
 
 #### A-98 MysqlBackup gets a deletion policy
 
@@ -2677,6 +2858,20 @@ The round 1 critiques (section 8.1) found two decisions the first draft lacked.
       the 409 body, `11.deployment-api.md`, `2.operations.md`, `2.monitoring.md:50`, the doctor
       (`alert_runbook_matrix.md:64`, `SKILL.md`) and s53.
     - Section 3.4 carries a migration row for each surface.
+- **Amended (revision 6, WS-E, decisions WE-Q4 and WE-Q8, B.5).**
+  - **Planned-failover `result` label.** `bloodraven_planned_failovers_total{result}` (1.5) follows the
+    enum-valued label rule: its values become the kebab-case of `PlannedFailoverOutcome`. `success`, `rejected`,
+    `failed_timeout` and `failed_other` become `succeeded`, `not-started`, `rolled-back`, `source-left-fenced`,
+    `promoted-unconfirmed` and `manual-recovery-required`, from one mapping function, in E7, with a 3.4 row.
+    - Rejected: keeping the four snake_case values. That is a lossy third spelling: a `NotStarted` run that hit
+      `AdmissionTimeout` is counted as `failed_timeout`.
+  - **Standing hold in `/deploy/v1`.** A standing planned-failover automation hold is reported as its own
+    `unstableReason`, `AutomaticFailoverHeld`. A run in flight or a held claim keeps `PlannedFailover`. The
+    chart's ArgoCD Lua reports `Degraded` while `AutomaticFailoverHeld=True` (E11). Leases stay refused either
+    way, so the semantics do not change.
+    - Rejected: one `PlannedFailover` token for both, which gives one token two meanings (A-73).
+  - **Unchanged.** `/deploy/v1` `operations.plannedFailover.outcome` (new in #246) carries the typed constant
+    verbatim. The sidecar `/archiver/status` is Internal and outside this finding (WE-Q10, 1.5).
 - **Rejected:**
   - Raw CamelCase metric values, which would break every documented query for no gain.
   - Freezing `dr-only`, which would leave a second name for the role.
@@ -2862,6 +3057,7 @@ nobody set them (OPUS-23).
 | MFG | `sites[].role: primary-candidate \| dr-only \| read-only` (present in every export) | `PrimaryCandidate \| DisasterRecovery \| ReadOnly` | Rewrite the values | A-27 |
 | MBV | `pointInTime.mode: none \| latest \| timestamp` | `Latest \| Timestamp`, required in the block | `none` → delete the block; capitalise the others. The MFG restore `pointInTime` has no `mode` (revision 5, F-66) | A-27 |
 | MFG | `dragonfly.plannedFailover.onSyncTimeout: proceed \| fail` (present in every export with Dragonfly) | `Proceed \| Fail` | Capitalise | A-27 |
+| MFG | `spec.plannedFailover.onCooldown: reject \| defer` (present in every export with a `plannedFailover` block) (revision 6, WS-E) | `Reject \| Defer` (#246); stored lowercase values are no longer read (WE-Q11f) | Capitalise | A-27, A-50 |
 | MFG | `spec.updateStrategy: OrderedUpdate \| Recreate` (present in every export) | `spec.updateStrategy: {type: …}` | Delete a defaulted `OrderedUpdate`; wrap `Recreate` in an object | A-27 |
 | MFG | `status.sites[].state`, `status.dragonfly.sites[].role` lowercase | CamelCase | Status-only | A-28 |
 | MFG | `""` admitted by the status enums listed in A-28 (`restoreInPlace.phase`, `dragonfly.phase`, keyring `phase` and `unsealReason`, `recoveryState`, `divergenceDetectedBy`, `sourceConvergenceState`) | `""` rejected; absent means unset (revision 4) | Status-only | A-28 |
@@ -2869,7 +3065,7 @@ nobody set them (OPUS-23).
 | MFG | `status.restoreInPlace.scope: "full" \| "schema:<n>"` | `scope{type, schema}` | Status-only | A-30 |
 | MBV | phases `Checking`, `Cleaning` | removed | Status-only | A-31 |
 | MDB | phase `Creating` | `Applying` | Status-only | A-32 |
-| MFG | free-string `status.restore.reason`, `dragonfly.upgrade.reason`, `plannedFailover.dragonfly.reason`, `sites[].sourceConvergenceReason` | typed; condition-reason pattern, `MaxLength=1024`; `sourceConvergenceReason` an enum | Status-only | A-33 |
+| MFG | free-string `status.restore.reason`, `dragonfly.upgrade.reason`, `plannedFailover.dragonfly.reason`, `sites[].sourceConvergenceReason` | typed; condition-reason pattern, `MaxLength=1024`; `sourceConvergenceReason` an enum. Revision 6, WS-E: `plannedFailover.dragonfly.reason` is already typed (#246); `status.restore.reason` takes the PITR catalog constants, never `PointInTimePartial` (WE-Q5), and serves the script sentinel as `PITRReplayFailed` (WE-Q7) | Status-only | A-33 |
 | MFG, MBV | `sanityCheck.expect.{minRows, maxDurationSeconds}` | `sanityCheck.{minResult, timeout}` | `minRows` → `minResult`; `maxDurationSeconds: 60` → `timeout: 60s` | A-34 |
 | MBV | `status.sanityCheck.{ran, resultRow, durationMs}` | `{outcome, result, durationMilliseconds, error}` | Status-only | A-34 |
 | MFG | `spec.cloneTimeout: 3600` (present in every export) | `spec.cloneTimeout: 1h` | Delete the default; convert other values from seconds to a duration | A-35, A-36 |
@@ -2878,7 +3074,7 @@ nobody set them (OPUS-23).
 | MFG | `spec.dns.ttl` (present in every export) | `spec.dns.ttlSeconds` | Rename, or delete the default `60` | A-35 |
 | MFG | `status.dragonfly.sites[].lastIOSecondsAgo` `int` | `*int64` | Status-only | A-36 |
 | MFG, MBV | zero rewritten to a default (`maxLagSeconds`, `backoffLimit`, `maxLagSecondsForSource`), and the TTL lifecycle change (`ttlSecondsAfterFinished` on the MBV and on the profile's `verification`) | pointers; 0 means 0 | Review explicit zeros. MBV `ttlSecondsAfterFinished` and the profile's `verification.ttlSecondsAfterFinished` no longer default to 0: an omitted value now keeps the verification's resources until retention (a lifecycle change, not a zero rewrite; F-54). Set 0 to keep immediate cleanup. | A-37 |
-| MFG, MSC | unbounded Durations | lower and upper bounds | Fix out-of-range values (e.g. `pollInterval: 0s`, `failoverCooldown` < 30s) | A-38 |
+| MFG, MSC | unbounded Durations | lower and upper bounds. Revision 6, WS-E: `plannedFailover.maxLagWait` `1s..1h` (also the `planned-failover` annotation's `maxLagWait=`), `plannedFailover.drainTimeout` and `dragonfly.plannedFailover.maxSyncWait` `1s..10m` (WE-Q3) | Fix out-of-range values (e.g. `pollInterval: 0s`, `failoverCooldown` < 30s, `maxLagWait: 24h`) | A-38 |
 | MFG | `pointInTime.stopDatetime: "2026-04-15 09:30:00"` | `pointInTime.stopTime: "2026-04-15T09:30:00Z"` | Rename; add the zone | A-39 |
 | MBV | `pointInTime.timestamp` | `pointInTime.stopTime` | Rename. The MFG restore `pointInTime` has no `timestamp`; its `stopDatetime` has its own row (revision 5, F-66) | A-39 |
 | MFG | `status.lastFailover`, `lastFailoverTarget`, `promotionGtidExecuted` | `status.lastFailover{time, target, promotionGtidExecuted}` | Status-only | A-40 |
@@ -2889,12 +3085,12 @@ nobody set them (OPUS-23).
 | MBK | `status.binlogFile`, `binlogPos` | `status.binlogPosition{file, position}` | Status-only | A-42 |
 | MFG | `status.sites[].replicating` | `status.sites[].replication` (enum) | Status-only | A-43 |
 | MFG | `status.dragonfly.sites[].syncInProgress` `bool` | `*bool` | Status-only | A-44 |
-| MBK | `status.encrypted`, `encryptionAlgorithm` | `status.encryption{mode, algorithm}` | Status-only | A-45 |
+| MBK | `status.encrypted`, `encryptionAlgorithm` | `status.encryption{mode, algorithm}`; revision 6, WS-E: `mode: None \| Passphrase` (WE-R1), written at launch from the owned Job and re-derived at completion (WE-Q1) | Status-only | A-45 |
 | MFG | `status.encryptionAtRest.sites[].coverage.*` `bool` | `*bool` | Status-only | A-46 |
 | MFG | `status.encryptionAtRest.sealed` | removed; use `EncryptionAtRestReady` | Status-only; update alerts | A-47 |
 | MFG | annotation `bloodraven.shipstream.io/dragonfly-snapshot-upgrade=<img>` | `spec.dragonfly.upgradeStrategy: SnapshotRestore` + edit `spec.dragonfly.image` | Replace the annotation with a spec edit | A-48 |
 | MFG | `status.pitr.enabled`, `status.pitr.profileName` (revision 5, F-39), `status.dragonfly.enabled` | removed | Status-only: read `spec.backup.pitr` and the `PITRArchiveReady` condition | A-49 |
-| MFG | `status.plannedFailover.{target, sourcePrimary, reason, …}` and the #235 additions | owned by #235, held to the A-50 checklist: one durable-claim record with `runID`, `sourceSite`, `targetSite`, typed CamelCase `outcome` and `reason`; condition `AutomaticFailoverHeld`; `acknowledge-planned-failover-hold` annotation | Per #235's table; status-only for the record | A-50 |
+| MFG | `status.plannedFailover.{target, sourcePrimary, reason, …}` and the #235 additions | owned by #235, held to the A-50 checklist: one durable-claim record with `runID`, `sourceSite`, `targetSite`, typed CamelCase `outcome` and `reason`; condition `AutomaticFailoverHeld`; `acknowledge-planned-failover-hold` annotation. Revision 6, WS-E, as #246 merged it: `status.plannedFailover{runID, revision, phase, targetSite, settings, startTime, sourceSite, claimTime, claimBaseline, admission, fence, drain, lagWait, dragonfly, promotion, dns, rollback, result{outcome, reason, warnings, …}, message}` (phases in 1.2), plus `status.plannedFailoverHold{runID, reason, sourceSite, targetSite, ambiguousSites, holdTime}`; `claimBaseline` embeds into A-40's record (WE-Q2) | Status-only for the record. The trigger annotation keeps `<site>[:maxLagWait=<dur>]` (now `<site>(:<key>=<value>)*`, unknown keys rejected); a standing hold is cleared with `kubectl bloodraven ack-planned-failover-hold`. #246's own table is in `10.upgrade-policy.md`; the release notes merge it | A-50 |
 | MFG | annotation `bloodraven.shipstream.io/encryption-adopt=confirm` | `spec.encryptionAtRest.existingData: LeavePlaintext` | Replace the annotation | A-51 |
 | MFG | `spec.sidecarImage` (present in every export: the persisted default 1.3.2), `spec.sidecarResources` | `spec.sidecar.image` (empty means the operator default), `spec.sidecar.resources` | Delete a persisted `1.3.2` value to track the operator, or move a pin. An unpinned group rolls its sidecar after every operator upgrade, one group at a time | A-52 |
 | MFG | MySQL and Dragonfly pods get no security context by default; Jobs use uid 27 | merged hardened defaults, uid 999 (if the A-54 gate passes) | Remove contexts that only restated defaults; check volume ownership | A-54 |
@@ -2909,13 +3105,13 @@ nobody set them (OPUS-23).
 | MSC | `status.{lastVerified, activation, materializedFailoverGroup}` | removed | Status-only | A-61 |
 | MSC | `spec.template` | removed | Delete the block; keep it in Git for the future activation request | A-62 |
 | MSC | `spec.source.storage{type: S3, s3{…}}` | `spec.source.s3{…}` (`prefix` required) | Unwrap | A-63 |
-| MSC | `status.discovered.{dump*, …, message}` | `status.discovered{latestDump, binlogArchive, lastScanTime}` | Status-only | A-64 |
+| MSC | `status.discovered.{dump*, …, message}` | `status.discovered{latestDump, binlogArchive, lastScanTime}`; revision 6, WS-E: `binlogArchive.identity` carries #206's archive identity (unreleased `discovered.archive`), absent while the archive is refused (WE-R3) | Status-only | A-64 |
 | MBK, MBV | `spec.triggeredBy` | annotation `bloodraven.shipstream.io/triggered-by` | Move the value | A-65 |
 | MFG | `spec.sidecar.bloodravenAddress` | `spec.sidecar.operatorEndpoint` | Rename | A-66 |
 | MFG | `spec.dragonfly.snapshot.{s3Endpoint: host:port, s3UseHTTPS}` | `spec.dragonfly.snapshot.s3EndpointURL` | `s3Endpoint: rustfs:9000` plus `s3UseHTTPS: false` → `s3EndpointURL: http://rustfs:9000`. An unset `s3UseHTTPS` means `https://` | A-67 |
 | MFG | `Ready` reason `TopologyPolled`; `Bootstrapping`/`Updating`/`Degraded` reasons | per A-71 and A-72 | Status-only; update alert rules on reasons | A-71, A-72 |
 | MBK, MDB | reasons `NoHealthySource` (Pending), `GroupNotFound` (Pending) | `WaitingForHealthySource`, `GroupNotYetCreated` | Status-only | A-73 |
-| Events | the A-74 and A-75 rename lists, including A-73's `PITRArchiveReady` → `PITRArchiveRecovered` (revision 5, F-34) | renamed reasons and types | Update Event routing | A-73, A-74, A-75 |
+| Events | the A-74 and A-75 rename lists, including A-73's `PITRArchiveReady` → `PITRArchiveRecovered` (revision 5, F-34) | renamed reasons and types. Revision 6, WS-E: plus `DragonflySyncTimeout` → `DragonflySyncTimedOut` and `DragonflyPromotionWaiting` → `DragonflyPromotionDeferred` (Event only; WE-Q7); `PlannedFailoverCompleted` → `PlannedFailoverSucceeded` and the other #246 renames are in `10.upgrade-policy.md`; `PointInTimeCrossSiteUnverified` and `PITRSharedArchivePrefix` were removed (#206) | Update Event routing | A-73, A-74, A-75 |
 | Labels, annotations, finalizers | `shipstream.io/*`; `healthy=yes\|no`; `dragonfly-traffic=enabled` | `bloodraven.shipstream.io/*`; `"true"`/`"false"` | Write selectors, NetworkPolicies and monitors for the new keys in the new group's manifests | A-77 |
 | MBK annotation | `hold.verification.shipstream.io/<uid>` | `verification-hold.bloodraven.shipstream.io/<uid>` (`<kind>-hold.bloodraven.shipstream.io/<id>` family) | Operator-written; update scripts and queries that read it | A-77 |
 | MFG finalizer | `shipstream.io/graceful-shutdown` | `bloodraven.shipstream.io/failover-group` | Operator-written | A-77 |
@@ -2924,14 +3120,21 @@ nobody set them (OPUS-23).
 | MFG | `maxBinlogSize`, `bytesPerChunk`, `mysqlConf` unvalidated | patterns and CEL | Fix invalid values | A-90 |
 | MFG | PITR, schedule and verification cross-references unchecked | CEL | Fix dangling references | A-91 |
 | MFG | `license`, `dragonfly.args` unbounded; reserved flags in args | bounded, reserved flags rejected | Remove reserved flags | A-92 |
-| MBK | `status.location`, `status.storageType` | `status.artifactStorage.{location, type}` | Status-only; update printer columns and scripts | A-96 |
+| MBK | `status.location`, `status.storageType` | `status.artifactStorage.{location, type}`; revision 6, WS-E: plus #203's dump key as `artifactStorage.passphraseSecretKeyRef{name, key}` (unreleased `passphraseSecret`; E5, WE-Q1) | Status-only; update printer columns and scripts | A-96 |
 | MBV | `status.backupRef.{location, storageType}` | `status.backupRef.artifactStorage` | Status-only | A-96 |
-| MFG | `status.restore.*` and `status.restoreInPlace.*` `source*`/`target*`/`pitr*` fields | `provenance{source, target, pointInTime}` | Status-only | A-97 |
+| MFG | `status.restore.*` and `status.restoreInPlace.*` `source*`/`target*`/`pitr*` fields | `provenance{source, target, pointInTime}`; revision 6, WS-E: `pointInTime` is #206's `PointInTimeResult` (`outcome: TargetCovered \| Partial \| ArchiveHead` replaces `pitrPartial` and `pitrCrossSiteUnverified`; `replaySites`, `lastReplayedBinlog`, `newestReplayedCommitTime` replace the other `pitr*` fields); nil on `restoreInPlace` (WE-R2) | Status-only; alert on `provenance.pointInTime.outcome: Partial`, not on `reason: PointInTimePartial` (WE-Q5) | A-97 |
+| MBV | `status.replayedThroughBinlog{file, position, timestamp}` (revision 6, WS-E) | removed; `status.pointInTime` (`PointInTimeResult`) | Status-only; the replay-lag metric now reads `pointInTime.newestReplayedCommitTime` (WE-Q5) | A-57, A-97 |
+| MFG | `initFromBackup.pointInTime.{sites, allowUnverifiedCrossSite}` (revision 6, WS-E) | removed (#206): the replay order and cross-site continuity are proved from the archive, never chosen by the caller | Delete the keys (#247's step in `10.upgrade-policy.md:260-263`) | A-113 |
+| MBV, MFG | MBV `spec.pointInTime.sites` and the profile verification schedule's `pointInTime.sites` (revision 6, WS-E) | removed (#206) | Delete the key | A-113 |
+| MFG | `initFromBackup.pointInTime.archiveProfileName` optional (revision 6, WS-E) | required whenever `pointInTime` is set (CEL, #206), DNS label ≤ 63 | Name the profile whose archive to replay | A-113, A-23 |
+| MFG | encryption of the enabled PITR profile mutable (revision 6, WS-E) | `spec.backup.profiles[pitr.profileName].encryption` (presence, algorithm, passphrase Secret) refused while that profile archives to the same storage (root rule `api/v1alpha1/types.go:15`, #259) | Set the final encryption when the group is created. To rotate, create a new profile with a new prefix and switch `pitr.profileName` to it | A-25 |
+| MFG | (unreleased, #203) `release-pitr-archive-binding=<pab-id>:confirm=<name>` (revision 6, WS-E) | `…:confirm=<name>:uid=<group uid>` (WE-Q9) | Add `uid=` in scripts written against `main` | A-78 |
 | MDB | `spec.collation` defaulted to `utf8mb4_unicode_ci` (present in every export) | no default; unset renders no `COLLATE` | Keep `collation: utf8mb4_unicode_ci` explicitly where new schemas must match the old behaviour | A-53 |
 | Metrics | label `role="dr-only"` | `role="disaster-recovery"` (other `role` and `state` values unchanged) | Update alert rules and dashboards | A-114 |
 | Metrics | `bloodraven_restore_reclone_pending{phase}` values `Armed`, `Draining`, `Held` | `armed`, `draining`, `held` | Update alert rules such as `BloodravenRestoreReclonesHeld` (revision 5, F-17) | A-114 |
+| Metrics | `bloodraven_planned_failovers_total{result}` values `success`, `rejected`, `failed_timeout`, `failed_other` (revision 6, WS-E) | `succeeded`, `not-started`, `rolled-back`, `source-left-fenced`, `promoted-unconfirmed`, `manual-recovery-required` (WE-Q4) | Update alert rules and dashboards; `failed_timeout` has no single successor (a lag timeout ends `rolled-back`, an admission timeout `not-started`) | A-114 |
 | Metrics, `/deploy/v1` | lease revocation reason `operator_revoked`, `topology_changed` (the `bloodraven_deploy_lease_revocations_total{reason}` label and the 409 `reason`) | `OperatorRevoked`, `TopologyChanged` | Update PromQL and deploy clients that compare the 409 reason (revision 5, F-18) | A-114 |
-| `/deploy/v1` | raw tokens in `updatePhase`, `degradedReason`, `plannedFailover`, `restoreInPlace`, `dragonflyUpgrade`, `unstableReason` | the A-69 constants, as renamed by A-29, A-72, A-73 and #235 | Update CI gates that compare the values (release-note table) | A-114 |
+| `/deploy/v1` | raw tokens in `updatePhase`, `degradedReason`, `plannedFailover`, `restoreInPlace`, `dragonflyUpgrade`, `unstableReason` | the A-69 constants, as renamed by A-29, A-72, A-73 and #235. Revision 6, WS-E: `plannedFailover` gains `outcome` (#246), and a standing automation hold reports `unstableReason: AutomaticFailoverHeld`, not `PlannedFailover` (WE-Q8) | Update CI gates that compare the values (release-note table) | A-114 |
 | `/deploy/v1` | `health.replicationRunning` from the `replicating` bool | same name and meaning: every non-active spec site reports `Healthy` or `Lagging` | None; the definition is now documented | A-43, A-114 |
 | Metrics | `reason` label values on `bloodraven_planned_failovers_deferred_total`, `bloodraven_deploy_lease_revocations_total`, `bloodraven_backup_artifact_cleanup_failures_total` | the A-69 reason constants, as renamed by A-73, A-74 and #235 | Update alert rules that select on a renamed reason (release-note table) | A-114 |
 | Operator `/status`, `/ws/status` | site `state` lowercase (`writable`, `read-only`, …); `role` kebab-case | `state` and `role` carry the CR values (`Writable`, `ReadOnly`, `PrimaryCandidate`, …) | Update scripts and dashboards that compare them | A-27, A-28, A-114 |
@@ -2979,9 +3182,10 @@ instruction fails, and a `_test.go` negative assertion with the same token passe
 | MFG `status.restoreReclones` removed | `7.backup-and-restore/2.backup-restore.md:930`; doctor `troubleshooting_playbooks.md:544`, `alert_runbook_matrix.md:58`; prose in `8.observability/2.monitoring.md:374,390` | Accept stale peers while the restored primary is down | #204 (deferred under D4): a confirmed `restore-reclones-release=<site>:confirm=<group>:uid=<uid>:token=<t>` annotation | **Break-glass, unsupported**: needs status RBAC, releases every queued site without validation, and since #233 restarts their replication from the current primary | A-85 |
 | MFG `status.restoreReclones` removed (operator messages) | `PromotionRefusedPendingReclone` Event text (`internal/controller/runner.go:2149-2152`); `Degraded=NoPrimary` refusal text (`internal/state/matrix.go:219-221`) | The same: the message embeds the command | E18 rewrites both messages to name the break-glass runbook anchor instead of embedding the command. The mirrored log-schema row (`7.log-schema.md:268`) keeps its `msg` and fields | **Break-glass, unsupported** (by reference) | A-85 |
 | MFG `status.restoreReclones.phase` → `Draining` | `2.backup-restore.md:913`; `troubleshooting_playbooks.md:548`; prose in `2.monitoring.md:390`; API comment `api/v1alpha1/backup_types.go:901-913` | Resume a `Held` queue | #204 scope extended: a `restore-reclones-resume` action bound to the group UID and the queue `confirmToken`. The API comment loses the administrator sentence now | **Break-glass, unsupported** until #204 | A-85 |
+| MFG `status.conditions[<index>]` (`AutomaticFailoverHeld`, a `True` condition with no `status.plannedFailoverHold`) removed (revision 6, WS-E; #246) | Command: `6.operations/4.runbooks.md:116`. Prose: doctor `SKILL.md:84`, `troubleshooting_playbooks.md:1168`, `6.operations/7.planned-failover.md:368`, `6.operations/10.upgrade-policy.md:477` (at `8067420`) | Release an orphan hold (a hand-edited status, or a CRD rollback that pruned the hold record) that names no run, so no acknowledgement can match it; the operator then releases the hold (`why=orphanHold`) | None in v1.7.0. The supported acknowledgement (`ack-planned-failover-hold`) needs a run id. A supported repair would change claim recovery, which #235 owns | **Break-glass, unsupported** (WE-R5): E18 labels the block or replaces it, and its lint would otherwise fail on `:116` | A-50, A-89 |
 | MFG `status.conditions[<index>]` (`DivergentPromotion`) removed | `troubleshooting_playbooks.md:931-937`; `8.observability/7.log-schema.md:169`; `4.configuration/2.crd-reference.md:709` | Acknowledge a reviewed divergent promotion | `bloodraven.shipstream.io/acknowledge-divergent-promotion=<id>` and `kubectl bloodraven ack-divergence`, over `status.divergentPromotions[]` | Supported (WS-E) | A-86 |
 | MDB `status.{ownerUser, pendingOwnerUser, ownerHosts, appliedUsers[]}` "patch the record out" | `4.configuration/7.tenant-databases.md:356` (section at `:352`) | Remove doubtful records left by older operators | Delete the section. The remedy is `deletionPolicy: Retain`, then delete the CR | Removed (D3) | A-87 |
-| MFG `status.{activeSite, sites, conditions, lastFailover, lastFailoverTarget, promotionGtidExecuted, plannedFailover, updatePhase, recovery, dragonfly}`, plus `encryptionAtRest` on the wipe pass, removed, plus the failover annotations | `cmd/playground-chaos/reset.go:365-371,384-410` (via `playground/reset-mysql.sh`) | Playground wipe, so that `isFreshDeploy` re-bootstraps | None | **Break-glass, playground-only, unsupported on real clusters** | A-88 |
+| MFG `status.{activeSite, sites, conditions, lastFailover, lastFailoverTarget, promotionGtidExecuted, plannedFailover, updatePhase, recovery, dragonfly}`, plus `encryptionAtRest` on the wipe pass, removed, plus the failover annotations. Revision 6, WS-E, at `8067420`: the list is `{activeSite, sites, conditions, lastFailover, lastFailoverTarget, promotionGtidExecuted, plannedFailover, plannedFailoverHold, updatePhase, dragonfly}` (`recovery` dropped: no such field), plus `encryptionAtRest` and `pitrArchiveBindings` on the wipe pass; the reset also deletes stale PITR and dump key snapshot Secrets and clears the planned-failover annotations, except `planned-failover-confirmed` (D-16) | `cmd/playground-chaos/reset.go:365-371,384-410` (via `playground/reset-mysql.sh`); at `8067420` `reset.go:375-377,385-427,460` | Playground wipe, so that `isFreshDeploy` re-bootstraps | None | **Break-glass, playground-only, unsupported on real clusters** | A-88 |
 | MFG `status.{lastFailover, lastFailoverTarget, promotionGtidExecuted}` removed | s05 setup through `internal/playground/kube/mfg.go` | Test setup that bypasses the cooldown | None | Test tooling only | A-88 |
 
 Metadata patches that stay documented, because they are not status: removing old taints after A-21, on the old
@@ -3055,6 +3259,17 @@ delivered as five PRs. Each branches from `main` after the previous one merges, 
 | PR3 | A-52 rollout pacing | E13b | No: runtime behaviour; A-52's API part is in E13 | `e2e`, its own PR | The first release that upgrades v1.7.0-schema groups to a new default, in practice v1.7.0 (A-52); not WS-F or rc.0 |
 | PR4 | A-54 hardened security-context gate | E17 | No: A-54's API shape is the same in both outcomes | `e2e`, its own PR | Nothing. If it has not merged when v1.7.0 is cut, v1.7.0 ships option C (Q6) and records why |
 | PR5 | Non-freeze-critical behaviour and docs | E15, E18, E19 | No: E15 adds an additive status field, a key and plugin verbs; E18 and E19 change docs, messages and CI gates | `e2e` (E15) | v1.7.0, through C-12 and C-13; not WS-F or rc.0 |
+
+A finding graded **Brk** no rides in a freeze-critical PR only when a breaking shape it depends on forces it
+there; otherwise it goes to a later PR. Revision 6 (WS-E) records why: A-89's promotion wait rode in E10, cost
+three review rounds and was narrowed out to #274 before PR1 merged (A-89).
+
+Known follow-ups recorded during WS-E (revision 6), neither freeze-critical:
+
+- **#274:** the A-89 lost-status promotion wait and lease fencing (see A-89).
+- **#275 (pre-existing on `main`):** retention, artifact cleanup and the PITR cutoff count only verifications as
+  readers of a backup, so a running `restoreInPlace` or `initFromBackup` can lose its dump and binlogs mid-load.
+  The suggested fix is a stamped hold taken by UID. It adds behaviour, not a schema change.
 
 E14's taint-key length unit test uses A-15's bounds as constants; E6 then enforces them at admission. Until PR3
 merges, a change of the sidecar default rolls unpinned groups without pacing. No release is cut in that state
@@ -3148,7 +3363,7 @@ E16; PR3: E13b; PR4: E17; PR5: E15, E18, E19), and each one builds and passes on
 | E7 | CamelCase, typed enums for spec and status; stable metric label values; one vocabulary on the operator's JSON endpoints | A-27, A-28, A-29, A-30, A-32, A-33, A-114 (metrics, `/status`, `/ws/status` role and state) | types and constants; the API-to-internal `state.SiteRole` adapter replacing the cast at `reconciler.go:2383`, and its reverse for the endpoints and metrics (GPT-R3-01); the internal-to-API mappings for `DragonflyRole` (`dragonfly_topology.go:550,567`) and `SiteState` (`runner.go:2448`) (F-21); the PITR verification-mode wire adapter in `backup_verification_job.go` (F-10); `""` removed from the A-28 status enums; `UpdatePhaseComplete` deleted or mapped to `""` in the snapshot (A-29); literal sweep across the controller, plugin, `internal/playground`, `playground/manifests` (the `role:` values in `failovergroup.yaml` and `failovergroup-3site.yaml`; F-48), doctor `triage.sh`/`gtid-audit.sh`; `internal/metrics` label-value functions; the role and state adapter for `/status` (`topology.go:1124-1140`) and `/ws/status` (`:2136-2140`); the playground dashboard's comparisons and CSS classes (`playground/dashboard/index.html:17-18,131-150`) | unit: enum round-trip; unit: every Dragonfly classifier value and every internal site state maps into the API enum (F-21); unit: a verification Job rendered for each `PointInTimeVerificationMode` feeds a mode the download planner accepts (F-10); unit: each API role taken through the topology configuration into `EvalCrossSite`, with a writable `PrimaryCandidate` left unfenced (GPT-R3-01); unit: every enum value of every enum-valued metric label (`role`, `state`, the keyring `phase`, the restore-reclone `phase`, the source `state`, `from`, `to`) maps to its documented value (OPUS-R3-06, F-17); unit: a snapshot taken between `setPhase(Complete)` and the reset carries no `updatePhase` (OPUS-R3-07); payload test: `/status` and `/ws/status` serialize every role and state as the CR value; envtest: old lowercase values and A-33's invalid reasons rejected | docs that show `primary-candidate` or `writable`; `3.monitoring-prometheus.md` and `2.monitoring.md` (PromQL, and the `/status` and `/ws/status` examples at `:543-651`), `examples/prometheusrule.yaml`; the `BloodravenRestoreReclonesHeld` alert and the restore-reclone metric docs (`2.monitoring.md:70,212-213`, `3.monitoring-prometheus.md:134`, `2.backup-restore.md:790`, doctor `SKILL.md:171`; F-17); doctor references; log-schema fields that carry state values; course (`primary-candidate`, `dr-only`) |
 | E8 | Timers, timestamps and numeric types: the Duration rule, bounds, zero semantics and `stopTime` | A-35, A-36, A-37, A-38, A-41, A-34, A-39 (R11, OPUS-03) | types; `topology.go` (drop the 0 → 5m mapping); `site_helpers.go` (drop the 0 → 300 mapping); the profile `VerificationSpec` TTL mirror and its two creators (`trigger_verification.go`, plugin `verify.go`; F-11); retry and escrow readers; `restore_script.py` stop-time conversion and the verification Job's timestamp argument (A-39) | CRD test: reflects over the Go Duration fields and asserts both CEL bounds (OPUS-10); envtest bound checks; zero-value unit tests; an omitted `ttlSecondsAfterFinished` stays nil and an explicit 0 stays 0 through the scheduled trigger and through the plugin (F-11); envtest: `maxMemory` of `-1Gi` or `0` rejected, and a unit test pins its byte rendering (F-12); envtest: `stopTime` without a zone, with a lowercase `t` or `z`, with a fraction, or with the offsets `+25:00`, `+99:00` or `+05:99` rejected (OPUS-R3-03, F-02), and every admitted value decodes with `metav1.Time.UnmarshalJSON`, `mode: Timestamp` needs `stopTime`, `mode: Latest` forbids it; CRD test: both `stopTime` properties carry the RFC 3339 pattern | `crd-reference.md` timer table; `production-hardening.md`; PITR docs (`stopTime`); course (`stopDatetime`) |
 | E9 | One retention shape | A-55 | `backup_types.go`, `mysqlbackupverification_types.go`; `resolveRetention`, `pruneSuccessful` and the verification sweep | table test of keep-if-any (`keepLast`, `keepWithinDays`, `keepFailed`, explicit 0 meaning keep none, an omitted field meaning the default); the documented mapping of a legacy explicit 0 to omission (F-26) | `2.backup-restore.md` retention section, with the `max(count, minKeep, 1)` mapping and the no-pruning note (R07); doctor playbook entries on retention |
-| E10 | Status reshapes: replication state, encryption attribution, failover record, the `…Time` timestamp names, binlog coordinates, artifact identity, provenance; the durable-status markers | A-40 (including `requestTime`, `unsealTime` and `lastSeenTime`, revision 4), A-42, A-43, A-44, A-45, A-46, A-47, A-49, A-96, A-97, A-89 (markers and fail-safe test), A-114 (`replicationRunning`, `/ws/status` shapes) | status types; writers; `cmd/bloodraven/deploy_api.go` (`replicationRunning`); `internal/platform/websocket.go` `TopologyMessage` and its dashboard readers; `internal/dragonfly/info.go` field presence for `master_sync_in_progress` and `master_last_io_seconds_ago` (A-44, F-22); the sidecar's coverage probes and the `/keyring/status` wire types on both sides (`internal/sidecar/mysql.go`, `keyring.go`, `internal/mysql/sidecar_client.go`; A-46, F-13); the `Replicating` readers in `planned_failover.go`, `backup_reconciler.go` and `reconciler.go` (A-43, F-24); `playground/enable-encryption.sh` (A-47, F-25); restore and verification readers of `artifactStorage` (D-12); plugin `status.go`; s31, s37, s48 and s50; the `status.pitr.profileName` readers (`pitr_archive_condition.go:615`, `internal/playground/scenarios/backup_helpers.go:723`; A-49, F-39); `// Durable:` markers | unit: verification and restore use the recorded claim and endpoint; lease gate uses the `replication` enum; unit: A-43's producer mapping (`Unknown` while the healthy streak builds, `Lagging` above `maxLagSeconds`, `Broken` with a stopped thread, the gate refusing `Unknown`); deploy API: `replicationRunning` for each `replication` value; `/ws/status` carries `lastFailover{…}` and `sites[].replication`; unit: INFO without `master_sync_in_progress` leaves `syncInProgress` nil, INFO without `master_last_io_seconds_ago` leaves `lastIOSecondsAgo` nil, and a reported -1 stays -1 (F-22); unit: each coverage flag missing, false and true through the sidecar and the operator (F-13); unit: the planned-failover target check, backup source selection and the `healthy=yes` label each accept a `Lagging` site (F-24); component (`test/component`): the A-89 lost-status and fresh-deploy cases (R11) | doctor `triage.sh`, `SKILL.md`, `sidecar-probe.sh` (F-13), alert matrix (`sealed` → condition); the `/ws/status` meaning change in the release notes (F-23); `8.encryption-at-rest.md`; the MBK `Location` printer column moves here with A-96 (OPUS-26) |
+| E10 | Status reshapes: replication state, encryption attribution, failover record, the `…Time` timestamp names, binlog coordinates, artifact identity, provenance; the durable-status markers | A-40 (including `requestTime`, `unsealTime` and `lastSeenTime`, revision 4), A-42, A-43, A-44, A-45, A-46, A-47, A-49, A-96, A-97, A-89 (markers and fail-safe test), A-114 (`replicationRunning`, `/ws/status` shapes) | status types; writers; `cmd/bloodraven/deploy_api.go` (`replicationRunning`); `internal/platform/websocket.go` `TopologyMessage` and its dashboard readers; `internal/dragonfly/info.go` field presence for `master_sync_in_progress` and `master_last_io_seconds_ago` (A-44, F-22); the sidecar's coverage probes and the `/keyring/status` wire types on both sides (`internal/sidecar/mysql.go`, `keyring.go`, `internal/mysql/sidecar_client.go`; A-46, F-13); the `Replicating` readers in `planned_failover.go`, `backup_reconciler.go` and `reconciler.go` (A-43, F-24); `playground/enable-encryption.sh` (A-47, F-25); restore and verification readers of `artifactStorage` (D-12); plugin `status.go`; s31, s37, s48 and s50; the `status.pitr.profileName` readers (`pitr_archive_condition.go:615`, `internal/playground/scenarios/backup_helpers.go:723`; A-49, F-39); `// Durable:` markers | unit: verification and restore use the recorded claim and endpoint; lease gate uses the `replication` enum; unit: A-43's producer mapping (`Unknown` while the healthy streak builds, `Lagging` above `maxLagSeconds`, `Broken` with a stopped thread, the gate refusing `Unknown`); deploy API: `replicationRunning` for each `replication` value; `/ws/status` carries `lastFailover{…}` and `sites[].replication`; unit: INFO without `master_sync_in_progress` leaves `syncInProgress` nil, INFO without `master_last_io_seconds_ago` leaves `lastIOSecondsAgo` nil, and a reported -1 stays -1 (F-22); unit: each coverage flag missing, false and true through the sidecar and the operator (F-13); unit: the planned-failover target check, backup source selection and the `healthy=yes` label each accept a `Lagging` site (F-24); component (`test/component`): the A-89 lost-status (no bootstrap clone) and fresh-deploy cases (R11); revision 6, WS-E: the lost-status promotion wait and lease fencing were narrowed out to #274 (A-89), and control tests pin the shipped promotion behaviour instead | doctor `triage.sh`, `SKILL.md`, `sidecar-probe.sh` (F-13), alert matrix (`sealed` → condition); the `/ws/status` meaning change in the release notes (F-23); `8.encryption-at-rest.md`; the MBK `Location` printer column moves here with A-96 (OPUS-26) |
 | E11 | Honest generations, the condition vocabulary and the deploy-API token set | A-68, A-70, A-71, A-72, A-73, A-114 (`/deploy/v1`) | `runner.go` (snapshot config generation, advanced on the equal-config path too, F-28; `BootstrapFailed` in `degradedReason`, F-30); `backup_reconciler.go` `pendBackup` escalation (F-29); MBK, MBV and MSC `Ready` and their printer columns; chart ArgoCD Lua (`:66-75,77-87`); `cmd/bloodraven/deploy_api.go`; the bootstrap predicates in s10, s13, s19, s37, s59 and `repair_helpers.go` (F-31) | unit: conditions are stamped with the applied generation; a backup-schedule-only edit brings `observedGeneration` and `Ready.observedGeneration` to `metadata.generation` (F-28); a backup pending past 30m fails with `NoHealthySource` or `PendingTimedOut`, never a pending reason (F-29); `Degraded=True/BootstrapFailed` persists across polls, clears on recovery without a clone, and deployment leases are granted again (F-30); s10, s13, s19, s37 and s59 use the new completion and failure predicates (F-31); Lua test fixtures; course fixtures; deploy API test: every token field, `unstableReason` included, is drawn from the A-69 constants, and every value `DeploymentUnstableReason` returns is declared (F-32) | `crd-reference.md` conditions; `11.deployment-api.md`, with the closed value set of every token field and the `replicationRunning` definition (A-43); `gitops.md`; the ArgoCD Lua in the chart; `playground/chaos-scenarios.md:39,43,545,1479`, `9.failure-mode-matrix.md:51` and the course's bootstrap tokens (`topic-24-provisioning/read.md:287`, `SOURCES.md:228`; F-31) |
 | E12 | Event reason naming and types | A-74, A-75, A-76 (generated docs table), A-73 (the `PITRArchiveReady` Event rename, F-34), A-114 (the lease revocation reasons, F-18) | Event call sites, including the six reasons added since `3fa1900` and every Event reason that survives #235, not only its completion Event (F-55); status writers and constants that share a renamed Event token, such as `status.restore.reason` (F-34); `operator_revoked`/`topology_changed` → `OperatorRevoked`/`TopologyChanged` in `deployment_leases.go`, the 409 body and s53 (F-18); s48 assertion | registry test (from E1) extended to doc coverage; unit: every metric `reason` label value written is a declared A-69 constant (A-114) | `2.monitoring.md` (generated), `7.log-schema.md` Event reference, doctor `SKILL.md`/alert matrix/playbooks; release-note rename table, including renamed metric `reason` values |
 | E13 | Desired state out of annotations and status; no persisted sidecar default (the API shape) | A-48, A-51, A-52 (the field, the chart values and `default={}`; not pacing), A-53, A-98 | `dragonfly_upgrade.go` (no spec writes; the A-48 level-trigger rules), the Dragonfly StatefulSet renderer (live image kept under `SnapshotRestore`), encryption adoption gate, sidecar image env from the new chart values `sidecar.image.{repository, tag}` (chart `values.yaml`, `deployment.yaml`), MDB DDL, MBK finalizer | envtest: `SnapshotRestore` needs `snapshot.dir`, and `snapshot: {}` gets the rule's message, not an evaluation error; unit: a spec image that differs from the live StatefulSet drives the snapshot upgrade, an unknown live image does nothing (OPUS-18), and the operator never calls `Update` on spec; unit (F-03): a failed SAVE ends in one terminal run and no restart while `spec.dragonfly` is unchanged, a `spec.dragonfly` change re-arms it, a run blocked by a planned failover or a missing `activeSite` waits without the Rolling render moving any site, `sourceImage` comes from the live active site, and a run interrupted after one site resumes after an operator restart; chart test: the env renders from `sidecar.image.*`; a `Retain` backup keeps its artifact | `5.app-integration.md` (Dragonfly upgrade, including the two-step retry); `7.tenant-databases.md`; doctor; course unit 7 (`sidecarImage`); `e2e` label |
@@ -3273,7 +3488,7 @@ using the zero-production-users rule. "MBOD" means the section 7 debate decided.
 | A-85 | Reclone patches are break-glass until #204, plus `resume` added to its scope | Pull #204 into v1.7.0 | Settled |
 | A-86 | `divergentPromotions[]` keyed by a UUID per promotion, 8 KiB per GTID set, a durable `divergentPromotionsOmitted` count with its own bound acknowledgement, and a per-id acknowledgement annotation (revision 5) | A condition-timestamp acknowledgement (STATUS); a time-and-site id; an overflow count kept only in the message | Settled |
 | A-87, A-88 | Delete the MDB patch advice; playground resets are break-glass | Keep them documented as supported | Settled |
-| A-89 | Durable status stays in status, with a written contract | Move it to annotations or a ConfigMap | Settled |
+| A-89 | Durable status stays in status, with a written contract. Revision 6 (WS-E): the lost-status promotion wait and lease fencing are narrowed out to #274; markers, annotation rehydration and the no-bootstrap-on-lost-status rule ship | Move it to annotations or a ConfigMap; a fourth patch round of the wait in PR1 | Settled (wait: #274) |
 | A-90 to A-92 | Admission patterns, cross-reference CEL, bounds | Reconcile-time checks only | Settled |
 | A-93 to A-95 | `mbk`/`mbv` short names; new printer paths; no line numbers in doc comments | — | Settled |
 | A-96 | Fold `storageType` into #232's `artifactStorage`; every consumer reads it | A tagged sub-union; keep the top-level duplicates | Settled |
@@ -3602,6 +3817,7 @@ already touch.
 | D-13 | A planned-failover deferral rewrites the user's annotation. | `planned_failover_deployment.go:33-48`. | Owned by #235. |
 | D-14 | Docs drift: the resize claim (`6.operations/2.operations.md:381`); Event kinds and two dead reasons in `8.observability/2.monitoring.md:353,427,430`; `revoke-deployment-leases` missing from the `2.crd-reference.md` annotations table; a controller comment claiming the CRD already rejects `transport: Network` (`standbycluster_reconciler.go:175`). | As cited. | Fixed by E6, E12, E14 and E2. |
 | D-15 | The chart ClusterRole is not checked against `config/rbac/role.yaml` in CI. | `.github/workflows/ci.yml:226-260` checks only CRDs. | WS-F rule-coverage test (C-5). |
+| D-16 (revision 6, WS-E; WE-Q11e) | `ClearPlannedFailoverAnnotations` does not clear `planned-failover-confirmed`, so the playground reset leaves it behind. | `internal/controller/failover_state.go:409-415,423` vs `planned_failover_contract.go:78` (at `8067420`); called from `cmd/playground-chaos/reset.go:460`. | Issue: a follow-up to #235, which owns claim recovery. Not a WS-E fix. |
 
 ## Appendix B. Dropped and rejected raw findings
 
@@ -3672,3 +3888,125 @@ lines moved.
   `8.encryption-at-rest.md:536-541` (section 4, A-84).
 - B.3 is left as it was. It records the earlier move from `b5b525e` to `3fa1900`.
 
+### B.5 Re-check at `8067420` (WS-E step 0 and re-triage)
+
+#245, #246 (#235), #247 (#206) and #259 (#203) merged after `2340f6b`. WS-E ran section 6's step 0 and its
+re-triage on `8067420`.
+
+- **Method.** Two independent triages (Claude Opus 5.5 and GPT 6.1 Sol) read 608 of the 621 changed paths. The 13
+  excluded paths are the generated `site/public/courses/**` files. Where the triages disagreed, the code at HEAD
+  decided. The merged triage is in WS-E PR1's description. The triage files and the MBOD round 1 transcripts are
+  working files and are not published (as in section 7).
+- **Decision ids.** WS-E's decisions are cited as `WE-R1`…`WE-R5` and `WE-Q1`…`WE-Q11f`. This keeps them apart from
+  the MBOD questions Q1-Q6 in section 7.
+- **Citations.** The revision 6 additions cite `8067420`. Older citations were not re-mapped.
+
+**What the re-check found.**
+
+- **Step 0.** #246 meets the A-50 checklist except for:
+  - the timer bounds;
+  - where the keys are defined;
+  - A-80 reporting;
+  - one `/deploy/v1` token and one metric vocabulary;
+  - four Event names;
+  - the Durable markers;
+  - one taught status write.
+
+  None of the fixes changes claim semantics. A-50 records the item-by-item result.
+- **#206 (PITR archive identity)** removed `pointInTime.sites` and `allowUnverifiedCrossSite`, which A-113
+  expected to be kept as a set; the flat `pitr*` status fields; and the MSC `activation.pitr*` fields. It added:
+  - `PointInTimeResult` and `PITRArchiveIdentity`, plus `status.pitr.archive`;
+  - MBK `failoverGroupUID` and `pitrArchiveID`;
+  - `PITRMysqlConfAccepted`, the 39-token PITR catalog, and new `PITRArchiveReady`, `Ready` and MSC reasons;
+  - seven Events, including `ArtifactCleanupProducerStuck`;
+  - the backup Job identity annotations.
+- **#203 (encryption identity)** added:
+  - `status.pitrArchiveBindings[]` and `PITRArchiveBindingReady`;
+  - MBK `artifactStorage.passphraseSecret` and its new reasons;
+  - the key-snapshot labels and annotations, `pitr-render`, `pitr-accepted` and `release-pitr-archive-binding`;
+  - fourteen Events (`PITRArchive*` and `BackupScheduleRefused`);
+  - an MFG root transition rule (so 1.1's "MFG has no transition rule" is stale; the count is one).
+
+  It also made `profiles` a list-map with at most 32 items (A-09 for profiles) and added A-92's S3 and PVC bounds.
+- **#245 and `deploy-site.yml`** met both program prerequisites (section 6).
+- **Other changes:**
+  - Kubernetes 1.31 is the chart floor, and one CI step runs envtest at 1.31. A-115's chart and docs parts are
+    done; the CI part is not.
+  - A-103's `sessionsPreserved *bool` is now #246's `sessions` enum.
+  - Nothing changed in `internal/metrics`, `internal/platform`, `examples/`, the chart Lua or the NetworkPolicy.
+
+**Proposal edits (revision 6).**
+
+- **Inventory.**
+  - 1.2: the new conditions, reasons and enums.
+  - 1.3: every new `bloodraven.shipstream.io/` key, including `promotion-gtid-executed` and `…-for` beside A-104.
+  - 1.4: the added and removed Event reasons.
+  - 1.5: the `planned_failovers_total{result}` values, the `/deploy/v1` `outcome`, and the Internal sidecar
+    `/archiver/status` and PITR protocols.
+- **Migration table (3.4).**
+  - Updated rows: A-33, A-38, A-45, A-50, A-64, A-96, A-97, Events and `/deploy/v1`.
+  - Eight new rows: `onCooldown`; MBV `replayedThroughBinlog`; the two `sites` removals and
+    `allowUnverifiedCrossSite`; the required `archiveProfileName`; #259's encryption rule; the `uid=` of
+    `release-pitr-archive-binding`; the planned-failover `result` values.
+- **Section 4.**
+  - The `4.runbooks.md:116` orphan `AutomaticFailoverHeld` removal: break-glass, assigned to E18 (WE-R5).
+  - The refreshed playground reset row.
+- **Amended findings.** A-38, A-45, A-50, A-64, A-74, A-97 and A-114.
+- **Appendix A.** D-16.
+
+**Decisions (settled before E1; binding on E1-E16).** Both triages and MBOD round 1 (Claude Opus 5.5 and GPT 6.1
+Sol) settled these. The orchestrator broke the ties on WE-Q1, the status CEL part of WE-Q3, and the WE-Q7 names.
+
+| Id | Decision | Rejected | Where |
+|---|---|---|---|
+| WE-R1 | One encryption mode `None\|Passphrase` through one shared type, everywhere | `None\|Encrypted` (a second spelling; changes descriptor bytes) | A-45; E7, E10 |
+| WE-R2 | `PointInTimeResult` under `provenance` on both restore records; MBV keeps root `pointInTime`; MBV mode reuses `PointInTimeMode` | `PointInTimeReplayStatus{partial bool}`; a second mode type | A-97; E7, E10 |
+| WE-R3 | MSC `binlogArchive.identity`; identity and window together or not at all | a third `discovered` sibling | A-64; E2 |
+| WE-R4 | Full `make test-envtest` on the 1.31 floor assets, in the existing step | a hand-kept filter; a third job | A-115; E4 |
+| WE-R5 | E13b, E15, E17, E18 and E19 stay out of PR1/PR2; the orphan-hold step goes to E18 | — | section 4 |
+| WE-Q1 | The dump key stays at `artifactStorage.passphraseSecretKeyRef`; `status.encryption` is written at launch and re-derived at completion | the key under `status.encryption` with a second rule (GPT) | A-45; E5, E10 |
+| WE-Q2 | `claimBaseline` keeps `FailoverRecordRef`, embedded inline in A-40's `FailoverRecord` | `FailoverRecord` with an absent watermark | A-50; E10 |
+| WE-Q3 | `maxLagWait` `1s..1h` (also the annotation override); `drainTimeout` and `maxSyncWait` `1s..10m`; no CEL on status settings | CEL on the status copies (GPT); `24h` | A-38; E8 |
+| WE-Q4 | `planned_failovers_total{result}` = kebab-case of `PlannedFailoverOutcome` | the four snake_case values | A-114; E7 |
+| WE-Q5 | Drop `restore.reason=PointInTimePartial` and MBV `replayedThroughBinlog`; rename only the Event | rename both; keep the duplicates | A-74, A-97; E10, E12 |
+| WE-Q6 | Typed API PITR token constants; `internal/pitrarchive/tokens.go` stays, with a set-equality test | aliasing the API package into the sidecar | A-69; E1 |
+| WE-Q7 | Condition-mirror Events exempt from A-74; Event-only renames `DragonflySyncTimedOut`, `DragonflyPromotionDeferred`, `PITRArchiveKeySnapshotReadFailed`, `ArtifactCleanupStalled…`, `…Acknowledgment…`; served fallback `PITRReplayFailed` | renaming status reasons or mirrors | A-74; E7, E12 |
+| WE-Q8 | `unstableReason` `AutomaticFailoverHeld` for a standing hold; ArgoCD Lua `Degraded` | keep `PlannedFailover` | A-114; E11 |
+| WE-Q9 | `release-pitr-archive-binding=<pab-id>:confirm=<name>:uid=<uid>` through the A-78 parser | today's form | A-78; E14 |
+| WE-Q10 | Sidecar `/archiver/status` unchanged, listed as Internal | an HTTP projection for cosmetic renames | 1.5 |
+| WE-Q11a | E4 feeds `site.serverID` into `backupStampTemplate` (`backup_job.go:617-622`, today `101 + index`), no `int32` wrap; doctor `SKILL.md:158` | — | A-08; E4 |
+| WE-Q11b | E10 moves `pitrDumpSourceForBackup` (`pitr_dump_meta.go:49-79`) to the recorded `artifactStorage` | — | A-96; E10 |
+| WE-Q11c | Each condition carries the generation it was evaluated against; `AutomaticFailoverHeld` keeps its object's generation | blanket replacement with the topology generation | A-68; E11 |
+| WE-Q11d | An unknown A-80 payload version gets a registered condition and Event; `parseHoldMarker` stays fail-closed | — | A-80; E14 |
+| WE-Q11e | `ClearPlannedFailoverAnnotations` misses `planned-failover-confirmed` | a WS-E fix | D-16 |
+| WE-Q11f | E7 deletes #235's remaining lowercase-compatibility reads (D2) | keeping them | A-27; E7 |
+
+**Commit-scope changes.** Section 6's rows are summaries (How to read this). WS-E PR1's description lists the
+per-commit deltas and the moved citations. The deltas that change what a commit must do:
+
+- E1 creates only `well_known.go`.
+- E2 re-measures the MSC CRD shrink.
+- E4: WE-Q11a and WE-R4. The profiles list-map and the chart floor are done.
+- E6 drops the `pointInTime.sites` bound (the field is gone). It adds #259's root rule and the new MBV PITR fields
+  to its traversal and cost tests.
+- E7: WE-Q4, WE-Q7, WE-Q11f; `BackupEncryptionSpec.algorithm` becomes `EncryptionAlgorithm`. The planned enum work
+  is done.
+- E8: WE-Q3, and A-37 for a zero planned timer.
+- E9: a pruned encrypted backup also releases its dump-key snapshot.
+- E10: WE-Q1, WE-Q2, WE-Q5 and WE-Q11b, plus Durable markers on `plannedFailoverHold`, `pitrArchiveBindings` and
+  the MBK identity.
+- E11: WE-Q8 and WE-Q11c, the `InitFromBackup*` reasons, and the `plannedFailover.outcome` docs.
+- E12: WE-Q7, plus `DragonflyPromotionCompleted` on the planned path.
+- E13: A-98's `Retain` keeps the dump-key snapshot.
+- E14: WE-Q9 and WE-Q11d, plus the verification hold on key Secrets.
+- E16: the MBV `archiveProfileName` cross-reference.
+
+**Not settled by these decisions.**
+
+- The A-74 name for `PITRArchiveNotStamped`: E12 chooses it and records it in its PR.
+- Opus also proposed:
+  - nesting `PITRArchiveIdentity`'s mode and algorithm as `encryption{mode, algorithm}`;
+  - typing `PointInTimeResult.stopTime` as `metav1.Time`;
+  - an A-49 ruling on `status.pitr.archive.encryptionMode`.
+
+  None of these was adopted, so E10 keeps HEAD's shape for them.

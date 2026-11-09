@@ -1,20 +1,19 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	"github.com/shipstream/bloodraven/internal/pitrplan"
 )
 
 const (
@@ -48,12 +47,6 @@ const (
 	// is not set. Verification loads a dump into a cold instance so the
 	// ceiling matches the backup default.
 	verificationDefaultActiveDeadline = int64(7200)
-
-	// verificationMinPVCSize is the floor autoSizeVerificationPVC returns.
-	// MySQL's initial datadir plus a small dump is already a few hundred
-	// MB; 10Gi keeps us comfortable for tiny backups. Nothing applies the
-	// result yet (see the datadir volume TODO in buildVerificationJob).
-	verificationMinPVCSize = int64(10 * 1024 * 1024 * 1024) // 10 GiB
 )
 
 // verificationJobInputs bundles the resolved inputs for building the
@@ -67,38 +60,9 @@ type verificationJobInputs struct {
 	ScriptsConfigMapName string
 }
 
-// autoSizeVerificationPVC returns the intended capacity for the
-// verification run's ephemeral datadir (~1.5x the backup size). It is not
-// applied to the Job today: the datadir emptyDir carries no SizeLimit, and
-// the helper is kept for the planned container ephemeral-storage limit (see
-// the TODO in buildVerificationJob). Explicit spec.storage.size wins; otherwise we use
-// max(verificationMinPVCSize, ceil(1.5 * backup.status.sizeBytes / 10 GiB) * 10 GiB).
-func autoSizeVerificationPVC(v *v1alpha1.MysqlBackupVerification, backup *v1alpha1.MysqlBackup) resource.Quantity {
-	if v.Spec.Storage != nil && !v.Spec.Storage.Size.IsZero() {
-		return v.Spec.Storage.Size
-	}
-
-	var src int64
-	if backup != nil {
-		src = backup.Status.SizeBytes
-	}
-	if src <= 0 {
-		return *resource.NewQuantity(verificationMinPVCSize, resource.BinarySI)
-	}
-	need := int64(math.Ceil(float64(src) * 1.5))
-	// Round up to the nearest 10 GiB.
-	const step = int64(10 * 1024 * 1024 * 1024)
-	blocks := (need + step - 1) / step
-	sized := blocks * step
-	if sized < verificationMinPVCSize {
-		sized = verificationMinPVCSize
-	}
-	return *resource.NewQuantity(sized, resource.BinarySI)
-}
-
 // buildVerificationJob constructs the batchv1.Job that runs verify.sh
 // inside the container image pinned on spec.backup.image. verify.sh
-// boots an ephemeral mysqld on the mounted PVC, then delegates the
+// boots an ephemeral mysqld on the emptyDir datadir, then delegates the
 // actual load to the shared restore.py script.
 func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	fg := in.FailoverGroup
@@ -114,20 +78,23 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if backup == nil {
 		return nil, fmt.Errorf("verification job: backup reference not resolved")
 	}
-	if backup.Status.Location == "" {
-		return nil, fmt.Errorf("verification job: referenced backup %q has no status.location", backup.Name)
+	// The artifact is read at the destination the backup's producing Job
+	// recorded; only the storage credentials come from the profile.
+	storage, err := recordedArtifactStorage(backup)
+	if err != nil {
+		return nil, fmt.Errorf("verification job: %w", err)
 	}
 
 	image := backupImage(fg)
 
 	labels := map[string]string{
-		labelAppName:                 "mysql-verify",
-		labelInstance:                fg.Name,
-		labelFailoverGroup:           fg.Name,
-		labelBackupProfile:           in.Profile.Name,
-		labelMysqlBackupVerification: v.Name,
-		labelManagedBy:               managerName,
-		labelResourceKind:            verificationResourceKindCR,
+		labelAppName:                          "mysql-verify",
+		labelInstance:                         fg.Name,
+		v1alpha1.FailoverGroupLabel:           fg.Name,
+		v1alpha1.BackupProfileLabel:           in.Profile.Name,
+		v1alpha1.MysqlBackupVerificationLabel: v.Name,
+		labelManagedBy:                        managerName,
+		v1alpha1.ResourceLabel:                verificationResourceKindCR,
 	}
 
 	loadOptsJSON, err := marshalVerificationLoadOptions(verificationLoadOptions())
@@ -135,7 +102,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		return nil, err
 	}
 
-	inputURL := mysqlShellDumpInput(backup.Status.Location, backup.Status.StorageType)
+	inputURL := mysqlShellDumpInput(storage.Location, storage.Type)
 
 	// PITR replay fragments (download init container + shared emptyDir
 	// + main-container env/mounts). buildRestorePITRFragmentsFor returns
@@ -156,10 +123,10 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if pitrFrags.KeySecretName != "" {
 		// Correlation label (Δ18); the verification also holds the
 		// snapshot (K9) before this Job is created.
-		labels[labelPITRKeySecret] = pitrFrags.KeySecretName
+		labels[v1alpha1.PITRKeySecretLabel] = pitrFrags.KeySecretName
 	}
 	// An encrypted backup is decrypted only with the key it recorded (its
-	// dump-key snapshot, status.artifactStorage.passphraseSecret), never
+	// dump-key snapshot, status.artifactStorage.passphraseSecretKeyRef), never
 	// the profile's live Secret (Δ17).
 	dumpKey, err := verificationDumpKey(backup)
 	if err != nil {
@@ -172,7 +139,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if pitrReq != nil {
 		key := dumpKey
 		profile := in.Profile
-		src, err := pitrDumpSourceForBackup(fg, backup, &profile, key)
+		src, err := pitrDumpSourceForBackup(backup, &profile, key)
 		if err != nil {
 			return nil, fmt.Errorf("verification job: %w", err)
 		}
@@ -216,20 +183,16 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			return nil, fmt.Errorf("verification job: %w", err)
 		}
 		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_QUERY", Value: query})
-		maxSec := int32(60)
-		var minRows int64
-		if v.Spec.SanityCheck.Expect != nil {
-			if v.Spec.SanityCheck.Expect.MaxDurationSeconds > 0 {
-				maxSec = v.Spec.SanityCheck.Expect.MaxDurationSeconds
-			}
-			if v.Spec.SanityCheck.Expect.MinRows > 0 {
-				minRows = v.Spec.SanityCheck.Expect.MinRows
-			}
+		timeout := defaultSanityCheckTimeout
+		if v.Spec.SanityCheck.Timeout != nil {
+			timeout = v.Spec.SanityCheck.Timeout.Duration
 		}
-		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS", Value: strconv.FormatInt(int64(maxSec), 10)},
-			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS", Value: strconv.FormatInt(minRows, 10)},
-		)
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS", Value: strconv.FormatInt(wholeSecondsCeil(timeout), 10)})
+		// The floor is rendered only when set: an explicit minResult of 0
+		// still rejects a negative result, an unset one compares nothing.
+		if v.Spec.SanityCheck.MinResult != nil {
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS", Value: strconv.FormatInt(*v.Spec.SanityCheck.MinResult, 10)})
+		}
 	}
 
 	// The ephemeral datadir, mysqld socket/pid dir, mysqlsh HOME, /tmp, and
@@ -245,10 +208,8 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// there during --initialize, which fails with EROFS otherwise.
 	//
 	// Do NOT set EmptyDir.SizeLimit: a size-limited emptyDir is set up as a
-	// separate mount that is not always fsGroup-chowned. (TODO: re-introduce
-	// node-disk bounding via a container ephemeral-storage limit once we
-	// confirm CI nodes have the headroom; autoSizeVerificationPVC stays
-	// available for that.)
+	// separate mount that is not always fsGroup-chowned. Node disk is
+	// bounded through spec.resources.limits.ephemeral-storage instead.
 	volumes := []corev1.Volume{
 		{
 			Name:         "datadir",
@@ -288,36 +249,30 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// Job mounts them. PVC-hosted backups need the backup PVC mounted
 	// read-only so mysqlsh util.loadDump() can read the on-disk dump.
 	awsCredsSecret := ""
-	switch backup.Status.StorageType {
+	switch storage.Type {
 	case v1alpha1.BackupStorageS3:
 		if in.Profile.Storage.S3 == nil {
-			return nil, fmt.Errorf("verification job: backup %q storageType=S3 but profile %q has no s3 config",
+			return nil, fmt.Errorf("verification job: backup %q is on S3 but profile %q has no s3 config",
 				backup.Name, in.Profile.Name)
 		}
-		awsCredsSecret = in.Profile.Storage.S3.CredentialsSecret
+		awsCredsSecret = in.Profile.Storage.S3.CredentialsSecretName
+		// The recorded destination is already expanded; escape it so
+		// kubelet's $(VAR) expansion cannot change it again.
 		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: in.Profile.Storage.S3.Bucket},
+			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(storage.Bucket)},
 		)
-		if in.Profile.Storage.S3.EndpointURL != "" {
-			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: in.Profile.Storage.S3.EndpointURL})
+		if storage.EndpointURL != "" {
+			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: literalArtifactEnvValue(storage.EndpointURL)})
 		}
-		if in.Profile.Storage.S3.Region != "" {
-			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: in.Profile.Storage.S3.Region})
+		if storage.Region != "" {
+			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: literalArtifactEnvValue(storage.Region)})
 		}
 	case v1alpha1.BackupStoragePVC:
-		if in.Profile.Storage.PVC == nil {
-			return nil, fmt.Errorf("verification job: backup %q storageType=PVC but profile %q has no pvc config",
-				backup.Name, in.Profile.Name)
-		}
-		claim := in.Profile.Storage.PVC.ClaimName
-		if claim == "" {
-			claim = ownedBackupPVCName(fg.Name, in.Profile.Name)
-		}
 		volumes = append(volumes, corev1.Volume{
 			Name: "backup-src",
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: claim,
+					ClaimName: storage.ClaimName,
 					ReadOnly:  true,
 				},
 			},
@@ -326,8 +281,8 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			Name: "backup-src", MountPath: backupPVCMountPath, ReadOnly: true,
 		})
 	default:
-		return nil, fmt.Errorf("verification job: backup %q has unknown or empty storageType %q",
-			backup.Name, backup.Status.StorageType)
+		return nil, fmt.Errorf("verification job: backup %q has unknown storage type %q",
+			backup.Name, storage.Type)
 	}
 
 	if awsCredsSecret != "" {
@@ -366,9 +321,9 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// When the source backup is encrypted we run the same
 	// `bloodraven decrypt-download` init container the restore path
 	// uses, with the dump-key snapshot the backup recorded
-	// (status.artifactStorage.passphraseSecret, verificationDumpKey): the
+	// (status.artifactStorage.passphraseSecretKeyRef, verificationDumpKey): the
 	// immutable copy of the key its artifacts were encrypted with (Δ17).
-	// Never fall back to the profile's live encryption.passphraseSecret:
+	// Never fall back to the profile's live encryption.passphraseSecretKeyRef:
 	// it may hold other bytes since the backup ran, and an encrypted
 	// backup that recorded no key is refused (PITRBackupDumpKeyMissing).
 	if dumpKey != nil {
@@ -402,7 +357,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 
 		decEnv := []corev1.EnvVar{
 			{Name: "BLOODRAVEN_TARGET_DIR", Value: decryptDir},
-			{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(backup.Status.StorageType)},
+			{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(storage.Type)},
 			{Name: "BLOODRAVEN_BACKUP_PASSPHRASE_FILE", Value: backupPassphraseMountPath + "/" + backupPassphraseFileName},
 		}
 		decMounts := []corev1.VolumeMount{
@@ -411,25 +366,22 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			{Name: "tmp", MountPath: tmpMountPath},
 		}
 
-		switch backup.Status.StorageType {
+		switch storage.Type {
 		case v1alpha1.BackupStorageS3:
-			bucket, prefix := splitS3Location(backup.Status.Location)
-			if bucket == "" {
-				bucket = in.Profile.Storage.S3.Bucket
-			}
+			_, prefix := splitS3Location(storage.Location)
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(prefix)},
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(storage.Bucket)},
 			)
-			if in.Profile.Storage.S3.EndpointURL != "" {
+			if storage.EndpointURL != "" {
 				decEnv = append(decEnv, corev1.EnvVar{
-					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: in.Profile.Storage.S3.EndpointURL,
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: literalArtifactEnvValue(storage.EndpointURL),
 				})
 			}
-			if in.Profile.Storage.S3.Region != "" {
-				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: in.Profile.Storage.S3.Region})
+			if storage.Region != "" {
+				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: literalArtifactEnvValue(storage.Region)})
 			}
-			if in.Profile.Storage.S3.CredentialsSecret != "" {
+			if in.Profile.Storage.S3.CredentialsSecretName != "" {
 				decMounts = append(decMounts, corev1.VolumeMount{
 					Name: "aws-creds", MountPath: backupAWSCredsMountPath, ReadOnly: true,
 				})
@@ -463,15 +415,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			// mysqlsh no longer reads ciphertext directly.
 			volumes = filterOutVolumeByName(volumes, "backup-src")
 			mounts = filterOutMountByName(mounts, "backup-src")
-			claim := in.Profile.Storage.PVC.ClaimName
-			if claim == "" {
-				claim = ownedBackupPVCName(fg.Name, in.Profile.Name)
-			}
 			volumes = append(volumes, corev1.Volume{
 				Name: "decrypt-src",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: claim,
+						ClaimName: storage.ClaimName,
 						ReadOnly:  true,
 					},
 				},
@@ -479,10 +427,10 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			decMounts = append(decMounts, corev1.VolumeMount{
 				Name: "decrypt-src", MountPath: decPVCMount, ReadOnly: true,
 			})
-			// Derive the relative prefix under the PVC root from
-			// backup.Status.Location (which is the absolute pod-side
-			// path the backup wrote to).
-			prefix := strings.TrimPrefix(backup.Status.Location, backupPVCMountPath+"/")
+			// Derive the relative prefix under the PVC root from the
+			// recorded location (the absolute pod-side path the backup
+			// wrote to).
+			prefix := strings.TrimPrefix(storage.Location, backupPVCMountPath+"/")
 			prefix = strings.TrimSuffix(prefix, "/")
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_PVC_MOUNT_PATH", Value: decPVCMount},
@@ -497,8 +445,8 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 				}
 			}
 		default:
-			return nil, fmt.Errorf("verification job: backup %q has unknown storageType %q for decrypt wiring",
-				backup.Name, backup.Status.StorageType)
+			return nil, fmt.Errorf("verification job: backup %q has unknown storage type %q for decrypt wiring",
+				backup.Name, storage.Type)
 		}
 
 		// Add the read-only decrypt dir to the main container so
@@ -545,7 +493,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 	podSC, containerSC := mergeSecurityContexts(userPod, userCont)
 
-	sourceSnapshot, err := json.Marshal(verificationBackupSnapshot(backup))
+	sourceSnapshot, err := encodeVerificationSource(verificationBackupSnapshot(backup))
 	if err != nil {
 		return nil, fmt.Errorf("encode verification source snapshot: %w", err)
 	}
@@ -560,7 +508,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			ActiveDeadlineSeconds: &activeDeadline,
 			BackoffLimit:          &backoff,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{annotationVerificationBackup: string(sourceSnapshot)}},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{v1alpha1.VerificationBackupAnnotation: string(sourceSnapshot)}},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
@@ -573,7 +521,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 					// this pod and never touches the group's MySQL, so the
 					// read-only side is a fine place for it and a failover
 					// must not evict a long-running run.
-					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					Tolerations:    groupReadOnlyTolerations(fg),
 					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{
@@ -640,34 +588,34 @@ func validateSanityQuery(q string) (string, error) {
 
 var sanityQueryStartRE = regexp.MustCompile(`(?i)^(\(|(select|with)\b)`)
 
+// defaultSanityCheckTimeout is spec.sanityCheck.timeout's API default.
+const defaultSanityCheckTimeout = 60 * time.Second
+
 // verificationPITRRequest normalizes a verification's
 // PointInTimeVerificationSpec into the replay request the shared PITR
-// builders render. It returns nil (no replay) for empty or "none" input.
+// builders render. It returns nil (no replay) when the block is absent.
 // Verifications read the group's own active PITR archive and never accept
 // a Partial outcome.
 func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrReplayRequest, error) {
 	if in == nil {
 		return nil, nil
 	}
+	mode, err := pitrWireMode(in.Mode)
+	if err != nil {
+		return nil, err
+	}
 	// archiveProfileName reads a retained archive (after a prefix switch);
 	// empty means the group's active PITR profile (Δ28).
-	req := &pitrReplayRequest{Verification: true, ArchiveProfileName: in.ArchiveProfileName}
-	switch in.Mode {
-	case "", "none":
-		return nil, nil
-	case "latest":
-		req.Mode = "latest"
-	case "timestamp":
-		if in.Timestamp == "" {
-			return nil, fmt.Errorf("%s: pointInTime.timestamp is required when mode=timestamp", pitrarchive.TokenTargetInvalid)
-		}
-		stop, err := parsePITRTarget(in.Timestamp)
+	req := &pitrReplayRequest{Verification: true, ArchiveProfileName: in.ArchiveProfileName, Mode: string(mode)}
+	switch {
+	case mode == pitrplan.ModeTimestamp:
+		stop, err := pitrTarget("pointInTime.stopTime (mode=Timestamp)", in.StopTime)
 		if err != nil {
-			return nil, fmt.Errorf("%s: pointInTime.timestamp: %v", pitrarchive.TokenTargetInvalid, err)
+			return nil, err
 		}
-		req.Mode, req.Stop = "timestamp", canonicalPITRTarget(stop)
-	default:
-		return nil, fmt.Errorf("pointInTime.mode %q is not one of none|latest|timestamp", in.Mode)
+		req.Stop = canonicalPITRTarget(stop)
+	case in.StopTime != nil:
+		return nil, fmt.Errorf("%s: pointInTime.stopTime is forbidden when mode=Latest", pitrarchive.TokenTargetInvalid)
 	}
 	exclude, err := canonicalExcludeGtids("pointInTime.excludeGtids", in.ExcludeGtids)
 	if err != nil {
@@ -678,19 +626,17 @@ func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrRep
 }
 
 // verificationLoadOptions returns the util.loadDump() options used for
-// a verification run. ResetProgress=true is inert: verification Jobs
-// disable load-progress tracking, so every run starts clean anyway.
-// SkipBinlog=true because the ephemeral mysqld runs with --skip-log-bin
-// anyway; LoadIndexes=true so a
+// a verification run. Verification Jobs disable load-progress tracking, so
+// every run starts clean. SkipBinlog=true because the ephemeral mysqld runs
+// with --skip-log-bin anyway; LoadIndexes=true so a
 // "restore loads successfully" result is not weakened by deferred
 // index builds that would only fail later.
 func verificationLoadOptions() *v1alpha1.LoadOptions {
 	t := true
 	return &v1alpha1.LoadOptions{
-		Threads:       4,
-		ResetProgress: &t,
-		SkipBinlog:    &t,
-		LoadIndexes:   &t,
+		Threads:     4,
+		SkipBinlog:  &t,
+		LoadIndexes: &t,
 	}
 }
 
@@ -709,15 +655,15 @@ func marshalVerificationLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 // backup's dump with: the one the backup recorded (Δ17). nil for a
 // plaintext backup; an encrypted backup that recorded none is refused with
 // PITRBackupDumpKeyMissing.
-func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecretRef, error) {
-	if !backup.Status.Encrypted {
+func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecretKeyRef, error) {
+	if !backupStatusEncrypted(&backup.Status) {
 		return nil, nil
 	}
-	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecret == nil ||
-		backup.Status.ArtifactStorage.PassphraseSecret.Name == "" {
-		return nil, fmt.Errorf("%s: verification job: backup %q is encrypted but recorded no dump key (status.artifactStorage.passphraseSecret)",
+	if backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.PassphraseSecretKeyRef == nil ||
+		backup.Status.ArtifactStorage.PassphraseSecretKeyRef.Name == "" {
+		return nil, fmt.Errorf("%s: verification job: backup %q is encrypted but recorded no dump key (status.artifactStorage.passphraseSecretKeyRef)",
 			pitrarchive.TokenBackupDumpKeyMissing, backup.Name)
 	}
-	recorded := backup.Status.ArtifactStorage.PassphraseSecret
-	return &v1alpha1.PassphraseSecretRef{Name: recorded.Name, Key: recorded.Key}, nil
+	recorded := backup.Status.ArtifactStorage.PassphraseSecretKeyRef
+	return &v1alpha1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}, nil
 }

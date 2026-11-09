@@ -195,13 +195,13 @@ func TestDeploymentLeaseHoldIdentity(t *testing.T) {
 }
 
 func TestDeploymentLeaseRevokedTombstoneSurvivesReplacementAndRelease(t *testing.T) {
-	for _, reason := range []string{"topology_changed", "operator_revoked"} {
+	for _, reason := range []string{"TopologyChanged", "OperatorRevoked"} {
 		t.Run(reason, func(t *testing.T) {
 			m, fg, now := deploymentLeaseFixture(t)
 			old := grantDeploymentLease(t, m, fg, "migration", "old-operation", 120)
 			grantDeploymentLease(t, m, fg, "failover-hold", "old-operation", 120)
 			before := testutil.ToFloat64(metrics.DeployLeaseRevocationsTotal.WithLabelValues(fg.Name, "migration", reason))
-			if reason == "topology_changed" {
+			if reason == "TopologyChanged" {
 				fg.Status.TopologyGeneration++
 				if err := m.client.Status().Update(context.Background(), fg); err != nil {
 					t.Fatal(err)
@@ -345,7 +345,7 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	m, fg, now := deploymentLeaseFixture(t)
 	grantDeploymentLease(t, m, fg, "migration", "op1", 120)
 	hold := grantDeploymentLease(t, m, fg, "failover-hold", "op1", 30)
-	fg.Annotations = map[string]string{PlannedFailoverAnnotation: "pdx"}
+	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx"}
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func TestDeploymentLeaseRestoreWaitAndSameSiteInvalidation(t *testing.T) {
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full-instance"}
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	if err := m.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +546,7 @@ func TestDeploymentLeaseHoldsSurviveMigrationHandoff(t *testing.T) {
 	if err != nil || hold == nil || hold.OperationID != "op1" {
 		t.Fatalf("remaining hold = %+v, %v", hold, err)
 	}
-	if err := m.Revoke(ctx, fg, "operator_revoked"); err != nil {
+	if err := m.Revoke(ctx, fg, "OperatorRevoked"); err != nil {
 		t.Fatal(err)
 	}
 	_, err = m.Renew(ctx, fg, "failover-hold", "op1", "tenant", "tenant-ns", "deployer", hold1.Token, 30)
@@ -559,7 +559,7 @@ func TestDeploymentLeaseStability(t *testing.T) {
 		change func(*v1alpha1.MysqlFailoverGroup)
 	}{
 		{"missing site", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites = fg.Status.Sites[:1] }},
-		{"primary read-only", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[0].State = "read-only" }},
+		{"primary read-only", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[0].State = v1alpha1.SiteStateReadOnly }},
 		{"recovery in progress", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryInProgress" }},
 		{"recovery blocked", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryBlocked" }},
 		{"source convergence", func(fg *v1alpha1.MysqlFailoverGroup) {

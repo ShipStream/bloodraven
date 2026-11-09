@@ -301,37 +301,34 @@ type PITRPVCConfig struct {
 
 // ConfigFromEnv reads sidecar configuration from environment variables.
 func ConfigFromEnv() (*Config, error) {
-	dsn := os.Getenv("MYSQL_DSN")
-	if dsn == "" {
-		// Prefer mounted-file credentials (MYSQL_CREDS_DIR/{username,
-		// password}) over env-var credentials so the hottest secret in
-		// the system doesn't end up in /proc/<pid>/environ or crash
-		// dumps (AUDIT L2). Falls through to MYSQL_USER / MYSQL_PASSWORD
-		// for backward compatibility. The files are read verbatim, not
-		// trimmed: the operator sets the MySQL account password to the
-		// Secret's exact bytes, as the env vars used to carry them.
-		credsDir := os.Getenv("MYSQL_CREDS_DIR")
-		if credsDir != "" {
-			user, err := readCredentialFile(credsDir + "/username")
-			if err != nil {
-				return nil, fmt.Errorf("read MYSQL_CREDS_DIR/username: %w", err)
-			}
-			password, err := readCredentialFile(credsDir + "/password")
-			if err != nil {
-				return nil, fmt.Errorf("read MYSQL_CREDS_DIR/password: %w", err)
-			}
-			if user == "" {
-				return nil, fmt.Errorf("MYSQL_CREDS_DIR/username is empty")
-			}
-			dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
-		} else {
-			user := os.Getenv("MYSQL_USER")
-			password := os.Getenv("MYSQL_PASSWORD")
-			if user == "" {
-				return nil, fmt.Errorf("one of MYSQL_DSN, MYSQL_CREDS_DIR, or MYSQL_USER is required")
-			}
-			dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
+	// Prefer mounted-file credentials (MYSQL_CREDS_DIR/{username,
+	// password}) over env-var credentials so the hottest secret in the
+	// system doesn't end up in /proc/<pid>/environ or crash dumps (AUDIT
+	// L2). Falls through to MYSQL_USER / MYSQL_PASSWORD. The files are read
+	// verbatim, not trimmed: the operator sets the MySQL account password
+	// to the Secret's exact bytes, as the env vars used to carry them.
+	var dsn string
+	credsDir := os.Getenv("MYSQL_CREDS_DIR")
+	if credsDir != "" {
+		user, err := readCredentialFile(credsDir + "/username")
+		if err != nil {
+			return nil, fmt.Errorf("read MYSQL_CREDS_DIR/username: %w", err)
 		}
+		password, err := readCredentialFile(credsDir + "/password")
+		if err != nil {
+			return nil, fmt.Errorf("read MYSQL_CREDS_DIR/password: %w", err)
+		}
+		if user == "" {
+			return nil, fmt.Errorf("MYSQL_CREDS_DIR/username is empty")
+		}
+		dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
+	} else {
+		user := os.Getenv("MYSQL_USER")
+		password := os.Getenv("MYSQL_PASSWORD")
+		if user == "" {
+			return nil, fmt.Errorf("one of MYSQL_CREDS_DIR or MYSQL_USER is required")
+		}
+		dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
 	}
 
 	// When the group has spec.tls, mysqld runs with

@@ -14,21 +14,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const annotationVerificationBackup = "shipstream.io/verification-backup"
-
+// verificationBackupSnapshot pins the backup a verification reads: its
+// identity and its recorded artifact destination.
 func verificationBackupSnapshot(backup *v1alpha1.MysqlBackup) *v1alpha1.VerificationBackupRef {
 	return &v1alpha1.VerificationBackupRef{
 		Name: backup.Name, UID: string(backup.UID),
-		Location: backup.Status.Location, StorageType: backup.Status.StorageType,
+		ArtifactStorage: backup.Status.ArtifactStorage.DeepCopy(),
 	}
 }
 
 func validateVerificationBackupRef(ref *v1alpha1.VerificationBackupRef) error {
-	if ref == nil || ref.Name == "" || ref.UID == "" || ref.Location == "" {
-		return fmt.Errorf("verification source requires a pinned name, UID and location")
+	if ref == nil || ref.Name == "" || ref.UID == "" || ref.ArtifactStorage == nil || ref.ArtifactStorage.Location == "" {
+		return fmt.Errorf("verification source requires a pinned name, UID and artifact location")
 	}
-	if ref.StorageType != v1alpha1.BackupStorageS3 && ref.StorageType != v1alpha1.BackupStoragePVC {
-		return fmt.Errorf("verification source has unknown storage type %q", ref.StorageType)
+	if t := ref.ArtifactStorage.Type; t != v1alpha1.BackupStorageS3 && t != v1alpha1.BackupStoragePVC {
+		return fmt.Errorf("verification source has unknown storage type %q", t)
 	}
 	return nil
 }
@@ -64,8 +64,7 @@ func (r *MysqlBackupVerificationReconciler) resolvePinnedVerificationBackup(ctx 
 	if !backup.DeletionTimestamp.IsZero() {
 		return nil, fmt.Errorf("pinned backup %q is being deleted", ref.Name)
 	}
-	backup.Status.Location = ref.Location
-	backup.Status.StorageType = ref.StorageType
+	backup.Status.ArtifactStorage = ref.ArtifactStorage.DeepCopy()
 	return &backup, nil
 }
 
@@ -90,20 +89,21 @@ func verificationContainerEnv(container corev1.Container) map[string]string {
 // verificationJobReadsBackup checks the original source, not a decrypt staging
 // path. This also permits safe observation of older Jobs without a snapshot.
 func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBackupRef) bool {
+	storage := ref.ArtifactStorage
 	for _, container := range job.Spec.Template.Spec.InitContainers {
 		if container.Name != "decrypt-download" {
 			continue
 		}
 		env := verificationContainerEnv(container)
-		if env["BLOODRAVEN_STORAGE_TYPE"] != string(ref.StorageType) {
+		if env["BLOODRAVEN_STORAGE_TYPE"] != string(storage.Type) {
 			return false
 		}
-		switch ref.StorageType {
+		switch storage.Type {
 		case v1alpha1.BackupStorageS3:
-			bucket, prefix := splitS3Location(ref.Location)
-			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix && (bucket == "" || env["BLOODRAVEN_S3_BUCKET"] == bucket)
+			_, prefix := splitS3Location(storage.Location)
+			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix && env["BLOODRAVEN_S3_BUCKET"] == storage.Bucket
 		case v1alpha1.BackupStoragePVC:
-			prefix := strings.TrimSuffix(strings.TrimPrefix(ref.Location, backupPVCMountPath+"/"), "/")
+			prefix := strings.TrimSuffix(strings.TrimPrefix(storage.Location, backupPVCMountPath+"/"), "/")
 			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix
 		}
 	}
@@ -112,10 +112,37 @@ func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBack
 			continue
 		}
 		env := verificationContainerEnv(container)
-		return env["BLOODRAVEN_INPUT_URL"] == mysqlShellDumpInput(ref.Location, ref.StorageType) &&
-			(ref.StorageType != v1alpha1.BackupStorageS3 || env["BLOODRAVEN_S3_BUCKET"] != "")
+		return env["BLOODRAVEN_INPUT_URL"] == mysqlShellDumpInput(storage.Location, storage.Type) &&
+			(storage.Type != v1alpha1.BackupStorageS3 || env["BLOODRAVEN_S3_BUCKET"] == storage.Bucket)
 	}
 	return false
+}
+
+// verificationSourceSchemaVersion is verificationSourceRecord.SchemaVersion
+// (A-80).
+const verificationSourceSchemaVersion = 1
+
+// verificationSourceRecord is the verification-backup annotation's payload:
+// the pinned source, with its schema version.
+type verificationSourceRecord struct {
+	SchemaVersion int `json:"schemaVersion"`
+	v1alpha1.VerificationBackupRef
+}
+
+// encodeVerificationSource renders ref as the verification-backup
+// annotation value.
+func encodeVerificationSource(ref *v1alpha1.VerificationBackupRef) ([]byte, error) {
+	return json.Marshal(verificationSourceRecord{SchemaVersion: verificationSourceSchemaVersion, VerificationBackupRef: *ref})
+}
+
+// errVerificationSourceVersion is a verification-backup record with a
+// schemaVersion this operator does not know: it proves no source.
+type errVerificationSourceVersion struct{ version int }
+
+func (e errVerificationSourceVersion) Error() string {
+	return fmt.Sprintf("the verification Job's %s record has schemaVersion %d, which this operator does not know (it reads %d); "+
+		"it proves no source, so the run cannot be certified: create a new verification",
+		v1alpha1.VerificationBackupAnnotation, e.version, verificationSourceSchemaVersion)
 }
 
 func verificationJobSource(v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) (*v1alpha1.VerificationBackupRef, error) {
@@ -123,12 +150,15 @@ func verificationJobSource(v *v1alpha1.MysqlBackupVerification, job *batchv1.Job
 		return nil, fmt.Errorf("verification Job is not owned by this verification")
 	}
 	ref := v.Status.BackupRef
-	if encoded, exists := job.Spec.Template.Annotations[annotationVerificationBackup]; exists {
-		var recorded v1alpha1.VerificationBackupRef
+	if encoded, exists := job.Spec.Template.Annotations[v1alpha1.VerificationBackupAnnotation]; exists {
+		var recorded verificationSourceRecord
 		if err := json.Unmarshal([]byte(encoded), &recorded); err != nil {
 			return nil, fmt.Errorf("decode verification Job source snapshot: %w", err)
 		}
-		ref = &recorded
+		if recorded.SchemaVersion != verificationSourceSchemaVersion {
+			return nil, errVerificationSourceVersion{version: recorded.SchemaVersion}
+		}
+		ref = &recorded.VerificationBackupRef
 	}
 	if err := validateVerificationBackupRef(ref); err != nil {
 		return nil, err
@@ -150,6 +180,7 @@ func (r *MysqlBackupVerificationReconciler) pinVerificationJobSource(ctx context
 	if v.Status.Phase == "" || v.Status.Phase == v1alpha1.VerificationPhasePending || v.Status.Phase == v1alpha1.VerificationPhaseProvisioning {
 		v.Status.Phase = v1alpha1.VerificationPhaseRestoring
 	}
+	setVerificationReady(&v.Status, v.Generation)
 	if err := r.Status().Patch(ctx, v, patch); err != nil {
 		return fmt.Errorf("persist verification Job source: %w", err)
 	}

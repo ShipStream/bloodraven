@@ -128,6 +128,24 @@ find_candidate_containers() {
     echo "${candidates[@]}"
 }
 
+# The /keyring/status coverage flags systemTablespaceEncrypted,
+# redoLogEncrypted, undoLogEncrypted and binlogEncrypted are omitted when
+# MySQL did not report them (no row, NULL, or an unrecognized value). An
+# absent flag is unknown, never false: report it as "not reported".
+summarize_keyring_coverage() {
+    command -v jq >/dev/null 2>&1 || return 0
+    local body
+    body=$(printf '%s\n' "$1" | sed '/^(HTTP [0-9]*)$/d')
+    printf '%s\n' "$body" | jq -r '
+        if type != "object" then empty
+        elif .coverage == null then "   coverage: not reported (no coverage block)"
+        else .coverage as $c |
+            "   coverage: " + ([ "systemTablespaceEncrypted", "redoLogEncrypted", "undoLogEncrypted", "binlogEncrypted"]
+                | map(. as $k | $k + "=" + (if ($c | has($k)) then ($c[$k] | tostring) else "not-reported" end))
+                | join(" ")) + " unencryptedTablespaces=" + ($c.unencryptedTablespaces // 0 | tostring)
+        end' 2>/dev/null || true
+}
+
 for pod in $PODS; do
     echo ""
     echo "📍 Pod: $pod"
@@ -156,6 +174,9 @@ for pod in $PODS; do
     if [[ -n "$RESULT" ]]; then
         echo "   (queried via container: $SUCCESSFUL_CONTAINER)"
         echo "$RESULT"
+        if [[ "$ENDPOINT" == "keyring" ]]; then
+            summarize_keyring_coverage "$RESULT"
+        fi
     else
         echo "⚠️ Unable to fetch $TARGET_PATH from sidecar on pod $pod (tried containers: $CANDIDATES)."
     fi

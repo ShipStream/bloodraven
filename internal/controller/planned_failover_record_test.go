@@ -95,11 +95,11 @@ func TestRestore_WatermarkFromNewerOOBRecord(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := newTestFG()
-			fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &older, "dc1", opsUUIDA+":1-10"
-			fg.Annotations = map[string]string{LastFailoverAnnotation: failoverStampFormat(newer), LastFailoverTargetAnnotation: "dc2"}
+			fg.Status.SetLastFailover(&older, "dc1", opsUUIDA+":1-10")
+			fg.Annotations = map[string]string{v1alpha1.LastFailoverAnnotation: failoverStampFormat(newer), v1alpha1.LastFailoverTargetAnnotation: "dc2"}
 			if tc.oobWater != "" {
-				fg.Annotations[PromotionGtidExecutedAnnotation] = tc.oobWater
-				fg.Annotations[PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(newer, "dc2")
+				fg.Annotations[v1alpha1.PromotionGtidExecutedAnnotation] = tc.oobWater
+				fg.Annotations[v1alpha1.PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(newer, "dc2")
 			}
 			tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
 			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg).Build()
@@ -137,7 +137,7 @@ func TestUpdateCRStatus_TrackingTripleMonotonic(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := newTestFG()
 			at := metav1.NewTime(stored)
-			fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &at, "dc2", "stored"
+			fg.Status.SetLastFailover(&at, "dc2", "stored")
 			c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 			r := &TopologyManagerRunner{client: c, logger: testLogger(), recorder: record.NewFakeRecorder(32),
 				managers: make(map[types.NamespacedName]*managedTopology)}
@@ -150,10 +150,10 @@ func TestUpdateCRStatus_TrackingTripleMonotonic(t *testing.T) {
 			if err := c.Get(context.Background(), nn, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Status.LastFailover == nil || !got.Status.LastFailover.UTC().Truncate(time.Second).Equal(tc.wantAt) ||
-				got.Status.LastFailoverTarget != tc.wantTarget || got.Status.PromotionGtidExecuted != tc.wantW {
-				t.Fatalf("triple = %v/%q/%q, want %s/%q/%q", got.Status.LastFailover, got.Status.LastFailoverTarget,
-					got.Status.PromotionGtidExecuted, tc.wantAt, tc.wantTarget, tc.wantW)
+			if got.Status.LastFailoverTime() == nil || !got.Status.LastFailoverTime().UTC().Truncate(time.Second).Equal(tc.wantAt) ||
+				got.Status.LastFailoverTarget() != tc.wantTarget || got.Status.PromotionGtidExecuted() != tc.wantW {
+				t.Fatalf("triple = %v/%q/%q, want %s/%q/%q", got.Status.LastFailoverTime(), got.Status.LastFailoverTarget(),
+					got.Status.PromotionGtidExecuted(), tc.wantAt, tc.wantTarget, tc.wantW)
 			}
 		})
 	}
@@ -164,13 +164,12 @@ func TestUpdateCRStatus_TrackingTripleMonotonic(t *testing.T) {
 // dc2 at failedAt.
 func upgradeDuringEmergency(phase v1alpha1.DragonflyUpgradePhase, start, failedAt time.Time) *v1alpha1.MysqlFailoverGroup {
 	fg := fgWithDragonflySnapshotUpgrade()
-	fg.Annotations = nil
 	st := metav1.NewTime(start)
 	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{Phase: phase, ActiveSite: "dc1",
-		TargetImage: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0", SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, StartTime: &st}
+		TargetImage: fg.Spec.Dragonfly.Image, SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, StartTime: &st}
 	if !failedAt.IsZero() {
 		at := metav1.NewTime(failedAt)
-		fg.Status.LastFailover, fg.Status.LastFailoverTarget = &at, "dc2"
+		fg.Status.SetLastFailover(&at, "dc2", "")
 	}
 	return fg
 }

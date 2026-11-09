@@ -2,9 +2,11 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/actionvalue"
 )
 
 // minRecloneGtidPrefix is the minimum number of characters of the
@@ -15,52 +17,97 @@ import (
 const minRecloneGtidPrefix = 8
 
 // RecloneRequest is the parsed form of the
-// bloodraven.shipstream.io/reclone-site annotation value, which is one
-// of:
+// bloodraven.shipstream.io/reclone-site annotation value, in A-78's grammar
+// (internal/actionvalue). A reclone wipes the site's datadir, and its
+// subject is a site name, so both forms carry confirm= and uid=:
 //
-//	reclone-site=<siteName>:confirm=<groupName>
-//	reclone-site=<siteName>:<divergentGtidPrefix>
+//	reclone-site=<site>:confirm=<group name>:uid=<group uid>
+//	reclone-site=<site>:confirm=<group name>:uid=<group uid>:gtidPrefix=<p>
 //
 // The first form is the cold reclone of a site with no recorded
 // divergence. The second is required when the site has a non-empty
-// status.sites[i].divergentGtid: matching the prefix against the
-// observed divergent GTID proves the requester is acting on the state
-// they think they are. See validateRecloneRequest for the full rule set
-// and recloneAnnotationValue for the operator's own requests.
+// status.sites[i].divergentGtid: gtidPrefix, a prefix of the divergent
+// GTID's source UUID, proves the requester read the divergence. It is an
+// extra interlock, not a replacement for confirm=. See
+// validateRecloneRequest for the full rule set and recloneAnnotationValue
+// for the operator's own requests.
 type RecloneRequest struct {
 	Site       string
+	Confirm    string
+	UID        string
 	GtidPrefix string
+	// Err is the grammar error of a malformed value; Site is still the
+	// text before the first ':' so the annotation can be matched to a site.
+	Err error
 }
 
-// parseRecloneAnnotation splits the raw annotation value into a
-// RecloneRequest. Whitespace is trimmed and the prefix separator ":"
-// is honoured. A value without a separator yields an empty GtidPrefix.
-func parseRecloneAnnotation(raw string) RecloneRequest {
-	v := strings.TrimSpace(raw)
-	if idx := strings.Index(v, ":"); idx >= 0 {
-		return RecloneRequest{
-			Site:       strings.TrimSpace(v[:idx]),
-			GtidPrefix: strings.TrimSpace(v[idx+1:]),
-		}
+// value is req as a parsed value, for actionvalue.Confirm.
+func (req RecloneRequest) value() actionvalue.Value {
+	v := actionvalue.Value{Subjects: []string{req.Site}}
+	if req.Confirm != "" {
+		v.Pairs = append(v.Pairs, actionvalue.Pair{Key: actionvalue.ConfirmKey, Value: req.Confirm})
 	}
-	return RecloneRequest{Site: v}
+	if req.UID != "" {
+		v.Pairs = append(v.Pairs, actionvalue.Pair{Key: actionvalue.UIDKey, Value: req.UID})
+	}
+	return v
+}
+
+// recloneGrammar is the reclone-site annotation's grammar.
+var recloneGrammar = actionvalue.Grammar{
+	Keys:     []string{actionvalue.ConfirmKey, actionvalue.UIDKey, "gtidPrefix"},
+	Required: []string{actionvalue.ConfirmKey, actionvalue.UIDKey},
+}
+
+// recloneGtidPrefixRE is the gtidPrefix charset: the hex digits and
+// hyphens of a server UUID.
+var recloneGtidPrefixRE = regexp.MustCompile(`^[0-9A-Fa-f-]+$`)
+
+// parseRecloneAnnotation parses the raw annotation value into a
+// RecloneRequest. A malformed value sets Err.
+func parseRecloneAnnotation(raw string) RecloneRequest {
+	v, err := actionvalue.Parse(raw, recloneGrammar)
+	if err != nil {
+		site, _, _ := strings.Cut(strings.TrimSpace(raw), ":")
+		return RecloneRequest{Site: strings.TrimSpace(site), Err: err}
+	}
+	req := RecloneRequest{Site: v.Subject()}
+	req.Confirm, _ = v.Get(actionvalue.ConfirmKey)
+	req.UID, _ = v.Get(actionvalue.UIDKey)
+	req.GtidPrefix, _ = v.Get("gtidPrefix")
+	return req
+}
+
+// recloneFullForm is the value a request for site must have, for the
+// rejection message: the divergent form when divergentGtid is set.
+func recloneFullForm(fg *v1alpha1.MysqlFailoverGroup, site, divergentGtid string) string {
+	pairs := actionvalue.ConfirmPairs(fg.Name, string(fg.UID))
+	if divergentGtid != "" {
+		pairs = append(pairs, actionvalue.Pair{Key: "gtidPrefix", Value: truncateForHint(divergentGTIDSourceUUID(divergentGtid), minRecloneGtidPrefix)})
+	}
+	return v1alpha1.RecloneAnnotation + "=" + actionvalue.Format(site, pairs...)
 }
 
 // validateRecloneRequest enforces the safety interlock documented on
 // RecloneAnnotation. Returns nil when the request is safe to execute,
 // or an error whose message is suitable for a Kubernetes Event (it
-// tells the admin exactly how to fix their annotation).
+// prints the full form the value must have).
 //
 // Rules:
-//  1. Site must name an entry in spec.sites.
-//  2. If the target site has a non-empty divergentGtid in status, the
-//     admin MUST include a prefix of at least minRecloneGtidPrefix
-//     characters, and that prefix must match the observed GTID.
-//  3. When divergentGtid is empty, the value must be
-//     site:confirm=<group>: a cold reclone still wipes the datadir.
+//  1. The value matches the grammar, and Site names an entry in
+//     spec.sites.
+//  2. confirm= names the group and uid= is its metadata.uid: a reclone
+//     wipes the datadir, and a request written for an earlier group of
+//     the same name must not apply to this one.
+//  3. If the site has a non-empty divergentGtid in status, gtidPrefix=
+//     is required: at least minRecloneGtidPrefix hex or '-' characters,
+//     a prefix of the divergent GTID's source UUID. Without a recorded
+//     divergence gtidPrefix= is refused: the requester acted on a state
+//     that is not the current one.
 func validateRecloneRequest(fg *v1alpha1.MysqlFailoverGroup, req RecloneRequest) error {
 	if req.Site == "" {
-		return fmt.Errorf("reclone annotation is empty; expected <site> or <site>:<divergentGtid-prefix>")
+		return fmt.Errorf("reclone annotation names no site; expected %s",
+			actionvalue.Format("<site>", actionvalue.Pair{Key: actionvalue.ConfirmKey, Value: fg.Name}, actionvalue.Pair{Key: actionvalue.UIDKey, Value: string(fg.UID)}))
 	}
 
 	// Site name must match spec.sites. Built from spec rather than
@@ -88,17 +135,18 @@ func validateRecloneRequest(fg *v1alpha1.MysqlFailoverGroup, req RecloneRequest)
 			break
 		}
 	}
+	full := recloneFullForm(fg, req.Site, divergentGtid)
+	if req.Err != nil {
+		return fmt.Errorf("reclone of %q rejected: the value %v; set annotation %s", req.Site, req.Err, full)
+	}
+	if err := actionvalue.Confirm(req.value(), fg.Name, string(fg.UID)); err != nil {
+		return fmt.Errorf("reclone of %q rejected: CLONE INSTANCE wipes the datadir and must be confirmed (%v); set annotation %s",
+			req.Site, err, full)
+	}
 	if divergentGtid == "" {
-		// Cold reclone: no divergence is recorded but CLONE INSTANCE
-		// still wipes the target's datadir. Require a confirm token
-		// matching the failover group name so a fat-fingered single
-		// annotation can't destructively wipe the wrong site
-		// (AUDIT L3 / WISHLIST #5).
-		if req.GtidPrefix != "confirm="+fg.Name {
-			return fmt.Errorf(
-				"reclone of %q rejected: cold reclone wipes the datadir and must be confirmed — "+
-					"set annotation bloodraven.shipstream.io/reclone-site=%s:confirm=%s",
-				req.Site, req.Site, fg.Name)
+		if req.GtidPrefix != "" {
+			return fmt.Errorf("reclone of %q rejected: gtidPrefix=%s was given but the site has no recorded divergent GTID; "+
+				"re-read status.sites[].divergentGtid and set annotation %s", req.Site, req.GtidPrefix, full)
 		}
 		return nil
 	}
@@ -106,22 +154,33 @@ func validateRecloneRequest(fg *v1alpha1.MysqlFailoverGroup, req RecloneRequest)
 	if req.GtidPrefix == "" {
 		return fmt.Errorf(
 			"reclone of %q rejected: site has divergent transactions (gtid %q); "+
-				"annotation value must include the divergent-GTID prefix to confirm intent — "+
-				"set annotation bloodraven.shipstream.io/reclone-site=%s:%s",
-			req.Site, divergentGtid, req.Site, truncateForHint(divergentGtid, minRecloneGtidPrefix))
+				"the value must include gtidPrefix=, a prefix of the divergent GTID's source UUID, to confirm intent — "+
+				"set annotation %s",
+			req.Site, divergentGtid, full)
 	}
-	if len(req.GtidPrefix) < minRecloneGtidPrefix {
+	if len(req.GtidPrefix) < minRecloneGtidPrefix || !recloneGtidPrefixRE.MatchString(req.GtidPrefix) {
 		return fmt.Errorf(
-			"reclone of %q rejected: divergent-GTID prefix %q is shorter than the required %d characters",
-			req.Site, req.GtidPrefix, minRecloneGtidPrefix)
+			"reclone of %q rejected: gtidPrefix %q must be at least %d hex digits or '-' of the divergent GTID's source UUID; set annotation %s",
+			req.Site, req.GtidPrefix, minRecloneGtidPrefix, full)
 	}
-	if !strings.HasPrefix(divergentGtid, req.GtidPrefix) {
+	if !strings.HasPrefix(divergentGTIDSourceUUID(divergentGtid), req.GtidPrefix) {
 		return fmt.Errorf(
-			"reclone of %q rejected: divergent-GTID prefix %q does not match the observed divergentGtid %q — "+
+			"reclone of %q rejected: gtidPrefix %q does not match the observed divergentGtid %q — "+
 				"double-check the site name and re-read status.sites[].divergentGtid",
 			req.Site, req.GtidPrefix, divergentGtid)
 	}
 	return nil
+}
+
+// divergentGTIDSourceUUID returns the source UUID of the first entry of a
+// GTID set: the text before the first ':' (and before any separator a set
+// that spans entries or lines carries).
+func divergentGTIDSourceUUID(gtid string) string {
+	first := strings.TrimSpace(gtid)
+	if i := strings.IndexAny(first, ",: \t\r\n"); i >= 0 {
+		first = first[:i]
+	}
+	return first
 }
 
 // truncateForHint returns the first n characters of s without panicking
@@ -136,20 +195,38 @@ func truncateForHint(s string, n int) string {
 
 // recloneAnnotationValue is the reclone-site annotation value the
 // operator writes for its own reclone requests (the in-place restore's
-// peer queue). It satisfies validateRecloneRequest for the site's current
-// status: the first entry of the recorded divergent GTID set when there
-// is one (a set may span lines, which an annotation should not), otherwise
-// the cold-reclone confirmation.
+// peer queue), and kubectl bloodraven reclone builds the same form. It
+// satisfies validateRecloneRequest for the site's current status:
+// confirm= and uid= always, plus gtidPrefix= with the source UUID of the
+// recorded divergent GTID set's first entry when there is one.
 func recloneAnnotationValue(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+	pairs := actionvalue.ConfirmPairs(fg.Name, string(fg.UID))
 	for _, s := range fg.Status.Sites {
 		if s.Name != site || s.DivergentGtid == "" {
 			continue
 		}
-		prefix := s.DivergentGtid
-		if i := strings.IndexAny(prefix, ", \t\r\n"); i >= minRecloneGtidPrefix {
-			prefix = prefix[:i]
-		}
-		return site + ":" + prefix
+		pairs = append(pairs, actionvalue.Pair{Key: "gtidPrefix", Value: divergentGTIDSourceUUID(s.DivergentGtid)})
+		break
 	}
-	return site + ":confirm=" + fg.Name
+	return actionvalue.Format(site, pairs...)
+}
+
+// RecloneAnnotationValue is the value kubectl bloodraven reclone writes for
+// site: recloneAnnotationValue, the form the operator's own requests use.
+func RecloneAnnotationValue(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+	return recloneAnnotationValue(fg, site)
+}
+
+// RecloneAnnotationValueWithPrefix is RecloneAnnotationValue with an
+// explicit gtidPrefix (kubectl bloodraven reclone --gtid-prefix).
+func RecloneAnnotationValueWithPrefix(fg *v1alpha1.MysqlFailoverGroup, site, gtidPrefix string) string {
+	pairs := append(actionvalue.ConfirmPairs(fg.Name, string(fg.UID)), actionvalue.Pair{Key: "gtidPrefix", Value: gtidPrefix})
+	return actionvalue.Format(site, pairs...)
+}
+
+// ValidateRecloneAnnotation runs value through the operator's reclone
+// interlock against fg, so kubectl bloodraven reclone fails before it
+// writes a value the operator would reject.
+func ValidateRecloneAnnotation(fg *v1alpha1.MysqlFailoverGroup, value string) error {
+	return validateRecloneRequest(fg, parseRecloneAnnotation(value))
 }

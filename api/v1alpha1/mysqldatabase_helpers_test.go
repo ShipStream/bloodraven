@@ -219,14 +219,14 @@ func TestEffectiveDeletionPolicyDefaultsToRetain(t *testing.T) {
 	// be read as permission to DROP DATABASE.
 	// Only the exact "Delete" string opts into destruction; every near miss
 	// falls back to Retain.
-	cases := map[MysqlDatabaseDeletionPolicy]MysqlDatabaseDeletionPolicy{
-		"":                  MysqlDatabaseRetain,
-		MysqlDatabaseRetain: MysqlDatabaseRetain,
-		MysqlDatabaseDelete: MysqlDatabaseDelete,
-		"delete":            MysqlDatabaseRetain,
-		"DELETE":            MysqlDatabaseRetain,
-		"Delete ":           MysqlDatabaseRetain,
-		"Destroy":           MysqlDatabaseRetain,
+	cases := map[DeletionPolicy]DeletionPolicy{
+		"":                   DeletionPolicyRetain,
+		DeletionPolicyRetain: DeletionPolicyRetain,
+		DeletionPolicyDelete: DeletionPolicyDelete,
+		"delete":             DeletionPolicyRetain,
+		"DELETE":             DeletionPolicyRetain,
+		"Delete ":            DeletionPolicyRetain,
+		"Destroy":            DeletionPolicyRetain,
 	}
 	for in, want := range cases {
 		spec := MysqlDatabaseSpec{DeletionPolicy: in}
@@ -241,9 +241,6 @@ func TestEffectiveDefaults(t *testing.T) {
 	if got := spec.EffectiveCharacterSet(); got != DefaultDatabaseCharacterSet {
 		t.Fatalf("EffectiveCharacterSet() = %q, want %q", got, DefaultDatabaseCharacterSet)
 	}
-	if got := spec.EffectiveCollation(); got != DefaultDatabaseCollation {
-		t.Fatalf("EffectiveCollation() = %q, want %q", got, DefaultDatabaseCollation)
-	}
 	privs := spec.EffectiveOwnerPrivileges()
 	if len(privs) != 1 || privs[0] != PrivilegeAllPrivileges {
 		t.Fatalf("EffectiveOwnerPrivileges() = %v, want [ALL PRIVILEGES]", privs)
@@ -253,9 +250,9 @@ func TestEffectiveDefaults(t *testing.T) {
 func TestSpecValidate(t *testing.T) {
 	valid := func() MysqlDatabaseSpec {
 		return MysqlDatabaseSpec{
-			GroupRef:     LocalGroupRef{Name: "main"},
-			DatabaseName: "acme_wms",
-			Owner:        MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			FailoverGroupRef: LocalFailoverGroupRef{Name: "main"},
+			DatabaseName:     "acme_wms",
+			Owner:            MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 			Grants: []MysqlDatabaseGrant{
 				{Username: "maester", Privileges: []MysqlPrivilege{PrivilegeSelect, PrivilegeDelete}},
 			},

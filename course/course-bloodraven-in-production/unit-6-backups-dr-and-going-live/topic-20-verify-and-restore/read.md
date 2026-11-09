@@ -6,17 +6,17 @@
 
 The API type says it plainly. A verification "restores a MysqlBackup artifact into an ephemeral, throwaway MySQL instance to prove the backup can actually be loaded. Unverified backups are schrödinger backups." Until something reads it, last night's object in S3 is not a backup. It is a file that is the right size.
 
-`MysqlBackupVerification` is the CR that reads it, and the mechanism is deliberately unglamorous. The run gets an **ephemeral PVC** as its datadir — dedicated per run, deleted on cleanup, lifecycle never shared with the backup PVC — and an in-pod `mysqld` that binds `127.0.0.1` with **no Service**, so the instance is unreachable from outside its own network namespace. Nothing can point at it by accident, and nothing it does can touch `playground`. The PVC is auto-sized to `max(10Gi, ceil(1.5 × backup.status.sizeBytes / 10Gi) × 10Gi)` — a **10 GiB floor**, because a fresh datadir plus a small dump is already a few hundred megabytes. On failure, `keepOnFailure` (default `true`) leaves the Pod and PVC in place so you can `kubectl exec` in and look at the wreckage.
+`MysqlBackupVerification` is the CR that reads it, and the mechanism is deliberately unglamorous. The run gets an **`emptyDir` datadir** on the Job's node — dedicated per run, gone with the Pod, never a PersistentVolumeClaim — and an in-pod `mysqld` that binds `127.0.0.1` with **no Service**, so the instance is unreachable from outside its own network namespace. Nothing can point at it by accident, and nothing it does can touch `playground`. The datadir is not size-limited: it draws on the node's ephemeral storage, so budget roughly 1.5 × the backup's `status.sizeBytes`, and bound a run with `spec.resources.limits.ephemeral-storage` (the kubelet evicts the Pod past it and the verification fails). On failure, `keepOnFailure` (default `true`) leaves the Job and its Pod in place so you can `kubectl exec` in and look at the wreckage.
 
 ## The sanity check has exact semantics
 
 Loading is the default contract. `spec.sanityCheck` extends it from "it loaded" to "it loaded something". The query is a single statement, run through the `mysql` CLI as `mysql -B -N -e` wrapped in `timeout`, and it must return **one row and one column**. Multi-statement input is rejected to keep the timeout budget predictable.
 
-The detail that earns its keep: **an empty result set is treated as scalar 0**. That is precisely the shape a silently-empty restore produces — the query runs, nothing errors, no rows come back. Without that rule, "returned nothing" would look like success. With it, a `minRows: 1` floor catches it.
+The detail that earns its keep: **an empty result set is treated as scalar 0**. That is precisely the shape a silently-empty restore produces — the query runs, nothing errors, no rows come back. Without that rule, "returned nothing" would look like success. With it, a `minResult: 1` floor catches it.
 
-Failures split into two reasons, not one. `SanityCheckFailed` means the scalar came back below `expect.minRows`, or the query errored — the data is wrong. `SanityCheckTimeout` means the query exceeded `expect.maxDurationSeconds` (default 60) — the instance is wedged. Different problems, different pagers.
+Failures split into two reasons, not one. `SanityCheckFailed` means the scalar came back below `sanityCheck.minResult`, or the query errored — the data is wrong. `SanityCheckTimeout` means the query ran longer than `sanityCheck.timeout` (default `60s`; admission accepts 1s to 1h) — the instance is wedged. Different problems, different pagers. `status.sanityCheck.outcome` records which one you got: `Passed`, `Failed`, `TimedOut`, or `Skipped` when the load or the replay failed first and the query never ran.
 
-Pick an assertion whose expected value is structural rather than a moving row count. `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'counter_db'` returns 1 when the schema landed and 0 when it did not, and `minRows: 1` turns that into a pass/fail.
+Pick an assertion whose expected value is structural rather than a moving row count. `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'counter_db'` returns 1 when the schema landed and 0 when it did not, and `minResult: 1` turns that into a pass/fail.
 
 ```widget
 {
@@ -28,8 +28,8 @@ Pick an assertion whose expected value is structural rather than a moving row co
       "out": "Created MysqlBackupVerification bloodraven-playground/playground-nightly-verify-9k2rt (profile=nightly, triggeredBy=manual)\nWatch with: kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -n bloodraven-playground -w"
     },
     {
-      "cmd": "kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -o jsonpath='{.status.phase} {.status.sanityCheck.ran} {.status.sanityCheck.resultRow}'",
-      "out": "Succeeded true 1"
+      "cmd": "kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -o jsonpath='{.status.phase} {.status.sanityCheck.outcome} {.status.sanityCheck.result}'",
+      "out": "Succeeded Passed 1"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
@@ -90,11 +90,11 @@ An in-place restore runs against a live cluster, so it walks discrete phases one
 
 `spec.restoreInPlace.confirm` is required, must parse as an **RFC 3339 timestamp**, and must be **strictly greater** than the timestamp in `status.restoreInPlace.confirmTokenUsed`. Programmatic callers just send `now()`.
 
-Look at what that buys. Re-applying last week's manifest does nothing: its token is no longer greater than the recorded one, so the reconciler sees a terminal status that already reflects that confirm value and returns. GitOps cannot replay a destructive restore. An invalid token on a re-arm emits a `RestoreInPlaceRejected` event and leaves the previous terminal status visible.
+Look at what that buys. Re-applying last week's manifest does nothing: its token is no longer greater than the recorded one, so the reconciler sees a terminal status that already reflects that confirm value and returns. GitOps cannot replay a destructive restore. An invalid token on a re-arm emits a `RestoreInPlaceConfirmIgnored` event and leaves the previous terminal status visible.
 
-## Why `pointInTime` gets rejected
+## Why `pointInTime` gets rejected, and where it does not exist
 
-The two restore fields reject `pointInTime` for different reasons.
+The two restore fields treat `pointInTime` differently.
 
 On `spec.initFromBackup`, ask for `pointInTime` while `spec.backup.pitr.enabled=false`, without a `pointInTime.archiveProfileName` naming the source's archive, and you get:
 
@@ -102,9 +102,9 @@ On `spec.initFromBackup`, ask for `pointInTime` while `spec.backup.pitr.enabled=
 
 It is not a style preference: replay material only exists if something archived it, and the restore has to be told where. A group that does not archive itself (a fresh DR group, say) can still replay the source's binlogs by naming that archive in `archiveProfileName`.
 
-On `spec.restoreInPlace`, `pointInTime` is refused outright, whatever the PITR settings, with a message that begins `restoreInPlace.pointInTime is not supported`. The archived binlogs carry their original GTIDs, and the live primary has already executed every one of them, so MySQL would skip the whole replay and the restore would quietly stop at the backup. To get back to a point in time, restore into a new failover group with `spec.initFromBackup.pointInTime`.
+`spec.restoreInPlace` has no `pointInTime` field at all (releases before v1.7.0 accepted one and refused it). The archived binlogs carry their original GTIDs, and the live primary has already executed every one of them, so MySQL would skip the whole replay and the restore would quietly stop at the backup. To get back to a point in time, restore into a new failover group with `spec.initFromBackup.pointInTime`.
 
-Where it surfaces matters more than the wording. Both are **reconciliation-time checks, not admission rejections**. Your `kubectl apply` succeeds. The failure arrives seconds later in the CR's status — `status.restore` with a `RestoreBuildFailed` Warning Event, or `status.restoreInPlace` with a `RestoreInPlaceRejected` Event, before anything is fenced and without consuming your `confirm`. Look there, not at the exit code of the apply.
+Where the `initFromBackup` rejection surfaces matters more than the wording. It is a **reconciliation-time check, not an admission rejection**. Your `kubectl apply` succeeds. The failure arrives seconds later in the CR's status — `status.restore` with a `RestoreBuildFailed` Warning Event, before any restore Job exists. Look there, not at the exit code of the apply.
 
 ## Handoff
 

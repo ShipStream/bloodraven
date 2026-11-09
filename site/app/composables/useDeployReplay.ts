@@ -9,7 +9,7 @@
  *
  * Every status code, reason string and field name is taken from
  * docs/configuration/deployment-api: TTL clamp [5,120], renew at ttl/3,
- * 201/200 grant, 409 held, 423 unstable, 409 revoked (topology_changed),
+ * 201/200 grant, 409 held, 423 unstable, 409 revoked (TopologyChanged),
  * 204 release, Deferred/DeploymentHold, topologyGeneration fencing.
  */
 export const DEPLOY_CLOCK_RATE = 2.2
@@ -34,7 +34,7 @@ export interface Lease {
   topologyGeneration: number
   state: LeaseState
   endedAt?: number
-  endReason?: 'released' | 'topology_changed' | 'operator_revoked'
+  endReason?: 'released' | 'TopologyChanged' | 'OperatorRevoked'
   renewals: { at: number, expiresAt: number }[]
 }
 
@@ -135,7 +135,7 @@ function bumpGeneration(w: GroupWorld, site: 'iad' | 'pdx', at: number) {
     if (lease.state !== 'active') continue
     lease.state = 'revoked'
     lease.endedAt = at
-    lease.endReason = 'topology_changed'
+    lease.endReason = 'TopologyChanged'
   }
 }
 
@@ -221,14 +221,14 @@ const fence: Scenario = {
     ...acquisition(),
     ...renewBoth(6.3, 21.5),
     { at: 8.0, actor: 'a', tone: 'muted', text: 'ALTER TABLE shipments ADD COLUMN routed_at DATETIME (2/3)', apply: (_w, c) => { c.a.ddl = 2; c.a.detail = 'DDL 2/3 · schema v41 → v42' } },
-    { at: 8.8, actor: 'chaos', tone: 'danger', text: 'chaos: site iad lost (node gone)', apply: (w) => { w.sites.iad = 'unreachable'; w.stable = false; w.unstableReason = 'Degraded'; w.siteLostAt = 8.8 } },
+    { at: 8.8, actor: 'chaos', tone: 'danger', text: 'chaos: site iad lost (node gone)', apply: (w) => { w.sites.iad = 'unreachable'; w.stable = false; w.unstableReason = 'SiteUnhealthy'; w.siteLostAt = 8.8 } },
     { at: 9.0, actor: 'operator', tone: 'warn', text: 'probe iad: dial tcp 10.0.1.1:3306 i/o timeout (1/3)' },
     { at: 9.9, actor: 'operator', tone: 'warn', text: 'probe iad: dial tcp 10.0.1.1:3306 i/o timeout (3/3) · failureThreshold reached' },
     { at: 10.3, actor: 'operator', tone: 'danger', text: 'emergency failover · deployment leases not consulted · candidate pdx: freshest GTID set', apply: (w) => { w.unstableReason = 'NoPrimary' } },
     { at: 11.0, actor: 'operator', tone: 'ok', text: 'pdx promoted · activeSite=pdx · topologyGeneration=18', apply: (w) => { bumpGeneration(w, 'pdx', 11.0); w.sites.pdx = 'primary'; w.unstableReason = 'RecoveryInProgress' } },
-    { at: 11.2, actor: 'operator', tone: 'danger', text: `event DeploymentLeaseRevoked: migration + failover-hold for ${OP_A}… revoked: topology_changed`, apply: (w) => { w.event = 'DeploymentLeaseRevoked' } },
+    { at: 11.2, actor: 'operator', tone: 'danger', text: `event DeploymentLeaseRevoked: migration + failover-hold for ${OP_A}… revoked: TopologyChanged`, apply: (w) => { w.event = 'DeploymentLeaseRevoked' } },
     { at: 11.5, actor: 'a', tone: 'req', text: `PUT /deploy/v1/groups/orders/leases/migration/${OP_A}… {token, ttlSeconds:15}`, apply: (_w, c) => { c.a.lastAt = 11.5; c.a.lastStatus = 'PUT' } },
-    { at: 11.8, actor: 'a', tone: 'danger', text: '409 revoked reason=topology_changed topologyGeneration=18', apply: (_w, c) => { c.a.phase = 'fenced'; c.a.detail = '409 revoked · gen 17 ≠ 18 · heartbeat stopped'; c.a.lastAt = 11.8; c.a.lastStatus = '409' } },
+    { at: 11.8, actor: 'a', tone: 'danger', text: '409 revoked reason=TopologyChanged topologyGeneration=18', apply: (_w, c) => { c.a.phase = 'fenced'; c.a.detail = '409 revoked · gen 17 ≠ 18 · heartbeat stopped'; c.a.lastAt = 11.8; c.a.lastStatus = '409' } },
     { at: 12.4, actor: 'a', tone: 'danger', text: 'stop: DDL at 2/3 · not reconnecting to pdx · manual schema verification required', apply: (_w, c) => { c.a.detail = 'fenced at DDL 2/3 · verify schema before retry' } },
     { at: 13.4, actor: 'b', tone: 'req', text: `POST /deploy/v1/groups/orders/leases {kind:migration, operationId:${OP_B}…, instance:orders-app, ttlSeconds:15}`, apply: (_w, c) => { c.b.phase = 'observing'; c.b.detail = 'retry deploy'; c.b.lastAt = 13.4; c.b.lastStatus = 'POST' } },
     { at: 13.8, actor: 'b', tone: 'warn', text: '423 unstable reason=RecoveryInProgress retryAfterSeconds=1 · old primary iad still being reconfigured', apply: (_w, c) => { c.b.phase = 'blocked'; c.b.detail = '423 unstable · retry in 1s'; c.b.lastAt = 13.8; c.b.lastStatus = '423' } },

@@ -26,13 +26,13 @@ func TestDestinationFor(t *testing.T) {
 		{
 			name: "s3 aws",
 			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "backups", Prefix: "/prod/", CredentialsSecret: "c"}}},
+				Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "backups", Prefix: "/prod/", CredentialsSecretName: "c"}}},
 			want: "s3://backups/prod/binlogs?endpoint=aws",
 		},
 		{
 			name: "s3 endpoint",
 			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "b", EndpointURL: "http://MinIO:80/", CredentialsSecret: "c"}}},
+				Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "b", EndpointURL: "http://MinIO:80/", CredentialsSecretName: "c"}}},
 			want: "s3://b/binlogs?endpoint=http%3A%2F%2Fminio",
 		},
 		{
@@ -97,10 +97,10 @@ func TestEncryptionIdentityFor(t *testing.T) {
 		{"nil profile", nil, pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}},
 		{"no encryption", &v1alpha1.BackupProfile{}, pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}},
 		{"default algorithm", &v1alpha1.BackupProfile{Encryption: &v1alpha1.BackupEncryptionSpec{
-			PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "k"}}},
+			PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "k"}}},
 			pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM}},
 		{"explicit algorithm", &v1alpha1.BackupProfile{Encryption: &v1alpha1.BackupEncryptionSpec{
-			Algorithm: "AES-256-GCM", PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "k"}}},
+			Algorithm: "AES-256-GCM", PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "k"}}},
 			pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM}},
 	}
 	for _, tt := range tests {

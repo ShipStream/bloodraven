@@ -108,12 +108,12 @@ CANONICAL = {
     },
     "playground-iad-down.json": {
         "coreCount": 2, "writable": [], "readOnly": ["pdx"], "unreachable": ["iad"],
-        "reason": "Degraded", "alert": None, "promotionCandidates": ["pdx"],
+        "reason": "SiteUnhealthy", "alert": None, "promotionCandidates": ["pdx"],
         "promotionBlockedBy": None, "willRun": ["promote"],
     },
     "playground-reader-writable.json": {
         "coreCount": 2, "writable": ["iad"], "fenceSites": ["reader"],
-        "reason": "Degraded", "splitBrain": False,
+        "reason": "SiteUnhealthy", "splitBrain": False,
         "alert": "writable non-promotable site requires fencing (reader)",
         "promotionCandidates": [], "willRun": ["fence:reader"],
     },
@@ -121,7 +121,7 @@ CANONICAL = {
     # Fence-first returns before the split-brain row is ever reached.
     "playground-reader-writable-split-brain.json": {
         "coreCount": 2, "writable": ["iad", "pdx"], "fenceSites": ["reader"],
-        "reason": "Degraded", "splitBrain": False,
+        "reason": "SiteUnhealthy", "splitBrain": False,
         "alert": "writable non-promotable site requires fencing (reader)",
         "promotionCandidates": [], "willRun": ["fence:reader"],
     },
@@ -142,7 +142,7 @@ CANONICAL = {
     },
     "playground-peer-down.json": {
         "coreCount": 2, "writable": ["iad"], "unreachable": ["pdx"],
-        "reason": "Degraded", "alert": "pdx unreachable while iad is primary",
+        "reason": "SiteUnhealthy", "alert": "pdx unreachable while iad is primary",
         "promotionCandidates": [], "willRun": [],
     },
 }
@@ -157,7 +157,7 @@ def canonical() -> None:
 # 2. Awkward topologies and the two durable history copies
 # --------------------------------------------------------------------------
 AWKWARD = {
-    # A dr-only site is non-promotable but still counts toward coreCount and
+    # A DisasterRecovery site is non-promotable but still counts toward coreCount and
     # still lands in a tally. Excluding it like a reader would read 2 == 2 and
     # report TotalLoss; promoting it would name lhr as a candidate.
     "playground-dr-only.json": {
@@ -169,11 +169,11 @@ AWKWARD = {
     # the reader is writable, so len(unreachable) == coreCount never gets asked.
     "playground-reader-writable-total-loss.json": {
         "coreCount": 2, "unreachable": ["iad", "pdx"], "fenceSites": ["reader"],
-        "reason": "Degraded",
+        "reason": "SiteUnhealthy",
         "alert": "writable non-promotable site requires fencing (reader)",
         "willRun": ["fence:reader"],
     },
-    # Every site unknown at startup: no tally holds anything, and the message is
+    # Every site Unknown at startup: no tally holds anything, and the message is
     # the general one, not the two-site one.
     "playground-unknown-startup.json": {
         "coreCount": 2, "writable": [], "readOnly": [], "unreachable": [],
@@ -181,10 +181,10 @@ AWKWARD = {
     },
     # sitePriorities reorders the tiebreak list; the site that is not listed goes last.
     "playground-priority-order.json": {
-        "coreCount": 3, "reason": "Degraded", "promotionCandidates": ["sfo", "pdx"],
+        "coreCount": 3, "reason": "SiteUnhealthy", "promotionCandidates": ["sfo", "pdx"],
         "willRun": ["promote"],
     },
-    # A site absent from status.sites is unknown, not missing.
+    # A site absent from status.sites is Unknown, not missing.
     "playground-reader-unpolled.json": {
         "coreCount": 2, "writable": ["iad"], "readOnly": ["pdx"], "reason": "Healthy",
     },
@@ -220,7 +220,7 @@ def cooldown_gate() -> None:
     # non-promotable site is not gated: it runs every poll. A tool that wraps
     # the whole decision in the cooldown emits an empty willRun here.
     check("playground-reader-writable-cooldown.json", {
-        "reason": "Degraded",
+        "reason": "SiteUnhealthy",
         "alert": "writable non-promotable site requires fencing (reader)",
         "fenceSites": ["reader"],
         "promotionCandidates": [],
@@ -234,7 +234,7 @@ def cooldown_gate() -> None:
     # still ran: the reason and the candidate list are unchanged, and only the
     # promotion is withheld. A tool that returns early on cooldown loses them.
     check("playground-iad-down-cooldown.json", {
-        "reason": "Degraded",
+        "reason": "SiteUnhealthy",
         "alert": None,
         "promotionCandidates": ["pdx"],
         "promotionBlockedBy": "cooldown",
@@ -309,16 +309,16 @@ def purity() -> None:
     # The table must return the same action whatever the clock says.
     Observation = module.Observation
     observations = [
-        Observation("iad", "primary-candidate", "unreachable"),
-        Observation("pdx", "primary-candidate", "read-only"),
-        Observation("reader", "read-only", "read-only"),
+        Observation("iad", "PrimaryCandidate", "Unreachable"),
+        Observation("pdx", "PrimaryCandidate", "ReadOnly"),
+        Observation("reader", "ReadOnly", "ReadOnly"),
     ]
     action = module.evaluate_cross_site(observations, ["iad", "pdx"])
-    if action["reason"] != "Degraded" or action["promotionCandidates"] != ["pdx"]:
+    if action["reason"] != "SiteUnhealthy" or action["promotionCandidates"] != ["pdx"]:
         raise AssertionError(
             "evaluate_cross_site called directly returned "
             f"reason={action.get('reason')!r} candidates={action.get('promotionCandidates')!r}; "
-            "expected 'Degraded' and ['pdx']"
+            "expected 'SiteUnhealthy' and ['pdx']"
         )
     if action["alert"] is not None:
         raise AssertionError(

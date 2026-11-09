@@ -11,6 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -22,7 +23,7 @@ const (
 func blockSite(tm *TopologyManager, site, gtid string, count int64) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	tm.recovery[site] = &siteRecovery{state: recoveryStateBlocked, divergentGtid: gtid, divergentCount: count,
+	tm.recovery[site] = &siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentGtid: gtid, divergentCount: count,
 		detectedBy: divergenceDetectedByAudit, comparedTo: "dc0"}
 }
 

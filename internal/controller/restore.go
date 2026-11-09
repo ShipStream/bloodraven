@@ -24,9 +24,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
-	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
-	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // filterOutVolumeByName returns a copy of vols with the entry whose
@@ -79,27 +77,7 @@ func mysqlShellDumpInput(location string, storageType v1alpha1.BackupStorageType
 	return ensureTrailingSlash(location)
 }
 
-// isS3Location heuristically detects when a MysqlBackup.status.location
-// points at an S3 bucket. Used as a fallback when the CR does not carry
-// the explicit StorageType field (old CRs). util.dumpInstance() stores
-// S3 outputs as a bare prefix (e.g. "lion/seed/") rather than an
-// "s3://" URL, so we have to infer from the absence of a local
-// filesystem path.
-func isS3Location(loc string) bool {
-	if loc == "" {
-		return false
-	}
-	if strings.HasPrefix(loc, "s3://") {
-		return true
-	}
-	if strings.HasPrefix(loc, "/") || strings.HasPrefix(loc, "pvc://") {
-		return false
-	}
-	// Relative prefix with no leading slash => S3-style.
-	return true
-}
-
-// splitS3Location turns an S3 MysqlBackup.status.location into the
+// splitS3Location turns an S3 MysqlBackup.status.artifactStorage.location into the
 // bucket it names and the object-key prefix inside that bucket, without
 // surrounding slashes. mysqlsh dumps record a bare key prefix
 // ("lion/nightly-abc"), for which bucket is "". The encrypt-upload
@@ -153,12 +131,6 @@ func initRestoreSeedSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	return fg.Status.ActiveSite
 }
 
-// Ready condition reasons while spec.initFromBackup has not succeeded.
-const (
-	readyReasonInitRestoreInProgress = "InitFromBackupInProgress"
-	readyReasonInitRestoreFailed     = "InitFromBackupFailed"
-)
-
 // initRestoreRecovery is the recovery procedure for a failed
 // initFromBackup restore, shared by the RestoreFailed Event and the Ready
 // condition so both say the same thing.
@@ -177,19 +149,19 @@ func initRestoreReadyCondition(fg *v1alpha1.MysqlFailoverGroup) (reason, message
 	if rs != nil && rs.Phase == v1alpha1.BackupPhaseFailed {
 		detail := rs.Message
 		if rs.Reason != "" {
-			detail = rs.Reason + ": " + detail
+			detail = string(rs.Reason) + ": " + detail
 		}
 		if rs.JobName == "" {
-			return readyReasonInitRestoreFailed, fmt.Sprintf(
+			return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf(
 				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed.", detail)
 		}
-		return readyReasonInitRestoreFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
+		return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
 	}
 	phase := "Pending"
 	if rs != nil && rs.Phase != "" {
 		phase = string(rs.Phase)
 	}
-	return readyReasonInitRestoreInProgress, fmt.Sprintf(
+	return v1alpha1.ReasonInitFromBackupInProgress, fmt.Sprintf(
 		"initFromBackup restore has not succeeded (phase %s); applications are kept off the group (no DNS record, no Service endpoints) until it does", phase)
 }
 
@@ -214,64 +186,99 @@ func (m restoreCompletionMetadata) pitrPartial() bool {
 // Keep restoreCompletionMetadata, the status copy helpers below, and the
 // BLOODRAVEN_RESTORE_COMPLETE parser/script fields in lockstep.
 func restoreMetadataFromBackupStatus(status v1alpha1.MysqlBackupStatus) restoreCompletionMetadata {
-	return restoreCompletionMetadata{
+	meta := restoreCompletionMetadata{
 		SourceSizeBytes:    status.SizeBytes,
 		SourceGtidExecuted: status.GtidExecuted,
-		SourceBinlogFile:   status.BinlogFile,
-		SourceBinlogPos:    status.BinlogPos,
 	}
+	if bp := status.BinlogPosition; bp != nil {
+		meta.SourceBinlogFile, meta.SourceBinlogPos = bp.File, bp.Position
+	}
+	return meta
 }
 
-func (r *MysqlFailoverGroupReconciler) restoreSourceMetadata(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource) restoreCompletionMetadata {
-	if src.MysqlBackupRef == nil {
+func (r *MysqlFailoverGroupReconciler) restoreSourceMetadata(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource) restoreCompletionMetadata {
+	if src.BackupRef == nil {
 		return restoreCompletionMetadata{}
 	}
 	var ref v1alpha1.MysqlBackup
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.MysqlBackupRef.Name}, &ref); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.BackupRef.Name}, &ref); err != nil {
 		return restoreCompletionMetadata{}
 	}
 	return restoreMetadataFromBackupStatus(ref.Status)
 }
 
 func applyRestoreMetadataToStatus(rs *v1alpha1.RestoreStatus, meta restoreCompletionMetadata) {
-	rs.SourceSizeBytes = meta.SourceSizeBytes
-	rs.SourceGtidExecuted = meta.SourceGtidExecuted
-	rs.SourceBinlogFile = meta.SourceBinlogFile
-	rs.SourceBinlogPos = meta.SourceBinlogPos
-	rs.TargetGtidExecuted = meta.TargetGtidExecuted
-	rs.TargetBinlogFile = meta.TargetBinlogFile
-	rs.TargetBinlogPos = meta.TargetBinlogPos
-	rs.PointInTime = meta.PointInTime
-	if meta.pitrPartial() {
-		rs.Reason = "PointInTimePartial"
-	}
+	rs.Provenance = restoreProvenance(meta)
 }
 
 func applyRestoreMetadataToInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus, meta restoreCompletionMetadata) {
-	rs.SourceSizeBytes = meta.SourceSizeBytes
-	rs.SourceGtidExecuted = meta.SourceGtidExecuted
-	rs.SourceBinlogFile = meta.SourceBinlogFile
-	rs.SourceBinlogPos = meta.SourceBinlogPos
-	rs.TargetGtidExecuted = meta.TargetGtidExecuted
-	rs.TargetBinlogFile = meta.TargetBinlogFile
-	rs.TargetBinlogPos = meta.TargetBinlogPos
-	rs.PointInTime = meta.PointInTime
+	rs.Provenance = restoreProvenance(meta)
+}
+
+// restoreProvenance is status.restore(InPlace).provenance for meta: nil
+// when meta records nothing, and each part present only when it records
+// something (a zero size or an empty binlog file is unknown, not zero).
+func restoreProvenance(meta restoreCompletionMetadata) *v1alpha1.RestoreProvenance {
+	p := &v1alpha1.RestoreProvenance{PointInTime: meta.PointInTime}
+	if meta.SourceSizeBytes > 0 || meta.SourceGtidExecuted != "" || meta.SourceBinlogFile != "" {
+		src := &v1alpha1.RestoreSourceProvenance{GtidExecuted: meta.SourceGtidExecuted}
+		if meta.SourceSizeBytes > 0 {
+			size := meta.SourceSizeBytes
+			src.SizeBytes = &size
+		}
+		src.BinlogPosition = binlogCoordinate(meta.SourceBinlogFile, meta.SourceBinlogPos)
+		p.Source = src
+	}
+	if meta.TargetGtidExecuted != "" || meta.TargetBinlogFile != "" {
+		p.Target = &v1alpha1.RestoreTargetProvenance{
+			GtidExecuted:   meta.TargetGtidExecuted,
+			BinlogPosition: binlogCoordinate(meta.TargetBinlogFile, meta.TargetBinlogPos),
+		}
+	}
+	if p.Source == nil && p.Target == nil && p.PointInTime == nil {
+		return nil
+	}
+	return p
+}
+
+// binlogCoordinate is the coordinate {file, position}, nil without a file.
+func binlogCoordinate(file string, position int64) *v1alpha1.BinlogCoordinate {
+	if file == "" {
+		return nil
+	}
+	return &v1alpha1.BinlogCoordinate{File: file, Position: position}
+}
+
+// restoreMetadataFromProvenance is the inverse of restoreProvenance.
+func restoreMetadataFromProvenance(p *v1alpha1.RestoreProvenance) restoreCompletionMetadata {
+	var meta restoreCompletionMetadata
+	if p == nil {
+		return meta
+	}
+	meta.PointInTime = p.PointInTime
+	if src := p.Source; src != nil {
+		meta.SourceGtidExecuted = src.GtidExecuted
+		if src.SizeBytes != nil {
+			meta.SourceSizeBytes = *src.SizeBytes
+		}
+		if bp := src.BinlogPosition; bp != nil {
+			meta.SourceBinlogFile, meta.SourceBinlogPos = bp.File, bp.Position
+		}
+	}
+	if tgt := p.Target; tgt != nil {
+		meta.TargetGtidExecuted = tgt.GtidExecuted
+		if bp := tgt.BinlogPosition; bp != nil {
+			meta.TargetBinlogFile, meta.TargetBinlogPos = bp.File, bp.Position
+		}
+	}
+	return meta
 }
 
 func restoreMetadataFromInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus) restoreCompletionMetadata {
 	if rs == nil {
 		return restoreCompletionMetadata{}
 	}
-	return restoreCompletionMetadata{
-		SourceSizeBytes:    rs.SourceSizeBytes,
-		SourceGtidExecuted: rs.SourceGtidExecuted,
-		SourceBinlogFile:   rs.SourceBinlogFile,
-		SourceBinlogPos:    rs.SourceBinlogPos,
-		TargetGtidExecuted: rs.TargetGtidExecuted,
-		TargetBinlogFile:   rs.TargetBinlogFile,
-		TargetBinlogPos:    rs.TargetBinlogPos,
-		PointInTime:        rs.PointInTime,
-	}
+	return restoreMetadataFromProvenance(rs.Provenance)
 }
 
 func parseRestoreCompleteLine(line string) (restoreCompletionMetadata, bool) {
@@ -486,9 +493,9 @@ func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) (site string, ready bool
 			continue
 		}
 		switch s.State {
-		case state.StateWritable.String():
+		case v1alpha1.SiteStateWritable:
 			return active, true, "", false
-		case "", state.StateReadOnly.String():
+		case "", v1alpha1.SiteStateReadOnly:
 			// The seed is published before the poll that observes it
 			// writable, so read-only here is normally that window.
 			return active, false, fmt.Sprintf("waiting for active site %q to be observed writable", active), false
@@ -612,7 +619,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 
 	if phase == v1alpha1.BackupPhaseSucceeded {
 		if patched {
-			emitRestoreSuccessMetrics(fg, "init_from_backup", targetSite, rs.SourceSizeBytes, rs.StartTime, now)
+			emitRestoreSuccessMetrics(fg, "init_from_backup", targetSite, meta.SourceSizeBytes, rs.StartTime, now)
 		}
 		if !patched {
 			// The outcome Events describe a recorded status.
@@ -622,7 +629,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		if meta.pitrPartial() {
 			return 0, nil
 		}
-		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreSucceeded",
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreSucceeded,
 			"restore Job %s completed: %s", job.Name, message)
 		return 0, nil
 	}
@@ -630,7 +637,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	if !patched {
 		return 15 * time.Second, nil
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreFailed",
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreFailed,
 		"restore Job %s failed: %s. %s", job.Name, rs.Message, initRestoreRecovery)
 	// No automatic retry. Operator must delete the Job to re-trigger.
 	return 0, nil
@@ -642,7 +649,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite string, ready bool, wait string, refuse bool) (time.Duration, error) {
 	if !ready {
 		if refuse {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreTargetUnavailable",
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreTargetUnavailable,
 				"refusing to run restore: active site %q is not writable / not ready",
 				fg.Status.ActiveSite)
 		}
@@ -691,7 +698,7 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 		return pitrReadBindingRequeue, nil
 	}
 	if err != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreBuildFailed", "%s", err.Error())
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreBuildFailed, "%s", err.Error())
 		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
 			Phase:      v1alpha1.BackupPhaseFailed,
 			Reason:     pitrFailureReason(err.Error()),
@@ -717,7 +724,7 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 	}
 	applyRestoreMetadataToStatus(running, sourceMeta)
 	r.setRestoreStatus(ctx, fg, running)
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreStarted",
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestoreStarted,
 		"created restore Job %s targeting site %s", built.Name, targetSite)
 	return 15 * time.Second, nil
 }
@@ -780,34 +787,18 @@ func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg 
 // backup role: they DROP and CREATE schemas, set global variables
 // (local_infile) and, for a full-instance in-place restore, must keep
 // working under the offline_mode fence, none of which the backup role's
-// grants allow. In legacy mode the DSN secret is parsed.
+// grants allow.
 func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, secretName string) error {
-	var user, password string
-
-	backupSecretName := fg.Spec.EffectiveOperatorSecretName()
+	operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 	var srcSecret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: backupSecretName}, &srcSecret); err != nil {
-		return fmt.Errorf("get credential secret %s: %w", backupSecretName, err)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &srcSecret); err != nil {
+		return fmt.Errorf("get credential secret %s: %w", operatorSecretName, err)
 	}
 
-	if fg.Spec.UsesCredentials() {
-		user = string(srcSecret.Data["username"])
-		password = string(srcSecret.Data["password"])
-	} else {
-		dsnBytes, ok := srcSecret.Data["dsn"]
-		if !ok {
-			return fmt.Errorf("secret %s missing 'dsn' key", backupSecretName)
-		}
-		parsed, err := internalmysql.ParseDSN(string(dsnBytes))
-		if err != nil {
-			return fmt.Errorf("parse dsn: %w", err)
-		}
-		user = parsed.User
-		password = parsed.Passwd
-	}
-
+	user := string(srcSecret.Data["username"])
+	password := string(srcSecret.Data["password"])
 	if user == "" {
-		return fmt.Errorf("secret %s has empty username", backupSecretName)
+		return fmt.Errorf("secret %s has empty username", operatorSecretName)
 	}
 
 	derived := &corev1.Secret{
@@ -823,9 +814,9 @@ func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Cont
 		if derived.Labels == nil {
 			derived.Labels = map[string]string{}
 		}
-		derived.Labels[labelFailoverGroup] = fg.Name
+		derived.Labels[v1alpha1.FailoverGroupLabel] = fg.Name
 		derived.Labels[labelManagedBy] = managerName
-		derived.Labels[labelResourceKind] = "restore"
+		derived.Labels[v1alpha1.ResourceLabel] = "restore"
 		derived.Type = corev1.SecretTypeOpaque
 		derived.Data = map[string][]byte{
 			"MYSQL_USER":     []byte(user),
@@ -846,13 +837,13 @@ type restoreJobInputs struct {
 	JobName     string
 	TargetSite  string
 	CredsName   string
-	Source      v1alpha1.InitFromBackupSource
+	Source      v1alpha1.RestoreSource
 	LoadOptions *v1alpha1.LoadOptions
 	PointInTime *v1alpha1.PointInTimeSpec
 	// Decryption, when set, provides the passphrase Secret the restore
 	// will use to decrypt the source artifact. When unset, the
 	// resolver falls back to the profile's own PassphraseSecret when
-	// the source is a MysqlBackupRef pointing at an encrypted backup.
+	// the source is a backupRef pointing at an encrypted backup.
 	Decryption *v1alpha1.BackupDecryptionSpec
 	// FieldPath is the root CR field name used in error messages
 	// ("initFromBackup" for bootstrap restore, "restoreInPlace" for
@@ -892,33 +883,32 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 	})
 }
 
-// backupRefProfileStorageError reports why a mysqlBackupRef's profile can
-// no longer locate the backup's artifact on the backend it was written to
-// (want), or returns nil when profile.Storage carries that backend's
-// configuration. A non-nil profile with a nil error guarantees the
-// matching profile.Storage.S3 / profile.Storage.PVC pointer is non-nil.
-func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, want v1alpha1.BackupStorageType) error {
-	kind, field := "an S3", "s3"
-	if want == v1alpha1.BackupStoragePVC {
-		kind, field = "a PVC", "pvc"
+// backupRefS3CredentialsError reports why an S3 backupRef's profile can no
+// longer supply the S3 credentials its recorded destination is read with,
+// or returns nil. The destination itself comes from the backup's
+// status.artifactStorage; a PVC backup needs no profile. A nil error
+// guarantees profile.Storage.S3 is non-nil.
+func backupRefS3CredentialsError(fp string, ref *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile) error {
+	location := ""
+	if ref.Status.ArtifactStorage != nil {
+		location = ref.Status.ArtifactStorage.Location
 	}
 	switch {
 	case profile == nil:
 		return fmt.Errorf(
-			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q is missing from spec.backup.profiles; "+
-				"either restore the profile or set %s.source.%s explicitly",
-			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, fp, field)
-	case profile.Storage.Type != want:
+			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles (it supplies the S3 credentials); "+
+				"either restore the profile or set %s.source.s3 explicitly",
+			fp, ref.Name, location, ref.Spec.ProfileName, fp)
+	case profile.Storage.Type != v1alpha1.BackupStorageS3:
 		return fmt.Errorf(
-			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q now stores to %s; "+
-				"either restore the profile's %s storage or set %s.source.%s explicitly",
-			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, profile.Storage.Type, want, fp, field)
-	case want == v1alpha1.BackupStorageS3 && profile.Storage.S3 == nil,
-		want == v1alpha1.BackupStoragePVC && profile.Storage.PVC == nil:
+			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q now stores to %s (it supplies the S3 credentials); "+
+				"either restore the profile's S3 storage or set %s.source.s3 explicitly",
+			fp, ref.Name, location, ref.Spec.ProfileName, profile.Storage.Type, fp)
+	case profile.Storage.S3 == nil:
 		return fmt.Errorf(
-			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q has no storage.%s configuration; "+
-				"either restore the profile's %s storage or set %s.source.%s explicitly",
-			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, field, want, fp, field)
+			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q has no storage.s3 configuration to supply its credentials; "+
+				"either restore the profile's S3 storage or set %s.source.s3 explicitly",
+			fp, ref.Name, location, ref.Spec.ProfileName, fp)
 	}
 	return nil
 }
@@ -994,7 +984,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		decryptPVCPrefix          string
 		// Resolved passphrase Secret reference for the source (may
 		// come from in.Decryption or from the source profile itself).
-		passphraseRef *v1alpha1.PassphraseSecretRef
+		passphraseRef *v1alpha1.PassphraseSecretKeyRef
 		sourceMeta    restoreCompletionMetadata
 		// dumpSrc is where dump-meta reads the dump's identity; set only
 		// for a point-in-time restore.
@@ -1014,102 +1004,88 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	}
 
 	switch {
-	case src.MysqlBackupRef != nil:
+	case src.BackupRef != nil:
 		var ref v1alpha1.MysqlBackup
-		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.MysqlBackupRef.Name}, &ref); err != nil {
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.BackupRef.Name}, &ref); err != nil {
 			return nil, fmt.Errorf("get referenced mysqlbackup: %w", err)
 		}
-		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
-			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
+		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded", ref.Name)
+		}
+		// The artifact is read at the destination its producing Job
+		// recorded, never at the profile's current one (a bucket,
+		// endpoint, claim or prefix edited since the backup ran).
+		storage, err := recordedArtifactStorage(&ref)
+		if err != nil {
+			return nil, fmt.Errorf("%s.source.backupRef: %w", fp, err)
 		}
 		// D-44 (a target before the dump ended) is enforced by dump-meta
 		// against the dump's own serverClock.end. status.completionTime is
 		// no bound: it includes the upload, which can end long after the
 		// dump did, so it would refuse valid targets in between (F034).
 		sourceMeta = restoreMetadataFromBackupStatus(ref.Status)
+		inputURL = mysqlShellDumpInput(storage.Location, storage.Type)
 
-		// Prefer the structured StorageType set by the backup
-		// reconciler; fall back to the old heuristic for pre-upgrade
-		// CRs that don't carry it.
-		wantsS3 := ref.Status.StorageType == v1alpha1.BackupStorageS3
-		wantsPVC := ref.Status.StorageType == v1alpha1.BackupStoragePVC
-		if ref.Status.StorageType == "" {
-			wantsS3 = isS3Location(ref.Status.Location)
-			wantsPVC = !wantsS3
-		}
-		if wantsS3 {
-			inputURL = mysqlShellDumpInput(ref.Status.Location, v1alpha1.BackupStorageS3)
-		} else {
-			inputURL = mysqlShellDumpInput(ref.Status.Location, v1alpha1.BackupStoragePVC)
-		}
-
-		// Resolve the backend the backup was written to from the profile
-		// before anything reads its storage block: the profile may have
-		// been deleted or moved to the other backend since the backup ran,
-		// and an explicit decryption Secret must not bypass that check.
+		// The profile supplies only the S3 credentials. Resolve it before
+		// anything reads its storage block: it may have been deleted or
+		// moved to the other backend since the backup ran, and an explicit
+		// decryption Secret must not bypass that check.
 		profile := findProfile(fg, ref.Spec.ProfileName)
 		var (
-			profileS3       *v1alpha1.S3Storage
-			profilePVCClaim string
+			s3Storage *v1alpha1.BackupArtifactStorage
+			pvcClaim  string
+			s3Creds   string
 		)
-		switch {
-		case wantsS3:
-			if err := backupRefProfileStorageError(fp, &ref, profile, v1alpha1.BackupStorageS3); err != nil {
+		switch storage.Type {
+		case v1alpha1.BackupStorageS3:
+			if err := backupRefS3CredentialsError(fp, &ref, profile); err != nil {
 				return nil, err
 			}
-			profileS3 = profile.Storage.S3
-		case wantsPVC:
-			if err := backupRefProfileStorageError(fp, &ref, profile, v1alpha1.BackupStoragePVC); err != nil {
-				return nil, err
-			}
-			profilePVCClaim = profile.Storage.PVC.ClaimName
-			if profilePVCClaim == "" {
-				profilePVCClaim = ownedBackupPVCName(fg.Name, profile.Name)
-			}
+			s3Storage, s3Creds = storage, profile.Storage.S3.CredentialsSecretName
+		case v1alpha1.BackupStoragePVC:
+			pvcClaim = storage.ClaimName
 		}
 
-		if ref.Status.Encrypted {
+		if backupStatusEncrypted(&ref.Status) {
 			// The dump is decrypted with an explicit decryption Secret,
 			// else the key the backup recorded (its dump-key snapshot),
 			// never the profile's live Secret (Δ17, #203): that may hold
 			// other bytes since the backup ran.
 			switch {
-			case in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "":
-				ref := in.Decryption.PassphraseSecret
+			case in.Decryption != nil && in.Decryption.PassphraseSecretKeyRef.Name != "":
+				ref := in.Decryption.PassphraseSecretKeyRef
 				passphraseRef = &ref
-			case ref.Status.ArtifactStorage != nil && ref.Status.ArtifactStorage.PassphraseSecret != nil:
-				recorded := ref.Status.ArtifactStorage.PassphraseSecret
+			case ref.Status.ArtifactStorage != nil && ref.Status.ArtifactStorage.PassphraseSecretKeyRef != nil:
+				recorded := ref.Status.ArtifactStorage.PassphraseSecretKeyRef
 				var key corev1.Secret
 				if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: recorded.Name}, &key); err != nil {
 					if !apierrors.IsNotFound(err) {
 						return nil, fmt.Errorf("get recorded passphrase secret %s: %w", recorded.Name, err)
 					}
 					return nil, fmt.Errorf(
-						"%s: %s.source.mysqlBackupRef=%q is encrypted and the Secret %q it recorded as its dump key is gone; "+
-							"restore that Secret or set %s.decryption.passphraseSecret",
+						"%s: %s.source.backupRef=%q is encrypted and the Secret %q it recorded as its dump key is gone; "+
+							"restore that Secret or set %s.decryption.passphraseSecretKeyRef",
 						pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, recorded.Name, fp)
 				}
-				passphraseRef = &v1alpha1.PassphraseSecretRef{Name: recorded.Name, Key: recorded.Key}
+				passphraseRef = &v1alpha1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}
 			default:
 				return nil, fmt.Errorf(
-					"%s: %s.source.mysqlBackupRef=%q is encrypted but recorded no dump key; "+
-						"set %s.decryption.passphraseSecret",
+					"%s: %s.source.backupRef=%q is encrypted but recorded no dump key; "+
+						"set %s.decryption.passphraseSecretKeyRef",
 					pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, fp)
 			}
-			if profileS3 != nil {
+			if s3Storage != nil {
 				decryptSourceKind = "S3"
-				decryptS3Bucket = profileS3.Bucket
-				decryptS3EndpointOverride = profileS3.EndpointURL
-				decryptS3Region = profileS3.Region
-				var locBucket string
-				locBucket, decryptS3Prefix = splitS3Location(ref.Status.Location)
-				if locBucket != "" {
-					decryptS3Bucket = locBucket
-				}
-				decryptAWSCredsSecret = profileS3.CredentialsSecret
-			} else if profilePVCClaim != "" {
+				// Recorded values are already resolved: render them
+				// literally (as BLOODRAVEN_SOURCE_PREFIX always is).
+				decryptS3Bucket = literalArtifactEnvValue(s3Storage.Bucket)
+				decryptS3EndpointOverride = literalArtifactEnvValue(s3Storage.EndpointURL)
+				decryptS3Region = literalArtifactEnvValue(s3Storage.Region)
+				_, decryptS3Prefix = splitS3Location(s3Storage.Location)
+				decryptAWSCredsSecret = s3Creds
+			} else if pvcClaim != "" {
 				decryptSourceKind = "PVC"
-				decryptPVCClaim = profilePVCClaim
+				decryptPVCClaim = pvcClaim
 				// inputURL is the in-pod absolute path the backup
 				// wrote to (e.g. "/backups/<backup-name>"). Derive a
 				// storage-relative prefix from the PVC mount path
@@ -1118,34 +1094,37 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			}
 		}
 		if pitrReq != nil {
-			ds, err := pitrDumpSourceForBackup(fg, &ref, profile, passphraseRef)
+			ds, err := pitrDumpSourceForBackup(&ref, profile, passphraseRef)
 			if err != nil {
-				return nil, wrapTokenFirst(fp+".source.mysqlBackupRef", err)
+				return nil, wrapTokenFirst(fp+".source.backupRef", err)
 			}
 			dumpSrc = &ds
 		}
-		if profileS3 != nil {
+		if s3Storage != nil {
+			// The recorded destination is already expanded; escape it so
+			// kubelet's $(VAR) expansion cannot change it again. A direct
+			// source below keeps its one expansion.
 			extraEnv = append(extraEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profileS3.Bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: literalArtifactEnvValue(s3Storage.Bucket)},
 			)
-			if profileS3.EndpointURL != "" {
+			if s3Storage.EndpointURL != "" {
 				extraEnv = append(extraEnv, corev1.EnvVar{
-					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: profileS3.EndpointURL,
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: literalArtifactEnvValue(s3Storage.EndpointURL),
 				})
 			}
-			if profileS3.Region != "" {
-				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profileS3.Region})
+			if s3Storage.Region != "" {
+				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: literalArtifactEnvValue(s3Storage.Region)})
 			}
-			awsCredsSecret = profileS3.CredentialsSecret
-		} else if profilePVCClaim != "" {
-			// MysqlBackup.status.location stores the in-pod dump path that the
+			awsCredsSecret = s3Creds
+		} else if pvcClaim != "" {
+			// status.artifactStorage.location is the in-pod dump path the
 			// backup Job used. For PVC-backed backups that path lives under
 			// /backups, so the restore Job must mount the same claim there.
 			extraVolumes = append(extraVolumes, corev1.Volume{
 				Name: "restore-src",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: profilePVCClaim,
+						ClaimName: pvcClaim,
 						ReadOnly:  true,
 					},
 				},
@@ -1172,23 +1151,23 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if src.S3.Region != "" {
 			extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: src.S3.Region})
 		}
-		awsCredsSecret = src.S3.CredentialsSecret
+		awsCredsSecret = src.S3.CredentialsSecretName
 
-		if in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "" {
-			ref := in.Decryption.PassphraseSecret
+		if in.Decryption != nil && in.Decryption.PassphraseSecretKeyRef.Name != "" {
+			ref := in.Decryption.PassphraseSecretKeyRef
 			passphraseRef = &ref
 			decryptSourceKind = "S3"
 			decryptS3Bucket = src.S3.Bucket
 			decryptS3EndpointOverride = src.S3.EndpointURL
 			decryptS3Region = src.S3.Region
 			decryptS3Prefix = s3Prefix
-			decryptAWSCredsSecret = src.S3.CredentialsSecret
+			decryptAWSCredsSecret = src.S3.CredentialsSecretName
 		}
 		if pitrReq != nil {
 			dumpSrc = &pitrDumpSource{
 				StorageType: v1alpha1.BackupStorageS3, Prefix: s3Prefix,
 				S3Bucket: src.S3.Bucket, S3EndpointURL: src.S3.EndpointURL, S3Region: src.S3.Region,
-				AWSCredsSecret: src.S3.CredentialsSecret, Passphrase: passphraseRef,
+				AWSCredsSecret: src.S3.CredentialsSecretName, Passphrase: passphraseRef,
 			}
 		}
 
@@ -1221,8 +1200,8 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			Name: "restore-src", MountPath: mountPath, ReadOnly: true,
 		})
 
-		if in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "" {
-			ref := in.Decryption.PassphraseSecret
+		if in.Decryption != nil && in.Decryption.PassphraseSecretKeyRef.Name != "" {
+			ref := in.Decryption.PassphraseSecretKeyRef
 			passphraseRef = &ref
 			decryptSourceKind = "PVC"
 			decryptPVCClaim = claim
@@ -1233,7 +1212,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 	default:
-		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
+		return nil, fmt.Errorf("%s.source must set backupRef, s3, or pvc", fp)
 	}
 
 	loadOptsJSON, err := restoreLoadOptionsJSON(fp, in)
@@ -1271,17 +1250,17 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	extraMounts = append(extraMounts, pitrFrags.MainMounts...)
 
 	labels := map[string]string{
-		labelAppName:       "mysql-restore",
-		labelInstance:      fg.Name,
-		labelFailoverGroup: fg.Name,
-		labelSite:          targetSite,
-		labelManagedBy:     managerName,
-		labelResourceKind:  "restore",
+		labelAppName:                "mysql-restore",
+		labelInstance:               fg.Name,
+		v1alpha1.FailoverGroupLabel: fg.Name,
+		v1alpha1.SiteLabel:          targetSite,
+		labelManagedBy:              managerName,
+		v1alpha1.ResourceLabel:      "restore",
 	}
 	if pitrFrags.KeySecretName != "" {
 		// Correlation label (Δ18): a release of this archive's binding
 		// sees the Job and refuses while it runs.
-		labels[labelPITRKeySecret] = pitrFrags.KeySecretName
+		labels[v1alpha1.PITRKeySecretLabel] = pitrFrags.KeySecretName
 	}
 
 	env := []corev1.EnvVar{
@@ -1602,7 +1581,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 					// Evicting it mid-load because a failover tainted its
 					// node would leave a half-dropped or half-loaded schema;
 					// let it finish or fail on its own instead.
-					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					Tolerations:    groupReadOnlyTolerations(fg),
 					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{

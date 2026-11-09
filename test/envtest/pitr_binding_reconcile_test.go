@@ -30,19 +30,19 @@ const (
 	bindingCondition = "PITRArchiveBindingReady"
 	pitrRenderKey    = "bloodraven.shipstream.io/pitr-render"
 	acceptedKey      = "bloodraven.shipstream.io/pitr-accepted"
-	specHashKey      = "shipstream.io/spec-hash"
+	specHashKey      = "bloodraven.shipstream.io/spec-hash"
 )
 
 func bindingFG(ns string) *v1alpha1.MysqlFailoverGroup {
 	fg := newTestFG(ns)
 	// Recreate: the reconciler itself patches existing Deployments, so a
 	// render change is visible without the ordered updater.
-	fg.Spec.UpdateStrategy = "Recreate"
+	fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
 	s3 := func(prefix string) v1alpha1.BackupStorage {
-		return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive", Prefix: prefix, EndpointURL: "http://rustfs:9000", CredentialsSecret: "s3-creds"}}
+		return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive", Prefix: prefix, EndpointURL: "http://rustfs:9000", CredentialsSecretName: "s3-creds"}}
 	}
 	enc := func(secret string) *v1alpha1.BackupEncryptionSpec {
-		return &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secret}}
+		return &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secret}}
 	}
 	fg.Spec.Backup = &v1alpha1.BackupSpec{
 		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"},
@@ -159,9 +159,9 @@ func (h *bindingHarness) prove(profile, keyRevision string) {
 	fg := h.fg()
 	dest := h.dest(fg, profile)
 	now := metav1.NowMicro()
-	fg.Status.PITR = &v1alpha1.PITRStatus{Enabled: true, ProfileName: fg.Spec.Backup.PITR.ProfileName, Archive: &v1alpha1.PITRArchiveObservation{
+	fg.Status.PITR = &v1alpha1.PITRStatus{Archive: &v1alpha1.PITRArchiveObservation{
 		Destination: dest.String(), ArchiveID: pitrarchive.CreateArchiveID(fg.UID, dest), State: v1alpha1.PITRArchiveVerified,
-		EncryptionMode: v1alpha1.PITRArchiveEncryptionPassphrase, KeyRevision: keyRevision, ObservedTime: &now,
+		EncryptionMode: v1alpha1.EncryptionModePassphrase, KeyRevision: keyRevision, ObservedTime: &now,
 	}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		h.t.Fatal(err)
@@ -175,7 +175,7 @@ func (h *bindingHarness) condition() *metav1.Condition {
 func (h *bindingHarness) checkJobs() []batchv1.Job {
 	h.t.Helper()
 	var jobs batchv1.JobList
-	if err := k8sClient.List(ctx, &jobs, client.InNamespace(h.ns), client.MatchingLabels{"shipstream.io/resource": "pitr-archive-check"}); err != nil {
+	if err := k8sClient.List(ctx, &jobs, client.InNamespace(h.ns), client.MatchingLabels{"bloodraven.shipstream.io/resource": "pitr-archive-check"}); err != nil {
 		h.t.Fatal(err)
 	}
 	return jobs.Items
@@ -354,12 +354,12 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 		fg.Annotations = map[string]string{}
 	}
 	id := h.binding("a").ID
-	fg.Annotations[controller.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion"
+	fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion:uid=" + string(fg.UID)
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	h.reconcile(1)
-	if h.binding("a") == nil || h.fg().Annotations[controller.ReleasePITRArchiveBindingAnnotation] == "" {
+	if h.binding("a") == nil || h.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] == "" {
 		t.Fatal("a release of an in-use binding was not refused")
 	}
 
@@ -379,7 +379,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: snapshot}, &snap); err == nil {
 		t.Fatal("released snapshot not deleted")
 	}
-	if h.fg().Annotations[controller.ReleasePITRArchiveBindingAnnotation] != "" {
+	if h.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] != "" {
 		t.Fatal("release annotation kept after the release")
 	}
 }
@@ -398,8 +398,8 @@ func TestEnvtest_PITRBindingDefersPre203Deployment(t *testing.T) {
 	}
 	fg := h.fg()
 	for _, site := range []string{"dc1", "dc2"} {
-		sel := map[string]string{"app.kubernetes.io/name": "mysql", "app.kubernetes.io/instance": "lion", "shipstream.io/site": site}
-		labels := map[string]string{"shipstream.io/failover-group": "lion"}
+		sel := map[string]string{"app.kubernetes.io/name": "mysql", "app.kubernetes.io/instance": "lion", "bloodraven.shipstream.io/site": site}
+		labels := map[string]string{"bloodraven.shipstream.io/failover-group": "lion"}
 		for k, v := range sel {
 			labels[k] = v
 		}
@@ -477,13 +477,13 @@ func TestEnvtest_MysqlBackupDumpKeySnapshot(t *testing.T) {
 	}
 	fg = h.fg()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	mb := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "nightly-1"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"}, ProfileName: "a"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "a"},
 	}
 	if err := k8sClient.Create(ctx, mb); err != nil {
 		t.Fatal(err)
@@ -521,7 +521,7 @@ func TestEnvtest_MysqlBackupDumpKeySnapshot(t *testing.T) {
 	if mounted != snap.Name || snap.CreationTimestamp.After(job.CreationTimestamp.Time) {
 		t.Fatalf("Job mounts %q, want %q created first", mounted, snap.Name)
 	}
-	if ps := mb.Status.ArtifactStorage; ps == nil || ps.PassphraseSecret == nil || ps.PassphraseSecret.Name != snap.Name {
+	if ps := mb.Status.ArtifactStorage; ps == nil || ps.PassphraseSecretKeyRef == nil || ps.PassphraseSecretKeyRef.Name != snap.Name {
 		t.Fatalf("recorded dump key %+v", mb.Status.ArtifactStorage)
 	}
 }

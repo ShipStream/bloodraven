@@ -277,7 +277,7 @@ func enginePFWrite(obj client.Object, phase v1alpha1.PlannedFailoverPhase) bool 
 // engine's conditioned write; the write conflicts, reloads and lands, the
 // other writer's change survives, and revisions only increase.
 func TestEnvtest_PlannedFailoverStore_ConditionedWriteNeverRegresses(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-cond", map[string]string{controller.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-cond", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
 	raced := false
 	r := pfEnvInterceptedReconciler(t, &pfEnvTopology{}, func(ctx context.Context, c client.Client, obj client.Object, _ ...client.SubResourceUpdateOption) (bool, error) {
 		if raced || !enginePFWrite(obj, v1alpha1.PlannedFailoverPhaseFencing) {
@@ -323,7 +323,7 @@ func TestEnvtest_PlannedFailoverStore_ConditionedWriteNeverRegresses(t *testing.
 // §15.4 item 3: a write that commits and then times out is settled as
 // committed, and the run proceeds.
 func TestEnvtest_PlannedFailoverStatusFence_CommitThenTimeoutProceeds(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-commit-timeout", map[string]string{controller.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-commit-timeout", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
 	done := false
 	r := pfEnvInterceptedReconciler(t, &pfEnvTopology{}, func(ctx context.Context, c client.Client, obj client.Object, opts ...client.SubResourceUpdateOption) (bool, error) {
 		if done || !enginePFWrite(obj, v1alpha1.PlannedFailoverPhaseFencing) {
@@ -342,7 +342,7 @@ func TestEnvtest_PlannedFailoverStatusFence_CommitThenTimeoutProceeds(t *testing
 	if got.Status.PlannedFailover.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("result %+v", got.Status.PlannedFailover.Result)
 	}
-	if got.Annotations[controller.PlannedFailoverStatusFenceAnnotation] != "" {
+	if got.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
 		t.Fatal("a committed write was fenced")
 	}
 }
@@ -351,7 +351,7 @@ func TestEnvtest_PlannedFailoverStatusFence_CommitThenTimeoutProceeds(t *testing
 // status fence; replaying the dropped request with its old resourceVersion
 // afterwards is a 409.
 func TestEnvtest_PlannedFailoverStatusFence_DroppedThenReplayed409(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-dropped", map[string]string{controller.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-dropped", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
 	var dropped *v1alpha1.MysqlFailoverGroup
 	topo := &pfEnvTopology{}
 	r := pfEnvInterceptedReconciler(t, topo, func(_ context.Context, _ client.Client, obj client.Object, _ ...client.SubResourceUpdateOption) (bool, error) {
@@ -365,7 +365,7 @@ func TestEnvtest_PlannedFailoverStatusFence_DroppedThenReplayed409(t *testing.T)
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 		t.Fatal(err)
 	}
-	if pfEnvGet(t, nn).Annotations[controller.PlannedFailoverStatusFenceAnnotation] == "" {
+	if pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] == "" {
 		t.Fatal("settlement did not fence the dropped write")
 	}
 	if err := k8sClient.Status().Update(ctx, dropped); !apierrors.IsConflict(err) {

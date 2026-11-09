@@ -70,7 +70,7 @@ later of what survives, and give a tie to status — equal instants describe the
 first that matches:
 
 1. The active site is missing from `status.sites`, or its `gtidExecuted` is empty → `UNMEASURED`.
-2. `status.promotionGtidExecuted` is empty → `UNMEASURED`. The failover step that records it is
+2. `status.lastFailover.promotionGtidExecuted` is empty → `UNMEASURED`. The failover step that records it is
    non-fatal, so a promotion can complete without it, and a capture without it cannot be audited.
 3. The active site's `gtidExecuted` does not contain `promotionGtidExecuted` → `UNMEASURED`. The site
    writing now is not the site this record describes.
@@ -127,7 +127,7 @@ Exit `0` for `RPO 0`, `1` when transactions were lost, `2` for `UNMEASURED`.
 - [ ] **1. Get a capture worth auditing**
       Drive the emergency failover on `playground` again if the playground is up, then save `kubectl -n bloodraven-playground get mysqlfailovergroup playground -o json`. If you have no cluster, use `tests/fixtures/playground-recovery-blocked.json`, which is the same capture after the promotion this unit drove. Run `python3 braudit.py <capture>` before you change anything: the starter reports `RPO 0` against a capture that plainly shows four divergent transactions.
 
-      *Done when:* A capture file exists whose `.status.lastFailoverTarget` and `.status.promotionGtidExecuted` are both non-empty, and `python3 braudit.py <capture>` prints a line beginning `group: ` and exits without a traceback.
+      *Done when:* A capture file exists whose `.status.lastFailover.target` and `.status.lastFailover.promotionGtidExecuted` are both non-empty, and `python3 braudit.py <capture>` prints a line beginning `group: ` and exits without a traceback.
 
 - [ ] **2. Parse a GTID set and count it (TODO A, TODO B)**
       Implement `parse_gtid_set` and `transaction_count`. Handle several UUIDs, several intervals per UUID, a bare single-transaction interval, and the newlines a captured set is folded across. Refuse a tagged set rather than mis-counting it.
@@ -175,8 +175,8 @@ NS=bloodraven-playground; FG=playground
 CAP=$(kubectl -n $NS get mysqlfailovergroup $FG -o json)
 
 # 1. What the operator recorded at the moment of promotion.
-echo "$CAP" | jq -r '"activeSite=\(.status.activeSite)  target=\(.status.lastFailoverTarget)  at=\(.status.lastFailover)"'
-PROMO=$(echo "$CAP" | jq -r '.status.promotionGtidExecuted // "" | gsub("\\s";"")')
+echo "$CAP" | jq -r '"activeSite=\(.status.activeSite)  target=\(.status.lastFailover.target)  at=\(.status.lastFailover.time)"'
+PROMO=$(echo "$CAP" | jq -r '.status.lastFailover.promotionGtidExecuted // "" | gsub("\\s";"")')
 
 # 2. Every non-active site's executed set, straight from status.
 echo "$CAP" | jq -r '.status.activeSite as $a | .status.sites[] | select(.name != $a)

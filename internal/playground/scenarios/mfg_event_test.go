@@ -15,7 +15,7 @@ func TestMatchMFGEvent(t *testing.T) {
 	iadMsg := "refusing to rotate keyring on site iad: site is the active primary; rotate replicas first"
 
 	fresh := func(msg string) corev1.Event {
-		return testMFGEvent(fg, "KeyringRotationRefused", msg, notBefore, time.Time{})
+		return testMFGEvent(fg, "KeyringRotationRejected", msg, notBefore, time.Time{})
 	}
 
 	cases := []struct {
@@ -32,37 +32,37 @@ func TestMatchMFGEvent(t *testing.T) {
 		},
 		{
 			name:    "stale LastTimestamp",
-			ev:      testMFGEvent(fg, "KeyringRotationRefused", pdxMsg, notBefore.Add(-3*time.Second), time.Time{}),
+			ev:      testMFGEvent(fg, "KeyringRotationRejected", pdxMsg, notBefore.Add(-3*time.Second), time.Time{}),
 			snippet: "pdx",
 			want:    false,
 		},
 		{
 			name:    "2s slack on LastTimestamp",
-			ev:      testMFGEvent(fg, "KeyringRotationRefused", pdxMsg, notBefore.Add(-2*time.Second), time.Time{}),
+			ev:      testMFGEvent(fg, "KeyringRotationRejected", pdxMsg, notBefore.Add(-2*time.Second), time.Time{}),
 			snippet: "pdx",
 			want:    true,
 		},
 		{
 			name:    "EventTime fallback when LastTimestamp is zero",
-			ev:      testMFGEvent(fg, "KeyringRotationRefused", pdxMsg, time.Time{}, notBefore),
+			ev:      testMFGEvent(fg, "KeyringRotationRejected", pdxMsg, time.Time{}, notBefore),
 			snippet: "pdx",
 			want:    true,
 		},
 		{
 			name:    "stale EventTime when LastTimestamp is zero",
-			ev:      testMFGEvent(fg, "KeyringRotationRefused", pdxMsg, time.Time{}, notBefore.Add(-3*time.Second)),
+			ev:      testMFGEvent(fg, "KeyringRotationRejected", pdxMsg, time.Time{}, notBefore.Add(-3*time.Second)),
 			snippet: "pdx",
 			want:    false,
 		},
 		{
 			name:    "LastTimestamp wins over a fresher EventTime",
-			ev:      testMFGEvent(fg, "KeyringRotationRefused", pdxMsg, notBefore.Add(-3*time.Second), notBefore),
+			ev:      testMFGEvent(fg, "KeyringRotationRejected", pdxMsg, notBefore.Add(-3*time.Second), notBefore),
 			snippet: "pdx",
 			want:    false,
 		},
 		{
 			name:    "both timestamps zero",
-			ev:      testMFGEvent(fg, "KeyringRotationRefused", pdxMsg, time.Time{}, time.Time{}),
+			ev:      testMFGEvent(fg, "KeyringRotationRejected", pdxMsg, time.Time{}, time.Time{}),
 			snippet: "pdx",
 			want:    false,
 		},
@@ -74,7 +74,7 @@ func TestMatchMFGEvent(t *testing.T) {
 		},
 		{
 			name:    "wrong InvolvedObject.Name",
-			ev:      testMFGEvent("other-fg", "KeyringRotationRefused", pdxMsg, notBefore, time.Time{}),
+			ev:      testMFGEvent("other-fg", "KeyringRotationRejected", pdxMsg, notBefore, time.Time{}),
 			snippet: "pdx",
 			want:    false,
 		},
@@ -110,7 +110,7 @@ func TestMatchMFGEvent(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := matchMFGEvent(tc.ev, fg, notBefore, "KeyringRotationRefused", tc.snippet)
+			got := matchMFGEvent(tc.ev, fg, notBefore, "KeyringRotationRejected", tc.snippet)
 			if got != tc.want {
 				t.Fatalf("matchMFGEvent = %v, want %v", got, tc.want)
 			}
@@ -121,10 +121,10 @@ func TestMatchMFGEvent(t *testing.T) {
 func TestMatchMFGEventMixedListPicksThisRunThisSite(t *testing.T) {
 	fg := "mysql-ha"
 	notBefore := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
-	staleIAD := testMFGEvent(fg, "KeyringRotationRefused",
+	staleIAD := testMFGEvent(fg, "KeyringRotationRejected",
 		"refusing to rotate keyring on site iad: site is the active primary; rotate replicas first",
 		notBefore.Add(-time.Hour), time.Time{})
-	freshPDX := testMFGEvent(fg, "KeyringRotationRefused",
+	freshPDX := testMFGEvent(fg, "KeyringRotationRejected",
 		"refusing to rotate keyring on site pdx: site is the active primary; rotate replicas first",
 		notBefore.Add(time.Second), time.Time{})
 	events := []corev1.Event{staleIAD, freshPDX}
@@ -132,7 +132,7 @@ func TestMatchMFGEventMixedListPicksThisRunThisSite(t *testing.T) {
 	snippet := "refusing to rotate keyring on site pdx: site is the active primary"
 	var hit *corev1.Event
 	for i := range events {
-		if matchMFGEvent(events[i], fg, notBefore, "KeyringRotationRefused", snippet) {
+		if matchMFGEvent(events[i], fg, notBefore, "KeyringRotationRejected", snippet) {
 			hit = &events[i]
 			break
 		}
@@ -143,7 +143,7 @@ func TestMatchMFGEventMixedListPicksThisRunThisSite(t *testing.T) {
 	if hit.Message != freshPDX.Message {
 		t.Fatalf("matched %q, want the fresh pdx refusal", hit.Message)
 	}
-	if matchMFGEvent(staleIAD, fg, notBefore, "KeyringRotationRefused", "") {
+	if matchMFGEvent(staleIAD, fg, notBefore, "KeyringRotationRejected", "") {
 		t.Fatal("stale iad event must not match even with an empty snippet")
 	}
 }

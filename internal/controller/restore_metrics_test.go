@@ -69,8 +69,7 @@ func TestBuildRestoreJob_AddsSourceMetadataEnv(t *testing.T) {
 	seed := succeededSeedBackup()
 	seed.Status.SizeBytes = 1024
 	seed.Status.GtidExecuted = "uuid:1-10"
-	seed.Status.BinlogFile = "mysql-bin.000004"
-	seed.Status.BinlogPos = 99
+	seed.Status.BinlogPosition = &v1alpha1.BinlogCoordinate{File: "mysql-bin.000004", Position: 99}
 	r, _ := newReconciler(fg, seed)
 
 	job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
@@ -109,12 +108,12 @@ func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 	fg.Spec.Sites[1].Name = "pdx"
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = fggroup
 	seed := succeededSeedBackup()
-	seed.Labels[labelFailoverGroup] = fggroup
+	seed.Labels[v1alpha1.FailoverGroupLabel] = fggroup
 	seed.Spec.FailoverGroupRef.Name = fggroup
-	seed.Status.Location = fggroup + "/seed/"
+	setTestArtifactLocation(seed, fggroup+"/seed/")
 	seed.Status.SizeBytes = 2048
 	deploy := primaryReadyDeployment(fggroup, fg.Spec.Sites[0].Name)
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 	defer bmetrics.RestoreDurationSeconds.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSuccessTimestamp.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSourceSizeBytes.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
@@ -176,12 +175,12 @@ func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 	fg.Spec.Sites[1].Name = "pdx"
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = fggroup
 	seed := succeededSeedBackup()
-	seed.Labels[labelFailoverGroup] = fggroup
+	seed.Labels[v1alpha1.FailoverGroupLabel] = fggroup
 	seed.Spec.FailoverGroupRef.Name = fggroup
-	seed.Status.Location = fggroup + "/seed/"
+	setTestArtifactLocation(seed, fggroup+"/seed/")
 	seed.Status.SizeBytes = 4096
 	deploy := primaryReadyDeployment(fggroup, "iad")
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 	defer bmetrics.RestoreDurationSeconds.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSuccessTimestamp.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
 	defer bmetrics.RestoreLastSourceSizeBytes.DeleteLabelValues("ns", fggroup, "init_from_backup", "iad")
@@ -247,16 +246,18 @@ func TestInPlaceRestorePreservesMetadataThroughResuming(t *testing.T) {
 	fg.Status.Sites[0].Name = "iad"
 	fg.Status.Sites[1].Name = "pdx"
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase:              v1alpha1.RestoreInPlaceResuming,
-		JobName:            "job",
-		TargetSite:         "iad",
-		Scope:              "full",
-		StartTime:          ptrTime(time.Now()),
-		SourceSizeBytes:    777,
-		TargetGtidExecuted: "uuid:1-7",
+		Phase:      v1alpha1.RestoreInPlaceResuming,
+		JobName:    "job",
+		TargetSite: "iad",
+		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
+		StartTime:  ptrTime(time.Now()),
+		Provenance: &v1alpha1.RestoreProvenance{
+			Source: &v1alpha1.RestoreSourceProvenance{SizeBytes: new(int64(777))},
+			Target: &v1alpha1.RestoreTargetProvenance{GtidExecuted: "uuid:1-7"},
+		},
 	}
 	seed := succeededSeedBackup()
-	r, c := newReconciler(fg, seed, dsnSecret())
+	r, c := newReconciler(fg, seed, operatorCredsSecret())
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -265,7 +266,8 @@ func TestInPlaceRestorePreservesMetadataThroughResuming(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &fresh); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
-	if fresh.Status.RestoreInPlace.SourceSizeBytes != 777 || fresh.Status.RestoreInPlace.TargetGtidExecuted != "uuid:1-7" {
+	if p := fresh.Status.RestoreInPlace.Provenance; p == nil || p.Source == nil || p.Source.SizeBytes == nil || *p.Source.SizeBytes != 777 ||
+		p.Target == nil || p.Target.GtidExecuted != "uuid:1-7" {
 		t.Fatalf("metadata not preserved: %+v", fresh.Status.RestoreInPlace)
 	}
 }

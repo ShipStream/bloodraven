@@ -78,7 +78,7 @@ func TestMysqlDatabaseRestrictedGrantorDoesNotBlockTenant(t *testing.T) {
 	for _, backend := range []string{"fake", "mysql"} {
 		t.Run(backend, func(t *testing.T) {
 			h, admin := newGrantReviewHarness(t, backend, interceptor.Funcs{}, func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+				m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "cdc", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
 			})
 			h.reconcile()
@@ -147,7 +147,7 @@ func TestMysqlDatabaseLegacyRepairFailureIsBestEffort(t *testing.T) {
 	for _, step := range []string{"metadata read", "repair grant"} {
 		t.Run(step, func(t *testing.T) {
 			h, _ := newGrantReviewHarness(t, "fake", interceptor.Funcs{}, func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+				m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "cdc", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
 			})
 			h.reconcile()
@@ -181,7 +181,7 @@ func TestMysqlDatabaseMixedCaseIPv6GrantCleanup(t *testing.T) {
 		for _, cleanup := range []string{"retire", "delete"} {
 			t.Run(backend+"/"+cleanup, func(t *testing.T) {
 				h, admin := newGrantReviewHarness(t, backend, interceptor.Funcs{}, func(m *v1alpha1.MysqlDatabase) {
-					m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+					m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 					m.Spec.Owner.Hosts = []string{"%", "2001:DB8::A"}
 					m.Spec.Owner.Privileges = []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeInsert}
 				})
@@ -293,16 +293,17 @@ func TestMysqlDatabaseGrantOnlyRowsSurviveCleanupRetry(t *testing.T) {
 						}
 						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 					},
-					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					// The finalizer is removed with a metadata merge patch.
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						if m, ok := obj.(*v1alpha1.MysqlDatabase); ok && failFinalizer && !m.DeletionTimestamp.IsZero() && len(m.Finalizers) == 0 {
 							failFinalizer = false
-							return errors.New("injected finalizer update failure")
+							return errors.New("injected finalizer patch failure")
 						}
-						return c.Update(ctx, obj, opts...)
+						return c.Patch(ctx, obj, patch, opts...)
 					},
 				}
 				h, admin := newGrantReviewHarness(t, backend, funcs, func(m *v1alpha1.MysqlDatabase) {
-					m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+					m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
 					m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "cdc", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
 				})
 				h.reconcile()

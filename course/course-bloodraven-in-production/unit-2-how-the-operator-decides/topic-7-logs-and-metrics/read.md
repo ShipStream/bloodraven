@@ -12,9 +12,9 @@ Two things follow. First, there are two JSON streams on stdout and only one is c
 
 The anchor event for this unit is one line:
 
-**INFO `state transition`**, with fields `site`, `from`, `to`, `fg`. The `from` and `to` values are the four site states you already know: `unknown`, `unreachable`, `read-only`, `writable`.
+**INFO `state transition`**, with fields `site`, `from`, `to`, `fg`. The `from` and `to` values are the four site states you already know: `Unknown`, `Unreachable`, `ReadOnly`, `Writable`.
 
-It is mirrored exactly once by the counter `bloodraven_state_transitions_total{site, from, to}` — same event, same labels, one increment per line. It is deliberately *not* turned into a Kubernetes Event; the log schema's correlation table lists the Event column for this row as "(none — too noisy for events)". Transitions are cheap and frequent. Events are for humans you want to page.
+It is mirrored exactly once by the counter `bloodraven_state_transitions_total{site, from, to}` — same event, same fields, one increment per line. Only the spelling differs: the log carries the API values (`ReadOnly`), the counter's `from` and `to` labels their kebab-case (`read-only`). It is deliberately *not* turned into a Kubernetes Event; the log schema's correlation table lists the Event column for this row as "(none — too noisy for events)". Transitions are cheap and frequent. Events are for humans you want to page.
 
 ## One poll cycle
 
@@ -27,11 +27,11 @@ It is mirrored exactly once by the counter `bloodraven_state_transitions_total{s
   "lines": [
     {
       "cmd": "kubectl -n bloodraven-playground logs -l app.kubernetes.io/name=bloodraven -f | jq -c 'select(.fg==\"bloodraven-playground/playground\")'",
-      "out": "{\"time\":\"2026-08-12T12:04:12.114Z\",\"level\":\"WARN\",\"msg\":\"failed to check replica status\",\"site\":\"reader\",\"error\":\"dial tcp 10.43.62.14:3306: connect: connection refused\",\"fg\":\"bloodraven-playground/playground\"}\n{\"time\":\"2026-08-12T12:04:16.118Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"read-only\",\"to\":\"unreachable\",\"fg\":\"bloodraven-playground/playground\"}"
+      "out": "{\"time\":\"2026-08-12T12:04:12.114Z\",\"level\":\"WARN\",\"msg\":\"failed to check replica status\",\"site\":\"reader\",\"error\":\"dial tcp 10.43.62.14:3306: connect: connection refused\",\"fg\":\"bloodraven-playground/playground\"}\n{\"time\":\"2026-08-12T12:04:16.118Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"ReadOnly\",\"to\":\"Unreachable\",\"fg\":\"bloodraven-playground/playground\"}"
     },
     {
       "cmd": "# the pod is back and answering. What is the next INFO line?",
-      "out": "{\"time\":\"2026-08-12T12:05:02.340Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"unreachable\",\"to\":\"read-only\",\"fg\":\"bloodraven-playground/playground\"}"
+      "out": "{\"time\":\"2026-08-12T12:05:02.340Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"Unreachable\",\"to\":\"ReadOnly\",\"fg\":\"bloodraven-playground/playground\"}"
     }
   ],
   "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
@@ -40,7 +40,7 @@ It is mirrored exactly once by the counter `bloodraven_state_transitions_total{s
 
 Read the first block carefully. The last successful poll was at `12:04:10`; the transition lands at `12:04:16`, six seconds later — `pollInterval` 2 s × `failureThreshold` 3, exactly the sum you computed earlier. The `WARN` above it is *not* in the Event reference: ad-hoc retry warnings are best-effort, and the `error` field is a Go error string passed through verbatim. Useful for forensics, unsafe for alerts.
 
-The line you predicted takes a single poll. There is no six-second wait on the way back and no `recoveryThreshold` involved, because `recoveryThreshold` gates only the transition **to `writable`**. `read-only` is entered on one successful poll.
+The line you predicted takes a single poll. There is no six-second wait on the way back and no `recoveryThreshold` involved, because `recoveryThreshold` gates only the transition **to `Writable`**. `ReadOnly` is entered on one successful poll.
 
 ## The seven metrics
 
@@ -67,26 +67,26 @@ The line you predicted takes a single poll. There is no six-second wait on the w
 
 `bloodraven_replication_lag_seconds` is set only for replicating sites, and the operator writes **`-1` when `Seconds_Behind_Source` is NULL — that is, when the site is not replicating at all**. This matters more than any threshold you might pick. A reading of `0` means "caught up as far as MySQL can tell". A reading of `-1` means "there is no replication stream here". A dashboard that renders both as "low lag, everything green" inverts the most important signal on the page. Sort your queries so `-1` is never averaged with real seconds.
 
-One more trap: when a site goes `unreachable`, the operator neither updates nor deletes its lag gauge — the `DeleteLabelValues` branch in the poll's metric-emission loop is reached only for a site whose state is `writable`. The last value it published stays on the series. A lag gauge is fresh only as long as the poll loop is turning.
+One more trap: when a site goes `Unreachable`, the operator neither updates nor deletes its lag gauge — the `DeleteLabelValues` branch in the poll's metric-emission loop is reached only for a site whose state is `Writable`. The last value it published stays on the series. A lag gauge is fresh only as long as the poll loop is turning.
 
 ## A lagging replica versus a lagging reader
 
 `bloodraven_replication_lag_seconds` carries only `site`. There is no `role` label, so telling a lagging replica apart from a lagging reader is a join you perform yourself, against the group spec. In `playground` that join is trivial and worth doing consciously:
 
-| | `pdx` (`primary-candidate`) | `reader` (`read-only`) |
+| | `pdx` (`PrimaryCandidate`) | `reader` (`ReadOnly`) |
 |---|---|---|
 | Counted in `coreCount`? | yes | no — excluded from every tally |
 | Can it be promoted? | yes | never |
 | Lag judged against | `maxLagSeconds` (30 on `playground`, 300 shipped) | `readOnlyMaxLagSeconds` (10 on `playground`; nil inherits `maxLagSeconds`) |
-| Consequence of breaching it | the group's `ReplicationLagging` Degraded condition | the site drops out of the `-replicas` reader endpoint — and nothing else, because the condition loop skips `read-only` sites entirely |
+| Consequence of breaching it | the group's `ReplicationLagging` Degraded condition | the site drops out of the `-replicas` reader endpoint — and nothing else, because the condition loop skips `ReadOnly` sites entirely |
 
-`readOnlyMaxLagSeconds` has **no default**. When it is nil it inherits `maxLagSeconds`; but an explicit `0` is meaningful and demands zero reported lag. Setting it to `0` is not "unset" — it is the strictest possible reader gate, and it is one of five conjuncts the reader endpoint requires (converged source, replicating, non-nil lag, canonical direct source host, and lag within the threshold). The asymmetry goes further than the numbers. The loop that raises `ReplicationLagging`, `ReplicationBroken` and `ReplicationError` **skips every `role: read-only` site before it reads a threshold at all**, so a reader cannot contribute to the group's `Degraded` condition however far behind it gets. On `playground` — `maxLagSeconds: 30`, `readOnlyMaxLagSeconds: 10` — a reader at 45 s is past both numbers and still changes nothing except its own reader-endpoint membership. A `primary-candidate` at 45 s does the opposite: it stays in the endpoint, stays promotable, and *does* put `ReplicationLagging` on the group.
+`readOnlyMaxLagSeconds` has **no default**. When it is nil it inherits `maxLagSeconds`; but an explicit `0` is meaningful and demands zero reported lag. Setting it to `0` is not "unset" — it is the strictest possible reader gate, and it is one of five conjuncts the reader endpoint requires (converged source, replication `Healthy` or `Lagging`, non-nil lag, canonical direct source host, and lag within the threshold). The asymmetry goes further than the numbers. The loop that raises `ReplicationLagging`, `ReplicationBroken` and `ReplicationError` **skips every `role: ReadOnly` site before it reads a threshold at all**, so a reader cannot contribute to the group's `Degraded` condition however far behind it gets. On `playground` — `maxLagSeconds: 30`, `readOnlyMaxLagSeconds: 10` — a reader at 45 s is past both numbers and still changes nothing except its own reader-endpoint membership. A `PrimaryCandidate` at 45 s does the opposite: it stays in the endpoint, stays promotable, and *does* put `ReplicationLagging` on the group.
 
 ## Forensics: two minutes of confident nonsense
 
 **This is a captured case study, not something to reproduce.** Issue #93 needs Calico; on k3d with kube-router it is masked, because kube-router flushes conntrack on policy change.
 
-The artefacts. Under a deny-all NetworkPolicy, the operator reports `activeSite=iad`, the site condition `state=writable`, and `Ready=True` — for two full minutes. Meanwhile the sidecar at `iad` has already self-fenced. On `/metrics`: `bloodraven_site_state{site="iad",state="writable"}` is pinned at `1`, `bloodraven_state_transitions_total` is perfectly flat, and `rate(bloodraven_poll_latency_seconds_count[1m])` is `0` for **every** site, not just `iad`.
+The artefacts. Under a deny-all NetworkPolicy, the operator reports `activeSite=iad`, the site condition `state=Writable`, and `Ready=True` — for two full minutes. Meanwhile the sidecar at `iad` has already self-fenced. On `/metrics`: `bloodraven_site_state{site="iad",state="writable"}` is pinned at `1`, `bloodraven_state_transitions_total` is perfectly flat, and `rate(bloodraven_poll_latency_seconds_count[1m])` is `0` for **every** site, not just `iad`.
 
 Stop and answer before reading on: what broke?
 

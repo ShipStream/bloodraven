@@ -13,22 +13,22 @@ make chaos-run SCENARIO=01-clean-primary-kill
 make chaos-run-all                        # bail on first failure (default)
 ```
 
-The runner stamps an in-progress marker (`chaos.playground.bloodraven.io/in-progress` annotation on the MFG) after Precheck and clears it on cleanup or on the pass path. A subsequent run that finds a leftover marker refuses to start and tells you whether the prior owner is still alive (same host + live pid), abandoned (same host + dead pid), or on another host. Override with:
+The runner stamps an in-progress marker (`playground.bloodraven.shipstream.io/in-progress` annotation on the MFG) after Precheck and clears it on cleanup or on the pass path. A subsequent run that finds a leftover marker refuses to start and tells you whether the prior owner is still alive (same host + live pid), abandoned (same host + dead pid), or on another host. Override with:
 
 - `--force` — delete any prior marker before preflight (banner printed).
 - `--auto-reset` — on Precheck failure, shell out to `./playground/reset-mysql.sh && ./playground/setup.sh`, then retry the scenario once. Wipes data; 3-second confirmation pause unless `CI=1`.
 
-`chaos-check` runs the same structural baseline scenarios use (stuck scale-to-0 deployments, bogus `lastFailoverTarget`, anti-flap cooldown still ticking, all-sites-read-only `NoPrimary` symptom, replication off on a non-active candidate, a standing planned-failover automation hold) and prints `inProgress: yes/no + summary`. Each error includes the exact remediation command, so `chaos-check` is the fastest way to decide whether to re-run, `--force`, or reset.
+`chaos-check` runs the same structural baseline scenarios use (stuck scale-to-0 deployments, bogus `lastFailover.target`, anti-flap cooldown still ticking, all-sites-read-only `NoPrimary` symptom, replication off on a non-active candidate, a standing planned-failover automation hold) and prints `inProgress: yes/no + summary`. Each error includes the exact remediation command, so `chaos-check` is the fastest way to decide whether to re-run, `--force`, or reset.
 
 After each scenario, standard cleanup waits for the MFG `Ready=True` condition, stable MySQL site states, and, when `spec.dragonfly.enabled=true`, `status.dragonfly.phase=Ready` with exactly one master and healthy replicas. This keeps `run-all` from starting the next scenario while Dragonfly is still recovering from an expected REPLTAKEOVER or pod restart.
 
-Some bootstrap scenarios exercise operator branches that only exist before any failover has stamped `status.lastFailoverTarget`. When `run-all` reaches those scenarios (`10-full-bootstrap-after-data-wipe` and `13-operator-kill-during-bootstrap`), the runner performs an explicit `reset` first so the precondition is real rather than hidden behind a broad auto-reset. Direct `run <scenario-id>` invocations still fail precheck on a non-pristine cluster and tell you to reset manually. To run a chosen list in order with the same suite handling (resets, the baseline wait, JUnit), use `./bin/playground-chaos run-all --scenarios=<id>,<id>,...`; CI's scenario-list jobs (`encryption`, `pitr`) run that way.
+Some bootstrap scenarios exercise operator branches that only exist before any failover has stamped `status.lastFailover.target`. When `run-all` reaches those scenarios (`10-full-bootstrap-after-data-wipe` and `13-operator-kill-during-bootstrap`), the runner performs an explicit `reset` first so the precondition is real rather than hidden behind a broad auto-reset. Direct `run <scenario-id>` invocations still fail precheck on a non-pristine cluster and tell you to reset manually. To run a chosen list in order with the same suite handling (resets, the baseline wait, JUnit), use `./bin/playground-chaos run-all --scenarios=<id>,<id>,...`; CI's scenario-list jobs (`encryption`, `pitr`) run that way.
 
 Currently automated (every `runner.Register` entry in `internal/playground/scenarios/`):
 
 - `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
 - `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
-- `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Admitting→Fencing→Draining→WaitingForLag→Promoting→Publishing→Succeeded`, outcome `Succeeded` with `promotionGtidExecuted` equal to `fence.gtidSet`, and the `bloodraven_planned_failovers_total{result="success"}` increment)
+- `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Admitting→Fencing→Draining→WaitingForLag→Promoting→Publishing→Succeeded`, outcome `Succeeded` with `lastFailover.promotionGtidExecuted` equal to `fence.gtidSet`, and the `bloodraven_planned_failovers_total{result="succeeded"}` increment)
 - `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
 - `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + all followers read-only with `Ready=True` and no sidecar exhausts its operator-and-peer lease during the short gap; an immediate topology-mismatch self-fence is allowed because it safely closes a promotion/publication race)
 - `05-split-brain-auto-resolve` (§SBR; requires `spec.splitBrainPolicy.sitePriorities` set — clears `super_read_only` on the read-only site to force both writable, asserts the operator fences the non-preferred site, increments `bloodraven_split_brain_auto_resolve_total{prefer_site=...}`, and logs `split-brain auto-resolve`)
@@ -36,35 +36,35 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `08-gtid-divergence-detection` (§8; manufactures a rogue write on the old primary, asserts `recoveryState=RecoveryBlocked` + `divergentTransactionCount>0` + `divergence detected` log; auto-reclones in cleanup)
 - `09-anti-flap-cooldown` (§9; force-deletes the active primary, waits for failover + the original primary to come back as a reachable read-only candidate, then scales the new primary to 0 inside `failoverCooldown` and asserts `failovers_total` increments by exactly 1 across all sites — best-effort log scan for `failover blocked by anti-flap cooldown`)
 - `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
-- `10-full-bootstrap-after-data-wipe` (§10; scales a candidate replica to 0, scrubs the per-FG readonly taint from every node, deletes that replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done` with replica IO+SQL threads ON at the end)
+- `10-full-bootstrap-after-data-wipe` (§10; scales a candidate replica to 0, scrubs the per-FG readonly taint from every node, deletes that replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) to `False`/`NotBootstrapping` with a transition after the wipe and the wiped replica's IO+SQL threads ON; a `BootstrapFailed` after the wipe fails the step at once)
 - `11-total-loss-recovery` (§11; scales every site to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
 - `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
-- `12-rolling-update-healthy-state` (§12; patches `spec.sites[*].resources.requests.memory` and asserts `status.updatePhase` engages then returns to empty, both deployments end at the new memory request, no `TOTAL LOSS` log fires during the roll)
-- `13-operator-kill-during-bootstrap` (§13; wipes the read-only site's PVC, scales it back up, then kills the operator pod once `Bootstrapping=True` and asserts the replacement operator drives the clone to `Status=False Reason=Done` with replica IO+SQL threads ON — runs `ResetBeforeRunAll` so `lastFailoverTarget` is empty when the precondition gate runs)
+- `12-rolling-update-healthy-state` (§12; patches `spec.sites[*].resources.requests.memory` and asserts `status.updatePhase` engages then is absent again, both deployments end at the new memory request, no `TOTAL LOSS` log fires during the roll)
+- `13-operator-kill-during-bootstrap` (§13; wipes the read-only site's PVC, scales it back up, then kills the operator pod once `Bootstrapping=True` and asserts the replacement operator drives the clone to `Status=False Reason=NotBootstrapping` (transition after the wipe) with the wiped site's IO+SQL threads ON; a restarted operator writes `False`/`NotBootstrapping` before it starts a clone, so the replication check is what tells completion apart — runs `ResetBeforeRunAll` so `lastFailover.target` is empty when the precondition gate runs)
 - `14-failover-with-replication-lag` (§14; pauses the replica SQL applier, seeds rows over 5s on the primary so they sit in the relay log unapplied, then scales the primary to 0 and asserts the new primary's relay-log drain recovered every transaction — `GTID_SUBSET(post-write, current)=1` and full row count)
 - `15-sidecar-crash-no-failover` (§15; ephemeral container `kill 1` against the sidecar PID namespace, asserts restartCount increments and activeSite/SELF-FENC/failover all stay quiet)
 - `16-mysql-process-kill` (§16; issues SQL `SHUTDOWN` against the active site's mysqld and asserts the mysql container restartCount increments and the cluster never enters split-brain — accepts either "no failover" or "failover" outcomes, but rejects `>1 writable`, `RecoveryBlocked`, or sustained zero-writable)
 - `17-partition-replica-no-failover` (§17; asymmetric partition — asserts NO failover and NO self-fence on read-only site)
 - `18-rapid-cr-spec-changes-during-failover` (§18; triggers a failover and applies five rapid memory-request JSON patches at 2s intervals; asserts the cluster converges to {1 writable, 1 read-only, no RecoveryBlocked} with the last-applied memory request landing on every site deployment)
 - `19-reclone-interlock` (§19; self-contained — manufactures divergence, then exercises rejected/accepted reclone annotation cases)
-- `20-shared-node-selector-isolation` (§20; labels primary node into a fake `inventory` FG and asserts that a playground failover taints only `db-readonly-playground`, leaving `db-readonly-inventory` absent and the inventory canary still Running)
+- `20-shared-node-selector-isolation` (§20; labels primary node into a fake `inventory` FG and asserts that a playground failover taints only `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground`, leaving `bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory` absent and the inventory canary still Running)
 - `21-noexecute-eviction-semantics` (§21; deploys tolerating + non-tolerating canaries on the primary's node, asserts the non-tolerating one is deletion-marked or gone post-failover and the tolerating one stays Running)
 - `22-planned-dragonfly-switchover` (§24; planned MySQL+Dragonfly failover, session-preservation status, active Service endpoint convergence, and Dragonfly promotion metrics)
-- `22-replication-status-after-recovery` (§22; WISHLIST #36 guard — clean primary kill + old-primary auto-recovery, asserts the read-only site's `status.sites[].replicating` becomes true within 30s without an operator restart and cross-checks against the sidecar `/status` endpoint)
+- `22-replication-status-after-recovery` (§22; WISHLIST #36 guard — clean primary kill + old-primary auto-recovery, asserts the read-only site's `status.sites[].replication` becomes `Healthy` or `Lagging` within 30s without an operator restart and cross-checks against the sidecar `/status` endpoint)
 - `23-dragonfly-master-kill` (§25; Dragonfly-only master kill promotes the replica without changing MySQL activeSite)
-- `23-failover-state-durability` (§23; WISHLIST #38 guard — clean failover, then kills the operator pod; asserts post-restart `lastFailoverTarget`, `activeSite`, and `lastFailover` survive, with up to 90s tolerance on the stamp to absorb a status-enrichment rewrite)
+- `23-failover-state-durability` (§23; WISHLIST #38 guard — clean failover, then kills the operator pod; asserts post-restart `lastFailover.target`, `activeSite`, and `lastFailover.time` survive, with up to 90s tolerance on the stamp to absorb a status-enrichment rewrite)
 - `24-emergency-mysql-dragonfly-down` (§26; all Dragonfly StatefulSets scaled to 0, MySQL emergency failover still completes)
 - `25-operator-restart-mid-dragonfly-failover` (§27; operator restart while planned failover is in Dragonfly sync/promotion phase resumes safely)
 - `26-planned-dragonfly-sync-timeout-proceed` (§28; `onSyncTimeout=Proceed` marks sessions not preserved and still completes MySQL failover)
 - `27-dragonfly-rolling-image-update` (§D6b; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
 - `29-dragonfly-snapshot-upgrade` (§29; D6a snapshot-restore upgrade using the playground RustFS bucket)
 - `30-backup-verification-rustfs` (§30; configures a RustFS backup profile, creates a real `MysqlBackup`, pins `MysqlBackupVerification.spec.backupRef`, and asserts marker rows restore)
-- `30-encrypted-backup-verification-rustfs` (§30; same round trip with `encryption.algorithm=AES-256-GCM`, so the backup Job runs the operator-image `encrypt-upload` container and verification runs the `decrypt-download` init container; asserts `status.encrypted=true`)
+- `30-encrypted-backup-verification-rustfs` (§30; same round trip with `encryption.algorithm=AES-256-GCM`, so the backup Job runs the operator-image `encrypt-upload` container and verification runs the `decrypt-download` init container; asserts `status.encryption.mode=Passphrase`)
 - `31-pitr-verification-rustfs` (§31; enables RustFS PITR, archives sealed binlogs, verifies timestamp replay includes pre-target rows and excludes post-target rows)
 - `32-mfg-status-write-denial-emergency-promotion` (§32; denies the operator patch/update on `mysqlfailovergroups/status`, scales the active primary to 0, asserts MySQL promotes at the data layer while the CR status is frozen, then self-heals to the promoted site within 90s after RBAC restore)
 - `33-scoped-dns-outage` (§33; NetworkPolicy blocking only kube-dns egress from the active MySQL pod — proven with a DNS canary first — asserts the outage is DNS-scoped, not a pod partition and not the DNSEndpoint-API denial of §38)
 - `34-operator-kill-during-wait-replica` (§34; force-deletes the operator while an ordered update is held at `WaitReplica`; the replacement operator re-derives remaining drift from Deployment spec-hash mismatch and finishes with no double-roll and no `TOTAL LOSS`)
-- `35-planned-switchover-lag-timeout-rollback` (§35; `SOURCE_DELAY=60` on the target + `maxLagWait=5s` drives `WaitingForLag`→`Failed{LagTimeout}`; source stays active, `bloodraven_planned_failovers_total{result="failed_timeout"}` increments)
+- `35-planned-switchover-lag-timeout-rollback` (§35; `SOURCE_DELAY=60` on the target + `maxLagWait=5s` drives `WaitingForLag`→`Failed{LagTimeout}`; source stays active, `bloodraven_planned_failovers_total{result="rolled-back"}` increments)
 - `36-rustfs-outage-during-restore-in-place` (§36; a per-schema in-place restore whose RustFS storage is scaled to 0 mid-run terminates `Failed` with the topology frozen; the untouched canary schema survives and the terminal `Failed` holds on the same confirm — a retry needs a new monotonic confirm — `ResetBeforeRunAll`)
 - `37-pitr-planned-failback-no-reclone` ([§37](#37-pitr-planned-failback-no-reclone); release profile, `ResetBeforeRunAll`; planned A→B→A without reclone or a flush on b; every era, including b's anchored replica-copy era, and an `initFromBackup` restore certify exactly the fenced history)
 - `38-dnsendpoint-write-denial-during-failover` (§38; denies the operator write verbs on `dnsendpoints`, forces promotion; the DNSEndpoint target stays stale during denial then heals to the promoted LBIP within 90s after RBAC restore with no re-failover)
@@ -104,7 +104,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 - **Relay log drain**: Failover takes up to ~37s when the primary is dead (detection + a drain of at most 30s + promotion). The drain ends as soon as the replica has applied what it already received, so without a backlog it is much shorter. Plan wait times for the bound.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
 - **Verify replication between scenarios**: After any failover, always verify replication is actually working (`SELECT SERVICE_STATE FROM performance_schema.replication_connection_status` should show `ON`) before proceeding. GTID divergence from the respawn race (see scenario 1 note) can silently break replication, causing false results in subsequent scenarios.
-- **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly-playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. `reset-mysql.sh` now scales the operator to 0 before stripping taints (single-shot, no race), so a manual taint clear after a reset is no longer needed. If you wipe state by hand, mirror the same order: scale operator → 0, scale MySQL → 0, delete PVCs, strip taints, scale MySQL → 1, clear stale `status.lastFailover{,Target}`/`promotionGtidExecuted`/`plannedFailover`, scale operator → 1.
+- **db-readonly taint blocks PVC provisioning**: The operator applies `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. `reset-mysql.sh` now scales the operator to 0 before stripping taints (single-shot, no race), so a manual taint clear after a reset is no longer needed. If you wipe state by hand, mirror the same order: scale operator → 0, scale MySQL → 0, delete PVCs, strip taints, scale MySQL → 1, clear stale `status.lastFailover`/`plannedFailover`, scale operator → 1.
 - **`reset-mysql.sh` dumps on timeout**: If the post-reset wait loop times out without both pods Ready, the script writes pods/events/PVC+PV/node-taint/per-container-log forensics under `playground/chaos-results/reset-<timestamp>/` and exits non-zero — no more "two commands you should have remembered" footer.
 - **Distroless containers**: The sidecar and operator images use distroless base images with no shell or userspace tools. Use `kubectl debug --target=<container> --image=busybox` to get a shell with tools like `kill`, `ps`, etc.
 - **JSON patch vs merge patch**: When patching the MysqlFailoverGroup CR, always use `--type json` (JSON Patch). Merge patches on the `spec.sites` array drop required fields (lbIP, storage, zone) and fail validation.
@@ -216,7 +216,7 @@ kubectl -n $NS scale deployment mysql-playground-pdx --replicas=0
 
 **Verify**: Old primary shows Replica_IO_Running=Yes, Source_Host=<new-primary>. Data replicates. No RecoveryBlocked condition.
 
-**Note**: This also works across operator restarts now that `lastFailoverTarget` is persisted in CR status.
+**Note**: This also works across operator restarts now that `lastFailover.target` is persisted in CR status.
 
 ---
 
@@ -246,8 +246,8 @@ Automated as `09-anti-flap-cooldown`.
 **Injection**: `make chaos-run SCENARIO=09-anti-flap-cooldown`. The scenario raises `spec.failoverCooldown` to 90s (restored in cleanup) and waits for the topology manager restart that the config change causes. It scales the primary to 0, waits for the first failover, scales the old primary back up, and waits until it is a caught-up replica. Then it scales the new primary to 0 and holds it there.
 
 **Verify**:
-- The operator logs `failover blocked by anti-flap cooldown` with `retryAt` = `lastFailover + failoverCooldown`.
-- `status.lastFailover` does not move before the cooldown expires.
+- The operator logs `failover blocked by anti-flap cooldown` with `retryAt` = `lastFailover.time + failoverCooldown`.
+- `status.lastFailover.time` does not move before the cooldown expires.
 - A second failover back to the original primary completes within 45s of expiry, and `bloodraven_failovers_total` rises by exactly 2 across sites.
 
 **History**: Until 2026-10-15 a failover refused by the cooldown was never retried. Cross-site actions ran only on state transitions, and a dead primary is a stable state, so the group stayed without a primary until the dead site came back (4m40s past expiry in the reproduction). The old version of this scenario asserted "no second failover within 90s" against a 30s cooldown, which was asserting that bug.
@@ -266,7 +266,7 @@ Automated as `09-anti-flap-cooldown`.
 
 **Injection**: `./playground/reset-mysql.sh` (wipes both sites and bootstraps from scratch)
 
-**Verify**: Bootstrap phases progress (Cloning -> WaitingForRestart -> SetupReplication -> Done). Replica ends up read-only with replication running, data matches primary. GTID sets aligned. Typically takes 30-60s.
+**Verify**: Bootstrap phases progress (Cloning -> WaitingForRestart -> SetupReplication, `Bootstrapping=True`), then `Bootstrapping` returns to `False`/`NotBootstrapping`. Replica ends up read-only with replication running, data matches primary. GTID sets aligned. Typically takes 30-60s.
 
 ---
 
@@ -328,7 +328,7 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 
 **Verify**: New operator either waits for the in-progress clone to finish (MySQL tracks clone state in `performance_schema.clone_status`) or starts a fresh clone. End state: healthy primary/replica pair. No stuck bootstrap phase.
 
-**Caution**: Before deleting the replica PVC, clear the `shipstream.io/db-readonly-playground` taint from the replica's node. Otherwise the local-path-provisioner's helper pod gets evicted by the NoExecute taint and the replacement PVC never provisions, leaving the replica pod stuck in Pending.
+**Caution**: Before deleting the replica PVC, clear the `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` taint from the replica's node. Otherwise the local-path-provisioner's helper pod gets evicted by the NoExecute taint and the replacement PVC never provisions, leaving the replica pod stuck in Pending.
 
 ---
 
@@ -398,7 +398,7 @@ kubectl -n $NS exec deploy/mysql-playground-$REPLICA -c mysql -- \
 ```bash
 NS=bloodraven-playground
 SITE=<active-site>
-POD=$(kubectl -n $NS get pods -l shipstream.io/site=$SITE -o name)
+POD=$(kubectl -n $NS get pods -l bloodraven.shipstream.io/site=$SITE -o name)
 
 # Kill PID 1 in the sidecar container (triggers container restart, not pod restart)
 # Distroless container has no kill binary — use kubectl debug:
@@ -422,7 +422,7 @@ kubectl -n $NS debug $POD --target=sidecar --image=busybox -- kill 1
 ```bash
 NS=bloodraven-playground
 PRIMARY=$(kubectl -n $NS get mysqlfailovergroups playground -o jsonpath='{.status.activeSite}')
-POD=$(kubectl -n $NS get pods -l shipstream.io/site=$PRIMARY -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl -n $NS get pods -l bloodraven.shipstream.io/site=$PRIMARY -o jsonpath='{.items[0].metadata.name}')
 
 # Record restart count
 kubectl -n $NS get pod/$POD -o jsonpath='{.status.containerStatuses[?(@.name=="mysql")].restartCount}'
@@ -498,7 +498,7 @@ done
 ### 19. Reclone Safety Interlock
 **Category**: Admin-action safety / divergent-GTID confirmation | **Risk**: Medium
 
-**Hypothesis**: The `bloodraven.shipstream.io/reclone-site` annotation rejects bare site names and mismatched GTID prefixes when the target site has a non-empty `status.sites[].divergentGtid`, preventing a fat-fingered `reclone-site=<wrong-site>` from destroying the wrong replica. Cold reclones (no divergence recorded) still accept the bare form.
+**Hypothesis**: The `bloodraven.shipstream.io/reclone-site` annotation rejects a value without a `gtidPrefix`, and a mismatched GTID prefix, when the target site has a non-empty `status.sites[].divergentGtid`, preventing a fat-fingered `reclone-site=<wrong-site>` from destroying the wrong replica. Both forms carry the group's name and uid (`<site>:confirm=<group>:uid=<uid>`, plus `:gtidPrefix=<prefix>` on a diverged site); a cold reclone (no divergence recorded) is accepted in the form without `gtidPrefix`.
 
 **Prerequisite**: Scenario 8 (GTID Divergence Detection) — it creates a site with `divergentGtid` and `recoveryState=RecoveryBlocked` that the interlock gates can be exercised against. Do NOT run `reset-mysql.sh` until this scenario completes; the interlock needs the divergent state scenario 8 leaves behind.
 
@@ -511,22 +511,26 @@ FG=playground
 # Identify the divergent site from scenario 8's aftermath.
 SITE=$(kubectl -n $NS get mfg $FG -o jsonpath='{range .status.sites[?(@.recoveryState=="RecoveryBlocked")]}{.name}{end}')
 DG=$(kubectl -n $NS get mfg $FG -o jsonpath="{.status.sites[?(@.name==\"$SITE\")].divergentGtid}")
-echo "divergent site=$SITE gtid=$DG"
+GROUP_UID=$(kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.uid}')
+echo "divergent site=$SITE gtid=$DG uid=$GROUP_UID"
 
-# --- A) Rejected: bare site name against a divergent site ---
+# --- A) Rejected: a bare site, then the confirmed cold form against a divergent site ---
 kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE
+sleep 5
+kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -3
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
 kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/reclone-site}'; echo
 
 # --- B) Rejected: mismatched GTID prefix ---
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:deadbeef
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID:gtidPrefix=deadbeef
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
 
-# --- C) Accepted: matching 8-char prefix of divergentGtid ---
+# --- C) Accepted: matching 8-char prefix of divergentGtid's source UUID ---
 PREFIX=$(echo -n "$DG" | cut -c1-8)
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:$PREFIX
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID:gtidPrefix=$PREFIX
 # Watch for RecloneRequested and the Bootstrapping condition entering Cloning.
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp -w &
 EVENT_WATCH_PID=$!
@@ -535,8 +539,8 @@ kill $EVENT_WATCH_PID 2>/dev/null
 
 # --- D) Cold reclone still works (no divergence) ---
 # After sub-case C completes the site has rejoined as replica and no longer
-# has divergentGtid in status. The bare form should now be accepted.
-kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE
+# has divergentGtid in status. The cold form (no gtidPrefix) is accepted.
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:confirm=$FG:uid=$GROUP_UID
 sleep 5
 kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -3
 ```
@@ -545,35 +549,35 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 
 | Sub-case | Expected outcome |
 |---|---|
-| A. bare site, divergent | `RecloneRejected` Warning event with "annotation must include the divergent-GTID prefix" text; annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
+| A. bare site, then cold form, divergent | The bare `<site>`: a `RecloneRejected` Warning event saying the value must be confirmed; annotation removed. The cold form: a `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
 | B. mismatched prefix | `RecloneRejected` Warning event with "does not match the observed divergentGtid" text; annotation removed; site still fenced; no clone executed. |
-| C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done`; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
-| D. cold bare site | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms we didn't accidentally make the interlock mandatory in the non-divergent case. |
+| C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) and returns to `False`/`NotBootstrapping`, with the recloned site replicating; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
+| D. cold form | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms the non-divergent case needs no `gtidPrefix`. |
 
 **Timing**: Sub-cases A and B resolve within one sync cycle (~30s; the runner's `sync()` ticker). Sub-case C takes 30-60s for the clone + restart. Sub-case D is the same.
 
 **Important — sync interval**: The runner re-reads CRs every 30s, so the annotation may sit briefly before being processed. If you see no event after 5s, wait up to 35s before concluding rejection isn't firing.
 
-**Cleanup**: `./playground/reset-mysql.sh` is advisable after sub-case D to restore a clean matrix for subsequent scenarios. Clear the `shipstream.io/db-readonly-playground` taint from both nodes after the reset.
+**Cleanup**: `./playground/reset-mysql.sh` is advisable after sub-case D to restore a clean matrix for subsequent scenarios. Clear the `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground` taint from both nodes after the reset.
 
 ---
 
 ### 20. Shared-Node Selector Isolation
 **Category**: Placement / multi-tenant isolation | **Risk**: Low
 
-**Hypothesis**: A node can advertise membership in multiple failover groups at the same site, and a failover for `playground` only applies `shipstream.io/db-readonly-playground`. Workloads for an unrelated group that tolerate `playground`'s taint are not evicted.
+**Hypothesis**: A node can advertise membership in multiple failover groups at the same site, and a failover for `playground` only applies `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground`. Workloads for an unrelated group that tolerate `playground`'s taint are not evicted.
 
 **Injection**:
 ```bash
 NS=bloodraven-playground
 FG=playground
 PRIMARY=$(kubectl -n $NS get mfg $FG -o jsonpath='{.status.activeSite}')
-NODE=$(kubectl get nodes -l "shipstream.io/failover-group.playground=true,shipstream.io/site.playground=$PRIMARY" -o jsonpath='{.items[0].metadata.name}')
+NODE=$(kubectl get nodes -l "bloodraven.shipstream.io/failover-group.playground=true,bloodraven.shipstream.io/site.playground=$PRIMARY" -o jsonpath='{.items[0].metadata.name}')
 
 # Mark the same physical node as also serving an unrelated inventory group.
 kubectl label node $NODE \
-  shipstream.io/failover-group.inventory=true \
-  shipstream.io/site.inventory=$PRIMARY \
+  bloodraven.shipstream.io/failover-group.inventory=true \
+  bloodraven.shipstream.io/site.inventory=$PRIMARY \
   --overwrite
 
 # Simulated inventory workload: it tolerates playground's taint because
@@ -587,10 +591,10 @@ metadata:
     app: inventory-shared-node-canary
 spec:
   nodeSelector:
-    shipstream.io/failover-group.inventory: "true"
-    shipstream.io/site.inventory: "$PRIMARY"
+    bloodraven.shipstream.io/failover-group.inventory: "true"
+    bloodraven.shipstream.io/site.inventory: "$PRIMARY"
   tolerations:
-    - key: shipstream.io/db-readonly-playground
+    - key: bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground
       operator: Exists
       effect: NoExecute
   containers:
@@ -608,8 +612,8 @@ sleep 45
 ```bash
 # The old-primary node should have the playground taint only.
 kubectl get node $NODE -o jsonpath='{.spec.taints[*].key}{"\n"}'
-# Expected includes: shipstream.io/db-readonly-playground
-# Expected excludes: shipstream.io/db-readonly-inventory
+# Expected includes: bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground
+# Expected excludes: bloodraven-playground.db-readonly.bloodraven.shipstream.io/inventory
 
 # The unrelated inventory pod should still be running on the shared node.
 kubectl -n $NS get pod inventory-shared-node-canary -o wide
@@ -619,7 +623,7 @@ kubectl -n $NS get pod inventory-shared-node-canary -o wide
 **Cleanup**:
 ```bash
 kubectl -n $NS delete pod inventory-shared-node-canary --ignore-not-found
-kubectl label node $NODE shipstream.io/failover-group.inventory- shipstream.io/site.inventory- 2>/dev/null || true
+kubectl label node $NODE bloodraven.shipstream.io/failover-group.inventory- bloodraven.shipstream.io/site.inventory- 2>/dev/null || true
 ./playground/chaos.sh recover
 ```
 
@@ -628,7 +632,7 @@ kubectl label node $NODE shipstream.io/failover-group.inventory- shipstream.io/s
 ### 21. NoExecute Eviction Semantics
 **Category**: Placement / eviction contract | **Risk**: Low
 
-**Hypothesis**: During failover, the old active site's selected nodes receive `shipstream.io/db-readonly-playground=true:NoExecute`. Pods without that toleration are evicted; pods with the toleration remain.
+**Hypothesis**: During failover, the old active site's selected nodes receive `bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground=true:NoExecute`. Pods without that toleration are evicted; pods with the toleration remain.
 
 **Injection**:
 ```bash
@@ -645,8 +649,8 @@ metadata:
     app: noexecute-evict-canary
 spec:
   nodeSelector:
-    shipstream.io/failover-group.playground: "true"
-    shipstream.io/site.playground: "$PRIMARY"
+    bloodraven.shipstream.io/failover-group.playground: "true"
+    bloodraven.shipstream.io/site.playground: "$PRIMARY"
   containers:
     - name: sleep
       image: busybox:1.36
@@ -660,10 +664,10 @@ metadata:
     app: noexecute-tolerate-canary
 spec:
   nodeSelector:
-    shipstream.io/failover-group.playground: "true"
-    shipstream.io/site.playground: "$PRIMARY"
+    bloodraven.shipstream.io/failover-group.playground: "true"
+    bloodraven.shipstream.io/site.playground: "$PRIMARY"
   tolerations:
-    - key: shipstream.io/db-readonly-playground
+    - key: bloodraven-playground.db-readonly.bloodraven.shipstream.io/playground
       operator: Exists
       effect: NoExecute
   containers:
@@ -709,13 +713,13 @@ Fail-back behavior is intentionally GTID-freshest/current-state-driven. When an 
 ### 22. Replication Status After Recovery
 **Category**: CR-status enrichment regression | **Risk**: Low
 
-**Hypothesis**: After a clean primary kill and old-primary auto-recovery, the read-only site's `status.sites[].replicating` becomes true within 30s — without requiring an operator restart. During recovery, `status.sites[].recoveryState=RecoveryInProgress` may be visible until MySQL reports healthy replication. This is the contract that `internal/controller/planned_failover.go`'s `TargetUnhealthy` safety check depends on.
+**Hypothesis**: After a clean primary kill and old-primary auto-recovery, the read-only site's `status.sites[].replication` becomes `Healthy` or `Lagging` within 30s — without requiring an operator restart. During recovery, `status.sites[].recoveryState=RecoveryInProgress` may be visible until MySQL reports healthy replication. This is the contract that `internal/controller/planned_failover.go`'s `TargetUnhealthy` safety check depends on.
 
-**Why this regression test exists**: WISHLIST #36 documented that `replicating` and `gtidExecuted` stopped being populated on a post-recovery read-only site even though the sidecar `/status` endpoint reported replication threads running. The bug silently broke any planned switchover after the first chaos event in the same operator lifecycle. This scenario now guards that status-enrichment contract.
+**Why this regression test exists**: WISHLIST #36 documented that the replication field (then the `replicating` bool) and `gtidExecuted` stopped being populated on a post-recovery read-only site even though the sidecar `/status` endpoint reported replication threads running. The bug silently broke any planned switchover after the first chaos event in the same operator lifecycle. This scenario now guards that status-enrichment contract.
 
 **Injection**: `make chaos-run SCENARIO=22-replication-status-after-recovery`. The runner scales the active primary to 0, waits for failover, scales it back up, waits for re-convergence, then reads the CR.
 
-**Verify**: Within 30s of `writable=1 read-only=N-1`, `mfg.Status.Sites[i].Replicating == true` for the recovered candidate follower. The scenario also probes the sidecar `/status` endpoint as a cross-check; if the sidecar reports replication running but the CR field is false, that is exactly the bug WISHLIST #36 describes.
+**Verify**: Within 30s of `writable=1 read-only=N-1`, `mfg.Status.Sites[i].Replication.Running()` (`Healthy` or `Lagging`) for the recovered candidate follower. The scenario also probes the sidecar `/status` endpoint as a cross-check; if the sidecar reports replication running but the CR field is not `Healthy` or `Lagging`, that is exactly the bug WISHLIST #36 describes.
 
 **Cleanup**: Standard runner cleanup. No manual steps required.
 
@@ -724,13 +728,13 @@ Fail-back behavior is intentionally GTID-freshest/current-state-driven. When an 
 ### 23. Failover State Durability
 **Category**: CR-status persistence | **Risk**: Low
 
-**Hypothesis**: After a clean failover, killing and restarting the operator pod must NOT clear `status.lastFailoverTarget`, `status.lastFailover`, or an in-flight old-primary `RecoveryInProgress` marker. The post-restart operator must rehydrate those fields from the CR; `activeSite` must remain at the post-failover primary, and old-primary recovery must either clear when replication is healthy or retry when it is not.
+**Hypothesis**: After a clean failover, killing and restarting the operator pod must NOT clear `status.lastFailover.target`, `status.lastFailover.time`, or an in-flight old-primary `RecoveryInProgress` marker. The post-restart operator must rehydrate those fields from the CR; `activeSite` must remain at the post-failover primary, and old-primary recovery must either clear when replication is healthy or retry when it is not.
 
 **Why this regression test exists**: WISHLIST #38 noted that failover history and old-primary-recovery dispatch keys were partly in-memory. The operator now persists and rehydrates failover timestamps plus `RecoveryInProgress`/`RecoveryBlocked`, so a restart during recovery keeps the CR-visible lifecycle and retries safely instead of waiting for another failover.
 
-**Injection**: `make chaos-run SCENARIO=23-failover-state-durability`. The runner scales the primary to 0, waits for failover, snapshots `lastFailoverTarget` / `lastFailover` / `activeSite`, kills the operator pod, sleeps 30s for the new pod to come up and reconcile, then re-reads the CR.
+**Injection**: `make chaos-run SCENARIO=23-failover-state-durability`. The runner scales the primary to 0, waits for failover, snapshots `lastFailover.target` / `lastFailover.time` / `activeSite`, kills the operator pod, sleeps 30s for the new pod to come up and reconcile, then re-reads the CR.
 
-**Verify**: Post-restart values match the pre-restart snapshot. `lastFailover` is allowed to advance by up to 90s within tolerance (a status-enrichment loop may rewrite the field with a slightly later timestamp); a regression to zero or a "fresh failover happened just now" jump is rejected.
+**Verify**: Post-restart values match the pre-restart snapshot. `lastFailover.time` is allowed to advance by up to 90s within tolerance (a status-enrichment loop may rewrite the field with a slightly later timestamp); a regression to zero or a "fresh failover happened just now" jump is rejected.
 
 **Cleanup**: Standard runner cleanup. The operator's auto-recovery brings the original primary back up as a replica.
 
@@ -760,7 +764,7 @@ Live k3d status from May 3, 2026: scenarios 22, 23, 24, 25, 26, 27, and 29 pass 
 
 **Injection**: `make chaos-run SCENARIO=23-dragonfly-master-kill`
 
-**Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins as `role=replica` with `linkStatus=up`, and the Dragonfly promotion metric increments.
+**Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins with `status.dragonfly.sites[].role=Replica` and `linkStatus=up`, and the Dragonfly promotion metric increments.
 
 ---
 
@@ -791,7 +795,7 @@ The scenario temporarily scales the target Dragonfly StatefulSet to 0 and patche
 ### 28. Planned Dragonfly Sync Timeout Proceeds
 **Category**: Degraded planned failover | **Risk**: Medium
 
-**Hypothesis**: With `maxSyncWait=1ms`, target Dragonfly scaled to 0, and `onSyncTimeout=Proceed`, the planned failover does not claim session preservation but still completes MySQL promotion.
+**Hypothesis**: With `maxSyncWait=1s`, target Dragonfly scaled to 0, and `onSyncTimeout=Proceed`, the planned failover does not claim session preservation but still completes MySQL promotion.
 
 **Injection**: `make chaos-run SCENARIO=26-planned-dragonfly-sync-timeout-proceed`
 
@@ -808,14 +812,18 @@ The scenario temporarily scales the target Dragonfly StatefulSet to 0 and patche
 
 **Injection**:
 
+Set the strategy and the new image in one patch, so the Rolling render never sees the new image:
+
 ```bash
-kubectl -n bloodraven-playground annotate --overwrite mysqlfailovergroup playground \
-  bloodraven.shipstream.io/dragonfly-snapshot-upgrade=docker.dragonflydb.io/dragonflydb/dragonfly:<target>
+kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type=json -p '[
+  {"op": "add", "path": "/spec/dragonfly/upgradeStrategy", "value": "SnapshotRestore"},
+  {"op": "replace", "path": "/spec/dragonfly/image", "value": "docker.dragonflydb.io/dragonflydb/dragonfly:<target>"}
+]'
 ```
 
-**Verify**: `status.dragonfly.upgrade.phase` walks `Pending → SavingSnapshot → UpdatingActive → WaitingForActiveRestore → ReattachingReplicas → Succeeded`; the active Service has no endpoints while restore is in progress; `SAVE` completes before the active pod is deleted; final Dragonfly pods run the target image; `status.dragonfly.phase` returns to `Ready`; the seeded key is present after restore.
+**Verify**: `status.dragonfly.upgrade.phase` walks `Pending → SavingSnapshot → UpdatingActive → WaitingForActiveRestore → ReattachingReplicas → Succeeded`; the active Service has no endpoints while restore is in progress; `SAVE` completes before the active pod is deleted; final Dragonfly pods run the target image; `spec.dragonfly.image` still reads the requested target (the operator never writes spec); `status.dragonfly.phase` returns to `Ready`; the seeded key is present after restore.
 
-**Automation status**: Registered as `29-dragonfly-snapshot-upgrade`. The playground deploys RustFS during setup; the scenario creates the `dragonfly` bucket on demand, temporarily patches `spec.dragonfly.snapshot`, waits for Dragonfly pods to run with `--dir=s3://dragonfly/playground`, and then runs the upgrade.
+**Automation status**: Registered as `29-dragonfly-snapshot-upgrade`. The playground deploys RustFS during setup; the scenario creates the `dragonfly` bucket on demand, temporarily patches `spec.dragonfly.snapshot`, waits for Dragonfly pods to run with `--dir=s3://dragonfly/playground`, and then sets `upgradeStrategy: SnapshotRestore` and moves `spec.dragonfly.image` to the image the pods already run, by digest (no new pull). The reverter restores the strategy and the original image in one patch, which rolls back the ordinary way.
 
 ---
 
@@ -828,13 +836,13 @@ kubectl -n bloodraven-playground annotate --overwrite mysqlfailovergroup playgro
 
 The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `MysqlFailoverGroup.spec.backup` with profile `rustfs-e2e`, and isolates objects under `e2e/30-backup-verification-rustfs/<run-stamp>/`. It seeds `chaos_s30_backup.marker`, waits for replica GTID catch-up, creates one named `MysqlBackup`, then creates one `MysqlBackupVerification` with `spec.backupRef.name` pinned to that backup instead of relying on latest-success resolution.
 
-**Verify**: The backup reaches `Succeeded` with `status.storageType=S3`, `status.location=<prefix>/<backup>`, and a Job name. The verification reaches `Succeeded`, reports `status.backupRef.name` for the created backup, runs the sanity query, returns marker count `2`, and has `Verified=True`.
+**Verify**: The backup reaches `Succeeded` with `status.artifactStorage.type=S3`, `status.artifactStorage.location=<prefix>/<backup>`, and a Job name. The verification reaches `Succeeded`, reports `status.backupRef.name` for the created backup, runs the sanity query, returns marker count `2`, and has `Verified=True`.
 
 **Timing**: Scenario timeout is 18 minutes; backup and verification waits each have a 12-minute sub-budget. Cleanup deletes verification then backup CRs, drops `chaos_s30_backup`, restores the original `spec.backup`, and waits for a healthy baseline.
 
 **Artifact deletion check** (scenarios 30, 30-encrypted, 31, 36 and 37, through the shared backup-deletion helper): before deleting the `MysqlBackup`, the helper reads the bucket and exact artifact location from `status.artifactStorage`, lists `<artifact>/` in RustFS through a port-forward and requires at least one object. After the CR is gone (up to 5 minutes, which covers the first pull of the operator image that runs `artifact-cleanup`), the same listing must be empty. The listing uses 5-key pages, so a dump spans several. A cleanup that exits successfully without deleting anything fails the scenario.
 
-**Encrypted variant** (`make chaos-run SCENARIO=30-encrypted-backup-verification-rustfs`): creates a per-run passphrase Secret `bloodraven-backup-e2e-passphrase-<run-stamp>` with a random passphrase (it refuses to reuse an existing one), sets `encryption.algorithm=AES-256-GCM` on the `rustfs-e2e` profile, and uses objects under `e2e/30-encrypted-backup-verification-rustfs/<run-stamp>/` and schema `chaos_s30_encrypted_backup`. The backup must also report `status.encrypted=true`, and `status.location` is `s3://bloodraven-backup-e2e/<prefix>/<backup>/`, the URL form `encrypt-upload` writes. This is the only scenario that renders the operator-image `encrypt-upload` and `decrypt-download` containers. Before it existed, every scenario ran unencrypted backups, so two encrypted-path bugs shipped without an E2E failure, both fixed in 1.3.2. The first was a bare `bloodraven` command (`exec: "bloodraven": executable file not found in $PATH`). The second passed the `s3://` location to `decrypt-download` as the object-key prefix, which RustFS rejects with `InvalidArgument`. Cleanup deletes that Secret by UID, and only if this run created it.
+**Encrypted variant** (`make chaos-run SCENARIO=30-encrypted-backup-verification-rustfs`): creates a per-run passphrase Secret `bloodraven-backup-e2e-passphrase-<run-stamp>` with a random passphrase (it refuses to reuse an existing one), sets `encryption.algorithm=AES-256-GCM` on the `rustfs-e2e` profile, and uses objects under `e2e/30-encrypted-backup-verification-rustfs/<run-stamp>/` and schema `chaos_s30_encrypted_backup`. The backup must also report `status.encryption.mode=Passphrase`, and `status.artifactStorage.location` is `s3://bloodraven-backup-e2e/<prefix>/<backup>/`, the URL form `encrypt-upload` writes. This is the only scenario that renders the operator-image `encrypt-upload` and `decrypt-download` containers. Before it existed, every scenario ran unencrypted backups, so two encrypted-path bugs shipped without an E2E failure, both fixed in 1.3.2. The first was a bare `bloodraven` command (`exec: "bloodraven": executable file not found in $PATH`). The second passed the `s3://` location to `decrypt-download` as the object-key prefix, which RustFS rejects with `InvalidArgument`. Cleanup deletes that Secret by UID, and only if this run created it.
 
 ---
 
@@ -845,9 +853,9 @@ The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `Mysql
 
 **Injection**: `make chaos-run SCENARIO=31-pitr-verification-rustfs`
 
-The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=2s`). It waits for `Ready=True` from the patched MFG generation with no ordered update in progress, then requires the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup. The generation gate prevents stale pre-patch readiness from starting a backup during the PITR sidecar rollout.
+The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=5s`). It waits for `Ready=True` from the patched MFG generation with no ordered update in progress, then requires the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup. The generation gate prevents stale pre-patch readiness from starting a backup during the PITR sidecar rollout.
 
-**Verify**: After the full backup succeeds, the scenario inserts a before-target marker row, captures a MySQL UTC timestamp, sleeps 2 seconds, inserts an after-target marker, executes `FLUSH BINARY LOGS`, and waits for sidecar archiver coverage with zero backlog. The pinned PITR verification uses `spec.pointInTime.mode=timestamp` and a sanity scalar that returns `1` only when baseline and before-target rows are present and the after-target row is absent. Success also requires `status.replayedThroughBinlog` and `Verified=True`.
+**Verify**: After the full backup succeeds, the scenario inserts a before-target marker row, captures a MySQL UTC timestamp, sleeps 2 seconds, inserts an after-target marker, executes `FLUSH BINARY LOGS`, and waits for sidecar archiver coverage with zero backlog. The pinned PITR verification uses `spec.pointInTime.mode=Timestamp` and a sanity scalar that returns `1` only when baseline and before-target rows are present and the after-target row is absent. Success also requires `status.pointInTime.newestReplayedCommitTime` and `Verified=True`.
 
 **Timing**: Scenario timeout is 24 minutes; PITR rollout/archiver readiness has a 6-minute sub-budget, archive coverage has 3 minutes, and backup/verification waits each have 12 minutes. Cleanup deletes CRs, drops `chaos_s31_pitr`, restores the original `spec.backup` so PITR does not leak to later scenarios, and waits for a healthy baseline.
 
@@ -866,7 +874,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Injection**: Resolve the ClusterRole bound to ServiceAccount `bloodraven-playground/bloodraven`; remove `patch`/`update` from only `mysqlfailovergroups/status` (siblings like `mysqlbackups/status` keep their verbs via rule-splitting); scale the active MySQL Deployment to 0.
 
-**Verify**: The peer becomes writable at the MySQL layer (direct probe, not the frozen CR); `bloodraven_failovers_total{target_site=<peer>}` increments; the operator logs a forbidden `update fg status` error. After RBAC restore: `status.activeSite`, `lastFailoverTarget`, and `promotionGtidExecuted` heal to the promoted site within 90s and Ready returns True; the old primary rejoins without `RecoveryBlocked`.
+**Verify**: The peer becomes writable at the MySQL layer (direct probe, not the frozen CR); `bloodraven_failovers_total{target_site=<peer>}` increments; the operator logs a forbidden `update fg status` error. After RBAC restore: `status.activeSite`, `lastFailover.target`, and `lastFailover.promotionGtidExecuted` heal to the promoted site within 90s and Ready returns True; the old primary rejoins without `RecoveryBlocked`.
 
 **Timing**: 8-minute timeout; 90s status-heal budget after RBAC restore.
 
@@ -874,7 +882,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Observed defect and fix**: The operator wrote CR status only on transition events; a status write denied mid-failover was logged and dropped with nothing re-attempting it once the cluster stabilized. Fix (`internal/controller/runner.go`, `topology.go`): `updateCRStatus` now returns its error, the `StatusCallback` records it, and `Poll` re-fires the status callback every cycle while a prior write is known-failed (the writer already `DeepEqual`-skips no-ops, so a healthy cluster pays only a diff). Covered by `TestUpdateCRStatus_DeniedWriteReturnsErrorThenHeals` and `TestPoll_StatusRetryReFiresCallbackUntilCleared`.
 
-**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T004152Z`) with the status-write-retry fix above already in place: the ClusterRole edit denied `patch`/`update` on `mysqlfailovergroups/status` only, the active primary was scaled to 0, and MySQL promoted the peer at the data layer while the CR status stayed frozen during the denial. After RBAC restore, `status.activeSite`, `lastFailoverTarget`, and `promotionGtidExecuted` healed to the promoted site inside the 90s budget with no second failover and no `RecoveryBlocked` on rejoin.
+**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T004152Z`) with the status-write-retry fix above already in place: the ClusterRole edit denied `patch`/`update` on `mysqlfailovergroups/status` only, the active primary was scaled to 0, and MySQL promoted the peer at the data layer while the CR status stayed frozen during the denial. After RBAC restore, `status.activeSite`, `lastFailover.target`, and `lastFailover.promotionGtidExecuted` healed to the promoted site inside the 90s budget with no second failover and no `RecoveryBlocked` on rejoin.
 
 ---
 
@@ -904,7 +912,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Injection**: Patch `spec.sites[*].resources.requests.memory`; wait for `status.updatePhase` to engage (preferably `WaitReplica`); apply an **ingress-only** deny NetworkPolicy to the standby MySQL pod so the operator's health check of the freshly-rolled standby fails (egress/replication stays open, satisfying the updater's replicating-standby precondition once lifted); force-delete the operator pod; after the replacement is Available, remove the hold.
 
-**Verify**: Never 0 writable (no double-roll / `TOTAL LOSS` window) and never >1 writable throughout; final `status.updatePhase == ""`; both Deployments run the patched memory request; one writable + one read-only; no `TOTAL LOSS` operator log. Then restore original memory and wait for the revert roll to settle.
+**Verify**: Never 0 writable (no double-roll / `TOTAL LOSS` window) and never >1 writable throughout; final `status.updatePhase` absent; both Deployments run the patched memory request; one writable + one read-only; no `TOTAL LOSS` operator log. Then restore original memory and wait for the revert roll to settle.
 
 **Timing**: 12-minute timeout; 8-minute completion sub-budget.
 
@@ -921,13 +929,13 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Injection**: Set `SOURCE_DELAY=60` on the target (both threads still running, so the operator's replica-health check stays true); write a marker on the source **after** the delay is active (so the fenced GTID cannot be covered in time); annotate `bloodraven.shipstream.io/planned-failover=<target>:maxLagWait=5s`.
 
-**Verify**: `plannedFailover.phase` reaches terminal `Failed` with outcome `RolledBack` and reason `LagTimeout` (the intermediate `Admitting` and `Fencing` phases are not asserted — they may not persist long enough to observe); `bloodraven_planned_failovers_total{result="failed_timeout"}` increments; `status.activeSite` stays the source; `lastFailoverTarget` does not advance to the target; the source becomes writable again (eventual — unfencing clears `super_read_only` first); the target stays read-only and replicating.
+**Verify**: `plannedFailover.phase` reaches terminal `Failed` with outcome `RolledBack` and reason `LagTimeout` (the intermediate `Admitting` and `Fencing` phases are not asserted — they may not persist long enough to observe); `bloodraven_planned_failovers_total{result="rolled-back"}` increments; `status.activeSite` stays the source; `lastFailover.target` does not advance to the target; the source becomes writable again (eventual — unfencing clears `super_read_only` first); the target stays read-only and replicating.
 
 **Timing**: 8-minute timeout.
 
 **Cleanup**: Clear `SOURCE_DELAY` on the read-only site, wait for the marker to replicate, drop `chaos_s35`, clear the annotation (already consumed by the terminal state machine).
 
-**Actual live result**: First live attempt (`20260711T005733Z`) reached the correct `plannedFailover.phase=Failed{LagTimeout}` outcome in 7.007s, then failed the very next verify check 21ms later on `status.activeSite=""` — a scenario-side assertion-timing race, not an operator bug: rollback unfences the source in two MySQL-level steps (`super_read_only` clears before `read_only`), and `activeSiteLocked()` reports no active site in the gap between them (see `live-35-final.md`). After replacing the one-shot check with the `s35RollbackConverged` poll (90s budget, hard-fails immediately if `activeSite`/`lastFailoverTarget` actually advance to the target), the scenario passed live on `20260711T011112Z`: the source settled back to sole-writable/active, failover history never advanced to the target, and the target stayed read-only and replicating. Re-run live on `20260711T033630Z` after the post-review cleanup fix (clearing `SOURCE_DELAY` on the stashed rollback target rather than the observed read-only site): passed again with the same outcome.
+**Actual live result**: First live attempt (`20260711T005733Z`) reached the correct `plannedFailover.phase=Failed{LagTimeout}` outcome in 7.007s, then failed the very next verify check 21ms later on `status.activeSite=""` — a scenario-side assertion-timing race, not an operator bug: rollback unfences the source in two MySQL-level steps (`super_read_only` clears before `read_only`), and `activeSiteLocked()` reports no active site in the gap between them (see `live-35-final.md`). After replacing the one-shot check with the `s35RollbackConverged` poll (90s budget, hard-fails immediately if `activeSite`/`lastFailover.target` actually advance to the target), the scenario passed live on `20260711T011112Z`: the source settled back to sole-writable/active, failover history never advanced to the target, and the target stayed read-only and replicating. Re-run live on `20260711T033630Z` after the post-review cleanup fix (clearing `SOURCE_DELAY` on the stashed rollback target rather than the observed read-only site): passed again with the same outcome.
 
 ---
 
@@ -936,7 +944,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Hypothesis**: A per-schema in-place restore whose RustFS storage is scaled to 0 mid-run terminates `Failed` with the topology frozen (no emergency failover, no reclone). The untouched safe schema survives on the active primary. A genuine execution failure records `confirmTokenUsed` (the executed confirm), so the terminal `Failed` **holds** on the same confirm — the operator does not auto-re-arm the destructive restore; a retry requires a new monotonic confirm. Only a validation rejection (an invalid confirm that never ran) leaves `confirmTokenUsed` empty.
 
-**Injection**: Configure an isolated RustFS profile under `e2e/36-…/<run-stamp>`; seed `chaos_s36_restore` and `chaos_s36_safe`; take a valid `MysqlBackup`; mutate only `chaos_s36_restore`; **confirm-token gate substep** — apply an invalid `confirm` and assert `Failed` with no Job and empty `confirmTokenUsed`; apply a fresh RFC3339 `confirm` with `source.mysqlBackupRef` and `loadOptions.includeSchemas=[chaos_s36_restore]`; wait until the restore Job is active (`phase=Restoring`, `jobName` set); scale the `rustfs` Deployment to 0.
+**Injection**: Configure an isolated RustFS profile under `e2e/36-…/<run-stamp>`; seed `chaos_s36_restore` and `chaos_s36_safe`; take a valid `MysqlBackup`; mutate only `chaos_s36_restore`; **confirm-token gate substep** — apply an invalid `confirm` and assert `Failed` with no Job and empty `confirmTokenUsed`; apply a fresh RFC3339 `confirm` with `source.backupRef` and `loadOptions.includeSchemas=[chaos_s36_restore]`; wait until the restore Job is active (`phase=Restoring`, `jobName` set); scale the `rustfs` Deployment to 0.
 
 **Verify**: Terminal `phase=Failed`; `targetSite` equals the active site at preflight; `status.activeSite` unchanged; no `bloodraven.shipstream.io/reclone-site` annotation; exactly one writable; no `RecoveryBlocked`; `chaos_s36_safe.canary` still reads `must-survive`; `confirmTokenUsed` equals the executed confirm and the terminal `Failed` holds across a sampling window (no auto-re-arm on the same confirm). Restore Job pod logs are captured as evidence of the S3/RustFS read failure.
 
@@ -963,7 +971,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Setup**: an encrypted RustFS archive under `e2e/37-pitr-planned-failback-no-reclone/<run-stamp>` (`maxBinlogSize=64M`, so nothing rotates by size and the scenario decides what is sealed). The playground counter app writes only on request, so the scenario drives its own load: a background writer commits about 20 rows a second into `chaos_s37_pitr.load` on the era's primary across each era's marker, fence and witness marker. A window starts only after the writer's first commit (its first insert runs at once), and the writer is stopped, with its last insert committed, before every flush, failover, restore and backup, so the archive boundaries the scenario asserts stay exact; each window fails if the writer committed nothing.
 
-**Fences**: each expected set comes from a fence on the active primary: `FLUSH TABLES WITH READ LOCK`, read `@@gtid_executed` and the server clock under the lock, hold the lock until the clock has passed the next whole second (the target T; `stopDatetime` admits no fraction), optionally `FLUSH BINARY LOGS` under the lock, then `UNLOCK TABLES`. Every transaction committed before the lock is in the set and older than T; every later one is newer. So the expected history is exact while the writer commits concurrently. A flushing fence's set is exactly the sealed file's exec set (the latest-mode expectation). A flushing fence (and every plain flush) reads the file being sealed (`SHOW BINARY LOG STATUS`) on the same connection just before `FLUSH BINARY LOGS`, and waits until the site's manifest in RustFS holds a row for that file that was not there before the flush; the archiver uploading some earlier file does not count.
+**Fences**: each expected set comes from a fence on the active primary: `FLUSH TABLES WITH READ LOCK`, read `@@gtid_executed` and the server clock under the lock, hold the lock until the clock has passed the next whole second (the target T; `stopTime` admits no fraction), optionally `FLUSH BINARY LOGS` under the lock, then `UNLOCK TABLES`. Every transaction committed before the lock is in the set and older than T; every later one is newer. So the expected history is exact while the writer commits concurrently. A flushing fence's set is exactly the sealed file's exec set (the latest-mode expectation). A flushing fence (and every plain flush) reads the file being sealed (`SHOW BINARY LOG STATUS`) on the same connection just before `FLUSH BINARY LOGS`, and waits until the site's manifest in RustFS holds a row for that file that was not there before the flush; the archiver uploading some earlier file does not count.
 
 **Backups**: after a backup Succeeds, the scenario waits until the server clock is a second past both the clock it read once the backup reported Succeeded (which bounds the stamp's `serverClock.end`) and the dump's `@.done.json` end rounded up to the second, so no later target refuses `PITRBackupAfterTarget` (D-52). Each timestamp verification asserts its T is past that bound.
 
@@ -981,7 +989,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Timing**: 60-minute timeout.
 
-**Cleanup** (32-minute budget plus the group deletion): deletes `s37-restored` (its Deployments and PVCs are owned by it) only if it carries this run's `chaos.playground.bloodraven.io/run` annotation, with a UID precondition, so a group left by an earlier `--no-cleanup` run is kept; a `Create` that returns `AlreadyExists` fails the step and marks nothing for deletion. Its archive and dump key snapshots have no owner (#203), so after it is gone they are deleted by its UID label (`bloodraven.shipstream.io/failover-group-uid`). Then it deletes the verifications and backups (asserting their RustFS artifacts are removed), drops `chaos_s37_pitr`, restores the original `spec.backup`, deletes the run's passphrase Secret, and waits for a healthy baseline past the anti-flap cooldown. It then waits up to 3 minutes until no non-terminal pod in the namespace (a terminating pod of an old ReplicaSet, a deleted verification's pod) mounts a key snapshot under the run's prefixes, since the operator refuses to release a snapshot a pod still mounts, and releases every archive binding of the run's prefixes, one `bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>` annotation per id, waiting up to 2 minutes each (a failed release is a cleanup warning, and the annotation is taken back), and deletes any key snapshot under those prefixes that no binding names. Finally it deletes every object under each archive prefix the run configured (`e2e/<scenario>/<run-stamp>[-<suffix>]/`). Archive objects are always decrypted with the passphrase bytes stashed when the run created its Secret, never with the live Secret.
+**Cleanup** (32-minute budget plus the group deletion): deletes `s37-restored` (its Deployments and PVCs are owned by it) only if it carries this run's `playground.bloodraven.shipstream.io/run` annotation, with a UID precondition, so a group left by an earlier `--no-cleanup` run is kept; a `Create` that returns `AlreadyExists` fails the step and marks nothing for deletion. Its archive and dump key snapshots have no owner (#203), so after it is gone they are deleted by its UID label (`bloodraven.shipstream.io/failover-group-uid`). Then it deletes the verifications and backups (asserting their RustFS artifacts are removed), drops `chaos_s37_pitr`, restores the original `spec.backup`, deletes the run's passphrase Secret, and waits for a healthy baseline past the anti-flap cooldown. It then waits up to 3 minutes until no non-terminal pod in the namespace (a terminating pod of an old ReplicaSet, a deleted verification's pod) mounts a key snapshot under the run's prefixes, since the operator refuses to release a snapshot a pod still mounts, and releases every archive binding of the run's prefixes, one `bloodraven.shipstream.io/release-pitr-archive-binding=<id>:confirm=<group>:uid=<uid>` annotation per id, waiting up to 2 minutes each (a failed release is a cleanup warning, and the annotation is taken back), and deletes any key snapshot under those prefixes that no binding names. Finally it deletes every object under each archive prefix the run configured (`e2e/<scenario>/<run-stamp>[-<suffix>]/`). Archive objects are always decrypted with the passphrase bytes stashed when the run created its Secret, never with the live Secret.
 
 **Status**: written and compiled against the #206 series-2 API. Its first live runs are the e2e `pitr` job on the #206 PR (label `e2e`), which runs 31, 37, 68 and 70 through `run-all --scenarios`, so each `ResetBeforeRunAll` reset happens; record the run stamps here once they pass. The pre-#206 version of this scenario (`37-pitr-archive-handoff-across-failover`, which expected `PITRCrossSiteOrder`) is gone.
 
@@ -994,7 +1002,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Injection**: Capture the current DNSEndpoint target; remove the four write verbs from `dnsendpoints` only; scale the active MySQL Deployment to 0.
 
-**Verify**: `status.activeSite` and `lastFailoverTarget` flip to the peer; the DNSEndpoint target stays stale (never the peer LBIP) during denial; the operator logs `DNS flip failed after successful promotion` / forbidden `apply DNSEndpoint`. After RBAC restore: the DNSEndpoint target becomes the promoted LBIP within 90s and neither `activeSite` nor `lastFailover` advances (no re-failover). Finally the old primary rejoins and the DNS target matches the final active site.
+**Verify**: `status.activeSite` and `lastFailover.target` flip to the peer; the DNSEndpoint target stays stale (never the peer LBIP) during denial; the operator logs `DNS flip failed after successful promotion` / forbidden `apply DNSEndpoint`. After RBAC restore: the DNSEndpoint target becomes the promoted LBIP within 90s and neither `activeSite` nor `lastFailover.time` advances (no re-failover). Finally the old primary rejoins and the DNS target matches the final active site.
 
 **Timing**: 10-minute timeout; 90s DNS-heal budget.
 
@@ -1002,7 +1010,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Observed defect and fix**: The operator applied the DNSEndpoint only at promotion/re-assert time; a promotion-time apply denied by RBAC was logged and dropped with no per-poll reconcile to retry it once the group stabilized. Fix (`internal/controller/topology.go`, `internal/platform/dns.go`): DNS is now reconciled level-triggered. `reconcileDNS` runs on every poll, derives the desired target from live topology (the single writable site, or a promotion this process just performed), compares it against the live DNSEndpoint (read back through the new optional `platform.DNSRecordReader`), and re-applies only on a real divergence — healing DNS without re-running promotion or touching MySQL. Deriving the target rather than memoizing it buys two properties a pending-target retry could not: the heal **survives an operator restart** (nothing needs to be remembered — the live record and the live topology are enough), and it can **never replay a superseded target** at a site that is now read-only. Every DNS write goes through one `applyDNS` helper, so `bloodraven_dns_flips_total{site}` counts exactly the target applied, and only when the record's value really changed. Covered by `TestReconcileDNS_HealsStaleRecordAfterOperatorRestart`, `TestReconcileDNS_NeverReplaysSupersededTarget`, `TestReconcileDNS_MatchingRecordIsNeverRewritten`, `TestReconcileDNS_DeniedPromotionFlipHealsWithoutRefailover`, `TestReconcileDNS_HealsWithoutRecordReadCapability`, and `TestDNSEndpointUpdater_CurrentDNSRecord`.
 
-**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T022237Z`), with a first-cut version of the heal in place (a promotion-time pending target re-applied every poll): the four write verbs were denied on `dnsendpoints`, the active primary was scaled to 0, and `status.activeSite`/`lastFailoverTarget` flipped to the peer while the DNSEndpoint target stayed stale and the operator logged the forbidden `apply DNSEndpoint` error. After RBAC restore the DNSEndpoint healed to the promoted LBIP inside the 90s budget with no second failover, and the old primary rejoined with the DNS target matching the final active site. That first cut was superseded in review by the level-triggered `reconcileDNS` described above — same observable behavior for this scenario, plus restart-safety and no stale-target replay. The replacement was re-run live on `20260711T033413Z` (RBAC deny/restore captured in `s38-clusterrole-original.json`/`s38-clusterrole-patched.json`): passed again with the same outcome — DNS stayed stale during the denial and healed to the promoted LBIP within the 90s budget after RBAC restore, with no second failover.
+**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T022237Z`), with a first-cut version of the heal in place (a promotion-time pending target re-applied every poll): the four write verbs were denied on `dnsendpoints`, the active primary was scaled to 0, and `status.activeSite`/`lastFailover.target` flipped to the peer while the DNSEndpoint target stayed stale and the operator logged the forbidden `apply DNSEndpoint` error. After RBAC restore the DNSEndpoint healed to the promoted LBIP inside the 90s budget with no second failover, and the old primary rejoined with the DNS target matching the final active site. That first cut was superseded in review by the level-triggered `reconcileDNS` described above — same observable behavior for this scenario, plus restart-safety and no stale-target replay. The replacement was re-run live on `20260711T033413Z` (RBAC deny/restore captured in `s38-clusterrole-original.json`/`s38-clusterrole-patched.json`): passed again with the same outcome — DNS stayed stale during the denial and healed to the promoted LBIP within the 90s budget after RBAC restore, with no second failover.
 
 ---
 
@@ -1045,16 +1053,16 @@ These two scenarios cover state-machine paths that don't fit the §1-§30 emerge
 ### S. Planned Switchover (`02-planned-switchover`) {#planned-switchover}
 **Category**: Planned-failover state machine | **Risk**: Low
 
-**Hypothesis**: Annotating the MFG with `bloodraven.shipstream.io/planned-failover=<peer>` walks `status.plannedFailover.phase` through `Admitting → Fencing → Draining → WaitingForLag → Promoting → Publishing → Succeeded`, and the promotion watermark `status.promotionGtidExecuted` equals the fenced set `status.plannedFailover.fence.gtidSet` (the target held every acknowledged transaction when it was promoted, by construction).
+**Hypothesis**: Annotating the MFG with `bloodraven.shipstream.io/planned-failover=<peer>` walks `status.plannedFailover.phase` through `Admitting → Fencing → Draining → WaitingForLag → Promoting → Publishing → Succeeded`, and the promotion watermark `status.lastFailover.promotionGtidExecuted` equals the fenced set `status.plannedFailover.fence.gtidSet` (the target held every acknowledged transaction when it was promoted, by construction).
 
 **Injection**: `make chaos-run SCENARIO=02-planned-switchover`. The scenario picks the peer of the current active site as the target and patches the annotation.
 
 **Verify**:
 
 - `status.plannedFailover.phase` reaches `Succeeded` with `targetSite=<peer>` (stale plannedFailover blocks left over from prior runs are ignored via the `startTime` check, so this assertion is robust under rerun).
-- `result.outcome` is `Succeeded`; the `fence` record carries `gtidSet` and `sourceServerUUID`, the `promotion` record carries `confirmationTime` and `targetServerUUID`, and `status.promotionGtidExecuted` equals `fence.gtidSet`.
+- `result.outcome` is `Succeeded`; the `fence` record carries `gtidSet` and `sourceServerUUID`, the `promotion` record carries `confirmationTime` and `targetServerUUID`, and `status.lastFailover.promotionGtidExecuted` equals `fence.gtidSet`.
 - Direct `SHOW REPLICA STATUS` on every non-active follower reports both threads running and `Source_Host=mysql-playground-<new-active>-internal.bloodraven-playground.svc.cluster.local`; this explicitly covers the demoted old primary and the reader.
-- `bloodraven_planned_failovers_total{target_site=<peer>,result="success"}` increments.
+- `bloodraven_planned_failovers_total{target_site=<peer>,result="succeeded"}` increments.
 
 **Note**: Single-scenario `run` will fail precheck if the cluster already has an in-flight `plannedFailover` in a non-terminal phase. The runner's standard cleanup waits for `Ready=True` before the next scenario starts, so `run-all` does not need to reset between this and the next entry.
 
@@ -1072,11 +1080,11 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
   -p '[{"op":"add","path":"/spec/splitBrainPolicy","value":{"sitePriorities":["iad","pdx"]}}]'
 ```
 
-**Injection**: `make chaos-run SCENARIO=05-split-brain-auto-resolve`. The scenario also briefly scales the operator to 0 to clear `status.lastFailover{,Target}` so the cooldown branch does not suppress the auto-resolve.
+**Injection**: `make chaos-run SCENARIO=05-split-brain-auto-resolve`. The scenario also briefly scales the operator to 0 to clear `status.lastFailover` so the cooldown branch does not suppress the auto-resolve.
 
 **Verify**:
 
-- The non-preferred site stops being writable; only the priority site remains `state=writable`.
+- The non-preferred site stops being writable; only the priority site remains `state=Writable`.
 - `status.activeSite` equals `spec.splitBrainPolicy.sitePriorities[0]`.
 - The `bloodraven_split_brain_auto_resolve_total{prefer_site=...}` counter increments above the pre-injection baseline.
 - The operator log contains `split-brain auto-resolve` (canonical msg from `internal/controller/topology.go`).
@@ -1088,13 +1096,13 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 ### 40. Reader Data Loss and Auto-Clone {#40-reader-data-loss-and-auto-clone}
 **Category**: Reader recovery and endpoint safety | **Risk**: High
 
-**Hypothesis**: Losing only the dedicated `read-only` reader's local data does not affect failover-group readiness or the writable primary. The operator removes the unhealthy reader from its client Service, recreates it from the confirmed active primary, converges it to a direct source, and republishes it only after threads and lag are healthy.
+**Hypothesis**: Losing only the dedicated `ReadOnly` reader's local data does not affect failover-group readiness or the writable primary. The operator removes the unhealthy reader from its client Service, recreates it from the confirmed active primary, converges it to a direct source, and republishes it only after threads and lag are healthy.
 
 **Injection**: `make chaos-run SCENARIO=40-reader-data-loss-reclone`. The scenario verifies that the reader is on the `zone-reader` worker, scales its Deployment to zero, deletes and observes replacement of its PVC UID, then scales it back to one. This deterministic local-PV replacement is the playground interpretation of reader node/storage loss; it avoids relying on literal node deletion and cloud volume behavior.
 
 **Verify**:
 
-- Exactly one spec site has effective role `read-only`; its pod is on a dedicated `zone-reader` worker.
+- Exactly one spec site has effective role `ReadOnly`; its pod is on a dedicated `zone-reader` worker.
 - A marker written to the active primary is visible on the reader before loss and after recovery.
 - A continuous observer records any group `Ready` invariant violation during scale-down, empty-datadir detection, clone, or catch-up; `stopAndCheck` reports the first recorded error before the step completes.
 - Operator logs contain `starting bootstrap` with `source=auto-clone`, `donor=<captured-active>`, `recipient=reader`, and `donorHost=mysql-playground-<captured-active>-internal.bloodraven-playground.svc.cluster.local`.
@@ -1121,7 +1129,7 @@ Issue #115 chaos proposal R3.
 - `status.activeSite` flips to the promotable standby and nowhere else.
 - The reader's `SourceHost` history only ever moves old-primary → new-primary: any third host, or a return to the demoted primary after the repoint, fails the run.
 - The reader never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
-- Final reader status passes the serving contract against the new primary (`read-only`, replicating, `Converged`, lag ≤ `readOnlyMaxLagSeconds`), a marker written on the new primary replicates to the reader, and the client Service publishes exactly the reader pod again.
+- Final reader status passes the serving contract against the new primary (`ReadOnly`, replicating, `Converged`, lag ≤ `readOnlyMaxLagSeconds`), a marker written on the new primary replicates to the reader, and the client Service publishes exactly the reader pod again.
 
 **Cleanup**: The executor restores the old primary's scale; scenario cleanup reuses the scenario-08 auto-reclone path if the returning primary is divergent.
 
@@ -1140,9 +1148,9 @@ Issue #115 chaos proposal R4. Smoke-profile member: fast, no clone wait.
 
 - Group `Ready` stays `True` every tick; `status.activeSite` and `status.lastFailover` never change (no failover, no anti-flap cooldown consumed).
 - The promotable standby keeps replicating.
-- The reader stays `read-only` and never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
+- The reader stays `ReadOnly` and never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
 - Observed reader lag exceeds `readOnlyMaxLagSeconds` and the client Service sheds the reader endpoint.
-- `bloodraven_replication_lag_seconds{site=reader,role="read-only"}` exceeds the reader threshold while `bloodraven_replication_source_state{site=reader,state="converged"}` stays 1 — the metrics report the stall honestly. A core RPO alert on `{role=~"primary-candidate|dr-only"}` must stay silent.
+- `bloodraven_replication_lag_seconds{site=reader,role="read-only"}` exceeds the reader threshold while `bloodraven_replication_source_state{site=reader,state="converged"}` stays 1 — the metrics report the stall honestly. A core RPO alert on `{role=~"primary-candidate|disaster-recovery"}` must stay silent.
 
 **Rollback**: `SOURCE_DELAY=0`; the reader must catch up, pass the serving contract, and rejoin its client Service. Cleanup always clears the delay and drops the soak database through the primary.
 
@@ -1153,7 +1161,7 @@ Issue #115 chaos proposal R4. Smoke-profile member: fast, no clone wait.
 
 Issue #115 chaos proposal R5 — the regression gate for role semantics under the worst input (spec gap #2).
 
-**Hypothesis**: A reader that somehow becomes writable is fenced like a `dr-only` loser without debounce, its errant GTID trips the convergence containment gate instead of a silent repoint, and it is never a promotion target — not even by explicit admin request.
+**Hypothesis**: A reader that somehow becomes writable is fenced like a `DisasterRecovery` loser without debounce, its errant GTID trips the convergence containment gate instead of a silent repoint, and it is never a promotion target — not even by explicit admin request.
 
 Two independent actors can close the writable window and both are correct: the operator's poll loop (`pollInterval`, 2s in the playground) fences any writable non-promotable site without debounce, and the reader's own sidecar fencing monitor (`PEER_CHECK_INTERVAL`, 5s) self-fences on topology mismatch. Whichever ticks first wins, so the scenario asserts the invariant plus a fence from *either* actor rather than racing one specific log line (issue #119).
 
@@ -1165,7 +1173,7 @@ Note the coverage consequence: only the sidecar's fence kills connections, so th
 
 - `super_read_only` is back `ON` on the reader within 60s, and the fence was deliberate: either the operator logged `fenced writable non-promotable site` with `site=<reader>`, or the reader's sidecar logged `SELF-FENCING: topology mismatch`. Completion is already established by the `super_read_only` check, so the log only has to attribute the fence to a deliberate actor — which is why the sidecar is matched on its prompt decision line rather than the terminal `SELF-FENCED`, whose emission trails the connection eviction. Group `Ready` and `activeSite` untouched.
 - The fence costs the reader nothing but its writability: replication is sampled immediately and again 25s later, past the sidecar's whole-fence deadline (`fenceTimeout`, 20s), so whichever actor fenced, every `KILL` it was going to issue has happened or been abandoned before the last look under any realistic ordering. Treat this as a backstop rather than a proof: the sidecar is an independent process, so no sampling window is provably race-free against it, and the deterministic coverage for this regression is the `killableConnection` unit test. A fence that kills the site's own `system user` threads strands it — permanently, once it is diverged enough for source convergence to be `Blocked`.
-- Annotating a planned failover targeting the reader lands `status.plannedFailover.phase=Failed` carrying the "only primary-candidate sites may be promoted" role error, and `bloodraven_planned_failovers_total{target_site=<reader>,result="rejected"}` increments.
+- Annotating a planned failover targeting the reader lands `status.plannedFailover.phase=Failed` carrying the "only PrimaryCandidate sites may be promoted" role error, and `bloodraven_planned_failovers_total{target_site=<reader>,result="not-started"}` increments.
 - After `STOP REPLICA`, the operator logs `replication source convergence blocked`, the reader reaches `SourceConvergenceState=Blocked` with reason `GTIDDiverged` (never a silent restart), `bloodraven_replication_source_state{site=reader,state="blocked"}` flips to 1, and the reader is shed from its client Service.
 
 **Cleanup**: The scenario reconciles the errant transactions by committing them as empty transactions on the active primary (refusing if the errant set carries any UUID other than the reader's — that demands `kubectl bloodraven reclone`), waits for the convergence invariant to restart the reader, then drops the scenario database through the primary so replication removes the errant row itself.
@@ -1230,7 +1238,7 @@ of a production adoption.
 component; `ALTER INSTANCE ROTATE INNODB MASTER KEY` is rejected on a
 sealed site; annotating the replica for rotation mints escrow version N+1
 and returns it to `Sealed` with data intact; annotating the active primary
-is refused with a `KeyringRotationRefused` event.
+is refused with a `KeyringRotationRejected` event.
 
 **What it actually proves**, in order:
 
@@ -1284,7 +1292,7 @@ watch -n2 "kubectl -n bloodraven-playground get mysqlfailovergroup playground \
   without also cutting the sidecar's lease traffic to the operator —
   a chaos primitive that does not exist yet. The state-machine
   behaviour (stay `Unsealed`, surface the sidecar's own reason in
-  `.status`, go `Failed` after `escrowTimeoutSeconds`, never seal) is
+  `.status`, go `Failed` after `escrowTimeout`, never seal) is
   covered by unit tests.
 
 ---
@@ -1355,7 +1363,7 @@ is what defers it.
 
 1. **The cold-reclone interlock accepts the documented form.** The
    recipient has no divergent GTID, so the annotation must carry
-   `:confirm=<group>`.
+   `:confirm=<group>:uid=<uid>` and no `gtidPrefix`.
 2. **The unseal really flips the rendering.** When the transient
    `Unsealed`/`Clone` window is caught, the Deployment's keyring volume
    must be an `emptyDir`, not the Secret. A status field alone is not
@@ -1432,7 +1440,7 @@ it was at 0; clears a leftover `rotate-keyring` annotation.
 
 ## Deployment coordination
 
-Scenarios 53-56 exercise the real `/deploy/v1` API, not a fake lease store. Each creates a unique `MysqlDatabase` with `spec.groupRef.name` matching the tested group and `spec.deploymentClients` matching its client ServiceAccount and namespace. The database must reach Ready before the client starts.
+Scenarios 53-56 exercise the real `/deploy/v1` API, not a fake lease store. Each creates a unique `MysqlDatabase` with `spec.failoverGroupRef.name` matching the tested group and `spec.deploymentClients` matching its client ServiceAccount and namespace. The database must reach Ready before the client starts.
 
 The client is a `python:3.13-alpine` Pod with a projected ServiceAccount token. Kubernetes obtains the token through TokenRequest with audience `bloodraven-deploy`; the ordinary API-audience token is not automounted. The client verifies the operator's certificate against the playground CA and calls `https://bloodraven.<namespace>.svc.cluster.local:8443/deploy/v1/groups/<group>`. No request uses plaintext or skips certificate verification. The embedded client logs status, expiry, and topology generation, never bearer or lease tokens.
 
@@ -1489,11 +1497,11 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 
 **Hypothesis**: Killing a candidate reclone's CLONE INSTANCE session after it has dropped the recipient's data fails the bootstrap: the operator logs `bootstrap failed`, never `bootstrap completed successfully`, and the recipient stays `super_read_only`. With the primary then scaled to 0, the operator logs `failover picker: refusing candidate whose data regressed` and promotes nothing for 45s. When the primary returns it is active again with its data, and the candidate is recloned.
 
-**Injection**: 120 MiB of incompressible filler, `clone_max_data_bandwidth=1` on the recipient, a `reclone-site=<candidate>:confirm=<fg>` request, then `KILL` of the CLONE session once `performance_schema.clone_progress` shows FILE COPY in progress. The session is found through `performance_schema.clone_status.PID`. Its processlist `info` is NULL, because MySQL hides statements that carry a password.
+**Injection**: 120 MiB of incompressible filler, `clone_max_data_bandwidth=1` on the recipient, a `reclone-site=<candidate>:confirm=<fg>:uid=<uid>` request, then `KILL` of the CLONE session once `performance_schema.clone_progress` shows FILE COPY in progress. The session is found through `performance_schema.clone_status.PID`. Its processlist `info` is NULL, because MySQL hides statements that carry a password.
 
 **History (total data loss)**: The operator cleared `read_only` on the recipient for CLONE. The recipient's own sidecar then saw a writable non-active site, fenced it and killed the CLONE session. The operator treated the dropped connection as the expected post-clone restart and reported success on an empty site. This happened unprompted in 2 of about 8 reclones. When the primary later died, the picker promoted the empty site. The sidecar's first fix matched CLONE by processlist `info`, which MySQL hides. It now uses `clone_status`.
 
-**Still open**: the operator does not retry a failed reclone. The recipient keeps the replication metadata it had before the clone, so empty-site auto-bootstrap skips it, and the group runs without that replica (`Bootstrapping=True/Failed`, `Ready=False`) until someone sets `reclone-site` again. The scenario's settle step does exactly that.
+**Still open**: the operator does not retry a failed reclone. The recipient keeps the replication metadata it had before the clone, so empty-site auto-bootstrap skips it, and the group runs without that replica (`Bootstrapping=False/BootstrapFailed`, `Degraded=True/BootstrapFailed`, `Ready=False`) until someone sets `reclone-site` again. The scenario's settle step does exactly that.
 
 ### 60. Operator-Only Partition {#60-operator-only-partition}
 **Category**: Partition / data safety | **Risk**: High | **Automated (quarantined)**: `60-operator-only-partition-no-acked-loss`
@@ -1565,7 +1573,7 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 
 Every era's marker, fence and witness run with the §37 background writer on the era's primary; the writer is stopped before the era's flush.
 
-1. Cycle 1: era A (marker, fence T1, witness, flush a); planned A→B; era B (marker, fence T2, witness, **flush b**; the writer is already stopped, so nothing commits on b between the flush and the reclone, which would be an unarchived tail); reclone a (`bloodraven.shipstream.io/reclone-site=<a>:confirm=<group>`, once a is read-only with no recorded divergence; a `RecloneRejected` Event or a failed attempt fails the step at once); planned B→A; era A' (marker, fence T3, witness, flush a). Verifications of β1 at T1, T2 and T3 are each Verified with the exact fenced set, the replay count against the dump's `@.json`, the archive ID and the marker rows.
+1. Cycle 1: era A (marker, fence T1, witness, flush a); planned A→B; era B (marker, fence T2, witness, **flush b**; the writer is already stopped, so nothing commits on b between the flush and the reclone, which would be an unarchived tail); reclone a (`bloodraven.shipstream.io/reclone-site=<a>:confirm=<group>:uid=<uid>`, once a is read-only with no recorded divergence; a `RecloneRejected` Event or a failed attempt fails the step at once); planned B→A; era A' (marker, fence T3, witness, flush a). Verifications of β1 at T1, T2 and T3 are each Verified with the exact fenced set, the replay count against the dump's `@.json`, the archive ID and the marker rows.
 2. Cycle 2: planned A→B; marker M4 on b, with the writer, and **no flush**; reclone a, which wipes a's unarchived binlogs; planned B→A; era A'' (marker, fence T5, witness, flush a). A verification of β1 at T5 refuses `PITRArchiveGap`; the message names b's `server_uuid` and "unarchived tail", and prints exactly b's unarchived tail as a GTID set (what b executed between a's `@@gtid_executed` before the failover and the end of the writer window).
 3. Take backup β2 after the failback, then marker, fence T6, witness, flush a. A verification of β2 at T6 is Verified exactly (a target before β2's dump end would refuse `PITRBackupAfterTarget`, so the covered check uses a new target).
 
@@ -1578,9 +1586,9 @@ Every era's marker, fence and witness run with the §37 background writer on the
 
 **Setup**: encrypted RustFS profile A (`rustfs-e2e`) on prefix P1 = `e2e/69-…/<run-stamp>-p1`. The passphrase bytes are stashed when the run creates the Secret; every archive object is decrypted with stashed bytes, never with the live Secret.
 
-1. `PITRArchiveBindingReady=True`; P1's entry is `Bound/Bound` with `encryption.keySecretName` (not the user Secret). Each primary-candidate Deployment mounts that snapshot with `optional: true`, never the user Secret, renders `BLOODRAVEN_PITR_KEY_REVISION` = the snapshot and no `BLOODRAVEN_PITR_PROFILE_NAME`, and its `bloodraven.shipstream.io/pitr-render` annotation names the snapshot; `status.pitr.archive.keyRevision` equals it. The snapshot is `immutable`, has no `ownerReferences`, carries the group-UID and binding-id labels and a `bloodraven.shipstream.io/pitr-accepted` annotation with a `keyCheck`, and holds the original bytes.
-2. Marker table and baseline; backup β1. Its `status.artifactStorage.passphraseSecret` is its own immutable, ownerless `mysqlbackup-…-dump-key-…` snapshot (label `mysqlbackup-uid`) holding the original bytes. Marker M1, flush.
-3. Admission, as `dryRun=All` patches: removing A's encryption, renaming its `passphraseSecret` to a same-bytes copy, and changing its `key` are each refused with the root rule's message.
+1. `PITRArchiveBindingReady=True`; P1's entry is `Bound/Bound` with `encryption.keySecretName` (not the user Secret). Each PrimaryCandidate site Deployment mounts that snapshot with `optional: true`, never the user Secret, renders `BLOODRAVEN_PITR_KEY_REVISION` = the snapshot and no `BLOODRAVEN_PITR_PROFILE_NAME`, and its `bloodraven.shipstream.io/pitr-render` annotation names the snapshot; `status.pitr.archive.keyRevision` equals it. The snapshot is `immutable`, has no `ownerReferences`, carries the group-UID and binding-id labels and a `bloodraven.shipstream.io/pitr-accepted` annotation with a `keyCheck`, and holds the original bytes.
+2. Marker table and baseline; backup β1. Its `status.artifactStorage.passphraseSecretKeyRef` is its own immutable, ownerless `mysqlbackup-…-dump-key-…` snapshot (label `mysqlbackup-uid`) holding the original bytes. Marker M1, flush.
+3. Admission, as `dryRun=All` patches: removing A's encryption, renaming its `passphraseSecretKeyRef` to a same-bytes copy, and changing its `key` are each refused with the root rule's message.
 4. Rotate the user Secret in place: `PITRArchiveBindingReady=False/KeyChangeRefused` and Warning `PITRArchiveKeyChangeRefused`; P1's entry is unchanged and no Deployment `spec-hash` or pod changes for two operator polls (60 s).
 5. Restart the replica's pod, then (once it replicates) the primary's; the group may fail over, and the step waits until it is Ready, the failover target replicates and the active archiver archives P1. Both pods started after step 4. Marker M2 and a flushing fence on the current primary: the sealed file is in that site's manifest, its archiver reports `Verified` with the snapshot as `keyRevision`, and the archived object decrypts with the original bytes. Then the witness M2b, which is after the fence's T, flushed and archived: the fence's flush archives only the history before T, and a target is covered only once a transaction at or after it is archived. Every expectation at M2's fence stays the fenced history (baseline, M1, M2).
 6. A verification of β1 at M2's fence is Verified exactly: the old dump decrypts with its own snapshot after the Secret edit.
@@ -1590,7 +1598,7 @@ Every era's marker, fence and witness run with the §37 background writer on the
 10. **Read binding with the wrong key (C1)**: profile D reads P1 through another spelling of the RustFS endpoint (`http://rustfs.bloodraven-playground.svc:9000`, a distinct destination over the same objects) with a Secret holding wrong bytes. A verification of β1 with `archiveProfileName: D` starts a `pitr-archive-check` Job (a Reader check, carrying annotation `bloodraven.shipstream.io/pitr-key-secret-uid`), D's entry ends `Refused/KeyMismatch` (Warning `PITRArchiveBindingRefused`; the message says the refusal was "reported by the reader check of ..."), and the verification waits, reporting `PITRArchiveBindingNotReady`. Putting the right bytes in D's Secret runs a new check, D's entry is `Bound` and the verification is Verified exactly.
 11. **Status wipe and operator restart**: scale the operator to 0, JSON-patch away `/status/pitrArchiveBindings`, scale it back. P1's and D's entries come back `Bound` with the same snapshots, with the operator line `pitr archive binding changed` `cause=recovery` for each, no `pitr-archive-check` Job and no recorded check (watched for 30 s after the rebuild), and no Deployment or pod change.
 12. **Procedure**: profile C on P2 with a new passphrase; switch to it. P2's entry passes through `Pending/Establishing` (a check Job found the prefix empty) and ends `Bound` on the archive the sidecars report, after one roll; P1's entry is retained. The condition carries the baseline note until a full backup β2 of C, whose stamp's `pitrArchiveID` is P2's and whose dump key is its own snapshot of C's bytes; then the note is gone. A's user Secret is deleted.
-13. **Release**: a release of P1 with a wrong `confirm` is rejected (Warning `PITRArchiveBindingReleaseRejected`, annotation removed, entry unchanged). A verification of β1 with `archiveProfileName: A` starts; once P1's snapshot carries its hold (`hold.verification.shipstream.io/<uid>`), a release with the right `confirm` is refused (Warning `PITRArchiveBindingReleaseRefused`, entry unchanged; a site Deployment that renders P1's destination, references its snapshot in a pod template or carries an undecodable `pitr-render` annotation, or a non-terminal pod referencing the snapshot, would refuse it too). The verification is Verified exactly with A's user Secret gone (the retained snapshot). Then the kept annotation completes: Normal `PITRArchiveBindingReleased`, P1's entry, annotation and snapshots are gone. D's binding is released too.
+13. **Release**: a release of P1 with a wrong `confirm`, and one with this group's name but a stale `uid` (WE-Q9), are rejected (Warning `PITRArchiveBindingReleaseRejected`, annotation removed, entry unchanged). A verification of β1 with `archiveProfileName: A` starts; once P1's snapshot carries its hold (`verification-hold.bloodraven.shipstream.io/<uid>`), a release with the right `confirm` and `uid` is refused (Warning `PITRArchiveBindingReleaseRefused`, entry unchanged; a site Deployment that renders P1's destination, references its snapshot in a pod template or carries an undecodable `pitr-render` annotation, or a non-terminal pod referencing the snapshot, would refuse it too). The verification is Verified exactly with A's user Secret gone (the retained snapshot). Then the kept annotation completes: Normal `PITRArchiveBindingReleased`, P1's entry, annotation and snapshots are gone. D's binding is released too.
 
 **Timing**: 60-minute timeout (unmeasured; the steps add up to about 35-40 minutes). **Cleanup** (32-minute budget plus 4 minutes): removes a leftover release annotation, then as §37 (no restored group; the cleanup releases P2's binding and any binding left under P1), and deletes the extra passphrase Secrets the run created (UID precondition).
 
@@ -1603,7 +1611,7 @@ Every era's marker, fence and witness run with the §37 background writer on the
 
 **Injection and verification**: plaintext RustFS archive, fences as in §37.
 
-1. Take β1. Wait out any anti-flap cooldown. Write era P on a (marker P with the background writer) and wait until b has applied it: P is history b keeps, so a's archive holds something beyond β1 that survives the loss (without it, latest with `excludeGtids` = L has nothing to replay and refuses `PITRNoArchivedReplay`). Delay b's applier with `SOURCE_DELAY=300` (the operator auto-recovers `STOP REPLICA SQL_THREAD`, see §14, and the failover's 30 s relay-log drain restarts a stopped applier, so a delay is what keeps L out of b). The delay covers the writer window, the flushing fence's upload wait (up to 3 minutes), detection and the bounded 30 s drain. Write the lost markers L on a with the §37 background writer (its commits are part of L), stop the writer, archive L with a flushing fence, then scale a to 0. b is promoted without L; the scenario computes the lost set as a's archived set minus b's `@@gtid_executed` and fails if it is empty. Every `read-only` reader site replicates straight from a with no delay, so it applied L: the operator refuses to repoint it (`SourceConvergenceBlocked`) and the replica GTID audit reports it `RecoveryBlocked` with L. The scenario reclones each reader that holds any of L from b, confirmed by the divergent GTID's prefix. Left blocked, the reader would never be rolled to the new prefix in step 5 (the ordered update keeps an unsafe follower's drift), so the new archive would never be Verified; and once a reissues L's GTIDs the reader could look contained in a's history and be restarted on a history it does not share.
+1. Take β1. Wait out any anti-flap cooldown. Write era P on a (marker P with the background writer) and wait until b has applied it: P is history b keeps, so a's archive holds something beyond β1 that survives the loss (without it, latest with `excludeGtids` = L has nothing to replay and refuses `PITRNoArchivedReplay`). Delay b's applier with `SOURCE_DELAY=300` (the operator auto-recovers `STOP REPLICA SQL_THREAD`, see §14, and the failover's 30 s relay-log drain restarts a stopped applier, so a delay is what keeps L out of b). The delay covers the writer window, the flushing fence's upload wait (up to 3 minutes), detection and the bounded 30 s drain. Write the lost markers L on a with the §37 background writer (its commits are part of L), stop the writer, archive L with a flushing fence, then scale a to 0. b is promoted without L; the scenario computes the lost set as a's archived set minus b's `@@gtid_executed` and fails if it is empty. Every `ReadOnly` reader site replicates straight from a with no delay, so it applied L: the operator refuses to repoint it (`SourceConvergenceBlocked`) and the replica GTID audit reports it `RecoveryBlocked` with L. The scenario reclones each reader that holds any of L from b, confirmed by the divergent GTID's prefix. Left blocked, the reader would never be rolled to the new prefix in step 5 (the ordered update keeps an unsafe follower's drift), so the new archive would never be Verified; and once a reissues L's GTIDs the reader could look contained in a's history and be restarted on a history it does not share.
 2. A latest verification refuses `PITRArchiveDivergentHistory`, and the message prints exactly the lost set (compared as GTID sets, not just a's UUID). With `excludeGtids` = the lost set it is Verified (`ArchiveHead`, a's archived set minus the lost set, which replays era P). `excludedDivergentTransactionCount` is not asserted here: it counts the timestamp-mode D window, which latest mode does not compute.
 3. b writes S (fence TS, with the writer) and flushes. A timestamp verification of β1 at TS refuses `PITRArchiveDivergentHistory` printing exactly the lost set; with `excludeGtids` it is Verified exactly and reports `excludedDivergentTransactionCount` = |lost set|. Take β2; b writes S2 (fence, with the writer) and flushes; a verification of β2 **without exclusions** is Verified exactly.
 4. Scale a back up, wait until it is `RecoveryBlocked` with a recorded `divergentGtid`, and reclone it with that GTID's prefix as the confirmation. The failback waits until a is replicating and no longer `RecoveryBlocked`: only the replica GTID audit's next clean proof clears the block, and a planned failover refuses a blocked target (`DivergentTarget`). Wait until a's sidecar reports `divergentRows`/`quarantinedRows` > 0 (a's own manifest still holds the archived lost row), then two operator archiver-poll intervals (the operator's reissue check reads its cached poll, and it publishes no suspect-row count), requiring that `status.pitr.message` reports no failed poll of a and that a still reports the rows. A planned failback to a emits Warning `PITRArchiveReissueRiskDetected`. The failback waits for a to be the primary on this run's prefix and archive ID with a promotion record after the request (read on a's server clock); it tolerates the archiver's `lastError` only when it is the divergence audit's error (`… divergent transactions=…; preserve objects and use pitr-quarantine …`) and those divergent or quarantined rows exist, because the audit keeps reporting them. a writes R and flushes, reissuing the lost GTIDs (FU-4: a reclone keeps `server_uuid`); a verification refuses `PITRArchiveHistoryReset`.

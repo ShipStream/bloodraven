@@ -40,7 +40,6 @@ func TestEncryptionChaos_FailedSealedSiteKeepsSecretProjection(t *testing.T) {
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
@@ -249,10 +248,8 @@ func TestEncryptionChaos_PartialAdoptionKeepsBothSitesRestartable(t *testing.T) 
 	}
 	live.Spec.TLS = &v1alpha1.TLSSpec{
 		SecretName: "mysql-tls",
-		IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
 	}
-	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
-	live.Annotations = map[string]string{AdoptEncryptionAnnotation: "confirm"}
+	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1alpha1.EncryptionExistingDataLeavePlaintext}
 	if err := c.Update(ctx, &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}
@@ -332,11 +329,11 @@ func assertSiteRestartable(
 // escrow-outage timeline the plan asks for: the site must stay unsealed
 // (never sealed against nothing), the sidecar's own reason must reach
 // .status so the stall is diagnosable without reading pod logs, and once
-// escrowTimeoutSeconds elapses the site must go Failed so an alert fires
+// escrowTimeout elapses the site must go Failed so an alert fires
 // instead of it sitting quietly in Unsealed forever.
 func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeoutSeconds: 60}
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
 	ctx := context.Background()
 
 	stalled := liveKeyring(keyringDigest([]byte("live-but-unescrowed")), false)
@@ -366,7 +363,7 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &stored); err != nil {
 		t.Fatal(err)
 	}
-	siteStatus(&stored, "dc1").UnsealedSince = &old
+	siteStatus(&stored, "dc1").UnsealTime = &old
 	if err := c.Status().Update(ctx, &stored); err != nil {
 		t.Fatal(err)
 	}
@@ -376,12 +373,12 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 	}
 	s = siteStatus(fg, "dc1")
 	if s.Phase != v1alpha1.KeyringPhaseFailed {
-		t.Fatalf("phase = %q, want Failed once escrowTimeoutSeconds has elapsed", s.Phase)
+		t.Fatalf("phase = %q, want Failed once escrowTimeout has elapsed", s.Phase)
 	}
 	if fg.SiteKeyringSealed("dc1") {
 		t.Fatal("a site that failed to escrow must not be sealed by the failure itself")
 	}
-	cond := findCondition(fg.Status.Conditions, conditionEncryptionReady)
+	cond := findCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Errorf("EncryptionAtRestReady = %+v, want False so the alert fires", cond)
 	}
@@ -736,7 +733,6 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 	rotated := []byte("rotated-keyring")
 	digest := keyringDigest(rotated)
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v2", KeyringVersion: 2, KeyringDigest: digest},
@@ -840,7 +836,7 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 		{
 			name: "an ordered update is running",
 			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.UpdatePhase = string(UpdatePhaseWaitReplica)
+				fg.Status.UpdatePhase = v1alpha1.UpdatePhaseWaitReplica
 			},
 			wantMsg: "ordered update",
 		},
@@ -860,7 +856,7 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 			ctx := context.Background()
 			fg := sealedGroupWithActive("dc1")
 			tc.mutate(fg)
-			fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
 			r, c := encReconciler(t, scriptedKeyring(nil), fg)
 			store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
 			for _, s := range []string{"dc1", "dc2"} {
@@ -898,7 +894,6 @@ func TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes(t *testing.T) {
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
 	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sealed: true,
 		Sites: []v1alpha1.SiteEncryptionStatus{
 			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
@@ -928,11 +923,12 @@ func TestEncryptionChaos_DisableRetainsEscrowAndReEnableResumes(t *testing.T) {
 		}
 	}
 
-	// Re-enable. The group is serving, so adoption needs the annotation;
-	// with it, the lifecycle restarts from the retained versions.
+	// Re-enable. The group is serving, so adoption needs existingData:
+	// LeavePlaintext; with it, the lifecycle restarts from the retained
+	// versions.
 	fg.Spec.EncryptionAtRest.Enabled = true
+	fg.Spec.EncryptionAtRest.ExistingData = v1alpha1.EncryptionExistingDataLeavePlaintext
 	fg.Status.ActiveSite = "dc1"
-	fg.Annotations = map[string]string{AdoptEncryptionAnnotation: "confirm"}
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}

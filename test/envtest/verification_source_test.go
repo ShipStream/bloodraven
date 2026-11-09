@@ -31,11 +31,11 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 	if err := k8sClient.Create(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, Location: "prod_backups/a", StorageType: v1alpha1.BackupStorageS3, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
+	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
 	if err := k8sClient.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3", TTLSecondsAfterFinished: 3600}}
+	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3", TTLSecondsAfterFinished: new(int32(3600))}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +47,14 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 		}
 		return v.Status.Phase == v1alpha1.VerificationPhaseProvisioning
 	})
-	want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), Location: a.Status.Location, StorageType: a.Status.StorageType}
+	want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), ArtifactStorage: a.Status.ArtifactStorage.DeepCopy()}
 	b := newSucceededBackup(ns, fg.Name, "nightly-s3")
 	b.Name = "backup-b"
 	if err := k8sClient.Create(ctx, b); err != nil {
 		t.Fatal(err)
 	}
-	b.Status = a.Status
-	b.Status.Location = "prod_backups/b"
+	b.Status = *a.Status.DeepCopy()
+	b.Status.ArtifactStorage.Location = "prod_backups/b"
 	b.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 	if err := k8sClient.Status().Update(ctx, b); err != nil {
 		t.Fatal(err)
@@ -71,11 +71,11 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 		t.Fatal(err)
 	}
 	var snapshot v1alpha1.VerificationBackupRef
-	if err := json.Unmarshal([]byte(job.Spec.Template.Annotations["shipstream.io/verification-backup"]), &snapshot); err != nil || !reflect.DeepEqual(&snapshot, want) {
+	if err := json.Unmarshal([]byte(job.Spec.Template.Annotations["bloodraven.shipstream.io/verification-backup"]), &snapshot); err != nil || !reflect.DeepEqual(&snapshot, want) {
 		t.Fatalf("Job snapshot does not match persisted pin: err=%v snapshot=%+v want=%+v", err, snapshot, want)
 	}
 	modified := job.DeepCopy()
-	modified.Spec.Template.Annotations["shipstream.io/verification-backup"] = "{}"
+	modified.Spec.Template.Annotations["bloodraven.shipstream.io/verification-backup"] = "{}"
 	if err := k8sClient.Update(ctx, modified); err == nil {
 		t.Fatal("API server allowed the execution source snapshot to change")
 	}
@@ -94,7 +94,7 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	v.Spec.BackupRef = &corev1.LocalObjectReference{Name: b.Name}
+	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: b.Name}
 	if err := k8sClient.Update(ctx, v); err != nil {
 		t.Fatal(err)
 	}
@@ -137,11 +137,11 @@ func TestEnvtest_VerificationRejectsRecreatedSourceBeforeLaunch(t *testing.T) {
 	if err := k8sClient.Create(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, Location: "prod_backups/a", StorageType: v1alpha1.BackupStorageS3, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
+	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
 	if err := k8sClient.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"}}
+	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
 	}

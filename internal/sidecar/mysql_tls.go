@@ -123,9 +123,7 @@ func loadMySQLRootCAs(caFile string) (*x509.CertPool, error) {
 }
 
 // withMySQLTLSConfig stamps a registered TLS config name onto a DSN. A
-// DSN that already names one is returned unchanged, so an operator who
-// pins their own tls= parameter in the legacy spec.secretName DSN keeps
-// control.
+// DSN that already names one is returned unchanged.
 func withMySQLTLSConfig(dsn, name string) (string, error) {
 	cfg, err := internalmysql.ParseDSN(dsn)
 	if err != nil {

@@ -32,8 +32,8 @@ const (
 //
 // The assertion is the *invariant*, not the exact phase sequence:
 // status.updatePhase must visit at least one non-empty value (proves
-// the controller engaged) and must return to "" (proves it completed).
-// We do not pin the path to "Complete" through the phases because the
+// the controller engaged) and must return to absent (proves it
+// completed). We do not pin the path through the phases because the
 // operator's tickInterval can race past phases on a fast cluster.
 //
 // Issue #46 safety net (April 2026, see chaos-scenarios.md §12) is
@@ -109,8 +109,7 @@ func s12ObserveUpdateStarted() runner.Step {
 // s12ObserveUpdateComplete waits for the cluster to settle: updatePhase
 // returns to empty AND the cluster is in {1 writable, N-1 read-only}. The
 // updater clears the phase on its own when the roll lands successfully;
-// if it gets stuck in "Complete" or any non-empty value past 5 minutes
-// we want to know.
+// if it gets stuck in any phase past 5 minutes we want to know.
 func s12ObserveUpdateComplete() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
@@ -124,9 +123,9 @@ func s12ObserveUpdateComplete() runner.Step {
 					var writable, readOnly, other []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case "writable":
+						case v1alpha1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case "read-only":
+						case v1alpha1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
@@ -204,7 +203,7 @@ func s12VerifyClusterHealthy() runner.Step {
 			if err != nil {
 				return err
 			}
-			c := findCondition(mfg.Status.Conditions, "Ready")
+			c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady)
 			if c == nil || string(c.Status) != "True" {
 				status := "<missing>"
 				if c != nil {
@@ -213,7 +212,7 @@ func s12VerifyClusterHealthy() runner.Step {
 				return fmt.Errorf("Ready condition status=%q (want True)", status)
 			}
 			for _, s := range mfg.Status.Sites {
-				if s.RecoveryState == "RecoveryBlocked" {
+				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					return fmt.Errorf("site %s in RecoveryBlocked after roll", s.Name)
 				}
 			}

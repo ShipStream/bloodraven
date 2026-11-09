@@ -10,14 +10,6 @@ import (
 )
 
 const (
-	// ReasonTopologyManagerStartFailed is the Warning Event reason for a
-	// group left without a running topology manager because its start
-	// keeps failing.
-	ReasonTopologyManagerStartFailed = "TopologyManagerStartFailed"
-	// ReasonTopologyManagerStarted is the Normal Event reason for a start
-	// that succeeds after a TopologyManagerStartFailed Warning.
-	ReasonTopologyManagerStarted = "TopologyManagerStarted"
-
 	// startFailureWarningFloor is the minimum time between two
 	// TopologyManagerStartFailed Warnings for a group, whatever the error.
 	// client-go throttles Events per involved object and type, not per
@@ -100,7 +92,7 @@ func (r *TopologyManagerRunner) noteStartFailure(fg *v1alpha1.MysqlFailoverGroup
 	r.mu.Unlock()
 
 	if emit && r.recorder != nil {
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonTopologyManagerStartFailed,
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventTopologyManagerStartFailed,
 			"no topology manager is running for this group (no polling, status updates or failover); start failed: %s; retrying every 30s", msg)
 	}
 }
@@ -116,7 +108,7 @@ func (r *TopologyManagerRunner) noteStartSuccess(fg *v1alpha1.MysqlFailoverGroup
 	if st == nil || !st.warned || st.uid != fg.UID || r.recorder == nil {
 		return
 	}
-	r.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonTopologyManagerStarted,
+	r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventTopologyManagerStarted,
 		"topology manager started after %d failed attempts", st.count)
 }
 

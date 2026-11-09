@@ -13,13 +13,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 func waitFixture(marker string, phase v1alpha1.PlannedFailoverPhase) *v1alpha1.MysqlFailoverGroup {
 	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "lion"}}
 	if marker != "" {
-		fg.Annotations = map[string]string{brcontroller.PlannedFailoverTerminalAnnotation: marker}
+		fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: marker}
 	}
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 4, Phase: phase, TargetSite: "pdx", SourceSite: "iad",
 		StartTime: metav1.Now()}

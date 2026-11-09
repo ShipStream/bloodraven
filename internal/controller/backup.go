@@ -14,21 +14,6 @@ import (
 	"github.com/shipstream/bloodraven/internal/util"
 )
 
-// Bloodraven-specific labels added to backup / restore / schedule
-// resources. The labelFailoverGroup constant is declared in reconciler.go.
-const (
-	labelMysqlBackup     = "shipstream.io/mysqlbackup"
-	labelBackupProfile   = "shipstream.io/backup-profile"
-	labelBackupSchedule  = "shipstream.io/backup-schedule"
-	labelResourceKind    = "shipstream.io/resource"
-	labelBackupEncrypted = "shipstream.io/backup-encrypted"
-)
-
-// Finalizers used by backup-related CRs.
-const (
-	mysqlBackupFinalizer = "shipstream.io/mysqlbackup"
-)
-
 //go:embed backup_script.py
 var dumpScript string
 
@@ -189,8 +174,8 @@ func mysqlImageFor(fg *v1alpha1.MysqlFailoverGroup) string {
 //
 // The three labels are:
 //
-//	shipstream.io/failover-group   -> spec.failoverGroupRef.name
-//	shipstream.io/backup-profile   -> spec.profileName
+//	bloodraven.shipstream.io/failover-group   -> spec.failoverGroupRef.name
+//	bloodraven.shipstream.io/backup-profile   -> spec.profileName
 //	app.kubernetes.io/managed-by   -> bloodraven
 //
 // Stamping them for every MysqlBackup (including ad-hoc CRs created by
@@ -199,9 +184,9 @@ func mysqlImageFor(fg *v1alpha1.MysqlFailoverGroup) string {
 // filter the whole namespace.
 func ensureBackupLabels(backup *v1alpha1.MysqlBackup) bool {
 	desired := map[string]string{
-		labelFailoverGroup: backup.Spec.FailoverGroupRef.Name,
-		labelBackupProfile: backup.Spec.ProfileName,
-		labelManagedBy:     managerName,
+		v1alpha1.FailoverGroupLabel: backup.Spec.FailoverGroupRef.Name,
+		v1alpha1.BackupProfileLabel: backup.Spec.ProfileName,
+		labelManagedBy:              managerName,
 	}
 	changed := false
 	if backup.Labels == nil {

@@ -3,6 +3,8 @@ package controller
 import (
 	"errors"
 	"fmt"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // handoffBlock says why a standby must not receive an ordered-update
@@ -23,7 +25,7 @@ func (tm *TopologyManager) handoffBlockLocked(site string) handoffBlock {
 		rotation:       tm.keyringRotationBlockedLocked(site),
 		reclonePending: tm.restoreReclonePendingLocked(site),
 	}
-	if rec := tm.recovery[site]; rec != nil && rec.state == recoveryStateBlocked {
+	if rec := tm.recovery[site]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
 		b.divergence = *rec
 	}
 	return b
@@ -35,7 +37,7 @@ func (b handoffBlock) err(site string) error {
 		return fmt.Errorf("%s mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted", site)
 	case b.reclonePending:
 		return fmt.Errorf("%s pending post-restore reclone; wait for status.restoreReclones to drain", site)
-	case b.divergence.state == recoveryStateBlocked:
+	case b.divergence.state == v1alpha1.RecoveryStateBlocked:
 		return errors.New(divergentStandbyMessage(UpdateTarget{Name: site, DivergentTransactions: b.divergence.divergentCount}))
 	}
 	return nil

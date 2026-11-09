@@ -22,8 +22,8 @@ import (
 func fgInitFromMysqlBackup() *v1alpha1.MysqlFailoverGroup {
 	fg := fgWithBackup()
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
-			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		Source: v1alpha1.RestoreSource{
+			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	return fg
@@ -58,19 +58,19 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "seed", Namespace: "ns",
 			Labels: map[string]string{
-				labelFailoverGroup: "lion",
-				labelBackupProfile: "nightly-s3",
+				v1alpha1.FailoverGroupLabel: "lion",
+				v1alpha1.BackupProfileLabel: "nightly-s3",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 		Status: v1alpha1.MysqlBackupStatus{
 			Phase:            v1alpha1.BackupPhaseSucceeded,
 			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
 			CompletionTime:   &now,
-			Location:         "lion/seed/",
+			ArtifactStorage:  testArtifactStorage(v1alpha1.BackupStorageS3, "lion/seed/"),
 			FailoverGroupUID: "lion-uid",
 		},
 	}
@@ -83,7 +83,7 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 func seedPublished(fg *v1alpha1.MysqlFailoverGroup) {
 	seed := fg.Spec.DefaultSeedSite().Name
 	fg.Status.ActiveSite = seed
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: seed, State: "writable"}}
+	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: seed, State: v1alpha1.SiteStateWritable}}
 }
 
 // primaryReadyDeployment returns a Deployment matching the first site with
@@ -115,7 +115,7 @@ func TestReconcileRestoreJob_WaitsForPrimaryReady(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
 	seed := succeededSeedBackup()
 	// No deployment object -> not found path.
-	r, _ := newReconciler(fg, seed, dsnSecret())
+	r, _ := newReconciler(fg, seed, operatorCredsSecret())
 
 	d, err := r.reconcileRestoreJob(context.Background(), fg)
 	if err != nil {
@@ -132,7 +132,7 @@ func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 		t.Fatalf("reconcileRestoreJob: %v", err)
@@ -171,11 +171,11 @@ func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 func TestBuildRestoreJob_S3Source_NormalizesTrailingSlash(t *testing.T) {
 	fg := fgWithBackup()
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
+		Source: v1alpha1.RestoreSource{
 			S3: &v1alpha1.S3Storage{
-				Bucket:            "my-bucket",
-				Prefix:            "dumps/preprod/",
-				CredentialsSecret: "s3-creds",
+				Bucket:                "my-bucket",
+				Prefix:                "dumps/preprod/",
+				CredentialsSecretName: "s3-creds",
 			},
 		},
 	}
@@ -200,8 +200,8 @@ func TestBuildRestoreJob_MysqlBackupRef_MissingS3Profile_Errors(t *testing.T) {
 	// Drop the nightly-s3 profile so the lookup fails.
 	fg.Spec.Backup.Profiles = fg.Spec.Backup.Profiles[1:]
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
-			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		Source: v1alpha1.RestoreSource{
+			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	// Seed backup references the now-missing profile.
@@ -220,14 +220,14 @@ func TestBuildRestoreJob_MysqlBackupRef_MissingS3Profile_Errors(t *testing.T) {
 func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T) {
 	fg := fgWithBackup()
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
-			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		Source: v1alpha1.RestoreSource{
+			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	seed := succeededSeedBackup()
 	seed.Spec.ProfileName = "daily-local"
-	seed.Status.StorageType = v1alpha1.BackupStoragePVC
-	seed.Status.Location = backupPVCMountPath + "/seed/"
+	setTestArtifactType(seed, v1alpha1.BackupStoragePVC)
+	setTestArtifactLocation(seed, backupPVCMountPath+"/seed/")
 	r, _ := newReconciler(fg, seed)
 
 	job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
@@ -252,7 +252,7 @@ func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T)
 		}
 	}
 	if restoreSrcVolume == nil || restoreSrcVolume.PersistentVolumeClaim == nil {
-		t.Fatal("expected restore-src PVC volume for mysqlBackupRef PVC source")
+		t.Fatal("expected restore-src PVC volume for backupRef PVC source")
 	}
 	if got, want := restoreSrcVolume.PersistentVolumeClaim.ClaimName, ownedBackupPVCName("lion", "daily-local"); got != want {
 		t.Errorf("restore-src claim = %q, want %q", got, want)
@@ -269,7 +269,7 @@ func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T)
 		}
 	}
 	if restoreSrcMount == nil {
-		t.Fatal("expected restore-src volume mount for mysqlBackupRef PVC source")
+		t.Fatal("expected restore-src volume mount for backupRef PVC source")
 		return
 	}
 	if restoreSrcMount.MountPath != backupPVCMountPath {
@@ -283,7 +283,7 @@ func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T)
 func TestBuildRestoreJob_PVCSource_EmptyClaimName_Errors(t *testing.T) {
 	fg := fgWithBackup()
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{
+		Source: v1alpha1.RestoreSource{
 			PVC: &v1alpha1.InitFromBackupPVCSource{SubPath: "dumps"},
 		},
 	}
@@ -312,21 +312,6 @@ func TestEnsureTrailingSlash(t *testing.T) {
 	}
 }
 
-func TestIsS3Location(t *testing.T) {
-	cases := map[string]bool{
-		"":                 false,
-		"/backups/foo/":    false,
-		"pvc://foo":        false,
-		"s3://bucket/key/": true,
-		"lion/seed/":       true,
-	}
-	for in, want := range cases {
-		if got := isS3Location(in); got != want {
-			t.Errorf("isS3Location(%q) = %v, want %v", in, got, want)
-		}
-	}
-}
-
 // ------------------------------------------------------------------------
 
 func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
@@ -335,7 +320,7 @@ func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
 
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 		t.Fatalf("first pass: %v", err)
@@ -382,7 +367,7 @@ func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
 	seed := succeededSeedBackup()
 	deploy := primaryReadyDeployment("lion", fg.Spec.Sites[0].Name)
-	r, c := newReconciler(fg, seed, deploy, dsnSecret())
+	r, c := newReconciler(fg, seed, deploy, operatorCredsSecret())
 	jobKey := types.NamespacedName{Name: restoreJobName("lion", "iad"), Namespace: "ns"}
 
 	steps := []struct {
@@ -393,7 +378,7 @@ func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
 		{"not seeded", v1alpha1.MysqlFailoverGroupStatus{}, `waiting for the operator to seed site "iad"`},
 		{"seeded, still observed read-only", v1alpha1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			Sites:      []v1alpha1.SiteStatus{{Name: "iad", State: "read-only"}, {Name: "pdx", State: "read-only"}},
+			Sites:      []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly}},
 		}, `waiting for active site "iad" to be observed writable`},
 	}
 	for _, step := range steps {
@@ -434,7 +419,7 @@ func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
 	ctx := context.Background()
 	fg := fgInitFromMysqlBackup()
 	seedPublished(fg)
-	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), operatorCredsSecret())
 	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +427,7 @@ func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
 		t.Fatalf("status.restore = %+v, want Running", rs)
 	}
 
-	for _, st := range []string{"read-only", "unreachable"} {
+	for _, st := range []v1alpha1.SiteState{v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateUnreachable} {
 		fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: st}}
 		if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 			t.Fatal(err)
@@ -481,31 +466,31 @@ func TestBuildRestoreJob_DisablesLoadProgressFile(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 
-	decryption := &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "restore-pass", Key: "passphrase"}}
+	decryption := &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "restore-pass", Key: "passphrase"}}
 	encryptProfile := func(fg *v1alpha1.MysqlFailoverGroup, name string) {
 		findProfile(fg, name).Encryption = &v1alpha1.BackupEncryptionSpec{
-			Algorithm:        "AES-256-GCM",
-			PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "backup-passphrase", Key: "passphrase"},
+			Algorithm:              "AES-256-GCM",
+			PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "passphrase"},
 		}
 	}
-	refSrc := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}
+	refSrc := v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}
 
 	sources := []struct {
 		name       string
-		src        v1alpha1.InitFromBackupSource
+		src        v1alpha1.RestoreSource
 		decryption *v1alpha1.BackupDecryptionSpec
 		setup      func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup
 		roMount    string // source mount the main container reads; "" for S3
 	}{
-		{name: "direct s3", src: v1alpha1.InitFromBackupSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "dumps/x", CredentialsSecret: "s3-creds"}}},
-		{name: "direct pvc", src: v1alpha1.InitFromBackupSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, roMount: "/restore"},
-		{name: "direct pvc encrypted", src: v1alpha1.InitFromBackupSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, decryption: decryption, roMount: "/restore-decrypted"},
+		{name: "direct s3", src: v1alpha1.RestoreSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "dumps/x", CredentialsSecretName: "s3-creds"}}},
+		{name: "direct pvc", src: v1alpha1.RestoreSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, roMount: "/restore"},
+		{name: "direct pvc encrypted", src: v1alpha1.RestoreSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, decryption: decryption, roMount: "/restore-decrypted"},
 		{name: "ref s3", src: refSrc, setup: func(*v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup { return succeededSeedBackup() }},
 		{name: "ref pvc", src: refSrc, roMount: backupPVCMountPath, setup: func(*v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
 			seed := succeededSeedBackup()
 			seed.Spec.ProfileName = "daily-local"
-			seed.Status.StorageType = v1alpha1.BackupStoragePVC
-			seed.Status.Location = backupPVCMountPath + "/seed/"
+			setTestArtifactType(seed, v1alpha1.BackupStoragePVC)
+			setTestArtifactLocation(seed, backupPVCMountPath+"/seed/")
 			return seed
 		}},
 		{name: "ref s3 encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
@@ -519,17 +504,17 @@ func TestBuildRestoreJob_DisablesLoadProgressFile(t *testing.T) {
 	}
 	callers := []struct {
 		name  string
-		build func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error)
+		build func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error)
 	}{
-		{"bootstrap", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
+		{"bootstrap", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
 			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, Decryption: dec}
 			return r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
 		}},
-		{"in-place full-instance", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
+		{"in-place full-instance", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
 			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec}
 			return r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", true, "")
 		}},
-		{"in-place per-schema", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
+		{"in-place per-schema", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
 			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
 				Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec,
 				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders"}},
@@ -613,7 +598,7 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 	f, tr := false, true
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
+	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
 
 	for _, tc := range []struct {
 		name        string
@@ -692,7 +677,7 @@ func TestSetTerminationMessageLimit(t *testing.T) {
 func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: "source-archive"}
+	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
 
 	newFG := func() *v1alpha1.MysqlFailoverGroup {
 		fg := fgInPlaceRestore("")
@@ -767,18 +752,18 @@ func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) 
 func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	direct := func(src v1alpha1.InitFromBackupSource, decrypt bool) *v1alpha1.MysqlFailoverGroup {
+	direct := func(src v1alpha1.RestoreSource, decrypt bool) *v1alpha1.MysqlFailoverGroup {
 		fg := fgWithBackup()
 		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src}
-		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z", ArchiveProfileName: addSourceArchiveProfile(fg)}
+		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
 		if decrypt {
-			fg.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "pp"}}
+			fg.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pp"}}
 		}
 		return fg
 	}
-	s3 := func(prefix string) v1alpha1.InitFromBackupSource {
-		return v1alpha1.InitFromBackupSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: prefix, CredentialsSecret: "aws"}}
+	s3 := func(prefix string) v1alpha1.RestoreSource {
+		return v1alpha1.RestoreSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: prefix, CredentialsSecretName: "aws"}}
 	}
 
 	for _, decrypt := range []bool{false, true} {
@@ -801,7 +786,7 @@ func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
 		}
 	}
 
-	for name, src := range map[string]v1alpha1.InitFromBackupSource{
+	for name, src := range map[string]v1alpha1.RestoreSource{
 		"S3 without prefix":   s3(""),
 		"S3 prefix of '/'":    s3("/"),
 		"PVC without subPath": {PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dumps"}},
@@ -811,7 +796,7 @@ func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
 			r, _ := newReconciler(fg)
 			_, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
 			if err == nil || !strings.HasPrefix(err.Error(), "PITRBackupIdentityUnknown: ") ||
-				!strings.Contains(err.Error(), "root of its store") || !strings.Contains(err.Error(), "mysqlBackupRef") {
+				!strings.Contains(err.Error(), "root of its store") || !strings.Contains(err.Error(), "backupRef") {
 				t.Fatalf("err = %v, want a token-first PITRBackupIdentityUnknown refusal", err)
 			}
 		})

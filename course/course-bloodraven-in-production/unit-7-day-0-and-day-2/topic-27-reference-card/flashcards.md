@@ -11,13 +11,13 @@
 
 **Front:** The three playground overrides
 
-**Back:** `failoverCooldown` 30s (shipped 5m), `replication.maxLagSeconds` 30 (shipped 300), `dns.ttl` 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.
+**Back:** `failoverCooldown` 30s (shipped 5m), `replication.maxLagSeconds` 30 (shipped 300), `dns.ttlSeconds` 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.
 
 ---
 
 **Front:** The five condition reasons
 
-**Back:** `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`. There is no `Failover` reason — a rule matching one never fires.
+**Back:** `Healthy`, `SiteUnhealthy`, `SplitBrain`, `NoPrimary`, `TotalLoss`. There is no `Failover` reason — a rule matching one never fires.
 
 ---
 
@@ -53,13 +53,13 @@
 
 **Front:** The three roles in one line each
 
-**Back:** `primary-candidate` — the only promotable role, counted everywhere. `dr-only` — never promoted but **counted** in `coreCount` and the tallies. `read-only` — never promoted, invisible to the matrix, never tainted, refused as a backup source, skipped by every replication condition.
+**Back:** `PrimaryCandidate` — the only promotable role, counted everywhere. `DisasterRecovery` — never promoted but **counted** in `coreCount` and the tallies. `ReadOnly` — never promoted, invisible to the matrix, never tainted, refused as a backup source, skipped by every replication condition.
 
 ---
 
 **Front:** The three annotations you apply by hand
 
-**Back:** `planned-failover=<site>[:maxLagWait=…]`, `reclone-site=<site>:<divergentGtid prefix ≥8 chars>` (cold form `<site>:confirm=<group>`), and `rotate-keyring=<site>`. All under `bloodraven.shipstream.io/`, all consumed and cleared.
+**Back:** `planned-failover=<site>[:maxLagWait=…]`, `reclone-site=<site>:confirm=<group>:uid=<uid>:gtidPrefix=<divergentGtid prefix ≥8 chars>` (cold form without `gtidPrefix=`), and `rotate-keyring=<site>`. All under `bloodraven.shipstream.io/`, all consumed and cleared.
 
 ---
 

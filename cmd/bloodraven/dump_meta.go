@@ -41,9 +41,9 @@ import (
 //	BLOODRAVEN_S3_BUCKET, BLOODRAVEN_S3_ENDPOINT_OVERRIDE, AWS_REGION, BLOODRAVEN_AWS_CREDS_DIR   (S3)
 //	BLOODRAVEN_PVC_MOUNT_PATH              (PVC)
 //	BLOODRAVEN_BACKUP_PASSPHRASE_FILE      set iff the dump is encrypted
-//	BLOODRAVEN_DUMP_EXPECTED_BACKUP_UID    mysqlBackupRef: the MysqlBackup's UID
-//	BLOODRAVEN_DUMP_EXPECTED_SOURCE_UID    mysqlBackupRef: status.failoverGroupUID, when set
-//	BLOODRAVEN_DUMP_EXPECTED_GTID_EXECUTED mysqlBackupRef: status.gtidExecuted (⊆ @.json)
+//	BLOODRAVEN_DUMP_EXPECTED_BACKUP_UID    backupRef: the MysqlBackup's UID
+//	BLOODRAVEN_DUMP_EXPECTED_SOURCE_UID    backupRef: status.failoverGroupUID, when set
+//	BLOODRAVEN_DUMP_EXPECTED_GTID_EXECUTED backupRef: status.gtidExecuted (⊆ @.json)
 const dumpMetaJSONName = "dump.json"
 
 func runDumpMeta(args []string) {
@@ -95,7 +95,7 @@ func runDumpMeta(args []string) {
 		"pitrArchiveID", meta.Stamp.PITRArchiveID, "site", meta.Stamp.Site, "dumpEnd", meta.End.String())
 }
 
-// dumpExpectation is what the restore's mysqlBackupRef pins, and whether
+// dumpExpectation is what the restore's backupRef pins, and whether
 // the restore decrypts the dump.
 type dumpExpectation struct {
 	backupUID, sourceUID types.UID

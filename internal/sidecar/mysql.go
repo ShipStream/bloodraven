@@ -429,9 +429,9 @@ func (m *LiveMysql) EncryptionCoverage(ctx context.Context) (*KeyringCoverage, e
 	).Scan(&redo, &undo, &binlog); err != nil {
 		return nil, fmt.Errorf("query encryption variables: %w", err)
 	}
-	out.RedoLogEncrypted = mysqlBool(redo)
-	out.UndoLogEncrypted = mysqlBool(undo)
-	out.BinlogEncrypted = mysqlBool(binlog)
+	out.RedoLogEncrypted = mysqlOptionalBool(redo)
+	out.UndoLogEncrypted = mysqlOptionalBool(undo)
+	out.BinlogEncrypted = mysqlOptionalBool(binlog)
 
 	var sysEnc string
 	err := m.db.QueryRowContext(ctx,
@@ -439,11 +439,11 @@ func (m *LiveMysql) EncryptionCoverage(ctx context.Context) (*KeyringCoverage, e
 	).Scan(&sysEnc)
 	switch {
 	case err == nil:
-		out.SystemTablespaceEncrypted = strings.EqualFold(sysEnc, "Y")
+		out.SystemTablespaceEncrypted = tablespaceEncrypted(sysEnc)
 	case errors.Is(err, sql.ErrNoRows):
 		// No row means the general tablespace isn't present in this
-		// deployment shape; leave it false rather than failing the whole
-		// coverage sample.
+		// deployment shape; leave it unreported rather than failing the
+		// whole coverage sample.
 	default:
 		return nil, fmt.Errorf("query system tablespace encryption: %w", err)
 	}
@@ -462,6 +462,36 @@ func (m *LiveMysql) EncryptionCoverage(ctx context.Context) (*KeyringCoverage, e
 	}
 
 	return out, nil
+}
+
+// mysqlOptionalBool parses a MySQL boolean variable: nil for NULL or a
+// value that is neither on nor off, so an unknown is never reported as
+// false.
+func mysqlOptionalBool(value sql.NullString) *bool {
+	if !value.Valid {
+		return nil
+	}
+	switch s := strings.TrimSpace(value.String); {
+	case s == "1" || strings.EqualFold(s, "on") || strings.EqualFold(s, "true"):
+		return boolPtr(true)
+	case s == "0" || strings.EqualFold(s, "off") || strings.EqualFold(s, "false"):
+		return boolPtr(false)
+	}
+	return nil
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// tablespaceEncrypted parses INFORMATION_SCHEMA.INNODB_TABLESPACES.ENCRYPTION:
+// nil for a value that is neither Y nor N.
+func tablespaceEncrypted(value string) *bool {
+	switch {
+	case strings.EqualFold(value, "Y"):
+		return boolPtr(true)
+	case strings.EqualFold(value, "N"):
+		return boolPtr(false)
+	}
+	return nil
 }
 
 func mysqlBool(value sql.NullString) bool {

@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/metrics/labels"
 )
 
 // pfExpect is one engine-table expectation after the scripted steps.
@@ -94,7 +95,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			setup: func(h *pfEngineHarness) { h.faults.statusFaults = []pfWriteFault{pfWriteDropTimeout} },
 			want: pfExpect{phase: adm, releases: []string{"run-1:notCommitted"},
 				check: func(t *testing.T, h *pfEngineHarness) {
-					if h.fg().Annotations[PlannedFailoverStatusFenceAnnotation] == "" {
+					if h.fg().Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] == "" {
 						t.Error("settlement did not fence the unmoved base version")
 					}
 				}}},
@@ -105,7 +106,7 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			},
 			want: pfExpect{phase: adm, held: "run-1",
 				check: func(t *testing.T, h *pfEngineHarness) {
-					if _, ok := parseDeadlineStart(h.fg().Annotations[PlannedFailoverStallSinceAnnotation], "run-1"); !ok {
+					if _, ok := parseDeadlineStart(h.fg().Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation], "run-1"); !ok {
 						t.Error("an Unknown write under a held claim did not start the durable stall deadline")
 					}
 				}}},
@@ -375,10 +376,10 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, events: []string{"PlannedFailoverSucceeded"},
 				check: func(t *testing.T, h *pfEngineHarness) {
 					st := h.fg().Status
-					if st.LastFailover == nil || st.LastFailoverTarget != "pdx" || st.PromotionGtidExecuted != "uuid-iad:1-10" {
-						t.Errorf("failover record = %v %q %q", st.LastFailover, st.LastFailoverTarget, st.PromotionGtidExecuted)
+					if st.LastFailoverTime() == nil || st.LastFailoverTarget() != "pdx" || st.PromotionGtidExecuted() != "uuid-iad:1-10" {
+						t.Errorf("failover record = %v %q %q", st.LastFailover, st.LastFailoverTarget(), st.PromotionGtidExecuted())
 					}
-					if len(h.sink.terminals) != 1 || mapOutcomeToMetricResult(&h.sink.terminals[0]) != "success" {
+					if len(h.sink.terminals) != 1 || labels.PlannedFailoverResult(h.sink.terminals[0].Outcome) != "succeeded" {
 						t.Errorf("terminals = %+v", h.sink.terminals)
 					}
 				}}},
@@ -389,15 +390,15 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 				// plausible later record (K023 lets only an implausibly
 				// future-dated one be written over).
 				later := metav1.NewTime(h.clk.Now().Add(2 * time.Minute))
-				fg.Status.LastFailover, fg.Status.LastFailoverTarget, fg.Status.PromotionGtidExecuted = &later, "iad", "newer"
+				fg.Status.SetLastFailover(&later, "iad", "newer")
 				if err := h.c.Status().Update(t.Context(), fg); err != nil {
 					t.Fatal(err)
 				}
 			},
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded,
 				check: func(t *testing.T, h *pfEngineHarness) {
-					if st := h.fg().Status; st.LastFailoverTarget != "iad" || st.PromotionGtidExecuted != "newer" {
-						t.Errorf("an older run record replaced a newer one: %q %q", st.LastFailoverTarget, st.PromotionGtidExecuted)
+					if st := h.fg().Status; st.LastFailoverTarget() != "iad" || st.PromotionGtidExecuted() != "newer" {
+						t.Errorf("an older run record replaced a newer one: %q %q", st.LastFailoverTarget(), st.PromotionGtidExecuted())
 					}
 				}}},
 	}
@@ -433,7 +434,7 @@ func TestPlannedFailoverEngine_HappyPath(t *testing.T) {
 	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Revision != 1 || pf.Settings.MaxLagWait.Duration == 0 {
 		t.Fatalf("admitting record = %+v", pf)
 	}
-	if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation kept after the Admitting write committed")
 	}
 	runID := pf.RunID
@@ -456,7 +457,7 @@ func TestPlannedFailoverEngine_DeferredCooldown(t *testing.T) {
 	fg := plannedFailoverFG("pdx")
 	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
 	recent := metav1.NewTime(time.Date(2026, 11, 4, 11, 58, 0, 0, time.UTC))
-	fg.Status.LastFailover, fg.Status.LastFailoverTarget = &recent, "iad"
+	fg.Status.SetLastFailover(&recent, "iad", "")
 	h := newPFEngineHarness(t, fg)
 	h.step()
 	pf := h.pf()
@@ -464,7 +465,7 @@ func TestPlannedFailoverEngine_DeferredCooldown(t *testing.T) {
 		pf.Admission.RetryTime == nil {
 		t.Fatalf("deferred record = %+v", pf)
 	}
-	if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; !ok {
+	if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; !ok {
 		t.Fatal("Deferred must keep the annotation")
 	}
 	if len(h.sink.deferred) != 1 {
@@ -476,7 +477,7 @@ func TestPlannedFailoverEngine_DeferredCooldown(t *testing.T) {
 	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID != runID {
 		t.Fatalf("after the cooldown = %+v, want the same run in Admitting", pf)
 	}
-	if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation kept after Admitting committed")
 	}
 }
@@ -502,7 +503,7 @@ func TestPlannedFailoverEngine_RejectsStatically(t *testing.T) {
 	if h.topo.count("claim") != 0 {
 		t.Error("a statically invalid request asked for the claim")
 	}
-	if _, ok := h.fg().Annotations[PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
 		t.Error("rejected annotation kept")
 	}
 }
@@ -564,7 +565,7 @@ func TestPF_StallDeadlineSurvivesRepeatedRestarts(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseWaitingForLag)
 	h.faults.statusDenied = true
 	h.step() // caught up: the Promoting intent write is denied
-	start, ok := parseDeadlineStart(h.fg().Annotations[PlannedFailoverStallSinceAnnotation], "run-1")
+	start, ok := parseDeadlineStart(h.fg().Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation], "run-1")
 	if !ok {
 		t.Fatal("no durable stall start after a denied write under the claim")
 	}
@@ -572,7 +573,7 @@ func TestPF_StallDeadlineSurvivesRepeatedRestarts(t *testing.T) {
 		h.clk.Advance(25 * time.Second)
 		h.restart()
 		h.step()
-		if got, _ := parseDeadlineStart(h.fg().Annotations[PlannedFailoverStallSinceAnnotation], "run-1"); !got.Equal(start) {
+		if got, _ := parseDeadlineStart(h.fg().Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation], "run-1"); !got.Equal(start) {
 			t.Fatalf("restart %d moved the stall start from %s to %s", i, start, got)
 		}
 		if _, marked := plannedFailoverRun(h.fg()); marked {
@@ -583,9 +584,9 @@ func TestPF_StallDeadlineSurvivesRepeatedRestarts(t *testing.T) {
 	h.restart()
 	h.step()
 	fg := h.fg()
-	m, ok := ParseTerminalMarker(fg.Annotations[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation])
 	if !ok || m.RunID != "run-1" || m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced || m.Reason != v1alpha1.PlannedFailoverReasonStatusStalled {
-		t.Fatalf("marker = %q", fg.Annotations[PlannedFailoverTerminalAnnotation])
+		t.Fatalf("marker = %q", fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation])
 	}
 	if !plannedFailoverOwnsSites(fg) == false {
 		t.Error("a marked run still owns the sites")
@@ -605,7 +606,7 @@ func TestPF_StallDeadlineSurvivesRepeatedRestarts(t *testing.T) {
 	if pf := fg.Status.PlannedFailover; pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
 		t.Fatalf("terminal record = %+v", pf)
 	}
-	if _, ok := fg.Annotations[PlannedFailoverTerminalAnnotation]; ok {
+	if _, ok := fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation]; ok {
 		t.Error("non-hold marker kept after the terminal record committed")
 	}
 }
@@ -620,14 +621,14 @@ func TestPF_StatusStallBeforeFenceIsNotStarted(t *testing.T) {
 	pf.Admission.DeadlineTime = &later // the stall, not the admission deadline, ends this run
 	h.setBlock(pf)
 	h.faults.statusDefault = pfWriteDropTimeout
-	h.faults.denyMetaKey = PlannedFailoverStatusFenceAnnotation
+	h.faults.denyMetaKey = v1alpha1.PlannedFailoverStatusFenceAnnotation
 	h.step()
 	if held, _ := h.topo.held(); held != "run-1" {
 		t.Fatalf("an unsettled Fencing write released the grant (slot %q)", held)
 	}
 	h.clk.Advance(plannedFailoverStatusStallDeadline)
 	h.step()
-	m, ok := ParseTerminalMarker(h.fg().Annotations[PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(h.fg().Annotations[v1alpha1.PlannedFailoverTerminalAnnotation])
 	if !ok || m.Outcome != v1alpha1.PlannedFailoverOutcomeNotStarted || m.Reason != v1alpha1.PlannedFailoverReasonStatusStalled {
 		t.Fatalf("marker = %+v ok=%v", m, ok)
 	}
@@ -642,7 +643,7 @@ func TestPF_ManagerAbsenceDeadlineSurvivesRestart(t *testing.T) {
 	h.topo.setHeld("", false)
 	h.topo.ensure = func(PlannedRunRef) (PlannedClaimDecision, error) { return PlannedClaimDecision{}, errManagerAbsent }
 	h.step()
-	start, ok := parseDeadlineStart(h.fg().Annotations[PlannedFailoverManagerAbsentSinceAnnotation], "run-1")
+	start, ok := parseDeadlineStart(h.fg().Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation], "run-1")
 	if !ok {
 		t.Fatal("no durable absent-since start")
 	}
@@ -655,7 +656,7 @@ func TestPF_ManagerAbsenceDeadlineSurvivesRestart(t *testing.T) {
 		h.clk.Advance(time.Minute)
 		h.restart()
 		h.step()
-		if got, _ := parseDeadlineStart(h.fg().Annotations[PlannedFailoverManagerAbsentSinceAnnotation], "run-1"); !got.Equal(start) {
+		if got, _ := parseDeadlineStart(h.fg().Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation], "run-1"); !got.Equal(start) {
 			t.Fatalf("restart moved the absent-since start: %s → %s", start, got)
 		}
 		if plannedFailoverTerminal(h.pf()) {
@@ -673,7 +674,7 @@ func TestPF_ManagerAbsenceDeadlineSurvivesRestart(t *testing.T) {
 	if slices.ContainsFunc(h.topo.calls, func(c string) bool { return c != "ensure" }) {
 		t.Errorf("MySQL calls without a manager: %v", h.topo.calls)
 	}
-	if _, ok := h.fg().Annotations[PlannedFailoverManagerAbsentSinceAnnotation]; ok {
+	if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]; ok {
 		t.Error("absent-since annotation kept after the terminal record")
 	}
 }
@@ -681,7 +682,7 @@ func TestPF_ManagerAbsenceDeadlineSurvivesRestart(t *testing.T) {
 // A run this process marked is never driven as live again.
 func TestPF_MarkedRunNeverRehydrated(t *testing.T) {
 	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseWaitingForLag)
-	h.setAnnotation(PlannedFailoverTerminalAnnotation, `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`)
+	h.setAnnotation(v1alpha1.PlannedFailoverTerminalAnnotation, `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`)
 	h.faults.statusDenied = true
 	h.step()
 	if held, _ := h.topo.held(); held != "" {
@@ -707,30 +708,28 @@ func TestPF_ZombieClaimReleased(t *testing.T) {
 	}
 }
 
-// TestOutcomeReasonMapping pins the metric mapping and that every reason
-// in §10.2 is a known enum value.
+// TestOutcomeReasonMapping pins the metric result label (the kebab-case
+// of the outcome, whatever the reason) and that every reason in §10.2 is a
+// known enum value.
 func TestOutcomeReasonMapping(t *testing.T) {
 	cases := []struct {
 		outcome v1alpha1.PlannedFailoverOutcome
 		reason  v1alpha1.PlannedFailoverReason
 		want    string
 	}{
-		{v1alpha1.PlannedFailoverOutcomeSucceeded, "", "success"},
-		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonCooldownActive, "rejected"},
-		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAdmissionTimeout, "failed_timeout"},
-		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout, "failed_timeout"},
-		{v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonDragonflySyncTimeout, "failed_timeout"},
-		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonDivergentTarget, "failed_other"},
-		{v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverReasonTargetLost, "failed_other"},
-		{v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed, "failed_other"},
+		{v1alpha1.PlannedFailoverOutcomeSucceeded, "", "succeeded"},
+		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonCooldownActive, "not-started"},
+		{v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAdmissionTimeout, "not-started"},
+		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout, "rolled-back"},
+		{v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonDragonflySyncTimeout, "source-left-fenced"},
+		{v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonDivergentTarget, "rolled-back"},
+		{v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverReasonTargetLost, "promoted-unconfirmed"},
+		{v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed, "manual-recovery-required"},
 	}
 	for _, tc := range cases {
-		if got := mapOutcomeToMetricResult(&v1alpha1.PlannedFailoverResult{Outcome: tc.outcome, Reason: tc.reason}); got != tc.want {
+		if got := labels.PlannedFailoverResult(tc.outcome); got != tc.want {
 			t.Errorf("%s/%s → %q, want %q", tc.outcome, tc.reason, got, tc.want)
 		}
-	}
-	if got := mapOutcomeToMetricResult(nil); got != "failed_other" {
-		t.Errorf("nil → %q", got)
 	}
 	// ExecuteFailed is only ever a ManualRecoveryRequired reason (§10.2):
 	// the engine maps an Inconsistent promotion without a reason to it.
@@ -780,7 +779,7 @@ func TestPlannedFailoverEngine_HoldRecord(t *testing.T) {
 	fg := h.fg()
 	c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
 	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonPlannedFailoverManualRecoveryRequired ||
-		c.ObservedGeneration != fg.Generation || !strings.Contains(c.Message, AcknowledgePlannedFailoverHoldAnnotation+"=run-1") {
+		c.ObservedGeneration != fg.Generation || !strings.Contains(c.Message, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation+"=run-1") {
 		t.Fatalf("condition = %+v", c)
 	}
 	hold := fg.Status.PlannedFailoverHold

@@ -22,7 +22,7 @@ serves it. Only the leader answers; a follower returns `503 {"error":"not_leader
 A caller identifies itself with a projected ServiceAccount token whose audience is `bloodraven-deploy`,
 and the operator checks it with a TokenReview. That gets you authenticated, not authorized. Authorization
 lives on the `MysqlDatabase`: its `spec.deploymentClients[]` lists one `namespace` and `serviceAccount`
-pair per namespace, and the database's `spec.groupRef.name` decides which group that pair may
+pair per namespace, and the database's `spec.failoverGroupRef.name` decides which group that pair may
 coordinate. The lease's `instance` is the `MysqlDatabase` **resource name**, not the SQL schema name.
 
 Look at what the pipeline does *not* need. No permission to patch the `MysqlFailoverGroup`. No read on
@@ -56,7 +56,8 @@ is the only new authority in the system.
 
 `GET /deploy/v1/groups/{group}` is an observation: the active site, `topologyGeneration`, the health
 block, every in-flight operation phase, and `stable` with an `unstableReason`. `stable` is false during
-any operation phase — including a planned failover sitting in `Deferred` — and whenever the group is
+any operation phase — including a planned failover sitting in `Deferred` — while a planned failover's
+automation hold still stands (`unstableReason: AutomaticFailoverHeld`), and whenever the group is
 Degraded, SplitBrain or NoPrimary, recovery is pending, or replication is not running. Lag alone does
 not make it false; your lag threshold is your policy, so read `health.replicationLagSeconds` and decide.
 
@@ -143,7 +144,7 @@ that was running when the primary moved anyway?
 site — planned promotion, emergency failover, the failover inside an ordered update, restore-in-place
 promotion, bootstrap completion. It is not the CR's `metadata.generation` and it is not a restart
 counter. Every lease is stamped with the generation it was granted under, and a generation change
-revokes every lease in the group with reason `topology_changed`, raising a `DeploymentLeaseRevoked`
+revokes every lease in the group with reason `TopologyChanged`, raising a `DeploymentLeaseRevoked`
 event on the `MysqlFailoverGroup`.
 
 The pipeline finds out on its next heartbeat. `PUT` comes back `409 revoked` with the new generation; a
@@ -164,7 +165,7 @@ server.
 
 When you need every lease gone — a pipeline that will not die, a hold you must clear before a
 switchover — annotate the group with `bloodraven.shipstream.io/revoke-deployment-leases`. Renewals
-then report `operator_revoked`, and the same fenced-abort rules apply to the client. What you never do is
+then report `OperatorRevoked`, and the same fenced-abort rules apply to the client. What you never do is
 delete the leader-election Lease or edit `topologyGeneration` to clear a hold; both are ways of lying to
 the fence. `bloodraven_deploy_leases_active` and `bloodraven_planned_failovers_deferred_total` tell you
 whether a hold is live and how often it has cost a switchover, and every request logs `msg="deploy api"`

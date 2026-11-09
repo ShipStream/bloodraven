@@ -5,19 +5,19 @@
 
 **Front:** Backup source reason string `"replica-preferred"` — what had to be true for the operator to record it?
 
-**Back:** The chosen site's observed state was `read-only`, it was actually replicating, and its `secondsBehindSource` was at or below `maxLagSecondsForSource`.
+**Back:** The chosen site's observed state was `ReadOnly`, it was actually replicating, and its `secondsBehindSource` was at or below `maxLagSecondsForSource`.
 
 ---
 
 **Front:** Backup source reason string `"override"` — what does it tell you?
 
-**Back:** The MysqlBackup carried a `sourceSiteOverride` that named a configured, observed, non-read-only site, so replica-first selection never ran.
+**Back:** The MysqlBackup carried a `sourceSite` that named a configured, observed, non-read-only site, so replica-first selection never ran.
 
 ---
 
-**Front:** A non-primary site of `playground` is replicating and well inside `maxLagSecondsForSource`, but the operator observes it as `writable`. Is it eligible as a backup source?
+**Front:** A non-primary site of `playground` is replicating and well inside `maxLagSecondsForSource`, but the operator observes it as `Writable`. Is it eligible as a backup source?
 
-**Back:** No. `"replica-preferred"` requires the observed state to be `read-only`; a writable non-primary is skipped and selection falls through.
+**Back:** No. `"replica-preferred"` requires the observed state to be `ReadOnly`; a writable non-primary is skipped and selection falls through.
 
 ---
 

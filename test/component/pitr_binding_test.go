@@ -51,7 +51,7 @@ func pbcProfile(name, subPath, secret string) v1alpha1.BackupProfile {
 	p := v1alpha1.BackupProfile{Name: name, Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC,
 		PVC: &v1alpha1.PVCStorage{ClaimName: "archive", SubPath: subPath}}}
 	if secret != "" {
-		p.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secret}}
+		p.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secret}}
 	}
 	return p
 }
@@ -72,7 +72,7 @@ func newBindingEnv(t *testing.T, profiles []v1alpha1.BackupProfile, secrets map[
 	_ = v1alpha1.AddToScheme(scheme)
 	fg := &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: pbcGroupName, Namespace: pbcNS, UID: types.UID(writerGroup)},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "a"}, {Name: "b"}},
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "a", ServerID: 101}, {Name: "b", ServerID: 102}},
 			Backup: &v1alpha1.BackupSpec{Profiles: profiles, PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: profiles[0].Name}}},
 	}
 	objs := []client.Object{fg}
@@ -243,7 +243,7 @@ func (e *bindingEnv) startArchiver(site string, srv *simServer, dest pitrarchive
 		Encryption:  pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionMode(enc.Mode), Algorithm: string(enc.Algorithm)},
 		KeyRevision: enc.KeySecretName,
 	}
-	if enc.Mode == v1alpha1.PITRArchiveEncryptionNone {
+	if enc.Mode == v1alpha1.EncryptionModeNone {
 		ident.KeyRevision = "plaintext"
 	}
 	ctx, cancel := context.WithCancel(e.w.ctx)
@@ -274,7 +274,7 @@ func (e *bindingEnv) report(st *pitrarchive.ArchiveStatus) {
 			s.PITR = &v1alpha1.PITRStatus{}
 		}
 		obs := &v1alpha1.PITRArchiveObservation{Destination: st.Destination, ArchiveID: st.ArchiveID,
-			EncryptionMode: v1alpha1.PITRArchiveEncryptionMode(st.EncryptionMode), KeyRevision: st.KeyRevision,
+			EncryptionMode: v1alpha1.EncryptionMode(st.EncryptionMode), KeyRevision: st.KeyRevision,
 			State: v1alpha1.PITRArchiveObservedState(st.State), Reason: v1alpha1.PITRArchiveRefusalReason(st.Reason)}
 		s.PITR.Archive = obs
 	})
@@ -477,7 +477,7 @@ func TestPITRBindingPre203Deployment(t *testing.T) {
 	old := e.startArchiver("a", srv, e.dest(a), v1alpha1.PITRArchiveBindingEncryption{Mode: "Passphrase", Algorithm: "AES-256-GCM"}, e.writeKey("k-orig"))
 	e.waitState(old, pitrarchive.StateVerified)
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "mysql-orders-a", Namespace: pbcNS,
-		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "shipstream.io/failover-group": pbcGroupName, "shipstream.io/site": "a"}}}
+		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "bloodraven.shipstream.io/failover-group": pbcGroupName, "bloodraven.shipstream.io/site": "a"}}}
 	if err := e.c.Create(context.Background(), dep); err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func TestPITRBindingRetainedArchiveRead(t *testing.T) {
 	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
 	// The running writer is held on a (its Deployment's render).
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "mysql-orders-a", Namespace: pbcNS,
-		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "shipstream.io/failover-group": pbcGroupName, "shipstream.io/site": "a"}}}
+		Labels: map[string]string{"app.kubernetes.io/name": "mysql", "bloodraven.shipstream.io/failover-group": pbcGroupName, "bloodraven.shipstream.io/site": "a"}}}
 	if err := e.c.Create(context.Background(), dep); err != nil {
 		t.Fatal(err)
 	}

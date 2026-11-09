@@ -99,8 +99,8 @@ func s42InjectSourceDelay(state *s42RunState) runner.Step {
 			if err != nil {
 				return err
 			}
-			if mfg.Status.LastFailover != nil {
-				state.lastFailoverBefore = mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339)
+			if mfg.Status.LastFailoverTime() != nil {
+				state.lastFailoverBefore = mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339)
 			}
 			primary, err := env.MySQL(state.topo.active)
 			if err != nil {
@@ -160,8 +160,8 @@ func s42SoakGroupUnaffected(state *s42RunState) runner.Step {
 					return fmt.Errorf("active site changed during reader stall: %q -> %q", state.topo.active, mfg.Status.ActiveSite)
 				}
 				lastFailover := ""
-				if mfg.Status.LastFailover != nil {
-					lastFailover = mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339)
+				if mfg.Status.LastFailoverTime() != nil {
+					lastFailover = mfg.Status.LastFailoverTime().Time.UTC().Format(time.RFC3339)
 				}
 				if lastFailover != state.lastFailoverBefore {
 					return fmt.Errorf("failover recorded during reader stall: lastFailover %q -> %q", state.lastFailoverBefore, lastFailover)
@@ -170,20 +170,20 @@ func s42SoakGroupUnaffected(state *s42RunState) runner.Step {
 				if status == nil {
 					return fmt.Errorf("reader %q missing from status during soak", state.topo.reader)
 				}
-				if status.State != "read-only" {
+				if status.State != v1alpha1.SiteStateReadOnly {
 					return fmt.Errorf("reader state=%q during stall, want read-only", status.State)
 				}
 				if status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
 					return fmt.Errorf("reader entered SourceConvergenceState=Blocked (reason=%s) during a pure lag stall", status.SourceConvergenceReason)
 				}
-				if status.RecoveryState == "RecoveryBlocked" {
+				if status.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					return fmt.Errorf("reader entered RecoveryBlocked during a pure lag stall")
 				}
 				if status.SecondsBehindSource != nil && *status.SecondsBehindSource > state.maxObservedLag {
 					state.maxObservedLag = *status.SecondsBehindSource
 				}
 				standby := statusSiteByName(mfg, state.topo.standby)
-				if standby == nil || !standby.Replicating {
+				if standby == nil || !standby.Replication.Running() {
 					return fmt.Errorf("promotable standby %s stopped replicating during reader stall", state.topo.standby)
 				}
 
@@ -261,8 +261,8 @@ func s42ClearDelayAndRecover(state *s42RunState) runner.Step {
 						return false, "reader status missing", nil
 					}
 					err := assertReaderServingStatus(mfg, status, state.topo.activeHost)
-					return err == nil, fmt.Sprintf("state=%s replicating=%v convergence=%s lag=%v",
-						status.State, status.Replicating, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
+					return err == nil, fmt.Sprintf("state=%s replication=%s convergence=%s lag=%v",
+						status.State, status.Replication, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
 				})
 			if err != nil {
 				return err

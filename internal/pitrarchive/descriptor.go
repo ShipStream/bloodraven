@@ -56,7 +56,7 @@ func IsIgnoredArchiveKey(key string) bool {
 }
 
 // EncryptionMode is an archive's encryption mode. The API mirrors it as
-// v1alpha1.PITRArchiveEncryptionMode.
+// v1alpha1.EncryptionMode.
 type EncryptionMode string
 
 const (

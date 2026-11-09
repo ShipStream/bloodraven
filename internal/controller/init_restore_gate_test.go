@@ -28,15 +28,15 @@ import (
 func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup {
 	lag0 := int64(0)
 	fg := newTestFG()
-	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly})
+	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}},
+		Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
 	}
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: "writable"},
-		{Name: "dc2", State: "read-only", Replicating: true},
-		{Name: "reader", State: "read-only", Replicating: true, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
+		{Name: "dc1", State: v1alpha1.SiteStateWritable},
+		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
 			SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 	}
 	if phase != "" {
@@ -46,11 +46,11 @@ func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup 
 }
 
 // sitePod is a MySQL pod of site already labelled as a serving primary
-// (role=primary, healthy=yes), so a gate that fails to strip the labels
+// (role=primary, healthy=true), so a gate that fails to strip the labels
 // shows up as an endpoint.
 func sitePod(fg *v1alpha1.MysqlFailoverGroup, site string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: site + "-pod", Namespace: fg.Namespace, Labels: map[string]string{
-		labelAppName: "mysql", labelInstance: fg.Name, labelSite: site, labelRole: "primary", labelHealthy: "yes",
+		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: site, v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
 	}}}
 }
 
@@ -188,9 +188,9 @@ func TestUpdateCRStatus_ReadyFalseUntilInitRestoreSucceeds(t *testing.T) {
 		wantReason string
 		wantText   string
 	}{
-		{v1alpha1.BackupPhaseRunning, metav1.ConditionFalse, readyReasonInitRestoreInProgress, "applications are kept off the group"},
-		{v1alpha1.BackupPhaseFailed, metav1.ConditionFalse, readyReasonInitRestoreFailed, "delete the restore Job"},
-		{v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue, "TopologyPolled", ""},
+		{v1alpha1.BackupPhaseRunning, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupInProgress, "applications are kept off the group"},
+		{v1alpha1.BackupPhaseFailed, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupFailed, "delete the restore Job"},
+		{v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue, v1alpha1.ReasonHealthy, ""},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			fg := newTestFG()
@@ -225,7 +225,7 @@ func TestReconcileRestoreJob_FailedEventCarriesRecovery(t *testing.T) {
 	ctx := context.Background()
 	fg := fgInitFromMysqlBackup()
 	seedPublished(fg)
-	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), dsnSecret())
+	r, c := newReconciler(fg, succeededSeedBackup(), primaryReadyDeployment("lion", "iad"), operatorCredsSecret())
 	rec := record.NewFakeRecorder(20)
 	r.Recorder = rec
 	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
@@ -277,7 +277,7 @@ func TestStartManager_HydratesInitRestoreSeedBeforeRun(t *testing.T) {
 	fg.Status.ActiveSite = ""
 	fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "restore-lion-dc1", TargetSite: "dc1"}
 
-	if err := r.startManager(context.Background(), fg, CRConfigToTopologyConfig(fg), nil); err != nil {
+	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
 		t.Fatalf("startManager: %v", err)
 	}
 	mt := registeredManager(r, nn)

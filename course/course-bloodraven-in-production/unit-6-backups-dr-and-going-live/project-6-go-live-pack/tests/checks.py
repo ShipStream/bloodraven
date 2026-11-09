@@ -35,7 +35,7 @@ def reader_soak_stays_silent():
     loud = harness.firing("candidate-lagging")
     if loud != ["BloodravenReplicationLagging@pdx"]:
         errors.append(
-            "a genuinely lagging primary-candidate must still page: expected exactly "
+            "a genuinely lagging PrimaryCandidate must still page: expected exactly "
             "['BloodravenReplicationLagging@pdx'], got " + str(loud)
         )
 

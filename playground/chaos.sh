@@ -46,14 +46,14 @@ usage() {
 }
 
 site_node() {
-  kubectl get nodes -l "shipstream.io/site.playground=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+  kubectl get nodes -l "bloodraven.shipstream.io/site.playground=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
 
 cmd_kill_site() {
   local site="${1:?Usage: kill-site <site>}"
   info "Killing MySQL pod at site '$site'..."
-  kubectl -n "$NAMESPACE" delete pod -l "shipstream.io/site=$site" --grace-period=0 --force 2>/dev/null || \
-    kubectl -n "$NAMESPACE" delete pod -l "shipstream.io/site=$site"
+  kubectl -n "$NAMESPACE" delete pod -l "bloodraven.shipstream.io/site=$site" --grace-period=0 --force 2>/dev/null || \
+    kubectl -n "$NAMESPACE" delete pod -l "bloodraven.shipstream.io/site=$site"
   ok "MySQL pod at $site killed"
 }
 
@@ -86,7 +86,7 @@ cmd_cordon() {
 
 cmd_uncordon() {
   info "Uncordoning all playground nodes..."
-  for node in $(kubectl get nodes -l 'shipstream.io/site.playground' -o name 2>/dev/null); do
+  for node in $(kubectl get nodes -l 'bloodraven.shipstream.io/site.playground' -o name 2>/dev/null); do
     kubectl uncordon "$node" 2>/dev/null || true
   done
   ok "All playground nodes uncordoned"
@@ -110,7 +110,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      shipstream.io/site: ${site}
+      bloodraven.shipstream.io/site: ${site}
       app.kubernetes.io/name: mysql
   policyTypes:
   - Ingress
@@ -150,7 +150,7 @@ cmd_dragonfly_status() {
   # after the first restart, which silently shifts every column to the
   # right and makes positional parsing print things like "site=ago)".
   kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=dragonfly \
-    -o "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,SITE:.metadata.labels['shipstream\.io/site'],ROLE:.metadata.labels['shipstream\.io/dragonfly-role'],TRAFFIC:.metadata.labels['shipstream\.io/dragonfly-traffic']" \
+    -o "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,SITE:.metadata.labels['bloodraven\.shipstream\.io/site'],ROLE:.metadata.labels['bloodraven\.shipstream\.io/dragonfly-role'],TRAFFIC:.metadata.labels['bloodraven\.shipstream\.io/dragonfly-traffic']" \
     --no-headers 2>/dev/null \
     | awk '{printf "  %-32s ready=%-5s site=%-4s role=%-8s traffic=%s\n", $1, $2, $3, $4, $5}'
 
@@ -178,7 +178,7 @@ cmd_recover() {
 cmd_status() {
   echo ""
   info "Nodes:"
-  kubectl get nodes -o wide -L topology.kubernetes.io/zone,shipstream.io/site.playground
+  kubectl get nodes -o wide -L topology.kubernetes.io/zone,bloodraven.shipstream.io/site.playground
   echo ""
   info "MysqlFailoverGroup:"
   kubectl -n "$NAMESPACE" get mysqlfailovergroups -o wide 2>/dev/null || echo "  (none found)"
@@ -190,7 +190,7 @@ cmd_status() {
   kubectl -n "$NAMESPACE" get dnsendpoints -o yaml 2>/dev/null | grep -E "dnsName|targets|recordType" || echo "  (none found)"
   echo ""
   info "Node taints:"
-  for node in $(kubectl get nodes -l 'shipstream.io/site.playground' -o name 2>/dev/null); do
+  for node in $(kubectl get nodes -l 'bloodraven.shipstream.io/site.playground' -o name 2>/dev/null); do
     taints=$(kubectl get "$node" -o jsonpath='{.spec.taints[*].key}' 2>/dev/null)
     echo "  $node: ${taints:-<none>}"
   done

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -30,9 +29,10 @@ const (
 
 // scenario62FullRestoreFailsAfterDrop covers #212. A full-instance in-place
 // restore drops every user schema on the primary with binlogged DROP
-// DATABASE statements. Before the fix the peers replicated them (in
-// credentials mode the replication account is exempt from offline_mode; a
-// legacy replicator reconnected once the fence was released), so a restore
+// DATABASE statements. Before the fix the peers replicated them (the
+// operator account they replicate as by default is exempt from
+// offline_mode; a dedicated replication user reconnected once the fence was
+// released), so a restore
 // that failed after its DROP left the peers as damaged as the primary.
 //
 // The scenario seeds a marker schema (one row in the backup, one written
@@ -217,7 +217,7 @@ func s62StartRestoreAndCutStorage() runner.Step {
 			}
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm: confirm,
-				Source:  v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: ctxFetch(env, "backupName")}},
+				Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: ctxFetch(env, "backupName")}},
 			}
 			if _, err := patchRestoreInPlace(ctx, env, spec); err != nil {
 				return fmt.Errorf("patch full-instance restoreInPlace: %w", err)

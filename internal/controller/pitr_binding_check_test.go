@@ -179,8 +179,8 @@ func TestBuildPITRArchiveCheckJob(t *testing.T) {
 			t.Fatal("check Job is not controlled by the group")
 		}
 		l := job.Labels
-		if l[labelAppName] != appNameBackupJob || l[labelResourceKind] != resourcePITRArchiveCheck || l[labelPITRBindingID] != entry.ID ||
-			l[labelFailoverGroup] != pbtName || l[labelPITRKeySecret] != tc.enc.KeySecretName {
+		if l[labelAppName] != appNameBackupJob || l[v1alpha1.ResourceLabel] != resourcePITRArchiveCheck || l[v1alpha1.PITRBindingIDLabel] != entry.ID ||
+			l[v1alpha1.FailoverGroupLabel] != pbtName || l[v1alpha1.PITRKeySecretLabel] != tc.enc.KeySecretName {
 			t.Fatalf("labels %v", l)
 		}
 		spec := job.Spec

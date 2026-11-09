@@ -81,7 +81,7 @@ func observeFailoverDuringPartition() runner.Step {
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite flips away from partitioned site %s", original),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 					if mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original {
 						if mfg.Status.ActiveSite != expected {
 							return false, msg, fmt.Errorf("activeSite=%q, want expected peer %q", mfg.Status.ActiveSite, expected)

@@ -32,6 +32,7 @@ func newBootstrapHarness(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
+		FailoverCooldown:  int64(5 * time.Minute),
 	}
 	bootCfg := controller.BootstrapConfig{
 		ReplUser:     "replicator",

@@ -350,13 +350,13 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 				bad = append(bad, fmt.Sprintf("updatePhase=%s", mfg.Status.UpdatePhase))
 			}
 			for _, s := range mfg.Status.Sites {
-				if s.State != "writable" && s.State != "read-only" {
+				if s.State != v1alpha1.SiteStateWritable && s.State != v1alpha1.SiteStateReadOnly {
 					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
 				}
-				if s.RecoveryState == "RecoveryBlocked" {
+				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
 				}
-				if s.Name != mfg.Status.ActiveSite && isPromotableStatusSite(mfg, s.Name) && !s.Replicating {
+				if s.Name != mfg.Status.ActiveSite && isPromotableStatusSite(mfg, s.Name) && !s.Replication.Running() {
 					bad = append(bad, fmt.Sprintf("%s=not-replicating", s.Name))
 				}
 			}
@@ -441,10 +441,10 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 			if s.LinkStatus != "up" {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s.link=%s", s.Name, s.LinkStatus))
 			}
-			if s.SyncInProgress {
+			if s.SyncInProgress != nil && *s.SyncInProgress {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=syncing", s.Name))
 			}
-			if s.LastIOSecondsAgo < 0 {
+			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo < 0 {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=never-synced", s.Name))
 			}
 		case v1alpha1.DragonflyRoleUnreachable:

@@ -13,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
@@ -20,8 +22,8 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node1",
 			Labels: map[string]string{
-				"shipstream.io/failover-group.orders": "true",
-				"shipstream.io/site.orders":           "iad",
+				"bloodraven.shipstream.io/failover-group.orders": "true",
+				"bloodraven.shipstream.io/site.orders":           "iad",
 			},
 		},
 	}
@@ -29,8 +31,8 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node2",
 			Labels: map[string]string{
-				"shipstream.io/failover-group.orders": "true",
-				"shipstream.io/site.orders":           "iad",
+				"bloodraven.shipstream.io/failover-group.orders": "true",
+				"bloodraven.shipstream.io/site.orders":           "iad",
 			},
 		},
 	}
@@ -38,8 +40,8 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node3",
 			Labels: map[string]string{
-				"shipstream.io/failover-group.orders": "true",
-				"shipstream.io/site.orders":           "pdx",
+				"bloodraven.shipstream.io/failover-group.orders": "true",
+				"bloodraven.shipstream.io/site.orders":           "pdx",
 			},
 		},
 	}
@@ -51,11 +53,11 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 	tainter := NewNodeTainter(client, logger)
 	ctx := context.Background()
 
-	iadSelector := "shipstream.io/failover-group.orders=true,shipstream.io/site.orders=iad"
-	pdxSelector := "shipstream.io/failover-group.orders=true,shipstream.io/site.orders=pdx"
+	iadSelector := "bloodraven.shipstream.io/failover-group.orders=true,bloodraven.shipstream.io/site.orders=iad"
+	pdxSelector := "bloodraven.shipstream.io/failover-group.orders=true,bloodraven.shipstream.io/site.orders=pdx"
 
 	// Apply taint to iad nodes
-	if err := tainter.SetTaint(ctx, iadSelector, "orders", true); err != nil {
+	if err := tainter.SetTaint(ctx, iadSelector, testNamespace, "orders", true); err != nil {
 		t.Fatalf("apply taint: %v", err)
 	}
 
@@ -74,14 +76,14 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 	}
 
 	// Apply taint again (idempotent)
-	if err := tainter.SetTaint(ctx, iadSelector, "orders", true); err != nil {
+	if err := tainter.SetTaint(ctx, iadSelector, testNamespace, "orders", true); err != nil {
 		t.Fatalf("re-apply taint: %v", err)
 	}
 
 	node1Out, _ := client.CoreV1().Nodes().Get(ctx, "node1", metav1.GetOptions{})
 	count := 0
 	for _, taint := range node1Out.Spec.Taints {
-		if taint.Key == TaintKeyForGroup("orders") {
+		if taint.Key == v1alpha1.ReadOnlyTaintKey(testNamespace, "orders") {
 			count++
 		}
 	}
@@ -90,7 +92,7 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 	}
 
 	// Remove taint
-	if err := tainter.SetTaint(ctx, iadSelector, "orders", false); err != nil {
+	if err := tainter.SetTaint(ctx, iadSelector, testNamespace, "orders", false); err != nil {
 		t.Fatalf("remove taint: %v", err)
 	}
 
@@ -100,12 +102,12 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 	}
 
 	// Remove again (idempotent)
-	if err := tainter.SetTaint(ctx, iadSelector, "orders", false); err != nil {
+	if err := tainter.SetTaint(ctx, iadSelector, testNamespace, "orders", false); err != nil {
 		t.Fatalf("re-remove taint: %v", err)
 	}
 
 	// Verify pdx selector works independently
-	if err := tainter.SetTaint(ctx, pdxSelector, "orders", true); err != nil {
+	if err := tainter.SetTaint(ctx, pdxSelector, testNamespace, "orders", true); err != nil {
 		t.Fatalf("apply taint to pdx: %v", err)
 	}
 	n3, _ = client.CoreV1().Nodes().Get(ctx, "node3", metav1.GetOptions{})
@@ -124,10 +126,10 @@ func TestNodeTainter_PerGroupIsolation(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "shared-node",
 			Labels: map[string]string{
-				"shipstream.io/failover-group.orders":    "true",
-				"shipstream.io/failover-group.inventory": "true",
-				"shipstream.io/site.orders":              "iad",
-				"shipstream.io/site.inventory":           "iad",
+				"bloodraven.shipstream.io/failover-group.orders":    "true",
+				"bloodraven.shipstream.io/failover-group.inventory": "true",
+				"bloodraven.shipstream.io/site.orders":              "iad",
+				"bloodraven.shipstream.io/site.inventory":           "iad",
 			},
 		},
 	}
@@ -138,10 +140,10 @@ func TestNodeTainter_PerGroupIsolation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	tainter := NewNodeTainter(client, logger)
 	ctx := context.Background()
-	selector := "shipstream.io/failover-group.orders=true,shipstream.io/site.orders=iad"
+	selector := "bloodraven.shipstream.io/failover-group.orders=true,bloodraven.shipstream.io/site.orders=iad"
 
 	// Apply orders taint
-	if err := tainter.SetTaint(ctx, selector, "orders", true); err != nil {
+	if err := tainter.SetTaint(ctx, selector, testNamespace, "orders", true); err != nil {
 		t.Fatalf("apply orders taint: %v", err)
 	}
 
@@ -154,7 +156,7 @@ func TestNodeTainter_PerGroupIsolation(t *testing.T) {
 	}
 
 	// Remove orders taint — only orders key affected
-	if err := tainter.SetTaint(ctx, selector, "orders", false); err != nil {
+	if err := tainter.SetTaint(ctx, selector, testNamespace, "orders", false); err != nil {
 		t.Fatalf("remove orders taint: %v", err)
 	}
 
@@ -169,7 +171,7 @@ func TestNodeTainter_RejectsEmptySelector(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	tainter := NewNodeTainter(client, logger)
 
-	err := tainter.SetTaint(context.Background(), " ", "orders", true)
+	err := tainter.SetTaint(context.Background(), " ", testNamespace, "orders", true)
 	if err == nil || !strings.Contains(err.Error(), "empty selector") {
 		t.Fatalf("expected empty selector error, got %v", err)
 	}
@@ -180,13 +182,13 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node1",
 			Labels: map[string]string{
-				"shipstream.io/failover-group.orders": "true",
-				"shipstream.io/site.orders":           "iad",
+				"bloodraven.shipstream.io/failover-group.orders": "true",
+				"bloodraven.shipstream.io/site.orders":           "iad",
 			},
 		},
 		Spec: corev1.NodeSpec{
 			Taints: []corev1.Taint{
-				{Key: TaintKeyForGroup("orders"), Value: "old", Effect: corev1.TaintEffectNoSchedule},
+				{Key: v1alpha1.ReadOnlyTaintKey(testNamespace, "orders"), Value: "old", Effect: corev1.TaintEffectNoSchedule},
 			},
 		},
 	}
@@ -195,8 +197,8 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	tainter := NewNodeTainter(client, logger)
 
-	selector := "shipstream.io/failover-group.orders=true,shipstream.io/site.orders=iad"
-	if err := tainter.SetTaint(context.Background(), selector, "orders", true); err != nil {
+	selector := "bloodraven.shipstream.io/failover-group.orders=true,bloodraven.shipstream.io/site.orders=iad"
+	if err := tainter.SetTaint(context.Background(), selector, testNamespace, "orders", true); err != nil {
 		t.Fatalf("apply taint: %v", err)
 	}
 
@@ -204,24 +206,30 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 	if len(out.Spec.Taints) != 1 {
 		t.Fatalf("expected exactly 1 taint, got %v", out.Spec.Taints)
 	}
-	if taint := out.Spec.Taints[0]; taint.Key != TaintKeyForGroup("orders") || taint.Value != TaintValue || taint.Effect != corev1.TaintEffectNoExecute {
+	if taint := out.Spec.Taints[0]; taint.Key != v1alpha1.ReadOnlyTaintKey(testNamespace, "orders") || taint.Value != v1alpha1.ReadOnlyTaintValue || taint.Effect != corev1.TaintEffectNoExecute {
 		t.Fatalf("expected canonical NoExecute taint, got %v", taint)
 	}
 }
 
-func TestNodeTainter_RemovesLegacyTaint(t *testing.T) {
+// TestNodeTainter_NamespaceScopesTheKey: a group of the same name in
+// another namespace has its own taint, which removing ours leaves alone,
+// as it leaves the unscoped key of earlier releases (no legacy stripping).
+func TestNodeTainter_NamespaceScopesTheKey(t *testing.T) {
+	other := v1alpha1.ReadOnlyTaintKey("staging", "orders")
+	unscoped := "shipstream.io/db-readonly-orders"
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "node1",
 			Labels: map[string]string{
-				"shipstream.io/failover-group.orders": "true",
-				"shipstream.io/site.orders":           "iad",
+				"bloodraven.shipstream.io/failover-group.orders": "true",
+				"bloodraven.shipstream.io/site.orders":           "iad",
 			},
 		},
 		Spec: corev1.NodeSpec{
 			Taints: []corev1.Taint{
-				{Key: LegacyTaintKey, Value: TaintValue, Effect: corev1.TaintEffectNoExecute},
-				{Key: TaintKeyForGroup("orders"), Value: TaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: other, Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: unscoped, Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: v1alpha1.ReadOnlyTaintKey(testNamespace, "orders"), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
 			},
 		},
 	}
@@ -230,16 +238,18 @@ func TestNodeTainter_RemovesLegacyTaint(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	tainter := NewNodeTainter(client, logger)
 
-	selector := "shipstream.io/failover-group.orders=true,shipstream.io/site.orders=iad"
-	if err := tainter.SetTaint(context.Background(), selector, "orders", false); err != nil {
+	selector := "bloodraven.shipstream.io/failover-group.orders=true,bloodraven.shipstream.io/site.orders=iad"
+	if err := tainter.SetTaint(context.Background(), selector, testNamespace, "orders", false); err != nil {
 		t.Fatalf("remove taint: %v", err)
 	}
 
 	out, _ := client.CoreV1().Nodes().Get(context.Background(), "node1", metav1.GetOptions{})
+	got := map[string]bool{}
 	for _, taint := range out.Spec.Taints {
-		if taint.Key == LegacyTaintKey || taint.Key == TaintKeyForGroup("orders") {
-			t.Fatalf("expected readonly taints removed, got %v", out.Spec.Taints)
-		}
+		got[taint.Key] = true
+	}
+	if got[v1alpha1.ReadOnlyTaintKey(testNamespace, "orders")] || !got[other] || !got[unscoped] || len(got) != 2 {
+		t.Fatalf("want only this group's taint removed, got %v", out.Spec.Taints)
 	}
 }
 
@@ -280,8 +290,11 @@ func installPatchReactor(client *fake.Clientset) {
 	})
 }
 
+// testNamespace is the namespace of the groups these tests taint for.
+const testNamespace = "prod"
+
 func hasTaintForGroup(taints []corev1.Taint, group string) bool {
-	key := TaintKeyForGroup(group)
+	key := v1alpha1.ReadOnlyTaintKey(testNamespace, group)
 	for _, t := range taints {
 		if t.Key == key && t.Effect == corev1.TaintEffectNoExecute {
 			return true

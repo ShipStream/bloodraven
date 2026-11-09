@@ -27,15 +27,15 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: namespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Image:      "mysql:9.7",
-			SecretName: "mysql-credentials",
+			Image:       "mysql:9.7",
+			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", Zone: "lion-dc1", LBIP: "203.0.113.1", TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
+				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", LBIP: "203.0.113.1", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
-				{Name: "dc2", Zone: "lion-dc2", LBIP: "203.0.113.2", TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
+				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", LBIP: "203.0.113.2", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTL: 60},
+			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
 			Backup: &v1alpha1.BackupSpec{
 				Image: "container-registry.oracle.com/mysql/community-server:9.7",
 				Profiles: []v1alpha1.BackupProfile{
@@ -44,9 +44,9 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 						Storage: v1alpha1.BackupStorage{
 							Type: v1alpha1.BackupStorageS3,
 							S3: &v1alpha1.S3Storage{
-								Bucket:            "bloodraven",
-								Prefix:            "lion",
-								CredentialsSecret: "s3-creds",
+								Bucket:                "bloodraven",
+								Prefix:                "lion",
+								CredentialsSecretName: "s3-creds",
 							},
 						},
 					},
@@ -65,13 +65,13 @@ func newSucceededBackup(namespace, fgName, profile string) *v1alpha1.MysqlBackup
 			Name:      "lion-nightly-ok",
 			Namespace: namespace,
 			Labels: map[string]string{
-				"shipstream.io/failover-group": fgName,
-				"shipstream.io/backup-profile": profile,
-				"app.kubernetes.io/managed-by": "bloodraven",
+				"bloodraven.shipstream.io/failover-group": fgName,
+				"bloodraven.shipstream.io/backup-profile": profile,
+				"app.kubernetes.io/managed-by":            "bloodraven",
 			},
 		},
 		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fgName},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 	}
@@ -103,20 +103,16 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 	v := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-a", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: "timestamp",
-				// RFC3339 with an explicit offset — exercises the
-				// CRD's string validation without any runtime parsing.
-				Timestamp: "2026-04-15T09:30:00+00:00",
+				Mode:     v1alpha1.PointInTimeModeTimestamp,
+				StopTime: &metav1.Time{Time: time.Date(2026, 4, 15, 9, 30, 0, 0, time.UTC)},
 			},
 			SanityCheck: &v1alpha1.SanityCheckSpec{
-				Query: "SELECT COUNT(*) FROM information_schema.tables",
-				Expect: &v1alpha1.SanityCheckExpectation{
-					MinRows:            1,
-					MaxDurationSeconds: 30,
-				},
+				Query:     "SELECT COUNT(*) FROM information_schema.tables",
+				MinResult: new(int64(1)),
+				Timeout:   &metav1.Duration{Duration: 30 * time.Second},
 			},
 		},
 	}
@@ -128,7 +124,7 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "verify-a", Namespace: ns}, &fetched); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if fetched.Spec.PointInTime == nil || fetched.Spec.PointInTime.Mode != "timestamp" {
+	if fetched.Spec.PointInTime == nil || fetched.Spec.PointInTime.Mode != v1alpha1.PointInTimeModeTimestamp {
 		t.Errorf("pointInTime.mode not persisted: %+v", fetched.Spec.PointInTime)
 	}
 	if fetched.Spec.SanityCheck == nil || fetched.Spec.SanityCheck.Query == "" {
@@ -154,9 +150,10 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 	backup.Status = v1alpha1.MysqlBackupStatus{
 		Phase:          v1alpha1.BackupPhaseSucceeded,
 		CompletionTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
-		Location:       "s3://bloodraven/lion/lion-nightly-ok/",
-		StorageType:    v1alpha1.BackupStorageS3,
-		SizeBytes:      512 * 1024 * 1024,
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
+			Type: v1alpha1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
+		},
+		SizeBytes: 512 * 1024 * 1024,
 	}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatalf("update backup status: %v", err)
@@ -180,7 +177,7 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-provision", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -280,7 +277,7 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 	if after.Status.BackupRef == nil || after.Status.BackupRef.Name != backup.Name {
 		t.Errorf("status.backupRef not resolved: %+v", after.Status.BackupRef)
 	}
-	if !containsFinalizer(after.Finalizers, "shipstream.io/mysqlbackup-verification") {
+	if !containsFinalizer(after.Finalizers, "bloodraven.shipstream.io/mysqlbackup-verification") {
 		t.Errorf("finalizer not stamped: %v", after.Finalizers)
 	}
 }
@@ -302,9 +299,10 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	backup.Status = v1alpha1.MysqlBackupStatus{
 		Phase:          v1alpha1.BackupPhaseSucceeded,
 		CompletionTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
-		Location:       "s3://bloodraven/lion/lion-nightly-ok/",
-		StorageType:    v1alpha1.BackupStorageS3,
-		SizeBytes:      512 * 1024 * 1024,
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
+			Type: v1alpha1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
+		},
+		SizeBytes: 512 * 1024 * 1024,
 	}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatalf("update backup status: %v", err)
@@ -321,7 +319,7 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-ok", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -388,7 +386,7 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	}
 	var seenVerified bool
 	for _, c := range terminal.Status.Conditions {
-		if c.Type == controller.ConditionVerified {
+		if c.Type == v1alpha1.ConditionVerified {
 			seenVerified = true
 			if c.Status != metav1.ConditionTrue {
 				t.Errorf("Verified condition status: want True, got %s", c.Status)
@@ -415,7 +413,7 @@ func TestEnvtest_Verification_BackupNotFound_FailsWithReason(t *testing.T) {
 	verify := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-no-backup", Namespace: ns},
 		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -444,7 +442,7 @@ func TestEnvtest_Verification_BackupNotFound_FailsWithReason(t *testing.T) {
 	}
 	var reason string
 	for _, c := range terminal.Status.Conditions {
-		if c.Type == controller.ConditionVerified {
+		if c.Type == v1alpha1.ConditionVerified {
 			reason = c.Reason
 		}
 	}

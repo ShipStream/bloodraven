@@ -33,7 +33,7 @@ import (
 func listPITRSiteDeployments(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) ([]appsv1.Deployment, error) {
 	var list appsv1.DeploymentList
 	if err := reader.List(ctx, &list, client.InNamespace(fg.Namespace),
-		client.MatchingLabels{labelAppName: "mysql", labelFailoverGroup: fg.Name}); err != nil {
+		client.MatchingLabels{labelAppName: "mysql", v1alpha1.FailoverGroupLabel: fg.Name}); err != nil {
 		return nil, fmt.Errorf("list site deployments: %w", err)
 	}
 	return list.Items, nil
@@ -81,7 +81,7 @@ func pitrProfileRender(fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.Backup
 		if s3 := profile.Storage.S3; s3 != nil {
 			in.Region = s3.Region
 			in.EndpointURL = s3.EndpointURL
-			in.CredentialsSecret = s3.CredentialsSecret
+			in.CredentialsSecret = s3.CredentialsSecretName
 		}
 	case pitrarchive.DestinationPVC:
 		in.Claim = dest.Claim
@@ -115,7 +115,7 @@ func (p pitrRenderInputs) withAccess(src pitrRenderInputs) pitrRenderInputs {
 // pitrBindingEncryptionFor converts a profile's encryption identity to the
 // binding form with the given snapshot (empty for None).
 func pitrBindingEncryptionFor(ident pitrarchive.EncryptionIdentity, keySecretName string) v1alpha1.PITRArchiveBindingEncryption {
-	enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.PITRArchiveEncryptionMode(ident.Mode)}
+	enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionMode(ident.Mode)}
 	if ident.Mode == pitrarchive.EncryptionPassphrase {
 		enc.Algorithm = v1alpha1.EncryptionAlgorithm(ident.Algorithm)
 		enc.KeySecretName = keySecretName
@@ -216,7 +216,7 @@ func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploym
 	// profile's identity (G3): once the profile's mode or algorithm
 	// changed, the binding pass supersedes it, and until then the rows
 	// below hold the previous writer render instead of disabling PITR.
-	if entry != nil && entry.State == v1alpha1.PITRArchiveBindingPending && entry.Reason == pitrBindingEstablishing &&
+	if entry != nil && entry.State == v1alpha1.PITRArchiveBindingPending && entry.Reason == v1alpha1.PITRArchiveBindingReasonEstablishing &&
 		pitrEstablishingRenderable(profile, entry) {
 		return candidateRender(), pitrRenderApply
 	}
@@ -327,7 +327,7 @@ func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.D
 		ids[id] = append(ids[id], r.Deployment)
 	}
 	if len(unreadable) > 0 {
-		return "", false, fmt.Sprintf("site Deployments %s carry no readable %s annotation yet", strings.Join(unreadable, ", "), annotationPITRRender)
+		return "", false, fmt.Sprintf("site Deployments %s carry no readable %s annotation yet", strings.Join(unreadable, ", "), v1alpha1.PITRRenderAnnotation)
 	}
 	if len(ids) > 1 {
 		parts := make([]string, 0, len(ids))
@@ -389,9 +389,9 @@ func pitrReadBinding(fg *v1alpha1.MysqlFailoverGroup, profileName string) (*v1al
 		switch {
 		case entry != nil || len(fg.Status.PITRArchiveBindings) < pitrArchiveBindingsMax:
 		case pitrBindingSlotsTaken(fg) >= pitrArchiveBindingsMax:
-			notReady.reason = reasonPITRBindingLimitReached
+			notReady.reason = v1alpha1.ReasonBindingLimitReached
 			notReady.message = fmt.Sprintf("the group already has %d Bound archive bindings; release one (annotation %s) so %s can be bound",
-				pitrArchiveBindingsMax, ReleasePITRArchiveBindingAnnotation, dest.String())
+				pitrArchiveBindingsMax, v1alpha1.ReleasePITRArchiveBindingAnnotation, dest.String())
 		default:
 			notReady.message = fmt.Sprintf("the binding list is full of entries that are not Bound; waiting for the group's binding pass to make room for %s", dest.String())
 		}
@@ -435,7 +435,7 @@ func pitrProfileReadOnly(fg *v1alpha1.MysqlFailoverGroup, profileName string) (b
 			profileName, dest.String(), entry.Source.Namespace, entry.Source.Name)
 	}
 	if entry.State == v1alpha1.PITRArchiveBindingRefused &&
-		(entry.Reason == pitrBindingArchiveForeign || entry.Reason == pitrBindingArchiveCopy) {
+		(entry.Reason == v1alpha1.PITRArchiveBindingReasonArchiveForeign || entry.Reason == v1alpha1.PITRArchiveBindingReasonArchiveCopy) {
 		return true, fmt.Sprintf("profile %q resolves to %s, whose archive binding was refused (%s); it is read-only for this group",
 			profileName, dest.String(), entry.Reason)
 	}
@@ -486,33 +486,27 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// credentialRoleSecretNames is the Secret keys the MySQL pods read in
-// credentials mode (Δ15, O10): username and password of the five role
+// credentialRoleSecretNames is the Secret keys the MySQL pods read
+// (Δ15, O10): username and password of the five role
 // Secrets, and the operator Secret's MYSQL_ROOT_PASSWORD. Nothing else of
 // those Secrets (a passphrase sharing one, say) enters the pod hash.
 func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
 	out := consumedSecretKeys{}
 	c := fg.Spec.Credentials
-	if c == nil {
-		return out
-	}
-	out.add(c.OperatorSecret, "username", "password", "MYSQL_ROOT_PASSWORD")
-	for _, name := range []string{c.AppSecret, c.ReadOnlySecret, c.MonitorSecret, c.BackupSecret} {
+	out.add(c.OperatorSecretName, "username", "password", "MYSQL_ROOT_PASSWORD")
+	for _, name := range []string{c.AppSecretName, c.ReadOnlySecretName, c.MonitorSecretName, c.BackupSecretName} {
 		out.add(name, "username", "password")
 	}
 	return out
 }
 
 // credentialHashSecretKeys is what reconcileCredentials consumes (Δ15): the
-// role keys of credentialRoleSecretNames, the operator Secret's
-// replication account (a reserved principal), and in legacy mode the dsn of
-// spec.secretName. No passphrase or decryption Secret enters it.
+// role keys of credentialRoleSecretNames and the operator Secret's
+// replication account (a reserved principal). No passphrase or decryption
+// Secret enters it.
 func credentialHashSecretKeys(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
 	out := credentialRoleSecretNames(fg)
-	if c := fg.Spec.Credentials; c != nil {
-		out.add(c.OperatorSecret, "MYSQL_REPLICATION_USER", "MYSQL_REPLICATION_PASSWORD")
-	}
-	out.add(fg.Spec.SecretName, "dsn")
+	out.add(fg.Spec.Credentials.OperatorSecretName, replicationUserKey, replicationPasswordKey)
 	return out
 }
 

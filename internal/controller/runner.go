@@ -160,6 +160,12 @@ type TopologyManagerRunner struct {
 	lastStartWarning map[types.NamespacedName]startWarning
 	// now is the clock for start-failure Events; nil means time.Now.
 	now func() time.Time
+
+	// refusalMu guards refusals: per group, what the operator refuses to
+	// act on (see SetGroupRefusal), which updateCRStatus reports as
+	// Degraded.
+	refusalMu sync.Mutex
+	refusals  map[types.NamespacedName]map[string]groupRefusal
 }
 
 // NewTopologyManagerRunner creates a new runner.
@@ -184,6 +190,12 @@ func (r *TopologyManagerRunner) SetDeploymentReconciler(dr DeploymentReconciler)
 // is held, in either mode (a provisional grant included).
 func (r *TopologyManagerRunner) PlannedClaimHeld(nn types.NamespacedName) bool {
 	return r.PlannedTopology().PlannedClaimHeld(nn)
+}
+
+// PlannedHoldHeld reports whether nn's claim slot holds an automation hold.
+func (r *TopologyManagerRunner) PlannedHoldHeld(nn types.NamespacedName) bool {
+	_, held := r.PlannedTopology().HeldHoldClaim(nn)
+	return held
 }
 
 // SetDragonflyUpgradePaused sets the Dragonfly manager's upgrade pause
@@ -332,7 +344,7 @@ func (r *TopologyManagerRunner) LeaderContext() context.Context {
 	return r.leaderContext
 }
 
-// SetDNSRecordSpec pushes spec.dns.hostname and spec.dns.ttl onto the
+// SetDNSRecordSpec pushes spec.dns.hostname and spec.dns.ttlSeconds onto the
 // running topology manager's DNS updater. Returns true when a manager
 // is running for nn. A false return is safe — the next startManager
 // constructs the updater from the live spec.
@@ -445,12 +457,13 @@ func (r *TopologyManagerRunner) Start(ctx context.Context) error {
 }
 
 // cloneTimeoutFromSpec returns the clone budget from spec.cloneTimeout.
-// Zero means the bootstrap path applies its own default.
+// An unset field returns 0, for which the bootstrap path applies the API
+// default (1h); admission bounds a set value to 1m..24h.
 func cloneTimeoutFromSpec(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if fg == nil || fg.Spec.CloneTimeout <= 0 {
+	if fg == nil || fg.Spec.CloneTimeout == nil {
 		return 0
 	}
-	return time.Duration(fg.Spec.CloneTimeout) * time.Second
+	return fg.Spec.CloneTimeout.Duration
 }
 
 // connectionMaterialHash fingerprints the secrets the operator's MySQL
@@ -470,7 +483,7 @@ func connectionMaterialHash(ctx context.Context, c client.Client, fg *v1alpha1.M
 	h := sha256.New()
 	wrote := false
 
-	if name := fg.Spec.EffectiveOperatorSecretName(); name != "" {
+	if name := fg.Spec.Credentials.OperatorSecretName; name != "" {
 		var secret corev1.Secret
 		nn := types.NamespacedName{Namespace: fg.Namespace, Name: name}
 		if err := c.Get(ctx, nn, &secret); err != nil {
@@ -536,8 +549,33 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		fg := &groups.Items[i]
 		nn := FailoverGroupNamespacedName(fg)
 		seen[nn] = struct{}{}
+		if msg := terminalMarkerVersionProblem(fg); msg != "" {
+			r.SetGroupRefusal(fg, terminalMarkerRefusalKey, v1alpha1.ReasonMetadataVersionUnsupported, msg)
+		} else {
+			r.ClearGroupRefusal(nn, terminalMarkerRefusalKey)
+		}
 
-		cfg := CRConfigToTopologyConfig(fg)
+		cfg, cfgErr := CRConfigToTopologyConfig(fg)
+		if cfgErr != nil {
+			// Fail closed: a manager configured from a role the operator
+			// cannot interpret could promote or fence the wrong site, so
+			// none runs for this group until the spec is valid again.
+			r.mu.RLock()
+			existing, ok := r.managers[nn]
+			r.mu.RUnlock()
+			if ok {
+				r.mu.Lock()
+				if r.managers[nn] == existing {
+					r.retireManagerLocked(nn, existing)
+				}
+				r.mu.Unlock()
+				stopManagedTopology(existing)
+				clearManagedSiteGauges(existing.tm)
+			}
+			r.logger.Error("failed to start topology manager", "fg", nn, "error", cfgErr)
+			r.noteStartFailure(fg, nn, cfgErr, ok)
+			continue
+		}
 
 		// Include operator secret + TLS material so credential or
 		// cert rotation (or TLS adoption) restarts the manager with
@@ -581,12 +619,20 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			}
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			_ = r.applyRestoreProtection(ctx, existing.tm, fg, false)
-			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			r.syncDragonflyUpgradePause(ctx, nn, existing.dragonfly, upgradePaused)
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
+			// The running manager is now current for this generation: an
+			// edit outside the topology configuration (a backup schedule,
+			// a pod label) was applied by the setters above or is owned by
+			// another reconciler. Unreadable connection material keeps the
+			// old credentials, so that generation is not applied yet.
+			if materialErr == nil {
+				existing.tm.SetAppliedGeneration(fg.Generation)
+			}
 			continue
 		}
 
@@ -676,6 +722,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		clearManagedSiteGauges(mt.tm)
 	}
 	r.pruneStartFailures(seen)
+	r.pruneGroupRefusals(seen)
 
 	return nil
 }
@@ -707,13 +754,13 @@ func (r *TopologyManagerRunner) RefreshInitRestoreReadiness(nn types.NamespacedN
 // Initializing (which keeps its Unknown), gets its first verdict from the
 // topology manager's own first write and is not stale.
 func initRestoreReadyStale(fg *v1alpha1.MysqlFailoverGroup) bool {
-	ready := apimeta.FindStatusCondition(fg.Status.Conditions, "Ready")
-	if ready == nil || ready.Reason == "Initializing" {
+	ready := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady)
+	if ready == nil || ready.Reason == v1alpha1.ReasonInitializing {
 		return false
 	}
 	reason, message := initRestoreReadyCondition(fg)
 	if reason == "" {
-		return ready.Reason == readyReasonInitRestoreInProgress || ready.Reason == readyReasonInitRestoreFailed
+		return ready.Reason == v1alpha1.ReasonInitFromBackupInProgress || ready.Reason == v1alpha1.ReasonInitFromBackupFailed
 	}
 	return ready.Status != metav1.ConditionFalse || ready.Reason != reason || ready.Message != message
 }
@@ -724,7 +771,7 @@ func initRestoreReadyStale(fg *v1alpha1.MysqlFailoverGroup) bool {
 // annotation is cleared so the admin can retry with a fixed value
 // rather than receive one rejection event per reconcile.
 func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, tm *TopologyManager) {
-	raw := fg.GetAnnotations()[RecloneAnnotation]
+	raw := fg.GetAnnotations()[v1alpha1.RecloneAnnotation]
 	if raw == "" {
 		return
 	}
@@ -732,7 +779,7 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 	if err := validateRecloneRequest(fg, req); err != nil {
 		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", err.Error())
 		if r.recorder != nil {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", "%s", err.Error())
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRecloneRejected, "%s", err.Error())
 		}
 		// Clear the annotation so the admin sees a single rejection and
 		// can re-apply with the correct value. Leaving it would spam
@@ -749,7 +796,7 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 			"Once the primary's data is good, set status.restoreReclones.phase to Draining instead", req.Site, fg.Status.RestoreReclones.Phase)
 		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", msg)
 		if r.recorder != nil {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", "%s", msg)
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRecloneRejected, "%s", msg)
 		}
 		tm.cancelPendingReclone(req.Site)
 		r.removeRecloneAnnotation(ctx, nn)
@@ -763,10 +810,10 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 	}
 	if tm.SetRecloneSiteFor(req.Site, owner) && r.recorder != nil {
 		if owner != "" {
-			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRecloneRequested,
 				"in-place restore (confirm=%s) requested CLONE INSTANCE of site %q", owner, req.Site)
 		} else {
-			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRecloneRequested,
 				"admin requested CLONE INSTANCE of site %q", req.Site)
 		}
 	}
@@ -789,15 +836,16 @@ func (r *TopologyManagerRunner) removeRecloneAnnotationForSite(ctx context.Conte
 		if annotations == nil {
 			return nil
 		}
-		if _, ok := annotations[RecloneAnnotation]; !ok {
+		if _, ok := annotations[v1alpha1.RecloneAnnotation]; !ok {
 			return nil
 		}
-		if expectedSite != "" && parseRecloneAnnotation(annotations[RecloneAnnotation]).Site != expectedSite {
+		if expectedSite != "" && parseRecloneAnnotation(annotations[v1alpha1.RecloneAnnotation]).Site != expectedSite {
 			return fmt.Errorf("reclone annotation changed before start")
 		}
-		delete(annotations, RecloneAnnotation)
+		base := fresh.DeepCopy()
+		delete(annotations, v1alpha1.RecloneAnnotation)
 		fresh.SetAnnotations(annotations)
-		return r.client.Update(ctx, &fresh)
+		return r.client.Patch(ctx, &fresh, metadataPatch(base))
 	})
 }
 
@@ -821,12 +869,12 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 	// Recreate is owned by the bulk reconciler, which patches every site
 	// Deployment in one pass. Never let a partial or transient drift snapshot
 	// route this strategy back through the ordered updater.
-	if fg.Spec.UpdateStrategy == "Recreate" {
+	if fg.Spec.UpdateStrategy.EffectiveType() == v1alpha1.UpdateStrategyRecreate {
 		tm.SetSpecDriftSites(nil)
 		return
 	}
 
-	driftSites, ok := r.specDriftSites(ctx, r.client, fg)
+	driftSites, refused, ok := r.specDriftView(ctx, r.client, fg)
 	if !ok {
 		return
 	}
@@ -836,13 +884,14 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 			r.logger.Warn("failed to confirm spec drift with an uncached read; preserving current drift set", "error", err)
 			return
 		}
-		confirmed, ok := r.specDriftSites(ctx, r.apiReader, &fresh)
+		confirmed, confirmedRefused, ok := r.specDriftView(ctx, r.apiReader, &fresh)
 		if !ok {
 			return
 		}
-		driftSites = confirmed
+		driftSites, refused = confirmed, confirmedRefused
 	}
 
+	tm.SetSpecRefusedSites(refused)
 	tm.SetSpecDriftSites(driftSites)
 }
 
@@ -850,6 +899,22 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 // reader) carries a spec hash other than the desired one, or ok=false when
 // an input could not be read (the caller keeps the current set).
 func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) ([]string, bool) {
+	drift, _, ok := r.specDriftView(ctx, reader, fg)
+	return drift, ok
+}
+
+// specDriftView is specDriftSites plus the sites whose Deployment is
+// refused for its selector: those are never drift, and never evidence
+// that a site runs the current template either.
+func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (drift, refused []string, ok bool) {
+	// With no sidecar image to render (no pin and no operator default)
+	// every site would hash as drift the render then refuses to apply,
+	// and the ordered updater would retry it for ever. Keep the current
+	// set; the reconcile reports the refusal.
+	if _, err := effectiveSidecarImage(fg); err != nil {
+		r.logger.Warn("cannot render the group's Deployments; preserving current drift set", "fg", client.ObjectKeyFromObject(fg), "error", err)
+		return nil, nil, false
+	}
 	// The reconciler creates the digest key before the first Deployment;
 	// until it exists no live hash can match, so keep the current set.
 	digestKey, err := readDigestKey(ctx, reader, fg)
@@ -857,18 +922,18 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		if err != errDigestKeyMissing {
 			r.logger.Warn("failed to read secret digest key; preserving current drift set", "error", err)
 		}
-		return nil, false
+		return nil, nil, false
 	}
 	secretInputs, err := specSecretInputs(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to read spec secrets; preserving current drift set", "error", err)
-		return nil, false
+		return nil, nil, false
 	}
 	secretDigest := secretContentDigest(digestKey, secretInputs)
 	deploys, err := listPITRSiteDeployments(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to list site deployments; preserving current drift set", "error", err)
-		return nil, false
+		return nil, nil, false
 	}
 	pitr, action := resolvePITRRender(fg, deploys)
 	byName := make(map[string]*appsv1.Deployment, len(deploys))
@@ -876,7 +941,6 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 		byName[deploys[i].Name] = &deploys[i]
 	}
 
-	var driftSites []string
 	for _, site := range fg.Spec.Sites {
 		deploy, found := byName[resourceName(fg.Name, site.Name)]
 		if !found {
@@ -889,23 +953,30 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 					continue // Deployment doesn't exist yet — reconciler will create it
 				}
 				r.logger.Warn("failed to inspect deployment spec drift; preserving current drift set", "site", site.Name, "error", err)
-				return nil, false
+				return nil, nil, false
 			}
 			deploy = &d
 		}
 		if action == pitrRenderDefer {
 			continue
 		}
+		// A Deployment whose immutable selector differs is refused, not
+		// updated (workload_selector.go): it is not drift the ordered
+		// updater could roll.
+		if deploymentSelectorMismatch(deploy, fg, site.Name) != nil {
+			refused = append(refused, site.Name)
+			continue
+		}
 		// The render annotation is repaired on its own (U08): with a
 		// missing or edited one the site's writer would count as a
 		// disagreement (backup stamps, retention) forever, even when the
 		// hash matches.
-		if deploy.Annotations[specHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
-			deploy.Annotations[annotationPITRRender] != pitr.Canonical() {
-			driftSites = append(driftSites, site.Name)
+		if deploy.Annotations[v1alpha1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
+			deploy.Annotations[v1alpha1.PITRRenderAnnotation] != pitr.Canonical() {
+			drift = append(drift, site.Name)
 		}
 	}
-	return driftSites, true
+	return drift, refused, true
 }
 
 // startManager creates and starts a TopologyManager for a single
@@ -915,16 +986,23 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	nn := FailoverGroupNamespacedName(fg)
 
 	// Read the operator credentials secret.
-	operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
+	operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 	var secret corev1.Secret
 	secretNN := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
 	if err := r.client.Get(ctx, secretNN, &secret); err != nil {
 		return fmt.Errorf("get secret %s: %w", secretNN, err)
 	}
+	// A manager dialing with an empty account would only report every site
+	// unreachable; fail the start instead, so the group gets a
+	// TopologyManagerStartFailed Warning naming the Secret.
+	for _, key := range []string{"username", "password"} {
+		if problem := credentialKeyProblem(secret.Data, key, true); problem != "" {
+			return fmt.Errorf("operator secret %s %s %q", secretNN, problem, key)
+		}
+	}
 
 	siteMySQL := make([]internalmysql.Checker, len(fg.Spec.Sites))
 	for i, site := range fg.Spec.Sites {
-		var dsn string
 		var err error
 		tlsConfigName := ""
 		if fg.Spec.TLS != nil {
@@ -938,25 +1016,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 				return fmt.Errorf("configure TLS for site %s: %w", site.Name, err)
 			}
 		}
-		if fg.Spec.UsesCredentials() {
-			dsn = buildSiteDSNFromCreds(
-				string(secret.Data["username"]),
-				string(secret.Data["password"]),
-				fg, site, tlsConfigName,
-			)
-		} else {
-			dsnBytes, ok := secret.Data["dsn"]
-			if !ok {
-				return fmt.Errorf("secret %s missing 'dsn' key", secretNN)
-			}
-			dsn, err = buildSiteDSN(string(dsnBytes), fg, site, tlsConfigName)
-			if err != nil {
-				for j := 0; j < i; j++ {
-					siteMySQL[j].Close()
-				}
-				return fmt.Errorf("build site %s DSN: %w", site.Name, err)
-			}
-		}
+		dsn := buildSiteDSNFromCreds(
+			string(secret.Data["username"]),
+			string(secret.Data["password"]),
+			fg, site, tlsConfigName,
+		)
 
 		checker, err := internalmysql.NewChecker(dsn)
 		if err != nil {
@@ -971,36 +1035,21 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	failoverCtl := NewFailoverController(r.logger.With("fg", nn.String()))
 	tainter := platform.NewNodeTainter(r.clientset, r.logger.With("fg", nn.String()))
 
-	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
+	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds)
 	if spec, ok := dns.(platform.DNSSpecController); ok {
-		spec.SetRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+		spec.SetRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTLSeconds, fg.Generation)
 	}
 
-	// Build bootstrap configuration. In credentials mode, use operator
-	// username/password as replication credentials unless overridden.
-	var replUser, replPassword string
-	if fg.Spec.UsesCredentials() {
-		replUser = string(secret.Data["MYSQL_REPLICATION_USER"])
-		replPassword = string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
-		if replUser == "" {
-			replUser = string(secret.Data["username"])
-		}
-		if replPassword == "" {
-			replPassword = string(secret.Data["password"])
-		}
-	} else {
-		replUser = string(secret.Data["MYSQL_REPLICATION_USER"])
-		replPassword = string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
-	}
-
+	// Build bootstrap configuration from the replication account the
+	// operator Secret names, resolved as the start check and the init
+	// script resolve it. A Secret the start check refuses (one replication
+	// key without the other, or the operator account with another
+	// password) leaves auto-bootstrap disabled rather than replicating with
+	// a password MySQL does not hold for the account.
 	var bootstrapCtl *BootstrapController
 	var bootstrapCfg BootstrapConfig
-	if replUser == "" || replPassword == "" {
-		missing := "MYSQL_REPLICATION_USER"
-		if replUser != "" {
-			missing = "MYSQL_REPLICATION_PASSWORD"
-		}
-		r.logger.Warn("auto-bootstrap disabled: secret missing replication credentials", "fg", nn, "missing", missing)
+	if replUser, replPassword, problem := replicationCredentials(secret.Data); problem != "" {
+		r.logger.Warn("auto-bootstrap disabled: unusable replication credentials", "fg", nn, "reason", problem)
 	} else {
 		bootstrapCtl = NewBootstrapController(r.logger.With("fg", nn.String()))
 		bootstrapCfg = BootstrapConfig{
@@ -1014,6 +1063,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	updateCtl := NewUpdateController(failoverCtl, r.logger.With("fg", nn.String()))
 	tm := NewTopologyManager(cfg, siteMySQL, failoverCtl, updateCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
+	tm.SetAppliedGeneration(fg.Generation)
 
 	// Encryption-at-rest clone gate: a CLONE INSTANCE recipient needs a
 	// writable keyring to rewrap the donor's tablespace keys, so the
@@ -1074,12 +1124,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 	for _, site := range fg.Status.Sites {
 		if site.SourceConvergenceState != "" || site.SourceHost != "" {
-			tm.SetSourceConvergence(site.Name, site.SourceHost, SourceConvergenceState(site.SourceConvergenceState), site.SourceConvergenceReason)
+			tm.SetSourceConvergence(site.Name, site.SourceHost, site.SourceConvergenceState, site.SourceConvergenceReason)
 		}
-		if site.RecoveryState != recoveryStateBlocked && site.RecoveryState != recoveryStateInProgress && site.DivergentGtid == "" {
+		if site.RecoveryState != v1alpha1.RecoveryStateBlocked && site.RecoveryState != v1alpha1.RecoveryStateInProgress && site.DivergentGtid == "" {
 			continue
 		}
-		if site.RecoveryState == recoveryStateInProgress {
+		if site.RecoveryState == v1alpha1.RecoveryStateInProgress {
 			tm.SetRecoveryInProgress(site.Name)
 			r.logger.Info("restored recovery in-progress state from CR status", "fg", nn, "site", site.Name)
 			continue
@@ -1116,7 +1166,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// ReplicationBroken, Updating, ...) are not clobbered by a partially
 	// populated snapshot from the async bootstrap goroutine.
 	tm.BootstrapStatusCallback = func(phase, errMsg, source string) {
-		r.updateBootstrappingCondition(ctx, nn, phase, errMsg, source)
+		r.updateBootstrappingCondition(ctx, nn, tm.AppliedGeneration(), phase, errMsg, source)
 	}
 	tm.RecloneCompleteCallback = func(completeCtx context.Context, site string, outcome RecloneOutcome) error {
 		// Record the outcome on the restore queue first: once the
@@ -1300,8 +1350,8 @@ func (tm *TopologyManager) restoreFailoverRecordFrom(fg *v1alpha1.MysqlFailoverG
 	// The promotion GTID gates which candidates are safe to promote and how
 	// a returning old primary is judged, so it must survive a restart. It
 	// is taken from the newer record below; this is the status copy.
-	tm.promotionGtidExecuted = fg.Status.PromotionGtidExecuted
-	tm.groupHasData = strings.TrimSpace(fg.Status.PromotionGtidExecuted) != ""
+	tm.promotionGtidExecuted = fg.Status.PromotionGtidExecuted()
+	tm.groupHasData = strings.TrimSpace(fg.Status.PromotionGtidExecuted()) != ""
 	for _, site := range fg.Status.Sites {
 		if strings.TrimSpace(site.GtidExecuted) != "" {
 			tm.groupHasData = true
@@ -1633,6 +1683,12 @@ func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *T
 	r.managers[nn] = &managedTopology{tm: tm}
 }
 
+// RemoveRecloneAnnotationForTest removes the group's reclone annotation
+// the way a started reclone does. Not for production use.
+func (r *TopologyManagerRunner) RemoveRecloneAnnotationForTest(ctx context.Context, nn types.NamespacedName, expectedSite string) error {
+	return r.removeRecloneAnnotationForSite(ctx, nn, expectedSite)
+}
+
 // WriteStatusForTest writes snap to the CR status the way a running
 // manager's status callback does. Not for production use.
 func (r *TopologyManagerRunner) WriteStatusForTest(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) error {
@@ -1752,7 +1808,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	// Save existing status before modification for comparison.
 	existingStatus := freshFG.Status.DeepCopy()
-	if !MergeTopologySnapshotStatus(&freshFG.Status, snap) {
+	// Lagging uses the same threshold as Degraded=ReplicationLagging
+	// below: the spec this status is written against.
+	snap.MaxLagSeconds = freshFG.Spec.EffectiveMaxLagSeconds()
+	if snapshotSupersededByAppliedGeneration(&freshFG.Status, snap) || !MergeTopologySnapshotStatus(&freshFG.Status, snap) {
 		r.hydrateDeploymentGeneration(&freshFG)
 		return nil
 	}
@@ -1768,17 +1827,19 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			s.SourceConvergenceState == sourceConvergenceConverged
 	}
 
-	// Update conditions using freshFG.Generation so ObservedGeneration reflects
-	// the generation of the object we are actually writing against.
+	// The topology conditions are stamped with the generation the manager
+	// applied (snap.AppliedGeneration), not the fetched object's: a spec
+	// edit the manager has not taken up yet must not read as observed.
+	gen := snap.AppliedGeneration
 	now := metav1.Now()
 	reason := degradedReason(snap)
 	readyStatus := conditionBool(hasWritable && replicationHealthy)
-	readyReason := "TopologyPolled"
+	readyReason := v1alpha1.ReasonHealthy
 	readyMessage := "At least one site is writable and replication is healthy"
 	if !hasWritable {
-		readyMessage = "No site is writable"
+		readyReason, readyMessage = v1alpha1.ReasonNoWritablePrimary, "No site is writable"
 	} else if !replicationHealthy {
-		readyMessage = "Replication is not healthy"
+		readyReason, readyMessage = v1alpha1.ReasonReplicationUnhealthy, "Replication is not healthy"
 		if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 {
 			readyMessage = fmt.Sprintf("Replication is not healthy; %s await their post-restore reclone with replication stopped",
 				strings.Join(q.Pending, ", "))
@@ -1786,35 +1847,37 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 	degradedStatus, degradedMessage := metav1.ConditionTrue, snap.Alert
 	switch reason {
-	case "Healthy":
+	case v1alpha1.ReasonHealthy:
 		degradedStatus, degradedMessage = metav1.ConditionFalse, "No cross-site alerts"
-	case "Initializing":
+	case v1alpha1.ReasonInitializing:
 		// Neither is known yet. Unknown keeps Ready=False and Degraded=True
 		// consumers from reading every operator start as an outage.
-		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, reason, initializingMessage(snap)
+		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, v1alpha1.ReasonInitializing, initializingMessage(snap)
 		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
+	case v1alpha1.ReasonBootstrapFailed:
+		degradedMessage = bootstrapFailedMessage(snap, &freshFG)
 	}
 	// A group whose initFromBackup restore has not succeeded is not ready
 	// for applications whatever its topology: the operator keeps them off
 	// it (no DNS record, no Service endpoints). Ready says why and, after a
 	// failed load, how to recover. Initializing keeps its Unknown.
-	if reason != "Initializing" {
+	if reason != v1alpha1.ReasonInitializing {
 		if restoreReason, restoreMessage := initRestoreReadyCondition(&freshFG); restoreReason != "" {
 			readyStatus, readyReason, readyMessage = metav1.ConditionFalse, restoreReason, restoreMessage
 		}
 	}
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
+		Type:               v1alpha1.ConditionReady,
 		Status:             readyStatus,
-		ObservedGeneration: freshFG.Generation,
+		ObservedGeneration: gen,
 		LastTransitionTime: now,
 		Reason:             readyReason,
 		Message:            readyMessage,
 	})
 	setCondition(&freshFG.Status.Conditions, metav1.Condition{
-		Type:               "Degraded",
+		Type:               v1alpha1.ConditionDegraded,
 		Status:             degradedStatus,
-		ObservedGeneration: freshFG.Generation,
+		ObservedGeneration: gen,
 		LastTransitionTime: now,
 		Reason:             reason,
 		Message:            degradedMessage,
@@ -1837,11 +1900,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// Pending/ProbeFailed, and skipping here would suppress the Degraded
 		// condition. Only read-only followers carry convergence state — the
 		// writable primary is excluded.
-		if reason == "Healthy" && s.State == state.StateReadOnly && s.SourceConvergenceState != sourceConvergenceConverged {
+		if reason == v1alpha1.ReasonHealthy && s.State == state.StateReadOnly && s.SourceConvergenceState != sourceConvergenceConverged {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: "Degraded", Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason:  "ReplicationSourceMismatch",
+				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
+				ObservedGeneration: gen, LastTransitionTime: now,
+				Reason:  v1alpha1.ReasonReplicationSourceMismatch,
 				Message: fmt.Sprintf("Replication source on %s is not the active primary", s.Name),
 			})
 		}
@@ -1850,35 +1913,41 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			continue
 		}
 		siteName := s.Name
+		if reason == v1alpha1.ReasonBootstrapFailed {
+			// The failed clone outranks the per-site replication
+			// reasons: the site needs another clone, not a replication
+			// fix, and the reason must hold until it gets one.
+			continue
+		}
 		if !repl.IORunning || !repl.SQLRunning {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type:               "Degraded",
+				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation,
+				ObservedGeneration: gen,
 				LastTransitionTime: now,
-				Reason:             "ReplicationBroken",
+				Reason:             v1alpha1.ReasonReplicationBroken,
 				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", siteName),
 			})
 		}
-		degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded")
+		degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDegraded)
 		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds &&
-			(degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason == "ReplicationLagging") {
+			(degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason == v1alpha1.ReasonReplicationLagging) {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type:               "Degraded",
+				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation,
+				ObservedGeneration: gen,
 				LastTransitionTime: now,
-				Reason:             "ReplicationLagging",
+				Reason:             v1alpha1.ReasonReplicationLagging,
 				Message:            fmt.Sprintf("Replication lag on %s is %ds (threshold %ds)", siteName, *repl.SecondsBehindSource, maxLagSeconds),
 			})
 		}
 		if repl.LastError != "" {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type:               "Degraded",
+				Type:               v1alpha1.ConditionDegraded,
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation,
+				ObservedGeneration: gen,
 				LastTransitionTime: now,
-				Reason:             "ReplicationError",
+				Reason:             v1alpha1.ReasonReplicationError,
 				Message:            fmt.Sprintf("Replication error on %s: %s", siteName, repl.LastError),
 			})
 		}
@@ -1892,17 +1961,23 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// persisted status, not a topology observation, so it is known before
 	// the topology is classified, and True keeps the deployment API
 	// refusing leases while peers are held.
-	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == "Healthy" || reason == "Initializing") {
-		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded"); degraded == nil || degraded.Status != metav1.ConditionTrue {
+	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonInitializing) {
+		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: "Degraded", Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason: "RestoreReclonePending",
+				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
+				ObservedGeneration: gen, LastTransitionTime: now,
+				Reason: v1alpha1.ReasonRestoreReclonePending,
 				Message: fmt.Sprintf("%s await their post-restore reclone (status.restoreReclones phase %s); their replication is stopped until then",
 					strings.Join(q.Pending, ", "), q.Phase),
 			})
 		}
 	}
+
+	// Something the operator refuses to act on (a workload selector it
+	// cannot update, a payload it cannot read) outranks the per-site
+	// reasons above; the divergence block below and the topology alerts
+	// still win.
+	r.setRefusalDegraded(&freshFG.Status.Conditions, nn, reason, gen, now)
 
 	// A divergence block outranks the per-site replication reasons above,
 	// which are last-writer-wins: a lagging or broken replica must not hide
@@ -1910,23 +1985,25 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// (split brain, no primary, total loss) still win; Initializing is not
 	// an alert and does not. Ready is untouched: the group serves, and Ready
 	// gates application rollouts.
-	if reason == "Healthy" || reason == "Initializing" {
+	if reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonInitializing {
 		if msg := divergenceDegradedMessage(snap); msg != "" {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: "Degraded", Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason:  "DivergentTransactions",
+				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
+				ObservedGeneration: gen, LastTransitionTime: now,
+				Reason:  v1alpha1.ReasonDivergentTransactions,
 				Message: msg,
 			})
 		}
 	}
+	// A refusal the reasons above outrank still shows, with its remedy.
+	r.appendRefusalDetail(&freshFG.Status.Conditions, nn)
 
 	// A promotion of a divergent site is recorded once and kept until an
 	// administrator removes the condition after reviewing the transactions.
 	newDivergentPromotion := false
 	if note := snap.DivergentPromotion; note != nil {
 		msg := divergentPromotionMessage(*note)
-		existing := apimeta.FindStatusCondition(freshFG.Status.Conditions, divergentPromotionCondition)
+		existing := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDivergentPromotion)
 		if existing == nil || !strings.Contains(existing.Message, msg) {
 			newDivergentPromotion = true
 			// Earlier promotions an administrator has not reviewed (and
@@ -1936,78 +2013,80 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				combined = appendDivergentPromotion(existing.Message, msg)
 			}
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: divergentPromotionCondition, Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason:  "DivergentSitePromoted",
+				Type: v1alpha1.ConditionDivergentPromotion, Status: metav1.ConditionTrue,
+				ObservedGeneration: gen, LastTransitionTime: now,
+				Reason:  v1alpha1.ReasonDivergentSitePromoted,
 				Message: combined,
 			})
 		}
 	}
 
 	// Bootstrapping condition reflects fresh-deploy bootstrap progress.
-	setBootstrappingCondition(&freshFG.Status.Conditions, freshFG.Generation, now, snap.BootstrapPhase, snap.BootstrapError, snap.BootstrapSource)
+	setBootstrappingCondition(&freshFG.Status.Conditions, gen, now, BootstrapPhase(snap.BootstrapPhase), snap.BootstrapError, snap.BootstrapSource)
 
 	// Update phase tracking (status.updatePhase itself is merged above).
 	if snap.UpdatePhase != "" {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Updating",
+			Type:               v1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
-			Reason:             snap.UpdatePhase,
+			Reason:             string(snap.UpdatePhase),
 			Message:            fmt.Sprintf("Ordered update in progress: %s", snap.UpdatePhase),
 		})
 	} else if snap.UpdateStalled != "" {
+		// Still updating: the update resumes once the pod is Ready.
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Updating",
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
+			Type:               v1alpha1.ConditionUpdating,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
-			Reason:             ReasonOrderedUpdateStalled,
+			Reason:             v1alpha1.ReasonOrderedUpdateStalled,
 			Message:            orderedUpdateStalledMessage(snap.UpdateStalled),
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Updating",
+			Type:               v1alpha1.ConditionUpdating,
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
-			Reason:             "NotUpdating",
+			Reason:             v1alpha1.ReasonNotUpdating,
 			Message:            "No update in progress",
 		})
 	}
 
 	// RecoveryPending condition.
-	if snap.RecoveryState == recoveryStateInProgress {
+	if snap.RecoveryState == v1alpha1.RecoveryStateInProgress {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "RecoveryPending",
+			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
-			Reason:             "RecoveryInProgress",
+			Reason:             v1alpha1.ReasonRecoveryInProgress,
 			Message:            fmt.Sprintf("Old primary %s is being reconfigured as a replica", snap.RecoverySite),
 		})
-	} else if snap.RecoveryState == recoveryStateBlocked {
-		msg := fmt.Sprintf("Old primary %s has %d divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=%s to recover", snap.RecoverySite, snap.DivergentTxnCount, snap.RecoverySite)
+	} else if snap.RecoveryState == v1alpha1.RecoveryStateBlocked {
+		msg := fmt.Sprintf("Old primary %s has %d divergent transactions — reclone it (kubectl bloodraven reclone %s %s, or annotate %s=%s) to recover",
+			snap.RecoverySite, snap.DivergentTxnCount, freshFG.Name, snap.RecoverySite, v1alpha1.RecloneAnnotation, recloneAnnotationValue(&freshFG, snap.RecoverySite))
 		if snap.DivergenceDetectedBy == divergenceDetectedByAudit {
 			msg = fmt.Sprintf("Replica %s has %d transactions the primary%s lacks — reclone it (kubectl bloodraven reclone %s %s) or make the primary contain them",
 				snap.RecoverySite, snap.DivergentTxnCount, comparedToSuffix(snap.DivergenceComparedTo), freshFG.Name, snap.RecoverySite)
 		}
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "RecoveryPending",
+			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
-			Reason:             "DivergentTransactions",
+			Reason:             v1alpha1.ReasonDivergentTransactions,
 			Message:            msg,
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "RecoveryPending",
+			Type:               v1alpha1.ConditionRecoveryPending,
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
+			ObservedGeneration: gen,
 			LastTransitionTime: now,
-			Reason:             "NoRecoveryPending",
+			Reason:             v1alpha1.ReasonNoRecoveryPending,
 			Message:            "No old primary recovery pending",
 		})
 	}
@@ -2053,6 +2132,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			r.hydrateDeploymentGeneration(&fresh)
 			return nil
 		}
+		// A newer write at the same topology generation may have landed
+		// since the first read (see snapshotSupersededByAppliedGeneration).
+		if snapshotSupersededByAppliedGeneration(&fresh.Status, snap) {
+			superseded = true
+			return nil
+		}
 		// Apply status changes to the freshly-fetched object.
 		//
 		// freshFG.Status is a snapshot taken before this function started
@@ -2095,7 +2180,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// that raced this write is not undone.
 		var liveDivergentPromotion *metav1.Condition
 		if !newDivergentPromotion {
-			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, divergentPromotionCondition); c != nil {
+			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDivergentPromotion); c != nil {
 				cp := *c
 				liveDivergentPromotion = &cp
 			}
@@ -2106,14 +2191,14 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// not be replaced by freshFG's pre-merged copy.
 		live := fresh.Status
 		fresh.Status = *freshFG.Status.DeepCopy()
-		fresh.Status.LastFailover, fresh.Status.LastFailoverTarget, fresh.Status.PromotionGtidExecuted =
-			live.LastFailover, live.LastFailoverTarget, live.PromotionGtidExecuted
+		fresh.Status.ObservedGeneration = max(live.ObservedGeneration, fresh.Status.ObservedGeneration)
+		fresh.Status.LastFailover = live.LastFailover
 		mergeFailoverTriple(&fresh.Status, snap)
 		if !newDivergentPromotion {
 			if liveDivergentPromotion != nil {
 				setCondition(&fresh.Status.Conditions, *liveDivergentPromotion)
 			} else {
-				removeCondition(&fresh.Status.Conditions, divergentPromotionCondition)
+				removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionDivergentPromotion)
 			}
 		}
 		fresh.Status.PlannedFailover = planned
@@ -2139,7 +2224,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		if pitrArchivePrev != nil {
 			setCondition(&fresh.Status.Conditions, *pitrArchivePrev)
 		} else {
-			removeCondition(&fresh.Status.Conditions, conditionPITRArchiveReady)
+			removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionPITRArchiveReady)
 		}
 		r.applyPITRArchiveStatus(ctx, nn, &fresh)
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
@@ -2163,7 +2248,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 	r.ackDivergentPromotion(nn, snap)
 	if newDivergentPromotion && r.recorder != nil {
-		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, "DivergentSitePromoted", "%s", divergentPromotionMessage(*snap.DivergentPromotion))
+		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, v1alpha1.ReasonDivergentSitePromoted, "%s", divergentPromotionMessage(*snap.DivergentPromotion))
 	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 	r.emitPITRArchiveReissueRisk(&freshFG, persistedActiveFrom)
@@ -2177,15 +2262,33 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	return nil
 }
 
+// snapshotSupersededByAppliedGeneration reports whether st was already
+// written from a newer snapshot at the same topology generation: one that
+// published a later applied generation than snap's. The manager's applied
+// generation only rises, so such a write came from a later callback that
+// won the race to the API server. Its topology conditions are stamped with
+// that generation; writing snap's over them would move them back while the
+// root observedGeneration stays at its maximum, and the status refresh that
+// produced the newer write has been consumed, so nothing would rewrite
+// them. The comparison is against snap.AppliedGeneration, not a status
+// already merged with st, whose observedGeneration never moves back.
+func snapshotSupersededByAppliedGeneration(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) bool {
+	return st.TopologyGeneration == snap.TopologyGeneration && st.ObservedGeneration > snap.AppliedGeneration
+}
+
 // MergeTopologySnapshotStatus merges the topology manager's snapshot into
-// st: the active site, topologyGeneration, the per-site observations and
-// recovery fields, the failover record {lastFailover, lastFailoverTarget,
+// st: observedGeneration (never backwards), the active site,
+// topologyGeneration, the per-site observations and
+// recovery fields, the failover record status.lastFailover {time, target,
 // promotionGtidExecuted} and updatePhase. It returns false, leaving st
 // untouched, when the snapshot is older than the stored topologyGeneration.
 // Conditions and the subtrees other writers own are not touched.
 func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) bool {
 	if snap.TopologyGeneration < st.TopologyGeneration {
 		return false
+	}
+	if snap.AppliedGeneration > st.ObservedGeneration {
+		st.ObservedGeneration = snap.AppliedGeneration
 	}
 
 	st.ActiveSite = snap.ActiveSite
@@ -2198,7 +2301,7 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 		st.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
 	}
 	for i, s := range snap.Sites {
-		st.Sites[i] = siteStatusFromSnapshot(s)
+		st.Sites[i] = siteStatusFromSnapshot(s, snap.MaxLagSeconds)
 	}
 
 	mergeFailoverTriple(st, snap)
@@ -2217,7 +2320,7 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 		}
 		st.Sites[i].DivergenceDetectedBy = ""
 		st.Sites[i].DivergenceComparedTo = ""
-		if s.RecoveryState == recoveryStateBlocked {
+		if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 			st.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
 			st.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
 		}
@@ -2227,18 +2330,18 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 	return true
 }
 
-// mergeFailoverTriple moves the failover record {lastFailover,
-// lastFailoverTarget, promotionGtidExecuted} of st forward to snap's: a
-// snapshot whose lastFailover is strictly older (second precision) than
-// the stored one leaves the triple alone, and an equal one may change only
+// mergeFailoverTriple moves the failover record status.lastFailover{time,
+// target, promotionGtidExecuted} of st forward to snap's: a snapshot whose
+// failover time is strictly older (second precision) than the stored one
+// leaves the record alone, and an equal one may change only
 // the target (a planned failover naming an unconfirmed target). The status
 // write's conflict retry applies it again over the live triple, so a newer
 // record committed in between (the planned engine's) is not overwritten.
 func mergeFailoverTriple(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
 	snapAt := snap.LastFailover.UTC().Truncate(time.Second)
 	var storedAt time.Time
-	if st.LastFailover != nil {
-		storedAt = st.LastFailover.UTC().Truncate(time.Second)
+	if t := st.LastFailoverTime(); t != nil {
+		storedAt = t.UTC().Truncate(time.Second)
 	}
 	if !snapAt.IsZero() && failoverStampFutureDated(storedAt, snap.ObservedAt) {
 		// A stored record implausibly ahead of the writer's clock is no
@@ -2248,11 +2351,9 @@ func mergeFailoverTriple(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySna
 	switch {
 	case snapAt.After(storedAt):
 		t := metav1.NewTime(snap.LastFailover)
-		st.LastFailover = &t
-		st.LastFailoverTarget = snap.LastFailoverTarget
-		st.PromotionGtidExecuted = snap.PromotionGtidExecuted
+		st.SetLastFailover(&t, snap.LastFailoverTarget, snap.PromotionGtidExecuted)
 	case snapAt.Equal(storedAt):
-		st.LastFailoverTarget = snap.LastFailoverTarget
+		st.SetLastFailover(st.LastFailoverTime(), snap.LastFailoverTarget, st.PromotionGtidExecuted())
 	}
 }
 
@@ -2330,10 +2431,7 @@ func (r *TopologyManagerRunner) populatePITRStatusFor(nn types.NamespacedName, f
 		return
 	}
 
-	out := &v1alpha1.PITRStatus{
-		Enabled:     true,
-		ProfileName: fg.Spec.Backup.PITR.ProfileName,
-	}
+	out := &v1alpha1.PITRStatus{}
 	// Iterate in site-name order so the derived Message (and any future
 	// order-sensitive field) is reproducible across reconciles — map
 	// iteration in Go is randomized, which would otherwise flap the
@@ -2398,7 +2496,6 @@ func (r *TopologyManagerRunner) populatePITRStatusFor(nn types.NamespacedName, f
 		// times are maxima: the answering sites can only move them
 		// forward, and a stale value would read as a stopped archive.
 		kept := fg.Status.PITR.DeepCopy()
-		kept.Enabled, kept.ProfileName = true, fg.Spec.Backup.PITR.ProfileName
 		if out.NewestArchivedTime != nil && (kept.NewestArchivedTime == nil || out.NewestArchivedTime.After(kept.NewestArchivedTime.Time)) {
 			kept.NewestArchivedTime = out.NewestArchivedTime
 		}
@@ -2435,17 +2532,17 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	}
 
 	// Failover executed: new failover target differs from previously persisted target.
-	if snap.LastFailoverTarget != "" && snap.LastFailoverTarget != existingStatus.LastFailoverTarget {
-		r.recorder.Eventf(fg, corev1.EventTypeNormal, "FailoverExecuted",
+	if snap.LastFailoverTarget != "" && snap.LastFailoverTarget != existingStatus.LastFailoverTarget() {
+		r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventFailoverExecuted,
 			"Failover completed: %s promoted as new primary", snap.LastFailoverTarget)
 	}
 
 	// Per-site recovery transitions: compare the previously persisted state
 	// against the new snapshot for each site independently, since multiple
 	// sites can be in recovery at once.
-	oldState := make(map[string]string, len(existingStatus.Sites))
+	oldState := make(map[string]v1alpha1.SiteRecoveryState, len(existingStatus.Sites))
 	oldDivergentCount := make(map[string]int64, len(existingStatus.Sites))
-	oldDetectedBy := make(map[string]string, len(existingStatus.Sites))
+	oldDetectedBy := make(map[string]v1alpha1.DivergenceDetector, len(existingStatus.Sites))
 	oldSet := make(map[string]string, len(existingStatus.Sites))
 	oldComparedTo := make(map[string]string, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
@@ -2456,15 +2553,15 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 			oldDivergentCount[s.Name] = *s.DivergentTransactionCount
 		}
 	}
-	recoveryActive := func(st string) bool {
-		return st == recoveryStateInProgress || st == recoveryStateBlocked
+	recoveryActive := func(st v1alpha1.SiteRecoveryState) bool {
+		return st == v1alpha1.RecoveryStateInProgress || st == v1alpha1.RecoveryStateBlocked
 	}
 	for _, s := range snap.Sites {
 		// Data loss detected: RecoveryBlocked appeared where it wasn't before,
 		// or the periodic re-verification found the divergent set has CHANGED
 		// while the site stayed blocked (it respawned writable, took writes,
 		// and was re-fenced). Re-emitting on a changed count keeps the Event
-		// stream in step with status.divergentTransactionCount — an admin who
+		// stream in step with status.sites[].divergentTransactionCount — an admin who
 		// extracts only the first-reported set would lose the rest. An
 		// unchanged count is not re-emitted, and a status that never recorded
 		// a count is treated as unchanged rather than as a new report.
@@ -2476,20 +2573,20 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// while another appeared) or a comparison against another primary;
 		// both are new evidence. A field the old status never recorded
 		// (written before provenance existed) is not.
-		evidenceChanged := oldState[s.Name] == recoveryStateBlocked &&
+		evidenceChanged := oldState[s.Name] == v1alpha1.RecoveryStateBlocked &&
 			((oldSet[s.Name] != "" && oldSet[s.Name] != s.DivergentGtid) ||
 				(oldComparedTo[s.Name] != "" && s.DivergenceComparedTo != "" && oldComparedTo[s.Name] != s.DivergenceComparedTo))
-		if s.RecoveryState == recoveryStateBlocked &&
-			(oldState[s.Name] != recoveryStateBlocked || countChanged || evidenceChanged) {
+		if s.RecoveryState == v1alpha1.RecoveryStateBlocked &&
+			(oldState[s.Name] != v1alpha1.RecoveryStateBlocked || countChanged || evidenceChanged) {
 			if s.DivergenceDetectedBy == divergenceDetectedByAudit {
 				// A replica, usually replicating normally, holds history
 				// the primary lacks; "did not replicate before failover"
 				// would send the reader to the wrong playbook.
-				r.recorder.Eventf(fg, corev1.EventTypeWarning, "DivergentReplicaDetected",
+				r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDivergentReplicaDetected,
 					"%d transactions on %s are missing from the primary%s (%s); ordered updates and planned failovers will not promote it. Reclone it or make the primary contain them",
 					s.DivergentTxnCount, s.Name, comparedToSuffix(s.DivergenceComparedTo), truncateGtidHint(s.DivergentGtid))
 			} else {
-				r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
+				r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDataLossDetected,
 					"%d divergent transactions on %s did not replicate before failover",
 					s.DivergentTxnCount, s.Name)
 			}
@@ -2499,20 +2596,16 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// re-assert) is not a recovery completion — the site did not rejoin
 		// as a replica — so no Normal event is emitted for it.
 		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable {
-			if oldState[s.Name] == recoveryStateBlocked && oldDetectedBy[s.Name] == divergenceDetectedByAudit {
-				r.recorder.Eventf(fg, corev1.EventTypeNormal, "DivergenceResolved",
+			if oldState[s.Name] == v1alpha1.RecoveryStateBlocked && oldDetectedBy[s.Name] == divergenceDetectedByAudit {
+				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDivergenceResolved,
 					"Replica %s no longer holds transactions the primary lacks", s.Name)
 			} else {
-				r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
+				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventOldPrimaryRecovered,
 					"Old primary %s recovered and is now replicating", s.Name)
 			}
 		}
 	}
 }
-
-// eventReasonPITRArchiveReissueRisk warns that a promoted site may reissue
-// GTIDs the archive already holds (D-46).
-const eventReasonPITRArchiveReissueRisk = "PITRArchiveReissueRiskDetected"
 
 // emitPITRArchiveReissueRisk fires when a status write persisted an
 // active-site change (a failover, a planned failover or a re-promotion) to a
@@ -2539,14 +2632,14 @@ func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFai
 	if r == nil || r.recorder == nil || !pitrEnabled(fg) || promoted == "" || promoted == from {
 		return
 	}
-	if from == "" && fg.Status.LastFailover == nil && fg.Status.LastFailoverTarget == "" {
+	if from == "" && fg.Status.LastFailoverTime() == nil && fg.Status.LastFailoverTarget() == "" {
 		return
 	}
 	rows, ok := r.pitrArchiveSuspectRows(FailoverGroupNamespacedName(fg), promoted)
 	if !ok || rows == 0 {
 		return
 	}
-	r.recorder.Eventf(fg, corev1.EventTypeWarning, eventReasonPITRArchiveReissueRisk,
+	r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveReissueRiskDetected,
 		"site %s was promoted while its archive manifest holds %d divergent/quarantined rows. If %s was recloned after a lossy failover, it reissues the lost GTIDs, and every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup.",
 		promoted, rows, promoted)
 }
@@ -2571,11 +2664,6 @@ func (r *TopologyManagerRunner) pitrArchiveSuspectRows(nn types.NamespacedName, 
 	return s.DivergentRows + s.QuarantinedRows, true
 }
 
-// ReasonOrderedUpdateStalled is the Updating condition reason, and the
-// Warning Event reason, for an ordered update stopped on a site whose pod
-// is not Ready.
-const ReasonOrderedUpdateStalled = "OrderedUpdateStalled"
-
 func orderedUpdateStalledMessage(stall string) string {
 	return fmt.Sprintf("Ordered update stalled: %s. No other site is rolled and the active site is not handed off until that pod has been Ready for %s; the update retries every %s",
 		stall, podStableFor, orderedUpdateStallRetry)
@@ -2592,14 +2680,14 @@ func (r *TopologyManagerRunner) emitOrderedUpdateStallEvent(fg *v1alpha1.MysqlFa
 	if r.recorder == nil {
 		return
 	}
-	cur := apimeta.FindStatusCondition(fg.Status.Conditions, "Updating")
-	if cur == nil || cur.Reason != ReasonOrderedUpdateStalled {
+	cur := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating)
+	if cur == nil || cur.Reason != v1alpha1.ReasonOrderedUpdateStalled {
 		return
 	}
-	if prev := apimeta.FindStatusCondition(existingStatus.Conditions, "Updating"); prev != nil && prev.Reason == cur.Reason && prev.Message == cur.Message {
+	if prev := apimeta.FindStatusCondition(existingStatus.Conditions, v1alpha1.ConditionUpdating); prev != nil && prev.Reason == cur.Reason && prev.Message == cur.Message {
 		return
 	}
-	r.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonOrderedUpdateStalled, "%s", cur.Message)
+	r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.ReasonOrderedUpdateStalled, "%s", cur.Message)
 }
 
 // emitKeyringPromotionEvents fires Warning Events when the promotion
@@ -2620,14 +2708,14 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 	}
 	if !stringSlicesEqual(snap.KeyringPromotionSkipped, mt.lastKeyringPromotionSkipped) {
 		for _, site := range snap.KeyringPromotionSkipped {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringPromotionSkipped",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringPromotionSkipped,
 				"skipping promotion candidate %s: site is mid-keyring-rotation (UnsealReason=Rotation)", site)
 		}
 		mt.lastKeyringPromotionSkipped = append([]string(nil), snap.KeyringPromotionSkipped...)
 	}
 	if !stringSlicesEqual(snap.KeyringPromotionRefused, mt.lastKeyringPromotionRefused) {
 		if len(snap.KeyringPromotionRefused) > 0 {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringPromotionRefused",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventKeyringPromotionRefused,
 				"promotion refused: %s mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
 				strings.Join(snap.KeyringPromotionRefused, ", "))
 		}
@@ -2635,7 +2723,7 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 	}
 	if !stringSlicesEqual(snap.RestoreReclonePromotionRefused, mt.lastRestoreReclonePromotionRefused) {
 		if len(snap.RestoreReclonePromotionRefused) > 0 {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "PromotionRefusedPendingReclone",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPromotionRefusedReclonePending,
 				"automatic promotion refused: %s not yet recloned after the in-place restore and hold pre-restore data; "+
 					"bring the primary back, or accept that data by removing status.restoreReclones "+
 					"(kubectl patch mfg <group> --subresource=status --type=json -p '[{\"op\":\"remove\",\"path\":\"/status/restoreReclones\"}]')",
@@ -2645,7 +2733,7 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 	}
 	if snap.BootstrapRefusedRestoreHold != mt.lastBootstrapRefusedRestoreHold {
 		if snap.BootstrapRefusedRestoreHold != "" {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "BootstrapRefusedRestoreHold",
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBootstrapRefusedRestoreHold,
 				"refused to clone into %s: an in-place restore holds it (status.restoreReclones is Armed or Held, or the topology is frozen); "+
 					"its data and stopped replication are kept until the restore queue is resolved",
 				snap.BootstrapRefusedRestoreHold)
@@ -2665,7 +2753,7 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	}
 
 	newReason := degradedReason(snap)
-	if newReason == "Initializing" {
+	if newReason == v1alpha1.ReasonInitializing {
 		// Not a topology verdict: neither raise an event nor record it, so
 		// the first real verdict compares against what came before (no
 		// SiteRecovered for a group that was never reported degraded).
@@ -2685,10 +2773,10 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	}
 
 	switch newReason {
-	case "SplitBrain":
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, "SplitBrainDetected",
+	case v1alpha1.ReasonSplitBrain:
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSplitBrainDetected,
 			"Both sites are writable: %s", snap.Alert)
-	case "NoPrimary":
+	case v1alpha1.ReasonNoPrimary:
 		if strings.Contains(snap.Alert, "UnsealReason=Rotation") || strings.Contains(snap.Alert, "pending post-restore reclone") {
 			// KeyringPromotionRefused / PromotionRefusedPendingReclone is
 			// the specific Event; the generic "Both sites are read-only"
@@ -2696,14 +2784,14 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 			// primary + one rotating or not-yet-recloned replica).
 			break
 		}
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, "NoPrimaryDetected",
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventNoPrimaryDetected,
 			"Both sites are read-only: %s", snap.Alert)
-	case "TotalLoss":
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, "TotalLossDetected",
+	case v1alpha1.ReasonTotalLoss:
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventTotalLossDetected,
 			"Both sites are unreachable: %s", snap.Alert)
-	case "Healthy":
+	case v1alpha1.ReasonHealthy:
 		if oldReason != "" {
-			r.recorder.Event(fg, corev1.EventTypeNormal, "SiteRecovered",
+			r.recorder.Event(fg, corev1.EventTypeNormal, v1alpha1.EventSiteRecovered,
 				"Degraded condition cleared, topology is healthy")
 		}
 	}
@@ -2712,15 +2800,70 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 }
 
 // degradedReason returns the Degraded condition reason for a topology
-// snapshot. Prefers the pre-computed DegradedReason from the state
-// machine; falls back to inspecting aggregate site states when the
-// snapshot is a partial update (e.g. bootstrap-only).
+// snapshot: the topology verdict (topologyDegradedReason), or
+// BootstrapFailed when the last clone failed and its target has not
+// replicated since. BootstrapFailed ranks below the cross-site alerts and
+// above SiteUnhealthy; Initializing is no verdict and keeps its Unknown.
 func degradedReason(snap TopologySnapshot) string {
+	reason := topologyDegradedReason(snap)
+	if (reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonSiteUnhealthy) && bootstrapFailureStands(snap) {
+		return v1alpha1.ReasonBootstrapFailed
+	}
+	return reason
+}
+
+// bootstrapFailureStands reports whether the snapshot's failed bootstrap
+// still needs attention: the phase is Failed and its target has neither
+// replicated (Healthy or Lagging) nor been the writable primary since the
+// failure (BootstrapFailureResolved latches the first time it did, so a
+// later unrelated blip does not bring the old clone error back). A failure
+// before a target was chosen stands until the next bootstrap starts. A
+// target no longer configured has nothing left to report.
+func bootstrapFailureStands(snap TopologySnapshot) bool {
+	if BootstrapPhase(snap.BootstrapPhase) != BootstrapPhaseFailed || snap.BootstrapFailureResolved {
+		return false
+	}
+	if snap.BootstrapTarget == "" {
+		return true
+	}
+	for _, s := range snap.Sites {
+		if s.Name != snap.BootstrapTarget {
+			continue
+		}
+		if s.State == state.StateWritable {
+			return false
+		}
+		return !siteReplicationState(s.State, s.Replication, s.ReplicaStatusRead, s.ReplicationHealthy, snap.MaxLagSeconds).Running()
+	}
+	return false
+}
+
+// bootstrapFailedMessage is the Degraded=True/BootstrapFailed message.
+func bootstrapFailedMessage(snap TopologySnapshot, fg *v1alpha1.MysqlFailoverGroup) string {
+	label := bootstrapLabel(snap.BootstrapSource)
+	msg := label + " failed"
+	if snap.BootstrapTarget != "" {
+		msg = fmt.Sprintf("%s into %s failed", label, snap.BootstrapTarget)
+	}
+	if snap.BootstrapError != "" {
+		msg += ": " + snap.BootstrapError
+	}
+	if snap.BootstrapTarget != "" {
+		msg += fmt.Sprintf(". It clears when %s replicates; to clone it again, annotate %s=%s", snap.BootstrapTarget, v1alpha1.RecloneAnnotation, recloneAnnotationValue(fg, snap.BootstrapTarget))
+	}
+	return msg
+}
+
+// topologyDegradedReason returns the topology verdict for a snapshot.
+// Prefers the pre-computed DegradedReason from the state machine; falls
+// back to inspecting aggregate site states when the snapshot is a partial
+// update (e.g. bootstrap-only).
+func topologyDegradedReason(snap TopologySnapshot) string {
 	if snap.DegradedReason != "" {
 		return snap.DegradedReason
 	}
 	if snap.Alert == "" {
-		return "Healthy"
+		return v1alpha1.ReasonHealthy
 	}
 	var writable, readOnly, unreachable, coreSites int
 	for _, s := range snap.Sites {
@@ -2738,17 +2881,17 @@ func degradedReason(snap TopologySnapshot) string {
 		}
 	}
 	if coreSites == 0 {
-		return "Alert"
+		return v1alpha1.ReasonCrossSiteAlert
 	}
 	switch {
 	case writable > 1:
-		return "SplitBrain"
+		return v1alpha1.ReasonSplitBrain
 	case unreachable == coreSites:
-		return "TotalLoss"
+		return v1alpha1.ReasonTotalLoss
 	case writable == 0 && readOnly > 0:
-		return "NoPrimary"
+		return v1alpha1.ReasonNoPrimary
 	}
-	return "Alert"
+	return v1alpha1.ReasonCrossSiteAlert
 }
 
 // initializingMessage names the primary-candidates not yet classified since
@@ -2772,17 +2915,12 @@ func initializingMessage(snap TopologySnapshot) string {
 	return "Classifying sites after operator start: " + strings.Join(parts, "; ")
 }
 
-// divergentPromotionCondition records that a site holding transactions its
-// former primary lacked was promoted. Set by the operator, removed only by
-// an administrator.
-const divergentPromotionCondition = "DivergentPromotion"
-
 // divergenceDegradedMessage describes every site carrying a divergence
 // block, or returns "" when none does.
 func divergenceDegradedMessage(snap TopologySnapshot) string {
 	var parts []string
 	for _, s := range snap.Sites {
-		if s.RecoveryState != recoveryStateBlocked {
+		if s.RecoveryState != v1alpha1.RecoveryStateBlocked {
 			continue
 		}
 		parts = append(parts, fmt.Sprintf("%s holds %d transactions the primary%s lacks (%s)",
@@ -2852,72 +2990,64 @@ func (r *TopologyManagerRunner) ackDivergentPromotion(nn types.NamespacedName, s
 // setBootstrappingCondition writes the Bootstrapping condition based on the
 // current phase. It is shared between the full-status writer (updateCRStatus)
 // and the dedicated bootstrap-only writer (updateBootstrappingCondition) so
-// they stay in sync.
-func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64, now metav1.Time, phase, errMsg, source string) {
-	label := "Bootstrap"
+// they stay in sync. The condition is True only while a clone runs; a
+// finished clone is False/NotBootstrapping and a failed one
+// False/BootstrapFailed (Degraded carries the failure while it stands).
+func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64, now metav1.Time, phase BootstrapPhase, errMsg, source string) {
+	label := bootstrapLabel(source)
+	c := metav1.Condition{
+		Type:               v1alpha1.ConditionBootstrapping,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: generation,
+		LastTransitionTime: now,
+	}
+	switch phase {
+	case BootstrapPhaseCloning:
+		c.Reason = v1alpha1.ReasonCloning
+	case BootstrapPhaseRestarting:
+		c.Reason = v1alpha1.ReasonWaitingForRestart
+	case BootstrapPhaseSetupRepl:
+		c.Reason = v1alpha1.ReasonSetupReplication
+	case BootstrapPhaseDone:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, v1alpha1.ReasonNotBootstrapping, label+" completed successfully"
+	case BootstrapPhaseFailed:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, v1alpha1.ReasonBootstrapFailed, label+" failed"
+		if errMsg != "" {
+			c.Message = fmt.Sprintf("%s failed: %s", label, errMsg)
+		}
+	default:
+		c.Status, c.Reason, c.Message = metav1.ConditionFalse, v1alpha1.ReasonNotBootstrapping, "No bootstrap in progress"
+	}
+	if c.Status == metav1.ConditionTrue {
+		c.Message = fmt.Sprintf("%s in progress: %s", label, c.Reason)
+	}
+	setCondition(conditions, c)
+}
+
+// bootstrapLabel names a bootstrap source in condition messages.
+func bootstrapLabel(source string) string {
 	switch source {
 	case "reclone":
-		label = "Reclone"
+		return "Reclone"
 	case "auto-clone":
-		label = "Auto-clone"
+		return "Auto-clone"
 	}
-
-	switch phase {
-	case "":
-		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             "NotBootstrapping",
-			Message:            "No bootstrap in progress",
-		})
-	case string(BootstrapPhaseDone):
-		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             string(BootstrapPhaseDone),
-			Message:            fmt.Sprintf("%s completed successfully", label),
-		})
-	case string(BootstrapPhaseFailed):
-		msg := fmt.Sprintf("%s failed", label)
-		if errMsg != "" {
-			msg = fmt.Sprintf("%s failed: %s", label, errMsg)
-		}
-		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             "Failed",
-			Message:            msg,
-		})
-	default:
-		setCondition(conditions, metav1.Condition{
-			Type:               "Bootstrapping",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: generation,
-			LastTransitionTime: now,
-			Reason:             phase,
-			Message:            fmt.Sprintf("%s in progress: %s", label, phase),
-		})
-	}
+	return "Bootstrap"
 }
 
 // updateBootstrappingCondition updates ONLY the Bootstrapping condition on the
-// CR. It is invoked from the bootstrap goroutine on phase transitions; using a
+// CR, stamped with generation (the manager's applied generation). It is
+// invoked from the bootstrap goroutine on phase transitions; using a
 // dedicated path (rather than updateCRStatus with a partially populated
 // TopologySnapshot) prevents inadvertently clearing unrelated conditions.
-func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context, nn types.NamespacedName, phase, errMsg, source string) {
+func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context, nn types.NamespacedName, generation int64, phase, errMsg, source string) {
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.client.Get(ctx, nn, &fresh); err != nil {
 			return err
 		}
 		before := fresh.Status.DeepCopy()
-		setBootstrappingCondition(&fresh.Status.Conditions, fresh.Generation, metav1.Now(), phase, errMsg, source)
+		setBootstrappingCondition(&fresh.Status.Conditions, generation, metav1.Now(), BootstrapPhase(phase), errMsg, source)
 		if equality.Semantic.DeepEqual(before, &fresh.Status) {
 			return nil
 		}
@@ -2932,20 +3062,28 @@ func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context
 	}
 }
 
-func siteStatusFromSnapshot(s SiteSnapshot) v1alpha1.SiteStatus {
+// siteStatusFromSnapshot is the status.sites[] entry of one site snapshot.
+// maxLagSeconds is spec.replication.maxLagSeconds, the Lagging threshold.
+func siteStatusFromSnapshot(s SiteSnapshot, maxLagSeconds int64) v1alpha1.SiteStatus {
 	status := v1alpha1.SiteStatus{
 		Name:                    s.Name,
-		State:                   s.State.String(),
+		State:                   apiSiteState(s.State),
 		SourceHost:              s.SourceHost,
 		SourceConvergenceState:  v1alpha1.SourceConvergenceState(s.SourceConvergenceState),
 		SourceConvergenceReason: s.SourceConvergenceReason,
 	}
 	if !s.LastSeen.IsZero() {
 		t := metav1.NewTime(s.LastSeen)
-		status.LastSeen = &t
+		status.LastSeenTime = &t
 	}
+	// The observation decides the enum; the manager's published value only
+	// keeps a Lagging site Lagging inside the hysteresis band, which a
+	// recomputation from raw lag alone would drop. A snapshot built
+	// without a published value (PublishedReplication empty) gets none.
+	status.Replication = lagHysteresis(s.PublishedReplication,
+		siteReplicationState(s.State, s.Replication, s.ReplicaStatusRead, s.ReplicationHealthy, maxLagSeconds),
+		s.Replication, maxLagSeconds)
 	if s.Replication != nil {
-		status.Replicating = s.ReplicationHealthy
 		status.SecondsBehindSource = s.Replication.SecondsBehindSource
 		status.GtidExecuted = s.Replication.ExecutedGtidSet
 	}
@@ -2964,7 +3102,7 @@ func conditionBool(v bool) metav1.ConditionStatus {
 // copy, which would undo a concurrent reconciler write.
 // AutomaticFailoverHeld is the planned-failover automation hold: a runner
 // status write must never drop it.
-var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady, conditionPITRMysqlConfAccepted, conditionPITRArchiveBindingReady, v1alpha1.ConditionAutomaticFailoverHeld}
+var reconcilerOwnedConditions = []string{v1alpha1.ConditionEncryptionAtRestReady, v1alpha1.ConditionS3CredentialsReady, v1alpha1.ConditionPITRMysqlConfAccepted, v1alpha1.ConditionPITRArchiveBindingReady, v1alpha1.ConditionAutomaticFailoverHeld}
 
 // setCondition sets or updates a condition in the slice, preserving LastTransitionTime
 // if the status has not changed.
@@ -2993,30 +3131,8 @@ func removeCondition(conditions *[]metav1.Condition, condType string) {
 	}
 }
 
-// buildSiteDSN takes a base DSN and replaces the host with the site
-// service endpoint. tlsConfigName, when non-empty, names a MySQL driver
-// TLS config registered for the site's service host.
-//
-// The TLS config is only stamped on when the supplied DSN does not
-// already choose one: this is the legacy spec.secretName mode where the
-// DSN is user-authored, so an explicit `tls=` parameter is a deliberate
-// choice and wins. Without this, a group that turns on spec.tls — which
-// sets require_secure_transport=ON — would have every site probe fail
-// with Error 3159, and no failover could ever run.
-func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) (string, error) {
-	parsed, err := internalmysql.ParseDSN(baseDSN)
-	if err != nil {
-		return "", fmt.Errorf("parse DSN: %w", err)
-	}
-	parsed.Addr = fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, site.Name, fg.Namespace), mysqlPort)
-	if tlsConfigName != "" && parsed.TLSConfig == "" {
-		parsed.TLSConfig = tlsConfigName
-	}
-	return parsed.FormatDSN(), nil
-}
-
 // buildSiteDSNFromCreds constructs a DSN from username/password credentials
-// and the site service endpoint (used in credentials mode). tlsConfigName, when
+// and the site service endpoint. tlsConfigName, when
 // non-empty, names a MySQL driver TLS config registered for the site's service host.
 func buildSiteDSNFromCreds(username, password string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) string {
 	cfg := mysql.NewConfig()
