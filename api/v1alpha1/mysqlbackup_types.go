@@ -230,9 +230,9 @@ type MysqlBackupStatus struct {
 
 	// CleanupStartTime is when the deletion of this backup committed to
 	// removing its artifact. It is recorded just before the first cleanup
-	// Job is created, against the spec that said Delete, and is never
-	// cleared. From then on a deletionPolicy changed to Retain is not
-	// applied.
+	// Job is created, against the spec that said Delete. It is removed
+	// again only when that Job cannot be created; otherwise it stays, and
+	// a deletionPolicy changed to Retain is no longer applied.
 	// +optional
 	CleanupStartTime *metav1.Time `json:"cleanupStartTime,omitempty"`
 

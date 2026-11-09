@@ -388,12 +388,27 @@ func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *test
 		t.Fatal("the timed-out run put the loading active back in traffic")
 	}
 	for range 2 {
-		if err := r.syncDragonflyPodLabels(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+		requeue, err := r.syncDragonflyPodLabels(ctx, getFGByKey(t, c, fgNN(fg)))
+		if err != nil {
 			t.Fatal(err)
+		}
+		if requeue <= 0 {
+			t.Fatal("a sweep holding traffic for a load asked for no requeue; nothing would probe the load again")
 		}
 	}
 	if serving() {
 		t.Fatal("the label sweep gave the loading active its traffic back")
+	}
+	// Another writer (a promotion restoring its source) gives the
+	// traffic back while the load runs: the next sweep takes it off again.
+	if err := setDragonflyTrafficOnSite(ctx, c, getFGByKey(t, c, fgNN(fg)), "dc1", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.syncDragonflyPodLabels(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+		t.Fatal(err)
+	}
+	if serving() {
+		t.Fatal("traffic another writer restored on the loading active survived the sweep")
 	}
 
 	// Every site on one image would remove the Failed record; it stays
@@ -411,12 +426,15 @@ func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *test
 	}
 
 	conn.persist = dragonfly.PersistenceInfo{}
-	if err := r.syncDragonflyPodLabels(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
-		t.Fatal(err)
+	if requeue, err := r.syncDragonflyPodLabels(ctx, getFGByKey(t, c, fgNN(fg))); err != nil || requeue != 0 {
+		t.Fatalf("sweep after the load = (%v, %v), want no requeue", requeue, err)
 	}
 	for _, p := range podsForSite(t, c, fg, "dc1") {
 		if p.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || p.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
 			t.Fatalf("labels %v once the active loaded, want master with traffic", p.Labels)
+		}
+		if _, ok := p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation]; ok {
+			t.Fatal("the load-hold mark outlived the load")
 		}
 	}
 	if _, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {

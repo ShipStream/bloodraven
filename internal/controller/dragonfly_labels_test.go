@@ -42,7 +42,7 @@ func TestSyncDragonflyPodLabels_StampsBothLabels(t *testing.T) {
 	dc2Pod := makeDragonflyPod(fg.Name, "dc2", "master", true)
 	r, c := newReconciler(fg, dc1Pod, dc2Pod)
 
-	if err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
 		t.Fatalf("syncDragonflyPodLabels: %v", err)
 	}
 	var got1, got2 corev1.Pod
@@ -88,7 +88,7 @@ func TestSyncDragonflyPodLabels_SkipsRestoreDuringStripWindow(t *testing.T) {
 	dc2Pod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	r, c := newReconciler(fg, dc1Pod, dc2Pod)
 
-	if err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
 		t.Fatalf("syncDragonflyPodLabels: %v", err)
 	}
 	var got1 corev1.Pod
@@ -123,7 +123,7 @@ func TestSyncDragonflyPodLabels_RestoresAfterTakeoverSucceeded(t *testing.T) {
 	dc2Pod := makeDragonflyPod(fg.Name, "dc2", "master", true)
 	r, c := newReconciler(fg, dc1Pod, dc2Pod)
 
-	if err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
 		t.Fatalf("syncDragonflyPodLabels: %v", err)
 	}
 	var got1, got2 corev1.Pod
@@ -154,7 +154,7 @@ func TestSyncDragonflyPodLabels_HonorsDragonflyOnlyActiveSite(t *testing.T) {
 	dc2Pod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	r, c := newReconciler(fg, dc1Pod, dc2Pod)
 
-	if err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
 		t.Fatalf("syncDragonflyPodLabels: %v", err)
 	}
 	var got1, got2 corev1.Pod

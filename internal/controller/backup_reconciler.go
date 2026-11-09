@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	k8sretry "k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -1038,12 +1039,22 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		if err := controllerutil.SetControllerReference(backup, built, r.Scheme); err != nil {
 			return false, 0, fmt.Errorf("set cleanup job owner ref: %w", err)
 		}
-		if wait, err := r.recordCleanupStart(ctx, backup); err != nil || wait > 0 {
+		recorded, wait, err := r.recordCleanupStart(ctx, backup)
+		if err != nil || wait > 0 {
 			return false, wait, err
 		}
 		if err := r.Create(ctx, built); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				return false, 5 * time.Second, nil
+			}
+			// No Job of this deletion exists yet (a quota, a webhook), so
+			// nothing has deleted anything: take back the start this pass
+			// recorded, and a Retain set while the create keeps failing
+			// still applies.
+			if recorded {
+				if clearErr := r.clearCleanupStart(ctx, backup); clearErr != nil {
+					return false, 0, errors.Join(fmt.Errorf("create cleanup job: %w", err), clearErr)
+				}
 			}
 			return false, 0, fmt.Errorf("create cleanup job: %w", err)
 		}
@@ -1223,20 +1234,47 @@ func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1al
 // the resourceVersion this pass read: a spec edit (to Retain) since then
 // conflicts, and the next pass decides from the new spec before any Job
 // exists.
-func (r *MysqlBackupReconciler) recordCleanupStart(ctx context.Context, backup *v1alpha1.MysqlBackup) (time.Duration, error) {
+//
+// recorded reports that this call set it (it was not set before).
+func (r *MysqlBackupReconciler) recordCleanupStart(ctx context.Context, backup *v1alpha1.MysqlBackup) (recorded bool, wait time.Duration, err error) {
 	if backup.Status.CleanupStartTime != nil {
-		return 0, nil
+		return false, 0, nil
 	}
 	patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	now := metav1.NewTime(r.clock())
 	backup.Status.CleanupStartTime = &now
 	if err := r.Status().Patch(ctx, backup, patch); err != nil {
+		backup.Status.CleanupStartTime = nil
 		if apierrors.IsConflict(err) {
-			return 2 * time.Second, nil
+			return false, 2 * time.Second, nil
 		}
-		return 0, fmt.Errorf("record cleanup start: %w", err)
+		return false, 0, fmt.Errorf("record cleanup start: %w", err)
 	}
-	return 0, nil
+	return true, 0, nil
+}
+
+// clearCleanupStart removes the status.cleanupStartTime that
+// recordCleanupStart set when the cleanup Job it preceded could not be
+// created. It retries on a conflict: a spec edit since (to Retain) must not
+// leave a start recorded for a Job that never existed.
+func (r *MysqlBackupReconciler) clearCleanupStart(ctx context.Context, backup *v1alpha1.MysqlBackup) error {
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		var fresh v1alpha1.MysqlBackup
+		if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(backup), &fresh); err != nil {
+			return err
+		}
+		if fresh.Status.CleanupStartTime == nil {
+			return nil
+		}
+		patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		fresh.Status.CleanupStartTime = nil
+		return r.Status().Patch(ctx, &fresh, patch)
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("clear cleanup start after the cleanup Job create failed: %w", err)
+	}
+	backup.Status.CleanupStartTime = nil
+	return nil
 }
 
 // artifactCleanupStarted reports whether the deletion has started cleaning

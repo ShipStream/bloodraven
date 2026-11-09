@@ -654,9 +654,11 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Mirror the same sweep for Dragonfly pods so the active service
 	// selector follows the active site (or the in-flight planned-
 	// failover target). No-op when spec.dragonfly is disabled.
-	if err := r.syncDragonflyPodLabels(ctx, &fg); err != nil {
+	dragonflyLabelRequeue, err := r.syncDragonflyPodLabels(ctx, &fg)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
 	}
+	deferredRequeue = minPositiveDuration(deferredRequeue, dragonflyLabelRequeue)
 
 	// Backup work runs after the label syncs above: those labels route the
 	// primary and replica Services, so a failing backup step must not
