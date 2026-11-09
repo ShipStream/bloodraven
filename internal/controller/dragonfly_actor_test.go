@@ -885,7 +885,7 @@ func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) 
 		t.Errorf("Tick overwrote the dc2 promotion: %+v", current.Status.Dragonfly)
 	}
 	r := &MysqlFailoverGroupReconciler{Client: c}
-	if err := r.syncDragonflyPodLabels(context.Background(), current); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), current); err != nil {
 		t.Fatal(err)
 	}
 	var pod corev1.Pod
@@ -1072,7 +1072,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), live, "dc1", "dc2"); promoted || !deferred {
 		t.Fatalf("rollout promotion with the gate held = (promoted %v, deferred %v), want deferred", promoted, deferred)
 	}
-	if err := r.syncDragonflyPodLabels(context.Background(), live); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), live); err != nil {
 		t.Fatalf("label sweep with the gate held: %v", err)
 	}
 	if n := plannedDials.Load(); n != 0 {
@@ -1208,7 +1208,7 @@ func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 	if !ok {
 		t.Fatal("gate busy")
 	}
-	if err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
 		t.Fatal(err)
 	}
 	if after := podLabels(t, c, fg.Namespace); !maps.EqualFunc(before, after, maps.Equal) {
@@ -1218,7 +1218,7 @@ func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 
 	// With the gate free the same pass converges on status (dc1), which
 	// shows the skipped pass would have relabelled.
-	if err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), getFGByKey(t, c, key)); err != nil {
 		t.Fatal(err)
 	}
 	if eps := writableEndpoints(t, c, fg); !slices.Equal(eps, []string{"dc1"}) {
@@ -1241,7 +1241,7 @@ func TestSyncDragonflyPodLabels_ReadsStatusAfterTakingGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &MysqlFailoverGroupReconciler{Client: c, Runner: &TopologyManagerRunner{}}
-	if err := r.syncDragonflyPodLabels(context.Background(), stale); err != nil {
+	if _, err := r.syncDragonflyPodLabels(context.Background(), stale); err != nil {
 		t.Fatal(err)
 	}
 	if eps := writableEndpoints(t, c, fg); !slices.Equal(eps, []string{"dc2"}) {

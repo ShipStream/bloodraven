@@ -421,6 +421,19 @@ const (
 	// Value: a hash.
 	// Stability: Internal (may change).
 	SystemSchemaRestrictionAnnotation = "bloodraven.shipstream.io/system-schema-restriction"
+
+	// DragonflyLoadHoldAnnotation marks a Dragonfly pod whose traffic the
+	// operator holds off until it has loaded its snapshot: the active site
+	// of a snapshot-restore upgrade that ended while it was still loading.
+	// While it is set, the operator removes the pod's
+	// DragonflyTrafficLabel again whoever restored it, and it removes the
+	// annotation once the site answers as loaded.
+	//
+	// On: Dragonfly pods.
+	// Writer: operator.
+	// Value: an RFC 3339 time, when the hold started.
+	// Stability: Internal (may change).
+	DragonflyLoadHoldAnnotation = "bloodraven.shipstream.io/dragonfly-load-hold"
 )
 
 // Keys: Backup and verification labels.

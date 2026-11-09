@@ -137,7 +137,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 			// traffic is held for a snapshot load; it goes once the sweep
 			// has given that traffic back.
 			if held, err := r.dragonflyUpgradeTrafficHeld(ctx, fg, cur); err != nil || held {
-				return dragonflyUpgradeStep{}, err
+				return dragonflyUpgradeStep{wait: dragonflyUpgradePollInterval}, err
 			}
 			return dragonflyUpgradeStep{}, r.setDragonflyUpgradeStatus(ctx, fg, nil)
 		case dragonflyUpgradeWait:
@@ -978,7 +978,7 @@ func (r *MysqlFailoverGroupReconciler) failDragonflyUpgrade(ctx context.Context,
 		return dragonflyUpgradeStep{}, err
 	}
 	if loading {
-		if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.ActiveSite, false); err != nil {
+		if err := holdDragonflyTrafficForLoad(ctx, r.Client, fg, cur.ActiveSite, r.now()); err != nil {
 			return dragonflyUpgradeStep{}, err
 		}
 		msg += "; the active site's Dragonfly has not loaded its snapshot yet (" + state + "), so its traffic stays off until it does"
@@ -1041,9 +1041,10 @@ func dragonflyUpgradeTrafficGateSite(fg *v1alpha1.MysqlFailoverGroup) string {
 }
 
 // dragonflyUpgradeTrafficHeld reports whether a pod of the Failed run
-// cur's active site has no traffic label: the run, or the label sweep's
-// gate after it, holds it off until the site loads. The record is the
-// gate's input, so it is not removed while that holds.
+// cur's active site carries DragonflyLoadHoldAnnotation or has no traffic
+// label: the run, or the label sweep's gate after it, holds it off until
+// the site loads. The record is the gate's input, so it is not removed
+// while that holds.
 func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeTrafficHeld(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus) (bool, error) {
 	if cur == nil || cur.Phase != v1alpha1.DragonflyUpgradePhaseFailed || cur.ActiveSite == "" {
 		return false, nil
@@ -1053,6 +1054,9 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeTrafficHeld(ctx context.C
 		return false, err
 	}
 	for i := range pods {
+		if _, ok := pods[i].Annotations[v1alpha1.DragonflyLoadHoldAnnotation]; ok {
+			return true, nil
+		}
 		if pods[i].Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 			return true, nil
 		}

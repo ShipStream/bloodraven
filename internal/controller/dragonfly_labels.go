@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,34 +39,39 @@ import (
 // The sweep holds the group's Dragonfly gate and reads the group after
 // acquiring it, so it never relabels from status that a promotion has just
 // superseded. If another writer holds the gate it skips this pass.
-func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+//
+// The returned duration is non-zero while the sweep holds a site's traffic
+// for a snapshot load (dragonflySweepHoldsTraffic): the load ending
+// produces no event, so the reconcile must come back to probe it.
+func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	if !dragonflyEnabled(fg) {
-		return nil
+		return 0, nil
 	}
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	release, ok := r.tryDragonflyGate(nn)
 	if !ok {
 		log.FromContext(ctx).V(1).Info("dragonfly label sweep skipped: gate busy", "fg", nn)
-		return nil
+		return 0, nil
 	}
 	defer release()
 	fresh, err := r.freshFailoverGroup(ctx, nn)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil
+			return 0, nil
 		}
-		return fmt.Errorf("re-read failover group for dragonfly label sweep: %w", err)
+		return 0, fmt.Errorf("re-read failover group for dragonfly label sweep: %w", err)
 	}
 	fg = fresh
 	if !dragonflyEnabled(fg) {
-		return nil
+		return 0, nil
 	}
 	master := effectiveDragonflyMasterSite(fg)
 	if master == "" {
 		// Nothing to align until MySQL has chosen an active site.
-		return nil
+		return 0, nil
 	}
 	logger := log.FromContext(ctx)
+	var requeue time.Duration
 
 	for _, site := range fg.Spec.Sites {
 		desiredRole := "replica"
@@ -89,18 +95,20 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 				v1alpha1.SiteLabel: site.Name,
 			},
 		); err != nil {
-			return fmt.Errorf("list dragonfly pods for site %s: %w", site.Name, err)
+			return 0, fmt.Errorf("list dragonfly pods for site %s: %w", site.Name, err)
 		}
 		holdTraffic, err := r.dragonflySweepHoldsTraffic(ctx, fg, site.Name, desiredRole, stripActiveOnSource, pods.Items)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if holdTraffic {
-			// A pod re-created from the template carries traffic; take it
-			// off before the role below could make it an endpoint.
-			if err := setDragonflyTrafficOnSite(ctx, r.Client, fg, site.Name, false); err != nil {
-				return err
+			// A pod re-created from the template, or one another writer
+			// gave traffic back, carries it; take it off before the role
+			// below could make it an endpoint.
+			if err := holdDragonflyTrafficForLoad(ctx, r.Client, fg, site.Name, r.now()); err != nil {
+				return 0, err
 			}
+			requeue = dragonflyUpgradePollInterval
 		}
 		for i := range pods.Items {
 			pod := &pods.Items[i]
@@ -127,35 +135,46 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 				}
 				return r.Update(ctx, &fresh)
 			}); err != nil {
-				return fmt.Errorf("update dragonfly pod %s labels: %w", podName, err)
+				return 0, fmt.Errorf("update dragonfly pod %s labels: %w", podName, err)
 			}
 			logger.Info("synced dragonfly pod labels", "pod", podName, "role", desiredRole)
 		}
 	}
-	return nil
+	return requeue, nil
 }
 
 // dragonflySweepHoldsTraffic reports whether the sweep keeps site's
 // Dragonfly pods out of traffic this pass: site is the active site of a
-// Failed snapshot-restore run (dragonflyUpgradeTrafficGateSite), the sweep
-// would make one of its pods serve (give it the traffic label, or the
-// master role while it carries traffic), and the site does not answer as
-// loaded. A run that ends while the pod it restarted on its snapshot is
-// still loading must not have that pod put behind the Services, by itself
-// or by this sweep, before the load completes; the pod's TCP readiness
-// probe passes while it loads.
+// Failed snapshot-restore run (dragonflyUpgradeTrafficGateSite), and the
+// site does not answer as loaded while either a pod carries
+// DragonflyLoadHoldAnnotation (the run ended, or an earlier sweep held it,
+// while it loaded) or the sweep would make a pod serve (give it the
+// traffic label, or the master role while it carries traffic). A run that
+// ends while the pod it restarted on its snapshot is still loading must
+// not have that pod put behind the Services before the load completes,
+// by this sweep or by another writer (a promotion that restores its
+// source's traffic): the pod's TCP readiness probe passes while it loads.
+// Once the site answers as loaded the marks are removed; a mark on a site
+// that is no longer gated is removed without a probe.
 func (r *MysqlFailoverGroupReconciler) dragonflySweepHoldsTraffic(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site, desiredRole string, stripActiveOnSource bool, pods []corev1.Pod) (bool, error) {
-	if stripActiveOnSource || site != dragonflyUpgradeTrafficGateSite(fg) {
-		return false, nil
-	}
+	marked := false
 	serves := false
 	for i := range pods {
+		if _, ok := pods[i].Annotations[v1alpha1.DragonflyLoadHoldAnnotation]; ok {
+			marked = true
+		}
 		traffic := pods[i].Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled
 		if !traffic || (desiredRole == "master" && pods[i].Labels[v1alpha1.DragonflyRoleLabel] != desiredRole) {
 			serves = true
 		}
 	}
-	if !serves {
+	if site != dragonflyUpgradeTrafficGateSite(fg) {
+		if marked {
+			return false, releaseDragonflyLoadHold(ctx, r.Client, fg, site)
+		}
+		return false, nil
+	}
+	if stripActiveOnSource || (!serves && !marked) {
 		return false, nil
 	}
 	loaded, state, err := r.dragonflySiteLoaded(ctx, fg, site)
@@ -165,8 +184,73 @@ func (r *MysqlFailoverGroupReconciler) dragonflySweepHoldsTraffic(ctx context.Co
 	if !loaded {
 		log.FromContext(ctx).Info("dragonfly traffic held until the site loads after a failed snapshot-restore upgrade",
 			"fg", fg.Namespace+"/"+fg.Name, "site", site, "state", state)
+		return true, nil
 	}
-	return !loaded, nil
+	if marked {
+		return false, releaseDragonflyLoadHold(ctx, r.Client, fg, site)
+	}
+	return false, nil
+}
+
+// holdDragonflyTrafficForLoad removes the traffic label from site's
+// Dragonfly pods and marks them with DragonflyLoadHoldAnnotation, so the
+// label sweep keeps re-checking them until the site has loaded.
+func holdDragonflyTrafficForLoad(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string, now time.Time) error {
+	return updateDragonflySitePods(ctx, c, fg, site, func(p *corev1.Pod) bool {
+		_, traffic := p.Labels[v1alpha1.DragonflyTrafficLabel]
+		_, marked := p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation]
+		if !traffic && marked {
+			return false
+		}
+		delete(p.Labels, v1alpha1.DragonflyTrafficLabel)
+		if !marked {
+			if p.Annotations == nil {
+				p.Annotations = map[string]string{}
+			}
+			p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation] = now.UTC().Format(time.RFC3339)
+		}
+		return true
+	})
+}
+
+// releaseDragonflyLoadHold removes DragonflyLoadHoldAnnotation from site's
+// Dragonfly pods. It does not restore traffic; the sweep does.
+func releaseDragonflyLoadHold(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) error {
+	return updateDragonflySitePods(ctx, c, fg, site, func(p *corev1.Pod) bool {
+		if _, ok := p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation]; !ok {
+			return false
+		}
+		delete(p.Annotations, v1alpha1.DragonflyLoadHoldAnnotation)
+		return true
+	})
+}
+
+// updateDragonflySitePods applies mutate to each of site's Dragonfly pods
+// and writes the ones it changed, retrying on a conflict.
+func updateDragonflySitePods(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string, mutate func(*corev1.Pod) bool) error {
+	pods, err := listDragonflyPodsForSite(ctx, c, fg, site)
+	if err != nil {
+		return err
+	}
+	for i := range pods {
+		key := types.NamespacedName{Name: pods[i].Name, Namespace: pods[i].Namespace}
+		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+			var fresh corev1.Pod
+			if err := c.Get(ctx, key, &fresh); err != nil {
+				return err
+			}
+			if fresh.Labels == nil {
+				fresh.Labels = map[string]string{}
+			}
+			if !mutate(&fresh) {
+				return nil
+			}
+			return c.Update(ctx, &fresh)
+		}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("update dragonfly pod %s: %w", key.Name, err)
+		}
+	}
+	return nil
 }
 
 // setDragonflyTrafficOnSite either stamps or removes the traffic label

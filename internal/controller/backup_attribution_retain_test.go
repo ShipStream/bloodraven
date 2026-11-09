@@ -489,3 +489,43 @@ func TestFinalize_RetainWaitsForForeignCleanupPod(t *testing.T) {
 		t.Fatal("no ArtifactRetained once the pod stopped")
 	}
 }
+
+// TestFinalize_RetainAppliesWhileCleanupJobCannotBeCreated: the cleanup
+// start recorded before a cleanup Job create that fails (a quota, a
+// webhook) is taken back, since no Job of the deletion ever existed. A
+// switch to Retain while the create keeps failing is then applied.
+func TestFinalize_RetainAppliesWhileCleanupJobCannotBeCreated(t *testing.T) {
+	f := newCleanupFixture(t)
+	ctx := context.Background()
+	f.r.Client = interceptor.NewClient(f.c.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*batchv1.Job); ok {
+				return apierrors.NewForbidden(batchv1.Resource("jobs"), obj.GetName(), errors.New("exceeded quota: count/jobs.batch"))
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	})
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.r.finalize(ctx, f.mb); err == nil || !strings.Contains(err.Error(), "create cleanup job") {
+		t.Fatalf("finalize error = %v, want the refused Job create", err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if f.mb.Status.CleanupStartTime != nil {
+		t.Fatal("status.cleanupStartTime stayed recorded for a cleanup Job that was never created")
+	}
+	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	if err := f.c.Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(f.rec)
+	if done, _ := f.finalize(t); !done {
+		t.Fatal("Retain was not applied although no cleanup Job ever existed")
+	}
+	if n := countEvents(f.rec, "ArtifactRetained"); n != 1 {
+		t.Fatalf("%d ArtifactRetained Events, want 1", n)
+	}
+}
