@@ -79,8 +79,9 @@ type MysqlBackupSpec struct {
 	//     both. Nothing tracks them afterwards: delete them by hand when
 	//     they are no longer needed.
 	// It is read when the deletion is processed, so it can be changed up to
-	// then. Once a cleanup Job has been created for the deletion, a change
-	// to Retain is not applied: that Job may already have deleted part of
+	// then. Once the deletion has started the cleanup (status.cleanupStartTime
+	// is set just before the first cleanup Job is created), a change to
+	// Retain is not applied: a cleanup Job may already have deleted part of
 	// the artifact, so the cleanup runs to its end.
 	// +kubebuilder:default=Delete
 	// +optional
@@ -226,6 +227,14 @@ type MysqlBackupStatus struct {
 	// +optional
 	// +kubebuilder:validation:Pattern=`^(ar1-[a-z2-7]{26})?$`
 	PITRArchiveID string `json:"pitrArchiveID,omitempty"`
+
+	// CleanupStartTime is when the deletion of this backup committed to
+	// removing its artifact. It is recorded just before the first cleanup
+	// Job is created, against the spec that said Delete, and is never
+	// cleared. From then on a deletionPolicy changed to Retain is not
+	// applied.
+	// +optional
+	CleanupStartTime *metav1.Time `json:"cleanupStartTime,omitempty"`
 
 	// Message is a human-readable status message.
 	// +optional

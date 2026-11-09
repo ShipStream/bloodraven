@@ -133,6 +133,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 			return r.startDragonflySnapshotUpgrade(ctx, fg, nn, d)
 		case dragonflyUpgradeClearRecord:
 			r.clearDragonflyUpgradeDeferral(nn)
+			// The Failed record gates the label sweep while its active's
+			// traffic is held for a snapshot load; it goes once the sweep
+			// has given that traffic back.
+			if held, err := r.dragonflyUpgradeTrafficHeld(ctx, fg, cur); err != nil || held {
+				return dragonflyUpgradeStep{}, err
+			}
 			return dragonflyUpgradeStep{}, r.setDragonflyUpgradeStatus(ctx, fg, nil)
 		case dragonflyUpgradeWait:
 			r.noteDragonflyUpgradeDeferral(ctx, fg, d.why)
@@ -958,8 +964,27 @@ func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Conte
 	return dragonflyUpgradeStep{}, nil
 }
 
+// failDragonflyUpgrade ends the run cur as Failed{reason}. The active
+// site's traffic is given back, unless the run has restarted the active
+// on its snapshot (dragonflyUpgradeActiveMoved) and the active does not
+// answer as loaded yet: a run that ends then (its deadline, a spec change,
+// a refusal) must not put a Dragonfly that is still loading behind the
+// active Service. Its traffic is removed instead, and the label sweep
+// gives it back once the site answers as loaded
+// (dragonflyUpgradeTrafficGateSite).
 func (r *MysqlFailoverGroupReconciler) failDragonflyUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus, reason v1alpha1.DragonflyUpgradeReason, msg string) (dragonflyUpgradeStep, error) {
-	_ = r.setDragonflyTrafficOnSite(ctx, fg, cur.ActiveSite, true)
+	loading, state, err := r.dragonflyUpgradeActiveLoading(ctx, fg, cur, reason)
+	if err != nil {
+		return dragonflyUpgradeStep{}, err
+	}
+	if loading {
+		if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.ActiveSite, false); err != nil {
+			return dragonflyUpgradeStep{}, err
+		}
+		msg += "; the active site's Dragonfly has not loaded its snapshot yet (" + state + "), so its traffic stays off until it does"
+	} else {
+		_ = r.setDragonflyTrafficOnSite(ctx, fg, cur.ActiveSite, true)
+	}
 	now := metav1.Now()
 	next := copyDragonflyUpgradeStatus(cur)
 	next.Phase = v1alpha1.DragonflyUpgradePhaseFailed
@@ -974,6 +999,65 @@ func (r *MysqlFailoverGroupReconciler) failDragonflyUpgrade(ctx context.Context,
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyUpgradeFailed, "%s: %s", reason, msg)
 	return dragonflyUpgradeStep{}, nil
+}
+
+// dragonflyUpgradeActiveLoading reports whether the run cur, ending for
+// reason, leaves its active site restarted on the snapshot and not yet
+// answering as loaded, with the probe's state. An active the run has not
+// restarted is the pod that served before the run and gets its traffic
+// back as it was; so does one whose StatefulSet is gone, and every site
+// when Dragonfly is disabled, as the render then removes the workloads.
+func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeActiveLoading(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus, reason v1alpha1.DragonflyUpgradeReason) (bool, string, error) {
+	if reason == v1alpha1.DragonflyUpgradeReasonDragonflyDisabled || !dragonflyEnabled(fg) {
+		return false, "", nil
+	}
+	live, err := dragonflyLiveImages(ctx, r.uncachedReader(), fg)
+	if err != nil {
+		return false, "", err
+	}
+	if !dragonflyUpgradeActiveMoved(cur, live.images) || live.sets[cur.ActiveSite] == nil {
+		return false, "", nil
+	}
+	loaded, state, err := r.dragonflySiteLoaded(ctx, fg, cur.ActiveSite)
+	if err != nil {
+		return false, "", err
+	}
+	return !loaded, state, nil
+}
+
+// dragonflyUpgradeTrafficGateSite returns the site whose Dragonfly pods
+// the label sweep gives traffic (or the master role) only once the site
+// answers as loaded: the active site of a Failed snapshot-restore run,
+// which can have ended (its deadline, a spec change, a refusal) while the
+// pod it restarted on the snapshot was still loading. "" when there is
+// none. The sweep probes only when it would change a pod's labels, so a
+// site already serving is never probed.
+func dragonflyUpgradeTrafficGateSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	cur := dragonflyUpgradeStatus(fg)
+	if cur == nil || cur.Phase != v1alpha1.DragonflyUpgradePhaseFailed {
+		return ""
+	}
+	return cur.ActiveSite
+}
+
+// dragonflyUpgradeTrafficHeld reports whether a pod of the Failed run
+// cur's active site has no traffic label: the run, or the label sweep's
+// gate after it, holds it off until the site loads. The record is the
+// gate's input, so it is not removed while that holds.
+func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeTrafficHeld(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus) (bool, error) {
+	if cur == nil || cur.Phase != v1alpha1.DragonflyUpgradePhaseFailed || cur.ActiveSite == "" {
+		return false, nil
+	}
+	pods, err := listDragonflyPodsForSite(ctx, r.Client, fg, cur.ActiveSite)
+	if err != nil {
+		return false, err
+	}
+	for i := range pods {
+		if pods[i].Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *MysqlFailoverGroupReconciler) setDragonflyUpgradeStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.DragonflyUpgradeStatus) error {
@@ -1086,7 +1170,9 @@ func (r *MysqlFailoverGroupReconciler) probeDragonflySite(ctx context.Context, f
 	if !podReady(&pod) {
 		return dragonflySiteProbe{}, fmt.Sprintf("site %s pod not Ready", siteName), false, nil
 	}
-	conn, err := r.dragonflyDial(ctx, fg, siteName)
+	// The pod is dialed with the settings it runs, not spec.dragonfly's,
+	// which a spec change during (or just after) a run may have replaced.
+	conn, err := r.dragonflyDialPod(ctx, fg, siteName, &pod)
 	if err != nil {
 		return dragonflySiteProbe{}, fmt.Sprintf("site %s not reachable: %v", siteName, err), false, nil
 	}

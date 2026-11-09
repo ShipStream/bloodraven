@@ -1148,6 +1148,60 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 	return connector(ctx, addr, password)
 }
 
+// dragonflyDialPod is dragonflyDial with the connection settings pod was
+// started with rather than spec.dragonfly's: its client container port
+// and the password its DFLY_requirepass env carries. A snapshot-restore
+// run holds the render, so while it runs (and until the render rolls a new
+// template out after it) the live pod and its site Service can keep a port
+// or auth Secret that spec.dragonfly has since replaced; dialing them with
+// the spec's settings would fail against a pod that is fine. A pod with no
+// client port uses the spec port, and one with no password env is dialed
+// without a password, as it was rendered.
+func (r *MysqlFailoverGroupReconciler) dragonflyDialPod(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string, pod *corev1.Pod) (DragonflyConnection, error) {
+	connector := r.dragonflyConnector
+	if connector == nil {
+		connector = realDragonflyConnector
+	}
+	port := dragonflyPort(fg.Spec.Dragonfly)
+	var container *corev1.Container
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == dragonflyContainerName {
+			container = &pod.Spec.Containers[i]
+			break
+		}
+	}
+	password := ""
+	if container != nil {
+		for _, p := range container.Ports {
+			if p.Name == "client" && p.ContainerPort > 0 {
+				port = p.ContainerPort
+			}
+		}
+		for _, env := range container.Env {
+			if env.Name != DragonflyAuthEnvVar {
+				continue
+			}
+			switch {
+			case env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil:
+				ref := env.ValueFrom.SecretKeyRef
+				var s corev1.Secret
+				if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &s); err != nil {
+					return nil, fmt.Errorf("dragonfly: read auth secret %s of pod %s: %w", ref.Name, pod.Name, err)
+				}
+				raw, ok := s.Data[ref.Key]
+				if !ok {
+					return nil, fmt.Errorf("dragonfly: auth secret %s of pod %s missing key %q", ref.Name, pod.Name, ref.Key)
+				}
+				password = string(raw)
+			case env.ValueFrom == nil:
+				password = env.Value
+			}
+		}
+	}
+	addr := fmt.Sprintf("%s.%s.svc.cluster.local:%d", dragonflySiteServiceName(fg.Name, siteName), fg.Namespace, port)
+	return connector(ctx, addr, password)
+}
+
 // effectiveDragonflyMasterSite returns the site name whose Dragonfly pod
 // should currently carry dragonfly-role=master.
 //

@@ -143,6 +143,12 @@ type SiteSnapshot struct {
 	// on the site succeeded, so a nil Replication means no source is set
 	// rather than not probed.
 	ReplicaStatusRead bool
+	// PublishedReplication is the status.sites[].replication value the
+	// manager last published for the site (after lag hysteresis), empty
+	// before its first poll. The CR adapter recomputes the enum from this
+	// snapshot's observation and keeps it only inside the hysteresis band,
+	// so the CR and the WebSocket feed report the same value.
+	PublishedReplication v1alpha1.SiteReplicationState
 	// PendingWritable mirrors state.SiteObservation.PendingWritable.
 	PendingWritable bool
 	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
@@ -2233,6 +2239,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			ServingHealthy:          tm.sites[i].servingHealthy,
 			ReplicationHealthy:      tm.sites[i].replicating,
 			ReplicaStatusRead:       tm.sites[i].replicaStatusRead,
+			PublishedReplication:    tm.sites[i].replicationState,
 			PendingWritable:         tm.sites[i].pendingWritable(),
 			ClassificationOverdue:   tm.classificationOverdueLocked(&tm.sites[i]),
 		}

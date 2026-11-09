@@ -357,3 +357,135 @@ func TestFinalize_RetainRecordsLostDestinationBeforeStoppingProducer(t *testing.
 		t.Fatalf("events = %v, want ArtifactRetained naming %q", events, want)
 	}
 }
+
+// TestFinalize_LateRetainAfterCleanupJobRemovedIsNotApplied (K009,
+// verification V004): a cleanup Job deleted with Orphan propagation leaves
+// its pod deleting with no Job to find and no ArtifactCleanup reason
+// recorded. status.cleanupStartTime, written before the Job was created,
+// still marks the cleanup as started: a late Retain is not applied and
+// ArtifactRetained is not emitted while that pod may still write. The
+// cleanup waits for the pod, then resumes with a new Job.
+func TestFinalize_LateRetainAfterCleanupJobRemovedIsNotApplied(t *testing.T) {
+	f := newCleanupFixture(t)
+	ctx := context.Background()
+	if done, _ := f.finalize(t); done {
+		t.Fatal("released before the cleanup ran")
+	}
+	job, ok := f.cleanupJob(t)
+	if !ok {
+		t.Fatal("setup: no cleanup Job")
+	}
+	job.UID = types.UID("cleanup-uid")
+	pod := cleanupPodFor(job, corev1.PodRunning, 0, "")
+	pod.Status.ContainerStatuses = nil
+	if err := f.c.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	orphan := metav1.DeletePropagationOrphan
+	if err := f.c.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &orphan}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	if err := f.c.Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(f.rec)
+	if done, _ := f.finalize(t); done {
+		t.Fatal("a late Retain released the backup while its orphaned cleanup pod still runs")
+	}
+	if n := countEvents(f.rec, "ArtifactRetained"); n != 0 {
+		t.Fatal("ArtifactRetained emitted while a cleanup pod may still delete the artifact")
+	}
+	if _, ok := f.cleanupJob(t); ok {
+		t.Fatal("a replacement cleanup Job was created while the orphaned pod still runs")
+	}
+	pod.Status.Phase = corev1.PodSucceeded
+	if err := f.c.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); done {
+		t.Fatal("released without finishing the cleanup")
+	}
+	if _, ok := f.cleanupJob(t); !ok {
+		t.Fatal("the cleanup did not resume once the orphaned pod stopped")
+	}
+	if n := countEvents(f.rec, "ArtifactRetained"); n != 0 {
+		t.Fatal("ArtifactRetained emitted although the cleanup had started")
+	}
+	if f.mb.Status.CleanupStartTime == nil {
+		t.Fatal("status.cleanupStartTime not recorded")
+	}
+}
+
+// TestFinalize_RetainBeforeCleanupStartWinsTheRace (K009, V004): a switch
+// to Retain that lands after the finalize pass read the backup but before
+// it recorded the cleanup start makes the cleanupStartTime write conflict,
+// so no cleanup Job is created and the next pass applies Retain.
+func TestFinalize_RetainBeforeCleanupStartWinsTheRace(t *testing.T) {
+	f := newCleanupFixture(t)
+	ctx := context.Background()
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	var edited v1alpha1.MysqlBackup
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	if err := f.c.Update(ctx, &edited); err != nil {
+		t.Fatal(err)
+	}
+	// f.mb is the pass's stale read, still Delete.
+	done, wait, err := f.r.finalize(ctx, f.mb)
+	if err != nil || done || wait == 0 {
+		t.Fatalf("finalize on a stale Delete read = done %v wait %s err %v, want a requeue", done, wait, err)
+	}
+	if _, ok := f.cleanupJob(t); ok {
+		t.Fatal("a cleanup Job was created against a spec that had changed to Retain")
+	}
+	drainEvents(f.rec)
+	if done, _ := f.finalize(t); !done {
+		t.Fatal("Retain was not applied on the next pass")
+	}
+	if n := countEvents(f.rec, "ArtifactRetained"); n != 1 {
+		t.Fatal("no ArtifactRetained for the Retain that won the race")
+	}
+}
+
+// TestFinalize_RetainWaitsForForeignCleanupPod (V004): with no cleanup
+// started by this deletion, Retain still does not report the artifact as
+// left in storage while a cleanup pod of the same backup name is running.
+func TestFinalize_RetainWaitsForForeignCleanupPod(t *testing.T) {
+	f := newCleanupFixture(t)
+	ctx := context.Background()
+	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	if err := f.c.Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	pod := cleanupPodFor(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "earlier-cleanup", Namespace: "ns",
+		Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name}, UID: "earlier-uid"}}, corev1.PodRunning, 0, "")
+	pod.Status.ContainerStatuses = nil
+	if err := f.c.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(f.rec)
+	if done, _ := f.finalize(t); done {
+		t.Fatal("Retain released the backup while a cleanup pod still runs")
+	}
+	if n := countEvents(f.rec, "ArtifactRetained"); n != 0 {
+		t.Fatal("ArtifactRetained emitted while a cleanup pod may still write")
+	}
+	pod.Status.Phase = corev1.PodSucceeded
+	if err := f.c.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); !done {
+		t.Fatal("Retain not applied once the pod stopped")
+	}
+	if n := countEvents(f.rec, "ArtifactRetained"); n != 1 {
+		t.Fatal("no ArtifactRetained once the pod stopped")
+	}
+}

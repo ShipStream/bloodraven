@@ -165,7 +165,7 @@ func TestTriageReadsCurrentStatusShape(t *testing.T) {
 	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.status.lastFailover.time}{\" target=\"}{.status.lastFailover.target}", "2026-11-05T10:00:00Z target=dc2", false)
 	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath=*Replication: {.replication}*", "Site: dc1\n  Replication: Lagging\n", false)
 	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath=*EncryptionAtRestReady*", "True AllSitesSealed: all sites sealed", false)
-	e.rule(t, "get mysqlbackups -n orders -l bloodraven.shipstream.io/failover-group=lion -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,LOCATION:.status.artifactStorage.location,BUCKET:*",
+	e.rule(t, "get mysqlbackups -n orders -l bloodraven.shipstream.io/failover-group=lion -o custom-columns=NAME:.metadata.name,DELETING:.metadata.deletionTimestamp,POLICY:.spec.deletionPolicy,CLEANUP_START:.status.cleanupStartTime,LOCATION:.status.artifactStorage.location,BUCKET:*",
 		"NAME   DELETING   LOCATION\nb1     <none>     s3://bucket/lion/b1\n", false)
 	out, err := e.run(t, scriptPath("triage.sh"), "-n", "orders", "lion")
 	if err != nil {

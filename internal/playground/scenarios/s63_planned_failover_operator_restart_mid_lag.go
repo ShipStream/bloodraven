@@ -183,6 +183,11 @@ func s63PrepareBacklogAndAnnotate() runner.Step {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("SOURCE_DELAY=%ds applied on target %s", s63SourceDelay, target))
+			// The delay restarted replication; admission refuses a target
+			// the operator last saw stopped.
+			if err := waitOperatorSeesReplicating(ctx, env, target, 10*time.Second, 90*time.Second); err != nil {
+				return err
+			}
 
 			// 3) A marker written after the delay: the fenced set always holds
 			//    at least one transaction the target has not applied.
