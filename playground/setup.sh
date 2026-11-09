@@ -157,6 +157,18 @@ if [[ ${#WORKERS[@]} -lt "$EXPECTED_SITE_COUNT" ]]; then
 fi
 ok "Cluster reachable with ${#WORKERS[@]} worker nodes"
 
+# A topology switch over an existing group is refused before anything is
+# changed (node labels included): sites cannot be removed or renamed, and
+# relabeling a worker first would leave the existing site's zone with no node.
+EXISTING_SITES=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground -o jsonpath='{.spec.sites[*].name}' 2>/dev/null || true)
+if [[ -n "$EXISTING_SITES" ]]; then
+  existing_sorted=$(tr ' ' '\n' <<<"$EXISTING_SITES" | sort | xargs)
+  wanted_sorted=$(printf '%s\n' "${SITE_NAMES[@]}" | sort | xargs)
+  if [[ "$existing_sorted" != "$wanted_sorted" ]]; then
+    fail "MysqlFailoverGroup playground has sites '$EXISTING_SITES', not '${SITE_NAMES[*]}'. Sites cannot be removed or renamed: run ./playground/teardown.sh, then this script again (BLOODRAVEN_SETUP_TOPOLOGY selects the topology)."
+  fi
+fi
+
 # ── 2. Label nodes to simulate sites ────────────────────────────────────
 info "Labeling nodes as site zones..."
 for i in "${!SITE_NAMES[@]}"; do
@@ -357,10 +369,6 @@ ok "Operator deployed"
 # MySQL TLS must be present on the first observed generation. Adding it
 # later would make old pods and freshly rendered configuration disagree
 # about their connection contract during an ordered rollout.
-EXISTING_SITES=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground -o jsonpath='{.spec.sites[*].name}' 2>/dev/null || true)
-if [[ -n "$EXISTING_SITES" && "$EXISTING_SITES" != "${SITE_NAMES[*]}" ]]; then
-  fail "MysqlFailoverGroup playground has sites '$EXISTING_SITES', not '${SITE_NAMES[*]}'. Sites cannot be removed or renamed: run ./playground/teardown.sh, then this script again (BLOODRAVEN_SETUP_TOPOLOGY selects the topology)."
-fi
 info "Creating MysqlFailoverGroup CR..."
 if [[ "$SETUP_TLS" == "true" ]]; then
   {

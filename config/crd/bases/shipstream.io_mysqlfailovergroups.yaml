@@ -1296,8 +1296,10 @@ spec:
                           type: integer
                         suspend:
                           default: false
-                          description: Suspend pauses this schedule without deleting
-                            the CronJob.
+                          description: |-
+                            Suspend pauses this schedule without deleting the CronJob. A
+                            suspended schedule's failed backup is not retried either
+                            (spec.backup.retry) until the schedule is resumed.
                           type: boolean
                         timeZone:
                           default: Etc/UTC

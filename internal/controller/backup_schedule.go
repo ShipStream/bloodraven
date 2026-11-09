@@ -595,6 +595,12 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 	if fg.Spec.Backup == nil || fg.Spec.Backup.Retry == nil {
 		return nil, 0, "", nil
 	}
+	// A suspended schedule makes no new backups, retries included: the
+	// procedures that stop every producer before deleting a group rely on
+	// it. Unsuspending resumes the retry from the same failed attempt.
+	if sched.Suspend {
+		return nil, 0, "", nil
+	}
 	retry := fg.Spec.Backup.Retry
 	if retry.MaxAttempts <= 1 {
 		return nil, 0, "", nil

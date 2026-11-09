@@ -728,7 +728,9 @@ type BackupSchedule struct {
 	// +optional
 	TimeZone string `json:"timeZone,omitempty"`
 
-	// Suspend pauses this schedule without deleting the CronJob.
+	// Suspend pauses this schedule without deleting the CronJob. A
+	// suspended schedule's failed backup is not retried either
+	// (spec.backup.retry) until the schedule is resumed.
 	// +kubebuilder:default=false
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
