@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -270,6 +271,159 @@ func TestDragonflySnapshotUpgrade_InFlightRunFollowsSpec(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// V002: a spec change that ends a run while the active may be loading is
+// decided by probing the active with the connection settings its pod runs,
+// not the replaced ones. The run holds the render, so the pod (and its
+// site Service) still has its original auth Secret and port; dialing it
+// with the new spec's would fail against a fully restored pod and keep the
+// run, and its traffic hold, until the run's deadline.
+func TestDragonflySnapshotUpgrade_SpecChangeProbesTheInstalledSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*v1alpha1.MysqlFailoverGroup)
+	}{
+		{name: "auth Secret replaced", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.Dragonfly.Auth = &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "df-auth-new", Key: "password"}}
+		}},
+		{name: "client port changed", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Port = 6390 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, c, fg, conn := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore)
+			for name, pw := range map[string]string{"df-auth-old": "old-pw", "df-auth-new": "new-pw"} {
+				if err := c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: fg.Namespace, Name: name},
+					Data: map[string][]byte{"password": []byte(pw)}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The active pod as the render started it: the old Secret and
+			// the default client port.
+			var pod corev1.Pod
+			if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, "dc1") + "-0"}, &pod); err != nil {
+				t.Fatal(err)
+			}
+			pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{Name: "client", ContainerPort: 6379}}
+			pod.Spec.Containers[0].Env = []corev1.EnvVar{{Name: DragonflyAuthEnvVar, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "df-auth-old"}, Key: "password"}}}}
+			if err := c.Update(ctx, &pod); err != nil {
+				t.Fatal(err)
+			}
+			wantAddr := dragonflySiteServiceName(fg.Name, "dc1") + "." + fg.Namespace + ".svc.cluster.local:6379"
+			r.dragonflyConnector = func(_ context.Context, addr, password string) (DragonflyConnection, error) {
+				if addr == wantAddr && password == "old-pw" {
+					return conn, nil
+				}
+				return &fakeDragonflyConn{infoErr: errors.New("WRONGPASS"), persistErr: errors.New("WRONGPASS")}, nil
+			}
+
+			live := getFGByKey(t, c, fgNN(fg))
+			tc.mutate(live)
+			if err := c.Update(ctx, live); err != nil {
+				t.Fatal(err)
+			}
+			step, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			up := upgradeRecord(t, c, fg)
+			if step.hold != 0 || up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonSpecChanged {
+				t.Fatalf("= (%+v) record %+v, want the loaded active probed on its own settings and the run ended SpecChanged", step, up)
+			}
+			for _, p := range podsForSite(t, c, fg, "dc1") {
+				if p.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+					t.Fatal("the loaded active did not get its traffic back")
+				}
+			}
+		})
+	}
+}
+
+// V003: a run that reaches its deadline while the active it restarted is
+// still loading ends without putting that Dragonfly behind the Services:
+// its traffic stays off, the label sweep after the run does not give it
+// back (or make it master) until the site answers as loaded, and the
+// Failed record that gates the sweep is not removed while it holds.
+func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *testing.T) {
+	ctx := context.Background()
+	r, c, fg, conn := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore)
+	conn.persist = dragonfly.PersistenceInfo{Loading: true}
+	// The restarted active comes from the template: role replica, traffic on.
+	var pod corev1.Pod
+	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, "dc1") + "-0"}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Labels[v1alpha1.DragonflyRoleLabel] = "replica"
+	pod.Labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
+	if err := c.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	live := getFGByKey(t, c, fgNN(fg))
+	old := metav1.NewTime(time.Now().Add(-dragonflyUpgradeRunTimeout - time.Minute))
+	live.Status.Dragonfly.Upgrade.StartTime = &old
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+
+	step, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := upgradeRecord(t, c, fg)
+	if step.hold != 0 || up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonTimedOut ||
+		!strings.Contains(up.Message, "traffic stays off") {
+		t.Fatalf("= (%+v) record %+v, want Failed/TimedOut saying the traffic stays off", step, up)
+	}
+	serving := func() bool {
+		for _, p := range podsForSite(t, c, fg, "dc1") {
+			if p.Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
+				return true
+			}
+		}
+		return false
+	}
+	if serving() {
+		t.Fatal("the timed-out run put the loading active back in traffic")
+	}
+	for range 2 {
+		if err := r.syncDragonflyPodLabels(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if serving() {
+		t.Fatal("the label sweep gave the loading active its traffic back")
+	}
+
+	// Every site on one image would remove the Failed record; it stays
+	// while the traffic it gates is held.
+	dc2 := dragonflyStatefulSetForTest(t, c, fg, "dc2")
+	dc2.Spec.Template.Spec.Containers[0].Image = dfTargetImage
+	if err := c.Update(ctx, dc2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+		t.Fatal(err)
+	}
+	if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed {
+		t.Fatalf("record = %+v, want the Failed record kept while the active's traffic is held", up)
+	}
+
+	conn.persist = dragonfly.PersistenceInfo{}
+	if err := r.syncDragonflyPodLabels(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range podsForSite(t, c, fg, "dc1") {
+		if p.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || p.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+			t.Fatalf("labels %v once the active loaded, want master with traffic", p.Labels)
+		}
+	}
+	if _, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
+		t.Fatal(err)
+	}
+	if up := upgradeRecord(t, c, fg); up != nil {
+		t.Fatalf("record = %+v, want it removed once the traffic is back and every site runs one image", up)
 	}
 }
 

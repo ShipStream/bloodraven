@@ -353,7 +353,9 @@ const (
 	// `DragonflySnapshotSaveFailed`, `UnknownPhase`,
 	// `WorkloadSelectorMismatch`, `ActiveWorkloadDeleted`, `SpecChanged`,
 	// `DragonflyDisabled` or `TimedOut` the operator restores the active
-	// site's traffic label; on `ActiveWorkloadDeleted` it re-creates the
+	// site's traffic label, except that an active the run restarted and
+	// that is still loading its snapshot keeps it off until it answers as
+	// loaded (the message says so); on `ActiveWorkloadDeleted` it re-creates the
 	// active site's StatefulSet. On `ActiveSiteChanged` the upgrade was
 	// abandoned because MySQL failed over or a promotion moved the
 	// Dragonfly master. `SpecChanged`: `spec.dragonfly` changed during the

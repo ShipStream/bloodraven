@@ -91,10 +91,21 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 		); err != nil {
 			return fmt.Errorf("list dragonfly pods for site %s: %w", site.Name, err)
 		}
+		holdTraffic, err := r.dragonflySweepHoldsTraffic(ctx, fg, site.Name, desiredRole, stripActiveOnSource, pods.Items)
+		if err != nil {
+			return err
+		}
+		if holdTraffic {
+			// A pod re-created from the template carries traffic; take it
+			// off before the role below could make it an endpoint.
+			if err := setDragonflyTrafficOnSite(ctx, r.Client, fg, site.Name, false); err != nil {
+				return err
+			}
+		}
 		for i := range pods.Items {
 			pod := &pods.Items[i]
 			needRole := pod.Labels[v1alpha1.DragonflyRoleLabel] != desiredRole
-			needTraffic := !stripActiveOnSource && pod.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled
+			needTraffic := !stripActiveOnSource && !holdTraffic && pod.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled
 			if !needRole && !needTraffic {
 				continue
 			}
@@ -111,7 +122,7 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 				if fresh.Labels[v1alpha1.DragonflyRoleLabel] != desiredRole {
 					fresh.Labels[v1alpha1.DragonflyRoleLabel] = desiredRole
 				}
-				if !stripActiveOnSource && fresh.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+				if !stripActiveOnSource && !holdTraffic && fresh.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 					fresh.Labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 				}
 				return r.Update(ctx, &fresh)
@@ -122,6 +133,40 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 		}
 	}
 	return nil
+}
+
+// dragonflySweepHoldsTraffic reports whether the sweep keeps site's
+// Dragonfly pods out of traffic this pass: site is the active site of a
+// Failed snapshot-restore run (dragonflyUpgradeTrafficGateSite), the sweep
+// would make one of its pods serve (give it the traffic label, or the
+// master role while it carries traffic), and the site does not answer as
+// loaded. A run that ends while the pod it restarted on its snapshot is
+// still loading must not have that pod put behind the Services, by itself
+// or by this sweep, before the load completes; the pod's TCP readiness
+// probe passes while it loads.
+func (r *MysqlFailoverGroupReconciler) dragonflySweepHoldsTraffic(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site, desiredRole string, stripActiveOnSource bool, pods []corev1.Pod) (bool, error) {
+	if stripActiveOnSource || site != dragonflyUpgradeTrafficGateSite(fg) {
+		return false, nil
+	}
+	serves := false
+	for i := range pods {
+		traffic := pods[i].Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled
+		if !traffic || (desiredRole == "master" && pods[i].Labels[v1alpha1.DragonflyRoleLabel] != desiredRole) {
+			serves = true
+		}
+	}
+	if !serves {
+		return false, nil
+	}
+	loaded, state, err := r.dragonflySiteLoaded(ctx, fg, site)
+	if err != nil {
+		return false, err
+	}
+	if !loaded {
+		log.FromContext(ctx).Info("dragonfly traffic held until the site loads after a failed snapshot-restore upgrade",
+			"fg", fg.Namespace+"/"+fg.Name, "site", site, "state", state)
+	}
+	return !loaded, nil
 }
 
 // setDragonflyTrafficOnSite either stamps or removes the traffic label

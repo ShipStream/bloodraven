@@ -1811,7 +1811,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Lagging uses the same threshold as Degraded=ReplicationLagging
 	// below: the spec this status is written against.
 	snap.MaxLagSeconds = freshFG.Spec.EffectiveMaxLagSeconds()
-	if !MergeTopologySnapshotStatus(&freshFG.Status, snap) {
+	if snapshotSupersededByAppliedGeneration(&freshFG.Status, snap) || !MergeTopologySnapshotStatus(&freshFG.Status, snap) {
 		r.hydrateDeploymentGeneration(&freshFG)
 		return nil
 	}
@@ -2132,13 +2132,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			r.hydrateDeploymentGeneration(&fresh)
 			return nil
 		}
-		// A write at the same topology generation that already published
-		// a newer applied generation (a later callback that won the race
-		// to the API server) is newer than this one: its conditions are
-		// stamped with that generation, and replacing them with this
-		// write's would move observedGeneration back with nothing left to
-		// rewrite it (K017).
-		if fresh.Status.TopologyGeneration == snap.TopologyGeneration && fresh.Status.ObservedGeneration > freshFG.Status.ObservedGeneration {
+		// A newer write at the same topology generation may have landed
+		// since the first read (see snapshotSupersededByAppliedGeneration).
+		if snapshotSupersededByAppliedGeneration(&fresh.Status, snap) {
 			superseded = true
 			return nil
 		}
@@ -2264,6 +2260,20 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		r.deploymentLeases.confirmTopology(&freshFG, snap.DeploymentEpoch)
 	}
 	return nil
+}
+
+// snapshotSupersededByAppliedGeneration reports whether st was already
+// written from a newer snapshot at the same topology generation: one that
+// published a later applied generation than snap's. The manager's applied
+// generation only rises, so such a write came from a later callback that
+// won the race to the API server. Its topology conditions are stamped with
+// that generation; writing snap's over them would move them back while the
+// root observedGeneration stays at its maximum, and the status refresh that
+// produced the newer write has been consumed, so nothing would rewrite
+// them. The comparison is against snap.AppliedGeneration, not a status
+// already merged with st, whose observedGeneration never moves back.
+func snapshotSupersededByAppliedGeneration(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) bool {
+	return st.TopologyGeneration == snap.TopologyGeneration && st.ObservedGeneration > snap.AppliedGeneration
 }
 
 // MergeTopologySnapshotStatus merges the topology manager's snapshot into
@@ -3066,7 +3076,13 @@ func siteStatusFromSnapshot(s SiteSnapshot, maxLagSeconds int64) v1alpha1.SiteSt
 		t := metav1.NewTime(s.LastSeen)
 		status.LastSeenTime = &t
 	}
-	status.Replication = siteReplicationState(s.State, s.Replication, s.ReplicaStatusRead, s.ReplicationHealthy, maxLagSeconds)
+	// The observation decides the enum; the manager's published value only
+	// keeps a Lagging site Lagging inside the hysteresis band, which a
+	// recomputation from raw lag alone would drop. A snapshot built
+	// without a published value (PublishedReplication empty) gets none.
+	status.Replication = lagHysteresis(s.PublishedReplication,
+		siteReplicationState(s.State, s.Replication, s.ReplicaStatusRead, s.ReplicationHealthy, maxLagSeconds),
+		s.Replication, maxLagSeconds)
 	if s.Replication != nil {
 		status.SecondsBehindSource = s.Replication.SecondsBehindSource
 		status.GtidExecuted = s.Replication.ExecutedGtidSet

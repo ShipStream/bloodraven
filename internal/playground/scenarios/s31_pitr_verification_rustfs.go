@@ -494,7 +494,7 @@ func s31Cleanup(ctx context.Context, env *runner.Env) error {
 		if err != nil {
 			return false, "", err
 		}
-		done, msg := pitrBaselineRestored(mfg, wantPITR, wantProfile)
+		done, msg := pitrBaselineRestoredLive(ctx, env, mfg, wantPITR, wantProfile)
 		return done, msg, nil
 	}); err != nil {
 		errs = append(errs, err)

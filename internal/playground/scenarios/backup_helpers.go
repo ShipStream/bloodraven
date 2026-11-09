@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -747,19 +748,135 @@ func originalPITRExpected(env *runner.Env) (enabled bool, profile string, err er
 
 // pitrBaselineRestored is the PITR scenarios' cleanup predicate after
 // restoreOriginalBackupSpec: the operator has reconciled the restored spec
-// (Ready=True at the current generation, an active site, no ordered update
-// in progress) and its PITR observation matches it. With PITR restored off,
-// status.pitr is gone (the operator removes it once PITR is disabled). With
-// PITR restored on, the spec names the original profile and
-// status.pitr.archive observes that profile's archive destination, not
-// one the scenario left behind. Spec reads alone are true as soon as the
-// patch lands, before the operator has acted on it.
-func pitrBaselineRestored(mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+// and finished rolling it out, and its PITR observation matches it.
+//
+// Reconciled: Ready=True at the current generation, an active site, no
+// update phase, and Updating=False/NotUpdating at the current generation.
+// A stalled ordered update (Updating=True/OrderedUpdateStalled, a pod that
+// is not Ready) clears updatePhase while the rollout is unfinished, and
+// MySQL can stay healthy throughout, so Ready alone does not end it.
+//
+// Rolled out (pitrRolloutRestored): every site Deployment renders the
+// restored PITR state and has finished its rollout. Updating=False does not
+// prove that on its own: drift the ordered updater has not started on yet
+// (it waits for a standby, a stall retry, a bootstrap) has no phase either.
+//
+// PITR: with PITR restored off, status.pitr is gone (the operator removes
+// it once PITR is disabled). With PITR restored on, the spec names the
+// original profile and status.pitr.archive observes that profile's archive
+// destination, not one the scenario left behind. Spec reads alone are true
+// as soon as the patch lands, before the operator has acted on it.
+//
+// deployments maps each spec.sites name to its Deployment, nil when it
+// could not be found.
+func pitrBaselineRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
 	ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+	idle, updating := orderedUpdateIdleAtGeneration(mfg)
 	settled := backupProfileRolloutReady(mfg)
 	observed, why := pitrObservationRestored(mfg, wantPITR, wantProfile)
-	return ready && settled && observed, fmt.Sprintf("readyAtGeneration=%v generation=%d active=%q updatePhase=%q pitr=%v (%s) wantPITR=%v wantProfile=%q",
-		ready, mfg.Generation, mfg.Status.ActiveSite, mfg.Status.UpdatePhase, observed, why, wantPITR, wantProfile)
+	rolled, rollout := pitrRolloutRestored(mfg, deployments, wantPITR, wantProfile)
+	return ready && idle && settled && observed && rolled, fmt.Sprintf("readyAtGeneration=%v generation=%d active=%q updatePhase=%q updating=%s pitr=%v (%s) rollout=%v (%s) wantPITR=%v wantProfile=%q",
+		ready, mfg.Generation, mfg.Status.ActiveSite, mfg.Status.UpdatePhase, updating, observed, why, rolled, rollout, wantPITR, wantProfile)
+}
+
+// pitrBaselineRestoredLive is pitrBaselineRestored with the site
+// Deployments read from the cluster. A failed read is a wait, not an
+// error: the cleanup retries it.
+func pitrBaselineRestoredLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+	deployments := make(map[string]*appsv1.Deployment, len(mfg.Spec.Sites))
+	for _, site := range mfg.Spec.Sites {
+		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, fmt.Sprintf("mysql-%s-%s", mfg.Name, site.Name))
+		if err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Sprintf("read Deployment of site %s: %v", site.Name, err)
+		}
+		if err != nil {
+			dep = nil
+		}
+		deployments[site.Name] = dep
+	}
+	return pitrBaselineRestored(mfg, deployments, wantPITR, wantProfile)
+}
+
+// orderedUpdateIdleAtGeneration reports Updating=False/NotUpdating for the
+// current generation, with a summary of the condition.
+func orderedUpdateIdleAtGeneration(mfg *v1alpha1.MysqlFailoverGroup) (bool, string) {
+	c := apimeta.FindStatusCondition(mfg.Status.Conditions, v1alpha1.ConditionUpdating)
+	if c == nil {
+		return false, "<none>"
+	}
+	summary := fmt.Sprintf("%s/%s@%d", c.Status, c.Reason, c.ObservedGeneration)
+	return c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonNotUpdating && c.ObservedGeneration == mfg.Generation, summary
+}
+
+// pitrRolloutRestored reports whether every spec.sites Deployment renders
+// the restored PITR state (its pitr-render annotation: enabled as wanted
+// and, when on, the restored profile's destination) and has finished
+// rolling it out: the Deployment controller observed its generation and
+// every replica is updated, ready and available.
+func pitrRolloutRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
+	wantDest := ""
+	if wantPITR {
+		dest, err := pitrRestoredDestination(mfg, wantProfile)
+		if err != nil {
+			return false, err.Error()
+		}
+		wantDest = dest
+	}
+	var pending []string
+	for _, site := range mfg.Spec.Sites {
+		dep := deployments[site.Name]
+		if dep == nil {
+			pending = append(pending, site.Name+": no Deployment")
+			continue
+		}
+		var render struct {
+			Enabled     bool   `json:"enabled"`
+			Destination string `json:"destination"`
+		}
+		if err := json.Unmarshal([]byte(dep.Annotations[v1alpha1.PITRRenderAnnotation]), &render); err != nil {
+			pending = append(pending, fmt.Sprintf("%s: %s does not decode", site.Name, v1alpha1.PITRRenderAnnotation))
+			continue
+		}
+		if render.Enabled != wantPITR || render.Destination != wantDest {
+			pending = append(pending, fmt.Sprintf("%s: renders enabled=%v destination=%q", site.Name, render.Enabled, render.Destination))
+			continue
+		}
+		want := int32(1)
+		if dep.Spec.Replicas != nil {
+			want = *dep.Spec.Replicas
+		}
+		st := dep.Status
+		if st.ObservedGeneration < dep.Generation || st.UpdatedReplicas != want || st.ReadyReplicas != want ||
+			st.AvailableReplicas != want || st.Replicas != want || st.UnavailableReplicas != 0 {
+			pending = append(pending, fmt.Sprintf("%s: rollout observed=%d/%d updated=%d ready=%d available=%d replicas=%d want=%d",
+				site.Name, st.ObservedGeneration, dep.Generation, st.UpdatedReplicas, st.ReadyReplicas, st.AvailableReplicas, st.Replicas, want))
+		}
+	}
+	if len(pending) > 0 {
+		return false, strings.Join(pending, "; ")
+	}
+	return true, "rolled out"
+}
+
+// pitrRestoredDestination is the normalized archive destination of the
+// restored PITR profile.
+func pitrRestoredDestination(mfg *v1alpha1.MysqlFailoverGroup, wantProfile string) (string, error) {
+	var profile *v1alpha1.BackupProfile
+	if mfg.Spec.Backup != nil {
+		for i := range mfg.Spec.Backup.Profiles {
+			if mfg.Spec.Backup.Profiles[i].Name == wantProfile {
+				profile = &mfg.Spec.Backup.Profiles[i]
+			}
+		}
+	}
+	if profile == nil {
+		return "", fmt.Errorf("profile %q not in spec", wantProfile)
+	}
+	dest, err := pitrprofile.DestinationFor(mfg, profile)
+	if err != nil {
+		return "", fmt.Errorf("restored profile destination: %v", err)
+	}
+	return dest.String(), nil
 }
 
 // pitrObservationRestored is the PITR half of pitrBaselineRestored.
@@ -776,24 +893,15 @@ func pitrObservationRestored(mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wa
 	if got := pitrSpecProfile(mfg); got != wantProfile {
 		return false, fmt.Sprintf("spec PITR profile %q", got)
 	}
-	var profile *v1alpha1.BackupProfile
-	for i := range mfg.Spec.Backup.Profiles {
-		if mfg.Spec.Backup.Profiles[i].Name == wantProfile {
-			profile = &mfg.Spec.Backup.Profiles[i]
-		}
-	}
-	if profile == nil {
-		return false, fmt.Sprintf("profile %q not in spec", wantProfile)
-	}
-	dest, err := pitrprofile.DestinationFor(mfg, profile)
+	dest, err := pitrRestoredDestination(mfg, wantProfile)
 	if err != nil {
-		return false, fmt.Sprintf("restored profile destination: %v", err)
+		return false, err.Error()
 	}
 	if mfg.Status.PITR == nil || mfg.Status.PITR.Archive == nil {
 		return false, "no status.pitr.archive observation yet"
 	}
-	if got := mfg.Status.PITR.Archive.Destination; got != dest.String() {
-		return false, fmt.Sprintf("status.pitr.archive observes %s, want %s", got, dest.String())
+	if got := mfg.Status.PITR.Archive.Destination; got != dest {
+		return false, fmt.Sprintf("status.pitr.archive observes %s, want %s", got, dest)
 	}
 	return true, "archive=" + pitrArchiveSummary(mfg)
 }

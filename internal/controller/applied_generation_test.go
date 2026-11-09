@@ -251,3 +251,53 @@ func TestUpdateCRStatus_OlderCallbackRetryDoesNotMoveGenerationBack(t *testing.T
 		t.Fatalf("Ready = %+v, want the newer write's generation 5", ready)
 	}
 }
+
+// K017 (verification V001): the older callback's first read can already
+// see the newer write. Merging keeps the root observedGeneration at its
+// maximum, so the supersession check must compare against the snapshot's
+// own applied generation, or the topology conditions are rebuilt at the
+// older generation under a root that still reads as current.
+func TestUpdateCRStatus_OlderCallbackAfterNewerWriteIsSuperseded(t *testing.T) {
+	ctx := context.Background()
+	runner, c, fg, _ := lifecycleRunner(t)
+	nn := client.ObjectKeyFromObject(fg)
+	var cur v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &cur); err != nil {
+		t.Fatal(err)
+	}
+	cur.Generation = 5
+	if err := c.Update(ctx, &cur); err != nil {
+		t.Fatal(err)
+	}
+	snap := TopologySnapshot{
+		ActiveSite: "dc1",
+		Sites: []SiteSnapshot{
+			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
+			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, ReplicaStatusRead: true,
+				Replication: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: new(int64(0))}, SourceConvergenceState: sourceConvergenceConverged},
+		},
+		DegradedReason: v1alpha1.ReasonHealthy,
+	}
+	newer := snap
+	newer.AppliedGeneration = 5
+	if err := runner.updateCRStatus(ctx, nn, newer); err != nil {
+		t.Fatal(err)
+	}
+	older := snap
+	older.AppliedGeneration = 4
+	if err := runner.updateCRStatus(ctx, nn, older); err != nil {
+		t.Fatal(err)
+	}
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ObservedGeneration != 5 {
+		t.Fatalf("status.observedGeneration = %d, want the newer write's 5", got.Status.ObservedGeneration)
+	}
+	for _, typ := range []string{v1alpha1.ConditionReady, v1alpha1.ConditionDegraded} {
+		if cond := apimeta.FindStatusCondition(got.Status.Conditions, typ); cond == nil || cond.ObservedGeneration != 5 {
+			t.Fatalf("%s = %+v, want the newer write's generation 5", typ, cond)
+		}
+	}
+}

@@ -515,7 +515,7 @@ func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...stri
 		if err != nil {
 			return false, "", err
 		}
-		restored, restoredMsg := pitrBaselineRestored(mfg, wantPITR, wantProfile)
+		restored, restoredMsg := pitrBaselineRestoredLive(waitCtx, env, mfg, wantPITR, wantProfile)
 		var cooldown string
 		if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailoverTime() != nil {
 			if rem := mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailoverTime().Time); rem > 0 {

@@ -89,6 +89,11 @@ func s35InjectDelayMarkerAndAnnotate() runner.Step {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("SOURCE_DELAY=%ds applied on target %s", s35SourceDelay, target))
+			// The delay restarted replication; admission refuses a target
+			// the operator last saw stopped.
+			if err := waitOperatorSeesReplicating(ctx, env, target, 10*time.Second, 90*time.Second); err != nil {
+				return err
+			}
 
 			// 2) Write a marker on the source AFTER the delay is active.
 			sourceClient, err := env.MySQL(source)

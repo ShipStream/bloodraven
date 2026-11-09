@@ -783,11 +783,12 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		return false, 0, err
 	}
 	if backup.Spec.DeletionPolicy == v1alpha1.DeletionPolicyRetain {
-		// Retain applies only until the first cleanup Job is created: a
-		// Job that ran may have deleted part of the artifact, and one
-		// still running would be garbage-collected mid-delete once the
-		// finalizer goes. The cleanup then runs to its end, and its Events
-		// say that the late Retain was ignored.
+		// Retain applies only until the cleanup has started
+		// (status.cleanupStartTime, recorded before the first cleanup Job
+		// is created): a Job that ran may have deleted part of the
+		// artifact, and one still running would be garbage-collected
+		// mid-delete once the finalizer goes. The cleanup then runs to its
+		// end, and its Events say that the late Retain was ignored.
 		started, err := r.artifactCleanupStarted(ctx, backup)
 		if err != nil {
 			return false, 0, err
@@ -1014,6 +1015,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		if err := controllerutil.SetControllerReference(backup, built, r.Scheme); err != nil {
 			return false, 0, fmt.Errorf("set cleanup job owner ref: %w", err)
 		}
+		if wait, err := r.recordCleanupStart(ctx, backup); err != nil || wait > 0 {
+			return false, wait, err
+		}
 		if err := r.Create(ctx, built); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				return false, 5 * time.Second, nil
@@ -1158,6 +1162,18 @@ func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1al
 	if wait, err := r.waitForArtifactReaders(ctx, backup, true); err != nil || wait > 0 {
 		return false, wait, err
 	}
+	// The cleanup of this deletion never started (artifactCleanupStarted),
+	// but a cleanup pod not attributable to it (an earlier backup of the
+	// same name) may still be deleting at this destination. The artifact
+	// is not reported as left in storage while one may still write; the
+	// read is uncached so a pod the cache has not seen yet counts.
+	if active, err := r.activeCleanupPodsFrom(ctx, r.apiReader(), backup); err != nil {
+		return false, 0, err
+	} else if active {
+		log.FromContext(ctx).Info("deletionPolicy is Retain; waiting for a running cleanup pod of this backup name to stop before releasing it",
+			"mysqlbackup", client.ObjectKeyFromObject(backup))
+		return false, 5 * time.Second, nil
+	}
 	location := "no recorded destination"
 	if storage := backup.Status.ArtifactStorage; storage != nil && storage.Location != "" {
 		location = fmt.Sprintf("%q", storage.Location)
@@ -1176,11 +1192,38 @@ func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1al
 	return true, 0, nil
 }
 
-// artifactCleanupStarted reports whether a cleanup Job has been created
-// for backup's artifact: its own cleanup Job exists, or the
-// ArtifactCleanup condition records one that failed or could not start
-// (a failed Job is deleted before its replacement is created).
+// recordCleanupStart sets status.cleanupStartTime before the first
+// cleanup Job is created, so the cutoff after which a late Retain is not
+// applied survives the Job's removal (an Orphan delete of the Job, or the
+// gap between a failed Job's deletion and its replacement, leaves its pod
+// possibly still deleting with no Job to find). The write is conditioned on
+// the resourceVersion this pass read: a spec edit (to Retain) since then
+// conflicts, and the next pass decides from the new spec before any Job
+// exists.
+func (r *MysqlBackupReconciler) recordCleanupStart(ctx context.Context, backup *v1alpha1.MysqlBackup) (time.Duration, error) {
+	if backup.Status.CleanupStartTime != nil {
+		return 0, nil
+	}
+	patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	now := metav1.NewTime(r.clock())
+	backup.Status.CleanupStartTime = &now
+	if err := r.Status().Patch(ctx, backup, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			return 2 * time.Second, nil
+		}
+		return 0, fmt.Errorf("record cleanup start: %w", err)
+	}
+	return 0, nil
+}
+
+// artifactCleanupStarted reports whether the deletion has started cleaning
+// up backup's artifact: status.cleanupStartTime is set, its own cleanup Job
+// exists, or the ArtifactCleanup condition records one that failed or
+// could not start.
 func (r *MysqlBackupReconciler) artifactCleanupStarted(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+	if backup.Status.CleanupStartTime != nil {
+		return true, nil
+	}
 	job, err := r.currentCleanupJob(ctx, backup)
 	if err != nil {
 		return false, err
@@ -1535,8 +1578,13 @@ func (r *MysqlBackupReconciler) ownedBackupJob(ctx context.Context, backup *v1al
 // activeCleanupPods reports whether any cleanup pod of this backup is still
 // pending or running.
 func (r *MysqlBackupReconciler) activeCleanupPods(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+	return r.activeCleanupPodsFrom(ctx, r.Client, backup)
+}
+
+// activeCleanupPodsFrom is activeCleanupPods reading from reader.
+func (r *MysqlBackupReconciler) activeCleanupPodsFrom(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) (bool, error) {
 	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(backup.Namespace), client.MatchingLabels{
+	if err := reader.List(ctx, &pods, client.InNamespace(backup.Namespace), client.MatchingLabels{
 		v1alpha1.MysqlBackupLabel: backup.Name,
 		v1alpha1.ResourceLabel:    "backup-cleanup",
 	}); err != nil {
