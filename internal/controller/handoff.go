@@ -69,6 +69,9 @@ type HandoffOptions struct {
 	// REPLICA ALL re-creates it so the standby keeps replicating; an empty
 	// Host leaves the channel for an operator to restore.
 	RestoreReplication mysql.ReplicationSourceOpts
+	// SourceSite names the source in the log lines about its binary log
+	// rotation.
+	SourceSite string
 }
 
 func (o HandoffOptions) withDefaults() HandoffOptions {
@@ -105,12 +108,16 @@ func (o HandoffOptions) withDefaults() HandoffOptions {
 //  3. Fence the source with super_read_only=ON. A failed fence aborts.
 //  4. Kill application connections on the source (best effort).
 //  5. Read the fenced source's GTID_EXECUTED; nothing can be added to it now.
+//     Then rotate the source's binary log, best effort and bounded by
+//     BinlogRotationTimeout, so the tail it wrote as the primary is a
+//     sealed file its sidecar can archive.
 //  6. Wait for the candidate to contain that set. A candidate applier error,
 //     an unreadable or unparseable set, or the CatchUp budget, which runs
 //     from step 3, aborts.
 //  7. Promote the candidate, re-checking after STOP REPLICA and after
 //     RESET REPLICA ALL that its set equals the fenced set: nothing
-//     missing, nothing extra.
+//     missing, nothing extra. Its binary log is rotated, best effort,
+//     before its writes are enabled (promoteVerifiedFrom).
 //
 // Both waits probe the source too: if it stops answering for
 // SourceLossWindow, the handoff ends with errActivePrimaryLost so emergency
@@ -191,6 +198,12 @@ func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, sour
 		return "", f.abortHandoff(ctx, candidateSite, source, fmt.Errorf("maintenance handoff: read fenced source GTID set: %w", err))
 	}
 	f.logger.Info("maintenance handoff: fenced source", "candidate", candidateSite, "sourceGtid", fencedRaw)
+	// The source is read-only and its set is final: rotate its binary log,
+	// best effort, so the last transactions it took as the primary sit in
+	// a sealed file its sidecar can archive (see rotateBinlog). Bounded by
+	// BinlogRotationTimeout inside the fenced phase; whether it was
+	// acknowledged changes nothing below.
+	f.rotateBinlog(fencedCtx, source, opts.SourceSite, outgoingPrimaryRotation, "candidate", candidateSite)
 	if err := f.waitForCandidateGTIDs(fencedCtx, candidate, source, fenced, opts.CatchUp, opts); err != nil {
 		cause := fmt.Errorf("maintenance handoff: candidate %s did not reach the fenced source GTID set: %w", candidateSite, err)
 		if errors.Is(err, errActivePrimaryLost) {

@@ -195,9 +195,29 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 			}
 		}
 	}
-	a.sealedSnapshot = names
+	if a.tailUpload == nil {
+		a.sealedSnapshot = names
+	} else if a.sealedSnapshot != nil {
+		// A tail drain scans a prefix of the index. What is known about
+		// the sealed files after it stays, here and in localIDs below, or
+		// the next scan of the whole index would take every one of them
+		// for newly sealed and identify it again. (Without a snapshot no
+		// file counts as newly sealed; a drain does not start one.)
+		snapshot := make(map[string]os.FileInfo, len(names)+len(a.sealedSnapshot))
+		for name, info := range a.sealedSnapshot {
+			snapshot[name] = info
+		}
+		for name, info := range names {
+			snapshot[name] = info
+		}
+		a.sealedSnapshot = snapshot
+	}
 	uploaded := 0
 	hadError := false
+	// What this pass uploaded, and the files it reconciled with the
+	// manifest (uploaded, or found archived or retired), for the tail drain.
+	var uploadedNames []string
+	settled := make(map[string]bool)
 	fail := func(name string, err error) {
 		hadError = true
 		a.incUploadFailures()
@@ -222,6 +242,7 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 		}
 		if a.retiredIdentity(retired, name, id) || a.candidateSeen(rows[name], id) {
 			delete(pending, name)
+			settled[name] = true
 			continue
 		}
 		replace, err := a.missingLegacy(ctx, name, id, rows[name])
@@ -237,6 +258,7 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 		}
 		if legacySame && !replace {
 			delete(pending, name)
+			settled[name] = true
 			continue
 		}
 		if err := a.archivePinned(ctx, path, name, id, replace); err != nil {
@@ -245,7 +267,9 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 			continue
 		}
 		uploaded++
+		uploadedNames = append(uploadedNames, name)
 		delete(pending, name)
+		settled[name] = true
 		if replace {
 			rows[name] = nil
 		}
@@ -407,6 +431,7 @@ history:
 							problem = true
 						} else {
 							uploaded++
+							uploadedNames = append(uploadedNames, task.name)
 							rows[task.name][task.row] = ManifestEntry{Name: task.name, ID: task.id}
 						}
 					} else {
@@ -436,11 +461,13 @@ history:
 				problem = true
 			} else {
 				uploaded++
+				uploadedNames = append(uploadedNames, task.name)
 				rows[task.name] = append(rows[task.name], ManifestEntry{Name: task.name, ID: task.id})
 			}
 		}
 		if !problem {
 			delete(pending, task.name)
+			settled[task.name] = true
 		}
 		task.close()
 		a.historyTask = nil
@@ -461,9 +488,10 @@ history:
 		}
 	}
 	for name := range a.localIDs {
-		if names[name] == nil {
+		if names[name] == nil && a.tailUpload == nil {
 			delete(a.localIDs, name)
 		}
 	}
+	a.scanUploaded, a.scanSettled = uploadedNames, settled
 	return uploaded, int64(len(pending)), hadError
 }

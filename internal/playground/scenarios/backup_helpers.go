@@ -958,6 +958,14 @@ func archiverSummary(st *pgsidecar.ArchiverStatusResponse) string {
 	if st == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("enabled=%v primary=%v site=%s storage=%s prefix=%s lastScan=%s files=%d manifestFiles=%d backlog=%d newest=%s lastUpload=%s failures=%d lastError=%q",
-		st.Enabled, st.Primary, st.Site, st.StorageType, st.ManifestPrefix, st.LastScanAt.Format(time.RFC3339Nano), st.FilesArchived, st.ManifestFileCount, st.BacklogFiles, st.NewestArchivedTime.Format(time.RFC3339Nano), st.LastUploadAt.Format(time.RFC3339Nano), st.UploadFailures, st.LastError)
+	return fmt.Sprintf("enabled=%v primary=%v site=%s storage=%s prefix=%s lastScan=%s files=%d manifestFiles=%d backlog=%d newest=%s lastUpload=%s failures=%d lastError=%q tail=%s",
+		st.Enabled, st.Primary, st.Site, st.StorageType, st.ManifestPrefix, st.LastScanAt.Format(time.RFC3339Nano), st.FilesArchived, st.ManifestFileCount, st.BacklogFiles, st.NewestArchivedTime.Format(time.RFC3339Nano), st.LastUploadAt.Format(time.RFC3339Nano), st.UploadFailures, st.LastError, archiverTailSummary(st.Tail))
+}
+
+// archiverTailSummary renders the tail block of /archiver/status (#264).
+func archiverTailSummary(t *pgsidecar.ArchiverTailResponse) string {
+	if t == nil {
+		return "<none>"
+	}
+	return fmt.Sprintf("{%s active=%s newestSealed=%s pending=%d reason=%q}", t.State, t.ActiveFile, t.NewestSealedFile, t.PendingFiles, t.Reason)
 }

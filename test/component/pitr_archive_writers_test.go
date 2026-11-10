@@ -56,6 +56,9 @@ type simServer struct {
 	detail    string
 	files     []binlogtest.File // the last one is active
 	first     int               // number of files[0]
+	// written counts the sealed files already on disk: like mysqld, the
+	// simulation writes a sealed file once and never touches it again.
+	written int
 }
 
 func newSimServer(t *testing.T, uuid string, serverID uint32, readOnly bool) *simServer {
@@ -134,7 +137,7 @@ func (s *simServer) reclone(donor *simServer) {
 	}
 	s.executed = executed
 	s.files = []binlogtest.File{{ServerID: s.serverID, Created: writerClock, Previous: executed.String()}}
-	s.first = 1
+	s.first, s.written = 1, 0
 	s.writeLocked()
 }
 
@@ -143,8 +146,11 @@ func (s *simServer) writeLocked() {
 	for i, f := range s.files {
 		name := fmt.Sprintf("mysql-bin.%06d", s.first+i)
 		index = append(index, name)
-		writeAtomic(s.t, filepath.Join(s.dir, name), f.MustBytes())
+		if i >= s.written {
+			writeAtomic(s.t, filepath.Join(s.dir, name), f.MustBytes())
+		}
 	}
+	s.written = len(s.files) - 1
 	writeAtomic(s.t, filepath.Join(s.dir, "mysql-bin.index"), []byte(strings.Join(index, "\n")+"\n"))
 }
 
@@ -430,6 +436,22 @@ func assertRecord(t *testing.T, got sidecar.PromotionRecord, uuid string, server
 		got.ObservedAt.Location() != time.UTC || got.ObservedAt.Nanosecond()%1000 != 0 {
 		t.Fatalf("record = %+v, want %s/%d with %q at a µs UTC instant", got, uuid, serverID, executed)
 	}
+}
+
+// waitTailDrained waits for a site's archiver to report what the operator
+// waits for after its FLUSH BINARY LOGS: a scan that saw the rotation
+// (active is the new active binlog) and found nothing left to archive.
+func (w *writerArchive) waitTailDrained(a *sidecar.BinlogArchiver, active string) sidecar.Status {
+	w.t.Helper()
+	var st sidecar.Status
+	w.eventually("a drained tail with active binlog "+active, func() bool {
+		st = a.Snapshot(context.Background())
+		return st.Tail != nil && st.Tail.ActiveFile == active && st.Tail.State == internalmysql.ArchiverTailDrained
+	})
+	if st.Tail.PendingFiles != 0 || st.BacklogFiles != 0 || st.LastError != "" {
+		w.t.Fatalf("drained tail of %s: %+v (tail %+v)", st.Site, st, st.Tail)
+	}
+	return st
 }
 
 // Example 3 layout: A→B→A without reclone, a short B era with no B rotation.
@@ -889,4 +911,211 @@ func TestArchiveWritersSidecarRestart(t *testing.T) {
 		time.Duration(reset.ProbeInterval) < reset.ObservedAt.Sub(r.ObservedAt) {
 		t.Fatalf("start-up reset record = %+v, latest record before it %+v", reset, r)
 	}
+}
+
+// #264, a planned handoff: the operator fences a and flushes its binary
+// log, which seals a's writable-era tail. a is read-only from then on, and
+// its sidecar still archives the tail. Targets inside the tail plan from
+// a's own bytes (before, with b's era unrotated, they refused
+// PITRArchiveGap). The replica copies a logs afterwards are never uploaded.
+func TestArchiveWritersPlannedHandoffArchivesTail(t *testing.T) {
+	w := newWriterArchive(t)
+	srvA := newSimServer(t, writerUUIDA, 101, false)
+	srvB := newSimServer(t, writerUUIDB, 102, true)
+	id := w.identity(writerGroup, w.dest)
+	a := w.start("a", srvA, w.store, id)
+	w.start("b", srvB, w.store, id)
+
+	w.waitRecords("a", 1)
+	era1 := liveTxns(writerUUIDA, 101, 1, 5)
+	srvA.apply(era1...)
+	srvB.apply(era1...)
+	dump := writerDump(t, "a", 101, writerUUIDA+":1-5")
+	srvA.rotate()
+	w.eventually("a1 archived", func() bool { return len(w.manifest("a").Files) == 1 })
+	tail := liveTxns(writerUUIDA, 101, 6, 10)
+	srvA.apply(tail...)
+	srvB.apply(tail...)
+
+	// The handoff: a is fenced, then flushed; b is promoted. The flush
+	// comes once a's sidecar has seen the fence, so no scan of a's
+	// writable episode can still upload the file it seals.
+	srvA.setReadOnly(true)
+	w.waitDemoted(a)
+	srvA.rotate()
+	srvB.setReadOnly(false)
+	w.waitRecords("b", 1)
+	era2 := liveTxns(writerUUIDB, 102, 1, 3)
+	srvB.apply(era2...)
+	srvA.apply(era2...)
+
+	st := w.waitTailDrained(a, "mysql-bin.000003")
+	if st.Primary || st.Tail.NewestSealedFile != "mysql-bin.000002" {
+		t.Fatalf("a's status %+v (tail %+v)", st, st.Tail)
+	}
+	ma := w.manifest("a")
+	if len(ma.Files) != 2 || len(ma.Promotions) != 1 {
+		t.Fatalf("a manifest: %d rows, records %+v", len(ma.Files), ma.Promotions)
+	}
+	row := ma.Files[1]
+	if row.Name != "mysql-bin.000002" || row.PreviousGTIDs != gtidSet(t, writerUUIDA+":1-5") ||
+		row.GTIDCoverage == nil || !row.GTIDCoverage.Complete || row.GTIDCoverage.GTIDs != gtidSet(t, writerUUIDA+":6-10") {
+		t.Fatalf("a's tail row = %+v (coverage %+v)", row, row.GTIDCoverage)
+	}
+	if mb := w.manifest("b"); len(mb.Files) != 0 {
+		t.Fatalf("b's era never rotated, yet b archived %+v", mb.Files)
+	}
+
+	// Targets inside the tail, planned from the writers' manifests and bytes.
+	A, B := writerUUIDA, writerUUIDB
+	plan, err := w.plan(dump, before(tail[2]), "")
+	assertPlan(t, "inside a's tail", plan, err, A+":1-7", A+":8", pitrplan.GroundTruthOrigin)
+	if plan.Witness.Row.Site != "a" || plan.Witness.Row.Name != "mysql-bin.000002" {
+		t.Fatalf("witness row %+v, want a's tail file", plan.Witness.Row)
+	}
+	plan, err = w.plan(dump, before(tail[4]), "")
+	assertPlan(t, "the tail's last transaction", plan, err, A+":1-9", A+":10", pitrplan.GroundTruthOrigin)
+
+	// a's next file holds only replica copies of b's era: sealed, it is
+	// not uploaded.
+	srvA.rotate()
+	w.waitTailDrained(a, "mysql-bin.000004")
+	if got := len(w.manifest("a").Files); got != 2 {
+		t.Fatalf("a uploaded a replica copy: %d rows", got)
+	}
+
+	// b's era, once b seals its file.
+	srvB.rotate()
+	w.eventually("b's file archived", func() bool { return len(w.manifest("b").Files) == 1 })
+	plan, err = w.plan(dump, before(era2[1]), "")
+	assertPlan(t, "inside b's era", plan, err, A+":1-10,"+B+":1", B+":2", pitrplan.GroundTruthOrigin)
+	w.assertOneDescriptor()
+}
+
+// #264, the reclone of TestArchiveWritersFailbackWithReclone with the
+// operator's flush before the clone: a's unarchived file (its tail A:6-10,
+// then replica copies of b's era) is sealed and archived whole before the
+// wipe. The backup from before the tail now reaches a's new era, where it
+// refused PITRArchiveGap.
+func TestArchiveWritersRecloneArchivesTail(t *testing.T) {
+	w := newWriterArchive(t)
+	srvA := newSimServer(t, writerUUIDA, 101, false)
+	srvB := newSimServer(t, writerUUIDB, 102, true)
+	id := w.identity(writerGroup, w.dest)
+	a := w.start("a", srvA, w.store, id)
+	b := w.start("b", srvB, w.store, id)
+
+	w.waitRecords("a", 1)
+	era1 := liveTxns(writerUUIDA, 101, 1, 5)
+	srvA.apply(era1...)
+	srvB.apply(era1...)
+	early := writerDump(t, "a", 101, writerUUIDA+":1-5")
+	srvA.rotate()
+	w.eventually("a1 archived", func() bool { return len(w.manifest("a").Files) == 1 })
+	tail := liveTxns(writerUUIDA, 101, 6, 10)
+	srvA.apply(tail...)
+	srvB.apply(tail...)
+	srvA.setReadOnly(true)
+	w.waitDemoted(a)
+	srvB.setReadOnly(false)
+	w.waitRecords("b", 1)
+	era2 := liveTxns(writerUUIDB, 102, 1, 3)
+	srvB.apply(era2...)
+	srvA.apply(era2...)
+
+	// Before the reclone the operator flushes a and waits for its sidecar.
+	srvA.rotate()
+	w.waitTailDrained(a, "mysql-bin.000003")
+	ma := w.manifest("a")
+	if len(ma.Files) != 2 || ma.Files[1].GTIDCoverage.GTIDs != gtidSet(t, writerUUIDA+":6-10,"+writerUUIDB+":1-3") {
+		t.Fatalf("a's tail before the wipe: %+v", ma.Files)
+	}
+
+	srvA.reclone(srvB)
+	srvB.setReadOnly(true)
+	w.waitDemoted(b)
+	srvA.setReadOnly(false)
+	w.waitRecords("a", 2)
+	era3 := liveTxns(writerUUIDA, 101, 11, 15)
+	srvA.apply(era3...)
+	srvA.rotate()
+	w.eventually("a's post-clone file archived", func() bool { return len(w.manifest("a").Files) == 3 })
+	if mb := w.manifest("b"); len(mb.Files) != 0 {
+		t.Fatalf("b archived %+v", mb.Files)
+	}
+
+	A, B := writerUUIDA, writerUUIDB
+	plan, err := w.plan(early, before(era3[1]), "")
+	assertPlan(t, "early backup across the archived tail", plan, err, A+":1-11,"+B+":1-3", A+":12", pitrplan.GroundTruthOrigin)
+	plan, err = w.plan(early, before(tail[2]), "")
+	assertPlan(t, "inside the tail", plan, err, A+":1-7", A+":8", pitrplan.GroundTruthOrigin)
+	// b's era is archived only as the replica copies in a's tail file.
+	plan, err = w.plan(early, before(era2[1]), "")
+	assertPlan(t, "inside b's era", plan, err, A+":1-10,"+B+":1", B+":2", pitrplan.GroundTruthAnchored)
+}
+
+// #264, a reclone after a lossy failover: a committed A:9-10 that never
+// reached b. a comes back fenced, and the operator's flush before the
+// reclone seals its tail, which a's sidecar archives with the lost
+// transactions in it. The planner reports them as divergent history that a
+// restore of b's era must exclude; it is not a gap, and they are not lost
+// without a trace.
+func TestArchiveWritersRecloneArchivesLostTail(t *testing.T) {
+	w := newWriterArchive(t)
+	srvA := newSimServer(t, writerUUIDA, 101, false)
+	srvB := newSimServer(t, writerUUIDB, 102, true)
+	id := w.identity(writerGroup, w.dest)
+	a := w.start("a", srvA, w.store, id)
+	w.start("b", srvB, w.store, id)
+
+	w.waitRecords("a", 1)
+	era1 := liveTxns(writerUUIDA, 101, 1, 5)
+	srvA.apply(era1...)
+	srvB.apply(era1...)
+	early := writerDump(t, "a", 101, writerUUIDA+":1-5")
+	srvA.rotate()
+	w.eventually("a1 archived", func() bool { return len(w.manifest("a").Files) == 1 })
+	tail := liveTxns(writerUUIDA, 101, 6, 10)
+	srvA.apply(tail...)
+	srvB.apply(tail[:3]...)
+
+	// a fails; b is promoted without A:9-10. a comes back read-only.
+	srvA.setReadOnly(true)
+	w.waitDemoted(a)
+	srvB.setReadOnly(false)
+	w.waitRecords("b", 1)
+	era2 := liveTxns(writerUUIDB, 102, 1, 3)
+	srvB.apply(era2...)
+
+	srvA.rotate()
+	w.waitTailDrained(a, "mysql-bin.000003")
+	ma := w.manifest("a")
+	if len(ma.Files) != 2 || ma.Files[1].GTIDCoverage.GTIDs != gtidSet(t, writerUUIDA+":6-10") {
+		t.Fatalf("a's tail before the wipe: %+v", ma.Files)
+	}
+	srvA.reclone(srvB)
+	w.eventually("a's reset record", func() bool { return len(resetRecordsOf(w.manifest("a"))) == 1 })
+	srvB.rotate()
+	w.eventually("b's file archived", func() bool { return len(w.manifest("b").Files) == 1 })
+	if got := len(w.manifest("a").Files); got != 2 {
+		t.Fatalf("the recloned a uploaded while read-only: %d rows", got)
+	}
+
+	A, B := writerUUIDA, writerUUIDB
+	lost := A + ":9-10"
+	plan, err := w.plan(early, before(era2[1]), "")
+	assertRefusal(t, "b's era across the lost tail", err, pitrarchive.TokenArchiveDivergentHistory)
+	if plan == nil || !plan.Divergent.Equal(planSet(t, lost)) {
+		t.Fatalf("divergent set %+v, want %s", plan, lost)
+	}
+	plan, err = w.plan(early, before(era2[1]), lost)
+	assertPlan(t, "b's era, excluding the lost tail", plan, err, A+":1-8,"+B+":1", B+":2", pitrplan.GroundTruthOrigin)
+	// A target inside the lost tail restores what a had then.
+	plan, err = w.plan(early, before(tail[4]), "")
+	assertPlan(t, "inside the lost tail", plan, err, A+":1-9", A+":10", pitrplan.GroundTruthOrigin)
+	// Latest mode: two heads until the lost transactions are excluded.
+	_, err = w.plan(early, time.Time{}, "")
+	assertRefusal(t, "latest with a's lost tail archived", err, pitrarchive.TokenArchiveSplitBrain)
+	plan, err = w.plan(early, time.Time{}, lost)
+	assertPlan(t, "latest excluding the lost tail", plan, err, A+":1-8,"+B+":1-3", "", "")
 }

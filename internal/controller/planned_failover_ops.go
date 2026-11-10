@@ -63,6 +63,12 @@ type runnerPlannedTopology struct {
 	mu          sync.Mutex
 	fenceMemo   map[string]fenceMemoEntry
 	promoteMemo map[string]promoteMemoStage
+	// promoteFlushed holds the runs whose promotion this process already
+	// sent FLUSH BINARY LOGS for (acknowledged or not), so a promotion
+	// retried over several passes rotates the target's binary log once.
+	promoteFlushed map[string]bool
+	// sourceFlushed is the same for the fenced source's rotation.
+	sourceFlushed map[string]bool
 	// sourceLoss and rollbackTargetLoss are the first failed read of a
 	// run's loss window inside the facade. sourceLoss is fed by every
 	// source observation the facade makes for the run (the drain's kill
@@ -87,6 +93,8 @@ func newRunnerPlannedTopology(reg ManagerRegistry) *runnerPlannedTopology {
 		reg:                reg,
 		fenceMemo:          make(map[string]fenceMemoEntry),
 		promoteMemo:        make(map[string]promoteMemoStage),
+		promoteFlushed:     make(map[string]bool),
+		sourceFlushed:      make(map[string]bool),
 		sourceLoss:         make(map[string]time.Time),
 		rollbackTargetLoss: make(map[string]time.Time),
 	}
@@ -126,6 +134,8 @@ func (p *runnerPlannedTopology) forgetRun(runID string) {
 	defer p.mu.Unlock()
 	delete(p.fenceMemo, runID)
 	delete(p.promoteMemo, runID)
+	delete(p.promoteFlushed, runID)
+	delete(p.sourceFlushed, runID)
 	delete(p.sourceLoss, runID)
 	delete(p.rollbackTargetLoss, runID)
 }
@@ -163,6 +173,18 @@ func (p *runnerPlannedTopology) lossRecovered(window map[string]time.Time, runID
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(window, runID)
+}
+
+// firstFlush reports whether this process has not yet sent the rotation
+// that memo tracks for runID, and records that it now has.
+func (p *runnerPlannedTopology) firstFlush(memo map[string]bool, runID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if memo[runID] {
+		return false
+	}
+	memo[runID] = true
+	return true
 }
 
 // promoteMemoFor returns how far this process's promotion of runID got,
@@ -781,7 +803,33 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 	if err != nil || !after.superReadOnly || after.uuid != id.uuid {
 		return FenceProof{Kind: FenceRetry, Reason: v1alpha1.PlannedFailoverReasonFenceFailed, SourceServerUUID: id.uuid}, nil
 	}
+	p.sealFencedSource(ctx, tm, ref, src)
 	return p.postFenceProof(ctx, tm, ref, after, FenceByMemo), nil
+}
+
+// sealFencedSource rotates the fenced source's binary log, best effort
+// (FailoverController.rotateBinlog): the source is read-only and its
+// executed set is final, so the file the rotation closes holds the last
+// transactions it took as the primary, and its sidecar can archive that
+// file although the site no longer is one. Without it the tail stays in
+// the active file until some later rotation, which an early reclone of the
+// site would never see.
+//
+// It runs once per run and process, in the pass that sent the fence and
+// read it back, on a connection of its own, and only while the run still
+// holds the claim. Its outcome changes nothing: the run continues the same
+// whether the rotation was acknowledged, failed or was abandoned at its
+// bound.
+func (p *runnerPlannedTopology) sealFencedSource(ctx context.Context, tm *TopologyManager, ref PlannedRunRef, src *siteTracker) {
+	if tm.requireRunClaim(p.leader(), ref, false) != nil {
+		return
+	}
+	if !p.firstFlush(p.sourceFlushed, ref.RunID) {
+		return
+	}
+	p.hooks.stmt(true, ref.Source, "FLUSH BINARY LOGS")
+	tm.failover.rotateBinlog(ctx, src.mysql, ref.Source, outgoingPrimaryRotation, "runId", ref.RunID)
+	p.hooks.stmt(false, ref.Source, "FLUSH BINARY LOGS")
 }
 
 // postFenceProof re-runs the probe set after the fence (§4.3): a writable
@@ -1930,8 +1978,19 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		},
 		statementTimeout: mysqlSafetyProbeTimeout,
 		planned:          true,
+		// One rotation per run and process: a promotion whose gate is
+		// retried over several passes would otherwise add an empty binary
+		// log file, and up to BinlogRotationTimeout, on every pass.
+		flush: func(send func()) {
+			if !p.firstFlush(p.promoteFlushed, ref.RunID) {
+				return
+			}
+			p.hooks.stmt(true, ref.Target, "FLUSH BINARY LOGS")
+			send()
+			p.hooks.stmt(false, ref.Target, "FLUSH BINARY LOGS")
+		},
 	}
-	promotionGtid, _, err := tm.failover.promoteVerifiedFrom(ctx, sess, ref.Target, F, stage, hooks)
+	promotionGtid, _, err := tm.failover.promoteVerifiedFrom(ctx, sess, tgt.mysql, ref.Target, F, stage, hooks)
 	var refusal *plannedGateRefusal
 	var divergent *DivergentCandidateError
 	switch {

@@ -28,6 +28,7 @@ type ackedWriter struct {
 
 	mu      sync.Mutex
 	acked   []int64
+	lastAck time.Time
 	failed  int
 	lastErr string
 
@@ -78,6 +79,7 @@ func startAckedWriter(ctx context.Context, env *runner.Env, site, db, table stri
 			w.mu.Lock()
 			if err == nil {
 				w.acked = append(w.acked, next)
+				w.lastAck = time.Now()
 			} else {
 				w.failed++
 				w.lastErr = err.Error()
@@ -110,6 +112,14 @@ func (w *ackedWriter) ackedIDs() []int64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return append([]int64(nil), w.acked...)
+}
+
+// lastAckAt is when MySQL acknowledged the writer's latest write (the
+// runner's clock, read when the INSERT returned); zero before the first.
+func (w *ackedWriter) lastAckAt() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastAck
 }
 
 func (w *ackedWriter) summary() string {

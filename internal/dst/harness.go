@@ -106,6 +106,13 @@ type trialRunner struct {
 	sidecarTick int
 
 	promotionPolls []int
+	// promotionSpans is the fake-clock window of each promotion's poll in
+	// promotionPolls. A poll is one second of fake time unless a slow
+	// FLUSH BINARY LOGS took part of the operator's rotation bound inside
+	// it, so the cooldown is judged on these, not on poll numbers.
+	promotionSpans []clockSpan
+	// pollStartAt is the fake clock at the start of the current poll.
+	pollStartAt time.Time
 	// promotionActors is the actor of each promotion in promotionPolls
 	// (trials with actors only).
 	promotionActors []Actor
@@ -137,7 +144,13 @@ type trialRunner struct {
 	// pendingCrashDown carries the armed crash's down window until the
 	// death actually lands.
 	operatorDeadUntil int
-	pendingCrashDown  int
+
+	// recloneWait is the pre-reclone archive-tail wait in progress
+	// (OpRecloneWait), nil when none; recloneTold is the manager that was
+	// last given its request.
+	recloneWait      *simRecloneWait
+	recloneTold      *controller.TopologyManager
+	pendingCrashDown int
 
 	dualStreak  int
 	dualFlagged bool
@@ -257,6 +270,7 @@ func (r *trialRunner) setup(capture bool) {
 	r.dns = newSimDNS(r.cluster)
 	r.tainter = newSimTainter(r.cluster)
 	r.clk = clock.NewFakeClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	r.cluster.SetClockAdvancer(r.clk.Advance)
 	r.hub = platform.NewHub(r.logger)
 
 	r.cfg = controller.TopologyConfig{
@@ -313,7 +327,9 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 	for i, name := range r.trial.SiteNames {
 		checkers[i] = r.cluster.NewChecker(name)
 	}
-	fc := controller.NewFailoverController(r.logger)
+	// The trial's clock bounds the failover controller's best-effort binary
+	// log rotations, so a slow FLUSH BINARY LOGS is abandoned in fake time.
+	fc := controller.NewFailoverControllerWithClock(r.logger, r.clk)
 	// The bootstrap controller is real and non-nil, exactly as the runner
 	// wires it whenever replication credentials exist — a nil controller
 	// with credentials set is a production-impossible combination that
@@ -328,6 +344,19 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 		r.tainter, r.hub, r.dns, r.logger, r.clk,
 	)
 	tm.SetSleepForTest(func(time.Duration) {})
+	// PITR archiving is "enabled" only while a reclone wait is scripted
+	// (OpRecloneWait); otherwise the probe answers disabled and a reclone
+	// would skip the wait, as on a group without PITR.
+	tm.ArchiveTailProbe = r.archiveTailProbe
+	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
+		// A wait that reaches its bound goes on to CLONE, which the model
+		// does not have: the harness withdraws every request before that.
+		r.violations = append(r.violations, Violation{
+			Invariant: "HarnessRecloneWaitExpired",
+			Poll:      r.cluster.Poll(),
+			Detail:    fmt.Sprintf("the pre-reclone wait on %s reached its bound (%s); CLONE is not modelled", site, reason),
+		})
+	}
 
 	if r.pl != nil {
 		// Trials with actors run the production restore (runner.go
@@ -444,6 +473,7 @@ func (r *trialRunner) run() {
 		// faults are stamped with the poll they take effect in — the repro
 		// log then matches the schedule's @pNNN annotations exactly.
 		r.cluster.BeginPoll(p)
+		r.pollStartAt = r.clk.Now()
 		if r.pl != nil {
 			r.pl.beginPoll(p)
 		}
@@ -460,6 +490,7 @@ func (r *trialRunner) run() {
 		if p == r.trial.HealAt {
 			r.healAll()
 		}
+		r.driveRecloneWait(p)
 
 		// A process killed mid-Execute is replaced at the start of the poll
 		// its down window expires in — before that poll's sidecar ticks, so
@@ -516,6 +547,75 @@ func (r *trialRunner) run() {
 			Detail:    "trial ended with the operator process still dead",
 		})
 	}
+}
+
+// clockSpan is the fake-clock window of one poll.
+type clockSpan struct{ start, end time.Time }
+
+// simRecloneWait is one scripted pre-reclone wait (OpRecloneWait).
+type simRecloneWait struct {
+	site    string
+	until   int // the poll the request is withdrawn at
+	sidecar int // what the site's sidecar answers (Op.K)
+}
+
+// driveRecloneWait keeps the scripted reclone request on the current
+// manager, as the reclone annotation would after a restart or a manager
+// replacement, and withdraws it when its window ends or the faults heal.
+func (r *trialRunner) driveRecloneWait(p int) {
+	w := r.recloneWait
+	if w == nil {
+		return
+	}
+	if p >= w.until || p >= r.trial.HealAt {
+		if r.recloneTold != nil {
+			r.recloneTold.CancelPendingRecloneForSim(w.site)
+		}
+		if r.tm != nil && r.tm != r.recloneTold {
+			r.tm.CancelPendingRecloneForSim(w.site)
+		}
+		r.recloneWait, r.recloneTold = nil, nil
+		return
+	}
+	if r.tm != nil && r.tm != r.recloneTold {
+		if r.recloneTold != nil {
+			r.recloneTold.CancelPendingRecloneForSim(w.site)
+		}
+		r.tm.SetRecloneSite(w.site)
+		r.recloneTold = r.tm
+	}
+}
+
+// archiveTailProbe is the simulated sidecar's /archiver/status for the
+// pre-reclone wait. It never reports the tail archived (the wait must not
+// reach CLONE); what it does report is the trial's choice.
+func (r *trialRunner) archiveTailProbe(_ context.Context, site string) (*mysql.ArchiverStatus, bool, error) {
+	w := r.recloneWait
+	if w == nil || w.site != site {
+		return nil, false, nil
+	}
+	if r.cluster.OperatorDead() {
+		return nil, true, errOperatorDead
+	}
+	var truth SiteTruth
+	for _, t := range r.cluster.Truth() {
+		if t.Name == site {
+			truth = t
+		}
+	}
+	if truth.Crashed || w.sidecar == 0 {
+		return nil, true, fmt.Errorf("dial tcp %s:8080: connect: connection refused", site)
+	}
+	tail := &mysql.ArchiverTailStatus{State: mysql.ArchiverTailPending, PendingFiles: 1,
+		ActiveFile: fmt.Sprintf("binlog.%06d", truth.BinlogSeq+1)}
+	switch w.sidecar {
+	case 2:
+		tail.State, tail.Reason = mysql.ArchiverTailBlocked, "sim: the archive store is unreachable"
+	case 3:
+		// The sidecar has not scanned since the trial began.
+		tail.State, tail.PendingFiles, tail.ActiveFile = mysql.ArchiverTailDrained, 0, "binlog.000001"
+	}
+	return &mysql.ArchiverStatus{Enabled: true, Tail: tail}, true, nil
 }
 
 // restartOperator brings up a replacement process after any kind of death —
@@ -619,6 +719,13 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 		r.cluster.AddAmbiguousMutations(op.Site, op.N)
 	case OpFailMuts:
 		r.cluster.AddFailMutations(op.Site, op.N)
+	case OpRecloneWait:
+		r.recloneWait = &simRecloneWait{site: op.Site, until: poll + op.N, sidecar: op.K}
+		r.recloneTold = nil
+	case OpFailFlush:
+		r.cluster.AddFlushFailures(op.Site, op.N)
+	case OpSlowFlush:
+		r.cluster.AddSlowFlushes(op.Site, op.N, op.K == 1)
 	case OpStallApply:
 		r.cluster.SetApplyStalled(op.Site, true)
 	case OpHealApply:

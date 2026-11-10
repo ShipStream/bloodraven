@@ -216,6 +216,31 @@ func (p *archiverPoller) record(at time.Time, results []archiverPollResult) {
 	p.tracker.observe(at, results)
 }
 
+// tailStatus reads site's archiver status now, outside the poll rounds, for
+// the pre-reclone archive-tail wait (ArchiveTailProbe). enabled reports
+// whether the group's current PITR spec renders an enabled archiver; the
+// wait is skipped when it does not. The read is not recorded: it feeds
+// neither the snapshots nor the PITRArchiveReady tracker.
+func (p *archiverPoller) tailStatus(ctx context.Context, site string) (status *internalmysql.ArchiverStatus, enabled bool, err error) {
+	p.mu.RLock()
+	enabled = p.rolloutRenders
+	p.mu.RUnlock()
+	if !enabled {
+		return nil, false, nil
+	}
+	for _, pair := range p.clients {
+		if pair.name != site {
+			continue
+		}
+		if pair.client == nil {
+			return nil, true, fmt.Errorf("no sidecar client")
+		}
+		status, err = pair.client.GetArchiverStatus(ctx)
+		return status, true, err
+	}
+	return nil, true, fmt.Errorf("site %q has no sidecar client", site)
+}
+
 // archiveVerdict returns the PITRArchiveReady verdict for the rounds
 // recorded so far.
 func (p *archiverPoller) archiveVerdict() pitrArchiveVerdict {

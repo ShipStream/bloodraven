@@ -47,6 +47,14 @@ type FakeMySQL struct {
 	GtidExecutedVal string
 	GtidExecutedErr error
 
+	// FlushBinaryLogsErr is returned by FlushBinaryLogs. FlushBinaryLogsFn,
+	// when set, runs instead (without the fake's lock) with the caller's
+	// context, so a test can block it until that context ends.
+	// BinlogFlushes counts the calls that returned nil.
+	FlushBinaryLogsErr error
+	FlushBinaryLogsFn  func(ctx context.Context) error
+	BinlogFlushes      int
+
 	// Error injection per method
 	FenceErr        error
 	DrainErr        error
@@ -242,6 +250,25 @@ func (m *FakeMySQL) GetGtidExecuted(_ context.Context) (string, error) {
 	defer m.mu.Unlock()
 	m.record("GetGtidExecuted")
 	return m.GtidExecutedVal, m.GtidExecutedErr
+}
+
+// FlushBinaryLogs records the call and rotates nothing: the fake has no
+// binary log, only the count of successful flushes.
+func (m *FakeMySQL) FlushBinaryLogs(ctx context.Context) error {
+	m.mu.Lock()
+	m.record("FlushBinaryLogs")
+	fn, err := m.FlushBinaryLogsFn, m.FlushBinaryLogsErr
+	m.mu.Unlock()
+	if fn != nil {
+		err = fn(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.BinlogFlushes++
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {

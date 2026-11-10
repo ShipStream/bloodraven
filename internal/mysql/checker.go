@@ -3,9 +3,12 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strings"
 	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // Checker checks MySQL read_only status and manages replication.
@@ -27,6 +30,20 @@ type Checker interface {
 
 	// GTID methods:
 	GetGtidExecuted(ctx context.Context) (string, error)
+
+	// FlushBinaryLogs runs FLUSH BINARY LOGS: the server closes its active
+	// binary log file and opens the next one, whose Previous_gtids header
+	// is the server's gtid_executed at that moment. The statement is never
+	// written to the binary log, adds no GTID, and works under
+	// super_read_only; it needs the RELOAD privilege.
+	//
+	// It runs on a connection of its own, never on the primary pool and
+	// never on a pinned Session, so a slow or cancelled flush cannot break
+	// a pinned promotion session or hold a pooled connection a health probe
+	// needs. Callers on the failover path bound it and carry on when it
+	// fails. Cancelling ctx abandons the wait, not necessarily the
+	// statement: the server may still rotate afterwards.
+	FlushBinaryLogs(ctx context.Context) error
 
 	// PinSession holds one server connection for statements that must all
 	// reach the same server; see Session.
@@ -61,6 +78,10 @@ type checker struct {
 	// per-session net_read_timeout/net_write_timeout set just before the clone
 	// apply to the connection that actually runs it.
 	cloneDB *sql.DB
+	// oneShot dials a connection that is used for one statement and then
+	// closed (FlushBinaryLogs). It carries the primary pool's hard I/O
+	// deadlines, and shares nothing with db or cloneDB.
+	oneShot driver.Connector
 }
 
 // statusNetTimeout is the hard driver-level dial/read/write deadline applied to
@@ -108,7 +129,13 @@ func NewChecker(dsn string) (Checker, error) {
 		db.Close()
 		return nil, err
 	}
-	return &checker{db: db, cloneDB: cloneDB}, nil
+	oneShot, err := oneShotConnector(dsn)
+	if err != nil {
+		db.Close()
+		cloneDB.Close()
+		return nil, err
+	}
+	return &checker{db: db, cloneDB: cloneDB, oneShot: oneShot}, nil
 }
 
 // NewCheckerFromPools returns a Checker over pools the caller opened, such as
@@ -116,8 +143,49 @@ func NewChecker(dsn string) (Checker, error) {
 // and closes both in Close. NewChecker is the production constructor: it is
 // what applies the primary pool's I/O deadlines and pins the clone pool to
 // one connection, and callers of this one are responsible for equivalents.
-func NewCheckerFromPools(db, cloneDB *sql.DB) Checker {
-	return &checker{db: db, cloneDB: cloneDB}
+// oneShot dials the connections FlushBinaryLogs uses, one per call.
+func NewCheckerFromPools(db, cloneDB *sql.DB, oneShot driver.Connector) Checker {
+	return &checker{db: db, cloneDB: cloneDB, oneShot: oneShot}
+}
+
+// oneShotConnector returns the connector for single-statement connections.
+// Its DSN is the primary pool's (primaryDSN), so a dial, read or write on a
+// blackholed address ends within statusNetTimeout whatever the caller's
+// context does; the TLS configuration the DSN names is resolved here, once.
+func oneShotConnector(dsn string) (driver.Connector, error) {
+	pdsn, err := primaryDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := ParseDSN(pdsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse dsn: %w", err)
+	}
+	connector, err := mysqldriver.NewConnector(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open mysql connector: %w", err)
+	}
+	return connector, nil
+}
+
+// FlushBinaryLogs implements Checker. Each call dials its own connection
+// (TCP, the MySQL handshake, TLS when the DSN has it, authentication:
+// a few round trips to the site), runs the statement and closes it. The
+// connection is not pooled: a statement abandoned on a cancelled context
+// has its connection closed by the driver, and here that is the only
+// thing the connection was for.
+func (m *checker) FlushBinaryLogs(ctx context.Context) error {
+	if m.oneShot == nil {
+		return fmt.Errorf("flush binary logs: no one-shot connector configured")
+	}
+	db := sql.OpenDB(m.oneShot)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
+		return fmt.Errorf("flush binary logs: %w", err)
+	}
+	return nil
 }
 
 // primaryDSN derives the primary pool's DSN from the operational DSN by

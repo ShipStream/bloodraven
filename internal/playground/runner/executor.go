@@ -60,6 +60,9 @@ type Result struct {
 	Duration    time.Duration
 	CapturePath string
 	CleanupErr  error
+	// Measurements are the lines the scenario recorded with
+	// Capture.Measure, on a pass and on a failure alike.
+	Measurements []string
 }
 
 // Run executes a scenario end-to-end.
@@ -103,6 +106,7 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 		res.Phase = phase
 		res.StepName = stepName
 		res.Duration = time.Since(res.StartTime)
+		res.Measurements = cap.Measurements()
 		failureBlock := fmt.Sprintf(
 			"scenario %s failed in phase=%s step=%q\n%s",
 			s.ID, phase, stepName, msg,
@@ -159,6 +163,7 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 
 	res.Passed = true
 	res.Duration = time.Since(res.StartTime)
+	res.Measurements = cap.Measurements()
 	cap.Note(fmt.Sprintf("scenario %s passed (elapsed=%s)", s.ID, res.Duration.Round(time.Millisecond)))
 	if !e.Cfg.NoCleanup {
 		// Clear marker on the pass path. Failures clear in cleanup()

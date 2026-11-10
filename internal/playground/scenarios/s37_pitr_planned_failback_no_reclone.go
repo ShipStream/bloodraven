@@ -36,19 +36,25 @@ const (
 const pitrRunAnnotation = "playground.bloodraven.shipstream.io/run"
 
 // scenario37PITRPlannedFailbackNoReclone is DESIGN §9.4 s37 and §4.15
-// Example 3: a planned failover A→B and failback B→A without a reclone or a
-// flush on b, so b's short era reaches the archive only as replica copies in
-// a's mixed binlog. Restores inside b's era are anchored by b's promotion
-// record. Every verification asserts the exact replayed history.
+// Example 3: a planned failover A→B and failback B→A without a reclone, and
+// without the scenario ever flushing b. Until the failback b's short era is
+// in no sealed file, so a target inside it is not covered. The failback
+// seals it twice (#264, #229): the operator rotates the fenced b, whose
+// sidecar, by then read-only, archives the era as b's own file; and it
+// rotates a before a's writes are enabled, which seals a's replica copies
+// of the era for a to archive once writable. Restores inside b's era are
+// covered from then on, before a flushes anything of its own. Every
+// verification asserts the exact replayed history.
 func scenario37PITRPlannedFailbackNoReclone() runner.Scenario {
 	return runner.Scenario{
 		ID:    s37ID,
 		Title: "PITR across a planned failback without reclone restores every era exactly",
 		Hypothesis: "With an encrypted RustFS archive and a background writer committing through every era, a planned A→B→A failback " +
-			"without reclone and without a flush on b: before the failback a timestamp in b's era refuses " +
-			"PITRTargetNotCovered and latest is ArchiveHead; after a's flush, timestamp verifications before the " +
-			"failover, inside b's era (anchored by b's promotion record) and after the failback, a latest " +
-			"verification, and an initFromBackup restore inside b's era each certify exactly the fenced history.",
+			"without reclone and without a scenario flush on b: before the failback a timestamp in b's era refuses " +
+			"PITRTargetNotCovered and latest is ArchiveHead; the failback archives b's era as the outgoing primary's tail, so " +
+			"right after it a timestamp inside b's era and latest (b's whole era) verify; after a's flush, timestamp " +
+			"verifications before the failover, inside b's era and after the failback, a latest verification, and an " +
+			"initFromBackup restore inside b's era each certify exactly the fenced history.",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#37-pitr-planned-failback-no-reclone",
 		Timeout:           60 * time.Minute,
@@ -62,6 +68,8 @@ func scenario37PITRPlannedFailbackNoReclone() runner.Scenario {
 			s37FailoverToB(),
 			s37VerifyBetweenEras(),
 			s37FailbackToA(),
+			s37VerifyTailAfterFailback(),
+			s37EraA2(),
 			s37VerifyEveryEra(),
 			s37RestoreInsideBEra(),
 		},
@@ -134,13 +142,18 @@ func s37EraA() runner.Step {
 func s37FailoverToB() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "planned A→B (no flush); b's promotion record; marker M2, fence T2, witness M2b on b",
+		Name:  "planned A→B (no scenario flush); b's promotion record; marker M2, fence T2, witness M2b on b",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			b := ctxFetch(env, "siteB")
 			recorded, err := pitrPlannedFailover(ctx, env, b, false)
 			if err != nil {
 				return err
 			}
+			// Until the failback, era B is in b's active binlog only (the
+			// operator sealed b's replica-era file at the promotion, so
+			// that file starts with b's first write) and, as replica
+			// copies, in a's.
+			//
 			// A replica-copy witness w is anchored by b's record only when
 			// observedAt + δ < oct(w) (and no later record of b falls
 			// before oct(w) + probeInterval + δ; b stays writable through
@@ -219,19 +232,74 @@ func s37VerifyBetweenEras() runner.Step {
 func s37FailbackToA() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "planned B→A (no flush on b); marker M3, fence T3, witness M3b, flush a",
+		Name:  "planned B→A (no scenario flush on b): the operator seals b's era at the fence and b's sidecar archives it",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			a := ctxFetch(env, "siteA")
-			if _, err := pitrPlannedFailover(ctx, env, a, false); err != nil {
+			a, b := ctxFetch(env, "siteA"), ctxFetch(env, "siteB")
+			// The writer is stopped and nothing else commits on b, so this
+			// is b's executed set at the fence: the whole of era B.
+			bSet, err := pitrSiteGTID(ctx, env, b)
+			if err != nil {
 				return err
 			}
+			if err := pitrStashFence(ctx, env, "B-tail", pitrFence{Site: b, GTID: bSet}); err != nil {
+				return err
+			}
+			// Era B was never flushed while b was writable: its only sealed
+			// copy on b is the file the operator's rotation seals at the
+			// fence, which b's read-only sidecar must upload (#264).
+			_, err = pitrPlannedFailoverArchivingTail(ctx, env, a, false)
+			return err
+		},
+	}
+}
+
+// s37VerifyTailAfterFailback runs before a flushes anything of its own.
+// Before #264 b's era was in no archived file at this point (it reached the
+// archive only when a's next flush sealed a's replica copies), so T2 was
+// not covered and latest stopped at era A.
+func s37VerifyTailAfterFailback() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseVerify,
+		Name:  "right after the failback: T2 inside b's era is covered and latest is b's whole era (the archived tail)",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			f2, err := pitrFetchFence(env, "T2")
+			if err != nil {
+				return err
+			}
+			if err := pitrVerify(ctx, env, s37ID, s37DBName, "t2-tail", pitrExpectation{
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Markers: []string{"baseline", "M1", "M1b", "M2"},
+			}); err != nil {
+				return err
+			}
+			// a has written nothing since its promotion, so the archive
+			// head is what b had executed when it was fenced.
+			tail, err := pitrFetchFence(env, "B-tail")
+			if err != nil {
+				return err
+			}
+			return pitrVerify(ctx, env, s37ID, s37DBName, "latest-tail", pitrExpectation{
+				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: tail, Outcome: v1alpha1.PointInTimeArchiveHead,
+				Markers: []string{"baseline", "M1", "M1b", "M2", "M2b"},
+			})
+		},
+	}
+}
+
+func s37EraA2() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "era A': marker M3, fence T3, witness M3b, flush a",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			a := ctxFetch(env, "siteA")
 			if err := pitrWithWriter(ctx, env, a, s37DBName, func() error {
 				return s37Era(ctx, env, a, 6, "M3", "T3")
 			}); err != nil {
 				return err
 			}
-			// Seals a's mixed file: era A's tail (origin), b's era (replica
-			// copies) and the start of era A' (origin).
+			// Seals era A'. a's replica copies of b's era are in the file
+			// the operator sealed at a's promotion (era A's tail in the one
+			// it sealed when a was fenced), which a uploaded once writable.
 			flushed, err := pitrTakeFence(ctx, env, a, true)
 			if err != nil {
 				return err
@@ -244,7 +312,7 @@ func s37FailbackToA() runner.Step {
 func s37VerifyEveryEra() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "verify T1 (origin), T2 inside b's era (anchored), T3, and latest",
+		Name:  "verify T1, T2 inside b's era, T3, and latest",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			cases := []struct {
 				label, fence string

@@ -64,7 +64,12 @@ dimension rather than one per statement.
    fetch/apply stalls, relay-drain stalls, rogue fences, rogue `read_only=0`,
    CR-status write outages, out-of-band anti-flap store outages, DNS
    outages). Fault kinds are drawn from the `faultWeights` table, whose
-   weights must sum to 100 (checked at `init`). Execution consumes no
+   weights must sum to 100 (checked at `init`). The binary log rotation
+   faults (`failFlush`, `slowFlush`) and the pre-reclone wait
+   (`recloneWait`) are drawn from a PRNG stream of their own
+   (`flushFaults`), so they add ops to a seed's schedule without changing
+   the ones it had before they existed
+   (`TestGenerateTrial_FlushFaultsOnlyAdd`). Execution consumes no
    randomness after generation.
 2. The harness builds a production `TopologyManager` via
    `NewTopologyManagerWithClock` with a `FakeClock`, the simulated
@@ -264,6 +269,62 @@ production planned-failover path end to end:
   update is not held by the cooldown (it is a maintenance handoff); and a
   window with no registered manager is no operator, like a dead one.
 
+## Binary log rotations (#229, #264)
+
+The operator's best-effort `FLUSH BINARY LOGS` (the promotion candidate
+before its writes are enabled, the fenced source at a planned failover or an
+ordered update's handoff, a reclone recipient before CLONE) runs through the
+production `FailoverController.rotateBinlog`, bounded by the trial's fake
+clock: the harness builds the controller with
+`NewFailoverControllerWithClock`.
+
+- **The model.** Each site has a file counter and the active file's
+  `Previous_gtids` (the executed set when a rotation opened it). A rotation
+  changes nothing else, works on a fenced replica, and spends neither the
+  mutation-fault counters nor the mid-`Execute` crash countdown, so a fault
+  armed for a promotion statement still hits that statement.
+- **Faults.** `failFlush site n`: the next n rotations fail, nothing
+  rotated. `slowFlush site n [k=1]`: the next n outlive the operator's
+  bound. The simulated call advances the fake clock by
+  `controller.BinlogRotationTimeout`, which fires the operator's timer, and
+  then blocks until the operator cancels it; with `k=1` the server completes
+  the rotation at the next tick, after the operator has moved on (the
+  promotion may have enabled writes by then). `rotateBinlog` calls the
+  flush from a goroutine and waits for it or the timer, so the model still
+  sees one actor at a time, and nothing touches the model after the
+  cancellation.
+- **Time inside a poll.** A slow rotation takes one second of fake time
+  inside a poll, so a poll is no longer always one second. The cooldown
+  invariant is judged on the fake clock for that reason (the window of each
+  promotion's poll), not on poll numbers.
+- **The pre-reclone wait.** `recloneWait site n k` requests a reclone of a
+  site with PITR archiving "on": the manager's `checkReclone` reads the
+  site's simulated sidecar status, rotates the site's binary log and waits
+  for the tail to be archived. The simulated sidecar never reports it
+  archived (k: unreachable, still uploading, blocked, or a scan from before
+  the rotation), and the harness withdraws the request n polls later or at
+  heal-all, before the wait's 2-minute bound, because CLONE is not modelled
+  (`HarnessRecloneWaitExpired` guards that). The request is applied again
+  to every manager that replaces the one it was given to, as the annotation
+  would be, so a restart or a manager replacement mid-wait starts the wait
+  over. What is covered: the wait interleaved with failovers, planned runs
+  and restarts. What is not: a wait that ends (archived, or at its bound)
+  and the clone after it; component tests cover those
+  (`test/component/binlog_rotation_test.go`).
+- **Invariants.** `FlushAfterWriteGrant` (per poll): an actor never rotates
+  a site after it enabled that site's writes without fencing it again. With
+  the actors on: a planned run's rotation of its target after the target
+  became writable is `RepeatedPromotion` (a promotion resumed from
+  `WasWritable` or `Writable` sends none); every rotation by the planned
+  path belongs to a live run (`PlannedMutationWithoutRun`,
+  `MarkedRunResumed`), and a run that ends `NotStarted` sent none
+  (`OutcomeDishonest`); a rotation by the topology manager or an ordered
+  update while a planned run holds the claim is `ForeignMutationUnderClaim`
+  (the pre-reclone rotation waits for the claim for this reason).
+- **Signature.** A rotation adds two keys to the behavior signature
+  (rotated, not rotated); why it did not rotate is repro detail, and a late
+  rotation is the model's doing, like a fault.
+
 ## Invariants
 
 Per poll:
@@ -325,7 +386,8 @@ exactly what their lease rule exists for.
 
 Not modeled (excluded from trials, guarded by loud errors): CLONE /
 bootstrap (the bootstrap controller is real and production-shaped, but the
-model never produces an empty site so no clone goroutine can start),
+model never produces an empty site so no clone goroutine can start, and a
+scripted reclone request is withdrawn before its pre-reclone wait ends),
 Dragonfly (the engine skips its Dragonfly phases with no Dragonfly ops; the
 Dragonfly rows of the #235 table are controller unit tests), deployment
 leases, and wall-clock `context.WithTimeout` expiry (timeouts are modeled as

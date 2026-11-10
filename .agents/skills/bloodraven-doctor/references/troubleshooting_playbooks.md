@@ -758,6 +758,7 @@ Never delete a key snapshot to "unstick" a binding, never edit its data (it is i
 ### Symptoms
 - A former primary is rebuilt, becomes primary again, and reuses `mysql-bin.000001` or other retained binlog names.
 - Older archivers may report `backlogFiles=0` while missing the new files, because they recognized only the basename.
+- After a lossy failover, an old primary that came back archived its writable-era tail (a read-only site uploads it), including the transactions the new primary never received. Once that site is recloned its server no longer holds them, and its audit flags its own tail row: `divergentRows` above 0 and `lastError` "… divergent transactions=…; preserve objects and use pitr-quarantine …" on every scan until the row is quarantined, with `PITRArchiveReady=False/ArchiverError`. Follow the quarantine procedure below, and playbook 41 before that site is promoted again.
 
 ### Diagnostic steps
 1. Record sidecar, operator, and backup/restore image versions. Confirm all archive readers and writers understand the additive manifest `id` field before using new archives with older images.
@@ -1056,6 +1057,7 @@ Do not:
    - A new backup stuck `Pending` with `Ready=False/BackupJobConflict` (not a cleanup problem): a `mysqlbackup-<name>` Job it does not own exists, usually orphaned by an earlier same-name backup deleted with `--cascade=orphan`. Delete that Job if nothing owns it; the backup fails after 30 minutes otherwise.
    - `ProducerStopStuck` (Warning `ArtifactCleanupStalledProducerStop`): before releasing an abandoned backup (never succeeded, or its group or profile is gone) the operator stops the producing backup Job and waits for its pods; a pod has not stopped after 10 minutes, usually because its node is unreachable. The deletion stays held. A lost status update after the Job was created is recovered from the Job itself, running or failed. A never-succeeded encrypted backup's leftovers are read with `status.artifactStorage.passphraseSecretKeyRef` (the Secret the producing Job mounted), then the profile's. The cleanup Job has a third verdict for such a backup: exit 0 with `BLOODRAVEN_CLEANUP_SKIPPED: no backup stamp at <stamp key> names this backup, but <n> objects remain under <prefix>; nothing was deleted` (PVC: `... but <path> still exists; nothing was deleted`), WARN log `artifact cleanup skipped`. The finalizer is then released WITHOUT deleting the dump-key snapshot and a Warning `ArtifactCleanupSkipped` names the location, the stamp key and the kept snapshot Secret: the objects may be that backup's encrypted artifacts, so inspect and delete them by hand, and delete the snapshot only once none remain. A foreign stamp, or no stamp over an empty location, is still `BLOODRAVEN_CLEANUP_COMPLETE objects=0` (the snapshot is deleted).
    - `HeldByVerification`: a verification is still reading the artifact; see [playbook 36](#36-backup-kept-past-retention-or-deletion-waiting-on-a-verification).
+   - `HeldByRestore`: a restore (`initFromBackup` or `restoreInPlace` with `backupRef`) of the group named in the message is still reading the artifact; see [playbook 36](#36-backup-kept-past-retention-or-deletion-waiting-on-a-verification).
 3. Cleanup deletes from `status.artifactStorage` (captured when the backup ran), never from the live profile. A changed profile bucket, endpoint or claim does not move the delete; only credentials come from the current profile.
 
 ### Safe remediation
@@ -1076,8 +1078,9 @@ Do not:
 
 ### Symptoms
 - A successful `MysqlBackup` outside its profile's `retention.keepLast`/`keepWithinDays` windows is not pruned, with `RetentionDeferred` Events. Without `RetentionDeferred`, it is not a hold: see [playbook 43](#43-backups-or-verifications-kept-or-deleted-against-expectation-retention).
-- A deleted `MysqlBackup` stays Terminating with `ArtifactCleanup=False/HeldByVerification` and `ArtifactCleanupDeferred` Events.
+- A deleted `MysqlBackup` stays Terminating with `ArtifactCleanup=False/HeldByVerification` or `HeldByRestore` and `ArtifactCleanupDeferred` Events.
 - A deleted `MysqlBackupVerification` stays Terminating.
+- The `RetentionDeferred` or condition message names "the restore of group <name>": a restore of that group reads the backup (steps 4 and 5).
 
 ### Diagnostic steps
 1. List the holds on the backup and the verifications that reference it:
@@ -1091,14 +1094,22 @@ Do not:
    kubectl get pods -n <ns> -l bloodraven.shipstream.io/mysqlbackup-verification=<verification> -o 'custom-columns=POD:.metadata.name,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp'
    ```
 3. A hold is live while the verification is not finished, or while its Job is unfinished, or while any labelled pod is `Pending` or `Running`. A hold whose verification is gone counts only while that verification's pods still run. An unfinished verification that is not yet pinned holds every successful backup of its group and profile.
+4. For a restore, list the restore holds on the backup and the restores in the namespace that name it (any group of the namespace can restore from it):
+   ```bash
+   kubectl get mysqlbackup <backup> -n <ns> -o json | jq '{uid: .metadata.uid, holds: (.metadata.annotations // {} | with_entries(select(.key | startswith("restore-hold.bloodraven.shipstream.io/"))))}'
+   kubectl get mysqlfailovergroups -n <ns> -o json | jq -r '.items[] | [.metadata.name, (.status.restore.phase // "-"), (.status.restore.backupRef.name // .spec.initFromBackup.source.backupRef.name // "-"), (.status.restore.backupRef.uid // "-"), (.status.restoreInPlace.phase // "-"), (.status.restoreInPlace.backupRef.name // .spec.restoreInPlace.source.backupRef.name // "-"), (.status.restoreInPlace.backupRef.uid // "-")] | @tsv'
+   kubectl get jobs,pods -n <ns> -l app.kubernetes.io/name=mysql-restore,bloodraven.shipstream.io/failover-group=<group> -o wide
+   ```
+5. A restore hold (value: the restoring group; key suffix: that group's `backupRef.holdID`) is live while the group's `status.restore` or `status.restoreInPlace` carries that `holdID` and is neither `Succeeded` nor `Failed`. Afterwards, or when the group is gone, it counts only while a restore Job of that group is unfinished or one of its restore pods is `Pending` or `Running`. A restore pinned to another `uid` than the backup's does not hold it (a same-name backup created later is not protected). A restore that has not pinned yet counts for the live `Succeeded` backup its `backupRef` names.
 
 ### Safe remediation
 1. During a run this is expected; retention and cleanup resume on their own after the run stops (the hold release triggers a backup reconcile).
 2. If a finished run still holds, it is usually a failed run kept by `keepOnFailure: true` whose pod is still running, or a pod stuck terminating on an unreachable node. Delete the verification (its finalizer waits for its pods) or resolve the stuck pod.
 3. A verification that stays Terminating is waiting for its pods to be gone; it releases its hold and finalizer once they are.
+4. A restore releases its hold on the group's first reconcile after it is `Succeeded` or `Failed` and its restore pods have stopped. A restore that never gets there keeps holding: a bootstrap restore waiting in `Pending` (seed not writable, archive binding not ready), or an in-place run waiting in `Preflight`. Fix what it waits for, delete the abandoned group, or remove `spec.restoreInPlace` (a run without a Job is cancelled). A hold left by a deleted group needs nothing: it stops counting once that group's restore pods are gone and the backup's reconciler removes the annotation within a minute.
 
 Do not:
-- Remove a `verification-hold.bloodraven.shipstream.io/*` annotation by hand while a pod of that verification runs: retention or cleanup could then delete the artifact under it.
+- Remove a `verification-hold.bloodraven.shipstream.io/*` annotation by hand while a pod of that verification runs, or a `restore-hold.bloodraven.shipstream.io/*` annotation while a restore pod of that group runs: retention or cleanup could then delete the artifact under it.
 - Remove the verification finalizer to hurry deletion. The hold then stays on the backup; it stops counting once the pods are gone, but retention only notices on its next pass.
 
 ## 37. Planned failover left the source fenced
@@ -1316,18 +1327,19 @@ A restore or verification fails with one of `PITRArchiveDivergentHistory`, `PITR
    - **`PITRArchiveDivergentHistory` (timestamp)**: D was lost at a failover (in the old primary's archived tail, not in the new primary's promotion record), written on a replica (errant), or another branch of a split brain.
    - **`PITRArchiveDivergentHistory` "lost at the promotion of `<site>`" (latest)**: the newest archived state holds transactions the promoted site never had.
    - **`PITRArchiveSplitBrain` (latest)**: two archived heads each hold transactions the other lacks; the message lists each head's exclusive set.
-   - **`PITRArchiveGap`**: the history needs transactions no archived file holds: a quarantined row ("it is in quarantined row …"), or a tail that was never archived ("committed on `<site>` and never archived": a failover or reclone before the file was sealed while writable).
+   - **`PITRArchiveGap`**: the history needs transactions no archived file holds: a quarantined row ("it is in quarantined row …"), or a tail that was never archived ("committed on `<site>` and never archived": a primary that died and never came back, or a site recloned before its tail was archived, which the Warning `PITRArchiveTailNotArchived` announces; playbook 46).
    - **`PITRArchiveOrderConflict`**: every transaction is archived but no archived binlog continues from the furthest state; needs commit orders no server produced.
    - **`PITRArchiveOrderInversion`**: two archived binlogs apply the same pair of GTIDs in opposite orders (both named, with their files); usually an errant transaction.
-   - **`PITRArchiveNamespaceReuse`**: two copies of a GTID differ, a row that overlaps the history cannot be verified, or a GTID was reissued after the dump (a reclone kept `server_uuid`).
+   - **`PITRArchiveNamespaceReuse`**: two copies of a GTID differ, a row that overlaps the history cannot be verified, or a GTID was reissued after the dump (a reclone kept `server_uuid`). "differs between `<site/file>` and `<site/file>` (…)" lists what differs: commit time, origin server, "one copy is empty", or "row changes differ: effect digest … vs …". Row changes alone (same commit time and origin) mean one copy is not a faithful copy of the other: a repair transaction was injected under that GTID with `SET GTID_NEXT`, or the two servers' data had already diverged when they applied it (its before images differ). The comparison covers the tables, columns and row images of the copies the restore downloads; it skips statement and DDL text, transactions with `SAVEPOINT`/XA, partial JSON updates, tables with a `JSON` column, and copies that were not both downloaded.
 
 ### Safe remediation
 - **"Retry" with a changed `pointInTime`** (or any other change to the restore or verification inputs) never edits the existing object. A verification's spec is immutable: create a new `MysqlBackupVerification`. `spec.initFromBackup` is fixed at creation: delete the never-bootstrapped group and create it again with the corrected block, after checking that `status.restore.phase` never reached `Succeeded`; delete it as in site docs Operations, "Deleting a group without losing backups" (foreground, after its own backups are gone) and re-apply only once its PVCs and backups are gone (site docs: Backup and restore, "A failed bootstrap restore").
 - **Divergent history**: if D is history you mean to drop (the lost tail, the errant, the other branch), copy it into `pointInTime.excludeGtids` (restore or verification) and retry. Otherwise choose a target at or before the earliest time in D, or use a backup taken after the latest; a backup taken after a lossy failover needs no exclusion. A successful run reports `excludedDivergentTransactionCount` and a Warning `PITRDivergentHistoryExcluded`.
 - **Split brain (latest)**: decide which branch the cluster kept and put the other branch's exclusive set into `excludeGtids`.
-- **Gap**: un-quarantine a recovered row, or use a backup taken after the gap, or a target before it, as the message says. An unarchived tail cannot be recovered from the archive; flush binlogs on the primary before planned failovers and reclones (follow-up FU-1 automates this).
+- **Gap**: un-quarantine a recovered row, or use a backup taken after the gap, or a target before it, as the message says. An unarchived tail cannot be recovered from the archive. The operator rotates the outgoing primary at a planned failover or ordered-update handoff and before a reclone, and a read-only site archives its writable-era tail; when that did not happen, see playbook 46.
 - **Order conflict or inversion**: exclude the errant transaction the message names, or use a backup and an archive prefix that start after it. Do not edit binlogs.
 - **Reuse**: start a new archive prefix and take a full backup (playbook 41 when a reclone and failback caused it). Never delete or rename archived objects to force a plan.
+- **Row changes differ**: no `excludeGtids` accepts one of the copies. Restore from a full backup taken later, once the backup's newest transactions are in binlog files after the two the message names (the planner then no longer reads them). Find out which site diverged before trusting it: compare the named transaction on both sites (`mysqlbinlog --include-gtids='<gtid>' --base64-output=DECODE-ROWS -vv <binlog>`), run `scripts/gtid-audit.sh`, and reclone the site whose data is wrong (playbook 33).
 - After excluding transactions that are on the target history (for example a bad `UPDATE`), the result is not certified for them: check `pointInTime.onHistoryExclusions` and the Warning `PITROnHistoryTransactionsExcluded`, and inspect the affected rows.
 
 ## 43. Backups or verifications kept or deleted against expectation (retention)
@@ -1389,4 +1401,81 @@ A restore or verification fails with one of `PITRArchiveDivergentHistory`, `PITR
 
 Do not:
 - Patch the selector of a refused workload (the API server rejects it) or edit a payload's `schemaVersion` by hand: a payload of a known version but foreign content can be read as proof.
+
+## 45. Binary log rotation failed at a promotion, planned handoff or reclone (`promotion binlog rotation failed`)
+
+### Symptoms
+- Operator log WARN `promotion binlog rotation failed` (`site`, `durationMs`, `timedOut`, `error`) during an emergency failover, an ordered-update handoff or a planned failover. The promotion is unaffected: it went on with the same steps and succeeded or failed for its own reasons.
+- WARN `outgoing primary binlog rotation failed` (same fields, plus `runId` for a planned failover or `candidate` for an ordered-update handoff): the same statement, sent to the fenced source of a planned handoff.
+- WARN `pre-reclone binlog rotation failed` (`site`, `durationMs`, `timedOut`, `error`): the same statement, sent to a site before its reclone. It is retried on every topology poll; if it is never acknowledged the reclone ends in playbook 46.
+
+### Cause
+The operator sends one best-effort `FLUSH BINARY LOGS`, bounded at 1 second (connection setup included), on a connection of its own:
+- to the site being promoted, after `RESET REPLICA ALL` and before its writes are enabled, so everything it logged as a replica is in sealed files its sidecar can archive;
+- to the fenced source of a planned failover or ordered-update handoff, so the last transactions it took as the primary are in a sealed file;
+- to a site before `CLONE INSTANCE` wipes it (PITR enabled only).
+
+A failed or timed-out rotation changes nothing else. The site's last binary log stays unsealed until the next rotation (`max_binlog_size`, a mysqld restart, a manual flush), so the PITR archive lags until then. The matching INFO lines (`promotion binlog rotated`, `outgoing primary binlog rotated`, `pre-reclone binlog rotated`) carry the measured `durationMs`.
+
+### Diagnostic steps
+1. Read the record:
+   ```bash
+   kubectl logs -n <operator-ns> deploy/bloodraven | jq -c 'select(.msg | test("binlog rotation failed$"))'
+   ```
+   - `timedOut: true` (`error`: `no answer within 1s; continuing without it`): the site or the path to it was slow at that moment. Check the site's load then (commit stalls, disk latency, a slow connection handshake across regions). The server may still have completed the rotation afterwards.
+   - `error` containing `Error 1227` (`Access denied; you need (at least one of) the RELOAD privilege(s)`): the operator account lacks `RELOAD`. Check `SHOW GRANTS FOR CURRENT_USER()` as the operator account. `ALL PRIVILEGES ON *.*` includes it; `SUPER` does not.
+   - A connection error (refused, TLS, authentication): the rotation uses its own connection, so compare with the operator's probes of that site at the same time.
+   - `context canceled`: the pass or the topology manager stopped while the rotation was in flight.
+2. Check whether the file has been sealed and archived since: `scripts/sidecar-probe.sh -n <ns> <group> archiver` prints each site's `tail` (`activeFile`, `newestSealedFile`, `state`, `pendingFiles`, `reason`); compare `tail.activeFile` with `SHOW BINARY LOG STATUS` on the site.
+
+### Safe remediation
+- Nothing is needed for the failover, handoff or reclone itself.
+- To seal the file now, run `FLUSH BINARY LOGS` on the site that holds it (the new primary for the promotion WARN, the fenced former primary for the outgoing-primary WARN). The statement is not written to the binary log, creates no GTID and works under `super_read_only=ON`:
+  ```bash
+  kubectl exec -n <ns> <pod> -c mysql -- mysql -e "SHOW BINARY LOG STATUS; FLUSH BINARY LOGS;"
+  ```
+  Then confirm the upload: the site's `/archiver/status` reports `tail.state: Drained` with `tail.newestSealedFile` naming the file that was active, or (plaintext archives) `manifest-<site>.json` lists it under `files[].name`. A read-only former primary uploads its tail too; if it reports `tail.state: Blocked`, continue with playbook 46.
+- Missing `RELOAD`: restore the operator account's documented grant (`ALL PRIVILEGES ON *.*`), or at least `GRANT RELOAD ON *.*` to it on the primary.
+
+Do not:
+- Restart mysqld or run `PURGE BINARY LOGS` to force a rotation, and do not treat this WARN as a failed failover.
+
+## 46. A reclone started without its binary log tail archived (`PITRArchiveTailNotArchived`), or a read-only site does not archive its tail
+
+### Symptoms
+- Warning Event `PITRArchiveTailNotArchived` on the group: "site `<s>` is being recloned although its binary log tail was not confirmed archived within 2m0s: `<cause>`. CLONE wipes the site's binary logs; a point-in-time restore whose window needs transactions only they held refuses PITRArchiveGap."
+- Operator log INFO `pre-reclone archive tail wait started` (`site`, `timeout`) followed by WARN `pre-reclone archive tail not archived` (`site`, `waitedMs`, `reason`) instead of INFO `pre-reclone archive tail archived`.
+- Sidecar log WARN `binlog tail not archived while read-only` (`reason`, `pendingFiles`), and `/archiver/status` `tail.state: Blocked` on a read-only site.
+- Later, a restore or verification refuses `PITRArchiveGap` with "committed on `<site>` and never archived".
+
+### Cause
+A read-only site's sidecar archives the tail of its last writable era: every unarchived sealed binlog up to the last one that holds a transaction its own server originated, never pure replica copies. It uploads only with a verified archive session, no history-integrity marker, no pending incarnation-reset record, and when the latest record in its manifest is a promotion record of the same server incarnation. `/archiver/status` reports the result in `tail{state, activeFile, newestSealedFile, pendingFiles, reason}`: `Drained`, `Pending` or `Blocked`. The block is absent until a scan has read the binlog index, and from older sidecars.
+
+Before a reclone (PITR enabled only) the operator reads that block, sends the site one `FLUSH BINARY LOGS`, and waits up to 2 minutes for `tail.state: Drained` from a scan that saw the rotation (`tail.activeFile` changed). Then it clones regardless, and records the Event when the tail was not confirmed. The cause in the message is one of:
+- `the site's sidecar did not answer: …`: the sidecar was unreachable (playbook 31, `SidecarUnreachable`).
+- `the site's sidecar reports no archive tail …`: no scan has read the binlog index yet, or the sidecar image predates the `tail` block.
+- `FLUSH BINARY LOGS on the site was not acknowledged`: playbook 45 (`pre-reclone binlog rotation failed`).
+- `the site's sidecar has not reported a scan of the rotated binary log yet`.
+- `the site's archiver still had N sealed binary log(s) to archive`: the upload did not finish in time (a large file, a slow store).
+- `the site's archiver cannot archive the tail: <reason>`: `Blocked`. The reason is a failed upload (`lastError`), or a refusal: the site's latest record is not a promotion record (it was recloned or reset since it last wrote), it has no promotion record, the archive session is not verified, or a binlog file cannot be read (MySQL encrypts it: `binlog_encryption=ON`).
+- `the site's sidecar runs no binlog archiver`: the pod has not rolled onto the PITR configuration. This one ends the wait at once.
+
+### Diagnostic steps
+1. Read the Event and the operator's records of the wait:
+   ```bash
+   kubectl get events -n <ns> --field-selector involvedObject.name=<group>,reason=PITRArchiveTailNotArchived
+   kubectl logs -n <operator-ns> deploy/bloodraven | jq -c 'select(.msg | startswith("pre-reclone"))'
+   ```
+2. Read every site's tail now: `scripts/sidecar-probe.sh -n <ns> <group> archiver` (or `scripts/triage.sh`, which prints `tail=` per site). For a site that has not been recloned yet, `tail.reason` and `lastError` say what blocks it.
+3. Decide which restore targets are affected. Only windows that need transactions that tail alone held are affected; the candidates are the transactions the site committed as the primary after its last archived binlog. Fetch the plaintext `manifest-<site>.json` and note its newest `files[].name` and time range (`scripts/gtid-audit.sh -n <ns> <group> --manifest manifest-<site>.json` prints the records). To test a specific target, run a `MysqlBackupVerification` with `pointInTime`; a `PITRArchiveGap` refusal lists the safe targets and backups. Targets served by a backup taken after the reclone are not affected.
+4. If the reclone followed a lossy failover and the tail was archived (no Event), the recloned site's audit flags its own tail row: `divergentRows` above 0, `lastError` "… divergent transactions=…; preserve objects and use pitr-quarantine …", `PITRArchiveReady=False/ArchiverError`, and `PITRArchiveReissueRiskDetected` when that site is next promoted. That is playbook 27 (quarantine the row) and playbook 41.
+
+### Safe remediation
+- Nothing recovers a wiped tail. Take a full backup now and verify it, so later targets do not depend on it: `kubectl bloodraven backup <group> -n <ns>`.
+- For a target inside the lost tail, use the safe targets or backups the `PITRArchiveGap` message names (playbook 42).
+- Before recloning an old primary, check its tail first: `tail.state: Drained` means nothing is left to archive. For `Blocked`, fix the reason when it is fixable (store unreachable, archive session not verified, rotation not acknowledged). A site whose latest record is a reset record, or that has no promotion record, has no tail the archive accepts; a site with `binlog_encryption=ON` cannot archive its tail while read-only.
+- A tail that was archived with transactions the new primary never received makes restores across it refuse `PITRArchiveDivergentHistory` until they are in `excludeGtids` (playbook 42).
+
+Do not:
+- Delete or edit manifest rows, or copy binlog files into the archive by hand, to close a gap.
 

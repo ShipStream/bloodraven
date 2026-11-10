@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -433,6 +434,68 @@ func (m *simChecker) WaitForRelayLogDrain(_ context.Context, timeout time.Durati
 		}
 	}
 	m.c.event(m.s.name, EvDrain, fmt.Sprintf("applied=%d", applied), "")
+	return nil
+}
+
+// errFlushFailed is an injected FLUSH BINARY LOGS failure: nothing rotated.
+var errFlushFailed = errors.New("Error 1227: access denied (sim: FLUSH BINARY LOGS failed, nothing rotated)")
+
+// FlushBinaryLogs rotates the site's modelled binary log. It is the
+// operator's best-effort rotation (FailoverController.rotateBinlog), which
+// calls it from a goroutine of its own and waits on the trial's fake clock;
+// the caller is parked in that wait for as long as this runs, so the model
+// still sees one actor at a time.
+//
+// The statement runs on a connection of its own in production, so here it
+// reaches whichever server the site runs now, never fails a pinned session,
+// and consumes neither the mutation-fault counters nor the mid-Execute
+// crash countdown (a promotion statement's fault must not be spent on it).
+// Its own faults:
+//
+//   - flushFail: an error, nothing rotated.
+//   - flushSlow: the statement outlives the operator's bound. The call
+//     advances the fake clock by controller.BinlogRotationTimeout, which
+//     fires the operator's timer, and then blocks until the operator
+//     cancels it. With flushLate the server completes the rotation at the
+//     next tick, after the operator has moved on (the promotion may have
+//     enabled writes by then); otherwise it never happens.
+//
+// Nothing happens to the model after the cancellation, so the abandoned
+// goroutine cannot race the operator's next statement.
+func (m *simChecker) FlushBinaryLogs(ctx context.Context) error {
+	actor := actorFrom(ctx)
+	m.c.mu.Lock()
+	if err := m.reachableLocked(); err != nil {
+		m.c.eventBy(m.s.name, EvFlushBinlog, "", "unreachable", actor)
+		m.c.mu.Unlock()
+		return err
+	}
+	if m.c.flushFail[m.s.name] > 0 {
+		m.c.flushFail[m.s.name]--
+		m.c.eventBy(m.s.name, EvFlushBinlog, "", "failed", actor)
+		m.c.mu.Unlock()
+		return errFlushFailed
+	}
+	if m.c.flushSlow[m.s.name] > 0 {
+		m.c.flushSlow[m.s.name]--
+		late := m.c.flushLate[m.s.name]
+		if late {
+			m.c.lateFlushes[m.s.name]++
+		}
+		m.c.eventBy(m.s.name, EvFlushBinlog, fmt.Sprintf("late=%v", late), "timeout", actor)
+		advance := m.c.advanceClock
+		m.c.mu.Unlock()
+		if advance != nil {
+			advance(controller.BinlogRotationTimeout)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	before := m.observeLocked()
+	m.c.rotateBinlogLocked(m.s)
+	e := m.c.eventBy(m.s.name, EvFlushBinlog, fmt.Sprintf("file=%d prev=%s", m.s.binlogSeq, m.s.binlogPrev), "", actor)
+	m.notifyLocked(e, before)
+	m.c.mu.Unlock()
 	return nil
 }
 

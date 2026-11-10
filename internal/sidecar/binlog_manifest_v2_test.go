@@ -154,6 +154,8 @@ func TestArchiverStatusWireCompatibleWithClient(t *testing.T) {
 		QuarantinedRows:     3,
 		PromotionRecordedAt: at,
 		HistoryIntegrity:    &HistoryIntegrity{Violation: pitrarchive.ViolationCommitOrder, Detail: "replica_preserve_commit_order=0", At: at},
+		Tail: &internalmysql.ArchiverTailStatus{State: internalmysql.ArchiverTailBlocked, ActiveFile: "mysql-bin.000007",
+			NewestSealedFile: "mysql-bin.000006", PendingFiles: 2, Reason: "archive mysql-bin.000006: 503 SlowDown"},
 	}
 	b, err := json.Marshal(s)
 	if err != nil {
@@ -164,12 +166,19 @@ func TestArchiverStatusWireCompatibleWithClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Archive == nil || *c.Archive != *s.Archive || c.DivergentRows != 2 || c.QuarantinedRows != 3 ||
-		!c.PromotionRecordedAt.Equal(at) || c.HistoryIntegrity == nil || *c.HistoryIntegrity != *s.HistoryIntegrity {
+		!c.PromotionRecordedAt.Equal(at) || c.HistoryIntegrity == nil || *c.HistoryIntegrity != *s.HistoryIntegrity ||
+		c.Tail == nil || *c.Tail != *s.Tail {
 		t.Fatalf("client decoded %+v from %s", c, b)
+	}
+	// The tail block's wire names are the operator's wait condition.
+	for _, key := range []string{`"tail":{"state":"Blocked"`, `"activeFile":"mysql-bin.000007"`, `"newestSealedFile":"mysql-bin.000006"`, `"pendingFiles":2`, `"reason":"archive `} {
+		if !bytes.Contains(b, []byte(key)) {
+			t.Errorf("status lacks %s: %s", key, b)
+		}
 	}
 	// Absent optional blocks stay absent on the wire.
 	b, _ = json.Marshal(Status{Enabled: true})
-	for _, key := range []string{`"archive"`, `"promotionRecordedAt"`, `"historyIntegrity"`} {
+	for _, key := range []string{`"archive"`, `"promotionRecordedAt"`, `"historyIntegrity"`, `"tail"`} {
 		if bytes.Contains(b, []byte(key)) {
 			t.Errorf("empty status carries %s: %s", key, b)
 		}

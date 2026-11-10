@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // Hooks for the deterministic simulation's step model of an ordered update
@@ -75,6 +76,19 @@ func (u *SimOrderedUpdate) RecordHandoffForSim(ctx context.Context, target, prom
 	}
 }
 
+// RotateSourceBinlogForSim is ExecuteHandoff's best-effort rotation of the
+// fenced source's binary log, through the production rotateBinlog (the
+// manager's failover controller and its clock).
+func (u *SimOrderedUpdate) RotateSourceBinlogForSim(ctx context.Context, source mysql.Checker, site string) {
+	u.tm.failover.rotateBinlog(ctx, source, site, outgoingPrimaryRotation)
+}
+
+// RotateCandidateBinlogForSim is promoteVerifiedFrom's best-effort rotation
+// of the candidate's binary log before its writes are enabled.
+func (u *SimOrderedUpdate) RotateCandidateBinlogForSim(ctx context.Context, candidate mysql.Checker, site string) {
+	u.tm.failover.rotateBinlog(ctx, candidate, site, promotionRotation)
+}
+
 // FinishOrderedUpdateForSim ends the update as its goroutine's deferred
 // calls do: the claimed window is finished, the pending flag cleared and
 // the worker unregistered. Idempotent.
@@ -95,6 +109,10 @@ func (u *SimOrderedUpdate) FinishOrderedUpdateForSim() {
 	tm.mu.Unlock()
 	tm.updateWorkers.Done()
 }
+
+// CancelPendingRecloneForSim withdraws a pending reclone request that has
+// not started its clone, as the runner does when the annotation is removed.
+func (tm *TopologyManager) CancelPendingRecloneForSim(site string) { tm.cancelPendingReclone(site) }
 
 // SetSimHooksForSim installs the simulation's yield hooks on a facade built
 // by NewPlannedFailoverTopology. Call before first use.

@@ -47,6 +47,46 @@ type opsMySQL struct {
 	// server answering the single read_only probe but timing out on the
 	// identity read).
 	sroReadErr error
+	// flushes records every FLUSH BINARY LOGS with the statements sent
+	// before it and the executed set it found (the Previous_gtids of the
+	// file it opened). It is kept apart from stmts, which the promotion
+	// tests compare exactly. flushFn, when set, is the statement's body,
+	// run without mu so it can block until its context ends.
+	flushes []opsFlush
+	flushFn func(ctx context.Context) error
+}
+
+// opsFlush is one FLUSH BINARY LOGS an opsMySQL received.
+type opsFlush struct {
+	after []string // statements sent before it
+	gtid  string   // executed set at the flush
+	ro    bool     // read_only at the flush
+	err   error
+}
+
+func (m *opsMySQL) FlushBinaryLogs(ctx context.Context) error {
+	m.mu.Lock()
+	fl := opsFlush{after: append([]string(nil), m.stmts...), gtid: m.gtid, ro: m.ro}
+	fn := m.flushFn
+	if m.down {
+		fl.err = errors.New("connection refused")
+	} else if err := m.failStmt["flush"]; err != nil {
+		fl.err = err
+	}
+	m.mu.Unlock()
+	if fl.err == nil && fn != nil {
+		fl.err = fn(ctx)
+	}
+	m.mu.Lock()
+	m.flushes = append(m.flushes, fl)
+	m.mu.Unlock()
+	return fl.err
+}
+
+func (m *opsMySQL) flushLog() []opsFlush {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]opsFlush(nil), m.flushes...)
 }
 
 func (m *opsMySQL) log(stmt string) error {
@@ -394,7 +434,7 @@ func TestPromoteVerifiedFrom_StatementSequence(t *testing.T) {
 					return nil
 				},
 			}
-			_, reached, err := NewFailoverController(testLogger()).promoteVerifiedFrom(context.Background(), mysql.CheckerSession(m), "dc2", F, tc.from, hooks)
+			_, reached, err := NewFailoverController(testLogger()).promoteVerifiedFrom(context.Background(), mysql.CheckerSession(m), m, "dc2", F, tc.from, hooks)
 			if err != nil || reached != promoteStageWriteAttempted {
 				t.Fatalf("promoteVerifiedFrom = %v, %v", reached, err)
 			}
@@ -409,7 +449,7 @@ func TestPromoteVerifiedFrom_StatementSequence(t *testing.T) {
 	t.Run("gate refusal sends nothing further", func(t *testing.T) {
 		m := &opsMySQL{uuid: opsUUIDB, ro: true, sro: true, gtid: opsF}
 		refused := errors.New("refused")
-		_, _, err := NewFailoverController(testLogger()).promoteVerifiedFrom(context.Background(), mysql.CheckerSession(m), "dc2", F,
+		_, _, err := NewFailoverController(testLogger()).promoteVerifiedFrom(context.Background(), mysql.CheckerSession(m), m, "dc2", F,
 			PromotionStageReplicaReset, promoteHooks{gate: func(context.Context) error { return refused }})
 		if !errors.Is(err, refused) || len(m.statements()) != 0 {
 			t.Fatalf("err=%v statements=%v; want the refusal and nothing sent", err, m.statements())

@@ -123,6 +123,11 @@ func (b *bootstrapMock) SetCloneDonorList(_ context.Context, donor string) error
 	return b.setDonorErr
 }
 
+func (b *bootstrapMock) FlushBinaryLogs(_ context.Context) error {
+	b.record("FlushBinaryLogs")
+	return nil
+}
+
 func (b *bootstrapMock) GetGtidExecuted(_ context.Context) (string, error) {
 	b.record("GetGtidExecuted")
 	return "", nil

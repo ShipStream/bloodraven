@@ -31,6 +31,9 @@ type mockMySQL struct {
 	replicaStatusErr         error
 	gtidExecuted             string
 	gtidExecutedErr          error
+	flushBinaryLogsErr       error
+	flushBinaryLogsFn        func(ctx context.Context) error
+	flushBinaryLogsCalls     int
 	partialRevokesErr        error
 	partialRevokesCalls      int
 	gtidExecutedHadDeadline  bool
@@ -397,6 +400,20 @@ func (m *mockMySQL) StartReplica(ctx context.Context) error {
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
+
+// FlushBinaryLogs counts the call; flushBinaryLogsFn, when set, runs without
+// the mock's lock so it can block until ctx ends.
+func (m *mockMySQL) FlushBinaryLogs(ctx context.Context) error {
+	m.mu.Lock()
+	m.flushBinaryLogsCalls++
+	fn, err := m.flushBinaryLogsFn, m.flushBinaryLogsErr
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx)
+	}
+	return err
+}
+
 func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

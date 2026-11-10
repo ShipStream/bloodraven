@@ -175,3 +175,86 @@ func TestWaitAnyPrefersStreamErrorOverTimeout(t *testing.T) {
 		t.Fatalf("WaitAny err = %v, want the stream error", err)
 	}
 }
+
+// TestFieldsParsesJSONAndText pins the two formats scenarios read values
+// from: the operator's and sidecar's JSON records and slog text output.
+func TestFieldsParsesJSONAndText(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		ok   bool
+		want map[string]string
+	}{
+		{
+			name: "operator JSON record",
+			line: `{"time":"2026-11-10T10:00:00.123456789Z","level":"INFO","msg":"promotion binlog rotated","site":"pdx","durationMs":12}`,
+			ok:   true,
+			want: map[string]string{"msg": "promotion binlog rotated", "site": "pdx", "durationMs": "12", "level": "INFO"},
+		},
+		{
+			name: "JSON bool, large number and null",
+			line: `{"msg":"promotion binlog rotation failed","timedOut":true,"durationMs":1000,"waitedMs":12345678901,"error":null}`,
+			ok:   true,
+			want: map[string]string{"timedOut": "true", "durationMs": "1000", "waitedMs": "12345678901", "error": ""},
+		},
+		{
+			name: "JSON nested group keeps its JSON form",
+			line: `{"msg":"x","group":{"a":1}}`,
+			ok:   true,
+			want: map[string]string{"group": `{"a":1}`},
+		},
+		{
+			name: "slog text",
+			line: `time=2026-11-10T10:00:00.123Z level=INFO msg="promotion binlog rotated" site=pdx durationMs=12`,
+			ok:   true,
+			want: map[string]string{"msg": "promotion binlog rotated", "site": "pdx", "durationMs": "12", "level": "INFO"},
+		},
+		{
+			name: "slog text with a quoted value holding spaces, '=' and an escaped quote",
+			line: `level=WARN msg="promotion binlog rotation failed" site=pdx durationMs=1000 timedOut=true error="no answer within 1s; a=\"b\" continuing"`,
+			ok:   true,
+			want: map[string]string{"timedOut": "true", "error": `no answer within 1s; a="b" continuing`, "durationMs": "1000"},
+		},
+		{
+			name: "text with a leading free token",
+			line: `I1110 level=INFO msg=ready site=iad`,
+			ok:   true,
+			want: map[string]string{"msg": "ready", "site": "iad"},
+		},
+		{name: "JSON without msg", line: `{"site":"pdx","durationMs":12}`, ok: false},
+		{name: "text without msg", line: `site=pdx durationMs=12`, ok: false},
+		{name: "plain text", line: `mysqld: ready for connections.`, ok: false},
+		{name: "empty", line: ``, ok: false},
+		{name: "truncated JSON", line: `{"msg":"promotion binlog rotated","site":"pd`, ok: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := Fields(c.line)
+			if ok != c.ok {
+				t.Fatalf("ok=%v, want %v (fields %v)", ok, c.ok, got)
+			}
+			for key, want := range c.want {
+				if got[key] != want {
+					t.Errorf("field %s=%q, want %q", key, got[key], want)
+				}
+			}
+		})
+	}
+}
+
+// TestFieldsAgreesWithStructured: whatever Structured matches, Fields reads
+// the same values from.
+func TestFieldsAgreesWithStructured(t *testing.T) {
+	for _, line := range []string{
+		`{"msg":"pre-reclone archive tail archived","site":"iad","waitedMs":4012}`,
+		`time=now level=INFO msg="pre-reclone archive tail archived" site=iad waitedMs=4012`,
+	} {
+		if !Structured("pre-reclone archive tail archived", map[string]string{"site": "iad", "waitedMs": "4012"})(line) {
+			t.Fatalf("Structured does not match %q", line)
+		}
+		got, ok := Fields(line)
+		if !ok || got["msg"] != "pre-reclone archive tail archived" || got["site"] != "iad" || got["waitedMs"] != "4012" {
+			t.Errorf("Fields(%q)=%v ok=%v", line, got, ok)
+		}
+	}
+}

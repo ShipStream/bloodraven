@@ -470,7 +470,10 @@ const (
 	// The active site an `initFromBackup` restore would load into is
 	// unreachable or in an unknown state; the restore waits in `Pending`.
 	EventRestoreTargetUnavailable = "RestoreTargetUnavailable"
-	// Failed to build restore Job spec. PITR render refusals
+	// Failed to build restore Job spec, or the `backupRef` backup could
+	// not be held for the restore (it is being deleted, or was replaced by
+	// another backup of the same name after the restore pinned it; the
+	// message says which). PITR render refusals
 	// (`PITRArchiveDestinationShared` when
 	// `pointInTime.archiveProfileName` resolves to the group's own active
 	// PITR destination, `PITRTargetInvalid` for an unparsable or
@@ -538,8 +541,12 @@ const (
 	EventRestoreInPlaceRejected = "RestoreInPlaceRejected"
 	// The restore credentials Secret or the restore Job spec could not be
 	// built (for example a `backupRef` whose profile is gone or moved to
-	// another backend). The run ends `Failed` with nothing restored; the
-	// confirm counts as used, so bump `confirm` to retry.
+	// another backend), or the `backupRef` backup could not be held for
+	// the run (it is gone, not `Succeeded`, being deleted, or was replaced
+	// by another backup of the same name; checked in `Preflight`, before
+	// anything is fenced, and again before the Job is created). The run
+	// ends `Failed` with nothing restored; the confirm counts as used, so
+	// bump `confirm` to retry.
 	EventRestoreInPlaceBuildFailed = "RestoreInPlaceBuildFailed"
 	// `spec.restoreInPlace` was removed before the restore Job was
 	// created; the run ends `Failed` and nothing was restored.
@@ -718,6 +725,16 @@ const (
 	// backup ([Reissue risk after a
 	// reclone](/docs/backup-and-restore/pitr-history-repair#reissue-risk-after-a-reclone)).
 	EventPITRArchiveReissueRiskDetected = "PITRArchiveReissueRiskDetected"
+	// A reclone started although the recipient's binary log tail was not
+	// confirmed archived: before CLONE wipes a site's binary logs the
+	// operator rotates them and waits up to 2 minutes for the site's
+	// sidecar to archive the sealed tail. The message names the site and
+	// why the wait ended (the sidecar did not answer, the rotation was
+	// not acknowledged, the archiver was still uploading or could not
+	// upload). A point-in-time restore whose window needs transactions
+	// only that tail held refuses `PITRArchiveGap`. Not emitted when PITR
+	// is not enabled.
+	EventPITRArchiveTailNotArchived = "PITRArchiveTailNotArchived"
 	// While PITR is enabled, group or site `spec.mysqlConf` sets an option
 	// that breaks PITR replay (a replication or binlog filter,
 	// `binlog_format≠ROW`, `binlog_row_image≠FULL`). The option is left
@@ -890,8 +907,10 @@ const (
 	// `spec.sites` ("... belong to sites no longer in spec.sites and are
 	// never re-rendered: scale them to zero or delete them").
 	EventPITRArchiveStampSkipped = "PITRArchiveStampSkipped"
-	// Retention kept a backup past its window because a verification is
-	// reading it.
+	// Retention kept a backup past its window because a verification, or
+	// a restore (`initFromBackup` or `restoreInPlace` with `backupRef`),
+	// is reading it. The message names the verifications and the restoring
+	// groups.
 	EventRetentionDeferred = "RetentionDeferred"
 	// A Job named `mysqlbackup-<backup>` exists but is not owned by this
 	// `MysqlBackup` (a Job orphaned by an earlier backup of the same name,
@@ -997,9 +1016,9 @@ const (
 	EventArtifactCleanupFailed = "ArtifactCleanupFailed"
 	// A failed cleanup Job is being replaced.
 	EventArtifactCleanupRetry = "ArtifactCleanupRetry"
-	// A `MysqlBackupVerification` is still reading the artifact
-	// (`ArtifactCleanup=False/HeldByVerification`); cleanup waits until
-	// its pods stop.
+	// A `MysqlBackupVerification` (`ArtifactCleanup=False/HeldByVerification`)
+	// or a restore (`ArtifactCleanup=False/HeldByRestore`) is still reading
+	// the artifact; cleanup waits until its pods stop.
 	EventArtifactCleanupDeferred = "ArtifactCleanupDeferred"
 	// Deleting an abandoned backup (never succeeded, or its group or
 	// profile is gone) waits for its producing backup Job's pods to stop,

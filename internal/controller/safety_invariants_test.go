@@ -599,7 +599,7 @@ func TestInvariant_FailoverSequence(t *testing.T) {
 
 	// Candidate must follow exact sequence
 	candCalls := candidate.getCalls()
-	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
+	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "FlushBinaryLogs", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
 	if len(candCalls) != len(expected) {
 		t.Fatalf("SAFETY VIOLATION: wrong number of candidate calls: %v, want %v", candCalls, expected)
 	}

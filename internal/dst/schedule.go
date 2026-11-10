@@ -24,20 +24,38 @@ const (
 	OpRestartOperator OpKind = "restartOperator"
 	OpAmbiguousMuts   OpKind = "ambiguousMutations"
 	OpFailMuts        OpKind = "failMutations"
-	OpStallApply      OpKind = "stallApply"
-	OpHealApply       OpKind = "healApply"
-	OpStallFetch      OpKind = "stallFetch"
-	OpHealFetch       OpKind = "healFetch"
-	OpDrainStall      OpKind = "drainStall"
-	OpHealDrain       OpKind = "healDrain"
-	OpRogueFence      OpKind = "rogueFence"
-	OpRogueWritable   OpKind = "rogueWritable"
-	OpStatusOutage    OpKind = "statusWriteOutage"
-	OpStatusHeal      OpKind = "statusWriteHeal"
-	OpStateOutage     OpKind = "failoverStateOutage"
-	OpStateHeal       OpKind = "failoverStateHeal"
-	OpDNSOutage       OpKind = "dnsOutage"
-	OpDNSHeal         OpKind = "dnsHeal"
+	// OpFailFlush and OpSlowFlush are the binary log rotation faults: the
+	// next N FLUSH BINARY LOGS on Site fail without rotating, or block
+	// until the operator abandons them at its bound (K=1: the server still
+	// rotates afterwards). They are generated from a PRNG stream of their
+	// own (flushFaults), so they add to a seed's schedule without changing
+	// the ops it had before they existed.
+	OpFailFlush OpKind = "failFlush"
+	OpSlowFlush OpKind = "slowFlush"
+	// OpRecloneWait requests a reclone of Site with PITR archiving on, so
+	// the manager rotates the site's binary log and waits for its sidecar
+	// to archive the tail, and withdraws the request N polls later (or at
+	// heal-all), before the wait's bound: CLONE itself is not modelled. K
+	// is what the site's sidecar answers meanwhile: 0 nothing (it is
+	// unreachable), 1 still uploading, 2 blocked, 3 a scan from before the
+	// rotation. The request is applied again to every manager that
+	// replaces the one it was given to, as the annotation would be. Drawn
+	// from the rotation faults' stream.
+	OpRecloneWait   OpKind = "recloneWait"
+	OpStallApply    OpKind = "stallApply"
+	OpHealApply     OpKind = "healApply"
+	OpStallFetch    OpKind = "stallFetch"
+	OpHealFetch     OpKind = "healFetch"
+	OpDrainStall    OpKind = "drainStall"
+	OpHealDrain     OpKind = "healDrain"
+	OpRogueFence    OpKind = "rogueFence"
+	OpRogueWritable OpKind = "rogueWritable"
+	OpStatusOutage  OpKind = "statusWriteOutage"
+	OpStatusHeal    OpKind = "statusWriteHeal"
+	OpStateOutage   OpKind = "failoverStateOutage"
+	OpStateHeal     OpKind = "failoverStateHeal"
+	OpDNSOutage     OpKind = "dnsOutage"
+	OpDNSHeal       OpKind = "dnsHeal"
 	// OpCrashOperatorMid kills the operator process partway through a
 	// sequence of MySQL mutations rather than between polls. N is the
 	// countdown in operator mutations; PreApply chooses whether the fatal
@@ -288,6 +306,36 @@ func pickFaultKind(roll int) OpKind {
 	return faultWeights[len(faultWeights)-1].kind
 }
 
+// flushFaultStream salts the PRNG stream of the binary log rotation faults.
+const flushFaultStream = 0x4f1bb1e5f1a5c0de
+
+// flushFaults draws a trial's binary log rotation faults (OpFailFlush,
+// OpSlowFlush): in two trials out of five, one or two ops inside the fault
+// window, each on one site and good for the next one to three flushes; and
+// its pre-reclone wait (OpRecloneWait). A stream of its own keeps the rest
+// of every seed's schedule as it was.
+func flushFaults(seed uint64, names []string, warmup, faultWindow int) []Op {
+	rng := rand.New(rand.NewPCG(seed, flushFaultStream))
+	ops := make([]Op, 0, 3)
+	if rng.IntN(100) < 40 {
+		for n := 1 + rng.IntN(2); n > 0; n-- {
+			op := Op{At: warmup + rng.IntN(faultWindow), Kind: OpFailFlush, Site: names[rng.IntN(len(names))], N: 1 + rng.IntN(3)}
+			if rng.IntN(2) == 0 {
+				op.Kind = OpSlowFlush
+				op.K = rng.IntN(2)
+			}
+			ops = append(ops, op)
+		}
+	}
+	// A pre-reclone archive-tail wait, in three trials out of ten. Drawn
+	// after the rotation faults so their draws are unchanged.
+	if rng.IntN(100) < 30 {
+		ops = append(ops, Op{At: warmup + rng.IntN(faultWindow), Kind: OpRecloneWait, Site: names[rng.IntN(len(names))],
+			N: 5 + rng.IntN(30), K: rng.IntN(4)})
+	}
+	return ops
+}
+
 // GenerateTrial derives a complete trial from a seed.
 func GenerateTrial(seed uint64) Trial {
 	rng := rand.New(rand.NewPCG(seed, seed*0x9E3779B97F4A7C15+0xBF58476D1CE4E5B9))
@@ -455,6 +503,7 @@ func GenerateTrial(seed uint64) Trial {
 		}
 	}
 
+	ops = append(ops, flushFaults(seed, names, warmup, faultWindow)...)
 	sort.SliceStable(ops, func(i, j int) bool { return ops[i].At < ops[j].At })
 
 	return Trial{

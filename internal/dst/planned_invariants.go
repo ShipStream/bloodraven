@@ -247,7 +247,7 @@ func (m *plannedMonitor) claimHeld() bool {
 // exclude: anything but fencing a non-promotable (dr-only or reader) site.
 func (m *plannedMonitor) crossSite(e Event) bool {
 	switch e.Kind {
-	case EvPromote, EvResetReplica, EvStopReplica, EvStartReplica, EvChangeSource, EvSetRO, EvDrain, EvKillConns:
+	case EvPromote, EvResetReplica, EvStopReplica, EvStartReplica, EvChangeSource, EvSetRO, EvDrain, EvKillConns, EvFlushBinlog:
 		return true
 	case EvSetSuperRO:
 		return e.Detail != "on=true" || m.roles[e.Site] == state.SiteRolePrimaryCandidate
@@ -480,6 +480,13 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 		if r.targetWritable || r.resets > 1 {
 			m.violate("RepeatedPromotion", r.id, fmt.Sprintf(
 				"run %s sent RESET REPLICA ALL to %s (resets=%d, target already writable=%v)", r.id, e.Site, r.resets, r.targetWritable))
+		}
+	case EvFlushBinlog:
+		// The promotion's rotation precedes the clears, and a promotion
+		// resumed from a target that was already writable (WasWritable,
+		// Writable) sends none.
+		if r.targetWritable {
+			m.violate("RepeatedPromotion", r.id, fmt.Sprintf("run %s sent FLUSH BINARY LOGS to %s after making it writable", r.id, e.Site))
 		}
 	case EvSetRO:
 		if e.Detail == "on=false" && after.Writable() {

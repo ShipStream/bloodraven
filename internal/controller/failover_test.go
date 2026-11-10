@@ -18,6 +18,8 @@ type trackingMock struct {
 	drainErr     error
 	fenceErr     error
 	gtidExecuted string
+	// flushFn, when set, is FlushBinaryLogs' body (run without the lock).
+	flushFn func(ctx context.Context) error
 }
 
 func (t *trackingMock) record(name string) {
@@ -120,6 +122,17 @@ func (t *trackingMock) SetCloneDonorList(_ context.Context, donor string) error 
 	return nil
 }
 
+func (t *trackingMock) FlushBinaryLogs(ctx context.Context) error {
+	t.record("FlushBinaryLogs")
+	t.mu.Lock()
+	fn := t.flushFn
+	t.mu.Unlock()
+	if fn != nil {
+		return fn(ctx)
+	}
+	return nil
+}
+
 func (t *trackingMock) GetGtidExecuted(_ context.Context) (string, error) {
 	t.record("GetGtidExecuted")
 	t.mu.Lock()
@@ -169,9 +182,9 @@ func TestFailoverExecute_FullSequence(t *testing.T) {
 		}
 	}
 
-	// Verify candidate sequence: drain -> stop -> reset -> getGtid -> clear super_read_only -> set read_only=0.
+	// Verify candidate sequence: drain -> stop -> reset -> getGtid -> rotate the binary log -> clear super_read_only -> set read_only=0.
 	candCalls := candidate.getCalls()
-	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
+	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "FlushBinaryLogs", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
 	if len(candCalls) != len(expected) {
 		t.Fatalf("candidate calls: got %v, want %v", candCalls, expected)
 	}
@@ -201,7 +214,7 @@ func TestFailoverExecute_OldPrimaryNil(t *testing.T) {
 
 	// Should still complete promotion without fencing.
 	candCalls := candidate.getCalls()
-	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
+	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "FlushBinaryLogs", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
 	if len(candCalls) != len(expected) {
 		t.Fatalf("candidate calls: got %v, want %v", candCalls, expected)
 	}
@@ -228,11 +241,11 @@ func TestFailoverExecute_DrainTimeout(t *testing.T) {
 
 	// Verify promotion still happened.
 	candCalls := candidate.getCalls()
-	if len(candCalls) != 6 {
-		t.Fatalf("expected 6 calls, got %v", candCalls)
+	if len(candCalls) != 7 {
+		t.Fatalf("expected 7 calls, got %v", candCalls)
 	}
-	if candCalls[5] != "SetReadOnly(OFF)" {
-		t.Errorf("last call should be SetReadOnly(OFF), got %q", candCalls[5])
+	if candCalls[6] != "SetReadOnly(OFF)" {
+		t.Errorf("last call should be SetReadOnly(OFF), got %q", candCalls[6])
 	}
 }
 
@@ -248,7 +261,7 @@ func TestFailoverExecute_FenceError(t *testing.T) {
 	}
 
 	candCalls := candidate.getCalls()
-	if len(candCalls) != 6 {
-		t.Fatalf("expected 6 calls, got %v", candCalls)
+	if len(candCalls) != 7 {
+		t.Fatalf("expected 7 calls, got %v", candCalls)
 	}
 }

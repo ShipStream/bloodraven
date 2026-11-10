@@ -71,8 +71,9 @@ type Config struct {
 // PITRConfig controls the binlog archiver goroutine that runs inside
 // the sidecar. All fields are populated by the operator via env vars
 // on the pod spec. The archiver itself decides when to be active —
-// only the primary site uploads binlogs; the replica's archiver stays
-// idle, polling its own role, and takes over after failover.
+// only the primary site uploads every sealed binlog; a replica's
+// archiver polls its own role, uploads at most the sealed tail of its
+// server's last writable era, and takes over after failover.
 type PITRConfig struct {
 	// BinlogDir is the directory holding the MySQL binary logs. The
 	// archiver watches the index file inside this directory with

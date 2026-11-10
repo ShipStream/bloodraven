@@ -126,6 +126,18 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		if e.Outcome != "" {
 			key += ":" + e.Outcome
 		}
+		if e.Kind == EvFlushBinlog {
+			// A rotation the server completes later is the model's doing,
+			// like a fault; and why a rotation did not happen (failed,
+			// abandoned, unreachable) is repro detail. One extra dimension
+			// instead of four keeps the signature space coarse.
+			if e.Outcome == "late" {
+				continue
+			}
+			if e.Outcome != "" {
+				key = string(e.Kind) + ":notRotated"
+			}
+		}
 		// Which statement the operator died on is repro detail, not a
 		// distinct behavior class. Left per-statement, the two death
 		// outcomes would add one signature dimension per mutation kind and
@@ -161,23 +173,25 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		// are Execute's (the topology manager's) properties; the planned
 		// run's have their own invariants (planned_invariants.go).
 		for _, pr := range r.pl.promotions(events) {
-			r.promotionPolls = append(r.promotionPolls, p)
+			r.notePromotionPoll(p)
 			r.promotionActors = append(r.promotionActors, pr.actor)
 			r.promotionRuns = append(r.promotionRuns, pr.runID)
 		}
 		physical = tmEvents(events)
 		if target, _ := promotionTarget(physical, effectiveOutcome); target != "" {
-			r.promotionPolls = append(r.promotionPolls, p)
+			r.notePromotionPoll(p)
 			r.promotionActors = append(r.promotionActors, ActorTM)
 			r.promotionRuns = append(r.promotionRuns, "")
-			r.armPromotion(target, r.clk.Now())
+			r.armPromotion(target, r.pollStartAt)
 		}
 	} else if target, _ := promotionTarget(events, effectiveOutcome); target != "" {
-		r.promotionPolls = append(r.promotionPolls, p)
-		// The clock has not advanced for this poll yet, so Now() is the
-		// instant the operator itself stamped on the promotion. A restart
-		// that rehydrates anything older lost the record.
-		r.armPromotion(target, r.clk.Now())
+		r.notePromotionPoll(p)
+		// The operator stamped the promotion during this poll, so at or
+		// after the poll's start (a slow binary log rotation may have
+		// advanced the clock inside the poll); every earlier promotion was
+		// stamped before it. A restart that rehydrates anything older lost
+		// the record.
+		r.armPromotion(target, r.pollStartAt)
 	}
 
 	// Promotion detection for physical writable/fencing invariants includes
@@ -227,6 +241,34 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 					Invariant: "FenceAfterPromote",
 					Poll:      p,
 					Detail:    fmt.Sprintf("fence of %s (seq %d) after writable grant on %s (seq %d)", e.Site, e.Seq, target, grantSeq),
+				})
+			}
+		}
+	}
+
+	// I: the operator rotates a site's binary log only while the site is
+	// read-only by its own hand: a promotion candidate before its writes
+	// are enabled, a source it has fenced. A rotation an actor sends to a
+	// site after that actor enabled its writes (and did not fence it again)
+	// is out of order.
+	granted := map[string]int{}
+	for _, e := range events {
+		key := string(effectiveActor(e.Actor)) + "|" + e.Site
+		switch {
+		case e.Kind == EvPromote && observedOutcome(e.Outcome),
+			(e.Kind == EvSetRO || e.Kind == EvSetSuperRO) && e.Detail == "on=false" && observedOutcome(e.Outcome):
+			if _, ok := granted[key]; !ok {
+				granted[key] = e.Seq
+			}
+		case (e.Kind == EvSetRO || e.Kind == EvSetSuperRO) && e.Detail == "on=true" && observedOutcome(e.Outcome):
+			delete(granted, key)
+		case e.Kind == EvFlushBinlog && e.Outcome != "late":
+			if seq, ok := granted[key]; ok {
+				r.violations = append(r.violations, Violation{
+					Invariant: "FlushAfterWriteGrant",
+					Poll:      p,
+					Detail: fmt.Sprintf("%s sent FLUSH BINARY LOGS to %s (seq %d) after enabling its writes (seq %d)",
+						effectiveActor(e.Actor), e.Site, e.Seq, seq),
 				})
 			}
 		}
@@ -309,6 +351,7 @@ func (r *trialRunner) checkEnd() []Violation {
 	// residue (both durable copies were unwritable, so nothing could have
 	// carried the cooldown across the restart).
 	cooldownPolls := r.trial.CooldownSec // 1s per poll
+	cooldown := time.Duration(r.trial.CooldownSec) * time.Second
 	for i := 1; i < len(r.promotionPolls); i++ {
 		if i < len(r.promotionActors) && r.promotionActors[i] == ActorUpdate {
 			// An ordered update is a deliberate maintenance handoff: it
@@ -324,7 +367,19 @@ func (r *trialRunner) checkEnd() []Violation {
 			continue
 		}
 		gap := r.promotionPolls[i] - r.promotionPolls[i-1]
-		if gap < cooldownPolls {
+		// The operator's cooldown runs on the clock, from the stamp of one
+		// promotion to the decision of the next. Both lie inside their
+		// polls' windows, so the two are provably too close only when the
+		// later window ends less than a cooldown after the earlier one
+		// began. With no time taken inside a poll (no slow rotation) that
+		// is the poll count.
+		tooClose := gap < cooldownPolls
+		if i < len(r.promotionSpans) {
+			// (A runner built by hand with poll numbers only is judged on
+			// those: one second per poll.)
+			tooClose = r.promotionSpans[i].end.Sub(r.promotionSpans[i-1].start) < cooldown
+		}
+		if tooClose {
 			restarts, lost := 0, 0
 			for _, rp := range r.restartPolls {
 				if rp > r.promotionPolls[i-1] && rp <= r.promotionPolls[i] {
@@ -616,6 +671,13 @@ func (r *trialRunner) checkWedge(byName map[string]SiteTruth) []Violation {
 		Poll:      r.trial.Polls - 1,
 		Detail:    detail,
 	}}
+}
+
+// notePromotionPoll records a promotion detected in poll p with the poll's
+// fake-clock window.
+func (r *trialRunner) notePromotionPoll(p int) {
+	r.promotionPolls = append(r.promotionPolls, p)
+	r.promotionSpans = append(r.promotionSpans, clockSpan{start: r.pollStartAt, end: r.clk.Now()})
 }
 
 // armPromotion records a promotion that reached the operator's failover

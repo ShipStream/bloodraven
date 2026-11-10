@@ -44,6 +44,12 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 	if err != nil {
 		return err
 	}
+	// A read-only site's tail drain uploads only the files it examined.
+	if a.tailUpload != nil {
+		if err := a.tailUpload.check(name, before); err != nil {
+			return err
+		}
+	}
 	base := ""
 	if source, ok := a.mysql.(binlogBaseReader); ok {
 		var err error

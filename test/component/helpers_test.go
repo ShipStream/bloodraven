@@ -103,6 +103,9 @@ type mockMySQL struct {
 	// stmtLog records every applied mutation as "<Method>[:on|:off]", in
 	// order (exactly-once assertions).
 	stmtLog []string
+	// binlogPrevGtids is the executed set at each applied FLUSH BINARY
+	// LOGS (see FlushBinaryLogs).
+	binlogPrevGtids []string
 }
 
 // mutatingStmt are the statements stmtLog records by name; the read-only
@@ -437,6 +440,38 @@ func (m *mockMySQL) SetCloneDonorList(_ context.Context, donor string) error {
 	defer m.mu.Unlock()
 	m.cloneDonorList = donor
 	return nil
+}
+
+// FlushBinaryLogs runs through stmt like every statement (failNextCalls
+// and blockOn apply), on no pinned connection: the real checker dials a
+// connection of its own for it. A call blocked before apply returns the
+// context's error once ctx ends, as a cancelled statement does. Each flush
+// that applies records the executed set it found, which is the
+// Previous_gtids header of the file it opened.
+func (m *mockMySQL) FlushBinaryLogs(ctx context.Context) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- m.stmt("FlushBinaryLogs", nil, func() error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			m.binlogPrevGtids = append(m.binlogPrevGtids, m.gtidExecuted)
+			return nil
+		})
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// flushedAt returns the executed set each applied FLUSH BINARY LOGS found.
+func (m *mockMySQL) flushedAt() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.binlogPrevGtids...)
 }
 
 func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) { return m.getGtidExecuted(nil) }

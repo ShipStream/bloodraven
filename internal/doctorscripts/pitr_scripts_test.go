@@ -160,15 +160,16 @@ func TestSidecarHTTPGetFallsBackFromDistrolessSidecar(t *testing.T) {
 }
 
 // support-bundle.sh writes the sidecar's /archiver/status through the
-// fallback, and an explicit error object (never an empty file) when
-// nothing could fetch it.
+// fallback, verbatim (so the tail block of #264 is in the bundle), and an
+// explicit error object (never an empty file) when nothing could fetch it.
 func TestSupportBundleArchiverStatus(t *testing.T) {
+	const status = `{"site":"dc1","tail":{"state":"Pending","activeFile":"mysql-bin.000012","newestSealedFile":"mysql-bin.000011","pendingFiles":1}}`
 	for _, tc := range []struct {
 		name string
 		curl bool
 		want string
 	}{
-		{name: "fetched through the mysql container", curl: true, want: `{"site":"dc1"}`},
+		{name: "fetched through the mysql container", curl: true, want: status},
 		{name: "unavailable", want: `{"error":"/archiver/status unavailable","tried":"sidecar, mysql, pod proxy"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -176,7 +177,7 @@ func TestSupportBundleArchiverStatus(t *testing.T) {
 			e.rule(t, "get pods -n orders -l app.kubernetes.io/instance=lion,app.kubernetes.io/name=mysql -o jsonpath=*", "mysql-lion-dc1-0", false)
 			e.rule(t, "get pod mysql-lion-dc1-0 -n orders -o jsonpath=*", "sidecar mysql", false)
 			if tc.curl {
-				e.rule(t, "exec -n orders mysql-lion-dc1-0 -c mysql -- curl *", `{"site":"dc1"}`, false)
+				e.rule(t, "exec -n orders mysql-lion-dc1-0 -c mysql -- curl *", status, false)
 			}
 			e.rule(t, "exec *", "", true)
 			e.rule(t, "get --raw *", "", true)
@@ -224,14 +225,28 @@ func bundleFile(t *testing.T, tarball, base string) string {
 
 // triage.sh reads /archiver/status through the fallback and lists PITR
 // Warnings recorded on the group's verifications, not only on the group.
+// It prints each site's tail block (#264): a read-only site that does not
+// archive its tail points at playbook 46, and a sidecar that predates the
+// block is "not-reported", never taken for drained.
 func TestTriageArchiverStatusAndVerificationEvents(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not on PATH")
+	}
 	e := newRuleEnv(t)
 	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o json", "{}", false)
 	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.status.pitr.archive.state}*", "Verified ok archiveID=a1", false)
-	e.rule(t, "get pods -n orders -l app.kubernetes.io/instance=lion,app.kubernetes.io/name=mysql -o jsonpath=*", "mysql-lion-dc1-0", false)
-	e.rule(t, "get pod mysql-lion-dc1-0 -n orders -o jsonpath=*", "sidecar mysql", false)
-	e.rule(t, "exec -n orders mysql-lion-dc1-0 -c mysql -- curl *", `{"site":"dc1","archive":{"state":"Verified"},"divergentRows":2}`, false)
+	e.rule(t, "get pods -n orders -l app.kubernetes.io/instance=lion,app.kubernetes.io/name=mysql -o jsonpath=*", "mysql-lion-dc1-0 mysql-lion-dc2-0 mysql-lion-dc3-0", false)
+	e.rule(t, "get pod mysql-lion-dc?-0 -n orders -o jsonpath=*", "sidecar mysql", false)
+	// dc1: a read-only former primary whose tail is refused. dc2: the
+	// primary, drained. dc3: a sidecar that predates the tail block.
+	e.rule(t, "exec -n orders mysql-lion-dc1-0 -c mysql -- curl *",
+		`{"site":"dc1","primary":false,"archive":{"state":"Verified"},"divergentRows":2,"tail":{"state":"Blocked","activeFile":"mysql-bin.000012","newestSealedFile":"mysql-bin.000011","pendingFiles":1,"reason":"this site's latest record is not a promotion record"}}`, false)
+	e.rule(t, "exec -n orders mysql-lion-dc2-0 -c mysql -- curl *",
+		`{"site":"dc2","primary":true,"archive":{"state":"Verified"},"tail":{"state":"Drained","activeFile":"mysql-bin.000004","newestSealedFile":"mysql-bin.000003","pendingFiles":0}}`, false)
+	e.rule(t, "exec -n orders mysql-lion-dc3-0 -c mysql -- curl *", `{"site":"dc3","primary":false,"archive":{"state":"Verified"}}`, false)
 	e.rule(t, "exec *", "", true)
+	e.rule(t, "get events -n orders --field-selector involvedObject.name=lion *",
+		"2026-11-05T11:00:00Z   Warning   PITRArchiveTailNotArchived   1   site dc1 is being recloned although its binary log tail was not confirmed archived within 2m0s\n", false)
 	e.rule(t, "get mysqlbackupverifications -n orders -l bloodraven.shipstream.io/failover-group=lion -o jsonpath=*", "verify-1", false)
 	e.rule(t, "get events -n orders --field-selector involvedObject.kind=MysqlBackupVerification,involvedObject.name=verify-1 *",
 		"2026-11-05T10:00:00Z   Warning   PITROnHistoryTransactionsExcluded   1   excluded 3 transactions on the target history\n", false)
@@ -241,7 +256,13 @@ func TestTriageArchiverStatusAndVerificationEvents(t *testing.T) {
 	}
 	for _, want := range []string{
 		"mysql-lion-dc1-0 site=dc1 archive=Verified/",
-		"divergentRows=2",
+		"divergentRows=2 quarantinedRows=0 tail=Blocked active=mysql-bin.000012 newestSealed=mysql-bin.000011 pending=1 reason=this site's latest record is not a promotion record (read-only site not archiving its tail: playbook 46)",
+		"mysql-lion-dc2-0 site=dc2 archive=Verified/",
+		"quarantinedRows=0 tail=Drained active=mysql-bin.000004 newestSealed=mysql-bin.000003 pending=0\n",
+		"mysql-lion-dc3-0 site=dc3 archive=Verified/",
+		"quarantinedRows=0 tail=not-reported\n",
+		"PITRArchiveTailNotArchived: playbook 46",
+		"2026-11-05T11:00:00Z   Warning   PITRArchiveTailNotArchived   1   site dc1 is being recloned",
 		"[verification/verify-1] 2026-11-05T10:00:00Z   Warning   PITROnHistoryTransactionsExcluded",
 	} {
 		if !strings.Contains(out, want) {

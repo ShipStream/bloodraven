@@ -28,20 +28,23 @@ const (
 	// the same: a's archived L never reaches b. The delay must outlast
 	// everything between L's first commit and b's promotion: the writer
 	// window (seconds), the flushing fence's upload wait (up to 3 min,
-	// pitrWaitArchiverAdvanced), failure detection (~6 s) and the bounded
-	// drain (30 s): 5 min leaves a minute of margin. The drain is bounded
+	// pitrWaitArchiverAdvanced), the second lost batch L' and its tail
+	// watch (seconds), failure detection (~6 s) and the bounded drain
+	// (30 s): 5 min leaves most of a minute of margin. The drain is bounded
 	// whatever the delay, and promotion resets b's channel, so a longer
 	// delay does not slow the failover.
 	s70SourceDelay = 5 * time.Minute
 	// Marker ids, in history order (pitrMarkerQuery lists phases by id):
 	// baseline 1, P (kept by b) 2, L1/L2 (lost) 3-4, S/Sb 5-6, S2/S2b
-	// 7-8, R 9, F/Fb 10-11.
-	s70IDPreLoss = 2
-	s70IDLost    = 3
-	s70IDS       = 5
-	s70IDS2      = 7
-	s70IDReissue = 9
-	s70IDFresh   = 10
+	// 7-8, R 9, F/Fb 10-11. L3, the lost marker a never flushed, is in no
+	// history any verification expects; its id is clear of the others.
+	s70IDPreLoss  = 2
+	s70IDLost     = 3
+	s70IDS        = 5
+	s70IDS2       = 7
+	s70IDReissue  = 9
+	s70IDFresh    = 10
+	s70IDLostTail = 20
 	// s70RepairTimeout bounds cleanup's reclone of a RecoveryBlocked site.
 	s70RepairTimeout = 12 * time.Minute
 	// pitrOperatorArchiverPollInterval mirrors the operator's
@@ -57,6 +60,15 @@ const (
 // D-46 fail-closed path (reclone + failback reissues L's GTIDs:
 // PITRArchiveReissueRiskDetected, then PITRArchiveHistoryReset until a new prefix
 // and a full backup).
+//
+// It also covers the lost transactions a had not archived when it died
+// (#264). a commits a second lost batch L' after its last flush; while a is
+// down the archive knows only L. When a comes back its sidecar, read-only,
+// archives the binary log that held L' (the restart sealed it), so the old
+// backup's verification then refuses naming L ∪ L' and verifies with both
+// excluded; before #264 the reclone wiped L' unseen. The reclone of a (and
+// of every reader) starts only after the operator confirmed the site's
+// tail archived, with no PITRArchiveTailNotArchived Event (pitrRecloneSite).
 func scenario70PITRLossyFailover() runner.Scenario {
 	return runner.Scenario{
 		ID:    s70ID,
@@ -64,7 +76,10 @@ func scenario70PITRLossyFailover() runner.Scenario {
 		Hypothesis: "After a failover that loses archived transactions L: latest refuses PITRArchiveDivergentHistory with L " +
 			"and verifies with excludeGtids=L; a timestamp verification of the old backup after new writes refuses the " +
 			"same way and verifies with excludeGtids; a backup taken after the loss verifies without exclusions; " +
-			"recloning the old primary and failing back to it emits PITRArchiveReissueRiskDetected, its new writes make every " +
+			"when the old primary comes back its sidecar archives the lost transactions L' it had not archived, and the " +
+			"old backup's verification refuses with L ∪ L' and verifies with both excluded; " +
+			"recloning the old primary (after the operator confirmed its binlog tail archived) and failing back to it emits " +
+			"PITRArchiveReissueRiskDetected, its new writes make every " +
 			"verification refuse PITRArchiveHistoryReset, and a new archive prefix plus a full backup verifies again.",
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#70-pitr-lossy-failover",
@@ -79,6 +94,7 @@ func scenario70PITRLossyFailover() runner.Scenario {
 			s70VerifyLatestLoss(),
 			s70VerifyTimestampAfterLoss(),
 			s70VerifyBackupAfterLoss(),
+			s70OldPrimaryReturns(),
 			s70RecloneAndFailback(),
 			s70VerifyHistoryReset(),
 			s70Remedy(),
@@ -130,7 +146,7 @@ func s70Backup() runner.Step {
 func s70LossyFailover() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "era P reaches b; delay b's applier, archive lost markers L on a, scale a to 0, b promoted without L; reclone readers holding L",
+		Name:  "era P reaches b; delay b's applier, archive lost markers L on a, write L' unflushed, scale a to 0, b promoted without either; reclone readers holding L",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			a, b := ctxFetch(env, "siteA"), ctxFetch(env, "siteB")
 			// The emergency failover below must not wait out an anti-flap
@@ -171,8 +187,7 @@ func s70LossyFailover() runner.Step {
 			}
 			// L is the two markers plus the writer's commits around them.
 			// The writer stops before the flushing fence, so a's sealed
-			// file holds all of it and nothing of a's commits is left
-			// unarchived when a goes down.
+			// file holds all of it.
 			if err := pitrWithWriter(ctx, env, a, s70DBName, func() error {
 				if err := pitrInsertMarker(ctx, env, a, s70DBName, s70IDLost, "L1"); err != nil {
 					return err
@@ -188,6 +203,23 @@ func s70LossyFailover() runner.Step {
 				return err
 			}
 			if err := pitrStashFence(ctx, env, "A-flush", flushed); err != nil {
+				return err
+			}
+			// L' is a second lost batch, committed after the flush: it stays
+			// in a's active binlog, so nothing archives it before a goes
+			// down. It reaches the archive when a comes back
+			// (s70OldPrimaryReturns). The watch records the file that holds
+			// it and a's manifest rows as they are now.
+			if err := pitrWithWriter(ctx, env, a, s70DBName, func() error {
+				return pitrInsertMarker(ctx, env, a, s70DBName, s70IDLostTail, "L3")
+			}); err != nil {
+				return err
+			}
+			tail, err := pitrStartTailWatch(ctx, env, a)
+			if err != nil {
+				return err
+			}
+			if err := pitrStashTailWatch(ctx, env, "a", tail); err != nil {
 				return err
 			}
 			// Read on b's clock, which b's sidecar records with (F182).
@@ -210,6 +242,8 @@ func s70LossyFailover() runner.Step {
 			}
 			// b can never receive L now (a is down and b's channel was
 			// reset at promotion), so L = what a archived minus what b has.
+			// L' is not in a's archived set: the archive does not know it
+			// until a comes back.
 			bSet, err := pitrSiteGTID(ctx, env, b)
 			if err != nil {
 				return err
@@ -403,23 +437,100 @@ func s70VerifyBackupAfterLoss() runner.Step {
 	}
 }
 
-func s70RecloneAndFailback() runner.Step {
+// s70ReturnWait bounds the wait for a's pod to be back and observed
+// read-only after it is scaled up.
+const s70ReturnWait = 4 * time.Minute
+
+// s70OldPrimaryReturns brings a back and asserts what #264 changed for a
+// primary that died with unarchived transactions: its sidecar archives them
+// while a is read-only, before anything reclones a, and restores see them.
+func s70OldPrimaryReturns() runner.Step {
 	return runner.Step{
-		Phase: runner.PhaseInject,
-		Name:  "bring a back, reclone it, fail back: PITRArchiveReissueRiskDetected",
+		Phase: runner.PhaseVerify,
+		Name:  "a comes back: its sidecar archives the unflushed lost tail L'; β1 after S refuses DivergentHistory with L ∪ L', and verifies with both excluded",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			a := ctxFetch(env, "siteA")
+			a, b := ctxFetch(env, "siteA"), ctxFetch(env, "siteB")
+			tail, err := pitrFetchTailWatch(env, "a")
+			if err != nil {
+				return err
+			}
+			returned := time.Now()
 			if err := env.Chaos.ScaleSiteToOne(ctx, a); err != nil {
 				return err
 			}
-			// a returns RecoveryBlocked with L as its divergent set: the
-			// reclone is confirmed by that GTID's prefix (F067).
+			backCtx, cancel := context.WithTimeout(ctx, s70ReturnWait)
+			defer cancel()
+			if _, err := env.Wait.UntilCR(backCtx, env.Namespace, a+" back and read-only", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				for _, st := range m.Status.Sites {
+					if st.Name == a {
+						return st.State == v1alpha1.SiteStateReadOnly, fmt.Sprintf("state=%s recovery=%q", st.State, st.RecoveryState), nil
+					}
+				}
+				return false, "site not in status", nil
+			}); err != nil {
+				return err
+			}
+			// The restart sealed the binary log a was writing when it went
+			// down, which holds L'. a's latest record is still its own
+			// promotion record and its server is the same incarnation, so
+			// its sidecar uploads that file while a is read-only.
+			if err := tail.wait(ctx, env, true, returned); err != nil {
+				return fmt.Errorf("the returning old primary did not archive the transactions it had not archived when it went down: %w", err)
+			}
+			// Everything a holds that b does not: L, which a archived
+			// before it went down, and L'.
+			aSet, err := pitrSiteGTID(ctx, env, a)
+			if err != nil {
+				return err
+			}
+			bSet, err := pitrSiteGTID(ctx, env, b)
+			if err != nil {
+				return err
+			}
+			lostAll, err := gtidSubtract(aSet, bSet)
+			if err != nil {
+				return err
+			}
+			lostTail, err := gtidSubtract(lostAll, ctxFetch(env, "lost"))
+			if err != nil {
+				return err
+			}
+			if lostTail == "" {
+				return fmt.Errorf("a holds nothing beyond L that b lacks (a %s, b %s): the unflushed lost batch L' did not happen", aSet, bSet)
+			}
+			env.Capture.Note(fmt.Sprintf("old primary %s returned: unflushed lost tail L'=%s now archived; L ∪ L'=%s", a, lostTail, lostAll))
+			f, err := pitrFetchFence(env, "TS")
+			if err != nil {
+				return err
+			}
+			// The same verification as ts-lost, which named L alone while
+			// a was down: the archive now holds L' as well.
+			e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Markers: []string{"baseline", "P", "S"}}
+			if err := s70VerifyRefusedNamingL(ctx, env, "ts-lost-tail", e, lostAll); err != nil {
+				return err
+			}
+			e.Exclude, e.Outcome = lostAll, v1alpha1.PointInTimeTargetCovered
+			return pitrVerifyExcluded(ctx, env, "ts-x-tail", e)
+		},
+	}
+}
+
+func s70RecloneAndFailback() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "reclone a (its tail confirmed archived first), fail back: PITRArchiveReissueRiskDetected",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			a := ctxFetch(env, "siteA")
+			// a is RecoveryBlocked with L ∪ L' as its divergent set: the
+			// reclone is confirmed by that GTID's prefix (F067). Its tail
+			// is in the archive already, which the operator confirms after
+			// its own rotation before it lets CLONE wipe a's binary logs.
 			if err := pitrRecloneSite(ctx, env, a, true); err != nil {
 				return err
 			}
-			// a's own manifest still holds the archived row with L, which
-			// its recloned server no longer has: the audit flags it, which
-			// is what the runner's reissue warning keys on.
+			// a's own manifest still holds the archived rows with L and
+			// L', which its recloned server no longer has: the audit flags
+			// them, which is what the runner's reissue warning keys on.
 			if err := s70WaitSuspectRows(ctx, env, a); err != nil {
 				return err
 			}

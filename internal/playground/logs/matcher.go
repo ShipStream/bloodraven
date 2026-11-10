@@ -81,6 +81,95 @@ func textFieldMatches(line, key, value string) bool {
 	return regexp.MustCompile(pattern).MatchString(line)
 }
 
+// Fields parses one structured log line into its attributes, each value as
+// a string: a JSON record (what the operator and the sidecar write) or slog
+// text output (key=value tokens, values quoted when they hold a space). ok
+// is false when the line is neither, or carries no msg. Scenarios use it to
+// read a value out of a line (a duration, say), where Structured only
+// matches one.
+func Fields(line string) (map[string]string, bool) {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "{") {
+		dec := json.NewDecoder(strings.NewReader(line))
+		// Numbers keep their spelling: 12 stays "12", not "1.2e+01".
+		dec.UseNumber()
+		var record map[string]any
+		if dec.Decode(&record) == nil {
+			out := make(map[string]string, len(record))
+			for key, value := range record {
+				out[key] = jsonFieldString(value)
+			}
+			_, ok := out["msg"]
+			return out, ok
+		}
+	}
+	out := textFields(line)
+	_, ok := out["msg"]
+	return out, ok
+}
+
+func jsonFieldString(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case json.Number:
+		return t.String()
+	case bool:
+		return strconv.FormatBool(t)
+	}
+	// A nested group or list: its JSON form.
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(b)
+}
+
+// textFields reads the key=value tokens of a slog text line. A value that
+// starts with a double quote runs to its closing quote and is unquoted; any
+// other runs to the next space. Tokens without '=' are skipped.
+func textFields(line string) map[string]string {
+	out := map[string]string{}
+	for i := 0; i < len(line); {
+		if line[i] == ' ' || line[i] == '\t' {
+			i++
+			continue
+		}
+		end := i
+		for end < len(line) && line[end] != '=' && line[end] != ' ' && line[end] != '\t' {
+			end++
+		}
+		if end == len(line) || line[end] != '=' || end == i {
+			// Free text: skip to the next space.
+			for end < len(line) && line[end] != ' ' && line[end] != '\t' {
+				end++
+			}
+			i = end
+			continue
+		}
+		key := line[i:end]
+		rest := line[end+1:]
+		if strings.HasPrefix(rest, `"`) {
+			if quoted, err := strconv.QuotedPrefix(rest); err == nil {
+				if value, err := strconv.Unquote(quoted); err == nil {
+					out[key] = value
+					i = end + 1 + len(quoted)
+					continue
+				}
+			}
+		}
+		stop := strings.IndexAny(rest, " \t")
+		if stop < 0 {
+			stop = len(rest)
+		}
+		out[key] = rest[:stop]
+		i = end + 1 + stop
+	}
+	return out
+}
+
 // Wait blocks until a line matching the predicate is observed in the
 // tailer's ring buffer, or the context expires. The search begins at
 // the supplied since time — callers pass time.Now() before injecting

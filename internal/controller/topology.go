@@ -839,6 +839,20 @@ type TopologyManager struct {
 	// if any, requested it.
 	RecloneCompleteCallback func(ctx context.Context, site string, outcome RecloneOutcome) error
 
+	// ArchiveTailProbe reads a site's sidecar archiver status for the
+	// pre-reclone archive-tail wait (recloneArchiveTailSettled). nil skips
+	// the wait: no PITR status source is wired.
+	ArchiveTailProbe ArchiveTailProbe
+	// ArchiveTailNotArchivedCallback reports a reclone that goes ahead
+	// without its recipient's binary log tail confirmed archived; the
+	// runner records the PITRArchiveTailNotArchived Event.
+	ArchiveTailNotArchivedCallback func(site, reason string)
+	// recloneTail is the pre-reclone wait in progress and
+	// recloneTailSettled the site whose wait ended while its clone has not
+	// started yet. Only Poll's goroutine (checkReclone) uses them.
+	recloneTail        *recloneTailWait
+	recloneTailSettled string
+
 	// EmergencyFailoverCallback is invoked synchronously after a
 	// successful emergency failover Execute, on the same goroutine that
 	// drove the failover. The runner wires this to
@@ -5936,6 +5950,7 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 	}
 
 	if site == "" {
+		tm.clearRecloneArchiveTail()
 		return false
 	}
 
@@ -5992,9 +6007,25 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 		return false
 	}
 
+	// CLONE wipes the recipient's binary logs: let its sidecar archive the
+	// tail first, bounded (PITR only). Not while another actor holds the
+	// sites (a planned failover's claim, an ordered update): the clone
+	// could not start anyway, and the rotation is a statement on a site
+	// that actor owns. startBootstrapByName decides again below.
+	tm.mu.RLock()
+	busy := tm.bootstrapClaimRefusedLocked() != ""
+	tm.mu.RUnlock()
+	if busy {
+		return false
+	}
+	if !tm.recloneArchiveTailSettled(ctx, recipient) {
+		return false
+	}
+
 	if !tm.startBootstrapByName(ctx, donor.name, recipient.name, "reclone") {
 		return false
 	}
+	tm.clearRecloneArchiveTail()
 	metrics.RecloneOperations.WithLabelValues(site).Inc()
 	return true
 }

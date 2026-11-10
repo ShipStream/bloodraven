@@ -1210,6 +1210,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	archiver := r.newPITRArchiverPoller(ctx, fg, nn, buildSidecarClients(fg), prev)
 	archiver.awaitingRollout = tm.SpecDriftSites
 	archiver.rolloutKnown = tm.specDriftComputed
+	// A reclone waits, bounded, for its recipient's sidecar to archive the
+	// binary log tail CLONE wipes; a reclone that goes ahead without that
+	// is announced with an Event.
+	tm.ArchiveTailProbe = archiver.tailStatus
+	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
+		r.emitPITRArchiveTailNotArchived(tmCtx, nn, site, reason)
+	}
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})
@@ -2642,6 +2649,23 @@ func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFai
 	r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveReissueRiskDetected,
 		"site %s was promoted while its archive manifest holds %d divergent/quarantined rows. If %s was recloned after a lossy failover, it reissues the lost GTIDs, and every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup.",
 		promoted, rows, promoted)
+}
+
+// emitPITRArchiveTailNotArchived records the Warning Event of a reclone
+// that started without its recipient's binary log tail confirmed archived
+// (TopologyManager.recloneArchiveTailSettled).
+func (r *TopologyManagerRunner) emitPITRArchiveTailNotArchived(ctx context.Context, nn types.NamespacedName, site, reason string) {
+	if r == nil || r.recorder == nil {
+		return
+	}
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := r.client.Get(ctx, nn, &fg); err != nil {
+		r.logger.Warn("could not record the PITRArchiveTailNotArchived event", "fg", nn, "site", site, "error", err)
+		return
+	}
+	r.recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveTailNotArchived,
+		"site %s is being recloned although its binary log tail was not confirmed archived within %s: %s. CLONE wipes the site's binary logs; a point-in-time restore whose window needs transactions only they held refuses PITRArchiveGap.",
+		site, preRecloneArchiveTailTimeout, reason)
 }
 
 // pitrArchiveSuspectRows is divergentRows+quarantinedRows from site's latest

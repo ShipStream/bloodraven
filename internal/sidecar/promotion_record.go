@@ -372,8 +372,14 @@ func (a *BinlogArchiver) syncEpisode() roleSnapshot {
 
 // episodeCurrent refuses manifest writes of a recorded episode that the
 // timeline has since ended, so no row is published under another
-// episode's record; the next scan or tick starts the new episode.
+// episode's record; the next scan or tick starts the new episode. A
+// read-only site's tail drain runs under no episode: its writes are refused
+// once the timeline no longer shows the read-only server the drain was
+// decided on, and the next scan, as whatever the server then is, continues.
 func (a *BinlogArchiver) episodeCurrent() error {
+	if a.tailUpload != nil {
+		return a.roles.tailCurrent(a.tailUpload.obs)
+	}
 	if !a.episode.recorded {
 		return nil
 	}

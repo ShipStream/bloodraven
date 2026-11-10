@@ -175,6 +175,27 @@ type ArchiverStatusResponse struct {
 	PromotionRecordedAt time.Time `json:"promotionRecordedAt"`
 	// HistoryIntegrity is the site's persisted history-integrity marker.
 	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
+	// Tail is the site's archive tail (#264): whether every sealed local
+	// binary log the site has to archive is in its manifest. nil until a
+	// scan has read the binlog index, and from a sidecar that predates the
+	// field.
+	Tail *ArchiverTailResponse `json:"tail,omitempty"`
+}
+
+// ArchiverTailResponse mirrors internal/mysql.ArchiverTailStatus, the
+// `tail` block of /archiver/status.
+type ArchiverTailResponse struct {
+	// State is "Drained", "Pending" or "Blocked" (the
+	// internal/mysql.ArchiverTail* constants).
+	State string `json:"state"`
+	// ActiveFile is the binary log the server was writing at the last
+	// scan, and NewestSealedFile the one before it.
+	ActiveFile       string `json:"activeFile,omitempty"`
+	NewestSealedFile string `json:"newestSealedFile,omitempty"`
+	// PendingFiles counts the sealed files the site still has to archive.
+	PendingFiles int64 `json:"pendingFiles"`
+	// Reason says why the state is Blocked.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ArchiverStatus calls GET /archiver/status and decodes the JSON response.

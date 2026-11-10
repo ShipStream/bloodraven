@@ -33,7 +33,7 @@ func NewFakeEndpoint(r *FakeReplica) *FakeEndpoint {
 
 // Checker returns a real mysql.Checker connected to this endpoint.
 func (e *FakeEndpoint) Checker() mysql.Checker {
-	return mysql.NewCheckerFromPools(sql.OpenDB(e), sql.OpenDB(e))
+	return mysql.NewCheckerFromPools(sql.OpenDB(e), sql.OpenDB(e), e)
 }
 
 // Switch routes new connections to r and breaks every open one.

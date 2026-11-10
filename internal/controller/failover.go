@@ -7,17 +7,104 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // FailoverController orchestrates MySQL failover between sites.
 type FailoverController struct {
 	logger *slog.Logger
+	// clock bounds the best-effort binary log rotations (rotateBinlog), so
+	// a simulation's fake clock decides when one has taken too long.
+	clock clock.Clock
 }
 
 // NewFailoverController creates a new FailoverController.
 func NewFailoverController(logger *slog.Logger) *FailoverController {
-	return &FailoverController{logger: logger}
+	return NewFailoverControllerWithClock(logger, clock.RealClock{})
+}
+
+// NewFailoverControllerWithClock creates a FailoverController with an
+// injectable clock, for tests and simulations that drive time themselves.
+func NewFailoverControllerWithClock(logger *slog.Logger, clk clock.Clock) *FailoverController {
+	return &FailoverController{logger: logger, clock: clk}
+}
+
+// BinlogRotationTimeout bounds one best-effort FLUSH BINARY LOGS on the
+// failover path, connection setup included. A flush that has not answered
+// by then is abandoned and the promotion, handoff or reclone continues.
+const BinlogRotationTimeout = time.Second
+
+// binlogFlusher is the part of mysql.Checker a rotation needs.
+type binlogFlusher interface {
+	FlushBinaryLogs(ctx context.Context) error
+}
+
+// binlogRotation names one use of rotateBinlog by its two log messages
+// (both are in the log schema).
+type binlogRotation struct {
+	done   string
+	failed string
+}
+
+var (
+	// promotionRotation seals a promotion candidate's replica-era binary
+	// log before its writes are enabled.
+	promotionRotation = binlogRotation{done: "promotion binlog rotated", failed: "promotion binlog rotation failed"}
+	// outgoingPrimaryRotation seals a fenced primary's writable-era tail
+	// during a planned handoff, so its sidecar can archive it.
+	outgoingPrimaryRotation = binlogRotation{done: "outgoing primary binlog rotated", failed: "outgoing primary binlog rotation failed"}
+	// preRecloneRotation seals a reclone recipient's binary log before
+	// CLONE wipes its data directory.
+	preRecloneRotation = binlogRotation{done: "pre-reclone binlog rotated", failed: "pre-reclone binlog rotation failed"}
+)
+
+// rotateBinlog sends one best-effort FLUSH BINARY LOGS to site and reports
+// whether it was acknowledged within BinlogRotationTimeout. It never blocks
+// its caller longer than that and never fails it: on an error, a timeout or
+// a cancelled ctx it logs r.failed at WARN and returns false; on success it
+// logs r.done with the duration, so the cost is measurable.
+//
+// The flush runs in a goroutine and the wait is bounded by the controller's
+// clock rather than by a context deadline: the caller continues at the
+// bound even if the statement, or the connection attempt behind it, ignores
+// cancellation (a blackholed address answers only at the driver's own I/O
+// deadline). The abandoned call is cancelled; mysql.Checker.FlushBinaryLogs
+// runs on a connection of its own, so that neither breaks a pinned session
+// nor occupies a pooled connection. The server may still complete an
+// abandoned rotation later, even after writes were enabled. That is one
+// more rotation at an arbitrary point, which nothing depends on.
+func (f *FailoverController) rotateBinlog(ctx context.Context, c binlogFlusher, site string, r binlogRotation, attrs ...any) bool {
+	clk := f.clock
+	if clk == nil {
+		clk = clock.RealClock{}
+	}
+	start := clk.Now()
+	// The timer exists before the flush starts: a simulated flush advances
+	// a fake clock from inside the call.
+	timer := clk.NewTimer(BinlogRotationTimeout)
+	defer timer.Stop()
+	flushCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.FlushBinaryLogs(flushCtx) }()
+	var err error
+	timedOut := false
+	select {
+	case err = <-done:
+	case <-timer.C():
+		timedOut = true
+		err = fmt.Errorf("no answer within %s; continuing without it", BinlogRotationTimeout)
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	fields := append([]any{"site", site, "durationMs", clk.Since(start).Milliseconds()}, attrs...)
+	if err != nil {
+		f.logger.Warn(r.failed, append(fields, "timedOut", timedOut, "error", err)...)
+		return false
+	}
+	f.logger.Info(r.done, fields...)
+	return true
 }
 
 // Execute performs a failover: fences old primary, drains relay logs on candidate, promotes candidate.
@@ -70,10 +157,21 @@ const (
 )
 
 // promote turns a candidate into a writable primary for the emergency
-// path: STOP REPLICA, RESET REPLICA ALL, record GTID_EXECUTED, clear
+// path: STOP REPLICA, RESET REPLICA ALL, record GTID_EXECUTED, rotate the
+// binary log (best effort, rotateBinlog), clear
 // super_read_only, then read_only. Each statement takes any pooled
 // connection, and a failed GTID read is only logged: with the primary
 // gone, availability comes first.
+//
+// The rotation sits after the GTID read and before the clears: the
+// candidate is read-only with no replication channel, so its executed set
+// cannot change in between, and the file the rotation opens has a
+// Previous_gtids header equal to the recorded promotion GTID. Everything
+// the candidate logged as a replica is then in sealed files its sidecar can
+// archive, and its first own transaction starts a file. That holds only
+// when the rotation was acknowledged: a failed or abandoned one leaves the
+// replica-era file open (or rotates it at some later point), and the
+// promotion is the same either way.
 func (f *FailoverController) promote(ctx context.Context, candidate mysql.Checker, candidateSite string) (string, error) {
 	if err := candidate.StopReplica(ctx); err != nil {
 		return "", err
@@ -86,6 +184,7 @@ func (f *FailoverController) promote(ctx context.Context, candidate mysql.Checke
 	if err != nil {
 		f.logger.Warn("failed to record promotion GTID", "error", err)
 	}
+	f.rotateBinlog(ctx, candidate, candidateSite, promotionRotation)
 	// Clear super_read_only (may have been set by sidecar fencing or previous state).
 	if err := candidate.SetSuperReadOnly(ctx, false); err != nil {
 		return "", err
@@ -113,7 +212,7 @@ func (f *FailoverController) promoteVerified(ctx context.Context, candidate mysq
 		return "", promoteStageNotStarted, err
 	}
 	defer func() { _ = sess.Close() }()
-	return f.promoteVerifiedFrom(ctx, sess, candidateSite, require, PromotionStageNotStarted, promoteHooks{})
+	return f.promoteVerifiedFrom(ctx, sess, candidate, candidateSite, require, PromotionStageNotStarted, promoteHooks{})
 }
 
 // promoteHooks instrument promoteVerifiedFrom for the planned failover.
@@ -140,6 +239,10 @@ type promoteHooks struct {
 	// planned suppresses the "failover complete" log line: the planned
 	// failover emits it only after its live confirmation.
 	planned bool
+	// flush wraps the promotion's FLUSH BINARY LOGS: it calls send to send
+	// it, or returns without calling it. The planned failover sends it at
+	// most once per run and process. nil sends it on every attempt.
+	flush func(send func())
 }
 
 func (h promoteHooks) send(ctx context.Context, s promoteMemoStage, stmt func(context.Context) error) error {
@@ -176,7 +279,21 @@ func (h promoteHooks) send(ctx context.Context, s promoteMemoStage, stmt func(co
 //
 // From ReplicaReset and WasWritable the gate re-reads the GTID set itself.
 // The returned promoteStage is promoteVerified's: how far it got.
-func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql.Session, candidateSite string, require mysql.GTIDSet,
+//
+// Before the gate, every stage but WasWritable rotates the candidate's
+// binary log through flusher (nil skips it), best effort, as promote does:
+// the candidate is read-only, has no channel and holds exactly the proven
+// set, so the file the rotation opens starts at the promotion GTID set.
+// The rotation is not a stage and has no memo entry: it changes nothing
+// classifyPromotionStage reads, so a resumed attempt classifies the same
+// with or without it, and repeating it only adds an empty file. It is sent
+// on flusher's own connection, not on sess: cancelling a statement on sess
+// would close the pinned connection and fail the clears that follow. It is
+// guarded like a statement (h.guard), so a pass that lost its claim does
+// not send it. From WasWritable the candidate already holds its own
+// transactions and may take writes again at once; a rotation there would
+// seal nothing the promotion is about.
+func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql.Session, flusher binlogFlusher, candidateSite string, require mysql.GTIDSet,
 	from PromotionStage, h promoteHooks) (string, promoteStage, error) {
 	reached := promoteStageNotStarted
 	promotionGtid := ""
@@ -205,6 +322,19 @@ func (f *FailoverController) promoteVerifiedFrom(ctx context.Context, sess mysql
 		promotionGtid = require.String()
 	default:
 		return "", reached, fmt.Errorf("promotion cannot resume from stage %q", from)
+	}
+	if flusher != nil && from != PromotionStageWasWritable {
+		if h.guard != nil {
+			if err := h.guard(); err != nil {
+				return "", reached, err
+			}
+		}
+		send := func() { f.rotateBinlog(ctx, flusher, candidateSite, promotionRotation) }
+		if h.flush != nil {
+			h.flush(send)
+		} else {
+			send()
+		}
 	}
 	if h.gate != nil {
 		if err := h.gate(ctx); err != nil {
