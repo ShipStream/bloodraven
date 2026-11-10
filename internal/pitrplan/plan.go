@@ -112,6 +112,11 @@ type file struct {
 	prev   Set
 	exec   Set
 	marked bool
+	// ord is the file's index in planner.order.
+	ord int
+	// sids maps the file's source identifier indexes (Txn.SID) to the
+	// planner's (planner.sidNames).
+	sids []uint32
 	// posW caches witnessPos.
 	posW     int
 	posWDone bool
@@ -121,12 +126,6 @@ func (f *file) n() int            { return len(f.idx.Txns) }
 func (f *file) gtid(i int) GTID   { return f.idx.GTID(i) }
 func (f *file) txn(i int) Txn     { return f.idx.Txns[i] }
 func (f *file) origin(i int) bool { return f.idx.Txns[i].Srv == f.idx.WriterServerID }
-
-type occRef struct {
-	f *file
-	i int32
-	n uint16
-}
 
 // lostObjectAdvice is the remedy for a row whose object cannot be read
 // (review F063). pitr-quarantine writes only an archive its caller owns,
@@ -177,10 +176,14 @@ type planner struct {
 	T     int64 // µs; 0 in latest mode
 	delta int64 // µs
 
-	files    map[*Row]*file
-	failed   map[*Row]error
-	order    []*file
-	occ      map[GTID]*occRef
+	files  map[*Row]*file
+	failed map[*Row]error
+	order  []*file
+	// occ is the occurrence registry (occ.go), keyed by the planner's
+	// index of a GTID's source identifier and its GNO.
+	occ      occTable
+	sidIndex map[string]uint32
+	sidNames []string
 	mismatch *Refusal
 	// reissue is the first downloaded copy of a member of B committed
 	// after the dump finished (D-49 over every downloaded row, review
@@ -212,7 +215,7 @@ func newPlanner(ctx context.Context, req Request, archive Archive, fetcher Fetch
 	}
 	p := &planner{ctx: ctx, req: req, fetcher: fetcher, budget: req.Budget,
 		marked: map[string]*pitrarchive.HistoryIntegrity{}, files: map[*Row]*file{}, failed: map[*Row]error{},
-		occ: map[GTID]*occRef{}, used: map[*Row]bool{}, maxOctB: math.MinInt64, delta: req.Delta.Microseconds()}
+		occ: occTable{b: req.Budget}, sidIndex: map[string]uint32{}, used: map[*Row]bool{}, maxOctB: math.MinInt64, delta: req.Delta.Microseconds()}
 	p.X = req.Exclude
 	if p.X == nil {
 		p.X = Set{}
@@ -307,7 +310,9 @@ func (p *planner) fetch(r *Row) (*file, error) {
 	}
 	// The up-front estimate from hinted counts refuses before any bytes
 	// are read (D-42). A count too large to multiply is over any budget.
-	if r.Hints.Known {
+	// With a spill arena the index need not fit in memory, and what the
+	// staging volume can take is known only when it is asked.
+	if r.Hints.Known && !p.budget.Spilling() {
 		est := int64(math.MaxInt64)
 		if n := r.Hints.GTIDs.Count(); n <= math.MaxInt64/(TxnBytes+occurrenceBytes) {
 			est = n * (TxnBytes + occurrenceBytes)
@@ -389,30 +394,44 @@ func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 			return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "%s (id %s): the manifest hints disagree with the verified bytes: %v", r.Label(), r.ID, bad)
 		}
 	}
-	if err := p.budget.Charge(int64(len(idx.Txns))*occurrenceBytes, "occurrence registry"); err != nil {
-		return nil, err
-	}
 	// prev and exec (⊆ prev ∪ gtids) are both retained (review F047:
 	// prev was uncharged).
 	if err := p.budget.Charge(2*setBytes(prev)+setBytes(idx.GTIDs), "file sets"); err != nil {
 		return nil, err
 	}
-	f := &file{row: r, idx: idx, prev: prev, exec: prev.Union(idx.GTIDs), marked: p.isMarked(r.Site)}
+	f := &file{row: r, idx: idx, prev: prev, exec: prev.Union(idx.GTIDs), marked: p.isMarked(r.Site), ord: len(p.order)}
+	if err := p.mapSources(f); err != nil {
+		return nil, err
+	}
 	for i, t := range idx.Txns {
-		g := f.gtid(i)
-		if p.reissue == nil && t.OCT > p.serverEnd+p.delta && p.B.Has(g) {
-			p.reissue = p.reissueRefusal(g, f, t.OCT)
+		if p.reissue == nil && t.OCT > p.serverEnd+p.delta {
+			if g := f.gtid(i); p.B.Has(g) {
+				p.reissue = p.reissueRefusal(g, f, t.OCT)
+			}
 		}
-		o := p.occ[g]
-		if o == nil {
-			p.occ[g] = &occRef{f: f, i: int32(i), n: 1}
+		sid := f.sids[t.SID]
+		o, ok := p.occ.get(sid, t.GNO)
+		if !ok {
+			if err := p.occ.put(sid, t.GNO, occRec{file: uint32(f.ord) + 1, i: uint32(i), n: 1}); err != nil { //nolint:gosec // file and transaction counts fit: both index arrays
+				return nil, err
+			}
 			continue
 		}
+		changed := false
 		if o.n < math.MaxUint16 {
 			o.n++
+			changed = true
 		}
 		if p.mismatch == nil {
-			first := o.f.txn(int(o.i))
+			// The copy this one is compared with: the first, or the first
+			// that has an effect digest. A file holds a GTID once
+			// (IndexBuilder), so it is in an earlier file.
+			of := f
+			if int(o.file)-1 < len(p.order) {
+				of = p.order[o.file-1]
+			}
+			first := of.txn(int(o.i))
+			g := f.gtid(i)
 			var why []string
 			if first.OCT != t.OCT {
 				why = append(why, fmt.Sprintf("commit time %s vs %s", fmtMicros(first.OCT), fmtMicros(t.OCT)))
@@ -433,16 +452,22 @@ func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 			case effects && len(why) == 1:
 				// The copies agree on everything a GTID event says.
 				p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); one copy is not a faithful copy of the other: a transaction with other changes was injected under this GTID (a manual repair with SET GTID_NEXT), or the two servers' data had diverged when they applied it; restore from a full backup taken later, once its newest transactions are archived in binlog files after these two",
-					g, o.f.row.Label(), r.Label(), why[0])
+					g, of.row.Label(), r.Label(), why[0])
 			case len(why) > 0:
 				p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); the GTID was reissued, or one site's history was rewritten",
-					g, o.f.row.Label(), r.Label(), joinComma(why))
+					g, of.row.Label(), r.Label(), joinComma(why))
 			case first.Effect.IsZero() && !t.Effect.IsZero():
 				// Later copies are compared with a comparable one: the
 				// registry keeps the first copy that has a digest, so two
 				// comparable copies always meet, whatever the download
 				// order.
-				o.f, o.i = f, int32(i) //nolint:gosec // an index of idx.Txns
+				o.file, o.i = uint32(f.ord)+1, uint32(i) //nolint:gosec // as above
+				changed = true
+			}
+		}
+		if changed {
+			if err := p.occ.put(sid, t.GNO, o); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -450,6 +475,28 @@ func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 	p.order = append(p.order, f)
 	p.plan.IndexedTransactions += int64(len(idx.Txns))
 	return f, nil
+}
+
+// mapSources fills f.sids, registering the file's source identifiers the
+// planner has not seen.
+func (p *planner) mapSources(f *file) error {
+	if err := p.budget.Charge(4*int64(len(f.idx.SIDs)), "file source identifiers"); err != nil {
+		return err
+	}
+	f.sids = make([]uint32, len(f.idx.SIDs))
+	for k, sid := range f.idx.SIDs {
+		id, ok := p.sidIndex[sid]
+		if !ok {
+			if err := p.budget.Charge(sourceBytes+sidBytes(sid), "source identifiers"); err != nil {
+				return err
+			}
+			id = uint32(len(p.sidNames)) //nolint:gosec // one per source identifier, each charged
+			p.sidIndex[sid] = id
+			p.sidNames = append(p.sidNames, sid)
+		}
+		f.sids[k] = id
+	}
+	return nil
 }
 
 // pred materializes pred(f, i).
@@ -538,6 +585,11 @@ func Run(ctx context.Context, req Request, archive Archive, fetcher Fetcher) (*P
 		return &Plan{Mode: req.Mode, Stop: req.Stop, AllowPartial: req.AllowPartial, Excluded: req.Exclude}, err
 	}
 	err = p.run()
+	// A write-back of spilled data that failed makes whatever was computed
+	// over it unreliable, a refusal as much as a plan.
+	if serr := p.budget.SpillErr(); serr != nil {
+		err = serr
+	}
 	if err != nil {
 		p.plan.Files, p.plan.Segments, p.plan.Sites = nil, nil, nil
 	}

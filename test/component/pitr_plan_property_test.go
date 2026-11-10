@@ -536,6 +536,8 @@ func (o *propOracle) run(label string) []propResult {
 		excludes = append(excludes, p.dead)
 	}
 	var out []propResult
+	// Every query is planned again with spilled arrays (issue #266).
+	spill, spilling := newPropSpill(t)
 	for _, X := range excludes {
 		for _, T := range append(append([]time.Time{}, p.targets...), time.Time{}) {
 			mode := pitrplan.ModeTimestamp
@@ -546,6 +548,9 @@ func (o *propOracle) run(label string) []propResult {
 			plan, err := pitrplan.Run(context.Background(), pitrplan.Request{Mode: mode, Stop: T, Exclude: X, Delta: o.delta, Dump: p.backup, Budget: budget},
 				o.arch, o.fetcher(budget))
 			what := fmt.Sprintf("%s δ=%s %s T=%s X=%s lossy=%v", label, o.delta, mode, T.Format(time.RFC3339Nano), X, p.lossy)
+			if spilling {
+				o.mustMatchSpilled(spill, what, mode, T, X, plan, err)
+			}
 			if mode == pitrplan.ModeLatest {
 				o.checkLatest(what, X, plan, err)
 			} else {

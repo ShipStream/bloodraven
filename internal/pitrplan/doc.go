@@ -30,8 +30,28 @@
 // transaction (Segment.StartPosition, issue #271), which restore.py hands
 // to mysqlbinlog as --start-position.
 //
+// Memory (D-42, issue #266). Everything whose size grows with the archive
+// is charged to a Budget before it is allocated, and planning refuses
+// PITRPlanTooLarge instead of being OOM-killed. What grows with the
+// number of transactions is kept in arrays of fixed-size records without
+// pointers, allocated through the budget (store.go): the per-file
+// transaction index, the occurrence registry (occ.go), the search's
+// positions, classes, keys and queues, and the order check's graph. With
+// a spill arena (Budget.SetSpill; pitr-download provides one backed by
+// unlinked files on the staging volume, internal/pitrplan/spillfile) these
+// arrays leave the heap once the memory charge passes a threshold, so a
+// large window costs staging disk instead of refusing. The planner runs
+// the same code over an array wherever it lives, and a plan is the same
+// byte for byte with and without a spill: TestPlansIdenticalSpilled,
+// TestOraclesSpilled and TestExamplesSpilled hold it to that. GTID
+// interval sets, manifest rows and the event being decoded stay in
+// memory. The planner still does no I/O of its own: the arena is an
+// interface, and the pages it writes are written back in bounded steps
+// through it (store.go has why).
+//
 // Files: archive.go (inputs), index.go (FileIndex, built by
 // internal/sidecar.InspectTransactions), gtidset.go, budget.go (D-42),
+// store.go (the arrays and the spill), occ.go (the occurrence registry),
 // frontier.go (§4.3), witness.go (§4.4, anchors), lineage.go (L1–L3, L5),
 // dwindow.go (L4), search.go (§4.6), latest.go (§4.8, and the segment
 // construction both modes share), identity.go (§4.9: closure, waiver, D-51

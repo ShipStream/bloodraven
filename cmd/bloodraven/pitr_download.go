@@ -69,6 +69,13 @@ import (
 // (unless GOMEMLIMIT is set), so the heap stays near the live data the
 // budget charges and planning refuses PITRPlanTooLarge instead of being
 // OOM-killed (review round 1 P3).
+//
+// The planner's arrays that grow with the number of transactions (the
+// index, the occurrence registry, the plan search, the order check) spill
+// to unlinked files under <output dir>/.pitr-spill once they pass about
+// half of the planner budget (issue #266, pitr_download_spill.go), so a
+// large window costs staging disk instead of refusing on memory. The
+// directory is gone before the plan's files are staged.
 func runPITRDownload(args []string) {
 	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
 	fail := func(code int, msg string, err error) {
@@ -513,11 +520,14 @@ type cachedRow struct {
 // planner. A row is cached in cacheDir only when the planner says it may
 // become a plan file (P2), the node filesystem keeps max(10%, 256 MiB)
 // free after it, and the staging emptyDir's sizeLimit (when set) still
-// has room for it; the copy is dropped as soon as the bytes received pass
-// that allowance, whatever the manifest says the row's size is. An
-// uncached plan file is re-downloaded with a digest check when staged.
-// Before staging, cached rows the plan does not stage are deleted, and
-// the staged set must fit under the sizeLimit and above the node's floor.
+// has room for it beside the planner's spill; the copy is dropped as soon
+// as the bytes received pass that allowance, whatever the manifest says
+// the row's size is. An uncached plan file is re-downloaded with a digest
+// check when staged. The spill takes precedence over the cache: cached
+// rows are dropped to make room for it (reserveSpill). Before staging,
+// when the spill is gone, cached rows the plan does not stage are
+// deleted, and the staged set must fit under the sizeLimit and above the
+// node's floor.
 type rowFetcher struct {
 	store    sidecar.ArchiveStore
 	prefix   string
@@ -530,6 +540,8 @@ type rowFetcher struct {
 	// the cache's usage as the kubelet measures it (whole blocks).
 	limit       int64
 	cachedBytes int64
+	// spill is the planner's spill arena on the same volume, or nil.
+	spill *stagingSpill
 	// freeAfter reports the free bytes left on dir's filesystem after
 	// writing n more, and the floor to keep; tests replace it.
 	freeAfter func(dir string, n int64) (free, threshold int64)
@@ -577,13 +589,15 @@ func (rf *rowFetcher) FetchForPlan(ctx context.Context, ref pitrplan.RowRef, may
 		return nil, &pitrplan.Refusal{Token: pitrarchive.TokenArchiveObjectInvalid, Message: fmt.Sprintf("%s/%s: %v", ref.Site, ref.Name, err)}
 	}
 	for attempt := 0; ; attempt++ {
-		used := rf.budget.Used()
+		partial := rf.budget.Checkpoint()
 		idx, transient, err := rf.fetchOnce(ctx, ref, entry, key, mayStage)
 		if err == nil {
+			partial.Keep()
 			return idx, nil
 		}
-		// A failed attempt's partial index is garbage.
-		rf.budget.Release(rf.budget.Used() - used)
+		// A failed attempt's partial index is garbage: its memory charges
+		// and its spilled arrays are returned.
+		partial.Undo()
 		if ctx.Err() != nil {
 			// Cancellation is neither damage nor a refusal.
 			return nil, &pitrplan.TransientError{Err: fmt.Errorf("read %s: %w", key, ctx.Err())}
@@ -774,7 +788,7 @@ func (rf *rowFetcher) fetchOnce(ctx context.Context, ref pitrplan.RowRef, entry 
 func (rf *rowFetcher) cacheAllowance(size int64) int64 {
 	allow := int64(math.MaxInt64)
 	if rf.limit > 0 {
-		allow = rf.limit - rf.cachedBytes - stagingReserve
+		allow = rf.limit - rf.cachedBytes - rf.spill.diskBytes() - stagingReserve
 	}
 	free, threshold := rf.freeAfter(rf.cacheDir, 0)
 	allow = min(allow, free-threshold)
@@ -942,7 +956,7 @@ type planResult struct {
 var manifestRowBytes = 2*int64(unsafe.Sizeof(sidecar.ManifestEntry{})) + int64(unsafe.Sizeof(pitrplan.RowRef{})) + 64
 
 func manifestEntryBytes(e sidecar.ManifestEntry) int64 {
-	n := manifestRowBytes + int64(len(e.Name)+len(e.ID)+len(e.ContentID)+len(e.BaseGTIDs)+len(e.PreviousGTIDs))
+	n := manifestRowBytes + int64(len(e.Name)+len(e.ID)+len(e.BaseGTIDs)+len(e.PreviousGTIDs))
 	if c := e.GTIDCoverage; c != nil {
 		n += int64(unsafe.Sizeof(*c)) + int64(len(c.GTIDs)+len(c.EmptyGTIDs)+len(c.ContentID))
 	}
@@ -982,6 +996,12 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 	// The budget exists before the manifests are converted: their rows
 	// and parsed sets are charged as they are built (D-42, review F211).
 	budget := pitrplan.NewBudget(req.memory)
+	rf := &rowFetcher{store: store, prefix: req.archive.prefix, budget: budget, cached: map[pitrplan.RowRef]cachedRow{},
+		cacheDir: filepath.Join(req.outDir, ".pitr-cache"), freeAfter: pitrDiskFreeAfter, limit: req.stagingLimit, backoff: pitrFetchBackoff}
+	// The spill is closed on every way out: its files are unlinked from
+	// the start, and nothing of it is left under the staging directory.
+	rf.spill = openStagingSpill(req, rf, budget)
+	defer rf.spill.close()
 	var archive pitrplan.Archive
 	entries := map[pitrplan.RowRef]sidecar.ManifestEntry{}
 	for _, m := range opened.manifests {
@@ -1008,16 +1028,28 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 		}
 		archive.Sites = append(archive.Sites, site)
 	}
-	cacheDir := filepath.Join(req.outDir, ".pitr-cache")
+	cacheDir := rf.cacheDir
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return res, err
 	}
 	defer os.RemoveAll(cacheDir)
-	rf := &rowFetcher{store: store, prefix: req.archive.prefix, entries: entries, budget: budget, cacheDir: cacheDir,
-		cached: map[pitrplan.RowRef]cachedRow{}, freeAfter: pitrDiskFreeAfter,
-		limit: req.stagingLimit, backoff: pitrFetchBackoff}
-	plan, err := pitrplan.Run(ctx, pitrplan.Request{Mode: req.mode, Stop: req.stop, AllowPartial: req.allowPartial, Exclude: req.exclude,
-		Delta: req.delta, Dump: dump, Budget: budget}, archive, rf)
+	rf.entries = entries
+	var plan *pitrplan.Plan
+	err = rf.spill.guard(func() error {
+		var err error
+		plan, err = pitrplan.Run(ctx, pitrplan.Request{Mode: req.mode, Stop: req.stop, AllowPartial: req.allowPartial, Exclude: req.exclude,
+			Delta: req.delta, Dump: dump, Budget: budget}, archive, rf)
+		return err
+	})
+	// The plan holds no spilled memory. A plan, or a refusal, computed
+	// over spilled data the volume lost is not trusted: it ends the Job
+	// as an error, to be retried.
+	spilled := rf.spill.stats()
+	if serr := rf.spill.finish(); serr != nil && ctx.Err() == nil {
+		if _, refused := pitrplan.RefusalOf(err); err == nil || refused {
+			err = serr
+		}
+	}
 	res.plan = plan
 	if err != nil {
 		if _, ok := pitrplan.RefusalOf(err); !ok && ctx.Err() == nil {
@@ -1071,7 +1103,8 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 	logger.Info("pitr plan", "archiveID", opened.desc.ArchiveID, "mode", string(plan.Mode), "outcome", string(plan.Outcome),
 		"witness", witness, "groundTruth", groundTruth, "segments", len(plan.Segments), "files", len(plan.Files),
 		"sites", strings.Join(plan.Sites, ","), "replayed", plan.ReplayedTransactions(), "divergent", plan.Divergent.Count(),
-		"onHistoryExcluded", plan.OnHistoryExclusions.Count(), "downloaded", plan.Downloaded, "indexedTransactions", plan.IndexedTransactions)
+		"onHistoryExcluded", plan.OnHistoryExclusions.Count(), "downloaded", plan.Downloaded, "indexedTransactions", plan.IndexedTransactions,
+		"memoryPeakBytes", budget.Peak(), "spilledPeakBytes", budget.SpillPeak(), "spillDiskPeakBytes", spilled.PeakBytes)
 	if !plan.Divergent.IsEmpty() {
 		fmt.Printf("BLOODRAVEN_PITR_DIVERGENT_SET gtids=%s\n", boundedText(plan.Divergent.String(), 64<<10))
 	}

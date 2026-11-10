@@ -35,7 +35,7 @@ func (d EffectDigest) IsZero() bool { return d == EffectDigest{} }
 
 // Txn is one indexed transaction of a file. Its GTID is
 // (FileIndex.SIDs[SID], GNO). It is a fixed-size record without pointers,
-// so an index can be spilled to disk as is (issue #266).
+// so an index is spilled to disk as is (issue #266).
 type Txn struct {
 	GNO int64
 	// OCT is the original commit timestamp, µs since the Unix epoch. The
@@ -69,7 +69,11 @@ type FileIndex struct {
 	// manifest row's baseGtids to form prev(f).
 	Previous Set
 	SIDs     []string
-	Txns     []Txn
+	// Txns are the file's transactions in file order. The array is
+	// read-only once the index is built: with a spilling budget it may be
+	// file-backed memory of the budget's arena (issue #266), valid until
+	// the arena is closed.
+	Txns []Txn
 	// GTIDs, EmptyGTIDs, CommitMin and CommitMax are the content values
 	// the manifest hints must equal.
 	GTIDs      Set
@@ -87,10 +91,15 @@ func (x *FileIndex) GTID(i int) GTID {
 // pass drives it. It charges every transaction to the budget before
 // storing it and enforces the per-file identity rules (§4.9): no GTID
 // repeats, and gtids ∩ prev = ∅.
+//
+// The transactions accumulate in an array that doubles (charged, or
+// spilled, at its capacity) and is cut to its length by Finish, so a
+// finished index holds exactly TxnBytes per transaction.
 type IndexBuilder struct {
 	label  string
 	budget *Budget
 	idx    FileIndex
+	txns   vec[Txn]
 	sids   map[string]uint32
 	open   bool
 	prev   bool
@@ -99,7 +108,7 @@ type IndexBuilder struct {
 // NewIndexBuilder starts a file; label ("<site>/<name>") names it in
 // refusals.
 func NewIndexBuilder(label string, budget *Budget) *IndexBuilder {
-	return &IndexBuilder{label: label, budget: budget, sids: map[string]uint32{},
+	return &IndexBuilder{label: label, budget: budget, sids: map[string]uint32{}, txns: newVec[Txn](budget),
 		idx: FileIndex{GTIDs: Set{}, EmptyGTIDs: Set{}, Previous: Set{}}}
 }
 
@@ -129,7 +138,7 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32, pos int64) error 
 	if err := b.closeTxn(); err != nil {
 		return err
 	}
-	if last := len(b.idx.Txns) - 1; pos < 4 || (last >= 0 && pos <= b.idx.Txns[last].Pos) {
+	if last := b.txns.n - 1; pos < 4 || (last >= 0 && pos <= b.txns.items()[last].Pos) {
 		return refuse(pitrarchive.TokenArchiveObjectInvalid, "%s: transaction %s at offset %d does not follow the previous transaction", b.label, g, pos)
 	}
 	if g.GNO <= 0 || g.GNO > MaxGNO {
@@ -141,9 +150,10 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32, pos int64) error 
 	if b.idx.Previous.Has(g) {
 		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s: %s is both in the file's Previous_gtids and among its transactions; the GTID was reissued", b.label, g)
 	}
-	// The transaction record, plus (review F047) a new interval of the
-	// GTID set, and a new source identifier's map slots and spelling.
-	charge := TxnBytes
+	// (Review F047) a new interval of the GTID set, and a new source
+	// identifier's map slots and spelling. The transaction record itself
+	// is charged, or spilled, by the array it is appended to.
+	var charge int64
 	sid, ok := b.sids[g.SID]
 	if !ok {
 		charge += indexSourceBytes + sidBytes(g.SID)
@@ -162,7 +172,9 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32, pos int64) error 
 		b.sids[g.SID] = sid
 		b.idx.SIDs = append(b.idx.SIDs, g.SID)
 	}
-	b.idx.Txns = append(b.idx.Txns, Txn{GNO: g.GNO, OCT: oct, Pos: pos, Srv: srv, SID: sid, Flags: TxnEmpty})
+	if err := b.txns.push(Txn{GNO: g.GNO, OCT: oct, Pos: pos, Srv: srv, SID: sid, Flags: TxnEmpty}, "transaction index of "+b.label); err != nil {
+		return err
+	}
 	b.budget.indexed++
 	if b.idx.CommitMin == 0 || oct < b.idx.CommitMin {
 		b.idx.CommitMin = oct
@@ -175,17 +187,28 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32, pos int64) error 
 // InTxn reports whether a transaction is open.
 func (b *IndexBuilder) InTxn() bool { return b.open }
 
+// last is the open transaction; setLast stores it back.
+func (b *IndexBuilder) last() Txn { return b.txns.items()[b.txns.n-1] }
+
+func (b *IndexBuilder) setLast(t Txn) { b.txns.set(b.txns.n-1, t) }
+
 // Mark sets flags on the open transaction; MarkData clears TxnEmpty.
 func (b *IndexBuilder) Mark(f TxnFlags) {
 	if b.open {
-		b.idx.Txns[len(b.idx.Txns)-1].Flags |= f
+		if t := b.last(); t.Flags|f != t.Flags {
+			t.Flags |= f
+			b.setLast(t)
+		}
 	}
 }
 
 // MarkData records a data or statement event in the open transaction.
 func (b *IndexBuilder) MarkData() {
 	if b.open {
-		b.idx.Txns[len(b.idx.Txns)-1].Flags &^= TxnEmpty
+		if t := b.last(); t.Flags&TxnEmpty != 0 {
+			t.Flags &^= TxnEmpty
+			b.setLast(t)
+		}
 	}
 }
 
@@ -193,7 +216,10 @@ func (b *IndexBuilder) MarkData() {
 // comparable).
 func (b *IndexBuilder) SetEffect(d EffectDigest) {
 	if b.open {
-		b.idx.Txns[len(b.idx.Txns)-1].Effect = d
+		if t := b.last(); t.Effect != d {
+			t.Effect = d
+			b.setLast(t)
+		}
 	}
 }
 
@@ -202,7 +228,7 @@ func (b *IndexBuilder) closeTxn() error {
 		return nil
 	}
 	b.open = false
-	t := b.idx.Txns[len(b.idx.Txns)-1]
+	t := b.last()
 	if !t.Empty() {
 		return nil
 	}
@@ -229,7 +255,12 @@ func (b *IndexBuilder) Finish(digest string, size int64) (*FileIndex, error) {
 	if !b.prev {
 		return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "%s has no PREVIOUS_GTIDS event", b.label)
 	}
+	// The array keeps exactly its transactions.
+	if err := b.txns.trim("transaction index of " + b.label); err != nil {
+		return nil, err
+	}
 	b.idx.Digest, b.idx.Size = digest, size
 	out := b.idx
+	out.Txns = b.txns.items()
 	return &out, nil
 }

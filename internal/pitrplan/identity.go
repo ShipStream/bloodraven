@@ -2,6 +2,7 @@ package pitrplan
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -74,13 +75,130 @@ func (p *planner) waived(r *Row) bool {
 		!r.Hints.GTIDs.Overlaps(p.plan.Replay)
 }
 
-// orderNodeBytes and orderEdgeBytes are the order check's charges: per
-// node, its map entry, name, adjacency header, Tarjan arrays and stack
-// frames; per edge, the edge record.
-const (
-	orderNodeBytes = 48 + 24 + 24 + 13 + 4 + 16
-	orderEdgeBytes = 16
-)
+// orderNode is a node of the order check's graph: a shared transaction
+// (file < 0: its source and GNO), or the start or end node of the file
+// planner.order[file].
+type orderNode struct {
+	gno  int64
+	sid  uint32
+	file int32
+}
+
+// orderEdge is "from precedes to", proven by the bytes of
+// planner.order[file].
+type orderEdge struct {
+	from, to, file int32
+}
+
+// orderFrame is one level of the depth-first search: a node and the next
+// of its edges to follow.
+type orderFrame struct {
+	next int64
+	v    int32
+}
+
+// orderGraph is the order check's graph and its search state. Everything
+// with an entry per node or per edge is allocated through the budget, so
+// it can spill (issue #266).
+type orderGraph struct {
+	p     *planner
+	nodes vec[orderNode]
+	edges vec[orderEdge]
+	// The edges of node v, in the order they were added, are
+	// to[off[v]:off[v+1]], each proven by via[...].
+	off     arr[int64]
+	to, via arr[int32]
+	// start and end are each file's virtual nodes, by file.ord.
+	start, end []int32
+}
+
+func (g *orderGraph) free() {
+	g.nodes.free()
+	g.edges.free()
+	g.off.free()
+	g.to.free()
+	g.via.free()
+}
+
+func (g *orderGraph) node(n orderNode) (int32, error) {
+	if g.nodes.n >= math.MaxInt32 {
+		return 0, refuse(pitrarchive.TokenPlanTooLarge, "the order check covers more than %d shared transactions, the planner's limit; choose a backup closer to the target", math.MaxInt32)
+	}
+	id := int32(g.nodes.n) //nolint:gosec // checked above
+	return id, g.nodes.push(n, "order check")
+}
+
+func (g *orderGraph) link(from, to int32, f *file) error {
+	if from == to {
+		return nil
+	}
+	return g.edges.push(orderEdge{from: from, to: to, file: int32(f.ord)}, "order check") //nolint:gosec // bounded by the file count
+}
+
+// real returns the node of the shared transaction (sid, gno), creating it.
+// The node's number is kept in the transaction's registry record.
+func (g *orderGraph) real(sid uint32, gno int64) (int32, error) {
+	rec, ok := g.p.occ.get(sid, gno)
+	if !ok {
+		return 0, fmt.Errorf("pitrplan: internal error: shared transaction %s:%d is in no downloaded file", g.p.sidNames[sid], gno)
+	}
+	if rec.node != 0 {
+		return rec.node - 1, nil
+	}
+	id, err := g.node(orderNode{gno: gno, sid: sid, file: -1})
+	if err != nil {
+		return 0, err
+	}
+	rec.node = id + 1
+	return id, g.p.occ.put(sid, gno, rec)
+}
+
+func (g *orderGraph) isReal(v int32) bool { return g.nodes.items()[v].file < 0 }
+
+// name is the GTID of a real node.
+func (g *orderGraph) name(v int32) GTID {
+	n := g.nodes.items()[v]
+	return GTID{g.p.sidNames[n.sid], n.gno}
+}
+
+// fileOf is the file of a virtual node.
+func (g *orderGraph) fileOf(v int32) *file { return g.p.order[g.nodes.items()[v].file] }
+
+// adjacency turns the edge list into per-node lists, each in the order
+// its edges were added, and releases the list.
+func (g *orderGraph) adjacency() error {
+	n, edges := g.nodes.n, g.edges.items()
+	var err error
+	if g.off, err = alloc[int64](g.p.budget, n+1, "order check"); err != nil {
+		return err
+	}
+	if g.to, err = alloc[int32](g.p.budget, len(edges), "order check"); err != nil {
+		return err
+	}
+	if g.via, err = alloc[int32](g.p.budget, len(edges), "order check"); err != nil {
+		return err
+	}
+	for _, e := range edges {
+		g.off.set(int(e.from)+1, g.off.s[e.from+1]+1)
+	}
+	for v := 0; v < n; v++ {
+		g.off.set(v+1, g.off.s[v+1]+g.off.s[v])
+	}
+	// Filling advances off[v] to the end of v's list, which is where
+	// v+1's starts: shifting the offsets up by one node restores them.
+	for _, e := range edges {
+		at := g.off.s[e.from]
+		g.to.set(int(at), e.to)
+		g.via.set(int(at), e.file)
+		g.off.set(int(e.from), at+1)
+	}
+	for v := n; v > 0; v-- {
+		g.off.set(v, g.off.s[v-1])
+	}
+	g.off.set(0, 0)
+	g.edges.free()
+	return nil
+}
 
 // orderCheck is D-51: the downloaded binlogs must admit one order of their
 // shared transactions. Each file contributes what its bytes prove about
@@ -100,15 +218,6 @@ const (
 // so only prev(f') ∖ exec(f) needs its own edges and the graph stays
 // linear in the occurrences. A cycle is an inversion.
 func (p *planner) orderCheck() error {
-	charged := int64(0)
-	defer func() { p.budget.Release(charged) }()
-	charge := func(n int64) error {
-		if err := p.budget.Charge(n, "order check"); err != nil {
-			return err
-		}
-		charged += n
-		return nil
-	}
 	// The shared set.
 	txnsBySite := map[string]Set{}
 	for _, f := range p.order {
@@ -122,10 +231,21 @@ func (p *planner) orderCheck() error {
 			}
 		}
 	}
-	for g, o := range p.occ {
-		if o.n >= 2 {
-			shared.add(g)
+	// The registry is read in GNO order, so each source's GTIDs with two
+	// copies extend its last interval. A node number left by an earlier
+	// check is cleared.
+	err := p.occ.each(func(sid uint32, gno int64, rec occRec) error {
+		if rec.n >= 2 {
+			shared.add(GTID{p.sidNames[sid], gno})
 		}
+		if rec.node != 0 {
+			rec.node = 0
+			return p.occ.put(sid, gno, rec)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	// An excluded transaction is never replayed, so how the sites ordered
 	// it does not matter (the refusal's own remedy is to exclude it).
@@ -133,71 +253,38 @@ func (p *planner) orderCheck() error {
 	if shared.IsEmpty() {
 		return nil
 	}
-	ids := map[GTID]int32{}
-	var names []GTID   // real nodes; virtual nodes have a zero GTID
-	var labels []*file // the file of a virtual node
-	type edge struct {
-		to   int32
-		file *file
+	g := &orderGraph{p: p, nodes: newVec[orderNode](p.budget), edges: newVec[orderEdge](p.budget),
+		start: make([]int32, len(p.order)), end: make([]int32, len(p.order))}
+	defer g.free()
+	if err := p.budget.Charge(8*int64(len(p.order)), "order check"); err != nil {
+		return err
 	}
-	var adj [][]edge
-	node := func(g GTID, f *file) (int32, error) {
-		if err := charge(orderNodeBytes); err != nil {
-			return 0, err
-		}
-		id := int32(len(adj)) //nolint:gosec // budget-bounded
-		names, labels, adj = append(names, g), append(labels, f), append(adj, nil)
-		return id, nil
-	}
-	link := func(from, to int32, f *file) error {
-		if from == to {
-			return nil
-		}
-		if err := charge(orderEdgeBytes); err != nil {
-			return err
-		}
-		adj[from] = append(adj[from], edge{to, f})
-		return nil
-	}
-	real := func(g GTID) (int32, error) {
-		if id, ok := ids[g]; ok {
-			return id, nil
-		}
-		id, err := node(g, nil)
-		if err != nil {
-			return 0, err
-		}
-		ids[g] = id
-		return id, nil
-	}
-	start := map[*file]int32{}
-	end := map[*file]int32{}
+	defer p.budget.Release(8 * int64(len(p.order)))
 	for _, f := range p.order {
-		v, err := node(GTID{}, f)
+		v, err := g.node(orderNode{file: int32(f.ord)}) //nolint:gosec // bounded by the file count
 		if err != nil {
 			return err
 		}
-		e, err := node(GTID{}, f)
+		e, err := g.node(orderNode{file: int32(f.ord)}) //nolint:gosec
 		if err != nil {
 			return err
 		}
-		start[f], end[f] = v, e
+		g.start[f.ord], g.end[f.ord] = v, e
 		last := v
-		for i := range f.idx.Txns {
-			g := f.gtid(i)
-			if !shared.Has(g) {
+		for i, t := range f.idx.Txns {
+			if !shared.Has(f.gtid(i)) {
 				continue
 			}
-			id, err := real(g)
+			id, err := g.real(f.sids[t.SID], t.GNO)
 			if err != nil {
 				return err
 			}
-			if err := link(last, id, f); err != nil {
+			if err := g.link(last, id, f); err != nil {
 				return err
 			}
 			last = id
 		}
-		if err := link(last, e, f); err != nil {
+		if err := g.link(last, e, f); err != nil {
 			return err
 		}
 	}
@@ -212,19 +299,30 @@ func (p *planner) orderCheck() error {
 		for k, f := range fs {
 			need := f.prev.Intersect(shared)
 			if k > 0 && f.prev.Contains(fs[k-1].exec) {
-				if err := link(end[fs[k-1]], start[f], f); err != nil {
+				if err := g.link(g.end[fs[k-1].ord], g.start[f.ord], f); err != nil {
 					return err
 				}
 				need = need.Subtract(fs[k-1].exec)
 			}
-			for sid, ivs := range need {
-				for _, iv := range ivs {
+			// By source identifier, so that the graph, and with it the
+			// inversion a refusal names, is the same on every run.
+			names := make([]string, 0, len(need))
+			for name := range need {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				sid, ok := p.sidIndex[name]
+				if !ok {
+					return fmt.Errorf("pitrplan: internal error: shared transactions of %s are in no downloaded file", name)
+				}
+				for _, iv := range need[name] {
 					for n := iv.Start; n <= iv.End; n++ {
-						id, err := real(GTID{sid, n})
+						id, err := g.real(sid, n)
 						if err != nil {
 							return err
 						}
-						if err := link(id, start[f], f); err != nil {
+						if err := g.link(id, g.start[f.ord], f); err != nil {
 							return err
 						}
 					}
@@ -232,62 +330,93 @@ func (p *planner) orderCheck() error {
 			}
 		}
 	}
-	n := len(adj)
-	// Iterative Tarjan.
-	index := make([]int32, n)
-	low := make([]int32, n)
-	onStack := make([]bool, n)
+	if err := g.adjacency(); err != nil {
+		return err
+	}
+	n := g.nodes.n
+	// Iterative Tarjan. The stack and the call stack hold a node at most
+	// once each.
+	index, err := alloc[int32](p.budget, n, "order check")
+	if err != nil {
+		return err
+	}
+	defer index.free()
+	low, err := alloc[int32](p.budget, n, "order check")
+	if err != nil {
+		return err
+	}
+	defer low.free()
+	onStack, err := alloc[bool](p.budget, n, "order check")
+	if err != nil {
+		return err
+	}
+	defer onStack.free()
+	comp, err := alloc[int32](p.budget, n, "order check")
+	if err != nil {
+		return err
+	}
+	defer comp.free()
+	stack, err := alloc[int32](p.budget, n, "order check")
+	if err != nil {
+		return err
+	}
+	defer stack.free()
+	call, err := alloc[orderFrame](p.budget, n, "order check")
+	if err != nil {
+		return err
+	}
+	defer call.free()
 	defer probeMemory()
-	for i := range index {
-		index[i] = -1
-	}
-	var stack []int32
+	index.fill(0, n, -1)
 	var counter int32
-	comp := make([]int32, n)
-	type frame struct {
-		v  int32
-		ei int
-	}
 	var cycleComp int32 = -1
 	ncomp := int32(0)
+	sp := 0
 	for root := 0; root < n && cycleComp < 0; root++ {
-		if index[root] >= 0 {
+		if index.s[root] >= 0 {
 			continue
 		}
-		call := []frame{{int32(root), 0}} //nolint:gosec
-		index[root], low[root] = counter, counter
+		depth := 1
+		call.set(0, orderFrame{next: g.off.s[root], v: int32(root)}) //nolint:gosec
+		index.set(root, counter)
+		low.set(root, counter)
 		counter++
-		stack = append(stack, int32(root)) //nolint:gosec
-		onStack[root] = true
-		for len(call) > 0 {
-			top := &call[len(call)-1]
+		stack.set(sp, int32(root)) //nolint:gosec
+		sp++
+		onStack.set(root, true)
+		for depth > 0 {
+			top := call.s[depth-1]
 			v := top.v
-			if top.ei < len(adj[v]) {
-				w := adj[v][top.ei].to
-				top.ei++
-				if index[w] < 0 {
-					index[w], low[w] = counter, counter
+			if top.next < g.off.s[v+1] {
+				w := g.to.s[top.next]
+				top.next++
+				call.set(depth-1, top)
+				if index.s[w] < 0 {
+					index.set(int(w), counter)
+					low.set(int(w), counter)
 					counter++
-					stack = append(stack, w)
-					onStack[w] = true
-					call = append(call, frame{w, 0})
-				} else if onStack[w] {
-					low[v] = min(low[v], index[w])
+					stack.set(sp, w)
+					sp++
+					onStack.set(int(w), true)
+					call.set(depth, orderFrame{next: g.off.s[w], v: w})
+					depth++
+				} else if onStack.s[w] {
+					low.set(int(v), min(low.s[v], index.s[w]))
 				}
 				continue
 			}
-			call = call[:len(call)-1]
-			if len(call) > 0 {
-				u := call[len(call)-1].v
-				low[u] = min(low[u], low[v])
+			depth--
+			if depth > 0 {
+				u := call.s[depth-1].v
+				low.set(int(u), min(low.s[u], low.s[v]))
 			}
-			if low[v] == index[v] {
+			if low.s[v] == index.s[v] {
 				size := 0
 				for {
-					w := stack[len(stack)-1]
-					stack = stack[:len(stack)-1]
-					onStack[w] = false
-					comp[w] = ncomp
+					sp--
+					w := stack.s[sp]
+					onStack.set(int(w), false)
+					comp.set(int(w), ncomp)
 					size++
 					if w == v {
 						break
@@ -303,83 +432,102 @@ func (p *planner) orderCheck() error {
 	if cycleComp < 0 {
 		return nil
 	}
-	isReal := func(v int32) bool { return labels[v] == nil }
 	// Name the inversion: a 2-cycle between transactions when one exists,
 	// else a cycle path.
-	for v := 0; v < n; v++ {
-		if comp[v] != cycleComp || !isReal(int32(v)) { //nolint:gosec
+	for v := int32(0); int(v) < n; v++ {
+		if comp.s[v] != cycleComp || !g.isReal(v) {
 			continue
 		}
-		for _, e := range adj[v] {
-			if !isReal(e.to) {
+		for e := g.off.s[v]; e < g.off.s[v+1]; e++ {
+			w := g.to.s[e]
+			if !g.isReal(w) {
 				continue
 			}
-			for _, back := range adj[e.to] {
-				if int(back.to) == v {
-					return p.inversion(names[v], names[e.to], e.file, back.file)
+			for back := g.off.s[w]; back < g.off.s[w+1]; back++ {
+				if g.to.s[back] == v {
+					return p.inversion(g.name(v), g.name(w), p.order[g.via.s[e]], p.order[g.via.s[back]])
 				}
 			}
 		}
 	}
-	for v := 0; v < n; v++ {
-		if comp[v] != cycleComp || !isReal(int32(v)) { //nolint:gosec
+	// seenAt[v] is 1 + v's place on the path, or 0.
+	seenAt, err := alloc[int32](p.budget, n, "order check")
+	if err != nil {
+		return err
+	}
+	defer seenAt.free()
+	path, files := newVec[int32](p.budget), newVec[int32](p.budget)
+	defer path.free()
+	defer files.free()
+	for v := int32(0); int(v) < n; v++ {
+		if comp.s[v] != cycleComp || !g.isReal(v) {
 			continue
 		}
 		// Follow in-component edges until a node repeats.
-		seen := map[int32]int{}
-		path := []int32{int32(v)} //nolint:gosec
-		var files []*file
-		cur := int32(v) //nolint:gosec
+		for _, u := range path.items() {
+			seenAt.set(int(u), 0)
+		}
+		path.n, files.n = 0, 0
+		if err := path.push(v, "order check"); err != nil {
+			return err
+		}
+		cur := v
 		for {
-			seen[cur] = len(path) - 1
-			var next *edge
-			for i := range adj[cur] {
-				if comp[adj[cur][i].to] == cycleComp {
-					next = &adj[cur][i]
+			seenAt.set(int(cur), int32(path.n)) //nolint:gosec // a path holds a node once
+			next := int64(-1)
+			for e := g.off.s[cur]; e < g.off.s[cur+1]; e++ {
+				if comp.s[g.to.s[e]] == cycleComp {
+					next = e
 					break
 				}
 			}
-			if next == nil {
+			if next < 0 {
 				break
 			}
-			files = append(files, next.file)
-			if at, ok := seen[next.to]; ok {
-				cyc := append(append([]int32(nil), path[at:]...), next.to)
-				cf := files[at:]
-				// Rotate to start at a transaction.
+			if err := files.push(g.via.s[next], "order check"); err != nil {
+				return err
+			}
+			to := g.to.s[next]
+			if at := seenAt.s[to]; at != 0 {
+				// The cycle is path[at-1:], closed by the edge back to
+				// `to`; cyc(i) and cf(i) are its nodes and its edges'
+				// files once it is rotated to start at a transaction.
+				cycle, cfiles := path.items()[at-1:], files.items()[at-1:]
+				length := len(cycle)
 				r := 0
-				for r < len(cyc)-1 && !isReal(cyc[r]) {
+				for r < length && !g.isReal(cycle[r]) {
 					r++
 				}
-				if r == len(cyc)-1 {
+				if r == length {
 					break
 				}
-				cyc = append(append([]int32(nil), cyc[r:len(cyc)-1]...), cyc[:r+1]...)
-				cf = append(append([]*file(nil), cf[r:]...), cf[:r]...)
+				cyc := func(i int) int32 { return cycle[(r+i)%length] }
+				cf := func(i int) *file { return p.order[cfiles[(r+i)%length]] }
 				// Hops between consecutive transactions, each named by the
 				// file whose bytes prove it; consecutive hops of one file
-				// merge.
+				// merge. Eight are printed, so nine are enough to know
+				// whether more follow.
 				type hop struct {
 					from, to GTID
 					file     *file
 					viaPrev  bool
 				}
 				var hops []hop
-				from, viaPrev := names[cyc[0]], false
-				for i := 1; i < len(cyc); i++ {
-					if !isReal(cyc[i]) {
-						if v := cyc[i]; start[labels[v]] == v {
+				from, viaPrev := g.name(cyc(0)), false
+				for i := 1; i <= length && len(hops) <= 8; i++ {
+					if u := cyc(i); !g.isReal(u) {
+						if g.start[g.fileOf(u).ord] == u {
 							viaPrev = true
 						}
 						continue
 					}
-					h := hop{from, names[cyc[i]], cf[i-1], viaPrev}
+					h := hop{from, g.name(cyc(i)), cf(i - 1), viaPrev}
 					if k := len(hops) - 1; k >= 0 && hops[k].file == h.file && hops[k].viaPrev == h.viaPrev {
 						hops[k].to = h.to
 					} else {
 						hops = append(hops, h)
 					}
-					from, viaPrev = names[cyc[i]], false
+					from, viaPrev = h.to, false
 				}
 				var parts []string
 				for i, h := range hops {
@@ -396,8 +544,10 @@ func (p *planner) orderCheck() error {
 				return refuse(pitrarchive.TokenArchiveOrderInversion, "the downloaded binlogs order shared transactions in a cycle: %s; the sites applied the same transactions in different orders, so equal GTID sets may hold different data (an errant transaction?); exclude the errant transaction, or use a backup and archive prefix that start after it",
 					strings.Join(parts, ", "))
 			}
-			path = append(path, next.to)
-			cur = next.to
+			if err := path.push(to, "order check"); err != nil {
+				return err
+			}
+			cur = to
 		}
 	}
 	return refuse(pitrarchive.TokenArchiveOrderInversion, "downloaded binlogs order shared transactions inconsistently")

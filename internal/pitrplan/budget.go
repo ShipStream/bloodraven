@@ -30,7 +30,10 @@ func RefusalOf(err error) (*Refusal, bool) {
 
 // Memory budget (D-42). Every structure whose size grows with the archive
 // is charged before it is allocated, so planning refuses PITRPlanTooLarge
-// instead of being OOM-killed.
+// instead of being OOM-killed. The arrays that grow with the number of
+// transactions or search positions are charged at their real size when
+// they are allocated (alloc and vec, store.go), and leave the heap, and
+// the budget, for the spill arena when one is set (issue #266).
 const (
 	// DefaultPlanMemoryBytes applies when the cgroup has no memory limit.
 	DefaultPlanMemoryBytes = 512 << 20
@@ -38,28 +41,13 @@ const (
 	// transaction payload) the index pass decodes.
 	MaxEventBytesCap = 64 << 20
 
-	// TxnBytes is charged per indexed transaction: the Txn record itself
+	// TxnBytes is the size of one indexed transaction, the Txn record
 	// (56 bytes: GNO, commit time, file offset, the 16-byte effect digest,
 	// origin server, source index and flags). The effect digest adds no
 	// other per-transaction memory: the index pass hashes a transaction's
 	// rows events as it reads them and keeps only fixed state, charged
 	// once per file.
 	TxnBytes = int64(unsafe.Sizeof(Txn{}))
-	// occurrenceBytes is charged per indexed transaction for the
-	// occurrence registry (FP comparison, lookups) and the D-51 order
-	// check's rank and edge arrays.
-	occurrenceBytes = 64 + 12
-	// nodeBytes is charged per search position (§4.6) for every array
-	// the search allocates per position: hash 8, count 8, class 4,
-	// distance 4, start/goal/needed/step/inX/done 6, the bucket sort index
-	// 4, class membership 4, the BFS deque 8 (it may double), and the
-	// no-plan diagnosis' reach flag and queue 5.
-	nodeBytes = 8 + 8 + 4 + 4 + 6 + 4 + 4 + 8 + 5
-	// classBytes is charged per exact-key class besides its key's bytes:
-	// the key's map slot with growth headroom and string header (64), its
-	// members slice header (24), first file and span flag (5), and BFS
-	// state (8).
-	classBytes = 64 + 24 + 5 + 8
 	// intervalBytes is charged per interval of a materialized set: the
 	// interval and the slack of its slice's doubling growth.
 	intervalBytes = int64(unsafe.Sizeof(Interval{})) + 8
@@ -104,15 +92,42 @@ func probeMemory() {
 	}
 }
 
-// Budget is the planner's incremental memory budget. It is not safe for
-// concurrent use; the planner is single-threaded.
+// Budget is the planner's incremental memory budget, and the allocator of
+// its large arrays (store.go). It is not safe for concurrent use; the
+// planner is single-threaded.
 type Budget struct {
 	limit, used, peak int64
 	indexed           int64
+
+	// The spill (SetSpill). arena is nil when everything stays in memory.
+	arena     Arena
+	spillAt   int64
+	spillMin  int64
+	spilled   int64
+	spillPeak int64
+	// spilledBlocks counts the arrays in the arena.
+	spilledBlocks int
+	// dirtyMax bounds dirtyPages, the spilled pages written since they
+	// were last written back; dirty lists the arrays that have some.
+	dirtyMax, dirtyPages int
+	dirty                []*dirtyState
+	flushes              int
+	spillErr             error
+	attempt              *Checkpoint
 }
 
+// testSpill, when set (tests), configures the spill of every new budget,
+// so that whole suites run with their arrays in an arena.
+var testSpill func() SpillOptions
+
 // NewBudget returns a budget of limit bytes.
-func NewBudget(limit int64) *Budget { return &Budget{limit: limit} }
+func NewBudget(limit int64) *Budget {
+	b := &Budget{limit: limit}
+	if testSpill != nil {
+		b.SetSpill(testSpill())
+	}
+	return b
+}
 
 // Limit is the budget.
 func (b *Budget) Limit() int64 { return b.limit }
@@ -128,12 +143,17 @@ func (b *Budget) MaxEventBytes() int64 {
 	return min(int64(MaxEventBytesCap), b.limit/8)
 }
 
-// Charge reserves n bytes for what, or refuses PITRPlanTooLarge.
+// Charge reserves n bytes of memory for what, or refuses PITRPlanTooLarge.
 func (b *Budget) Charge(n int64, what string) error {
 	if n < 0 {
 		return fmt.Errorf("pitrplan: negative charge %d for %s", n, what)
 	}
 	if n > b.limit-b.used {
+		if b.arena != nil {
+			// What is charged here cannot go to the staging volume.
+			return refuse(pitrarchive.TokenPlanTooLarge, "planning needs more than %d bytes of memory for data it cannot spill to the staging volume (%s; %d transactions indexed, %d bytes spilled); choose a backup closer to the target or raise the Job's memory limit",
+				b.limit, what, b.indexed, b.spilled)
+		}
 		return refuse(pitrarchive.TokenPlanTooLarge, "planning needs more than %d bytes (%s; %d transactions indexed); choose a backup closer to the target or raise the Job's memory limit",
 			b.limit, what, b.indexed)
 	}
