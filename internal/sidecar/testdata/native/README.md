@@ -111,3 +111,60 @@ replays each plan's segments with the mysqlsh image's `mysqlbinlog
 --include-gtids` into one `mysql` session on a fresh `mysql:9.7` and compares
 the rows and `gtid_executed` with the captured source. Recapturing changes
 UUIDs and times; the tests read them from the TSV files.
+
+
+## Effect-digest pairs (MySQL 9.7)
+
+`effect/` is a genuine MySQL 9.7 capture of a source `s` (server_id 101) and
+its replica `r` (102, `log_replica_updates`) in one network-less container
+(`bash capture.sh effect`, script `effect/capture-inner.sh`). `r` replicates
+everything from `s`'s first transaction, so every GTID is archived twice: as
+an origin copy in `s-mysql-bin.*` and as a replica copy in `r-mysql-bin.*`.
+The two servers cut rows events at different sizes
+(`binlog_row_event_max_size` 2048 and 512) and only `r` compresses
+transactions, except for one transaction where only `s` does and one where
+neither does. Both rotate at the same transactions:
+
+| File | Holds |
+|---|---|
+| `mysql-bin.000001` | The schema: the backup's history. |
+| `mysql-bin.000002` | Faithful copies: multi-row statements larger than an event, several tables in one transaction, updates and deletes, every common column type (and BLOB, GEOMETRY, VECTOR), generated columns and a functional index, a partitioned table, a table without a primary key, upserts, a foreign-key cascade, a trigger, MyISAM, a tagged GTID; then what is not comparable: a `SAVEPOINT`, a `JSON` table and a partial JSON update. |
+| `mysql-bin.000003` | `drift`: `r`'s row was changed with `sql_log_bin=0`, so its copy of `s`'s next update of that row has another before image. GTID, commit time, origin server and emptiness agree. |
+| `mysql-bin.000004` | `injected`: a repair transaction run on `r` under `s`'s GTID (`SET gtid_next`), with other rows; `r` then skips `s`'s original. |
+
+`cases.tsv` lists each labelled statement's GTIDs and what the two copies'
+effect digests (`pitrplan.EffectDigest`, issue #268) must be: `equal`,
+`differ` or `uncomparable`. `phases.tsv` records `s`'s `gtid_executed` and
+`UTC_TIMESTAMP(6)` at each rotation.
+
+`go test ./internal/sidecar -run TestEffectDigestNativeFixtures` checks every
+GTID that occurs in more than one fixture file against `cases.tsv`, and that
+the capture is what it claims (different cuts, one-sided compression).
+`go test ./cmd/bloodraven -run TestPITRNativeEffectPlans` plans over both
+sites: the faithful files plan, the drifted copy refuses
+`PITRArchiveNamespaceReuse` on its row changes alone, and the injected one
+on commit time, origin server and row changes. With Docker,
+`BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run TestPITRNativeEffectCapture`
+runs the capture script again and checks the fresh capture the same way.
+
+What the capture and one-off runs of the same workload established (MySQL
+9.7.4; the one-off captures are not committed):
+
+- An origin copy and a replica copy have equal digests for every comparable
+  case above, with the events cut differently and with compression on
+  either side only. So do a MySQL 8.4.11 source and a 9.7.4 replica, and a
+  server that applied the source's binlog through `mysqlbinlog | mysql`.
+- `JSON` row images are the stored binary document. They stayed equal
+  between a source and a replica that replicated from the start, including
+  after in-place `JSON_SET`/`JSON_REMOVE`/`JSON_REPLACE` and after partial
+  JSON diffs were applied. After the replica's table was reloaded logically
+  (`INSERT … SELECT CAST(CAST(doc AS CHAR) AS JSON)`, as a dump and load
+  does), the same document was stored without the slack an in-place update
+  leaves (`JSON_STORAGE_FREE` 0 instead of 196), and the next update of
+  another column of that row had different row images on the two servers.
+  A table with a `JSON` column is therefore not comparable.
+- A partial JSON update is a `PARTIAL_UPDATE_ROWS` event on the origin and a
+  full `UPDATE_ROWS` event on a replica without the option.
+- A generated invisible primary key
+  (`sql_generate_invisible_primary_key` on the source only) is replicated
+  with the table, so both copies hold the column.

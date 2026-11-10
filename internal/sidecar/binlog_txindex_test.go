@@ -277,10 +277,11 @@ func TestInspectTransactionsDecoderBounds(t *testing.T) {
 		}
 	}
 	// Only the indexed structures stay charged; event and payload
-	// charges are transient. Per run the index keeps 448 bytes: the
-	// Previous_gtids set, the transaction, its new source identifier and
-	// its first interval (review F047).
-	if budget.Used() > 3*448 {
+	// charges are transient (the effect digester's state among them). Per
+	// run the index keeps 472 bytes: the Previous_gtids set, the
+	// transaction (56 bytes with its offset and effect digest), its new
+	// source identifier and its first interval (review F047).
+	if budget.Used() > 3*472 {
 		t.Errorf("transient charges leaked: %d bytes", budget.Used())
 	}
 }

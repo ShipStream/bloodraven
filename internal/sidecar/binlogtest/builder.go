@@ -31,6 +31,11 @@ type Txn struct {
 	// placeholder); otherwise Statement (default an INSERT) is written.
 	Empty     bool
 	Statement string
+	// Rows, when set, makes this a row transaction instead: BEGIN, a
+	// TABLE_MAP of orders.markers (one column), one WRITE_ROWS event whose
+	// row images are these bytes, and an XID. The index pass digests such
+	// a transaction's row changes (pitrplan.EffectDigest).
+	Rows []byte
 }
 
 // File is one sealed binlog.
@@ -72,6 +77,8 @@ func (f File) Bytes() ([]byte, error) {
 	fde = append(fde, 19)
 	lengths := make([]byte, 41)
 	lengths[1] = 13 // QUERY_EVENT post-header
+	// TABLE_MAP and the version-2 rows events, as MySQL 9.7 declares them.
+	lengths[18], lengths[29], lengths[30], lengths[31] = 8, 10, 10, 10
 	fde = append(fde, lengths...)
 	fde = append(fde, 1) // CRC32
 	event(15, created, f.ServerID, fde)
@@ -112,6 +119,13 @@ func (f File) Bytes() ([]byte, error) {
 			event(2, ts, t.ServerID, queryBody("COMMIT"))
 			continue
 		}
+		if t.Rows != nil {
+			event(2, ts, t.ServerID, queryBody("BEGIN"))
+			event(19, ts, t.ServerID, TableMapBody(rowsTableID, "orders", "markers", 15))
+			event(30, ts, t.ServerID, RowsBody(rowsTableID, true, 1, [][]byte{{0x01}}, t.Rows))
+			event(16, ts, t.ServerID, make([]byte, 8))
+			continue
+		}
 		stmt := t.Statement
 		if stmt == "" {
 			stmt = fmt.Sprintf("INSERT INTO markers VALUES ('%s:%d')", t.SID, t.GNO)
@@ -127,6 +141,50 @@ func (f File) MustBytes() []byte {
 	b, err := f.Bytes()
 	if err != nil {
 		panic(err)
+	}
+	return b
+}
+
+// rowsTableID is the table id of a Rows transaction's table map.
+const rowsTableID = 108
+
+// TableMapBody is a TABLE_MAP event's post-header and payload: the table
+// id, flags, the database and table names, and one type byte per column
+// (15 is VARCHAR, 245 JSON), with zeroed column metadata and null bitmap.
+func TableMapBody(id uint64, db, table string, types ...byte) []byte {
+	body := appendUint48(nil, id)
+	body = append(body, 1, 0) // flags
+	body = append(append(append(body, byte(len(db))), db...), 0)
+	body = append(append(append(body, byte(len(table))), table...), 0)
+	body = append(body, byte(len(types)))
+	body = append(body, types...)
+	body = append(body, byte(2*len(types)))                // metadata length
+	body = append(body, make([]byte, 2*len(types))...)     // metadata
+	return append(body, make([]byte, (len(types)+7)/8)...) // null bitmap
+}
+
+// RowsBody is a version-2 rows event's post-header and payload: the table
+// id, flags (STMT_END_F when end), an empty extra-data block, the column
+// count, the columns-present bitmaps (one, or two for an update) and the
+// row images.
+func RowsBody(id uint64, end bool, columns int, bitmaps [][]byte, rows []byte) []byte {
+	body := appendUint48(nil, id)
+	flags := byte(0)
+	if end {
+		flags = 1
+	}
+	body = append(body, flags, 0)
+	body = append(body, 2, 0) // extra-data length: its own two bytes
+	body = append(body, byte(columns))
+	for _, b := range bitmaps {
+		body = append(body, b...)
+	}
+	return append(body, rows...)
+}
+
+func appendUint48(b []byte, v uint64) []byte {
+	for i := 0; i < 6; i++ {
+		b = append(b, byte(v>>(8*i)))
 	}
 	return b
 }

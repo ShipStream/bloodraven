@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
+	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
 // The planner ↔ restore.py seam, end to end: a binlogtest-built two-site
@@ -247,7 +250,7 @@ func TestPITRDownloadRestoreScriptSeam(t *testing.T) {
 			// of its --include-gtids set, as the real one does; restore.py
 			// checks them against the segment (P6).
 			for name, body := range map[string]string{
-				"mysqlbinlog":  "#!/bin/sh\nprintf '%s\\t%s\\n' \"$1\" \"$2\" >>\"$SEAM_BINLOG_LOG\"\necho \"-- replay $1 $2\"\nexec " + python + " " + filepath.Join(shims, "gtid_next.py") + " \"$1\"\n",
+				"mysqlbinlog":  "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' \"$1\" \"$2\" \"$3\" >>\"$SEAM_BINLOG_LOG\"\necho \"-- replay $1 $2 $3\"\nexec " + python + " " + filepath.Join(shims, "gtid_next.py") + " \"$1\"\n",
 				"gtid_next.py": seamGTIDNext,
 				"mysql":        "#!/bin/sh\necho \"$@\" >>\"$SEAM_MYSQL_LOG\"\ncat >>\"$SEAM_MYSQL_LOG\"\n",
 			} {
@@ -280,8 +283,11 @@ func TestPITRDownloadRestoreScriptSeam(t *testing.T) {
 				t.Fatalf("restore.py refused pitr-download's coverage: %v\ntermination: %s\n%s", err, term, out)
 			}
 
-			// One mysqlbinlog --include-gtids per segment, in order, over
-			// the staged files.
+			// One mysqlbinlog --include-gtids --start-position per segment,
+			// in order, over the staged files. The offset is where the
+			// staged bytes hold the GTID event of the segment's first
+			// replayed transaction (restore.py checked the event's framing
+			// before the load).
 			root, err := filepath.EvalSymlinks(staging)
 			if err != nil {
 				t.Fatal(err)
@@ -300,8 +306,32 @@ func TestPITRDownloadRestoreScriptSeam(t *testing.T) {
 				if f.Name != name || f.Site != "a" {
 					t.Errorf("segment %d reads %s/%s, want a/%s", k, f.Site, f.Name, name)
 				}
-				if line := "--include-gtids=" + gtids + "\t" + filepath.Join(root, filepath.FromSlash(f.Path)); got[k] != line {
-					t.Errorf("mysqlbinlog call %d = %q, want %q", k, got[k], line)
+				staged, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.Path)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				idx, err := sidecar.InspectTransactions(bytes.NewReader(staged), sidecar.TxIndexOptions{Label: f.Path})
+				if err != nil {
+					t.Fatal(err)
+				}
+				include := pitrplan.MustParseSet(gtids)
+				start, first := int64(-1), int64(-1)
+				for i, tx := range idx.Txns {
+					if first < 0 {
+						first = tx.Pos
+					}
+					if include.Has(idx.GTID(i)) {
+						start = tx.Pos
+						break
+					}
+				}
+				if line := fmt.Sprintf("--include-gtids=%s\t--start-position=%d\t%s", gtids, start, filepath.Join(root, filepath.FromSlash(f.Path))); got[k] != line || cov.Segments[k].StartPosition != start {
+					t.Errorf("mysqlbinlog call %d = %q (coverage startPosition %d), want %q", k, got[k], cov.Segments[k].StartPosition, line)
+				}
+				// The first segment starts inside its file: the dump holds
+				// the file's first transactions.
+				if k == 0 && start <= first {
+					t.Errorf("segment 0 starts at offset %d, the file's first transaction (%d); want a mid-file start", start, first)
 				}
 			}
 			stream, err := os.ReadFile(mysqlLog)

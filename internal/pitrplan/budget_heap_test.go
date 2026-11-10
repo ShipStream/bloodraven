@@ -105,7 +105,7 @@ func indexHeapRatio(t *testing.T, shape string) {
 		case "gaps":
 			g = GTID{"A", 2 * i}
 		}
-		if err := b.BeginTxn(g, i, 1); err != nil {
+		if err := b.BeginTxn(g, i, 1, 4+i); err != nil {
 			t.Fatal(err)
 		}
 		if i%2 == 0 {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -597,5 +598,78 @@ func TestPlanAndStageRefusalWritesCoverage(t *testing.T) {
 	_, err = planAndStage(context.Background(), a.store, req, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenArchiveObjectInvalid {
 		t.Fatalf("err = %v, want PITRArchiveObjectInvalid", err)
+	}
+}
+
+// Issue #268, through the real glue: site b holds replica copies of a's row
+// transactions. When b's copy of one GTID changes other rows (same commit
+// time, origin server and emptiness), pitr-download refuses and records the
+// refusal in coverage.json; faithful copies plan, and every segment names
+// its first transaction's offset (issue #271).
+func TestPlanAndStageComparesRowChanges(t *testing.T) {
+	rowTxns := func(from, to int64, differ int64) []binlogtest.Txn {
+		txns := dlTxns(sidA, from, to, dlEpoch.Add(time.Duration(from)*time.Second), 101)
+		for i := range txns {
+			txns[i].Rows = []byte(fmt.Sprintf("\x00\x08row %04d", txns[i].GNO))
+			if txns[i].GNO == differ {
+				txns[i].Rows = []byte("\x00\x08repaired")
+			}
+		}
+		return txns
+	}
+	for _, tc := range []struct {
+		name   string
+		differ int64
+	}{{name: "faithful copies"}, {name: "another row change under one GTID", differ: 20}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &dlArchive{store: stampTestStore(t), dest: downloadDest(t), manifests: map[string]*sidecar.Manifest{}}
+			a.desc = putDescriptor(t, a.store, a.dest)
+			for _, s := range []string{"a", "b"} {
+				a.manifests[s] = &sidecar.Manifest{Version: 2, ArchiveID: a.desc.ArchiveID, Site: s}
+			}
+			a.put(t, "a", "mysql-bin.000001", 101, "", "", rowTxns(1, 30, 0))
+			a.put(t, "b", "mysql-bin.000001", 102, sidA+":1-10", "", rowTxns(11, 25, tc.differ))
+			a.save(t)
+			out, metaDir := t.TempDir(), t.TempDir()
+			req := pitrDownloadRequest{
+				archive: pitrArchiveRequest{prefix: downloadPrefix, expect: pitrarchive.Expectation{Role: pitrarchive.RoleReader, Destination: a.dest,
+					Encryption: pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}}},
+				mode: pitrplan.ModeTimestamp, stop: dlEpoch.Add(27*time.Second + 500*time.Millisecond), exclude: pitrplan.Set{}, outDir: out, delta: 5 * time.Second, memory: 64 << 20,
+				dumpMetaPath: writeDumpJSON(t, metaDir, sidA+":1-10", dlEpoch.Add(10*time.Second+500*time.Millisecond), a),
+			}
+			res, err := planAndStage(context.Background(), a.store, req, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			c := readCoverage(t, out)
+			if tc.differ != 0 {
+				want := sidA + ":20 differs between a/mysql-bin.000001 and b/mysql-bin.000001 (row changes differ: effect digest "
+				if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenArchiveNamespaceReuse || !strings.Contains(errString(err), want) {
+					t.Fatalf("planAndStage: %v, want PITRArchiveNamespaceReuse %q", err, want)
+				}
+				if !strings.HasPrefix(c.RefusalReason, "PITRArchiveNamespaceReuse: ") || !strings.Contains(c.RefusalReason, want) || len(c.Segments) != 0 || len(stagedFiles(t, out)) != 0 {
+					t.Fatalf("coverage after the refusal: %+v, staged %v", c, stagedFiles(t, out))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.plan.Downloaded != 2 || len(c.Segments) != 1 || c.Segments[0].GTIDs != sidA+":11-27" {
+				t.Fatalf("downloaded %d rows, segments %+v", res.plan.Downloaded, c.Segments)
+			}
+			// The segment starts at A:11's GTID event, inside the file.
+			staged, err := os.ReadFile(filepath.Join(out, filepath.FromSlash(c.Files[0].Path)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			idx, err := sidecar.InspectTransactions(bytes.NewReader(staged), sidecar.TxIndexOptions{Label: c.Files[0].Path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if idx.Txns[10].Effect.IsZero() || idx.Txns[10].Effect == idx.Txns[11].Effect {
+				t.Fatalf("row transactions have no distinct effect digests: %x, %x", idx.Txns[10].Effect, idx.Txns[11].Effect)
+			}
+			if pos := c.Segments[0].StartPosition; pos != idx.Txns[10].Pos || pos <= idx.Txns[0].Pos || staged[pos+4] != 33 {
+				t.Fatalf("startPosition %d, want A:11's GTID event at %d", pos, idx.Txns[10].Pos)
+			}
+		})
 	}
 }

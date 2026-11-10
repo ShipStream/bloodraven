@@ -700,7 +700,7 @@ func (o *propOracle) checkSegments(what string, X pitrplan.Set, plan *pitrplan.P
 			t.Fatalf("%s: segment %d starts at %s (file says %s), state %s", what, k, s.StartPredecessors, pred, state)
 		}
 		applied := pitrplan.Set{}
-		var n, first, last int64
+		var n, first, last, start int64
 		for i := s.Start; i < s.End; i++ {
 			g := idx.GTID(i)
 			if X.Has(g) {
@@ -709,13 +709,17 @@ func (o *propOracle) checkSegments(what string, X pitrplan.Set, plan *pitrplan.P
 			applied = applied.Union(pitrplan.SetOf(g))
 			n++
 			if first == 0 {
-				first = idx.Txns[i].OCT
+				first, start = idx.Txns[i].OCT, idx.Txns[i].Pos
 			}
 			last = idx.Txns[i].OCT
 		}
 		if !applied.Equal(s.GTIDs) || n != s.Transactions || first != s.FirstCommit || last != s.LastCommit || applied.Overlaps(state) {
 			t.Fatalf("%s: segment %d declares %s (%d, %d..%d); its file range holds %s (%d, %d..%d), state %s",
 				what, k, s.GTIDs, s.Transactions, s.FirstCommit, s.LastCommit, applied, n, first, last, state)
+		}
+		// --start-position: the offset of the first replayed transaction.
+		if s.StartPosition != start || start < 4 || start >= idx.Size {
+			t.Fatalf("%s: segment %d starts at offset %d; its first replayed transaction is at %d of %d bytes", what, k, s.StartPosition, start, idx.Size)
 		}
 		state = state.Union(applied)
 	}

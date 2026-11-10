@@ -582,7 +582,7 @@ func (p *planner) gapRefusal(missing Set, lastOCT int64) error {
 			}
 		}
 		sort.Strings(sites)
-		fmt.Fprintf(&b, "; it was committed on %s and never archived (an unarchived tail at a failover or reclone, FU-1); it is in the base of %s", strings.Join(sites, ", "), holder.row.Label())
+		fmt.Fprintf(&b, "; it was committed on %s and never archived (an unarchived tail: its writer died, or was recloned before its sidecar archived it); it is in the base of %s", strings.Join(sites, ", "), holder.row.Label())
 		if lastOCT != math.MinInt64 {
 			fmt.Fprintf(&b, "; choose a target at or before %s", fmtMicros(lastOCT))
 		}

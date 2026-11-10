@@ -12,6 +12,14 @@ import (
 
 // CoverageVersion is the coverage.json schema version (§4.12). restore.py's
 // _read_pitr_coverage refuses any other version (PITRCoverageInvalid).
+//
+// The file never outlives its Job (an emptyDir between pitr-download and
+// restore.py), so the version only guards a pod that mixes two releases.
+// It changes when a reader of another release could misread the file. A
+// field added for restore.py to require does not need a new version:
+// segments[].startPosition (issue #271) is ignored by an older restore.py,
+// which scans each file from its start with the same result, and a newer
+// restore.py refuses a file without it by name.
 const CoverageVersion = 2
 
 // CoverageFileName is the file pitr-download writes into its output
@@ -178,12 +186,18 @@ type CoverageFile struct {
 	GTIDs         string `json:"gtids"`
 }
 
-// CoverageSegment is one replay segment: `mysqlbinlog --include-gtids=<GTIDs>`
-// over Files[File], in order.
+// CoverageSegment is one replay segment: `mysqlbinlog
+// --start-position=<StartPosition> --include-gtids=<GTIDs>` over
+// Files[File], in order.
 type CoverageSegment struct {
 	// File indexes Coverage.Files.
-	File  int    `json:"file"`
-	GTIDs string `json:"gtids"`
+	File int `json:"file"`
+	// StartPosition is the offset in the file of the GTID event of the
+	// first transaction the segment replays. restore.py requires it on
+	// every segment and checks, before the load, that a GTID event starts
+	// there.
+	StartPosition int64  `json:"startPosition"`
+	GTIDs         string `json:"gtids"`
 	// StartPredecessors is pred(o) at the segment start; restore.py checks
 	// StartPredecessors ∖ excluded == baseline ∪ earlier segments (R4).
 	StartPredecessors string               `json:"startPredecessors"`
@@ -255,7 +269,7 @@ func (p *Plan) Coverage(archive CoverageArchive, dump CoverageDump, refusal stri
 			SHA256: f.Digest, PreviousGTIDs: f.Previous.String(), GTIDs: f.GTIDs.String()})
 	}
 	for _, s := range p.Segments {
-		c.Segments = append(c.Segments, CoverageSegment{File: s.File, GTIDs: s.GTIDs.String(), StartPredecessors: s.StartPredecessors.String(),
+		c.Segments = append(c.Segments, CoverageSegment{File: s.File, StartPosition: s.StartPosition, GTIDs: s.GTIDs.String(), StartPredecessors: s.StartPredecessors.String(),
 			Transactions: s.Transactions, FirstCommitTime: microTime(s.FirstCommit), LastCommitTime: microTime(s.LastCommit)})
 	}
 	return c

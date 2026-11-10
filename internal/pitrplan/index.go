@@ -20,13 +20,33 @@ const (
 	TxnUnsupported
 )
 
+// EffectDigest identifies a transaction's row changes independently of the
+// server that logged them (issue #268): 128 bits of a SHA-256 over the
+// transaction's rows events in a canonical form that an origin copy and a
+// faithful replica copy share (internal/sidecar's effect digester defines
+// the form and what it leaves out). The zero value means "not comparable":
+// the transaction has no rows events, or holds something whose re-logging
+// by a replica is not byte-stable. Two copies of a GTID are compared only
+// when both digests are non-zero.
+type EffectDigest [16]byte
+
+// IsZero reports whether the transaction's row changes are not comparable.
+func (d EffectDigest) IsZero() bool { return d == EffectDigest{} }
+
 // Txn is one indexed transaction of a file. Its GTID is
-// (FileIndex.SIDs[SID], GNO).
+// (FileIndex.SIDs[SID], GNO). It is a fixed-size record without pointers,
+// so an index can be spilled to disk as is (issue #266).
 type Txn struct {
 	GNO int64
 	// OCT is the original commit timestamp, µs since the Unix epoch. The
 	// index pass refuses 0 (PITRReplayUnsupported).
 	OCT int64
+	// Pos is the file offset of the transaction's GTID event: where
+	// `mysqlbinlog --start-position` starts a segment whose first replayed
+	// transaction this is.
+	Pos int64
+	// Effect is the digest of the transaction's row changes, or zero.
+	Effect EffectDigest
 	// Srv is the originating server_id (the GTID event header's).
 	Srv   uint32
 	SID   uint32
@@ -102,10 +122,15 @@ func (b *IndexBuilder) SetPrevious(s Set) error {
 // HasPrevious reports whether PREVIOUS_GTIDS was seen.
 func (b *IndexBuilder) HasPrevious() bool { return b.prev }
 
-// BeginTxn opens the transaction g. oct is µs; srv the event's server_id.
-func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
+// BeginTxn opens the transaction g. oct is µs; srv the event's server_id;
+// pos the file offset of its GTID event, which lies after the 4-byte magic
+// and after every earlier transaction's.
+func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32, pos int64) error {
 	if err := b.closeTxn(); err != nil {
 		return err
+	}
+	if last := len(b.idx.Txns) - 1; pos < 4 || (last >= 0 && pos <= b.idx.Txns[last].Pos) {
+		return refuse(pitrarchive.TokenArchiveObjectInvalid, "%s: transaction %s at offset %d does not follow the previous transaction", b.label, g, pos)
 	}
 	if g.GNO <= 0 || g.GNO > MaxGNO {
 		return refuse(pitrarchive.TokenReplayUnsupported, "%s holds a GTID with GNO %d", b.label, g.GNO)
@@ -137,7 +162,7 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
 		b.sids[g.SID] = sid
 		b.idx.SIDs = append(b.idx.SIDs, g.SID)
 	}
-	b.idx.Txns = append(b.idx.Txns, Txn{GNO: g.GNO, OCT: oct, Srv: srv, SID: sid, Flags: TxnEmpty})
+	b.idx.Txns = append(b.idx.Txns, Txn{GNO: g.GNO, OCT: oct, Pos: pos, Srv: srv, SID: sid, Flags: TxnEmpty})
 	b.budget.indexed++
 	if b.idx.CommitMin == 0 || oct < b.idx.CommitMin {
 		b.idx.CommitMin = oct
@@ -161,6 +186,14 @@ func (b *IndexBuilder) Mark(f TxnFlags) {
 func (b *IndexBuilder) MarkData() {
 	if b.open {
 		b.idx.Txns[len(b.idx.Txns)-1].Flags &^= TxnEmpty
+	}
+}
+
+// SetEffect records the open transaction's effect digest (zero: not
+// comparable).
+func (b *IndexBuilder) SetEffect(d EffectDigest) {
+	if b.open {
+		b.idx.Txns[len(b.idx.Txns)-1].Effect = d
 	}
 }
 

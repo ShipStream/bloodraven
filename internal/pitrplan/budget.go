@@ -38,7 +38,12 @@ const (
 	// transaction payload) the index pass decodes.
 	MaxEventBytesCap = 64 << 20
 
-	// TxnBytes is charged per indexed transaction: the Txn record itself.
+	// TxnBytes is charged per indexed transaction: the Txn record itself
+	// (56 bytes: GNO, commit time, file offset, the 16-byte effect digest,
+	// origin server, source index and flags). The effect digest adds no
+	// other per-transaction memory: the index pass hashes a transaction's
+	// rows events as it reads them and keeps only fixed state, charged
+	// once per file.
 	TxnBytes = int64(unsafe.Sizeof(Txn{}))
 	// occurrenceBytes is charged per indexed transaction for the
 	// occurrence registry (FP comparison, lookups) and the D-51 order

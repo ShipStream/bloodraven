@@ -85,9 +85,15 @@ const (
 //     FORMAT_DESCRIPTION and GTID events go through go-mysql's decoders
 //     (with their panics turned into refusals); query and PREVIOUS_GTIDS
 //     events are decoded here, and every other event is classified by its
-//     type alone, so no table map or row image is ever decoded or kept.
+//     type alone. Table maps and rows events are framed for the effect
+//     digest (2), never decoded: no row image is read or kept.
 //  2. Index: GTID, original commit timestamp, originating server_id,
-//     emptiness (binlogDataEvent, the rule the emptyGtids hint uses), XA.
+//     emptiness (binlogDataEvent, the rule the emptyGtids hint uses), XA,
+//     the file offset of the GTID event (a segment's --start-position), and
+//     the effect digest of the transaction's row changes
+//     (binlog_txindex_effect.go), for which the table maps' names and
+//     column types and the rows events' post-headers and bitmaps are framed
+//     with bounds checks.
 //     Every transaction must end with its terminator (XID, COMMIT,
 //     ROLLBACK, XA PREPARE, or a statement outside BEGIN) before the next
 //     GTID or the end of the file, and no event other than rotation,
@@ -128,6 +134,11 @@ func InspectTransactions(r io.Reader, opts TxIndexOptions) (*pitrplan.FileIndex,
 		queryPostHeader: 13,
 	}
 	ix.parser.SetVerifyChecksum(true)
+	// The effect digester's fixed state (D-42).
+	if err := budget.Charge(effectStateBytes, "effect digest state"); err != nil {
+		return nil, err
+	}
+	defer budget.Release(effectStateBytes)
 	offset := int64(4)
 	var header [replication.EventHeaderSize]byte
 	for {
@@ -173,6 +184,7 @@ func InspectTransactions(r io.Reader, opts TxIndexOptions) (*pitrplan.FileIndex,
 	if ix.state == txnOpen || ix.state == txnBegun {
 		return nil, invalid("the file ends inside transaction %s, before its terminator", ix.gtid)
 	}
+	ix.b.SetEffect(ix.fx.finish())
 	return ix.b.Finish(hex.EncodeToString(h.Sum(nil)), offset)
 }
 
@@ -217,6 +229,8 @@ type txIndexer struct {
 	queryPostHeader int
 	state           txnState
 	gtid            pitrplan.GTID
+	// fx digests the open transaction's row changes.
+	fx effectDigester
 }
 
 func (ix *txIndexer) invalid(format string, args ...any) error {
@@ -299,9 +313,12 @@ func (ix *txIndexer) event(raw []byte, offset int64) error {
 		if ix.state == txnOpen || ix.state == txnBegun {
 			return ix.invalid("transaction %s ends without a terminator before %s at offset %d", ix.gtid, g, offset)
 		}
-		if err := ix.b.BeginTxn(g, int64(gtid.OriginalCommitTimestamp), serverID); err != nil { //nolint:gosec // µs fit int64
+		// The transaction that ends here gets its effect digest.
+		ix.b.SetEffect(ix.fx.finish())
+		if err := ix.b.BeginTxn(g, int64(gtid.OriginalCommitTimestamp), serverID, offset); err != nil { //nolint:gosec // µs fit int64
 			return err
 		}
+		ix.fx.begin()
 		ix.state, ix.gtid = txnOpen, g
 		return nil
 	case replication.ANONYMOUS_GTID_EVENT:
@@ -334,6 +351,7 @@ func (ix *txIndexer) formatDescription(raw []byte, offset int64) error {
 	if n := int(replication.QUERY_EVENT) - 1; n < len(fde.EventTypeHeaderLengths) {
 		ix.queryPostHeader = int(fde.EventTypeHeaderLengths[n])
 	}
+	ix.fx.init(fde.EventTypeHeaderLengths)
 	ix.b.SetWriter(binary.LittleEndian.Uint32(raw[5:9]))
 	return nil
 }
@@ -395,6 +413,7 @@ func (ix *txIndexer) step(kind replication.EventType, body []byte, where string)
 		}
 	}
 	classifyEvent(ix.b, ev)
+	ix.fx.event(kind, body, query)
 	return nil
 }
 

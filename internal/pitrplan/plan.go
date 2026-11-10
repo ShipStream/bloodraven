@@ -86,11 +86,18 @@ func (f PlanFile) StagedPath() string {
 	return f.Row.Site + "/" + name
 }
 
-// Segment is `mysqlbinlog --include-gtids=<GTIDs>` over Files[File], over
-// transactions [Start, End) of that file.
+// Segment is `mysqlbinlog --start-position=<StartPosition>
+// --include-gtids=<GTIDs>` over Files[File], over transactions [Start, End)
+// of that file.
 type Segment struct {
-	File              int
-	Start, End        int
+	File       int
+	Start, End int
+	// StartPosition is the file offset of the GTID event of the first
+	// transaction the segment replays (the first of [Start, End) outside
+	// X), so mysqlbinlog does not scan the file from its start (issue
+	// #271). No transaction before it is in GTIDs: a file holds a GTID
+	// once.
+	StartPosition     int64
 	GTIDs             Set
 	StartPredecessors Set
 	Transactions      int64
@@ -416,9 +423,26 @@ func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 			if first.Empty() != t.Empty() {
 				why = append(why, "one copy is empty")
 			}
-			if len(why) > 0 {
+			// Row changes (issue #268) are compared only between two
+			// comparable copies; a zero digest says nothing.
+			effects := !first.Effect.IsZero() && !t.Effect.IsZero() && first.Effect != t.Effect
+			if effects {
+				why = append(why, fmt.Sprintf("row changes differ: effect digest %x vs %x", first.Effect, t.Effect))
+			}
+			switch {
+			case effects && len(why) == 1:
+				// The copies agree on everything a GTID event says.
+				p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); one copy is not a faithful copy of the other: a transaction with other changes was injected under this GTID (a manual repair with SET GTID_NEXT), or the two servers' data had diverged when they applied it; restore from a full backup taken later, once its newest transactions are archived in binlog files after these two",
+					g, o.f.row.Label(), r.Label(), why[0])
+			case len(why) > 0:
 				p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); the GTID was reissued, or one site's history was rewritten",
 					g, o.f.row.Label(), r.Label(), joinComma(why))
+			case first.Effect.IsZero() && !t.Effect.IsZero():
+				// Later copies are compared with a comparable one: the
+				// registry keeps the first copy that has a digest, so two
+				// comparable copies always meet, whatever the download
+				// order.
+				o.f, o.i = f, int32(i) //nolint:gosec // an index of idx.Txns
 			}
 		}
 	}

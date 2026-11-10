@@ -27,6 +27,18 @@ type stx struct {
 	srv   uint32
 	empty bool
 	xa    bool
+	// fx, when non-zero, is the transaction's effect digest (every byte
+	// fx); zero is "not comparable".
+	fx byte
+}
+
+// effect is the synthetic effect digest stx.fx stands for.
+func effect(fx byte) EffectDigest {
+	var d EffectDigest
+	for i := range d {
+		d[i] = fx
+	}
+	return d
 }
 
 // run builds sequential txns sid:from-to with commit times start, start+1s, …
@@ -37,6 +49,9 @@ func run(sid string, from, to int64, start float64, srv uint32) []stx {
 	}
 	return out
 }
+
+// synthPos is the offset of transaction k in a synthetic file.
+func synthPos(k int) int64 { return 4 + 100*int64(k+1) }
 
 type synth struct {
 	t     *testing.T
@@ -83,20 +98,24 @@ func (s *synth) file(site, name string, fsrv uint32, prev, base string, groups .
 	if err := b.SetPrevious(MustParseSet(prev)); err != nil {
 		s.t.Fatal(err)
 	}
+	// Transaction k of a synthetic file sits at offset synthPos(k).
+	n := 0
 	for _, g := range groups {
 		for _, t := range g {
-			if err := b.BeginTxn(mustGTID(s.t, t.g), t.oct, t.srv); err != nil {
+			if err := b.BeginTxn(mustGTID(s.t, t.g), t.oct, t.srv, synthPos(n)); err != nil {
 				s.t.Fatal(err)
 			}
+			n++
 			if !t.empty {
 				b.MarkData()
 			}
 			if t.xa {
 				b.Mark(TxnXA)
 			}
+			b.SetEffect(effect(t.fx))
 		}
 	}
-	idx, err := b.Finish(fmt.Sprintf("%s-%s", site, name), 100)
+	idx, err := b.Finish(fmt.Sprintf("%s-%s", site, name), synthPos(n))
 	if err != nil {
 		s.t.Fatal(err)
 	}

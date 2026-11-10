@@ -24,6 +24,11 @@ import (
 //	segment 0: a/mysql-bin.000001 replays A:11-20 from A:1-10
 //	segment 1: b/mysql-bin.000004 replays B:1-5   from A:1-20
 //	postStop  = B:6-7 (staged after the witness B:6)
+//
+// The staged files are framed like binlogs (binlog()): the magic, a filler
+// event, then for every GTID its GTID event and a filler event, so each
+// segment's startPosition is the offset of a real GTID event header
+// (POS_A[n], POS_B[n]).
 const pitrScriptPrelude = `import copy, hashlib, io, json, os, re, signal, tempfile, types
 A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
@@ -104,10 +109,43 @@ def write_coverage(d, cov):
     with open(os.path.join(d, 'coverage.json'), 'w') as f:
         json.dump(cov, f)
 
+def event(pos, kind, body, end=None):
+    size = 19 + len(body) + 4
+    end = pos + size if end is None else end
+    return bytes(4) + bytes([kind]) + (101).to_bytes(4, 'little') + size.to_bytes(4, 'little') + (end & 0xffffffff).to_bytes(4, 'little') + bytes(2) + body + bytes(4)
+
+def gtid_body(uuid, n):
+    return b'\x01' + bytes.fromhex(uuid.replace('-', '')) + n.to_bytes(8, 'little') + b'\x02' + bytes(16)
+
+def binlog(uuid, first, last, kind=33, mangle=None):
+    """A file framed like a binlog holding uuid:first-last, and the offset of
+    each GTID event. kind is the GTID events' type (42: tagged); mangle(n,
+    pos) may return another GTID event for n."""
+    data = b'\xfebin'
+    data += event(len(data), 15, b'format description')
+    pos = {}
+    for n in range(first, last + 1):
+        pos[n] = len(data)
+        ev = mangle(n, len(data)) if mangle else None
+        data += ev if ev is not None else event(len(data), kind, gtid_body(uuid, n))
+        pos[('body', n)] = len(data)
+        data += event(len(data), 2, b'changes of %d' % n)
+    return data, pos
+
+POS_A, POS_B = {}, {}
+
+def restage(d, cov, i, data):
+    """Replace staged file i with data, keeping the plan's digest true."""
+    cov['files'][i]['sha256'] = stage(d, cov['files'][i]['path'], data)
+
 def base_plan():
     d = tempfile.mkdtemp()
-    s1 = stage(d, 'a/mysql-bin.000001.r1', b'site a bytes')
-    s2 = stage(d, 'b/mysql-bin.000004.r2', b'site b bytes')
+    data_a, pos_a = binlog(A, 6, 20)
+    data_b, pos_b = binlog(B, 1, 7)
+    POS_A.update(pos_a)
+    POS_B.update(pos_b)
+    s1 = stage(d, 'a/mysql-bin.000001.r1', data_a)
+    s2 = stage(d, 'b/mysql-bin.000004.r2', data_b)
     cov = {
         'version': 2, 'mode': 'timestamp', 'stopTime': STOP, 'allowPartial': False,
         'outcome': 'TargetCovered', 'refusalReason': '',
@@ -129,9 +167,9 @@ def base_plan():
              'previousGTIDs': A + ':1-20', 'gtids': B + ':1-7'},
         ],
         'segments': [
-            {'file': 0, 'gtids': A + ':11-20', 'startPredecessors': A + ':1-10', 'transactions': 10,
+            {'file': 0, 'startPosition': pos_a[11], 'gtids': A + ':11-20', 'startPredecessors': A + ':1-10', 'transactions': 10,
              'firstCommitTime': '2029-12-31T23:10:00.000000Z', 'lastCommitTime': '2029-12-31T23:20:00.000000Z'},
-            {'file': 1, 'gtids': B + ':1-5', 'startPredecessors': A + ':1-20', 'transactions': 5,
+            {'file': 1, 'startPosition': pos_b[1], 'gtids': B + ':1-5', 'startPredecessors': A + ':1-20', 'transactions': 5,
              'firstCommitTime': '2029-12-31T23:30:00.000000Z', 'lastCommitTime': '2029-12-31T23:59:59.999999Z'},
         ],
     }
@@ -208,6 +246,26 @@ func TestPITRScriptCoverageRefusals(t *testing.T) {
 		{name: "zero transactions", mutate: `cov['segments'][0]['transactions']=0`, token: "PITRCoverageInvalid", detail: "transactions is invalid"},
 		// F154: a segment's count is checked against its GTIDs before the load.
 		{name: "segment count differs from its GTIDs", mutate: `cov['segments'][0]['transactions']=11; cov['replayedTransactionCount']=16`, token: "PITRCoverageInvalid", detail: "segments[0] counts 11 transactions but includes 10 GTIDs"},
+		// Issue #271: every segment names the offset of its first
+		// transaction, and a GTID event must be framed there (mysqlbinlog
+		// does not check, and from another event it emits a transaction
+		// without its GTID_NEXT).
+		{name: "start position missing", mutate: `del cov['segments'][0]['startPosition']`, token: "PITRCoverageInvalid", detail: "segments[0].startPosition is missing or not an integer (was coverage.json written by an older pitr-download?)"},
+		{name: "start position is a string", mutate: `cov['segments'][1]['startPosition']=str(POS_B[1])`, token: "PITRCoverageInvalid", detail: "segments[1].startPosition is missing or not an integer"},
+		{name: "start position is a boolean", mutate: `cov['segments'][1]['startPosition']=True`, token: "PITRCoverageInvalid", detail: "segments[1].startPosition is missing or not an integer"},
+		{name: "start position inside the magic", mutate: `cov['segments'][0]['startPosition']=3`, token: "PITRCoverageInvalid", detail: "segments[0].startPosition 3 is outside its file a/mysql-bin.000001.r1"},
+		{name: "start position negative", mutate: `cov['segments'][0]['startPosition']=-POS_A[11]`, token: "PITRCoverageInvalid", detail: "is outside its file"},
+		{name: "start position at the end of the file", mutate: `cov['segments'][0]['startPosition']=os.path.getsize(os.path.join(d,'a/mysql-bin.000001.r1'))`, token: "PITRCoverageInvalid", detail: "is outside its file"},
+		{name: "start position too close to the end", mutate: `cov['segments'][0]['startPosition']=os.path.getsize(os.path.join(d,'a/mysql-bin.000001.r1'))-18`, token: "PITRCoverageInvalid", detail: "is outside its file"},
+		{name: "start position at the transaction's next event", mutate: `cov['segments'][0]['startPosition']=POS_A[('body',11)]`, token: "PITRCoverageInvalid", detail: "is not a GTID event (event type 2)"},
+		{name: "start position inside an event", mutate: `cov['segments'][0]['startPosition']=POS_A[11]+1`, token: "PITRCoverageInvalid", detail: "segments[0].startPosition"},
+		{name: "start position at an earlier transaction", mutate: `cov['segments'][0]['startPosition']=POS_A[9]`, token: "PITRCoverageInvalid", detail: "is the GTID event of aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:9, which the segment does not replay"},
+		{name: "start position at another file's offset", mutate: `cov['segments'][1]['startPosition']=POS_B[6]`, token: "PITRCoverageInvalid", detail: "is the GTID event of bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:6, which the segment does not replay"},
+		{name: "start position event with a wrong end position", mutate: `restage(d, cov, 0, binlog(A, 6, 20, mangle=lambda n, pos: event(pos, 33, gtid_body(A, n), end=pos) if n == 11 else None)[0])`, token: "PITRCoverageInvalid", detail: "does not frame an event"},
+		{name: "start position event overruns the file", mutate: `data = binlog(A, 6, 20)[0]; restage(d, cov, 0, data[:POS_A[11]+30])`, token: "PITRCoverageInvalid", detail: "does not frame an event"},
+		{name: "start position at a truncated GTID event", mutate: `restage(d, cov, 0, binlog(A, 6, 20, mangle=lambda n, pos: event(pos, 33, b'short') if n == 11 else None)[0])`, token: "PITRCoverageInvalid", detail: "is a truncated GTID event"},
+		// A tagged GTID event (type 42) is accepted by its framing alone.
+		{name: "start position at a tagged GTID event", mutate: `restage(d, cov, 1, binlog(B, 1, 7, kind=42)[0])`},
 		{name: "sites malformed", mutate: `cov['sites']=['a','']`, token: "PITRCoverageInvalid", detail: "sites must be a list"},
 		{name: "archive not an object", mutate: `cov['archive']=None`, token: "PITRCoverageInvalid", detail: "archive and dump must be objects"},
 		{name: "encryption mode invalid", mutate: `cov['archive']['encryptionMode']='Rot13'`, token: "PITRCoverageInvalid", detail: "encryptionMode is invalid"},
@@ -258,7 +316,10 @@ func TestPITRScriptPlanRules(t *testing.T) {
 		{name: "R3 on-history not excluded", mutate: `cov['onHistoryExclusions']=A+':12'`, token: "PITRCoverageInvalid", detail: "R3: onHistoryExclusions"},
 		{name: "R4 segment starts elsewhere", mutate: `cov['segments'][1]['startPredecessors']=A+':1-19'`, token: "PITRCoverageInvalid", detail: "R4: segment 1"},
 		{name: "R4 order reversed", mutate: `cov['segments'].reverse()`, token: "PITRCoverageInvalid", detail: "R4: segment 0"},
-		{name: "R4 segment names the wrong file", mutate: `cov['segments'][1]['file']=0`, token: "PITRCoverageInvalid", detail: "R4: segment 1 replays bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-5, which its file a/mysql-bin.000001.r1 does not hold"},
+		// The start-position check refuses an untagged GTID event of
+		// another transaction first; a tagged one is checked by its
+		// framing only, so R4 is what refuses the wrong file.
+		{name: "R4 segment names the wrong file", mutate: `cov['segments'][1]['file']=0; restage(d, cov, 0, binlog(A, 6, 20, kind=42)[0])`, token: "PITRCoverageInvalid", detail: "R4: segment 1 replays bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-5, which its file a/mysql-bin.000001.r1 does not hold"},
 		{name: "R4 start outside its file", mutate: `cov['files'][0]['previousGTIDs']=A+':1-12'; cov['files'][0]['gtids']=A+':13-20'`, token: "PITRCoverageInvalid", detail: "R4: segment 0 replays aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:11-12, which its file"},
 		{name: "R4 start before its file", mutate: `cov['files'][0]['previousGTIDs']=A+':1-10,'+B+':9'`, token: "PITRCoverageInvalid", detail: "R4: segment 0 starts after aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10, which is no position of its file"},
 		{name: "R2 loaded dump differs", baseline: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-11", token: "PITRCoverageInvalid", detail: "R2"},
@@ -451,8 +512,10 @@ import subprocess
 g['subprocess'].Popen = FakeProc
 `
 
-// Every segment goes through its own mysqlbinlog --include-gtids into ONE
-// mysql session; a mysqlbinlog failure SIGKILLs mysql (D-32).
+// Every segment goes through its own mysqlbinlog --include-gtids
+// --start-position into ONE mysql session (the offset is the segment's
+// first transaction, mid-file for segment 0); a mysqlbinlog failure
+// SIGKILLs mysql (D-32).
 func TestPITRScriptSegmentReplay(t *testing.T) {
 	body := `d, cov = base_plan()
 c = read(d)
@@ -463,8 +526,8 @@ binlogs = [p for p in procs if not p.is_mysql]
 assert len(mysql) == 1 and mysql[0].args[:2] == ['mysql', '--binary-mode'], [p.args for p in procs]
 assert mysql[0].env['MYSQL_PWD'] == 'secret' and 'secret' not in ' '.join(mysql[0].args)
 assert [p.args for p in binlogs] == [
-    ['/usr/bin/mysqlbinlog', '--include-gtids=' + A + ':11-20', os.path.join(os.path.realpath(d), 'a/mysql-bin.000001.r1')],
-    ['/usr/bin/mysqlbinlog', '--include-gtids=' + B + ':1-5', os.path.join(os.path.realpath(d), 'b/mysql-bin.000004.r2')],
+    ['/usr/bin/mysqlbinlog', '--include-gtids=' + A + ':11-20', '--start-position=%d' % POS_A[11], os.path.join(os.path.realpath(d), 'a/mysql-bin.000001.r1')],
+    ['/usr/bin/mysqlbinlog', '--include-gtids=' + B + ':1-5', '--start-position=%d' % POS_B[1], os.path.join(os.path.realpath(d), 'b/mysql-bin.000004.r2')],
 ], [p.args for p in binlogs]
 stream = mysql[0].stdin.final.decode()
 assert stream.index('segment 0') < stream.index('segment 1'), stream
@@ -719,7 +782,12 @@ func execBash(t *testing.T, script string, env ...string) *exec.Cmd {
 // binlog_transaction_compression fixture (GTIDs :3 and :4 of one file on
 // top of :1-2). It proves F7 for the shapes the planner emits: two segments
 // of the same file in one session, and an excluded transaction inside a
-// segment, ending at exactly the planned gtid_executed and rows.
+// segment, ending at exactly the planned gtid_executed and rows. Each
+// segment starts at its first transaction's GTID event (--start-position,
+// issue #271): :4's is inside the file, and both transactions are
+// compressed (TRANSACTION_PAYLOAD), so the real mysqlbinlog shows that a
+// start there still emits the FORMAT_DESCRIPTION statement and exactly the
+// segment's GTID_NEXT assignments.
 func TestPITRNativeSegmentReplay(t *testing.T) {
 	if os.Getenv("BLOODRAVEN_PITR_NATIVE_TEST") != "1" {
 		t.Skip("opt-in native replay (BLOODRAVEN_PITR_NATIVE_TEST=1, docker)")
@@ -733,6 +801,27 @@ func TestPITRNativeSegmentReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	const uuid = "94ae26b8-d373-11f1-8ee3-b7be919e6317"
+	// The offsets of the fixture's GTID events (:3, then :4), each followed
+	// by its TRANSACTION_PAYLOAD event.
+	fixture, err := os.ReadFile(filepath.Join(fixtures, "compressed-session.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts []int
+	for pos := 4; pos+19 <= len(fixture); {
+		size := int(fixture[pos+9]) | int(fixture[pos+10])<<8 | int(fixture[pos+11])<<16 | int(fixture[pos+12])<<24
+		if fixture[pos+4] == 33 {
+			if next := pos + size; next+19 > len(fixture) || fixture[next+4] != 40 {
+				t.Fatalf("the transaction at offset %d is not compressed", pos)
+			}
+			starts = append(starts, pos)
+		}
+		pos += size
+	}
+	if len(starts) != 2 || starts[0] <= 4 || starts[1] <= starts[0] {
+		t.Fatalf("GTID events at %v, want two", starts)
+	}
+	gtidStart := map[string]int{uuid + ":3": starts[0], uuid + ":4": starts[1]}
 	image := os.Getenv("BLOODRAVEN_PITR_NATIVE_MYSQL_IMAGE")
 	if image == "" {
 		image = "mysql:9.7"
@@ -792,7 +881,7 @@ func TestPITRNativeSegmentReplay(t *testing.T) {
 			}
 			segments := []map[string]any{}
 			for _, s := range tc.segments {
-				segments = append(segments, map[string]any{"file": 0, "gtids": s[0], "startPredecessors": s[1], "transactions": 1})
+				segments = append(segments, map[string]any{"file": 0, "startPosition": gtidStart[s[0]], "gtids": s[0], "startPredecessors": s[1], "transactions": 1})
 			}
 			cov := map[string]any{"segments": segments, "files": []map[string]any{{"site": "a", "name": "mysql-bin.000002", "_path": filepath.Join(fixtures, "compressed-session.bin")}},
 				"mode": "timestamp", "stopTime": "2030-01-01T00:00:00.000000Z", "replayedTransactionCount": len(segments)}
@@ -923,7 +1012,9 @@ func TestPITRScriptPlanChecksStayCompact(t *testing.T) {
 N = 3000
 cov['files'] = cov['files'][:1]
 cov['files'][0]['gtids'] = A + ':6-%d' % (10 + N)
-cov['segments'] = [{'file': 0, 'gtids': A + ':%d' % n, 'startPredecessors': A + ':1-%d' % (n - 1), 'transactions': 1,
+data, pos = binlog(A, 6, 10 + N)
+restage(d, cov, 0, data)
+cov['segments'] = [{'file': 0, 'startPosition': pos[n], 'gtids': A + ':%d' % n, 'startPredecessors': A + ':1-%d' % (n - 1), 'transactions': 1,
                     'firstCommitTime': STOP, 'lastCommitTime': STOP} for n in range(11, 11 + N)]
 cov['lineage'] = A + ':1-%d' % (10 + N)
 cov['replay'] = A + ':11-%d' % (10 + N)

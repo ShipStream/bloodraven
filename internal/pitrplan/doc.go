@@ -23,6 +23,13 @@
 //
 // Every refusal carries a pitrarchive.Token; §4.11 fixes their precedence.
 //
+// Every downloaded copy of a GTID is compared with the others as it arrives
+// (ingest, plan.go): commit time, origin server, emptiness, and the effect
+// digest of its row changes when both copies have one (EffectDigest, issue
+// #268). Each segment records the file offset of its first replayed
+// transaction (Segment.StartPosition, issue #271), which restore.py hands
+// to mysqlbinlog as --start-position.
+//
 // Files: archive.go (inputs), index.go (FileIndex, built by
 // internal/sidecar.InspectTransactions), gtidset.go, budget.go (D-42),
 // frontier.go (§4.3), witness.go (§4.4, anchors), lineage.go (L1–L3, L5),

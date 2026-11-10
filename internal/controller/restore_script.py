@@ -356,10 +356,11 @@ def _maybe_preflight_drops(session):
 # structure, digests and identity (_read_pitr_coverage), and its set algebra
 # with the server's own GTID functions (_verify_pitr_plan, R1 and R3-R5).
 # After the load it proves the loaded state is the plan's baseline (R2),
-# replays every segment with `mysqlbinlog --include-gtids=<segment>` into ONE
-# mysql session (_run_pitr_segments, which admits a transaction only if its
-# GTID_NEXT is in the segment and requires the emitted set to be exactly the
-# segment's), and proves the result is exactly the
+# replays every segment with `mysqlbinlog --include-gtids=<segment>
+# --start-position=<the segment's first transaction>` into ONE mysql session
+# (_run_pitr_segments, which admits a transaction only if its GTID_NEXT is
+# in the segment and requires the emitted set to be exactly the segment's),
+# and proves the result is exactly the
 # target history minus the exclusions (_verify_pitr_result, R6). Only then
 # does it write the verdict the controller certifies the Job from.
 
@@ -369,6 +370,13 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GTID_SET_CHARS = re.compile(r"^[0-9A-Za-z:,_-]*$")
 _GTID_INTERVAL = re.compile(r"^([0-9]+)(?:-([0-9]+))?$")
 _MYSQLSH_MYSQLBINLOG = "/usr/libexec/mysqlsh/mysqlbinlog"
+# Binlog framing, for _check_segment_start: the common event header is 19
+# bytes (type at 4, event size at 9, end position at 13); a GTID_LOG_EVENT
+# body starts with flags (1), the source UUID (16) and the number (8).
+_EVENT_HEADER_SIZE = 19
+_GTID_LOG_EVENT = 33
+_GTID_TAGGED_LOG_EVENT = 42
+_GTID_BODY_SIZE = 1 + 16 + 8
 _PITR_OUTCOMES = {"timestamp": ("TargetCovered", "Partial"), "latest": ("ArchiveHead",)}
 # The verdict must fit this container's share of the kubelet's termination
 # messages (_termination_limit) together with the RESULT line (bounded to
@@ -548,6 +556,42 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _check_segment_start(k, seg, entry):
+    """A segment's startPosition must be the offset of a GTID event of its
+    staged file. mysqlbinlog starts decoding there without checking: at
+    another event of a transaction it would emit that transaction's body
+    with no GTID_NEXT of its own, which mysql would run under whatever
+    GTID_NEXT is in effect (seen with mysqlbinlog 9.7.1), and the per-
+    segment GTID_NEXT check cannot see such a transaction. So before the
+    load this checks the bytes: a GTID event is framed at that offset (its
+    size fits the file and its end position is offset + size, as the server
+    writes it), and an untagged one names a GTID the segment replays. The
+    replay then proves the emitted set is exactly the segment's."""
+    pos = seg.get("startPosition")
+    _require(type(pos) is int, "segments[{}].startPosition is missing or not an integer (was coverage.json written by an older pitr-download?)".format(k))
+    size = os.path.getsize(entry["_path"])
+    _require(4 <= pos and pos + _EVENT_HEADER_SIZE <= size,
+             "segments[{}].startPosition {} is outside its file {} ({} bytes)".format(k, pos, entry["path"], size))
+    with open(entry["_path"], "rb") as f:
+        f.seek(pos)
+        event = f.read(_EVENT_HEADER_SIZE + _GTID_BODY_SIZE)
+    kind = event[4]
+    length = int.from_bytes(event[9:13], "little")
+    end = int.from_bytes(event[13:17], "little")
+    _require(kind in (_GTID_LOG_EVENT, _GTID_TAGGED_LOG_EVENT),
+             "segments[{}].startPosition {} of {} is not a GTID event (event type {})".format(k, pos, entry["path"], kind))
+    # The header's end position is 32 bits wide.
+    _require(length >= _EVENT_HEADER_SIZE and pos + length <= size and end == (pos + length) & 0xFFFFFFFF,
+             "segments[{}].startPosition {} of {} does not frame an event (size {}, end position {})".format(k, pos, entry["path"], length, end))
+    if kind == _GTID_LOG_EVENT:
+        _require(length >= _EVENT_HEADER_SIZE + _GTID_BODY_SIZE and len(event) == _EVENT_HEADER_SIZE + _GTID_BODY_SIZE,
+                 "segments[{}].startPosition {} of {} is a truncated GTID event".format(k, pos, entry["path"]))
+        sid = event[20:36].hex()
+        gtid = "{}-{}-{}-{}-{}:{}".format(sid[0:8], sid[8:12], sid[12:16], sid[16:20], sid[20:32], int.from_bytes(event[36:44], "little"))
+        _require(_SegmentCheck(seg["gtids"]).admit(gtid),
+                 "segments[{}].startPosition {} of {} is the GTID event of {}, which the segment does not replay".format(k, pos, entry["path"], gtid))
+
+
 def _read_pitr_coverage(req):
     """Load and re-validate coverage.json (§4.13 checks 1-6) without the
     server. Identity disagreements refuse PITRArchiveIdentityMismatch; every
@@ -614,6 +658,7 @@ def _read_pitr_coverage(req):
             # only be found after the segment is streamed (F154).
             _require(seg["transactions"] == _gtid_cardinality(seg["gtids"]),
                      "segments[{}] counts {} transactions but includes {} GTIDs".format(k, seg["transactions"], _gtid_cardinality(seg["gtids"])))
+            _check_segment_start(k, seg, files[seg["file"]])
             transactions += seg["transactions"]
         _require(type(cov.get("replayedTransactionCount")) is int and cov["replayedTransactionCount"] == transactions,
                  "replayedTransactionCount differs from the segments' transactions")
@@ -914,7 +959,12 @@ def _run_pitr_segments(host, port, user, password, cov, mysqlbinlog):
               k, _escape_token(label), _gtid_count(seg["gtids"]), seg["transactions"]), flush=True)
         check = _SegmentCheck(seg["gtids"])
         try:
-            binlog = subprocess.Popen([mysqlbinlog, "--include-gtids=" + _gtid_normalize(seg["gtids"]), entry["_path"]],
+            # --start-position is the offset of the segment's first
+            # transaction (_check_segment_start), so the file is not
+            # decoded from its start; mysqlbinlog still reads the file's
+            # FORMAT_DESCRIPTION event and emits its BINLOG statement.
+            binlog = subprocess.Popen([mysqlbinlog, "--include-gtids=" + _gtid_normalize(seg["gtids"]),
+                                       "--start-position={}".format(seg["startPosition"]), entry["_path"]],
                                       stdout=subprocess.PIPE)
         except OSError as e:
             # E2BIG, ENOENT, EACCES: nothing of this segment reached mysql.
