@@ -13,8 +13,8 @@ name: Deploy Site
 # Railway builds the uploaded directory with Nixpacks per `site/railway.json`;
 # `site/.railwayignore` keeps build artifacts out of the upload.
 #
-# Which commit is deployed: until v1.7.0 ships, bloodraven.dev follows the
-# latest published release, NOT `main`. `main` is about to carry incompatible
+# Which commit is deployed: until v1.8.0 (v1beta1) ships, bloodraven.dev
+# follows the latest published release, NOT `main`. `main` is about to carry incompatible
 # v1alpha1 -> v1beta1 CRD changes (issue #237, proposals/20-api-v1beta1.md
 # section 6, F-41/F-42), and the site must never document fields that no
 # installable release has. So there is no push-to-main trigger: every run
@@ -33,7 +33,7 @@ name: Deploy Site
 #     own tag and supersedes the hotfix.
 #   * A bare manual run (no `ref`) redeploys the latest release.
 #
-# After v1.7.0 ships, revisit whether to go back to deploying `main`.
+# After v1.8.0 ships, revisit whether to go back to deploying `main`.
 
 on:
   release:

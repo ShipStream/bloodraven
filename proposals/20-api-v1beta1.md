@@ -1,6 +1,6 @@
 # Proposal: API audit and cleanup before `shipstream.io/v1beta1`
 
-**Status:** Draft, revision 6 (WS-E step 0 and re-triage at `8067420`, B.5; revision 5 followed critique rounds 1, 2
+**Status:** Draft, revision 7 (release split, see Summary); revision 6 (WS-E step 0 and re-triage at `8067420`, B.5; revision 5 followed critique rounds 1, 2
 and 3 and the ultra review of PR #242, section 8.1)
 **Branch:** `docs/api-v1beta1-audit`
 **Tracking:** #237
@@ -21,6 +21,15 @@ This audits every served field, condition, phase, Event reason, annotation and l
 before the API is frozen as `shipstream.io/v1beta1`. There are zero production users, so breaking changes
 land in v1alpha1 now (D2), with no shims and no legacy adoption (D3). v1beta1 then ships with the identical
 schema and conversion strategy `None` (D1). The release is v1.7.0 (D7).
+
+**Revision 7 (2026-11-09): the release split.** v1.7.0 ships WS-E PR1 (#272) and PR2 (#276), the breaking
+v1alpha1 cleanup, without v1beta1. The rest of the cleanup (WS-E PR3 to PR5) and the promotion itself (v1beta1
+types, multi-version CRDs, `migrate-storage`, the upgrade E2E) ship in v1.8.0, which replaces v1.7.0 as D7's
+release. Below, statements about the breaking v1alpha1 changes and the missing in-place upgrade from v1.6.0
+apply to v1.7.0; statements about v1beta1 itself apply to v1.8.0. One consequence is open: PR3 to PR5 change
+v1alpha1 again, so each of them either keeps v1.7.0's stored objects decodable or v1.8.0 documents a new-group
+move from v1.7.0 as v1.7.0 does from v1.6.0. The new-group procedure from v1.6.0 is still the outline in the
+upgrade policy; its tested version is #243 (WS-F).
 
 v1.7.0 is a minor release that breaks v1alpha1 and has no in-place upgrade path. A user who reads only the
 version number would expect a routine upgrade. The release notes therefore open with a prominent breaking-change
