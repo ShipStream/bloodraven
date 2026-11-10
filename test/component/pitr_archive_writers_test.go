@@ -775,10 +775,13 @@ func TestArchiveWritersReplicaViolationSetsItsMarker(t *testing.T) {
 	if mb.HistoryIntegrity.Violation != pitrarchive.ViolationReplicationFilter || len(mb.Promotions) != 0 {
 		t.Fatalf("b manifest = %+v", mb)
 	}
-	if st := b.Snapshot(context.Background()); st.HistoryIntegrity == nil ||
-		!strings.HasPrefix(st.LastError, string(pitrarchive.TokenArchiveUnsafeHistory)+": b ReplicationFilter") {
-		t.Fatalf("b status = %+v", st)
-	}
+	// The scan persists the marker in the manifest and sets LastError only
+	// once it returns, so the status can trail the manifest by one step.
+	w.eventually("b's status reports the violation", func() bool {
+		st := b.Snapshot(context.Background())
+		return st.HistoryIntegrity != nil &&
+			strings.HasPrefix(st.LastError, string(pitrarchive.TokenArchiveUnsafeHistory)+": b ReplicationFilter")
+	})
 	srvA.apply(txns(writerUUIDA, 101, 1, 3, writerClock)...)
 	srvA.rotate()
 	w.eventually("a keeps archiving", func() bool { return len(w.manifest("a").Files) == 1 })

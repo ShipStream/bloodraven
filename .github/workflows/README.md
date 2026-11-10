@@ -45,7 +45,7 @@ optional `ref` input.
 Uploads `site/` to the Railway service `bloodraven-site`, which builds it with
 Nixpacks (see `site/railway.json`) and serves <https://bloodraven.dev>.
 
-Until v1.7.0 ships, the site is built from the latest published release tag,
+Until v1.8.0 (v1beta1) ships, the site is built from the latest published release tag,
 not from `main`, so it never documents fields that no installable release has
 (issue #237). Pushes to `main` do not deploy. To deploy a docs fix for the
 released version, commit it to a branch cut from the release tag and run
