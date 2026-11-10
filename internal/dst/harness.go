@@ -81,6 +81,10 @@ type trialRunner struct {
 	// stale rehydrate is inherent only when NEITHER durable path could have
 	// preserved the record; this latch is what catches "status could have".
 	statusDroppedPromotion bool
+	// promotionArms counts armPromotion calls. A status write is in flight
+	// across a promotion's record when the count moves between the write's
+	// start (the manager's snapshot) and its commit.
+	promotionArms int
 	// promotionRestarts is len(restartPolls) at the last promotion. A
 	// stale-looking status write from a LATER process generation is
 	// legitimate (the replacement never knew the record), so the latch
@@ -435,6 +439,12 @@ func (r *trialRunner) wireStatus(tm *controller.TopologyManager) {
 			tm.MarkStatusWriteResult(errors.New("mysqlfailovergroups/status write forbidden (sim: outage)"))
 			return
 		}
+		// The snapshot was taken before this callback: the promotions armed
+		// so far are the ones it can carry. With actors the write below
+		// yields between its read and its commit, and a promotion recorded
+		// at that yield (an ordered update's handoff: another goroutine in
+		// production) is not in it.
+		armsAtSnapshot := r.promotionArms
 		if r.pl != nil {
 			// The snapshot lands on the simulated object, contending on its
 			// resourceVersion with the planned run's writes; the store also
@@ -451,9 +461,13 @@ func (r *trialRunner) wireStatus(tm *controller.TopologyManager) {
 		}
 		// A successful status write by the promoting process that still
 		// predates its own promotion means the operator dropped the record
-		// from a durable path that was accepting writes.
+		// from a durable path that was accepting writes. Only a snapshot
+		// taken after the promotion was recorded can have dropped it: a
+		// write already in flight when the record was made commits without
+		// it by construction, and the manager's next write (judged here
+		// like any other) carries it.
 		if !r.lastPromotionAt.IsZero() && cp.LastFailover.Before(r.lastPromotionAt) &&
-			len(r.restartPolls) == r.promotionRestarts {
+			len(r.restartPolls) == r.promotionRestarts && armsAtSnapshot == r.promotionArms {
 			r.statusDroppedPromotion = true
 		}
 		if !cp.LastFailover.Before(r.lastPromotionAt) && !r.statusDroppedPromotion {

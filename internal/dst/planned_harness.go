@@ -261,7 +261,8 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	pl.newProcess()
 	pl.mon.cur = pl.store.Object()
 	pl.mon.claim = slotView{pl}
-	pl.mon.onRecorded = func(target string, confirmedAt time.Time) { r.armPromotion(target, confirmedAt) }
+	pl.mon.onRecorded = r.armRecordedPromotion
+	pl.mon.noManager = pl.noManager
 	pl.store.dead = r.cluster.OperatorDead
 	pl.store.yield = pl.sched.Yield
 	pl.store.clusterStatusDenied = r.cluster.StatusDenied
@@ -1198,6 +1199,32 @@ func (pl *plannedHarness) stalledClaimWithinDeadline() bool {
 		return false
 	}
 	return pl.r.clk.Now().Sub(since) <= plannedStatusStallDeadline+stalledClaimSlack
+}
+
+// plannedRollbackDeadline mirrors the engine's 30s rollback deadline
+// (plannedFailoverRollbackDeadline, §9).
+const plannedRollbackDeadline = 30 * time.Second
+
+// rollbackClaimWithinDeadline reports whether the live slot holds a run
+// whose durable block reads RollingBack and whose rollback deadline, plus
+// slack, has not passed. Until then the rollback may keep the claim while
+// it retries a step it cannot verify (a target it cannot read back at
+// super_read_only=ON), and the claim defers the manager's cross-site
+// actions as in every other phase.
+func (pl *plannedHarness) rollbackClaimWithinDeadline() bool {
+	id, hold, ok := pl.reg.Slot(pl.nn).HeldForSim()
+	if !ok || hold {
+		return false
+	}
+	obj := pl.store.Object()
+	if obj == nil || obj.Status.PlannedFailover == nil {
+		return false
+	}
+	pf := obj.Status.PlannedFailover
+	if pf.RunID != id || pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Rollback == nil {
+		return false
+	}
+	return pl.r.clk.Now().Sub(pf.Rollback.IntentTime.Time) <= plannedRollbackDeadline+stalledClaimSlack
 }
 
 // confirmedClaimHeld reports whether the live slot holds a run that has

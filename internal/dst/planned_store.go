@@ -308,9 +308,12 @@ func (s *simPlannedStore) Log() []storeOp {
 // then, possibly after other writers have moved on (a scheduler yield),
 // re-read it and write the computed status back over the fresh object,
 // keeping from the fresh one only the subtrees the runner preserves (the
-// planned-failover block and hold, the reconciler-owned conditions). A
-// field outside those is written back as it was at the first read. It
-// fails while status writes are denied.
+// planned-failover block and hold, the reconciler-owned conditions), and
+// merging the failover record again over the fresh one (K058): a newer
+// record committed between the two steps, the planned engine's terminal
+// write say, is not replaced by the copy merged at the first read. Any
+// other field is written back as it was at the first read. It fails while
+// status writes are denied.
 func (s *simPlannedStore) MergeSnapshot(snap controller.TopologySnapshot) error {
 	s.mu.Lock()
 	if s.obj == nil {
@@ -347,6 +350,13 @@ func (s *simPlannedStore) MergeSnapshot(snap controller.TopologySnapshot) error 
 		return nil
 	}
 	next := *computed.DeepCopy()
+	// As updateCRStatus's second step: status.lastFailover starts from the
+	// live record and the snapshot's is merged over it under the
+	// timestamp-monotonic rule; observedGeneration never moves back.
+	live := *fresh.DeepCopy()
+	controller.MergeTopologySnapshotStatus(&live, snap)
+	next.LastFailover = live.LastFailover
+	next.ObservedGeneration = max(fresh.ObservedGeneration, next.ObservedGeneration)
 	next.PlannedFailover = fresh.PlannedFailover.DeepCopy()
 	next.PlannedFailoverHold = fresh.PlannedFailoverHold.DeepCopy()
 	for _, t := range runnerPreservedConditions {

@@ -226,16 +226,33 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		}
 
 		// I: fencing of other sites happens before the writable grant. A
-		// re-fence of a site already fenced before the grant (the
-		// split-brain path's "fencing returning old primary") left no
-		// moment with two writable sites.
+		// re-fence of a site whose fence was already sent before the grant
+		// (the split-brain path's "fencing returning old primary") is not
+		// out of order. As above, the earlier fence counts as an attempt
+		// with any outcome: the promotion fences best effort (an unreachable
+		// old primary fails it) and the same poll retries after the grant.
+		// Whether two sites then stay writable is DualWritableUnresolved's.
 		fencedBefore := map[string]bool{}
+		// A site an external writer made writable after the grant (a rogue
+		// read_only=0, a pod booting writable) was read-only when the
+		// promotion ran: fencing it afterwards is the operator reacting to
+		// a new writer, not a fence the promotion owed before its grant.
+		madeWritableAfter := map[string]int{}
 		for _, e := range events {
-			if e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Seq < grantSeq && observedOutcome(e.Outcome) {
+			if e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Seq < grantSeq {
 				fencedBefore[e.Site] = true
+			}
+			if e.Seq > grantSeq && (e.Kind == EvRogueWritable ||
+				(e.Kind == EvRecoverSite && strings.Contains(e.Detail, "bootWritable=true"))) {
+				if _, ok := madeWritableAfter[e.Site]; !ok {
+					madeWritableAfter[e.Site] = e.Seq
+				}
 			}
 		}
 		for _, e := range events {
+			if seq, ok := madeWritableAfter[e.Site]; ok && seq < e.Seq {
+				continue
+			}
 			if e.Site != target && e.Kind == EvSetSuperRO && e.Detail == "on=true" && e.Seq > grantSeq && !fencedBefore[e.Site] {
 				r.violations = append(r.violations, Violation{
 					Invariant: "FenceAfterPromote",
@@ -293,7 +310,10 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 	// the manager's split-brain fence deferred, until the stall marker ends
 	// it (§6.4): the documented bound on that deferral is the stall
 	// deadline, so the streak counts only once the run outlives it.
-	stalled := r.pl != nil && r.pl.stalledClaimWithinDeadline()
+	// So does a run that is rolling back: a rollback that cannot verify its
+	// target back at super_read_only=ON retries with the claim until the
+	// rollback deadline (§9), the documented bound of that deferral.
+	stalled := r.pl != nil && (r.pl.stalledClaimWithinDeadline() || r.pl.rollbackClaimWithinDeadline())
 	if !r.cluster.OperatorDead() && managed && !stalled && writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
 		r.dualStreak++
 		if r.dualStreak > dualWritableGrace && !r.dualFlagged {
@@ -684,11 +704,27 @@ func (r *trialRunner) notePromotionPoll(p int) {
 // record at instant at: the in-memory target, and the anti-flap
 // bookkeeping a later restart is judged against.
 func (r *trialRunner) armPromotion(target string, at time.Time) {
+	r.promotionArms++
 	r.currentTarget = target
 	r.lastPromotionAt = at
 	r.statusDroppedPromotion = false
 	r.replacedBeforeRecord = false
 	r.promotionRestarts = len(r.restartPolls)
+}
+
+// armRecordedPromotion arms a planned run's promotion when its Publishing
+// record commits, with the run's confirmation time. The record can commit
+// long after the promotion (a status outage), and after a later promotion
+// by another actor was armed. The operator's failover record is
+// timestamp-monotonic (the run's terminal write and the snapshot merge both
+// refuse to move it to an older failover), so the late record of an older
+// promotion changes neither the operator's target nor what a restart must
+// rehydrate, and it is not armed over the newer one.
+func (r *trialRunner) armRecordedPromotion(target string, confirmedAt time.Time) {
+	if confirmedAt.Before(r.lastPromotionAt) {
+		return
+	}
+	r.armPromotion(target, confirmedAt)
 }
 
 // tmEvents is the events not issued by the planned or update actors.

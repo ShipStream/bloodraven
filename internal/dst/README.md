@@ -19,6 +19,7 @@ DST_SEED=61 go test ./internal/dst -run PlannedRepro -v  # replay one seed with 
 DST_SEED=61 DST_SKIP=2 DST_ACTOR_SKIP=0,4 go test ./internal/dst -run PlannedRepro -v  # mask fault ops and actor ops
 DST_SEED=61 DST_LOG=1 go test ./internal/dst -run PlannedRepro -v  # with topology-manager and engine logs
 DST_PLANNED=1 make dst                  # saturation campaign over actors-on trials, shrunk over both schedules
+DST_PLANNED_START=16001 DST_PLANNED_TRIALS=16000 go test ./internal/dst -run 'TestDST_PlannedQuick$' -v  # a wider planned sweep, one range per process
 ```
 
 `make test` also runs `TestDST_PlannedQuick`: 300 seeds with the
@@ -131,8 +132,10 @@ production planned-failover path end to end:
   `resourceVersion`; a no-op write does not move it.
   The snapshot write is the runner's two steps (`updateCRStatus`): read and
   merge, a scheduler yield (`store.snapshotCommit`), then a re-read that
-  keeps only the planned block, the hold and `AutomaticFailoverHeld` from
-  the fresh object.
+  keeps the planned block, the hold and `AutomaticFailoverHeld` from the
+  fresh object and merges the failover record again over the fresh one
+  (K058), so a newer record committed between the two steps (a run's
+  terminal write) is not moved back.
 - **Restore.** Every manager start reads the object uncached through the
   store (`startView`), so a read outage or a dead process fails it, as the
   runner's `plannedFailoverView` does: a fresh start with an empty slot
@@ -238,6 +241,13 @@ production planned-failover path end to end:
     run's own last peer probe is the §18 R2 residual (`RogueRaceResidual`),
     not a violation; a writable peer the operator cannot read does not
     block a rollback's unfence (§9 step 1; `UnfenceBesideUnreadable`);
+  - a read-only reader the operator cannot read is allowed at the fence,
+    the gate and the confirmation (§4.1: only primary-candidate and dr-only
+    peers must answer), so a reader made writable where the operator cannot
+    see it does not count against `PlannedFenceWithoutAuthority`,
+    `PlannedPromoteBesideWritable`, `SucceededBesideWritable` or
+    `OutcomeDishonest` (`UnreadableReaderWritable`); a reader it can read,
+    and every promotable site, still count;
   - a target unfence needs a pre-write gate probe in the same engine pass;
     the gate window closes at the end of the pass and of the run;
   - a run ended by its terminal marker is judged when the marker commits,
@@ -247,19 +257,39 @@ production planned-failover path end to end:
     standing hold like the topology manager;
   - outcomes are judged with what the run could know: `Succeeded` at its
     confirm probe (the claim is released at Publishing), `SourceLeftFenced`
-    with an unreachable source by its reason (§6.2), and a cross-process
-    re-run's `PromotedUnconfirmed` / `ManualRecoveryRequired` without the
-    promotion memo (§7.1);
+    with an unreachable source by its reason (§6.2) or ended while no
+    manager was registered, and a cross-process re-run's
+    `PromotedUnconfirmed` / `ManualRecoveryRequired` without the promotion
+    memo (§7.1). `RolledBack` over a source that is not writable is honest
+    when the source was writable at a yield of the rollback (the run read
+    it so; its sidecar may fence it again before the record commits), and
+    a `read_only=OFF` the process died before sending does not make a
+    `RolledBack` dishonest;
+  - a hold is justified (`HoldWithoutDataAtRisk` is quiet) when a promotion
+    intent exists, the deciding pass cannot read the target and another
+    site is writable (`UnreadableTargetHold`): the target may hold the
+    run's writes beside that writer;
   - `FencedSourceNeverHealed` judges only the run's own fence (landed, in
     the source's current incarnation, still set, never healed) under the
-    re-assert's preconditions;
+    re-assert's preconditions, and only while no other site has been
+    writable since the run ended: after that the group had a primary and
+    the topology manager owns the source;
+  - `UnconfirmedBlocksEmergency` is judged over a window in which, at every
+    poll, the target stayed unreachable, an operator with a manager ran,
+    and the source was reachable and complete. A site writable inside the
+    window or a target that answers again ends it; an operator death or
+    restart, a window without a manager and an injected fault on the
+    manager's statement to the source start it again;
   - a standing automation hold is the documented manual-recovery state: the
     end-state convergence invariants and the dual-writable check do not
     judge it, but every acknowledged transaction must still exist on some
     site (`SilentDataLoss`);
   - while a run holds the claim with its status writes stalled, the
     manager's split-brain fence is deferred up to the 2m stall deadline
-    (§6.4), and `DualWritableUnresolved` counts only past it;
+    (§6.4), and `DualWritableUnresolved` counts only past it; the same
+    holds while a run that is rolling back keeps the claim, up to the 30s
+    rollback deadline (§9: it retries a target it cannot read back at
+    `super_read_only=ON`);
   - a request annotation left unconsumed after the settle window is
     `PlannedRunStuck`.
 
@@ -313,9 +343,12 @@ clock: the harness builds the controller with
   (`test/component/binlog_rotation_test.go`).
 - **Invariants.** `FlushAfterWriteGrant` (per poll): an actor never rotates
   a site after it enabled that site's writes without fencing it again. With
-  the actors on: a planned run's rotation of its target after the target
-  became writable is `RepeatedPromotion` (a promotion resumed from
-  `WasWritable` or `Writable` sends none); every rotation by the planned
+  the actors on: a planned run's rotation of a target it made writable,
+  while that target is still writable or holds its own transactions
+  outside F, is `RepeatedPromotion` (a promotion resumed from `WasWritable`
+  or `Writable` sends none; a target that restarted read-only with exactly
+  F before any write landed is `ReplicaReset` again, and a new process
+  rotates it once more); every rotation by the planned
   path belongs to a live run (`PlannedMutationWithoutRun`,
   `MarkedRunResumed`), and a run that ends `NotStarted` sent none
   (`OutcomeDishonest`); a rotation by the topology manager or an ordered
@@ -331,6 +364,9 @@ Per poll:
 - **PromoteWhileObservedWritable** — never grant writability while another
   site is observed writable, unless it was fenced in the same cycle.
 - **FenceAfterPromote** — fencing of other sites precedes the writable grant.
+  A fence sent before the grant counts whatever its outcome (the same poll
+  retries a failed one after the grant), and a site an external writer made
+  writable after the grant is not a fence the promotion owed.
 - **DualWritableUnresolved** — a dual-writable state that is fully
   operator-observable, with a resolution policy available (failover history
   or split-brain priorities), must be fenced within a grace window.
@@ -360,7 +396,12 @@ At every operator restart:
   post-promotion copy either. The operator writes the out-of-band record at
   promotion time and retries it every poll, so a healthy store means a
   current record; and a status write the promoting process landed without
-  the record is the operator dropping it, not the path failing.
+  the record is the operator dropping it, not the path failing. Only a
+  snapshot taken after the record was made counts: a status write already
+  in flight when an ordered update records its handoff commits without it.
+  A planned run's Publishing record that commits after a later promotion
+  does not move the harness's target back, as it does not move the
+  operator's.
 
 ## Model fidelity notes
 
@@ -443,6 +484,23 @@ Fixed findings, now regressions (`TestDST_PlannedQuick` fails on them):
 (`plannedAllowedClasses` in `planned_test.go`); anything else fails it. When
 a finding is fixed, pin its shrunk trial in
 `test/component/dst_regression_test.go`.
+
+### Open planned-failover findings
+
+`TestDST_PlannedQuick`'s 300 seeds are clean, and so were the 3,000 seeds
+swept for #235. A sweep of seeds 1–112,000 is not: after the harness
+defects it also found were fixed (`sweep_artifacts_test.go`), about one
+trial in 15,000 still fails, in three classes. They are the operator's, they
+are on `main` (none comes from the binary log rotations), each needs an
+external writer or a pod replacement inside a planned failover plus a
+restart or an outage, and none is allowed by the gate: a 300-seed run that
+hits one fails. Each has a fingerprint of its own:
+
+| Fingerprint | What happens | Verdict |
+|---|---|---|
+| `HoldWithoutDataAtRisk(writableTargetWithChannel)` | The operator restarts in `Promoting` before `RESET REPLICA ALL`; before the new process classifies the target, an external `read_only=0` makes it writable. Writable with a channel and no memo is `Inconsistent(ForeignWritable)`: a hold, although the channel proves no process of the run cleared `super_read_only` (the same process, with its memo, ends `SourceLeftFenced` without a hold). | Over-conservative hold; documented (`ManualRecoveryRequired`: "a writable target with a replication channel"). Needs a design decision. |
+| `HoldWithoutDataAtRisk(replacedTargetSameProcess)` | `super_read_only=OFF` is applied but answers with an error, then the target pod is replaced under a new `server_uuid` and reads read-only inside F. The same process holds (`Inconsistent(ExecuteFailed)`), where a new process would roll back by the DST-3 ruling on the same evidence (record not durable, source fenced with F, nobody writable). | Inconsistent with the DST-3 ruling; documented ("a replaced server after a possible write"). Needs a design decision. |
+| `OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)` | The confirmation takes an unreadable primary-candidate as a warning. That is the documented residual for a peer that answered read-only at the gate; it is wrong when the run had seen that peer writable after its own write (its `ManualRecoveryRequired` write did not commit, then the peer stopped answering), and when a new process finds the target writable with exactly F and no channel (made so by an external writer, not by the run) and confirms beside a source it cannot read. | Dishonest `Succeeded` beside a second writer. Needs a design decision (what the confirmation requires after an uncommitted decision or without a gate in this process). |
 
 `CooldownViolated` splits three ways so the inherent class cannot absorb a
 regression, and only the third is expected:
