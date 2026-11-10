@@ -56,10 +56,10 @@ are worth flagging here.
 
 *The role default is load-bearing.* `spec.sites[].role` is optional and defaults to
 `PrimaryCandidate`, so a site with no `role` key counts toward the two-candidate minimum and is
-required to carry `lbIP` and `taintNodeSelector`. Reading a missing role as "not a candidate" fails
+required to carry `loadBalancerIP` and `taintNodeSelector`. Reading a missing role as "not a candidate" fails
 half the fixtures.
 
-*The reader exemption is the discriminator.* `taintNodeSelector` and `lbIP` are required **unless**
+*The reader exemption is the discriminator.* `taintNodeSelector` and `loadBalancerIP` are required **unless**
 the role is `ReadOnly` — because a reader is never promoted and never tainted, so it needs neither.
 `tests/fixtures/reader-lbip.json` has a legitimate reader without them *and* a `PrimaryCandidate`
 missing both. A check that demands them unconditionally fails it; a check that never demands them

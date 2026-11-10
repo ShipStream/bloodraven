@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,9 +51,9 @@ func SetOperatorImageDefaults(image, _ string) {
 // owned PVCs are only provisioned when spec.backup declares PVC-backed
 // profiles.
 //
-// This function also emits the PITR reserved-not-implemented warning
-// event when spec.backup.pitr is explicitly enabled — PITR is a future
-// feature and the operator does not yet act on it.
+// It also warns (BackupPITRInvalid) when PITR is enabled without a
+// profile that exists. Admission refuses that combination; the warning
+// covers an object stored before the rule.
 func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	if fg.Spec.Backup == nil && fg.Spec.InitFromBackup == nil {
 		return nil
@@ -109,8 +108,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 			if profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil {
 				continue
 			}
-			if profile.Storage.PVC.ClaimName != "" {
-				// User-managed PVC; nothing to do.
+			if _, owned := ownedProfileClaim(fg.Name, &profile); !owned {
+				// A claimName profile's claim is user-managed. A profile
+				// with neither or both alternatives (only an object stored
+				// before admission required one) names no claim: the backup
+				// Job build refuses it naming the fix, and the PITR render
+				// treats it as an unresolvable profile, so nothing mounts a
+				// claim that is never provisioned.
 				continue
 			}
 			if err := r.reconcileOwnedBackupPVC(ctx, fg, profile); err != nil {
@@ -189,19 +193,27 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupScriptsConfigMap(ctx conte
 	return err
 }
 
-// reconcileOwnedBackupPVC provisions a PVC for a PVC-backed profile when
-// the user did not supply claimName.
+// reconcileOwnedBackupPVC provisions the PVC of a profile with
+// pvc.provisioned. An existing claim is never changed: the backup
+// reconciler refuses new backup Jobs on a claim that does not match
+// (ownedBackupPVCMismatch); a PITR archiver keeps writing to it.
 func (r *MysqlFailoverGroupReconciler) reconcileOwnedBackupPVC(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.BackupProfile) error {
-	if profile.Storage.PVC == nil {
+	claim, owned := ownedProfileClaim(fg.Name, &profile)
+	if !owned {
 		return nil
+	}
+	provisioned := profile.Storage.PVC.Provisioned
+	size, err := provisioned.Size.Quantity()
+	if err != nil {
+		return fmt.Errorf("pvc.provisioned.size: %w", err)
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ownedBackupPVCName(fg.Name, profile.Name),
+			Name:      claim,
 			Namespace: fg.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
 		if err := controllerutil.SetControllerReference(fg, pvc, r.Scheme); err != nil {
 			return err
 		}
@@ -216,21 +228,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileOwnedBackupPVC(ctx context.Conte
 
 		// PVC spec is largely immutable — only set on creation.
 		if pvc.CreationTimestamp.IsZero() {
-			storageSize := profile.Storage.PVC.Size
-			if storageSize.IsZero() {
-				storageSize = resource.MustParse("10Gi")
-			}
 			pvc.Spec = corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: storageSize,
+						corev1.ResourceStorage: size,
 					},
 				},
-			}
-			if profile.Storage.PVC.StorageClassName != "" {
-				sc := profile.Storage.PVC.StorageClassName
-				pvc.Spec.StorageClassName = &sc
+				StorageClassName: provisioned.StorageClassName,
 			}
 		}
 		return nil
@@ -590,6 +595,12 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 	if fg.Spec.Backup == nil || fg.Spec.Backup.Retry == nil {
 		return nil, 0, "", nil
 	}
+	// A suspended schedule makes no new backups, retries included: the
+	// procedures that stop every producer before deleting a group rely on
+	// it. Unsuspending resumes the retry from the same failed attempt.
+	if sched.Suspend {
+		return nil, 0, "", nil
+	}
 	retry := fg.Spec.Backup.Retry
 	if retry.MaxAttempts <= 1 {
 		return nil, 0, "", nil
@@ -745,4 +756,39 @@ func (r *MysqlFailoverGroupReconciler) noteScheduleRefused(fg *v1alpha1.MysqlFai
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBackupScheduleRefused,
 			"schedule %q is not run: %s", schedule, why)
 	}
+}
+
+// ownedBackupPVCMismatch compares a profile's owned claim with its
+// pvc.provisioned. A transition rule cannot see a profile that was removed
+// and added back with other values, so the claim an earlier profile of the
+// same name created may differ. It returns a refusal message when the claim
+// has another explicit class or requests less than Size, and expanded when
+// it requests more (an out-of-band expansion, which is accepted). A nil
+// class matches any class: the DefaultStorageClass admission plugin writes
+// the default's name into the claim. Size is compared with the request,
+// not with status.capacity, which provisioners round up.
+func ownedBackupPVCMismatch(provisioned *v1alpha1.ProvisionedVolumeSpec, pvc *corev1.PersistentVolumeClaim) (refusal string, expanded bool) {
+	if provisioned.StorageClassName != nil {
+		got := ""
+		if pvc.Spec.StorageClassName != nil {
+			got = *pvc.Spec.StorageClassName
+		}
+		if got != *provisioned.StorageClassName {
+			return fmt.Sprintf("PVC %s has storageClassName %q, but pvc.provisioned.storageClassName is %q; delete the claim or restore the profile's values",
+				pvc.Name, got, *provisioned.StorageClassName), false
+		}
+	}
+	want, err := provisioned.Size.Quantity()
+	if err != nil {
+		return fmt.Sprintf("pvc.provisioned.size: %v", err), false
+	}
+	request := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	switch request.Cmp(want) {
+	case -1:
+		return fmt.Sprintf("PVC %s requests %s, less than pvc.provisioned.size %s; delete the claim or restore the profile's values",
+			pvc.Name, request.String(), provisioned.Size), false
+	case 1:
+		return "", true
+	}
+	return "", false
 }

@@ -157,7 +157,7 @@ func TestRecovery_TwoDivergentSites_BothReported(t *testing.T) {
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	sites := defaultTwoSiteConfig()
 	sites = append(sites, controller.SiteTopologyConfig{
-		Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
+		Name: "dc3", Zone: "lion-dc3", LoadBalancerIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
 		TaintSelector: taintSelector("dc3"), Host: "mysql-lion-dc3.default.svc.cluster.local",
 	})
 	cfg := controller.TopologyConfig{
@@ -249,7 +249,7 @@ func TestRecovery_EmptySiteDoesNotStarveDivergentSite(t *testing.T) {
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	sites := defaultTwoSiteConfig()
 	sites = append(sites, controller.SiteTopologyConfig{
-		Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
+		Name: "dc3", Zone: "lion-dc3", LoadBalancerIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
 		TaintSelector: taintSelector("dc3"), Host: "mysql-lion-dc3.default.svc.cluster.local",
 	})
 	cfg := controller.TopologyConfig{
@@ -382,7 +382,7 @@ func TestSplitBrainFence_ReaderWritableDoesNotBlockCandidateFencing(t *testing.T
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	sites := defaultTwoSiteConfig()
 	sites = append(sites, controller.SiteTopologyConfig{
-		Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRoleReadOnly,
+		Name: "dc3", Zone: "lion-dc3", LoadBalancerIP: "3.3.3.3", Role: state.SiteRoleReadOnly,
 		TaintSelector: taintSelector("dc3"), Host: "mysql-lion-dc3.default.svc.cluster.local",
 	})
 	cfg := controller.TopologyConfig{

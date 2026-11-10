@@ -122,7 +122,12 @@ const (
 	// line break, or a key that would override an operator-owned setting,
 	// including through a `loose-`, `skip-`, `disable-`, `enable-` or
 	// `maximum-` spelling. The message names the site and the keys; remove
-	// them from `spec.mysqlConf`.
+	// them from `spec.mysqlConf`. Admission refuses the malformed keys and
+	// values, so only an object stored before that rule reaches the first
+	// case. Also emitted, without a site, when
+	// `spec.backup.pitr.maxBinlogSize` is not a byte count with an optional
+	// `k`, `m` or `g` suffix (likewise refused at admission): my.cnf gets
+	// the `100M` default instead.
 	EventMysqlConfIgnored = "MysqlConfIgnored"
 )
 
@@ -383,8 +388,9 @@ const (
 	// `spec.encryptionAtRest.enabled` was turned on for a group that is
 	// already serving, with `spec.encryptionAtRest.existingData: Refuse`
 	// (the default). Existing tablespaces would stay plaintext, so
-	// `EncryptionAtRestReady` is `False` with `AdoptionRefused`. Move onto
-	// an encrypted replica with a planned failover, or set
+	// `EncryptionAtRestReady` is `False` with `AdoptionRefused`.
+	// `enabled` cannot be turned back off. Restore a backup into a new
+	// encrypted group and move the applications to it, or set
 	// `existingData: LeavePlaintext` to accept partial coverage.
 	EventEncryptionAdoptionRefused = "EncryptionAdoptionRefused"
 	// A site's keyring moved to another phase (`Pending`, `Unsealed`,
@@ -454,10 +460,12 @@ const (
 	// Restore Job failed. Emitted once per Job; PITR failures carry a
 	// stable reason in `status.restore.reason`. For `initFromBackup` the
 	// message also states the recovery: the group stays out of service (no
-	// DNS record, no Service endpoints) and nothing is cloned; empty the
-	// target if the load had started (delete and recreate the group, or
-	// delete its MySQL PVCs), then delete the restore Job. `Ready=False`
-	// with reason `InitFromBackupFailed` says the same.
+	// DNS record, no Service endpoints) and nothing is cloned. If the load
+	// had started, empty the target: delete and recreate the group, or
+	// delete the group's MySQL pods and PVCs together, wait until the
+	// operator has re-created every claim `Bound` and every pod `Running`,
+	// then delete the restore Job. `Ready=False` with reason
+	// `InitFromBackupFailed` says the same.
 	EventRestoreFailed = "RestoreFailed"
 	// The active site an `initFromBackup` restore would load into is
 	// unreachable or in an unknown state; the restore waits in `Pending`.
@@ -472,7 +480,10 @@ const (
 	// source identity (no stamp) or a direct S3/PVC source at the root of
 	// its store, `PITRBackupFiltered` for a filtered load) also set
 	// `status.restore.reason`. `PITRBackupAfterTarget` is not raised here:
-	// the restore Job checks the target against the dump itself.
+	// the restore Job checks the target against the dump itself. A cause
+	// inside `spec.initFromBackup`, which is fixed at creation, names the
+	// recreate remedy (delete the group and create it again with the
+	// corrected block); a `restoreInPlace` cause names the edit.
 	EventRestoreBuildFailed = "RestoreBuildFailed"
 )
 
@@ -560,6 +571,8 @@ const (
 	// changed to a value that is not an RFC 3339 timestamp, so no new run
 	// starts and the previous terminal status stays. Set `confirm` to a
 	// valid timestamp newer than `status.restoreInPlace.confirmTokenUsed`.
+	// Admission refuses such a value, so only an object stored before that
+	// rule reaches it.
 	EventRestoreInPlaceConfirmIgnored = "RestoreInPlaceConfirmIgnored"
 	// The restore credentials Secret could not be refreshed while the
 	// run's restore Job exists. The Job is left running; the refresh is
@@ -772,7 +785,9 @@ const (
 
 // Events: Backup and verification scheduling. On: MysqlFailoverGroup.
 const (
-	// Schedule references an unknown backup profile.
+	// Schedule references an unknown backup profile. Admission refuses
+	// such a schedule, so only an object stored before that rule reaches
+	// it.
 	EventBackupScheduleInvalid = "BackupScheduleInvalid"
 	// The schedule's profile is
 	// [read-only](/docs/backup-and-restore/backup-encryption#read-only-profiles)
@@ -800,11 +815,13 @@ const (
 	// `spec.backup.pitr.profileName` is empty or names no entry in
 	// `spec.backup.profiles`. Binlog archiving stays disabled and
 	// `PITRArchiveReady` reports `ArchiverDisabled`; set `profileName` to
-	// an existing profile.
+	// an existing profile. Admission refuses both, so only an object
+	// stored before that rule reaches it.
 	EventBackupPITRInvalid = "BackupPITRInvalid"
 	// A backup profile sets `verification.enabled: true` but leaves
 	// `verification.schedule` empty, so no verification CronJob is created
-	// for it. Set a schedule or disable verification.
+	// for it. Set a schedule or disable verification. Admission refuses
+	// it, so only an object stored before that rule reaches it.
 	EventVerificationScheduleInvalid = "VerificationScheduleInvalid"
 )
 
@@ -825,7 +842,9 @@ const (
 	// `AWS_SECRET_ACCESS_KEY`; the message names each Secret and key.
 	// `S3CredentialsReady` is `False`, and backup, restore and cleanup
 	// Jobs fail because they do not fall back to ambient cloud
-	// credentials. Add both keys to the Secret.
+	// credentials. Add both keys to the Secret. The
+	// `initFromBackup.source.s3` Secret is checked only until the
+	// bootstrap restore succeeds; after that it can be deleted.
 	EventS3CredentialsIncomplete = "S3CredentialsIncomplete"
 )
 
@@ -925,6 +944,17 @@ const (
 	// `PendingTimedOut` after 30 minutes. Emitted once on entering the
 	// wait.
 	EventPassphraseSecretMissing = ReasonPassphraseSecretMissing
+	// Terminal: the profile's owned claim `mysql-<group>-backup-<profile>`
+	// has another StorageClass than `pvc.provisioned.storageClassName`, or
+	// requests less than `pvc.provisioned.size` (the claim was created for
+	// an earlier profile of the same name). The backup is `Failed` with
+	// `Ready=False/BackupStorageMismatch` and never writes to that claim;
+	// delete the claim or restore the profile's values.
+	EventBackupStorageMismatch = ReasonBackupStorageMismatch
+	// The profile's owned claim requests more than `pvc.provisioned.size`,
+	// for example after it was expanded out of band. The backup uses it.
+	// Emitted when a backup's Job is created.
+	EventBackupStorageExpansionAccepted = "BackupStorageExpansionAccepted"
 )
 
 // Events: Backup and verification setup. On: MysqlBackup, MysqlBackupVerification.

@@ -77,8 +77,9 @@ spec:
         storage:
           type: PVC
           pvc:
-            storageClassName: playground-fast
-            size: 2Gi
+            provisioned:
+              storageClassName: playground-fast
+              size: 2Gi
         dump:
           threads: 2
           compression: zstd

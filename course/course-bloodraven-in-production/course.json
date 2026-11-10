@@ -310,10 +310,10 @@
                   "Read `spec.sites[].role` — the status block carries no role field",
                   "Read `status.sites[].role`, which reports `ReadOnly` for the reader and `PrimaryCandidate` for `pdx`",
                   "The reader is the site whose `state` is `ReadOnly` while the other candidate's state would be `Unknown`",
-                  "The reader is the one with no `lbIP` in its status entry"
+                  "The reader is the one with no `loadBalancerIP` in its status entry"
                 ],
                 "correctOptionIndex": 0,
-                "explanation": "Role is spec, not status: `status.sites[]` carries name, state, lastSeenTime, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `PrimaryCandidate` follower and a `ReadOnly` reader sit in state `ReadOnly` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `lbIP` is spec, and status never mirrors it. (objective 8)"
+                "explanation": "Role is spec, not status: `status.sites[]` carries name, state, lastSeenTime, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `PrimaryCandidate` follower and a `ReadOnly` reader sit in state `ReadOnly` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `loadBalancerIP` is spec, and status never mirrors it. (objective 8)"
               },
               {
                 "question": "`playground` now reports `activeSite: iad`; `iad` state `Writable`; `pdx` state `ReadOnly`, `replication: Healthy`; `reader` state `Unreachable`. What `reason` does the `Degraded` condition carry?",
@@ -4777,7 +4777,7 @@
             },
             {
               "front": "spec.initFromBackup",
-              "back": "The one-shot restore entry point: it gates normal bootstrap of a brand-new group and is skipped on later reconciles once it has succeeded, even if the field is left in place.",
+              "back": "The one-shot restore entry point: it gates normal bootstrap of a brand-new group and is skipped on later reconciles once it has succeeded, even if the field is left in place. It is fixed at creation: it cannot be added to an existing group, edited or removed.",
               "orderIndex": 6
             },
             {
@@ -4832,7 +4832,7 @@
                   "`spec.restoreInPlace`, but only after deleting and recreating the failover group first."
                 ],
                 "correctOptionIndex": 1,
-                "explanation": "`spec.restoreInPlace` is the re-runnable entry point that operates against a live cluster: it fences, loads into the active primary, and resumes. `spec.initFromBackup` is one-shot and gates *bootstrap* — on an existing group that already bootstrapped, it is skipped, so setting it does nothing. There is no `MysqlRestore` CR; restore is two fields on the failover group, and reaching for a CR that does not exist is the most common wrong first move here. Deleting and recreating the group is exactly the teardown-and-rename cycle `restoreInPlace` was built to avoid. (objective 5)"
+                "explanation": "`spec.restoreInPlace` is the re-runnable entry point that operates against a live cluster: it fences, loads into the active primary, and resumes. `spec.initFromBackup` is one-shot and gates *bootstrap*, and it is fixed at creation, so admission refuses adding it to a group that already exists: a dump loaded into a serving primary would get none of the fencing `restoreInPlace` has. There is no `MysqlRestore` CR; restore is two fields on the failover group, and reaching for a CR that does not exist is the most common wrong first move here. Deleting and recreating the group is exactly the teardown-and-rename cycle `restoreInPlace` was built to avoid. (objective 5)"
               },
               {
                 "question": "Your `MysqlFailoverGroup` manifest is reconciled continuously by a GitOps controller. Leaving a `spec.restoreInPlace` block in that manifest means the destructive restore re-runs on every sync.",
@@ -5405,7 +5405,7 @@
               "Nothing. The token is not greater than `confirmTokenUsed`, so the reconciler returns on an already-matching status"
             ],
             "correctOptionIndex": 3,
-            "explanation": "`confirm` is required, must parse as an **RFC 3339 timestamp**, and must be **strictly greater** than `status.restoreInPlace.confirmTokenUsed`. Re-applying an unchanged manifest therefore carries a token that is no longer greater, and the reconciler returns on a terminal status already reflecting that value — GitOps cannot replay a destructive restore, which is the entire point of the design. Option one gets 're-runnable' right but reads it as 'runs again on its own': it means you may run another restore later, by bumping the token, not that every apply triggers one. Option two puts the check in the wrong layer — like the `pointInTime` rejection this is reconciler-side, so the apply succeeds. Option three confuses the rejection path: an *invalid* token on a re-arm emits `RestoreInPlaceConfirmIgnored` and leaves the previous terminal status **visible**; it does not tear the status down, and an unchanged valid token emits nothing at all. Programmatic callers simply send `now()`. (objective 5)"
+            "explanation": "`confirm` is required, must parse as an **RFC 3339 timestamp**, and must be **strictly greater** than `status.restoreInPlace.confirmTokenUsed`. Re-applying an unchanged manifest therefore carries a token that is no longer greater, and the reconciler returns on a terminal status already reflecting that value — GitOps cannot replay a destructive restore, which is the entire point of the design. Option one gets 're-runnable' right but reads it as 'runs again on its own': it means you may run another restore later, by bumping the token, not that every apply triggers one. Option two puts the check in the wrong layer — the API server checks only that `confirm` is an RFC 3339 timestamp; the strictly-greater comparison is reconciler-side, so the apply succeeds. Option three confuses the rejection path: the API server refuses an *invalid* token outright, `RestoreInPlaceConfirmIgnored` only covers an object stored before that rule (and leaves the previous terminal status **visible** rather than tearing it down), and an unchanged valid token emits nothing at all. Programmatic callers simply send `now()`. (objective 5)"
           },
           {
             "question": "You are asked to rotate every keyring in `playground` this evening. Right now `kubectl get mfg playground -o jsonpath='{.status.encryptionAtRest.sites}'` shows `iad Sealed` (and `iad` is the active primary), `pdx Unsealed` with `unsealReason: Rotation`, `reader Sealed`. What is the correct read of that state and the correct plan?",
@@ -5723,8 +5723,8 @@
               "orderIndex": 8
             },
             {
-              "front": "`lbIP` and `taintNodeSelector`",
-              "back": "Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and lbIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.",
+              "front": "`loadBalancerIP` and `taintNodeSelector`",
+              "back": "Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and loadBalancerIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.",
               "orderIndex": 9
             },
             {
@@ -6462,7 +6462,7 @@
             {
               "criterion": "Admission rules reproduced faithfully",
               "weight": 35,
-              "description": "All nine admission rules are checked, each against the manifest rather than against a hard-coded fixture name, and each emits the exact `REJECT <rule>` token in the fixed order. A manifest violating several produces several lines. `reader-lbip.json` is the discriminator: `lbIP` and `taintNodeSelector` are required *unless* the role is `ReadOnly`, so a check that demands them unconditionally fails it, and a check that never demands them fails `good.json`'s mutation."
+              "description": "All nine admission rules are checked, each against the manifest rather than against a hard-coded fixture name, and each emits the exact `REJECT <rule>` token in the fixed order. A manifest violating several produces several lines. `reader-lbip.json` is the discriminator: `loadBalancerIP` and `taintNodeSelector` are required *unless* the role is `ReadOnly`, so a check that demands them unconditionally fails it, and a check that never demands them fails `good.json`'s mutation."
             },
             {
               "criterion": "Silent findings separated from rejections",
@@ -6500,7 +6500,7 @@
               "code": "./tests/run.sh reader-lbip",
               "expectedOutput": "PASS",
               "weight": 20,
-              "description": "Adversarial: the reader legitimately has no `lbIP` and no `taintNodeSelector`, while a `PrimaryCandidate` in the same manifest is missing both. Exactly one REJECT. Catches both a check that demands them unconditionally and one that never demands them."
+              "description": "Adversarial: the reader legitimately has no `loadBalancerIP` and no `taintNodeSelector`, while a `PrimaryCandidate` in the same manifest is missing both. Exactly one REJECT. Catches both a check that demands them unconditionally and one that never demands them."
             },
             {
               "name": "silent_findings_do_not_reject",

@@ -106,3 +106,48 @@ func TestReconcileS3CredentialsCondition_RemovedWithoutS3Storage(t *testing.T) {
 		t.Fatalf("condition = %+v, want it removed once no S3 storage is referenced", cond)
 	}
 }
+
+// C06: spec.initFromBackup is fixed at creation, so a dedicated import
+// Secret retired after the bootstrap restore succeeded stays named on the
+// spec. It must not turn S3CredentialsReady False while the group's live
+// profile credentials are complete; before success it still counts.
+func TestReconcileS3CredentialsCondition_SucceededBootstrapImportSecretIgnored(t *testing.T) {
+	profileSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s3-creds", Namespace: "shared-lion"}, Data: map[string][]byte{
+		"AWS_ACCESS_KEY_ID": []byte("AKIA"), "AWS_SECRET_ACCESS_KEY": []byte("s"),
+	}}
+	for _, tc := range []struct {
+		name       string
+		phase      v1alpha1.BackupPhase
+		wantStatus metav1.ConditionStatus
+	}{
+		{"restore succeeded", v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue},
+		{"restore running", v1alpha1.BackupPhaseRunning, metav1.ConditionFalse},
+		{"restore failed", v1alpha1.BackupPhaseFailed, metav1.ConditionFalse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := s3CredsTestFG()
+			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{
+				S3: &v1alpha1.S3Storage{Bucket: "import", CredentialsSecretName: "import-creds"},
+			}}
+			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: tc.phase}
+			r, _ := newReconciler(fg, profileSecret.DeepCopy())
+			rec := record.NewFakeRecorder(10)
+			r.Recorder = rec
+
+			if err := r.reconcileS3CredentialsCondition(context.Background(), fg); err != nil {
+				t.Fatal(err)
+			}
+			cond := s3CredsCondition(t, r, fg)
+			if cond == nil || cond.Status != tc.wantStatus {
+				t.Fatalf("condition = %+v, want status %s", cond, tc.wantStatus)
+			}
+			mentionsImport := strings.Contains(cond.Message, "spec.initFromBackup.source.s3.credentialsSecretName")
+			if wantMention := tc.wantStatus == metav1.ConditionFalse; mentionsImport != wantMention {
+				t.Errorf("condition message %q names the import Secret = %t, want %t", cond.Message, mentionsImport, wantMention)
+			}
+			if gotEvent, wantEvent := len(rec.Events) > 0, tc.wantStatus == metav1.ConditionFalse; gotEvent != wantEvent {
+				t.Errorf("warning event emitted = %t, want %t", gotEvent, wantEvent)
+			}
+		})
+	}
+}

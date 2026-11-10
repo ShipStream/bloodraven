@@ -314,10 +314,10 @@ type Cluster struct {
 
 // SiteSpec configures one simulated site.
 type SiteSpec struct {
-	Name string
-	Host string
-	LBIP string
-	UUID string
+	Name           string
+	Host           string
+	LoadBalancerIP string
+	UUID           string
 }
 
 // NewCluster builds a cluster in a converged steady state: the first site is
@@ -345,7 +345,7 @@ func NewCluster(specs []SiteSpec, baselineTxns int64) *Cluster {
 		s := &siteData{
 			name:     sp.Name,
 			host:     sp.Host,
-			lbIP:     sp.LBIP,
+			lbIP:     sp.LoadBalancerIP,
 			uuid:     sp.UUID,
 			executed: base.clone(),
 			hasData:  baselineTxns > 0,
@@ -368,7 +368,7 @@ func NewCluster(specs []SiteSpec, baselineTxns int64) *Cluster {
 		c.sites = append(c.sites, s)
 		c.byName[sp.Name] = s
 		c.byHost[canonicalHost(sp.Host)] = s
-		c.byLBIP[sp.LBIP] = sp.Name
+		c.byLBIP[sp.LoadBalancerIP] = sp.Name
 	}
 	c.acked = base.clone()
 	return c

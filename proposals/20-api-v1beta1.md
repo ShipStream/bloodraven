@@ -614,6 +614,15 @@ first in WS-E so the template stops carrying them.
     `quantity()` library that a grow-only rule needs is available at the A-115 floor. A later release that
     implements expansion relaxes the rule, which is not breaking, in every served version identically (A-59;
     revision 5, F-27).
+  - Sizes are `StorageQuantity`, a bounded string type, not `resource.Quantity` (E6; the same type serves A-18's
+    `provisioned.size`). Reason: on the 1.31 floor the CEL cost estimator sizes an int-or-string value by the
+    request size limit and ignores `maxLength`, and controller-gen refuses `MaxLength` on a Quantity, so any rule
+    reading a size inside `spec.sites` or `spec.backup.profiles` exceeds the cost budget. A string is bounded on
+    every version, round-trips byte for byte, and still compares by value with `quantity()`. Cost: a bare byte
+    count must be quoted, and Go callers parse with `.Quantity()`. Exit: once the version floor is 1.33 or later
+    and the CRD-install envtest passes on that floor with `resource.Quantity`, the fields can go back to
+    `resource.Quantity`. That only loosens validation (the int-or-string schema admits every string this type
+    admits, and integers too), so stored objects stay valid.
   - Fix `operations.md:381`.
 
 #### A-18 Backup PVC storage: an existing claim or a provisioned claim, not both
@@ -2642,8 +2651,13 @@ Section 4 lists every documented status write with its replacement.
     `mysqlbackupverification_types.go:9-17`).
   - MFG, MDB and MSC have one (`types.go:11`, `mysqldatabase_types.go:9`, `mysqlstandbycluster_types.go:9`).
 - **Decision:**
-  - MBK: `shortName=mbk;mbks`. MBV: `shortName=mbv;mbvs`. Both get `categories=bloodraven;mysql;backup`.
+  - MBK: `shortName=mbk;mbks`. MBV: `shortName=mbv;mbvs`. Both get `categories=bloodraven;mysql`.
   - MDB keeps `mydb`, because `mdb` collides with other operators.
+  - No `backup` category (changed in the PR #276 review; E16 first shipped `categories=bloodraven;mysql;backup`).
+    kubectl expands a category before it resolves a resource name, so the category takes over the singular
+    `backup` of other operators' kinds (Velero `backups.velero.io`, CloudNativePG, the MariaDB operator, K8up).
+    `kubectl get backup` then lists Bloodraven objects, and `kubectl delete backup --all -n <ns>`, meant for the
+    other operator, deletes Bloodraven backups and, under the default `deletionPolicy: Delete`, their artifacts.
 
 #### A-94 Printer columns follow the new paths
 

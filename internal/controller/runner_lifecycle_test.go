@@ -195,7 +195,7 @@ func TestSync_UnreadableSecretDoesNotPinChangedTopology(t *testing.T) {
 	if err := c.Get(ctx, nn, &live); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
-	live.Spec.Sites[1].LBIP = "203.0.113.99"
+	live.Spec.Sites[1].LoadBalancerIP = "203.0.113.99"
 	if err := c.Update(ctx, &live); err != nil {
 		t.Fatalf("update fg: %v", err)
 	}

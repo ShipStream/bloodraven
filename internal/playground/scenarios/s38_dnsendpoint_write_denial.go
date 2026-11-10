@@ -22,7 +22,7 @@ const s38ID = "38-dnsendpoint-write-denial-during-failover"
 // forces an emergency promotion. MySQL promotion and CR status must proceed
 // normally (status writes are NOT denied), but the DNSEndpoint target stays
 // stale because the operator's apply is forbidden. After the ClusterRole is
-// restored the DNSEndpoint must flip to the promoted site's LBIP within 90s
+// restored the DNSEndpoint must flip to the promoted site's LoadBalancerIP within 90s
 // via the operator's per-poll DNS retry — with no second MySQL failover.
 func scenario38DNSEndpointWriteDenial() runner.Scenario {
 	var (
@@ -38,7 +38,7 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 		Title: "DNSEndpoint write denial during failover heals after RBAC restore without re-failover",
 		Hypothesis: "Denying the operator write verbs on dnsendpoints then scaling the active primary to 0 " +
 			"still promotes the peer (status.activeSite and lastFailoverTarget flip) while the DNSEndpoint target " +
-			"stays stale. After RBAC is restored the DNSEndpoint catches up to the promoted site's LBIP within " +
+			"stays stale. After RBAC is restored the DNSEndpoint catches up to the promoted site's LoadBalancerIP within " +
 			"90s without another failover.",
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#38-dnsendpoint-write-denial-during-failover",
@@ -61,7 +61,7 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 					}
 					peerLBIP = siteLBIP(mfg, peerSite)
 					if peerLBIP == "" {
-						return fmt.Errorf("peer site %s has no spec.lbIP", peerSite)
+						return fmt.Errorf("peer site %s has no spec.sites[].loadBalancerIP", peerSite)
 					}
 
 					targets, found, err := env.Kube.GetDNSEndpointTargets(ctx, env.Namespace, env.FG)
@@ -73,10 +73,10 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 					}
 					dnsBefore = targets
 					activeLBIP := siteLBIP(mfg, activeSite)
-					env.Capture.Note(fmt.Sprintf("pre-injection: activeSite=%s (lbIP=%s) peer=%s (lbIP=%s) DNSEndpoint targets=%v",
+					env.Capture.Note(fmt.Sprintf("pre-injection: activeSite=%s (loadBalancerIP=%s) peer=%s (loadBalancerIP=%s) DNSEndpoint targets=%v",
 						activeSite, activeLBIP, peerSite, peerLBIP, dnsBefore))
 					if stringsContain(dnsBefore, peerLBIP) {
-						return fmt.Errorf("DNSEndpoint already points at peer LBIP %s before injection; cannot prove a flip", peerLBIP)
+						return fmt.Errorf("DNSEndpoint already points at peer LoadBalancerIP %s before injection; cannot prove a flip", peerLBIP)
 					}
 
 					if _, err := env.Logs("operator"); err != nil {
@@ -119,7 +119,7 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 					}
 
 					// The DNSEndpoint apply is forbidden, so the target must not
-					// have advanced to the peer LBIP. Confirm over a short dwell
+					// have advanced to the peer LoadBalancerIP. Confirm over a short dwell
 					// so a slow apply is not mistaken for a stale target.
 					dwell := time.Now().Add(20 * time.Second)
 					for {
@@ -128,10 +128,10 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 							return fmt.Errorf("read DNSEndpoint targets during denial: %w", err)
 						}
 						if stringsContain(targets, peerLBIP) {
-							return fmt.Errorf("DNSEndpoint advanced to peer LBIP %s while writes were denied (targets=%v)", peerLBIP, targets)
+							return fmt.Errorf("DNSEndpoint advanced to peer LoadBalancerIP %s while writes were denied (targets=%v)", peerLBIP, targets)
 						}
 						if time.Now().After(dwell) {
-							env.Capture.Note(fmt.Sprintf("DNSEndpoint target stayed stale during denial: %v (peer LBIP %s absent)", targets, peerLBIP))
+							env.Capture.Note(fmt.Sprintf("DNSEndpoint target stayed stale during denial: %v (peer LoadBalancerIP %s absent)", targets, peerLBIP))
 							break
 						}
 						select {
@@ -153,7 +153,7 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 			},
 			{
 				Phase: runner.PhaseVerify,
-				Name:  "restore RBAC; DNSEndpoint heals to promoted LBIP within 90s (no re-failover)",
+				Name:  "restore RBAC; DNSEndpoint heals to promoted LoadBalancerIP within 90s (no re-failover)",
 				Do: func(ctx context.Context, env *runner.Env) error {
 					if restoreRBAC == nil {
 						return fmt.Errorf("internal: restoreRBAC closure not set")
@@ -178,12 +178,12 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 						if err == nil {
 							lastTargets = targets
 							if stringsContain(targets, peerLBIP) {
-								env.Capture.Note(fmt.Sprintf("DNSEndpoint healed to promoted LBIP %s (targets=%v)", peerLBIP, targets))
+								env.Capture.Note(fmt.Sprintf("DNSEndpoint healed to promoted LoadBalancerIP %s (targets=%v)", peerLBIP, targets))
 								break
 							}
 						}
 						if time.Now().After(deadline) {
-							return fmt.Errorf("DNSEndpoint did not heal to peer LBIP %s within 90s (last targets=%v)", peerLBIP, lastTargets)
+							return fmt.Errorf("DNSEndpoint did not heal to peer LoadBalancerIP %s within 90s (last targets=%v)", peerLBIP, lastTargets)
 						}
 						select {
 						case <-waitCtx.Done():
@@ -243,9 +243,9 @@ func scenario38DNSEndpointWriteDenial() runner.Scenario {
 						return fmt.Errorf("read final DNSEndpoint targets: %w", err)
 					}
 					if !stringsContain(targets, peerLBIP) {
-						return fmt.Errorf("final DNSEndpoint targets %v do not include the active site LBIP %s", targets, peerLBIP)
+						return fmt.Errorf("final DNSEndpoint targets %v do not include the active site LoadBalancerIP %s", targets, peerLBIP)
 					}
-					env.Capture.Note(fmt.Sprintf("final DNSEndpoint targets=%v match active site %s LBIP %s", targets, peerSite, peerLBIP))
+					env.Capture.Note(fmt.Sprintf("final DNSEndpoint targets=%v match active site %s LoadBalancerIP %s", targets, peerSite, peerLBIP))
 					return nil
 				},
 			},

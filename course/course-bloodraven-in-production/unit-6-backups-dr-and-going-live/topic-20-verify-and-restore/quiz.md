@@ -35,7 +35,7 @@ A verification restores the artifact into an ephemeral throwaway mysqld and runs
 
 **Explanation:**
 
-`spec.restoreInPlace` is the re-runnable entry point that operates against a live cluster: it fences, loads into the active primary, and resumes. `spec.initFromBackup` is one-shot and gates *bootstrap* — on an existing group that already bootstrapped, it is skipped, so setting it does nothing. There is no `MysqlRestore` CR; restore is two fields on the failover group, and reaching for a CR that does not exist is the most common wrong first move here. Deleting and recreating the group is exactly the teardown-and-rename cycle `restoreInPlace` was built to avoid. (objective 5)
+`spec.restoreInPlace` is the re-runnable entry point that operates against a live cluster: it fences, loads into the active primary, and resumes. `spec.initFromBackup` is one-shot and gates *bootstrap*, and it is fixed at creation, so admission refuses adding it to a group that already exists: a dump loaded into a serving primary would get none of the fencing `restoreInPlace` has. There is no `MysqlRestore` CR; restore is two fields on the failover group, and reaching for a CR that does not exist is the most common wrong first move here. Deleting and recreating the group is exactly the teardown-and-rename cycle `restoreInPlace` was built to avoid. (objective 5)
 
 ## Question 3
 

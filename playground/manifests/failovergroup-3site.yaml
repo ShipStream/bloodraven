@@ -1,10 +1,14 @@
 # Three-site playground variant: two PrimaryCandidate sites (iad, pdx)
 # plus a cross-region DisasterRecovery follower (fra). Useful for exercising the
 # "only PrimaryCandidate can be promoted" and "sitePriorities picks the
-# split-brain winner" behaviours without touching the default 2-site
-# manifest.
+# split-brain winner" behaviours without touching the default manifest
+# (iad, pdx and a ReadOnly reader).
 #
-# Apply instead of (not alongside) failovergroup.yaml.
+# Use instead of failovergroup.yaml, on a fresh group:
+#   ./playground/teardown.sh
+#   BLOODRAVEN_SETUP_TOPOLOGY=3site ./playground/setup.sh
+# It cannot be applied over a group created from failovergroup.yaml: sites
+# cannot be removed or renamed, so admission refuses dropping `reader`.
 apiVersion: shipstream.io/v1alpha1
 kind: MysqlFailoverGroup
 metadata:
@@ -31,7 +35,7 @@ spec:
       taintNodeSelector:
         bloodraven.shipstream.io/failover-group.playground: "true"
         bloodraven.shipstream.io/site.playground: iad
-      lbIP: "10.96.100.10"
+      loadBalancerIP: "10.96.100.10"
       storage:
         storageClassName: playground-fast
         size: 1Gi
@@ -45,7 +49,7 @@ spec:
       taintNodeSelector:
         bloodraven.shipstream.io/failover-group.playground: "true"
         bloodraven.shipstream.io/site.playground: pdx
-      lbIP: "10.96.100.20"
+      loadBalancerIP: "10.96.100.20"
       storage:
         storageClassName: playground-fast
         size: 1Gi
@@ -59,7 +63,7 @@ spec:
       taintNodeSelector:
         bloodraven.shipstream.io/failover-group.playground: "true"
         bloodraven.shipstream.io/site.playground: fra
-      lbIP: "10.96.100.30"
+      loadBalancerIP: "10.96.100.30"
       storage:
         storageClassName: playground-fast
         size: 1Gi

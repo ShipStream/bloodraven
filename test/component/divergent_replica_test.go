@@ -68,8 +68,8 @@ func TestDivergentReplica_Issue202UpgradeStallsUntilReconciled(t *testing.T) {
 	dc2 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: div202Replica,
 		replicaStatus: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: dc1Host, SecondsBehindSource: &lag}}
 	sites := []controller.SiteTopologyConfig{
-		{Name: "dc1", Zone: "lion-dc1", LBIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: dc1Host},
-		{Name: "dc2", Zone: "lion-dc2", LBIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: dc2Host},
+		{Name: "dc1", Zone: "lion-dc1", LoadBalancerIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: dc1Host},
+		{Name: "dc2", Zone: "lion-dc2", LoadBalancerIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: dc2Host},
 	}
 	clk := clock.NewFakeClock(time.Date(2026, 10, 29, 5, 30, 0, 0, time.UTC))
 	fc := controller.NewFailoverController(logger)

@@ -50,7 +50,7 @@ Operators reach for a `MysqlRestore` CR. **There is no restore CR.** Restore is 
 
 | Field | Shape | Use it to |
 | --- | --- | --- |
-| `spec.initFromBackup` | one-shot; gates normal bootstrap, skipped after success even if left in place | seed a brand-new group from an artifact |
+| `spec.initFromBackup` | one-shot; gates normal bootstrap, skipped after success even if left in place; fixed at creation (cannot be added, edited or removed) | seed a brand-new group from an artifact |
 | `spec.restoreInPlace` | re-runnable; no teardown-and-rename cycle | repair the live `playground` you already have |
 
 An in-place restore runs against a live cluster, so it walks discrete phases one step per reconcile, and an operator restart always lands on a well-defined observable state.
@@ -90,7 +90,7 @@ An in-place restore runs against a live cluster, so it walks discrete phases one
 
 `spec.restoreInPlace.confirm` is required, must parse as an **RFC 3339 timestamp**, and must be **strictly greater** than the timestamp in `status.restoreInPlace.confirmTokenUsed`. Programmatic callers just send `now()`.
 
-Look at what that buys. Re-applying last week's manifest does nothing: its token is no longer greater than the recorded one, so the reconciler sees a terminal status that already reflects that confirm value and returns. GitOps cannot replay a destructive restore. An invalid token on a re-arm emits a `RestoreInPlaceConfirmIgnored` event and leaves the previous terminal status visible.
+Look at what that buys. Re-applying last week's manifest does nothing: its token is no longer greater than the recorded one, so the reconciler sees a terminal status that already reflects that confirm value and returns. GitOps cannot replay a destructive restore. The API server refuses a token that is not an RFC 3339 timestamp, so an invalid token never reaches the operator; only the strictly-greater comparison happens in the reconciler.
 
 ## Why `pointInTime` gets rejected, and where it does not exist
 

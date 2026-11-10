@@ -11,7 +11,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -34,22 +33,22 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 					Name:              "dc1",
 					ServerID:          101,
 					Zone:              "lion-dc1",
-					LBIP:              "203.0.113.1",
+					LoadBalancerIP:    "203.0.113.1",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "standard",
-						Size:             resource.MustParse("10Gi"),
+						Size:             "10Gi",
 					},
 				},
 				{
 					Name:              "dc2",
 					ServerID:          102,
 					Zone:              "lion-dc2",
-					LBIP:              "203.0.113.2",
+					LoadBalancerIP:    "203.0.113.2",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "standard",
-						Size:             resource.MustParse("10Gi"),
+						Size:             "10Gi",
 					},
 				},
 			},
@@ -124,7 +123,7 @@ func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
 	readerSite := func() v1alpha1.SiteSpec {
 		return v1alpha1.SiteSpec{
 			Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-			Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
+			Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
 		}
 	}
 	tests := []struct {
@@ -135,11 +134,11 @@ func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
 		{name: "reader omits placement", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites = append(fg.Spec.Sites, readerSite()) }, wantOK: true},
 		{name: "reader accepts legacy placement", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
 			r := readerSite()
-			r.LBIP = "203.0.113.3"
+			r.LoadBalancerIP = "203.0.113.3"
 			r.TaintNodeSelector = map[string]string{"site": "reader"}
 			fg.Spec.Sites = append(fg.Spec.Sites, r)
 		}, wantOK: true},
-		{name: "candidate requires lb ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].LBIP = "" }},
+		{name: "candidate requires lb ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].LoadBalancerIP = "" }},
 		{name: "dr only requires selector", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
 			fg.Spec.Sites[0].Role = v1alpha1.SiteRoleDisasterRecovery
 			fg.Spec.Sites[0].TaintNodeSelector = nil
@@ -191,7 +190,7 @@ func TestEnvtest_ReadOnlyRoleTransitions(t *testing.T) {
 	fg := newTestFG(ns)
 	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{
 		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-		Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
+		Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
 	})
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
@@ -204,13 +203,13 @@ func TestEnvtest_ReadOnlyRoleTransitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDisasterRecovery
-	fg.Spec.Sites[2].LBIP = "203.0.113.3"
+	fg.Spec.Sites[2].LoadBalancerIP = "203.0.113.3"
 	fg.Spec.Sites[2].TaintNodeSelector = map[string]string{"site": "reader"}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatalf("reader to dr-only transition with placement rejected: %v", err)
 	}
 	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleReadOnly
-	fg.Spec.Sites[2].LBIP = ""
+	fg.Spec.Sites[2].LoadBalancerIP = ""
 	fg.Spec.Sites[2].TaintNodeSelector = nil
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatalf("dr-only to reader transition rejected: %v", err)
@@ -611,7 +610,8 @@ func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
 	ensureSecret(t, nsNone)
 
 	invalid := newTestFG(nsInvalid)
-	invalid.Spec.License = "this-is-not-a-valid-token"
+	// A compact JWS (admission requires the shape) that no key verifies.
+	invalid.Spec.License = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ4In0.bm90LWEtc2lnbmF0dXJl"
 	if err := k8sClient.Create(ctx, invalid); err != nil {
 		t.Fatalf("spec.license must be admitted: %v", err)
 	}

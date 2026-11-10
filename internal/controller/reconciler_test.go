@@ -50,11 +50,11 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					Name:              "dc1",
 					ServerID:          101,
 					Zone:              "lion-dc1",
-					LBIP:              "203.0.113.1",
+					LoadBalancerIP:    "203.0.113.1",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc1",
-						Size:             resource.MustParse("100Gi"),
+						Size:             "100Gi",
 					},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
@@ -67,11 +67,11 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					Name:              "dc2",
 					ServerID:          102,
 					Zone:              "lion-dc2",
-					LBIP:              "203.0.113.2",
+					LoadBalancerIP:    "203.0.113.2",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc2",
-						Size:             resource.MustParse("100Gi"),
+						Size:             "100Gi",
 					},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
@@ -381,7 +381,7 @@ func TestReconcile_TLSConfig(t *testing.T) {
 
 func TestReconcile_MysqlConfOverrides(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.MysqlConf = map[string]string{
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{
 		"max-connections": "1000",
 		"custom-setting":  "value",
 	}
@@ -736,7 +736,7 @@ func TestGenerateMyCnf_StripsLogBinDisableAliases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.MysqlConf = map[string]string{tt.key: ""}
+			fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{tt.key: ""}
 
 			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if strings.Contains(cnf, "skip-log-bin") || strings.Contains(cnf, "disable-log-bin") {
@@ -769,7 +769,7 @@ func TestGenerateMyCnf_OwnsReplicaPreserveCommitOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
 			if tt.key != "" {
-				conf := map[string]string{tt.key: tt.val}
+				conf := map[string]v1alpha1.MysqlConfValue{tt.key: v1alpha1.MysqlConfValue(tt.val)}
 				if tt.site {
 					fg.Spec.Sites[0].MysqlConf = conf
 				} else {
@@ -801,7 +801,7 @@ func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.MysqlConf = map[string]string{tt.key: "0"}
+			fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{tt.key: "0"}
 
 			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if !strings.Contains(cnf, "log-bin-trust-function-creators=0") {
@@ -978,7 +978,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	fg := newTestFG()
 	reader := v1alpha1.SiteSpec{
 		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-		Storage: v1alpha1.StorageSpec{StorageClassName: "local", Size: resource.MustParse("10Gi")},
+		Storage: v1alpha1.StorageSpec{StorageClassName: "local", Size: "10Gi"},
 		ServiceTemplate: &v1alpha1.SiteServiceTemplate{
 			Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
 			NodePort: 31001, Annotations: map[string]string{"site": "reader"},
@@ -1017,7 +1017,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 func TestReaderLoadBalancerIPLifecycle(t *testing.T) {
 	fg := newTestFG()
 	reader := v1alpha1.SiteSpec{
-		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, LBIP: "203.0.113.30",
+		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, LoadBalancerIP: "203.0.113.30",
 		ServiceTemplate: &v1alpha1.SiteServiceTemplate{Type: corev1.ServiceTypeLoadBalancer},
 	}
 	r, c := newReconciler(fg)
@@ -1030,8 +1030,8 @@ func TestReaderLoadBalancerIPLifecycle(t *testing.T) {
 	if err := c.Get(ctx, key, &svc); err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.Spec.LoadBalancerIP; got != reader.LBIP {
-		t.Fatalf("loadBalancerIP = %q, want %q", got, reader.LBIP)
+	if got := svc.Spec.LoadBalancerIP; got != reader.LoadBalancerIP {
+		t.Fatalf("loadBalancerIP = %q, want %q", got, reader.LoadBalancerIP)
 	}
 
 	reader.ServiceTemplate.Type = corev1.ServiceTypeClusterIP
@@ -1070,9 +1070,9 @@ func TestMutateServiceSpecLifecycle(t *testing.T) {
 
 func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.MysqlConf = map[string]string{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
+	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
 	site := fg.Spec.Sites[0]
-	site.MysqlConf = map[string]string{"max-connections": "700", "log_bin": "/unsafe"}
+	site.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max-connections": "700", "log_bin": "/unsafe"}
 	cnf := generateMyCnf(fg, pitrEnabled(fg), site)
 	for _, want := range []string{"max-connections=700", "sync-binlog=0", "gtid-mode=ON", "log-bin=/var/lib/mysql/mysql-bin"} {
 		if !strings.Contains(cnf, want) {
@@ -1080,7 +1080,7 @@ func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 		}
 	}
 	fg2 := fg.DeepCopy()
-	fg2.Spec.MysqlConf = map[string]string{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
+	fg2.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
 	if ComputeSpecHash(fg, site, "", testPITRRender(fg)) != ComputeSpecHash(fg2, site, "", testPITRRender(fg2)) {
 		t.Fatal("normalized equivalent MySQL settings must hash identically")
 	}
@@ -1820,7 +1820,7 @@ func TestReconcile_StartupDefersExistingDeploymentsBeforeManagerRegistration(t *
 	fresh.Spec.Image = "mysql:startup-drift"
 	fresh.Spec.Sites = append(fresh.Spec.Sites, v1alpha1.SiteSpec{
 		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly,
-		Storage: v1alpha1.StorageSpec{StorageClassName: "local-reader", Size: resource.MustParse("10Gi")},
+		Storage: v1alpha1.StorageSpec{StorageClassName: "local-reader", Size: "10Gi"},
 	})
 	if err := c.Update(ctx, &fresh); err != nil {
 		t.Fatal(err)
@@ -2016,7 +2016,7 @@ func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 			Name: "nightly",
 			Storage: v1alpha1.BackupStorage{
 				Type: v1alpha1.BackupStoragePVC,
-				PVC:  &v1alpha1.PVCStorage{StorageClassName: "fast", Size: resource.MustParse("50Gi")},
+				PVC:  &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{StorageClassName: new("fast"), Size: "50Gi"}},
 			},
 		}},
 		Schedules: []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly", Schedule: "0 2 * * *"}},

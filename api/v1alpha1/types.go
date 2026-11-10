@@ -12,6 +12,12 @@ import (
 // +kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.activeSite`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')",message="metadata.name must be a DNS-1035 label (a lowercase letter, then lowercase letters, digits or '-', ending in a letter or digit): it starts the names of the group's Services"
+// +kubebuilder:validation:XValidation:rule="self.spec.sites.all(s, size(self.metadata.name) + size(s.name) <= 41)",message="metadata.name plus each spec.sites[].name must be at most 41 characters: the site's Dragonfly StatefulSet <group>-dragonfly-<site> must fit in 52"
+// +kubebuilder:validation:XValidation:rule="oldSelf.spec.sites.all(o, self.spec.sites.exists(s, s.name == o.name))",message="spec.sites cannot be removed or renamed; see the site-replacement procedure (Operations > Replacing a site)"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.initFromBackup) == has(oldSelf.spec.initFromBackup) && (!has(self.spec.initFromBackup) || ((has(self.spec.initFromBackup.source.backupRef) == has(oldSelf.spec.initFromBackup.source.backupRef) && (!has(self.spec.initFromBackup.source.backupRef) || self.spec.initFromBackup.source.backupRef.name == oldSelf.spec.initFromBackup.source.backupRef.name)) && (has(self.spec.initFromBackup.source.s3) == has(oldSelf.spec.initFromBackup.source.s3) && (!has(self.spec.initFromBackup.source.s3) || (self.spec.initFromBackup.source.s3.bucket == oldSelf.spec.initFromBackup.source.s3.bucket && (has(self.spec.initFromBackup.source.s3.prefix) ? self.spec.initFromBackup.source.s3.prefix : '') == (has(oldSelf.spec.initFromBackup.source.s3.prefix) ? oldSelf.spec.initFromBackup.source.s3.prefix : '') && (has(self.spec.initFromBackup.source.s3.region) ? self.spec.initFromBackup.source.s3.region : '') == (has(oldSelf.spec.initFromBackup.source.s3.region) ? oldSelf.spec.initFromBackup.source.s3.region : '') && (has(self.spec.initFromBackup.source.s3.endpointURL) ? self.spec.initFromBackup.source.s3.endpointURL : '') == (has(oldSelf.spec.initFromBackup.source.s3.endpointURL) ? oldSelf.spec.initFromBackup.source.s3.endpointURL : '') && self.spec.initFromBackup.source.s3.credentialsSecretName == oldSelf.spec.initFromBackup.source.s3.credentialsSecretName))) && (has(self.spec.initFromBackup.source.pvc) == has(oldSelf.spec.initFromBackup.source.pvc) && (!has(self.spec.initFromBackup.source.pvc) || (self.spec.initFromBackup.source.pvc.claimName == oldSelf.spec.initFromBackup.source.pvc.claimName && (has(self.spec.initFromBackup.source.pvc.subPath) ? self.spec.initFromBackup.source.pvc.subPath : '') == (has(oldSelf.spec.initFromBackup.source.pvc.subPath) ? oldSelf.spec.initFromBackup.source.pvc.subPath : '')))) && (has(self.spec.initFromBackup.decryption) == has(oldSelf.spec.initFromBackup.decryption) && (!has(self.spec.initFromBackup.decryption) || (self.spec.initFromBackup.decryption.passphraseSecretKeyRef.name == oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.name && (has(self.spec.initFromBackup.decryption.passphraseSecretKeyRef.key) ? self.spec.initFromBackup.decryption.passphraseSecretKeyRef.key : '') == (has(oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.key) ? oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.key : '')))) && (has(self.spec.initFromBackup.loadOptions) == has(oldSelf.spec.initFromBackup.loadOptions) && (!has(self.spec.initFromBackup.loadOptions) || ((has(self.spec.initFromBackup.loadOptions.threads) ? self.spec.initFromBackup.loadOptions.threads : 0) == (has(oldSelf.spec.initFromBackup.loadOptions.threads) ? oldSelf.spec.initFromBackup.loadOptions.threads : 0) && (has(self.spec.initFromBackup.loadOptions.skipBinlog) == has(oldSelf.spec.initFromBackup.loadOptions.skipBinlog) && (!has(self.spec.initFromBackup.loadOptions.skipBinlog) || self.spec.initFromBackup.loadOptions.skipBinlog == oldSelf.spec.initFromBackup.loadOptions.skipBinlog)) && (has(self.spec.initFromBackup.loadOptions.loadIndexes) == has(oldSelf.spec.initFromBackup.loadOptions.loadIndexes) && (!has(self.spec.initFromBackup.loadOptions.loadIndexes) || self.spec.initFromBackup.loadOptions.loadIndexes == oldSelf.spec.initFromBackup.loadOptions.loadIndexes)) && (has(self.spec.initFromBackup.loadOptions.includeSchemas) ? self.spec.initFromBackup.loadOptions.includeSchemas : []) == (has(oldSelf.spec.initFromBackup.loadOptions.includeSchemas) ? oldSelf.spec.initFromBackup.loadOptions.includeSchemas : []) && (has(self.spec.initFromBackup.loadOptions.excludeSchemas) ? self.spec.initFromBackup.loadOptions.excludeSchemas : []) == (has(oldSelf.spec.initFromBackup.loadOptions.excludeSchemas) ? oldSelf.spec.initFromBackup.loadOptions.excludeSchemas : [])))) && (has(self.spec.initFromBackup.pointInTime) == has(oldSelf.spec.initFromBackup.pointInTime) && (!has(self.spec.initFromBackup.pointInTime) || ((has(self.spec.initFromBackup.pointInTime.archiveProfileName) ? self.spec.initFromBackup.pointInTime.archiveProfileName : '') == (has(oldSelf.spec.initFromBackup.pointInTime.archiveProfileName) ? oldSelf.spec.initFromBackup.pointInTime.archiveProfileName : '') && (has(self.spec.initFromBackup.pointInTime.allowPartial) && self.spec.initFromBackup.pointInTime.allowPartial) == (has(oldSelf.spec.initFromBackup.pointInTime.allowPartial) && oldSelf.spec.initFromBackup.pointInTime.allowPartial) && self.spec.initFromBackup.pointInTime.stopTime == oldSelf.spec.initFromBackup.pointInTime.stopTime && (has(self.spec.initFromBackup.pointInTime.excludeGtids) ? self.spec.initFromBackup.pointInTime.excludeGtids : '') == (has(oldSelf.spec.initFromBackup.pointInTime.excludeGtids) ? oldSelf.spec.initFromBackup.pointInTime.excludeGtids : ''))))))",message="spec.initFromBackup is fixed at creation: it cannot be added, changed or removed. To retry a bootstrap restore that never succeeded, delete the group and create it again with the corrected block (see Backup and restore > A failed bootstrap restore)"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.encryptionAtRest) || !(has(oldSelf.spec.encryptionAtRest.enabled) && oldSelf.spec.encryptionAtRest.enabled) || (has(self.spec.encryptionAtRest) && has(self.spec.encryptionAtRest.enabled) && self.spec.encryptionAtRest.enabled)",message="spec.encryptionAtRest.enabled cannot be turned off or removed once it is true, even if encryption never started. A group without encryption is a new group restored from a backup"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.encryptionAtRest) || !(has(oldSelf.spec.encryptionAtRest.enabled) && oldSelf.spec.encryptionAtRest.enabled) || !has(self.spec.encryptionAtRest) || !(has(self.spec.encryptionAtRest.enabled) && self.spec.encryptionAtRest.enabled) || ((has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.dataFileDir) ? self.spec.encryptionAtRest.keyring.dataFileDir : '/run/mysql-keyring') == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.dataFileDir) ? oldSelf.spec.encryptionAtRest.keyring.dataFileDir : '/run/mysql-keyring') && (has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.mysqldDir) ? self.spec.encryptionAtRest.keyring.mysqldDir : '/usr/sbin') == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.mysqldDir) ? oldSelf.spec.encryptionAtRest.keyring.mysqldDir : '/usr/sbin') && (has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.pluginDir) ? self.spec.encryptionAtRest.keyring.pluginDir : '/usr/lib64/mysql/plugin') == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.pluginDir) ? oldSelf.spec.encryptionAtRest.keyring.pluginDir : '/usr/lib64/mysql/plugin'))",message="spec.encryptionAtRest.keyring.dataFileDir, mysqldDir and pluginDir cannot change while encryption is enabled"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr) || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled) && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled) && self.spec.backup.pitr.enabled) || !has(oldSelf.spec.backup.pitr.profileName) || !has(self.spec.backup.pitr.profileName) || oldSelf.spec.backup.pitr.profileName != self.spec.backup.pitr.profileName || !has(oldSelf.spec.backup.profiles) || !has(self.spec.backup.profiles) || self.spec.backup.profiles.all(p, p.name != self.spec.backup.pitr.profileName || oldSelf.spec.backup.profiles.all(o, o.name != p.name || !(o.storage.type == p.storage.type && has(o.storage.s3) == has(p.storage.s3) && (!has(o.storage.s3) || (o.storage.s3.bucket == p.storage.s3.bucket && (has(o.storage.s3.prefix) ? o.storage.s3.prefix : '') == (has(p.storage.s3.prefix) ? p.storage.s3.prefix : '') && (has(o.storage.s3.endpointURL) ? o.storage.s3.endpointURL : '') == (has(p.storage.s3.endpointURL) ? p.storage.s3.endpointURL : ''))) && has(o.storage.pvc) == has(p.storage.pvc) && (!has(o.storage.pvc) || ((has(o.storage.pvc.claimName) ? o.storage.pvc.claimName : '') == (has(p.storage.pvc.claimName) ? p.storage.pvc.claimName : '') && (has(o.storage.pvc.subPath) ? o.storage.pvc.subPath : '') == (has(p.storage.pvc.subPath) ? p.storage.pvc.subPath : '')))) || (has(o.encryption) == has(p.encryption) && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm : 'AES-256-GCM') == (has(p.encryption.algorithm) ? p.encryption.algorithm : 'AES-256-GCM') && o.encryption.passphraseSecretKeyRef.name == p.encryption.passphraseSecretKeyRef.name && (has(o.encryption.passphraseSecretKeyRef.key) ? o.encryption.passphraseSecretKeyRef.key : 'passphrase') == (has(p.encryption.passphraseSecretKeyRef.key) ? p.encryption.passphraseSecretKeyRef.key : 'passphrase'))))))",message="spec.backup.profiles[pitr.profileName].encryption (presence, algorithm, passphraseSecretKeyRef) cannot change while that profile archives PITR binlogs to the same storage; create a new profile with a new storage prefix and its own passphrase, switch spec.backup.pitr.profileName to it, wait until its archive binding is Bound, then take a full backup (see Backup encryption > Rotation)"
 
 // MysqlFailoverGroup is the Schema for the mysqlfailovergroups API.
@@ -34,6 +40,12 @@ type MysqlFailoverGroupList struct {
 	Items           []MysqlFailoverGroup `json:"items"`
 }
 
+// The initFromBackup archive-profile rule runs at creation only
+// (optionalOldSelf: oldSelf has no value on create). It tests
+// oldSelf.?sites, not oldSelf.hasValue(), so it still compiles where the
+// API server drops optionalOldSelf from a CRD (CRDValidationRatcheting off,
+// possible on 1.31 and 1.32): there it is an update-only rule that passes.
+
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
 // +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size() == 1)",message="spec.sites[].serverID must be unique within the group"
 // +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'PrimaryCandidate').size() >= 2",message="spec.sites must contain at least two sites with role PrimaryCandidate"
@@ -44,6 +56,7 @@ type MysqlFailoverGroupList struct {
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="inherited externalTrafficPolicy requires each effective site service type to be NodePort or LoadBalancer"
 // +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)",message="spec.encryptionAtRest.enabled requires spec.tls: MySQL requires a secure connection to clone encrypted data"
 // +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))",message="spec.encryptionAtRest.keyring.dataFileDir must not be inside the MySQL data directory"
+// +kubebuilder:validation:XValidation:rule="oldSelf.?sites.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime) || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup) && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name == self.initFromBackup.pointInTime.archiveProfileName))",message="spec.initFromBackup.pointInTime.archiveProfileName must name an entry of spec.backup.profiles",optionalOldSelf=true
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.7
 	// +kubebuilder:default="mysql:9.7"
@@ -86,6 +99,8 @@ type MysqlFailoverGroupSpec struct {
 	// off exponentially to a 30s cap; other sites keep this interval.
 	// Default: 2s. Bounds: 1s to 5m.
 	// +kubebuilder:default="2s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('5m')",message="pollInterval must be between 1s and 5m"
 	// +optional
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
@@ -106,6 +121,8 @@ type MysqlFailoverGroupSpec struct {
 	// anti-flap guard; it cannot be disabled. Default: 5m. Bounds: 30s to
 	// 24h.
 	// +kubebuilder:default="5m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('24h')",message="failoverCooldown must be between 30s and 24h"
 	// +optional
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
@@ -116,6 +133,8 @@ type MysqlFailoverGroupSpec struct {
 	// after promotion has completed, so it cannot kill the operator's
 	// promotion session. Default: 30s. Bounds: 1s to 10m.
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('10m')",message="connectionDrainTimeout must be between 1s and 10m"
 	// +optional
 	ConnectionDrainTimeout *metav1.Duration `json:"connectionDrainTimeout,omitempty"`
@@ -133,13 +152,18 @@ type MysqlFailoverGroupSpec struct {
 	// via SET GLOBAL before cloning), all in whole seconds, rounded up.
 	// Default: 1h. Bounds: 1m to 24h.
 	// +kubebuilder:default="1h0m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1m') && duration(self) <= duration('24h')",message="cloneTimeout must be between 1m and 24h"
 	// +optional
 	CloneTimeout *metav1.Duration `json:"cloneTimeout,omitempty"`
 
-	// MysqlConf allows overriding default my.cnf settings.
+	// MysqlConf overrides default my.cnf settings. Keys are option names
+	// (letters, digits, '_', '.', '-'); values are single lines.
 	// +optional
-	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
+	// +kubebuilder:validation:MaxProperties=128
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))",message="mysqlConf keys must be option names: letters, digits, '_', '.' or '-'"
+	MysqlConf map[string]MysqlConfValue `json:"mysqlConf,omitempty"`
 
 	// Replication configures replication health monitoring.
 	// +optional
@@ -267,10 +291,19 @@ type MysqlFailoverGroupSpec struct {
 	// it offline (no network) and exposes organization, edition, and
 	// update-period end as logs and metrics. It never gates functionality
 	// or changes failover behavior. When empty, the operator-level license
-	// is used if set; otherwise the group is observed as Community.
+	// is used if set; otherwise the group is observed as Community. The
+	// value is a compact JWS (three base64url segments joined by '.').
 	// +optional
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`
 	License string `json:"license,omitempty"`
 }
+
+// MysqlConfValue is one my.cnf option value: a single line of at most 1024
+// characters, written after "key=" as it is.
+// +kubebuilder:validation:MaxLength=1024
+// +kubebuilder:validation:Pattern=`^[^\r\n\x00]*$`
+type MysqlConfValue string
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
 //
@@ -303,7 +336,8 @@ type SplitBrainPolicySpec struct {
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=16
-	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:MaxLength=20
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +kubebuilder:validation:XValidation:rule="self.all(x, self.filter(y, y == x).size() == 1)",message="splitBrainPolicy.sitePriorities entries must be unique"
 	SitePriorities []string `json:"sitePriorities,omitempty"`
 }
@@ -394,17 +428,18 @@ func (u UpdateStrategy) EffectiveType() UpdateStrategyType {
 }
 
 // SiteSpec defines the configuration for a single site in the failover group.
-// +kubebuilder:validation:XValidation:rule="self.role == 'ReadOnly' || (has(self.taintNodeSelector) && has(self.lbIP))",message="taintNodeSelector and lbIP are required unless role is ReadOnly"
+// +kubebuilder:validation:XValidation:rule="self.role == 'ReadOnly' || (has(self.taintNodeSelector) && has(self.loadBalancerIP))",message="taintNodeSelector and loadBalancerIP are required unless role is ReadOnly"
 type SiteSpec struct {
 	// Name is the site identifier (e.g. "iad", "pdx", "lhr"), the key of
-	// spec.sites. MaxLength caps the CEL cost of the spec-level
-	// priority-membership rule. The pattern matches what the per-site
-	// Service names already require, and keeps the name safe to use in
-	// object-storage keys.
+	// spec.sites. It is a DNS label of at most 20 characters, and the
+	// group name plus the site name are at most 41 characters: the site
+	// name is part of the names of the site's Deployment, PVC, Services
+	// and Dragonfly StatefulSet, of label values and of object-storage
+	// keys. Sites cannot be removed or renamed.
 	// +required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// ServerID is the MySQL server_id of this site's server. It must be
@@ -415,7 +450,7 @@ type SiteSpec struct {
 	// +required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4294967295
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="serverID is immutable"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="serverID is immutable; see the site-replacement procedure"
 	ServerID int64 `json:"serverID"`
 
 	// Role governs whether this site can be auto-promoted on failover.
@@ -424,8 +459,14 @@ type SiteSpec struct {
 	// +optional
 	Role SiteRole `json:"role,omitempty"`
 
-	// Zone is the Kubernetes topology zone for node selection.
+	// Zone is the Kubernetes topology zone for node selection. It cannot
+	// change: the site's volume is bound to its zone. It is the value of
+	// the pods' topology.kubernetes.io/zone node selector, so it follows
+	// the Kubernetes label-value grammar.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="zone is immutable: the site's volume cannot follow its pods into another zone; see the site-replacement procedure"
 	// +required
 	Zone string `json:"zone"`
 
@@ -437,10 +478,12 @@ type SiteSpec struct {
 	// +optional
 	TaintNodeSelector map[string]string `json:"taintNodeSelector,omitempty"`
 
-	// LBIP is the load balancer IP for DNS failover.
-	// +kubebuilder:validation:MinLength=1
+	// LoadBalancerIP is the IPv4 address the DNS record points at while
+	// this site is active. Required unless role is ReadOnly.
+	// +kubebuilder:validation:Format=ipv4
+	// +kubebuilder:validation:MaxLength=15
 	// +optional
-	LBIP string `json:"lbIP,omitempty"`
+	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
 
 	// Storage configures the persistent volume for this site.
 	// +required
@@ -450,9 +493,12 @@ type SiteSpec struct {
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// MysqlConf overrides group-level MySQL settings for this site.
+	// MysqlConf overrides group-level MySQL settings for this site, with
+	// the same key and value rules as spec.mysqlConf.
 	// +optional
-	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
+	// +kubebuilder:validation:MaxProperties=128
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))",message="mysqlConf keys must be option names: letters, digits, '_', '.' or '-'"
+	MysqlConf map[string]MysqlConfValue `json:"mysqlConf,omitempty"`
 
 	// ServiceTemplate overrides the group Service template for this site's
 	// client-facing MySQL Service.
@@ -477,16 +523,41 @@ func (s SiteSpec) IsPromotable() bool {
 	return s.EffectiveRole() == SiteRolePrimaryCandidate
 }
 
-// StorageSpec defines PVC storage configuration.
+// StorageSpec defines PVC storage configuration. It is applied only when
+// the site's PVC is created, so it cannot change afterwards: the operator
+// does not resize or move a site's volume.
 type StorageSpec struct {
-	// StorageClassName is the name of the StorageClass.
+	// StorageClassName is the name of the StorageClass, a DNS-1123
+	// subdomain as the PVC requires. Immutable.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="storageClassName is immutable; see the site-replacement procedure"
 	// +required
 	StorageClassName string `json:"storageClassName"`
 
-	// Size is the requested storage size.
+	// Size is the requested storage size, such as "100Gi". Immutable; it is
+	// compared by value, so 1Gi and 1024Mi are the same size.
+	// +kubebuilder:validation:XValidation:rule="quantity(self).compareTo(quantity(oldSelf)) == 0",message="size is immutable: the operator does not resize a site's volume; expand the PVC itself, or see the site-replacement procedure"
 	// +required
-	Size resource.Quantity `json:"size"`
+	Size StorageQuantity `json:"size"`
+}
+
+// StorageQuantity is a positive storage size written as a Kubernetes
+// quantity string, such as "100Gi" or "1.5Ti". It is a string rather than
+// a resource.Quantity: the operator's own writes keep it as written, and
+// its length is bounded, which a CEL rule comparing two sizes needs to stay
+// within the cost budget. A bare integer is a number of bytes and must be
+// quoted ("10737418240").
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=64
+// +kubebuilder:validation:Pattern=`^(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$`
+// +kubebuilder:validation:XValidation:rule="quantity(self).isGreaterThan(quantity('0'))",message="a storage size must be greater than 0"
+type StorageQuantity string
+
+// Quantity parses the size. Admission refuses a value it cannot parse.
+func (q StorageQuantity) Quantity() (resource.Quantity, error) {
+	return resource.ParseQuantity(string(q))
 }
 
 // TLSSpec configures TLS for MySQL.
@@ -554,6 +625,8 @@ type SidecarSpec struct {
 	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
 	// Bounds: 3s to 10m, and at least 3x PeerCheckInterval.
 	// +kubebuilder:default="20s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('3s') && duration(self) <= duration('10m')",message="sidecar.leaseTimeout must be between 3s and 10m"
 	// +optional
 	LeaseTimeout *metav1.Duration `json:"leaseTimeout,omitempty"`
@@ -561,6 +634,8 @@ type SidecarSpec struct {
 	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
 	// Bounds: 1s to 1m.
 	// +kubebuilder:default="5s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1m')",message="sidecar.peerCheckInterval must be between 1s and 1m"
 	// +optional
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
@@ -826,7 +901,7 @@ type MysqlFailoverGroupStatus struct {
 	EncryptionAtRest *EncryptionAtRestStatus `json:"encryptionAtRest,omitempty"`
 
 	// PITRArchiveBindings are the encryption identities accepted for the
-	// PITR archive destinations this group writes or reads (#203). Written
+	// PITR archive destinations this group writes or reads. Written
 	// by the group reconciler.
 	// Durable: a binding pins the key snapshot every writer and reader of
 	// its archive mounts. A lost encrypted entry is rebuilt from the

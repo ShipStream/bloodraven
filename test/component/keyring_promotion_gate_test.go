@@ -178,7 +178,7 @@ func newThreeSiteHarness(t *testing.T, dc1, dc2, dc3 *mockMySQL) *threeSiteHarne
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	sites := defaultTwoSiteConfig()
 	sites = append(sites, controller.SiteTopologyConfig{
-		Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
+		Name: "dc3", Zone: "lion-dc3", LoadBalancerIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
 		TaintSelector: taintSelector("dc3"), Host: "mysql-lion-dc3.default.svc.cluster.local",
 	})
 	cfg := controller.TopologyConfig{

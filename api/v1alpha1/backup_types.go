@@ -24,6 +24,9 @@ const DefaultBackupImage = "container-registry.oracle.com/mysql/community-server
 // BackupSpec is the top-level backup configuration embedded in
 // MysqlFailoverGroupSpec as spec.backup. All fields are optional; omitting
 // spec.backup entirely disables backups for this failover group.
+// +kubebuilder:validation:XValidation:rule="!has(self.pitr) || !has(self.pitr.enabled) || !self.pitr.enabled || (has(self.pitr.profileName) && has(self.profiles) && self.profiles.exists(p, p.name == self.pitr.profileName))",message="spec.backup.pitr.profileName must name an entry of spec.backup.profiles when pitr.enabled is true"
+// +kubebuilder:validation:XValidation:rule="!has(self.schedules) || self.schedules.all(s, has(self.profiles) && self.profiles.exists(p, p.name == s.profileName))",message="each spec.backup.schedules[].profileName must name an entry of spec.backup.profiles"
+// +kubebuilder:validation:XValidation:rule="!has(self.profiles) || self.profiles.all(p, !has(p.verification) || !has(p.verification.pointInTime) || !has(p.verification.pointInTime.archiveProfileName) || self.profiles.exists(q, q.name == p.verification.pointInTime.archiveProfileName))",message="each spec.backup.profiles[].verification.pointInTime.archiveProfileName must name an entry of spec.backup.profiles"
 type BackupSpec struct {
 	// Image is the container image containing mysqlsh. It must include
 	// util.dumpInstance() and util.loadDump() with native S3 support
@@ -125,7 +128,7 @@ type BackupSpec struct {
 	// the full dump spills past this limit the kubelet evicts the Job
 	// pod; without the cap, a multi-GB dump can fill the node's
 	// `/var/lib/kubelet` partition and trigger DiskPressure eviction of
-	// unrelated pods (AUDIT H6). Empty value falls through to the
+	// unrelated pods. Empty value falls through to the
 	// node's ephemeral-storage limit (preserving previous behavior).
 	// The reconciler does not enforce this — it's a hint to the kubelet.
 	// +optional
@@ -160,9 +163,12 @@ type PITRSpec struct {
 	// controlling how frequently binlogs rotate. Smaller values reduce
 	// the RPO gap (the tail of transactions on a crashed primary that
 	// may not yet have been archived) at the cost of more objects in
-	// storage. Accepts any value MySQL accepts (e.g. "100M", "256M",
-	// "1073741824"). Defaults to "100M" when PITR is enabled.
+	// storage. A byte count with an optional k, m or g suffix in either
+	// case, as mysqld reads it (e.g. "100M", "512m", "1073741824").
+	// Defaults to "100M" when PITR is enabled.
 	// +kubebuilder:default="100M"
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[0-9]+[kKmMgG]?$`
 	// +optional
 	MaxBinlogSize string `json:"maxBinlogSize,omitempty"`
 
@@ -170,6 +176,8 @@ type PITRSpec struct {
 	// of binlog files against storage as a belt-and-suspenders safety
 	// net alongside inotify. Default: 60s. Bounds: 5s to 1h.
 	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5s') && duration(self) <= duration('1h')",message="archivePollInterval must be between 5s and 1h"
 	// +optional
 	ArchivePollInterval *metav1.Duration `json:"archivePollInterval,omitempty"`
@@ -293,6 +301,8 @@ type BackupRetrySpec struct {
 	// retry. Subsequent retries double the backoff until MaxBackoff.
 	// Default: 1m. Bounds: 1s to 1h.
 	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="retry.initialBackoff must be between 1s and 1h"
 	// +optional
 	InitialBackoff *metav1.Duration `json:"initialBackoff,omitempty"`
@@ -300,6 +310,8 @@ type BackupRetrySpec struct {
 	// MaxBackoff caps the exponential backoff. Default: 30m. Bounds: 1s to
 	// 24h, and at least InitialBackoff.
 	// +kubebuilder:default="30m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('24h')",message="retry.maxBackoff must be between 1s and 24h"
 	// +optional
 	MaxBackoff *metav1.Duration `json:"maxBackoff,omitempty"`
@@ -380,10 +392,8 @@ type BackupProfile struct {
 // the restore Job fail fast with a clear "decryption failed" event
 // rather than silently reloading garbage into MySQL.
 type BackupEncryptionSpec struct {
-	// Algorithm selects the encryption mechanism. Only
-	// "AES-256-GCM" is currently supported; the field is present so
-	// future releases can add envelope-over-KMS / XChaCha20-Poly1305
-	// / external key-manager modes without a breaking CRD bump.
+	// Algorithm selects the encryption mechanism. Only "AES-256-GCM" is
+	// supported.
 	// +kubebuilder:default="AES-256-GCM"
 	// +optional
 	Algorithm EncryptionAlgorithm `json:"algorithm,omitempty"`
@@ -490,7 +500,19 @@ const (
 
 // BackupStorage is a tagged union. Exactly one of S3 or PVC must be set
 // and must match the Type discriminator.
+//
+// pvc.provisioned is applied only when the operator creates the profile's
+// claim, so it is immutable for as long as the profile is in
+// spec.backup.profiles (R04, A-18). The rule sits here, not on PVCStorage,
+// so that it compares the profile's old and new storage even when one side
+// has no pvc: switching a provisioned profile to S3 and back, or an S3 or
+// claimName profile to provisioned, is refused like an edit inside pvc.
+// The profile list is a map keyed by name, so a profile added under a new
+// name has no old value and is admitted. Removing a profile and adding it
+// back under the same name in a later update is not visible here; the
+// controller refuses that profile's backups with BackupStorageMismatch.
 // +kubebuilder:validation:XValidation:rule="(self.type == 'S3' && has(self.s3) && !has(self.pvc)) || (self.type == 'PVC' && has(self.pvc) && !has(self.s3))",message="exactly one of s3 or pvc must be set and must match type"
+// +kubebuilder:validation:XValidation:rule="(has(self.pvc) && has(self.pvc.provisioned)) == (has(oldSelf.pvc) && has(oldSelf.pvc.provisioned)) && (!has(self.pvc) || !has(self.pvc.provisioned) || (has(self.pvc.provisioned.storageClassName) == has(oldSelf.pvc.provisioned.storageClassName) && (!has(self.pvc.provisioned.storageClassName) || self.pvc.provisioned.storageClassName == oldSelf.pvc.provisioned.storageClassName) && quantity(self.pvc.provisioned.size).compareTo(quantity(oldSelf.pvc.provisioned.size)) == 0))",message="pvc.provisioned is immutable and cannot be added or removed, also by changing storage.type: the operator applies it only when it creates the claim; add a profile under a new name for other values"
 type BackupStorage struct {
 	// Type is the storage backend discriminator.
 	// +required
@@ -530,6 +552,7 @@ type S3Storage struct {
 	Prefix string `json:"prefix,omitempty"`
 
 	// Region is the AWS region. Optional for non-AWS S3 stores.
+	// +kubebuilder:validation:MaxLength=64
 	// +optional
 	Region string `json:"region,omitempty"`
 
@@ -555,24 +578,25 @@ type S3Storage struct {
 	CredentialsSecretName string `json:"credentialsSecretName"`
 }
 
-// PVCStorage configures a local persistent volume as the backup destination.
-// If ClaimName is empty the operator provisions and owns a PVC named
-// "mysql-<fg>-backup-<profile>".
+// PVCStorage configures a local persistent volume as the backup destination:
+// either an existing claim (ClaimName) or a claim the operator provisions
+// and owns, named "mysql-<fg>-backup-<profile>" (Provisioned).
+// +kubebuilder:validation:XValidation:rule="has(self.claimName) != has(self.provisioned)",message="exactly one of claimName or provisioned must be set"
 type PVCStorage struct {
-	// ClaimName is the name of a pre-existing PVC to use. If empty the
-	// operator provisions a PVC per profile.
+	// ClaimName is the name of an existing PVC to use. Exactly one of
+	// ClaimName and Provisioned is set.
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="bytes(self).size() <= 253",message="claimName must be at most 253 bytes (UTF-8)"
 	// +optional
 	ClaimName string `json:"claimName,omitempty"`
 
-	// StorageClassName is used when the operator provisions the PVC.
+	// Provisioned makes the operator create and own the profile's claim,
+	// "mysql-<fg>-backup-<profile>", with this class and size. It is
+	// applied only when the claim is created, so it is immutable. Exactly
+	// one of ClaimName and Provisioned is set.
 	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
-	// Size is used when the operator provisions the PVC.
-	// +optional
-	Size resource.Quantity `json:"size,omitempty"`
+	Provisioned *ProvisionedVolumeSpec `json:"provisioned,omitempty"`
 
 	// SubPath inside the PVC to use. Each backup lands under
 	// "<subPath>/<mysqlbackup-name>/".
@@ -584,6 +608,23 @@ type PVCStorage struct {
 	SubPath string `json:"subPath,omitempty"`
 }
 
+// ProvisionedVolumeSpec is a volume the operator provisions: a claim of
+// Size, of class StorageClassName.
+type ProvisionedVolumeSpec struct {
+	// StorageClassName is the StorageClass of the claim, a DNS-1123
+	// subdomain as the PVC requires. Unset uses the cluster's default
+	// StorageClass.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// Size is the requested size of the claim, such as "50Gi".
+	// +required
+	Size StorageQuantity `json:"size"`
+}
+
 // DumpOptions maps onto the options argument of util.dumpInstance().
 type DumpOptions struct {
 	// Threads is the number of parallel dump threads.
@@ -592,8 +633,12 @@ type DumpOptions struct {
 	// +optional
 	Threads int32 `json:"threads,omitempty"`
 
-	// BytesPerChunk is the approximate chunk size (e.g. "64M").
+	// BytesPerChunk is the approximate chunk size: a byte count with an
+	// optional k, K, M or G suffix, as mysqlsh reads it (e.g. "64M",
+	// "512k"). mysqlsh refuses a lowercase m or g.
 	// +kubebuilder:default="64M"
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[0-9]+[kKMG]?$`
 	// +optional
 	BytesPerChunk string `json:"bytesPerChunk,omitempty"`
 
@@ -683,7 +728,9 @@ type BackupSchedule struct {
 	// +optional
 	TimeZone string `json:"timeZone,omitempty"`
 
-	// Suspend pauses this schedule without deleting the CronJob.
+	// Suspend pauses this schedule without deleting the CronJob. A
+	// suspended schedule's failed backup is not retried either
+	// (spec.backup.retry) until the schedule is resumed.
 	// +kubebuilder:default=false
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
@@ -776,12 +823,14 @@ type InitFromBackupPVCSource struct {
 	// ClaimName is the name of an existing PersistentVolumeClaim in the same
 	// namespace to use as the restore source.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	// +required
 	ClaimName string `json:"claimName"`
 
 	// SubPath inside the PVC where the dump is located. Optional.
 	// A ".." segment is rejected so the path cannot leave the PVC.
 	// +optional
+	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
 	SubPath string `json:"subPath,omitempty"`
 }
@@ -922,8 +971,14 @@ type RestoreInPlaceSpec struct {
 	// timestamp recorded in status.restoreInPlace.confirmTokenUsed.
 	// This gives programmatic callers a simple "just send now()" idiom
 	// while also protecting against replay (an older manifest applied
-	// accidentally will not re-trigger a restore).
+	// accidentally will not re-trigger a restore). Admission requires an
+	// upper-case "T" and "Z", an offset within -23:59..+23:59 and a
+	// digits-only fraction. The value is kept as written: the status
+	// tokens compare it byte for byte.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Format=date-time
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`
 	// +required
 	Confirm string `json:"confirm"`
 

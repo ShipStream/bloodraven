@@ -494,14 +494,9 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
 	}
 
-	execution := v.DeepCopy()
-	if group := job.Spec.Template.Labels[v1alpha1.FailoverGroupLabel]; group != "" {
-		execution.Spec.FailoverGroupRef.Name = group
-	}
-	if profile := job.Spec.Template.Labels[v1alpha1.BackupProfileLabel]; profile != "" {
-		execution.Spec.ProfileName = profile
-	}
-	r.emitTerminalMetrics(execution, verificationJobPITRMode(job))
+	// spec.failoverGroupRef and spec.profileName are immutable, so the
+	// spec names the group and profile the Job ran for.
+	r.emitTerminalMetrics(v, verificationJobPITRMode(job))
 
 	if next.Phase == v1alpha1.VerificationPhaseSucceeded {
 		emitPointInTimeEvents(r.Recorder, v, next.PointInTime)

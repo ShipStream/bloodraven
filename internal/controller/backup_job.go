@@ -14,6 +14,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 )
 
 const (
@@ -819,9 +820,9 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 		if pvc == nil {
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=PVC but storage.pvc is nil", profile.Name)
 		}
-		claim := pvc.ClaimName
-		if claim == "" {
-			claim = ownedBackupPVCName(fg.Name, profile.Name)
+		claim, _, err := pitrprofile.ClaimFor(fg.Name, profile.Name, pvc)
+		if err != nil {
+			return "", nil, nil, nil, err
 		}
 		sub := pvc.SubPath
 		if err := checkPVCSubPath(sub); err != nil {

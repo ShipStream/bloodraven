@@ -30,9 +30,9 @@ func TestEncryptionSealRoll_UpdatesReaderWhenActiveHasNoStandby(t *testing.T) {
 		IORunning: true, SQLRunning: true, SourceHost: "mysql-lion-pdx.default.svc.cluster.local",
 	}}
 	sites := []controller.SiteTopologyConfig{
-		{Name: "pdx", Zone: "zone-pdx", LBIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate,
+		{Name: "pdx", Zone: "zone-pdx", LoadBalancerIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate,
 			Host: "mysql-lion-pdx.default.svc.cluster.local"},
-		{Name: "iad", Zone: "zone-iad", LBIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate,
+		{Name: "iad", Zone: "zone-iad", LoadBalancerIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate,
 			Host: "mysql-lion-iad.default.svc.cluster.local"},
 		{Name: "reader", Zone: "zone-reader", Role: state.SiteRoleReadOnly,
 			Host: "mysql-lion-reader.default.svc.cluster.local"},

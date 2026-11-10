@@ -36,11 +36,15 @@ import (
 type EncryptionAtRestSpec struct {
 	// Enabled turns on data-at-rest encryption for every site in the
 	// group. Enabling requires spec.tls to be set, because MySQL
-	// requires a secure connection to clone encrypted data.
+	// requires a secure connection to clone encrypted data. Once true it
+	// cannot be set back to false or removed, even if encryption never
+	// started (a refused adoption): a group without encryption is a new
+	// group restored from a backup.
 	//
-	// Encryption can only be enabled on a group that has not yet
-	// bootstrapped, or adopted by an existing group via the replica-first
-	// reclone procedure documented in https://bloodraven.dev/docs/configuration/encryption-at-rest.
+	// Encryption covers all data only on a group enabled before it
+	// bootstraps. An existing group's data moves to a new encrypted group
+	// restored from a backup, as documented in
+	// https://bloodraven.dev/docs/configuration/encryption-at-rest.
 	// On a group whose sites already hold unencrypted data, ExistingData
 	// decides.
 	// +kubebuilder:default=false
@@ -51,8 +55,8 @@ type EncryptionAtRestSpec struct {
 	// group that is already serving, whose existing tablespaces MySQL
 	// does not rewrite:
 	//   - Refuse (default): encryption is not started, and
-	//     EncryptionAtRestReady is False with reason AdoptionRefused. Move
-	//     onto an encrypted replica with a planned failover instead.
+	//     EncryptionAtRestReady is False with reason AdoptionRefused.
+	//     Restore a backup into a new encrypted group instead.
 	//   - LeavePlaintext: encryption starts and covers data written from
 	//     then on; the existing tablespaces stay plaintext until they are
 	//     rebuilt (status.encryptionAtRest.sites[].coverage reports how
@@ -146,7 +150,9 @@ type EncryptionCoverageSpec struct {
 //	docker run --rm --entrypoint sh <image> -c 'command -v mysqld; mysqld --verbose --help | grep plugin_dir'
 //
 // The three paths are limited to the characters [A-Za-z0-9._/-]: the
-// operator embeds them in the mysqld launcher shell script.
+// operator embeds them in the mysqld launcher shell script. They cannot
+// change while encryption is enabled, so set them for the image before
+// enabling it.
 type KeyringSpec struct {
 	// DataFileDir is the in-container directory holding the keyring data
 	// file. It is backed by a Secret volume when sealed and by a
@@ -156,6 +162,7 @@ type KeyringSpec struct {
 	// datadirs must be checked manually.
 	// +kubebuilder:default="/run/mysql-keyring"
 	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	DataFileDir string `json:"dataFileDir,omitempty"`
 
@@ -164,6 +171,7 @@ type KeyringSpec struct {
 	// operator mounts `mysqld.my` into this directory.
 	// +kubebuilder:default="/usr/sbin"
 	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	MysqldDir string `json:"mysqldDir,omitempty"`
 
@@ -172,6 +180,7 @@ type KeyringSpec struct {
 	// the generated config into this directory.
 	// +kubebuilder:default="/usr/lib64/mysql/plugin"
 	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	PluginDir string `json:"pluginDir,omitempty"`
 
@@ -191,6 +200,8 @@ type KeyringSpec struct {
 	// escrow succeeds; the timeout only controls when the condition flips
 	// to a loud failure. Default: 10m. Bounds: 30s to 1h.
 	// +kubebuilder:default="10m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s') && duration(self) <= duration('1h')",message="keyring.escrowTimeout must be between 30s and 1h"
 	// +optional
 	EscrowTimeout *metav1.Duration `json:"escrowTimeout,omitempty"`

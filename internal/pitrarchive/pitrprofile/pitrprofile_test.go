@@ -44,13 +44,19 @@ func TestDestinationFor(t *testing.T) {
 		{
 			name: "pvc owned claim",
 			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{}}},
+				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{Size: "10Gi"}}}},
 			want: "pvc://db/mysql-orders-backup-pitr/binlogs",
+		},
+		{
+			name: "pvc neither claimName nor provisioned",
+			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
+				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{}}},
+			wantErr: true,
 		},
 		{
 			name: "pvc dot-dot",
 			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{SubPath: "../x"}}},
+				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "shared", SubPath: "../x"}}},
 			wantErr: true,
 		},
 		{
@@ -85,6 +91,39 @@ func TestDestinationFor(t *testing.T) {
 	}
 	if _, err := DestinationFor(nil, &v1alpha1.BackupProfile{}); err == nil {
 		t.Fatal("nil group accepted")
+	}
+}
+
+// A-18: one rule resolves a PVC profile's claim for every consumer:
+// claimName, else the owned claim when provisioned is set, else an error
+// that names the fix (never the owned name of a claim nobody provisions).
+func TestClaimFor(t *testing.T) {
+	provisioned := &v1alpha1.ProvisionedVolumeSpec{Size: "10Gi"}
+	for _, tc := range []struct {
+		name      string
+		pvc       *v1alpha1.PVCStorage
+		wantClaim string
+		wantOwned bool
+		wantErr   string
+	}{
+		{"claimName", &v1alpha1.PVCStorage{ClaimName: "shared"}, "shared", false, ""},
+		{"provisioned", &v1alpha1.PVCStorage{Provisioned: provisioned}, "mysql-orders-backup-nightly", true, ""},
+		{"neither", &v1alpha1.PVCStorage{SubPath: "x"}, "", false, "sets neither storage.pvc.claimName nor storage.pvc.provisioned"},
+		{"both", &v1alpha1.PVCStorage{ClaimName: "shared", Provisioned: provisioned}, "", false, "sets both"},
+		{"no pvc", nil, "", false, "has no storage.pvc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim, owned, err := ClaimFor("orders", "nightly", tc.pvc)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || claim != "" || owned {
+					t.Fatalf("ClaimFor = %q, %v, %v; want error %q and no claim", claim, owned, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || claim != tc.wantClaim || owned != tc.wantOwned {
+				t.Fatalf("ClaimFor = %q, %v, %v; want %q, %v", claim, owned, err, tc.wantClaim, tc.wantOwned)
+			}
+		})
 	}
 }
 

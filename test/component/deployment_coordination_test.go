@@ -12,7 +12,6 @@ import (
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -31,8 +30,8 @@ func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroup
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", Storage: v1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}},
-				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", Storage: v1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}},
+				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", Storage: v1alpha1.StorageSpec{Size: "1Gi"}},
+				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", Storage: v1alpha1.StorageSpec{Size: "1Gi"}},
 			},
 		},
 		Status: v1alpha1.MysqlFailoverGroupStatus{

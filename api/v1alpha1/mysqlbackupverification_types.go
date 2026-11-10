@@ -8,6 +8,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=mbv;mbvs,categories=bloodraven;mysql
 // +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.failoverGroupRef.name`
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profileName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -16,6 +17,12 @@ import (
 // +kubebuilder:printcolumn:name="Started",type=date,JSONPath=`.status.startTime`
 // +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=`.status.completionTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters: it is a label value on the objects the run creates"
+// +kubebuilder:validation:XValidation:rule="self.spec.failoverGroupRef.name == oldSelf.spec.failoverGroupRef.name",message="spec.failoverGroupRef is immutable; create a new object instead"
+// +kubebuilder:validation:XValidation:rule="self.spec.profileName == oldSelf.spec.profileName",message="spec.profileName is immutable; create a new object instead"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.backupRef) == has(oldSelf.spec.backupRef) && (!has(self.spec.backupRef) || self.spec.backupRef.name == oldSelf.spec.backupRef.name)",message="spec.backupRef is immutable; create a new object instead"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.pointInTime) == has(oldSelf.spec.pointInTime) && (!has(self.spec.pointInTime) || (self.spec.pointInTime.mode == oldSelf.spec.pointInTime.mode && has(self.spec.pointInTime.stopTime) == has(oldSelf.spec.pointInTime.stopTime) && (!has(self.spec.pointInTime.stopTime) || self.spec.pointInTime.stopTime == oldSelf.spec.pointInTime.stopTime) && (has(self.spec.pointInTime.excludeGtids) ? self.spec.pointInTime.excludeGtids : '') == (has(oldSelf.spec.pointInTime.excludeGtids) ? oldSelf.spec.pointInTime.excludeGtids : '') && (has(self.spec.pointInTime.archiveProfileName) ? self.spec.pointInTime.archiveProfileName : '') == (has(oldSelf.spec.pointInTime.archiveProfileName) ? oldSelf.spec.pointInTime.archiveProfileName : '')))",message="spec.pointInTime is immutable; create a new object instead"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.sanityCheck) == has(oldSelf.spec.sanityCheck) && (!has(self.spec.sanityCheck) || (self.spec.sanityCheck.query == oldSelf.spec.sanityCheck.query && has(self.spec.sanityCheck.minResult) == has(oldSelf.spec.sanityCheck.minResult) && (!has(self.spec.sanityCheck.minResult) || self.spec.sanityCheck.minResult == oldSelf.spec.sanityCheck.minResult) && has(self.spec.sanityCheck.timeout) == has(oldSelf.spec.sanityCheck.timeout) && (!has(self.spec.sanityCheck.timeout) || duration(self.spec.sanityCheck.timeout) == duration(oldSelf.spec.sanityCheck.timeout))))",message="spec.sanityCheck is immutable; create a new object instead"
 
 // MysqlBackupVerification is the Schema for the mysqlbackupverifications API.
 // A verification restores a MysqlBackup artifact into an ephemeral,
@@ -178,6 +185,7 @@ type SanityCheckSpec struct {
 	// (single-row, single-column) result. Multi-statement inputs are
 	// rejected to keep the timeout budget predictable.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
 	// +required
 	Query string `json:"query"`
 
@@ -192,6 +200,8 @@ type SanityCheckSpec struct {
 	// whole seconds (rounded up). Exceeding it fails the verification with
 	// reason=SanityCheckTimeout. Default: 60s. Bounds: 1s to 1h.
 	// +kubebuilder:default="1m0s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s') && duration(self) <= duration('1h')",message="sanityCheck.timeout must be between 1s and 1h"
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
@@ -344,6 +354,7 @@ type VerificationBackupRef struct {
 // MysqlFailoverGroupReconciler renders a CronJob that creates
 // MysqlBackupVerification CRs on schedule. See
 // internal/controller/backup_verification_schedule.go.
+// +kubebuilder:validation:XValidation:rule="!has(self.enabled) || !self.enabled || (has(self.schedule) && size(self.schedule) > 0)",message="verification.schedule is required when verification.enabled is true"
 type VerificationSpec struct {
 	// Enabled turns the scheduled verification CronJob on or off.
 	// Omitting spec.backup.profiles[].verification entirely is
@@ -354,6 +365,7 @@ type VerificationSpec struct {
 
 	// Schedule is a standard cron expression (5 fields). Evaluated in
 	// the TimeZone below. Required when Enabled=true.
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Schedule string `json:"schedule,omitempty"`
 

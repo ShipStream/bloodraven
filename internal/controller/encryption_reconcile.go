@@ -60,9 +60,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	logger := log.FromContext(ctx)
 
 	if !fg.Spec.EncryptionEnabled() {
-		// Turning encryption off does not decrypt anything, so this is
-		// only a status cleanup. The escrow Secrets stay: deleting them
-		// would strand any data still encrypted on disk.
+		// Defensive: admission refuses turning encryption off, so a
+		// disabled group with status.encryptionAtRest is only an object
+		// stored before that rule. Nothing is decrypted, so this is only
+		// a status cleanup. The escrow Secrets stay: deleting them would
+		// strand any data still encrypted on disk.
 		if fg.Status.EncryptionAtRest != nil {
 			for i := range fg.Status.EncryptionAtRest.Sites {
 				metrics.DeleteKeyringSiteMetrics(fg.Namespace, fg.Name, fg.Status.EncryptionAtRest.Sites[i].Name)
@@ -93,9 +95,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 			"activeSite", fg.Status.ActiveSite)
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventEncryptionAdoptionRefused,
 			"spec.encryptionAtRest.enabled was turned on for a group that is already serving from site %q. "+
-				"Existing tablespaces stay plaintext — MySQL only encrypts data written after the fact. "+
-				"Supported path: bring up a replica on an encrypted group and planned-failover onto it, or "+
-				"accept partial coverage with spec.encryptionAtRest.existingData: LeavePlaintext.",
+				"Existing tablespaces stay plaintext: MySQL only encrypts data written after the fact. "+
+				"spec.encryptionAtRest.enabled cannot be turned back off. Supported path: restore a backup into a new "+
+				"encrypted group and move the applications to it, or accept partial coverage with "+
+				"spec.encryptionAtRest.existingData: LeavePlaintext.",
 			fg.Status.ActiveSite)
 		setEncryptionRefusedCondition(fg)
 		if _, err := r.patchEncryptionStatus(ctx, fg, nil, false); err != nil {
@@ -1038,9 +1041,11 @@ func publishKeyringMetrics(namespace, group string, site *v1alpha1.SiteEncryptio
 	}
 }
 
-// setEncryptionRefusedCondition reports a refused adoption. The
-// condition stays False until the admin either reverts the flag or sets
-// spec.encryptionAtRest.existingData: LeavePlaintext.
+// setEncryptionRefusedCondition reports a refused adoption. Admission
+// refuses turning spec.encryptionAtRest.enabled back off (A-24), so the
+// condition stays False until the admin sets
+// spec.encryptionAtRest.existingData: LeavePlaintext; the other way out is
+// a new encrypted group restored from a backup.
 func setEncryptionRefusedCondition(fg *v1alpha1.MysqlFailoverGroup) {
 	setCondition(&fg.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionEncryptionAtRestReady,
@@ -1049,8 +1054,9 @@ func setEncryptionRefusedCondition(fg *v1alpha1.MysqlFailoverGroup) {
 		ObservedGeneration: fg.Generation,
 		LastTransitionTime: metav1.Now(),
 		Message: "encryption at rest cannot be enabled on a group that is already serving; " +
-			"existing tablespaces would stay plaintext. Set spec.encryptionAtRest.existingData: " +
-			"LeavePlaintext to accept partial coverage.",
+			"existing tablespaces would stay plaintext, and spec.encryptionAtRest.enabled cannot be turned back off. " +
+			"Set spec.encryptionAtRest.existingData: LeavePlaintext to accept partial coverage, " +
+			"or restore a backup into a new encrypted group.",
 	})
 }
 

@@ -105,7 +105,7 @@ Next steps:
            taintNodeSelector:
              bloodraven.shipstream.io/failover-group.orders: "true"
              bloodraven.shipstream.io/site.orders: iad
-           lbIP: 10.0.1.1
+           loadBalancerIP: 10.0.1.1
            storage:
              size: 50Gi
              storageClassName: fast-ssd
@@ -115,7 +115,7 @@ Next steps:
            taintNodeSelector:
              bloodraven.shipstream.io/failover-group.orders: "true"
              bloodraven.shipstream.io/site.orders: pdx
-           lbIP: 10.0.2.1
+           loadBalancerIP: 10.0.2.1
            storage:
              size: 50Gi
              storageClassName: fast-ssd

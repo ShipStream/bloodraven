@@ -13,6 +13,23 @@ func (s *MysqlFailoverGroupSpec) SiteByName(name string) *SiteSpec {
 	return nil
 }
 
+// Name bounds admission enforces, sized for the names the operator derives
+// from the group and site names.
+const (
+	// MaxSiteNameLength bounds spec.sites[].name and every field naming a
+	// site in a spec.
+	MaxSiteNameLength = 20
+	// MaxGroupAndSiteNameLength bounds a MysqlFailoverGroup's name plus
+	// each of its site names: the Dragonfly StatefulSet
+	// <group>-dragonfly-<site> has 11 fixed characters and must fit in 52,
+	// so that the controller-revision-hash label fits in 63.
+	MaxGroupAndSiteNameLength = 41
+	// MaxRunNameLength bounds a MysqlBackup's and a
+	// MysqlBackupVerification's name, a label value on the objects the
+	// run creates.
+	MaxRunNameLength = 63
+)
+
 // MaxServerID is the largest MySQL server_id (an unsigned 32-bit value),
 // the upper bound of spec.sites[].serverID.
 const MaxServerID = 1<<32 - 1

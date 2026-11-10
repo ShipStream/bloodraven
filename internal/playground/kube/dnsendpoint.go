@@ -31,7 +31,7 @@ func DNSEndpointName(fg string) string {
 // operator last successfully applied. Returns found=false if the object is
 // absent. Scenario 38 uses this to prove the DNS target stays stale while the
 // operator's dnsendpoints write is RBAC-denied, then flips to the promoted
-// site's LBIP after the denial is lifted.
+// site's LoadBalancerIP after the denial is lifted.
 func (c *Client) GetDNSEndpointTargets(ctx context.Context, namespace, fg string) (targets []string, found bool, err error) {
 	if namespace == "" {
 		namespace = PlaygroundNamespace

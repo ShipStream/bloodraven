@@ -10,6 +10,12 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Active (`.status.activeSite`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
+- Root CEL: `self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')`
+- Root CEL: `self.spec.sites.all(s, size(self.metadata.name) + size(s.name) <= 41)`
+- Root CEL: `oldSelf.spec.sites.all(o, self.spec.sites.exists(s, s.name == o.name))`
+- Root CEL: `has(self.spec.initFromBackup) == has(oldSelf.spec.initFromBackup) && (!has(self.spec.initFromBackup) || ((has(self.spec.initFromBackup.source.backupRef) == has(oldSelf.spec.initFromBackup.source.backupRef) && (!has(self.spec.initFromBackup.source.backupRef) || self.spec.initFromBackup.source.backupRef.name == oldSelf.spec.initFromBackup.source.backupRef.name)) && (has(self.spec.initFromBackup.source.s3) == has(oldSelf.spec.initFromBackup.source.s3) && (!has(self.spec.initFromBackup.source.s3) || (self.spec.initFromBackup.source.s3.bucket == oldSelf.spec.initFromBackup.source.s3.bucket && (has(self.spec.initFromBackup.source.s3.prefix) ? self.spec.initFromBackup.source.s3.prefix : '') == (has(oldSelf.spec.initFromBackup.source.s3.prefix) ? oldSelf.spec.initFromBackup.source.s3.prefix : '') && (has(self.spec.initFromBackup.source.s3.region) ? self.spec.initFromBackup.source.s3.region : '') == (has(oldSelf.spec.initFromBackup.source.s3.region) ? oldSelf.spec.initFromBackup.source.s3.region : '') && (has(self.spec.initFromBackup.source.s3.endpointURL) ? self.spec.initFromBackup.source.s3.endpointURL : '') == (has(oldSelf.spec.initFromBackup.source.s3.endpointURL) ? oldSelf.spec.initFromBackup.source.s3.endpointURL : '') && self.spec.initFromBackup.source.s3.credentialsSecretName == oldSelf.spec.initFromBackup.source.s3.credentialsSecretName))) && (has(self.spec.initFromBackup.source.pvc) == has(oldSelf.spec.initFromBackup.source.pvc) && (!has(self.spec.initFromBackup.source.pvc) || (self.spec.initFromBackup.source.pvc.claimName == oldSelf.spec.initFromBackup.source.pvc.claimName && (has(self.spec.initFromBackup.source.pvc.subPath) ? self.spec.initFromBackup.source.pvc.subPath : '') == (has(oldSelf.spec.initFromBackup.source.pvc.subPath) ? oldSelf.spec.initFromBackup.source.pvc.subPath : '')))) && (has(self.spec.initFromBackup.decryption) == has(oldSelf.spec.initFromBackup.decryption) && (!has(self.spec.initFromBackup.decryption) || (self.spec.initFromBackup.decryption.passphraseSecretKeyRef.name == oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.name && (has(self.spec.initFromBackup.decryption.passphraseSecretKeyRef.key) ? self.spec.initFromBackup.decryption.passphraseSecretKeyRef.key : '') == (has(oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.key) ? oldSelf.spec.initFromBackup.decryption.passphraseSecretKeyRef.key : '')))) && (has(self.spec.initFromBackup.loadOptions) == has(oldSelf.spec.initFromBackup.loadOptions) && (!has(self.spec.initFromBackup.loadOptions) || ((has(self.spec.initFromBackup.loadOptions.threads) ? self.spec.initFromBackup.loadOptions.threads : 0) == (has(oldSelf.spec.initFromBackup.loadOptions.threads) ? oldSelf.spec.initFromBackup.loadOptions.threads : 0) && (has(self.spec.initFromBackup.loadOptions.skipBinlog) == has(oldSelf.spec.initFromBackup.loadOptions.skipBinlog) && (!has(self.spec.initFromBackup.loadOptions.skipBinlog) || self.spec.initFromBackup.loadOptions.skipBinlog == oldSelf.spec.initFromBackup.loadOptions.skipBinlog)) && (has(self.spec.initFromBackup.loadOptions.loadIndexes) == has(oldSelf.spec.initFromBackup.loadOptions.loadIndexes) && (!has(self.spec.initFromBackup.loadOptions.loadIndexes) || self.spec.initFromBackup.loadOptions.loadIndexes == oldSelf.spec.initFromBackup.loadOptions.loadIndexes)) && (has(self.spec.initFromBackup.loadOptions.includeSchemas) ? self.spec.initFromBackup.loadOptions.includeSchemas : []) == (has(oldSelf.spec.initFromBackup.loadOptions.includeSchemas) ? oldSelf.spec.initFromBackup.loadOptions.includeSchemas : []) && (has(self.spec.initFromBackup.loadOptions.excludeSchemas) ? self.spec.initFromBackup.loadOptions.excludeSchemas : []) == (has(oldSelf.spec.initFromBackup.loadOptions.excludeSchemas) ? oldSelf.spec.initFromBackup.loadOptions.excludeSchemas : [])))) && (has(self.spec.initFromBackup.pointInTime) == has(oldSelf.spec.initFromBackup.pointInTime) && (!has(self.spec.initFromBackup.pointInTime) || ((has(self.spec.initFromBackup.pointInTime.archiveProfileName) ? self.spec.initFromBackup.pointInTime.archiveProfileName : '') == (has(oldSelf.spec.initFromBackup.pointInTime.archiveProfileName) ? oldSelf.spec.initFromBackup.pointInTime.archiveProfileName : '') && (has(self.spec.initFromBackup.pointInTime.allowPartial) && self.spec.initFromBackup.pointInTime.allowPartial) == (has(oldSelf.spec.initFromBackup.pointInTime.allowPartial) && oldSelf.spec.initFromBackup.pointInTime.allowPartial) && self.spec.initFromBackup.pointInTime.stopTime == oldSelf.spec.initFromBackup.pointInTime.stopTime && (has(self.spec.initFromBackup.pointInTime.excludeGtids) ? self.spec.initFromBackup.pointInTime.excludeGtids : '') == (has(oldSelf.spec.initFromBackup.pointInTime.excludeGtids) ? oldSelf.spec.initFromBackup.pointInTime.excludeGtids : ''))))))`
+- Root CEL: `!has(oldSelf.spec.encryptionAtRest) || !(has(oldSelf.spec.encryptionAtRest.enabled) && oldSelf.spec.encryptionAtRest.enabled) || (has(self.spec.encryptionAtRest) && has(self.spec.encryptionAtRest.enabled) && self.spec.encryptionAtRest.enabled)`
+- Root CEL: `!has(oldSelf.spec.encryptionAtRest) || !(has(oldSelf.spec.encryptionAtRest.enabled) && oldSelf.spec.encryptionAtRest.enabled) || !has(self.spec.encryptionAtRest) || !(has(self.spec.encryptionAtRest.enabled) && self.spec.encryptionAtRest.enabled) || ((has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.dataFileDir) ? self.spec.encryptionAtRest.keyring.dataFileDir : '/run/mysql-keyring') == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.dataFileDir) ? oldSelf.spec.encryptionAtRest.keyring.dataFileDir : '/run/mysql-keyring') && (has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.mysqldDir) ? self.spec.encryptionAtRest.keyring.mysqldDir : '/usr/sbin') == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.mysqldDir) ? oldSelf.spec.encryptionAtRest.keyring.mysqldDir : '/usr/sbin') && (has(self.spec.encryptionAtRest.keyring) && has(self.spec.encryptionAtRest.keyring.pluginDir) ? self.spec.encryptionAtRest.keyring.pluginDir : '/usr/lib64/mysql/plugin') == (has(oldSelf.spec.encryptionAtRest.keyring) && has(oldSelf.spec.encryptionAtRest.keyring.pluginDir) ? oldSelf.spec.encryptionAtRest.keyring.pluginDir : '/usr/lib64/mysql/plugin'))`
 - Root CEL: `!has(oldSelf.spec.backup) || !has(self.spec.backup) || !has(oldSelf.spec.backup.pitr) || !has(self.spec.backup.pitr) || !(has(oldSelf.spec.backup.pitr.enabled) && oldSelf.spec.backup.pitr.enabled) || !(has(self.spec.backup.pitr.enabled) && self.spec.backup.pitr.enabled) || !has(oldSelf.spec.backup.pitr.profileName) || !has(self.spec.backup.pitr.profileName) || oldSelf.spec.backup.pitr.profileName != self.spec.backup.pitr.profileName || !has(oldSelf.spec.backup.profiles) || !has(self.spec.backup.profiles) || self.spec.backup.profiles.all(p, p.name != self.spec.backup.pitr.profileName || oldSelf.spec.backup.profiles.all(o, o.name != p.name || !(o.storage.type == p.storage.type && has(o.storage.s3) == has(p.storage.s3) && (!has(o.storage.s3) || (o.storage.s3.bucket == p.storage.s3.bucket && (has(o.storage.s3.prefix) ? o.storage.s3.prefix : '') == (has(p.storage.s3.prefix) ? p.storage.s3.prefix : '') && (has(o.storage.s3.endpointURL) ? o.storage.s3.endpointURL : '') == (has(p.storage.s3.endpointURL) ? p.storage.s3.endpointURL : ''))) && has(o.storage.pvc) == has(p.storage.pvc) && (!has(o.storage.pvc) || ((has(o.storage.pvc.claimName) ? o.storage.pvc.claimName : '') == (has(p.storage.pvc.claimName) ? p.storage.pvc.claimName : '') && (has(o.storage.pvc.subPath) ? o.storage.pvc.subPath : '') == (has(p.storage.pvc.subPath) ? p.storage.pvc.subPath : '')))) || (has(o.encryption) == has(p.encryption) && (!has(o.encryption) || ((has(o.encryption.algorithm) ? o.encryption.algorithm : 'AES-256-GCM') == (has(p.encryption.algorithm) ? p.encryption.algorithm : 'AES-256-GCM') && o.encryption.passphraseSecretKeyRef.name == p.encryption.passphraseSecretKeyRef.name && (has(o.encryption.passphraseSecretKeyRef.key) ? o.encryption.passphraseSecretKeyRef.key : 'passphrase') == (has(p.encryption.passphraseSecretKeyRef.key) ? p.encryption.passphraseSecretKeyRef.key : 'passphrase'))))))`
 - `spec` CEL: `self.sites.all(x, self.sites.filter(y, y.serverID == x.serverID).size() == 1)`
 - `spec` CEL: `self.sites.filter(s, s.role == 'PrimaryCandidate').size() >= 2`
@@ -20,12 +26,13 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 - `spec` CEL: `self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)`
 - `spec` CEL: `!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))`
+- `spec` CEL: `oldSelf.?sites.hasValue() || !has(self.initFromBackup) || !has(self.initFromBackup.pointInTime) || !has(self.initFromBackup.pointInTime.archiveProfileName) || (has(self.backup) && has(self.backup.profiles) && self.backup.profiles.exists(p, p.name == self.initFromBackup.pointInTime.archiveProfileName))`
 
-### MysqlFailoverGroup `spec` (243 fields)
+### MysqlFailoverGroup `spec` (244 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
-| `spec.backup` | object |  |  |  |
+| `spec.backup` | object |  |  | CEL: `!has(self.pitr) \|\| !has(self.pitr.enabled) \|\| !self.pitr.enabled \|\| (has(self.pitr.profileName) && has(self.profiles) && self.profiles.exists(p, p.name == self.pitr.profileName))`; CEL: `!has(self.schedules) \|\| self.schedules.all(s, has(self.profiles) && self.profiles.exists(p, p.name == s.profileName))`; CEL: `!has(self.profiles) \|\| self.profiles.all(p, !has(p.verification) \|\| !has(p.verification.pointInTime) \|\| !has(p.verification.pointInTime.archiveProfileName) \|\| self.profiles.exists(q, q.name == p.verification.pointInTime.archiveProfileName))` |
 | `spec.backup.activeDeadlineSeconds` | integer (int64) |  | `7200` | minimum=60 |
 | `spec.backup.backoffLimit` | integer (int32) |  | `2` | minimum=0 |
 | `spec.backup.containerSecurityContext` | corev1.SecurityContext |  |  |  |
@@ -34,14 +41,14 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.imagePullSecrets[].name` | string |  | `""` |  |
 | `spec.backup.maxLagSecondsForSource` | integer (int64) |  | `300` | minimum=0 |
 | `spec.backup.pitr` | object |  |  |  |
-| `spec.backup.pitr.archivePollInterval` | string |  | `"1m0s"` | CEL: `duration(self) >= duration('5s') && duration(self) <= duration('1h')` |
+| `spec.backup.pitr.archivePollInterval` | string |  | `"1m0s"` | maxLength=64; CEL: `duration(self) >= duration('5s') && duration(self) <= duration('1h')` |
 | `spec.backup.pitr.enabled` | boolean |  | `false` |  |
-| `spec.backup.pitr.maxBinlogSize` | string |  | `"100M"` |  |
+| `spec.backup.pitr.maxBinlogSize` | string |  | `"100M"` | maxLength=20; pattern=`^[0-9]+[kKmMgG]?$` |
 | `spec.backup.pitr.profileName` | string |  |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `spec.backup.podSecurityContext` | corev1.PodSecurityContext |  |  |  |
 | `spec.backup.profiles` | []object |  |  | maxItems=32; listType=map keys=name |
 | `spec.backup.profiles[].dump` | object |  |  |  |
-| `spec.backup.profiles[].dump.bytesPerChunk` | string |  | `"64M"` |  |
+| `spec.backup.profiles[].dump.bytesPerChunk` | string |  | `"64M"` | maxLength=20; pattern=`^[0-9]+[kKMG]?$` |
 | `spec.backup.profiles[].dump.compression` | string |  | `"zstd"` | enum: `none`, `gzip`, `zstd` |
 | `spec.backup.profiles[].dump.consistent` | boolean |  | `true` |  |
 | `spec.backup.profiles[].dump.excludeSchemas` | []string |  |  | maxItems=256; listType=set; items minLength=1; items maxLength=64 |
@@ -58,20 +65,21 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].retention.keepFailed` | integer (int32) |  | `10` | minimum=0 |
 | `spec.backup.profiles[].retention.keepLast` | integer (int32) |  | `7` | minimum=1 |
 | `spec.backup.profiles[].retention.keepWithinDays` | integer (int32) |  |  | minimum=1 |
-| `spec.backup.profiles[].storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))` |
-| `spec.backup.profiles[].storage.pvc` | object |  |  |  |
-| `spec.backup.profiles[].storage.pvc.claimName` | string |  |  | maxLength=253; CEL: `bytes(self).size() <= 253` |
-| `spec.backup.profiles[].storage.pvc.size` | int-or-string |  |  | pattern=`^(\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$` |
-| `spec.backup.profiles[].storage.pvc.storageClassName` | string |  |  |  |
+| `spec.backup.profiles[].storage` | object | yes |  | CEL: `(self.type == 'S3' && has(self.s3) && !has(self.pvc)) \|\| (self.type == 'PVC' && has(self.pvc) && !has(self.s3))`; CEL(transition): `(has(self.pvc) && has(self.pvc.provisioned)) == (has(oldSelf.pvc) && has(oldSelf.pvc.provisioned)) && (!has(self.pvc) \|\| !has(self.pvc.provisioned) \|\| (has(self.pvc.provisioned.storageClassName) == has(oldSelf.pvc.provisioned.storageClassName) && (!has(self.pvc.provisioned.storageClassName) \|\| self.pvc.provisioned.storageClassName == oldSelf.pvc.provisioned.storageClassName) && quantity(self.pvc.provisioned.size).compareTo(quantity(oldSelf.pvc.provisioned.size)) == 0))` |
+| `spec.backup.profiles[].storage.pvc` | object |  |  | CEL: `has(self.claimName) != has(self.provisioned)` |
+| `spec.backup.profiles[].storage.pvc.claimName` | string |  |  | minLength=1; maxLength=253; CEL: `bytes(self).size() <= 253` |
+| `spec.backup.profiles[].storage.pvc.provisioned` | object |  |  |  |
+| `spec.backup.profiles[].storage.pvc.provisioned.size` | string | yes |  | minLength=1; maxLength=64; pattern=`^(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$`; CEL: `quantity(self).isGreaterThan(quantity('0'))` |
+| `spec.backup.profiles[].storage.pvc.provisioned.storageClassName` | string |  |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` |
 | `spec.backup.profiles[].storage.pvc.subPath` | string |  |  | maxLength=512; pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.backup.profiles[].storage.s3` | object |  |  |  |
 | `spec.backup.profiles[].storage.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
 | `spec.backup.profiles[].storage.s3.credentialsSecretName` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.backup.profiles[].storage.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.backup.profiles[].storage.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
-| `spec.backup.profiles[].storage.s3.region` | string |  |  |  |
+| `spec.backup.profiles[].storage.s3.region` | string |  |  | maxLength=64 |
 | `spec.backup.profiles[].storage.type` | string | yes |  | enum: `S3`, `PVC` |
-| `spec.backup.profiles[].verification` | object |  |  |  |
+| `spec.backup.profiles[].verification` | object |  |  | CEL: `!has(self.enabled) \|\| !self.enabled \|\| (has(self.schedule) && size(self.schedule) > 0)` |
 | `spec.backup.profiles[].verification.concurrencyPolicy` | string |  | `"Forbid"` | enum: `Forbid`, `Replace` |
 | `spec.backup.profiles[].verification.enabled` | boolean |  | `false` |  |
 | `spec.backup.profiles[].verification.failedJobsHistoryLimit` | integer (int32) |  | `3` | minimum=0 |
@@ -86,9 +94,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].verification.retention.keepLast` | integer (int32) |  | `30` | minimum=0 |
 | `spec.backup.profiles[].verification.sanityCheck` | object |  |  |  |
 | `spec.backup.profiles[].verification.sanityCheck.minResult` | integer (int64) |  |  | minimum=0 |
-| `spec.backup.profiles[].verification.sanityCheck.query` | string | yes |  | minLength=1 |
-| `spec.backup.profiles[].verification.sanityCheck.timeout` | string |  | `"1m0s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
-| `spec.backup.profiles[].verification.schedule` | string |  |  |  |
+| `spec.backup.profiles[].verification.sanityCheck.query` | string | yes |  | minLength=1; maxLength=4096 |
+| `spec.backup.profiles[].verification.sanityCheck.timeout` | string |  | `"1m0s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
+| `spec.backup.profiles[].verification.schedule` | string |  |  | maxLength=256 |
 | `spec.backup.profiles[].verification.startingDeadlineSeconds` | integer (int64) |  |  | minimum=0 |
 | `spec.backup.profiles[].verification.successfulJobsHistoryLimit` | integer (int32) |  | `3` | minimum=0 |
 | `spec.backup.profiles[].verification.suspend` | boolean |  | `false` |  |
@@ -96,9 +104,9 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.profiles[].verification.ttlSecondsAfterFinished` | integer (int32) |  |  | minimum=0 |
 | `spec.backup.resources` | corev1.ResourceRequirements |  |  |  |
 | `spec.backup.retry` | object |  |  | CEL: `!has(self.initialBackoff) \|\| !has(self.maxBackoff) \|\| duration(self.maxBackoff) >= duration(self.initialBackoff)` |
-| `spec.backup.retry.initialBackoff` | string |  | `"1m0s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
+| `spec.backup.retry.initialBackoff` | string |  | `"1m0s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
 | `spec.backup.retry.maxAttempts` | integer (int32) |  | `1` | minimum=1; maximum=10 |
-| `spec.backup.retry.maxBackoff` | string |  | `"30m0s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('24h')` |
+| `spec.backup.retry.maxBackoff` | string |  | `"30m0s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('24h')` |
 | `spec.backup.schedules` | []object |  |  | maxItems=32; listType=map keys=name |
 | `spec.backup.schedules[].concurrencyPolicy` | string |  | `"Forbid"` | enum: `Allow`, `Forbid`, `Replace` |
 | `spec.backup.schedules[].failedJobsHistoryLimit` | integer (int32) |  | `3` | minimum=0 |
@@ -110,8 +118,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.backup.schedules[].suspend` | boolean |  | `false` |  |
 | `spec.backup.schedules[].timeZone` | string |  | `"Etc/UTC"` |  |
 | `spec.backup.stagingVolumeSizeLimit` | int-or-string |  |  | pattern=`^(\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$` |
-| `spec.cloneTimeout` | string |  | `"1h0m0s"` | CEL: `duration(self) >= duration('1m') && duration(self) <= duration('24h')` |
-| `spec.connectionDrainTimeout` | string |  | `"30s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('10m')` |
+| `spec.cloneTimeout` | string |  | `"1h0m0s"` | maxLength=64; CEL: `duration(self) >= duration('1m') && duration(self) <= duration('24h')` |
+| `spec.connectionDrainTimeout` | string |  | `"30s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('10m')` |
 | `spec.containerSecurityContext` | corev1.SecurityContext |  |  |  |
 | `spec.credentials` | object | yes |  |  |
 | `spec.credentials.appSecretName` | string |  |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
@@ -124,17 +132,17 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.dns.ttlSeconds` | integer (int64) |  | `60` | minimum=1 |
 | `spec.dragonfly` | object |  |  | CEL: `!self.enabled \|\| (has(self.image) && self.image.size() > 0)`; CEL: `!self.enabled \|\| !self.image.endsWith(':latest')`; CEL: `!has(self.upgradeStrategy) \|\| self.upgradeStrategy != 'SnapshotRestore' \|\| (has(self.snapshot) && has(self.snapshot.dir) && self.snapshot.dir.size() > 0)` |
 | `spec.dragonfly.adminPort` | integer (int32) |  | `9999` | minimum=1; maximum=65535 |
-| `spec.dragonfly.args` | []string |  |  | listType=atomic |
+| `spec.dragonfly.args` | []string |  |  | maxItems=64; listType=atomic; items maxLength=256; CEL: `self.all(a, !a.matches('^--?(no)?(port\|admin_port\|bind\|dir\|maxmemory\|proactor_threads\|replicaof\|requirepass\|masterauth\|break_replication_on_master_restart\|s3_endpoint\|s3_use_https\|s3_sign_payload\|flagfile\|fromenv\|tryfromenv)(=\|$)'))` |
 | `spec.dragonfly.auth` | object |  |  |  |
 | `spec.dragonfly.auth.passwordSecretKeyRef` | object | yes |  |  |
 | `spec.dragonfly.auth.passwordSecretKeyRef.key` | string |  | `"password"` | minLength=1; maxLength=253; pattern=`^[-._a-zA-Z0-9]+$` |
 | `spec.dragonfly.auth.passwordSecretKeyRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.dragonfly.containerSecurityContext` | corev1.SecurityContext |  |  |  |
 | `spec.dragonfly.enabled` | boolean |  | `false` |  |
-| `spec.dragonfly.image` | string |  |  |  |
+| `spec.dragonfly.image` | string |  |  | maxLength=1024 |
 | `spec.dragonfly.maxMemory` | int-or-string |  |  | pattern=`^(\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$`; CEL: `quantity(string(self)).isGreaterThan(quantity('0'))` |
 | `spec.dragonfly.plannedFailover` | object |  |  |  |
-| `spec.dragonfly.plannedFailover.maxSyncWait` | string |  | `"30s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('10m')` |
+| `spec.dragonfly.plannedFailover.maxSyncWait` | string |  | `"30s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('10m')` |
 | `spec.dragonfly.plannedFailover.onSyncTimeout` | string |  | `"Proceed"` | enum: `Proceed`, `Fail` |
 | `spec.dragonfly.podSecurityContext` | corev1.PodSecurityContext |  |  |  |
 | `spec.dragonfly.port` | integer (int32) |  | `6379` | minimum=1; maximum=65535 |
@@ -142,7 +150,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.dragonfly.resources` | corev1.ResourceRequirements |  |  |  |
 | `spec.dragonfly.snapshot` | object |  |  |  |
 | `spec.dragonfly.snapshot.credentialsSecretName` | string |  |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
-| `spec.dragonfly.snapshot.dir` | string |  |  |  |
+| `spec.dragonfly.snapshot.dir` | string |  |  | maxLength=1024 |
 | `spec.dragonfly.snapshot.s3EndpointURL` | string |  |  | maxLength=512; pattern=`^(https?://(\[[0-9A-Fa-f:.]+\]\|[^\s/?#@:\[\]]+)(:(6553[0-5]\|655[0-2][0-9]\|65[0-4][0-9]{2}\|6[0-4][0-9]{3}\|[1-5][0-9]{4}\|[1-9][0-9]{0,3}))?/?)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.dragonfly.snapshot.s3SignPayload` | boolean |  |  |  |
 | `spec.dragonfly.snapshot.serviceAccountName` | string |  |  |  |
@@ -158,14 +166,14 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.encryptionAtRest.enabled` | boolean |  | `false` |  |
 | `spec.encryptionAtRest.existingData` | string |  | `"Refuse"` | enum: `Refuse`, `LeavePlaintext` |
 | `spec.encryptionAtRest.keyring` | object |  |  |  |
-| `spec.encryptionAtRest.keyring.dataFileDir` | string |  | `"/run/mysql-keyring"` | pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$` |
-| `spec.encryptionAtRest.keyring.escrowTimeout` | string |  | `"10m0s"` | CEL: `duration(self) >= duration('30s') && duration(self) <= duration('1h')` |
-| `spec.encryptionAtRest.keyring.mysqldDir` | string |  | `"/usr/sbin"` | pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$` |
-| `spec.encryptionAtRest.keyring.pluginDir` | string |  | `"/usr/lib64/mysql/plugin"` | pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$` |
+| `spec.encryptionAtRest.keyring.dataFileDir` | string |  | `"/run/mysql-keyring"` | maxLength=1024; pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$` |
+| `spec.encryptionAtRest.keyring.escrowTimeout` | string |  | `"10m0s"` | maxLength=64; CEL: `duration(self) >= duration('30s') && duration(self) <= duration('1h')` |
+| `spec.encryptionAtRest.keyring.mysqldDir` | string |  | `"/usr/sbin"` | maxLength=1024; pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$` |
+| `spec.encryptionAtRest.keyring.pluginDir` | string |  | `"/usr/lib64/mysql/plugin"` | maxLength=1024; pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$` |
 | `spec.encryptionAtRest.keyring.retainVersions` | integer (int32) |  | `5` | minimum=2; maximum=50 |
 | `spec.extraContainers` | []corev1.Container |  |  | maxItems=16; listType=map keys=name |
 | `spec.extraInitContainers` | []corev1.Container |  |  | maxItems=16; listType=map keys=name |
-| `spec.failoverCooldown` | string |  | `"5m0s"` | CEL: `duration(self) >= duration('30s') && duration(self) <= duration('24h')` |
+| `spec.failoverCooldown` | string |  | `"5m0s"` | maxLength=64; CEL: `duration(self) >= duration('30s') && duration(self) <= duration('24h')` |
 | `spec.failureThreshold` | integer (int32) |  | `3` | minimum=1 |
 | `spec.image` | string |  | `"mysql:9.7"` |  |
 | `spec.initFromBackup` | object |  |  | CEL: `!has(self.pointInTime) \|\| has(self.pointInTime.archiveProfileName)` |
@@ -188,30 +196,30 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.initFromBackup.source.backupRef` | object |  |  |  |
 | `spec.initFromBackup.source.backupRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.initFromBackup.source.pvc` | object |  |  |  |
-| `spec.initFromBackup.source.pvc.claimName` | string | yes |  | minLength=1 |
-| `spec.initFromBackup.source.pvc.subPath` | string |  |  | pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
+| `spec.initFromBackup.source.pvc.claimName` | string | yes |  | minLength=1; maxLength=253 |
+| `spec.initFromBackup.source.pvc.subPath` | string |  |  | maxLength=512; pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
 | `spec.initFromBackup.source.s3` | object |  |  |  |
 | `spec.initFromBackup.source.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
 | `spec.initFromBackup.source.s3.credentialsSecretName` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.initFromBackup.source.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.initFromBackup.source.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
-| `spec.initFromBackup.source.s3.region` | string |  |  |  |
-| `spec.license` | string |  |  |  |
-| `spec.mysqlConf` | map[string]string |  |  |  |
+| `spec.initFromBackup.source.s3.region` | string |  |  | maxLength=64 |
+| `spec.license` | string |  |  | maxLength=4096; pattern=`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$` |
+| `spec.mysqlConf` | map[string]string |  |  | maxProperties=128; values maxLength=1024; values pattern=`^[^\r\n\x00]*$`; CEL: `self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))` |
 | `spec.plannedFailover` | object |  |  |  |
-| `spec.plannedFailover.drainTimeout` | string |  | `"30s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('10m')` |
-| `spec.plannedFailover.maxLagWait` | string |  | `"5m0s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
+| `spec.plannedFailover.drainTimeout` | string |  | `"30s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('10m')` |
+| `spec.plannedFailover.maxLagWait` | string |  | `"5m0s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
 | `spec.plannedFailover.onCooldown` | string |  | `"Reject"` | enum: `Reject`, `Defer` |
 | `spec.podAnnotations` | map[string]string |  |  |  |
 | `spec.podLabels` | map[string]string |  |  |  |
 | `spec.podSecurityContext` | corev1.PodSecurityContext |  |  |  |
-| `spec.pollInterval` | string |  | `"2s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('5m')` |
+| `spec.pollInterval` | string |  | `"2s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('5m')` |
 | `spec.recoveryThreshold` | integer (int32) |  | `2` | minimum=1 |
 | `spec.replication` | object |  |  |  |
 | `spec.replication.maxLagSeconds` | integer (int64) |  | `300` | minimum=0 |
 | `spec.replication.readOnlyMaxLagSeconds` | integer (int64) |  |  | minimum=0 |
 | `spec.restoreInPlace` | object |  |  | CEL: `!has(self.loadOptions) \|\| !has(self.loadOptions.includeSchemas) \|\| size(self.loadOptions.includeSchemas) <= 1` |
-| `spec.restoreInPlace.confirm` | string | yes |  | minLength=1 |
+| `spec.restoreInPlace.confirm` | string (date-time) | yes |  | minLength=1; maxLength=64; pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z\|[+-]([01][0-9]\|2[0-3]):[0-5][0-9])$` |
 | `spec.restoreInPlace.decryption` | object |  |  |  |
 | `spec.restoreInPlace.decryption.passphraseSecretKeyRef` | object | yes |  |  |
 | `spec.restoreInPlace.decryption.passphraseSecretKeyRef.key` | string |  | `"passphrase"` | minLength=1; maxLength=253; pattern=`^[-._a-zA-Z0-9]+$` |
@@ -226,28 +234,28 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.restoreInPlace.source.backupRef` | object |  |  |  |
 | `spec.restoreInPlace.source.backupRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.restoreInPlace.source.pvc` | object |  |  |  |
-| `spec.restoreInPlace.source.pvc.claimName` | string | yes |  | minLength=1 |
-| `spec.restoreInPlace.source.pvc.subPath` | string |  |  | pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
+| `spec.restoreInPlace.source.pvc.claimName` | string | yes |  | minLength=1; maxLength=253 |
+| `spec.restoreInPlace.source.pvc.subPath` | string |  |  | maxLength=512; pattern=`^/*((?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)/+)*(?:[^/.][^/]*\|\.\|\.[^/.][^/]*\|\.\.[^/]+)?$` |
 | `spec.restoreInPlace.source.s3` | object |  |  |  |
 | `spec.restoreInPlace.source.s3.bucket` | string | yes |  | minLength=1; maxLength=63; CEL: `bytes(self).size() <= 63` |
 | `spec.restoreInPlace.source.s3.credentialsSecretName` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.restoreInPlace.source.s3.endpointURL` | string |  |  | maxLength=512; pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`; CEL: `bytes(self).size() <= 512` |
 | `spec.restoreInPlace.source.s3.prefix` | string |  |  | maxLength=512; pattern=`^/?(([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+)(/([^/.][^/]*\|\.[^/.][^/]*\|\.\.[^/]+))*)?/?$`; CEL: `bytes(self).size() <= 512` |
-| `spec.restoreInPlace.source.s3.region` | string |  |  |  |
+| `spec.restoreInPlace.source.s3.region` | string |  |  | maxLength=64 |
 | `spec.serviceTemplate` | object |  |  |  |
 | `spec.serviceTemplate.annotations` | map[string]string |  |  |  |
 | `spec.serviceTemplate.externalTrafficPolicy` | string |  |  | enum: `Cluster`, `Local` |
 | `spec.serviceTemplate.type` | string |  |  | enum: `ClusterIP`, `LoadBalancer`, `NodePort` |
 | `spec.sidecar` | object |  | `{}` | CEL: `duration(has(self.leaseTimeout) ? self.leaseTimeout : '20s') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s')` |
 | `spec.sidecar.image` | string |  |  | minLength=1 |
-| `spec.sidecar.leaseTimeout` | string |  | `"20s"` | CEL: `duration(self) >= duration('3s') && duration(self) <= duration('10m')` |
+| `spec.sidecar.leaseTimeout` | string |  | `"20s"` | maxLength=64; CEL: `duration(self) >= duration('3s') && duration(self) <= duration('10m')` |
 | `spec.sidecar.operatorEndpoint` | string |  |  | maxLength=253; pattern=`^[A-Za-z0-9.-]+:[0-9]{1,5}$` |
-| `spec.sidecar.peerCheckInterval` | string |  | `"5s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1m')` |
+| `spec.sidecar.peerCheckInterval` | string |  | `"5s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1m')` |
 | `spec.sidecar.resources` | corev1.ResourceRequirements |  |  |  |
-| `spec.sites` | []object | yes |  | minItems=2; maxItems=16; listType=map keys=name; items CEL: `self.role == 'ReadOnly' \|\| (has(self.taintNodeSelector) && has(self.lbIP))` |
-| `spec.sites[].lbIP` | string |  |  | minLength=1 |
-| `spec.sites[].mysqlConf` | map[string]string |  |  |  |
-| `spec.sites[].name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9-]+$` |
+| `spec.sites` | []object | yes |  | minItems=2; maxItems=16; listType=map keys=name; items CEL: `self.role == 'ReadOnly' \|\| (has(self.taintNodeSelector) && has(self.loadBalancerIP))` |
+| `spec.sites[].loadBalancerIP` | string (ipv4) |  |  | maxLength=15 |
+| `spec.sites[].mysqlConf` | map[string]string |  |  | maxProperties=128; values maxLength=1024; values pattern=`^[^\r\n\x00]*$`; CEL: `self.all(k, k.matches('^[A-Za-z0-9_.-]+$'))` |
+| `spec.sites[].name` | string | yes |  | minLength=1; maxLength=20; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 | `spec.sites[].resources` | corev1.ResourceRequirements |  |  |  |
 | `spec.sites[].role` | string |  | `"PrimaryCandidate"` | enum: `PrimaryCandidate`, `DisasterRecovery`, `ReadOnly` |
 | `spec.sites[].serverID` | integer (int64) | yes |  | minimum=1; maximum=4294967295; CEL(transition): `self == oldSelf` |
@@ -257,12 +265,12 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.sites[].serviceTemplate.nodePort` | integer (int32) |  |  | minimum=1; maximum=65535 |
 | `spec.sites[].serviceTemplate.type` | string |  |  | enum: `ClusterIP`, `LoadBalancer`, `NodePort` |
 | `spec.sites[].storage` | object | yes |  |  |
-| `spec.sites[].storage.size` | int-or-string | yes |  | pattern=`^(\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$` |
-| `spec.sites[].storage.storageClassName` | string | yes |  | minLength=1 |
+| `spec.sites[].storage.size` | string | yes |  | minLength=1; maxLength=64; pattern=`^(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))(([KMGTPE]i)\|[numkMGTPE]\|([eE](\+\|-)?(([0-9]+(\.[0-9]*)?)\|(\.[0-9]+))))?$`; CEL(transition): `quantity(self).compareTo(quantity(oldSelf)) == 0`; CEL: `quantity(self).isGreaterThan(quantity('0'))` |
+| `spec.sites[].storage.storageClassName` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`; CEL(transition): `self == oldSelf` |
 | `spec.sites[].taintNodeSelector` | map[string]string |  |  | minProperties=1 |
-| `spec.sites[].zone` | string | yes |  | minLength=1 |
+| `spec.sites[].zone` | string | yes |  | minLength=1; maxLength=63; pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`; CEL(transition): `self == oldSelf` |
 | `spec.splitBrainPolicy` | object |  |  |  |
-| `spec.splitBrainPolicy.sitePriorities` | []string |  |  | maxItems=16; listType=atomic; items maxLength=253; CEL: `self.all(x, self.filter(y, y == x).size() == 1)` |
+| `spec.splitBrainPolicy.sitePriorities` | []string |  |  | maxItems=16; listType=atomic; items maxLength=20; items pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`; CEL: `self.all(x, self.filter(y, y == x).size() == 1)` |
 | `spec.terminationGracePeriodSeconds` | integer (int64) |  | `60` | minimum=1 |
 | `spec.tls` | object |  |  |  |
 | `spec.tls.secretName` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
@@ -599,10 +607,14 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 ## MysqlBackup
 
-- Scope: Namespaced; plural `mysqlbackups`; shortNames: none; categories: none
+- Scope: Namespaced; plural `mysqlbackups`; shortNames: `mbk`, `mbks`; categories: bloodraven, mysql
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Started (`.status.startTime`), Completed (`.status.completionTime`), Location (`.status.artifactStorage.location`), Size (`.status.size`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
+- Root CEL: `size(self.metadata.name) <= 63`
+- Root CEL: `self.spec.failoverGroupRef.name == oldSelf.spec.failoverGroupRef.name`
+- Root CEL: `self.spec.profileName == oldSelf.spec.profileName`
+- Root CEL: `has(self.spec.sourceSite) == has(oldSelf.spec.sourceSite) && (!has(self.spec.sourceSite) || self.spec.sourceSite == oldSelf.spec.sourceSite)`
 - Root CEL: `!self.metadata.name.endsWith('.bloodraven-backup.json')`
 - Root CEL: `!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)`
 
@@ -614,10 +626,10 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.failoverGroupRef` | object | yes |  |  |
 | `spec.failoverGroupRef.name` | string | yes |  | minLength=1; maxLength=253; pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$` |
 | `spec.profileName` | string | yes |  | minLength=1; maxLength=63; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
-| `spec.sourceSite` | string |  |  | minLength=1; maxLength=253; pattern=`^[a-z0-9-]+$` |
+| `spec.sourceSite` | string |  |  | minLength=1; maxLength=20; pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` |
 
 
-### MysqlBackup `status` (32 fields)
+### MysqlBackup `status` (33 fields)
 
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
@@ -636,6 +648,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `status.binlogPosition` | object |  |  |  |
 | `status.binlogPosition.file` | string | yes |  | minLength=1; maxLength=512 |
 | `status.binlogPosition.position` | integer (int64) | yes |  | minimum=0 |
+| `status.cleanupStartTime` | string (date-time) |  |  |  |
 | `status.completionTime` | string (date-time) |  |  |  |
 | `status.conditions` | []metav1.Condition |  |  | listType=map keys=type |
 | `status.encryption` | object |  |  |  |
@@ -656,10 +669,16 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 
 ## MysqlBackupVerification
 
-- Scope: Namespaced; plural `mysqlbackupverifications`; shortNames: none; categories: none
+- Scope: Namespaced; plural `mysqlbackupverifications`; shortNames: `mbv`, `mbvs`; categories: bloodraven, mysql
 - Versions: v1alpha1 (storage); subresources: status
 - Printer columns: Group (`.spec.failoverGroupRef.name`), Profile (`.spec.profileName`), Phase (`.status.phase`), Ready (`.status.conditions[?(@.type=="Ready")].status`), Backup (`.status.backupRef.name`), Started (`.status.startTime`), Completed (`.status.completionTime`), Age (`.metadata.creationTimestamp`)
 - Root required: `spec`
+- Root CEL: `size(self.metadata.name) <= 63`
+- Root CEL: `self.spec.failoverGroupRef.name == oldSelf.spec.failoverGroupRef.name`
+- Root CEL: `self.spec.profileName == oldSelf.spec.profileName`
+- Root CEL: `has(self.spec.backupRef) == has(oldSelf.spec.backupRef) && (!has(self.spec.backupRef) || self.spec.backupRef.name == oldSelf.spec.backupRef.name)`
+- Root CEL: `has(self.spec.pointInTime) == has(oldSelf.spec.pointInTime) && (!has(self.spec.pointInTime) || (self.spec.pointInTime.mode == oldSelf.spec.pointInTime.mode && has(self.spec.pointInTime.stopTime) == has(oldSelf.spec.pointInTime.stopTime) && (!has(self.spec.pointInTime.stopTime) || self.spec.pointInTime.stopTime == oldSelf.spec.pointInTime.stopTime) && (has(self.spec.pointInTime.excludeGtids) ? self.spec.pointInTime.excludeGtids : '') == (has(oldSelf.spec.pointInTime.excludeGtids) ? oldSelf.spec.pointInTime.excludeGtids : '') && (has(self.spec.pointInTime.archiveProfileName) ? self.spec.pointInTime.archiveProfileName : '') == (has(oldSelf.spec.pointInTime.archiveProfileName) ? oldSelf.spec.pointInTime.archiveProfileName : '')))`
+- Root CEL: `has(self.spec.sanityCheck) == has(oldSelf.spec.sanityCheck) && (!has(self.spec.sanityCheck) || (self.spec.sanityCheck.query == oldSelf.spec.sanityCheck.query && has(self.spec.sanityCheck.minResult) == has(oldSelf.spec.sanityCheck.minResult) && (!has(self.spec.sanityCheck.minResult) || self.spec.sanityCheck.minResult == oldSelf.spec.sanityCheck.minResult) && has(self.spec.sanityCheck.timeout) == has(oldSelf.spec.sanityCheck.timeout) && (!has(self.spec.sanityCheck.timeout) || duration(self.spec.sanityCheck.timeout) == duration(oldSelf.spec.sanityCheck.timeout))))`
 
 ### MysqlBackupVerification `spec` (17 fields)
 
@@ -679,8 +698,8 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | `spec.resources` | corev1.ResourceRequirements |  |  |  |
 | `spec.sanityCheck` | object |  |  |  |
 | `spec.sanityCheck.minResult` | integer (int64) |  |  | minimum=0 |
-| `spec.sanityCheck.query` | string | yes |  | minLength=1 |
-| `spec.sanityCheck.timeout` | string |  | `"1m0s"` | CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
+| `spec.sanityCheck.query` | string | yes |  | minLength=1; maxLength=4096 |
+| `spec.sanityCheck.timeout` | string |  | `"1m0s"` | maxLength=64; CEL: `duration(self) >= duration('1s') && duration(self) <= duration('1h')` |
 | `spec.ttlSecondsAfterFinished` | integer (int32) |  |  | minimum=0 |
 
 
@@ -817,7 +836,7 @@ Generated from the controller-gen CRDs. `Req` means listed in the parent's `requ
 | Path | Type | Req | Default | Validation |
 |---|---|---|---|---|
 | `spec.freshness` | object |  |  |  |
-| `spec.freshness.discoveryInterval` | string |  | `"5m0s"` | CEL: `duration(self) >= duration('30s') && duration(self) <= duration('24h')` |
+| `spec.freshness.discoveryInterval` | string |  | `"5m0s"` | maxLength=64; CEL: `duration(self) >= duration('30s') && duration(self) <= duration('24h')` |
 | `spec.source` | object | yes |  |  |
 | `spec.source.decryption` | object |  |  |  |
 | `spec.source.decryption.passphraseSecretKeyRef` | object | yes |  |  |

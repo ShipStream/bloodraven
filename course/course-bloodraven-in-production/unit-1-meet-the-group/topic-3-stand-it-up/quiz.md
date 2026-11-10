@@ -29,13 +29,13 @@ Same dump. `pdx` and `reader` both read state `ReadOnly`, `replication: Healthy`
 - Read `spec.sites[].role` — the status block carries no role field
 - Read `status.sites[].role`, which reports `ReadOnly` for the reader and `PrimaryCandidate` for `pdx`
 - The reader is the site whose `state` is `ReadOnly` while the other candidate's state would be `Unknown`
-- The reader is the one with no `lbIP` in its status entry
+- The reader is the one with no `loadBalancerIP` in its status entry
 
 **Correct option index:** 0
 
 **Explanation:**
 
-Role is spec, not status: `status.sites[]` carries name, state, lastSeenTime, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `PrimaryCandidate` follower and a `ReadOnly` reader sit in state `ReadOnly` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `lbIP` is spec, and status never mirrors it. (objective 8)
+Role is spec, not status: `status.sites[]` carries name, state, lastSeenTime, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `PrimaryCandidate` follower and a `ReadOnly` reader sit in state `ReadOnly` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `loadBalancerIP` is spec, and status never mirrors it. (objective 8)
 
 ## Question 3
 

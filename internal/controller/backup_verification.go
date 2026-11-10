@@ -41,7 +41,7 @@ func verificationCredsSecretName(crName string) string {
 // operator-managed CronJob that fires trigger-verification for a given
 // (failover group, profile) pair.
 func verificationScheduleCronJobName(fgName, profileName string) string {
-	return truncateDNS1123(fmt.Sprintf("mysql-%s-verify-%s", fgName, profileName))
+	return truncateCronJobName(fmt.Sprintf("mysql-%s-verify-%s", fgName, profileName))
 }
 
 // ensureVerificationLabels stamps the canonical labels on a

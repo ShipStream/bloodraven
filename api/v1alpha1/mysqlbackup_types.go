@@ -7,6 +7,7 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=mbk;mbks,categories=bloodraven;mysql
 // +kubebuilder:printcolumn:name="Group",type=string,JSONPath=`.spec.failoverGroupRef.name`
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profileName`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
@@ -16,6 +17,10 @@ import (
 // +kubebuilder:printcolumn:name="Location",type=string,JSONPath=`.status.artifactStorage.location`,priority=1
 // +kubebuilder:printcolumn:name="Size",type=string,JSONPath=`.status.size`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters: it is a label value on the objects the run creates"
+// +kubebuilder:validation:XValidation:rule="self.spec.failoverGroupRef.name == oldSelf.spec.failoverGroupRef.name",message="spec.failoverGroupRef is immutable; create a new object instead"
+// +kubebuilder:validation:XValidation:rule="self.spec.profileName == oldSelf.spec.profileName",message="spec.profileName is immutable; create a new object instead"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.sourceSite) == has(oldSelf.spec.sourceSite) && (!has(self.spec.sourceSite) || self.spec.sourceSite == oldSelf.spec.sourceSite)",message="spec.sourceSite is immutable; create a new object instead"
 // +kubebuilder:validation:XValidation:rule="!self.metadata.name.endsWith('.bloodraven-backup.json')",message="metadata.name must not end in .bloodraven-backup.json: that is the backup stamp's key suffix, and the dump location ends in the backup's name"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)",message="status.artifactStorage cannot be changed or removed once its location is recorded"
 
@@ -60,8 +65,8 @@ type MysqlBackupSpec struct {
 	// the referenced group) to be the dump source. Leave empty to let the
 	// reconciler choose (replica-first).
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
+	// +kubebuilder:validation:MaxLength=20
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +optional
 	SourceSite string `json:"sourceSite,omitempty"`
 
@@ -179,11 +184,9 @@ type MysqlBackupStatus struct {
 	// MysqlImage is the resolved MySQL server image (spec.image, or the
 	// controller default) that was in use on the source failover group
 	// when this backup was taken. Captured when the backup Job is
-	// created and backfilled from the live spec on next reconcile if
-	// empty on older CRs. Retained so future verifications can pin the
-	// ephemeral mysqld to a version-compatible tag; the Phase-2
-	// verification Job currently runs on the backup/restore image
-	// (spec.backup.image) and does not yet consume this field.
+	// created, and filled from the live spec on a later reconcile when
+	// empty. Verification Jobs run on the backup image (spec.backup.image)
+	// and do not read this field.
 	// +optional
 	MysqlImage string `json:"mysqlImage,omitempty"`
 

@@ -81,6 +81,7 @@ spec:
                       Default: 5m. Bounds: 30s to 24h (shorter intervals produce no
                       scheduled poll; the reconciler also enforces the floor as
                       defense-in-depth).
+                    maxLength: 64
                     type: string
                     x-kubernetes-validations:
                     - message: discoveryInterval must be between 30s and 24h

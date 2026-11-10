@@ -19,9 +19,8 @@ import (
 )
 
 // DestinationFor returns the normalized archive destination of profile p in
-// group fg (§3.1). For PVC the claim is p.Storage.PVC.ClaimName, or the
-// operator-owned OwnedBackupPVCName(fg.Name, p.Name) when that is empty, and
-// the namespace is fg's.
+// group fg (§3.1). For PVC the claim is the one ClaimFor resolves, and the
+// namespace is fg's.
 func DestinationFor(fg *v1alpha1.MysqlFailoverGroup, p *v1alpha1.BackupProfile) (pitrarchive.Destination, error) {
 	if fg == nil || p == nil {
 		return pitrarchive.Destination{}, fmt.Errorf("%w: nil group or profile", pitrarchive.ErrInvalidDestination)
@@ -42,9 +41,9 @@ func DestinationFor(fg *v1alpha1.MysqlFailoverGroup, p *v1alpha1.BackupProfile) 
 		if pvc == nil {
 			return pitrarchive.Destination{}, fmt.Errorf("%w: profile %q type=PVC but storage.pvc is nil", pitrarchive.ErrInvalidDestination, p.Name)
 		}
-		claim := pvc.ClaimName
-		if claim == "" {
-			claim = OwnedBackupPVCName(fg.Name, p.Name)
+		claim, _, err := ClaimFor(fg.Name, p.Name, pvc)
+		if err != nil {
+			return pitrarchive.Destination{}, fmt.Errorf("%w: %w", pitrarchive.ErrInvalidDestination, err)
 		}
 		d, err := pitrarchive.NewPVCDestination(fg.Namespace, claim, pvc.SubPath)
 		if err != nil {
@@ -68,8 +67,31 @@ func EncryptionIdentityFor(p *v1alpha1.BackupProfile) pitrarchive.EncryptionIden
 	return pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: string(p.Encryption.AlgorithmOrDefault())}
 }
 
+// ClaimFor resolves the claim of PVC profile profileName in group fgName.
+// It is the one rule every consumer uses, so the claim the operator
+// provisions, the claim a backup Job writes and the claim the PITR archive
+// mounts cannot disagree (A-18): pvc.claimName when it is set; else the
+// operator-owned OwnedBackupPVCName when pvc.provisioned is set (owned is
+// then true); else an error. Admission requires exactly one of the two, so
+// the error is reached only by an object stored before that rule, and it
+// names the fix instead of mounting a claim nobody provisions.
+func ClaimFor(fgName, profileName string, pvc *v1alpha1.PVCStorage) (claim string, owned bool, err error) {
+	switch {
+	case pvc == nil:
+		return "", false, fmt.Errorf("profile %q has no storage.pvc", profileName)
+	case pvc.ClaimName != "" && pvc.Provisioned != nil:
+		return "", false, fmt.Errorf("profile %q sets both storage.pvc.claimName and storage.pvc.provisioned; set exactly one", profileName)
+	case pvc.ClaimName != "":
+		return pvc.ClaimName, false, nil
+	case pvc.Provisioned != nil:
+		return OwnedBackupPVCName(fgName, profileName), true, nil
+	default:
+		return "", false, fmt.Errorf("profile %q sets neither storage.pvc.claimName nor storage.pvc.provisioned; set exactly one", profileName)
+	}
+}
+
 // OwnedBackupPVCName is the name of the PVC the operator provisions for a
-// PVC profile with no claimName: "mysql-<fg>-backup-<profile>", truncated to
+// PVC profile with pvc.provisioned: "mysql-<fg>-backup-<profile>", truncated to
 // a DNS-1123 label. internal/controller's ownedBackupPVCName delegates here
 // so the destination and the provisioned PVC can never disagree.
 func OwnedBackupPVCName(fgName, profileName string) string {

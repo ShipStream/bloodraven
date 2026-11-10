@@ -133,10 +133,64 @@ func initRestoreSeedSite(fg *v1alpha1.MysqlFailoverGroup) string {
 
 // initRestoreRecovery is the recovery procedure for a failed
 // initFromBackup restore, shared by the RestoreFailed Event and the Ready
-// condition so both say the same thing.
-const initRestoreRecovery = "The group stays out of service (no DNS record, no Service endpoints) and no site is cloned. " +
-	"To retry: if the load had started (BLOODRAVEN_LOAD_START in the Job log), empty the target first by deleting and recreating the group, " +
-	"or by deleting the group's MySQL PVCs; then delete the restore Job and the operator rebuilds it"
+// condition so both say the same thing. A partly loaded target is emptied
+// by deleting the MySQL pods with their data claims: a claim a running pod
+// mounts stays Terminating, and the operator re-creates both.
+func initRestoreRecovery(fg *v1alpha1.MysqlFailoverGroup) string {
+	return "The group stays out of service (no DNS record, no Service endpoints) and no site is cloned. " +
+		"To retry: if the load had started (BLOODRAVEN_LOAD_START in the Job log), the target holds part of it; " +
+		"either delete the group and create it again, or " +
+		fmt.Sprintf("delete the group's MySQL pods and PVCs (kubectl delete pvc,pod -l %s=%s,%s=mysql -n %s), ", labelInstance, fg.Name, labelAppName, fg.Namespace) +
+		"wait until the operator has re-created every claim Bound and every pod Running, then delete the restore Job. " +
+		"If the load had not started, delete the restore Job. The operator rebuilds it. " +
+		initFromBackupFixedAtCreation
+}
+
+// initFromBackupFixedAtCreation is the remedy for a cause inside
+// spec.initFromBackup, which admission refuses to change.
+const initFromBackupFixedAtCreation = "spec.initFromBackup is fixed at creation: if the cause is in it, " +
+	"delete the group and create it again with the corrected block (" + initFromBackupRecoveryDoc + ")"
+
+// initFromBackupRecoveryDoc is the failed-bootstrap procedure.
+const initFromBackupRecoveryDoc = "https://bloodraven.dev/docs/backup-and-restore/backup-restore#a-failed-bootstrap-restore"
+
+// restoreRemedy renders the remedy for a restore refused for a value inside
+// the restore block fp. spec.restoreInPlace is edited: edit is the
+// imperative to apply. spec.initFromBackup is fixed at creation, so the
+// group is deleted and created again with the block as recreateWith says.
+// Every refusal whose cause is in the block goes through here, so no
+// message tells the user to edit a block admission keeps fixed.
+func restoreRemedy(fp, edit, recreateWith string) string {
+	if fp == "restoreInPlace" {
+		return edit
+	}
+	return fmt.Sprintf("delete the group and create it again with %s (%s is fixed at creation; see %s)",
+		recreateWith, fp, initFromBackupRecoveryDoc)
+}
+
+// restoreSpecFix is restoreRemedy for a field (a path below fp) to set.
+func restoreSpecFix(fp, field string) string {
+	return restoreRemedy(fp, fmt.Sprintf("set %s.%s", fp, field), fmt.Sprintf("%s.%s set", fp, field))
+}
+
+// withRestoreRemedy appends remedy to err, keeping err (and its leading
+// refusal token) first and wrapped.
+func withRestoreRemedy(err error, remedy string) error {
+	if err == nil || remedy == "" {
+		return err
+	}
+	return fmt.Errorf("%w; %s", err, remedy)
+}
+
+// withFixedAtCreationNote appends the fixed-at-creation note to an
+// initFromBackup failure detail unless the detail already carries the
+// recreate remedy, so the Ready condition states it once.
+func withFixedAtCreationNote(detail string) string {
+	if strings.Contains(detail, initFromBackupRecoveryDoc) {
+		return detail
+	}
+	return detail + ". " + initFromBackupFixedAtCreation
+}
 
 // initRestoreReadyCondition returns the Ready=False reason and message for
 // a group whose initFromBackup restore has not succeeded, or "" when the
@@ -152,10 +206,10 @@ func initRestoreReadyCondition(fg *v1alpha1.MysqlFailoverGroup) (reason, message
 			detail = string(rs.Reason) + ": " + detail
 		}
 		if rs.JobName == "" {
-			return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf(
-				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed.", detail)
+			return v1alpha1.ReasonInitFromBackupFailed, withFixedAtCreationNote(fmt.Sprintf(
+				"initFromBackup restore failed before its Job was created: %s. The group stays out of service (no DNS record, no Service endpoints); the operator retries building the Job on each reconcile once the cause is fixed", detail)) + "."
 		}
-		return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery)
+		return v1alpha1.ReasonInitFromBackupFailed, fmt.Sprintf("initFromBackup restore failed (Job %s): %s. %s.", rs.JobName, detail, initRestoreRecovery(fg))
 	}
 	phase := "Pending"
 	if rs != nil && rs.Phase != "" {
@@ -511,7 +565,9 @@ func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) (site string, ready bool
 // gate in the main reconcile loop.
 func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	if fg.Spec.InitFromBackup == nil {
-		// Clear stale restore status if the user removed the field.
+		// Defensive: admission refuses adding or removing
+		// spec.initFromBackup, so only an object stored before that rule
+		// can carry a status.restore without the block. Clear it.
 		if fg.Status.Restore != nil {
 			patch := client.MergeFrom(fg.DeepCopy())
 			fg.Status.Restore = nil
@@ -519,7 +575,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		}
 		return 0, nil
 	}
-	if fg.Status.Restore != nil && fg.Status.Restore.Phase == v1alpha1.BackupPhaseSucceeded {
+	if initRestoreSucceeded(fg) {
 		return 0, nil
 	}
 
@@ -638,7 +694,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		return 15 * time.Second, nil
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreFailed,
-		"restore Job %s failed: %s. %s", job.Name, rs.Message, initRestoreRecovery)
+		"restore Job %s failed: %s. %s", job.Name, rs.Message, initRestoreRecovery(fg))
 	// No automatic retry. Operator must delete the Job to re-trigger.
 	return 0, nil
 }
@@ -897,18 +953,18 @@ func backupRefS3CredentialsError(fp string, ref *v1alpha1.MysqlBackup, profile *
 	case profile == nil:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles (it supplies the S3 credentials); "+
-				"either restore the profile or set %s.source.s3 explicitly",
-			fp, ref.Name, location, ref.Spec.ProfileName, fp)
+				"either restore the profile or %s",
+			fp, ref.Name, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source.s3"))
 	case profile.Storage.Type != v1alpha1.BackupStorageS3:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q now stores to %s (it supplies the S3 credentials); "+
-				"either restore the profile's S3 storage or set %s.source.s3 explicitly",
-			fp, ref.Name, location, ref.Spec.ProfileName, profile.Storage.Type, fp)
+				"either restore the profile's S3 storage or %s",
+			fp, ref.Name, location, ref.Spec.ProfileName, profile.Storage.Type, restoreSpecFix(fp, "source.s3"))
 	case profile.Storage.S3 == nil:
 		return fmt.Errorf(
 			"%s.source.backupRef=%q resolves to an S3 location (%q) but profile %q has no storage.s3 configuration to supply its credentials; "+
-				"either restore the profile's S3 storage or set %s.source.s3 explicitly",
-			fp, ref.Name, location, ref.Spec.ProfileName, fp)
+				"either restore the profile's S3 storage or %s",
+			fp, ref.Name, location, ref.Spec.ProfileName, restoreSpecFix(fp, "source.s3"))
 	}
 	return nil
 }
@@ -946,8 +1002,8 @@ func restoreLoadOptionsJSON(fp string, in restoreJobInputs) (string, error) {
 		return "", fmt.Errorf(
 			"%s.loadOptions.skipBinlog=false is incompatible with %s.pointInTime: the binlog replay needs the dump's "+
 				"GTID set installed on the target, and MySQL Shell pairs that with an unlogged load (a logged load would "+
-				"also binlog and archive the whole dump under new local GTIDs); remove skipBinlog or set it to true",
-			fp, fp)
+				"also binlog and archive the whole dump under new local GTIDs); %s",
+			fp, fp, restoreRemedy(fp, "remove skipBinlog or set it to true", fp+".loadOptions.skipBinlog omitted or true"))
 	}
 	return opts, err
 }
@@ -995,7 +1051,13 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	// load, refuses before anything is built (§7.1 reconcile tokens).
 	pitrReq, err := pitrRequestFromSpec(in.PointInTime)
 	if err != nil {
-		return nil, err
+		var tooLong *excludeGtidsTooLongError
+		if errors.As(err, &tooLong) {
+			return nil, withRestoreRemedy(err, restoreRemedy(fp, "exclude fewer GTIDs",
+				"fewer GTIDs in "+fp+".pointInTime.excludeGtids"))
+		}
+		return nil, withRestoreRemedy(err, restoreRemedy(fp, "correct "+fp+".pointInTime",
+			"a corrected "+fp+".pointInTime"))
 	}
 	if pitrReq != nil {
 		if err := pitrLoadFilterRefusal(fp, in.LoadOptions); err != nil {
@@ -1064,15 +1126,15 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 					}
 					return nil, fmt.Errorf(
 						"%s: %s.source.backupRef=%q is encrypted and the Secret %q it recorded as its dump key is gone; "+
-							"restore that Secret or set %s.decryption.passphraseSecretKeyRef",
-						pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, recorded.Name, fp)
+							"restore that Secret or %s",
+						pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, recorded.Name, restoreSpecFix(fp, "decryption.passphraseSecretKeyRef"))
 				}
 				passphraseRef = &v1alpha1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}
 			default:
 				return nil, fmt.Errorf(
 					"%s: %s.source.backupRef=%q is encrypted but recorded no dump key; "+
-						"set %s.decryption.passphraseSecretKeyRef",
-					pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, fp)
+						"%s",
+					pitrarchive.TokenBackupDumpKeyMissing, fp, ref.Name, restoreSpecFix(fp, "decryption.passphraseSecretKeyRef"))
 			}
 			if s3Storage != nil {
 				decryptSourceKind = "S3"
@@ -1175,8 +1237,8 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		claim := src.PVC.ClaimName
 		if claim == "" {
 			return nil, fmt.Errorf(
-				"%s.source.pvc.claimName is required; the restore source PVC must be created out of band and populated with the dump",
-				fp)
+				"%s.source.pvc.claimName is required; the restore source PVC must be created out of band and populated with the dump; %s",
+				fp, restoreSpecFix(fp, "source.pvc.claimName"))
 		}
 		if err := checkPVCSubPath(src.PVC.SubPath); err != nil {
 			return nil, fmt.Errorf("%s.source.pvc: %w", fp, err)
@@ -1237,7 +1299,13 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 		container, volumes, err := buildDumpMetaInitContainer(fg, *dumpSrc)
 		if err != nil {
-			return nil, wrapTokenFirst(fp+".pointInTime", err)
+			wrapped := wrapTokenFirst(fp+".pointInTime", err)
+			if errors.Is(err, errDumpAtStoreRoot) {
+				wrapped = withRestoreRemedy(wrapped, restoreRemedy(fp,
+					"name the dump's directory in source.s3.prefix or source.pvc.subPath, or restore from the MysqlBackup with source.backupRef",
+					fp+".source.s3.prefix or "+fp+".source.pvc.subPath naming the dump's directory, or with "+fp+".source.backupRef"))
+			}
+			return nil, wrapped
 		}
 		dumpMeta = &container
 		extraVolumes = append(extraVolumes, volumes...)

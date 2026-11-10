@@ -26,9 +26,16 @@ type apiCRDSchema struct {
 	Pattern     string                  `json:"pattern"`
 	Format      string                  `json:"format"`
 	Default     any                     `json:"default"`
+	MaxLength   *int64                  `json:"maxLength"`
+	MaxItems    *int64                  `json:"maxItems"`
+	Enum        []any                   `json:"enum"`
+	IntOrString bool                    `json:"x-kubernetes-int-or-string"`
 	Properties  map[string]apiCRDSchema `json:"properties"`
 	Items       *apiCRDSchema           `json:"items"`
-	Validations []struct {
+	// MaxProperties and AdditionalProperties describe a map.
+	MaxProperties        *int64        `json:"maxProperties"`
+	AdditionalProperties *apiCRDSchema `json:"additionalProperties"`
+	Validations          []struct {
 		Rule string `json:"rule"`
 	} `json:"x-kubernetes-validations"`
 }

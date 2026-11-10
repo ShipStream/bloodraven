@@ -94,10 +94,11 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: b.Name}
-	if err := k8sClient.Update(ctx, v); err != nil {
-		t.Fatal(err)
-	}
+	// spec.backupRef is immutable, so a running verification cannot be
+	// retargeted at all.
+	retarget := v.DeepCopy()
+	retarget.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: b.Name}
+	e4WantInvalid(t, "retarget a running verification", k8sClient.Update(ctx, retarget), "spec.backupRef is immutable")
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}

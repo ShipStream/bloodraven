@@ -250,10 +250,8 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 }
 
 // buildDragonflyArgs assembles the Dragonfly container command-line. The
-// operator owns --port, --admin_port, --maxmemory, --proactor_threads,
-// --break_replication_on_master_restart, --requirepass, and --masterauth
-// (when auth is configured); user-supplied args are appended last but with
-// safety-critical flags filtered out (see dragonflyOperatorOwnedFlags).
+// operator owns the flags in dragonflyOperatorOwnedFlags; user-supplied
+// args are appended last with those filtered out.
 func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []string {
 	args := []string{
 		"--port=" + strconv.Itoa(int(port)),
@@ -365,54 +363,72 @@ func dragonflyServiceAccountName(spec *v1alpha1.DragonflySpec) string {
 }
 
 // dragonflyOperatorOwnedFlags lists Dragonfly flags whose values are a
-// safety contract owned by Bloodraven. User-supplied spec.Args matching
-// any of these prefixes are stripped before being appended to the
-// operator's args. Dragonfly uses gflags (last-wins parsing), so a user
-// who set `spec.Args = ["--break_replication_on_master_restart=false"]`
-// would otherwise override the safety guard the operator just emitted.
-var dragonflyOperatorOwnedFlags = []string{
-	"--break_replication_on_master_restart",
-	"--bind",
-	"--port",
-	"--admin_port",
-	"--dir",
-	"--s3_endpoint",
-	"--s3_use_https",
-	"--s3_sign_payload",
-	"--requirepass",
-	"--masterauth",
+// safety contract owned by Bloodraven, by name without dashes; the value
+// says whether the flag is a boolean (it takes no separate value
+// argument). User-supplied spec.Args that set any of them are stripped
+// before being appended to the operator's args. Dragonfly parses flags with
+// Abseil (last one wins), so a user who set
+// `spec.Args = ["--nobreak_replication_on_master_restart"]` would otherwise
+// override the safety guard the operator just emitted. flagfile, fromenv
+// and tryfromenv read flags from elsewhere, so they could set any of the
+// others. Admission refuses the same set (the spec.dragonfly.args rule;
+// TestDragonflyArgsRuleCoversOwnedFlags keeps the two in step).
+var dragonflyOperatorOwnedFlags = map[string]bool{
+	"break_replication_on_master_restart": true,
+	"bind":                                false,
+	"port":                                false,
+	"admin_port":                          false,
+	"dir":                                 false,
+	"maxmemory":                           false,
+	"proactor_threads":                    false,
+	"replicaof":                           false,
+	"s3_endpoint":                         false,
+	"s3_use_https":                        true,
+	"s3_sign_payload":                     true,
+	"requirepass":                         false,
+	"masterauth":                          false,
+	"flagfile":                            false,
+	"fromenv":                             false,
+	"tryfromenv":                          false,
 }
 
-// filterDragonflyUserArgs drops args that target operator-owned flags.
-// Match is by exact equality on the flag verb or by "<flag>=" prefix
-// (gflags accepts both `--flag value` and `--flag=value` forms).
+// dragonflyOwnedFlag reports whether arg sets an operator-owned flag in a
+// spelling Abseil accepts (-flag, --flag, -flag=v, --flag=v, and --noflag
+// for a boolean), and whether the flag's value is the next argument (the
+// `--flag value` form of a non-boolean flag).
+func dragonflyOwnedFlag(arg string) (owned, valueFollows bool) {
+	name, ok := strings.CutPrefix(arg, "-")
+	if !ok {
+		return false, false
+	}
+	name = strings.TrimPrefix(name, "-")
+	name, _, hasValue := strings.Cut(name, "=")
+	if boolean, ok := dragonflyOperatorOwnedFlags[name]; ok {
+		return true, !hasValue && !boolean
+	}
+	if negated, ok := strings.CutPrefix(name, "no"); ok {
+		if _, ok := dragonflyOperatorOwnedFlags[negated]; ok {
+			return true, false
+		}
+	}
+	return false, false
+}
+
+// filterDragonflyUserArgs drops args that target operator-owned flags,
+// together with the value argument of the `--flag value` form.
 func filterDragonflyUserArgs(in []string) []string {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(in))
-	skipNext := false
-	for _, arg := range in {
-		if skipNext {
-			skipNext = false
+	for i := 0; i < len(in); i++ {
+		owned, valueFollows := dragonflyOwnedFlag(in[i])
+		if !owned {
+			out = append(out, in[i])
 			continue
 		}
-		drop := false
-		for _, owned := range dragonflyOperatorOwnedFlags {
-			if arg == owned {
-				// `--flag value` form: drop this arg AND the next one.
-				drop = true
-				skipNext = true
-				break
-			}
-			if strings.HasPrefix(arg, owned+"=") {
-				// `--flag=value` form: drop only this arg.
-				drop = true
-				break
-			}
-		}
-		if !drop {
-			out = append(out, arg)
+		if valueFollows {
+			i++
 		}
 	}
 	return out

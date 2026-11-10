@@ -19,8 +19,8 @@ func TestNewConfirmTokenIsRFC3339(t *testing.T) {
 func TestSiteLBIPAndStringsContain(t *testing.T) {
 	mfg := &v1alpha1.MysqlFailoverGroup{}
 	mfg.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", ServerID: 101, LBIP: "10.0.0.1"},
-		{Name: "pdx", ServerID: 102, LBIP: "10.0.0.2"},
+		{Name: "iad", ServerID: 101, LoadBalancerIP: "10.0.0.1"},
+		{Name: "pdx", ServerID: 102, LoadBalancerIP: "10.0.0.2"},
 	}
 	if got := siteLBIP(mfg, "pdx"); got != "10.0.0.2" {
 		t.Errorf("siteLBIP(pdx) = %q, want 10.0.0.2", got)

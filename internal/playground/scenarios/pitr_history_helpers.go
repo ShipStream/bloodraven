@@ -1516,8 +1516,8 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 // the source's own pods tolerate. It goes in the zone of the source's
 // read-only site, which the source never taints, when there is one.
 //
-// lbIP and taintNodeSelector are required for a primary candidate. The
-// lbIPs are documentation addresses (RFC 5737; the Services are ClusterIP,
+// loadBalancerIP and taintNodeSelector are required for a primary candidate. The
+// addresses are documentation addresses (RFC 5737; the Services are ClusterIP,
 // so only the restored group's own DNS name points at them), and the
 // selector is a group-scoped label no node carries: the restored group's
 // taint must never land on a node where the source's MySQL runs, since the
@@ -1542,7 +1542,7 @@ func pitrSourceSpecForRestore(src *v1alpha1.MysqlFailoverGroup, name, backupName
 			continue
 		}
 		s.TaintNodeSelector = map[string]string{"bloodraven.shipstream.io/failover-group." + name: "true"}
-		s.LBIP = fmt.Sprintf("192.0.2.%d", len(sites)+1)
+		s.LoadBalancerIP = fmt.Sprintf("192.0.2.%d", len(sites)+1)
 		s.ServiceTemplate = nil
 		if s.Name == src.Status.ActiveSite {
 			priorities = append([]string{s.Name}, priorities...)

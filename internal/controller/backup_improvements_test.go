@@ -642,6 +642,39 @@ func TestMaybeScheduleRetry_CreatesRetryCRWhenBackoffElapsed(t *testing.T) {
 	}
 }
 
+// A suspended schedule makes no retry backups: suspending every schedule
+// is how the group-deletion procedure stops its producers.
+func TestMaybeScheduleRetry_NoRetryWhileScheduleSuspended(t *testing.T) {
+	fg := fgWithRetrySpec(3, 1)
+	fg.Spec.Backup.Schedules[0].Suspend = true
+	sched := fg.Spec.Backup.Schedules[0]
+	completed := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	failed := &v1alpha1.MysqlBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "lion-nightly-r1", Namespace: "ns", UID: "failed-backup-uid",
+			Labels: map[string]string{v1alpha1.FailoverGroupLabel: "lion", v1alpha1.BackupScheduleLabel: sched.Name},
+		},
+		Spec: v1alpha1.MysqlBackupSpec{
+			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+			ProfileName:      sched.ProfileName,
+		},
+		Status: v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed, Attempt: 1, CompletionTime: &completed},
+	}
+	r, c := newReconciler(fg, failed)
+	next, wait, _, err := r.maybeScheduleRetry(context.Background(), fg, sched, failed)
+	if err != nil {
+		t.Fatalf("maybeScheduleRetry: %v", err)
+	}
+	if next != nil || wait != 0 {
+		t.Errorf("suspended schedule: next=%v wait=%v, want no retry pending", next, wait)
+	}
+	var list v1alpha1.MysqlBackupList
+	_ = c.List(context.Background(), &list, client.InNamespace("ns"))
+	if len(list.Items) != 1 {
+		t.Errorf("a suspended schedule created a retry backup: %d backups", len(list.Items))
+	}
+}
+
 func TestMaybeScheduleRetry_NoRetryWhenMaxAttemptsReached(t *testing.T) {
 	fg := fgWithRetrySpec(2, 1)
 	sched := fg.Spec.Backup.Schedules[0]

@@ -81,7 +81,20 @@ func restoreJobName(fgName, siteName string) string {
 
 // scheduleCronJobName returns the CronJob name for a given schedule entry.
 func scheduleCronJobName(fgName, scheduleName string) string {
-	return truncateDNS1123(fmt.Sprintf("mysql-%s-backup-%s", fgName, scheduleName))
+	return truncateCronJobName(fmt.Sprintf("mysql-%s-backup-%s", fgName, scheduleName))
+}
+
+// maxCronJobNameLength is the longest CronJob name the API server accepts.
+// The CronJob controller names each Job <cronjob>-<scheduled time in
+// minutes>, and the API server reserves 11 characters for that suffix (the
+// hyphen plus up to 10 digits; 8 today) so the Job name fits a 63-character
+// label: 63 - 11 = 52.
+const maxCronJobNameLength = 52
+
+// truncateCronJobName bounds a derived CronJob name to
+// maxCronJobNameLength, as truncateDNS1123 does for 63.
+func truncateCronJobName(name string) string {
+	return truncateDNS1123To(name, maxCronJobNameLength)
 }
 
 // ownedBackupPVCName returns the operator-managed PVC name for a PVC-backed
@@ -89,6 +102,21 @@ func scheduleCronJobName(fgName, scheduleName string) string {
 // pitrprofile so the provisioned PVC and the archive destination agree.
 func ownedBackupPVCName(fgName, profileName string) string {
 	return pitrprofile.OwnedBackupPVCName(fgName, profileName)
+}
+
+// ownedProfileClaim returns the operator-owned claim of a PVC profile with
+// pvc.provisioned, resolved by pitrprofile.ClaimFor, and whether there is
+// one. A claimName profile, an S3 profile and a profile whose pvc names no
+// claim have none.
+func ownedProfileClaim(fgName string, profile *v1alpha1.BackupProfile) (string, bool) {
+	if profile == nil || profile.Storage.Type != v1alpha1.BackupStoragePVC {
+		return "", false
+	}
+	claim, owned, err := pitrprofile.ClaimFor(fgName, profile.Name, profile.Storage.PVC)
+	if err != nil || !owned {
+		return "", false
+	}
+	return claim, true
 }
 
 // checkPVCSubPath rejects a PVC subPath with a ".." segment, which would
@@ -109,15 +137,20 @@ func checkPVCSubPath(sub string) error {
 // exceeds the limit we append a short hash of the original so truncated
 // names that would otherwise collide stay distinct.
 func truncateDNS1123(name string) string {
-	if len(name) <= 63 {
+	return truncateDNS1123To(name, 63)
+}
+
+// truncateDNS1123To is truncateDNS1123 for a limit other than 63.
+func truncateDNS1123To(name string, limit int) string {
+	if len(name) <= limit {
 		return trimDNS1123Tail(name)
 	}
 	// Reserve 9 chars for "-" + 8-char hex hash so the truncated body
-	// plus the suffix stay within the 63-char label limit.
+	// plus the suffix stay within the limit.
 	const reserve = 9
 	sum := sha256.Sum256([]byte(name))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]
-	body := name[:63-reserve]
+	body := name[:limit-reserve]
 	return trimDNS1123Tail(body) + suffix
 }
 

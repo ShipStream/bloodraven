@@ -46,8 +46,8 @@
       "orderIndex": 8
     },
     {
-      "front": "`lbIP` and `taintNodeSelector`",
-      "back": "Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and lbIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.",
+      "front": "`loadBalancerIP` and `taintNodeSelector`",
+      "back": "Required by a CEL rule unless the site's role is `ReadOnly`: *taintNodeSelector and loadBalancerIP are required unless role is ReadOnly*. A reader is never promoted and never tainted, so it needs neither.",
       "orderIndex": 9
     },
     {

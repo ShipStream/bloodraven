@@ -10,7 +10,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -161,10 +160,10 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 			Image:       "mysql:9.7",
 			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
 			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", ServerID: 101, Zone: "az-iad", LBIP: "10.0.0.1",
-					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
-				{Name: "pdx", ServerID: 102, Zone: "az-pdx", LBIP: "10.0.0.2",
-					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: resource.MustParse("10Gi")}},
+				{Name: "iad", ServerID: 101, Zone: "az-iad", LoadBalancerIP: "10.0.0.1",
+					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
+				{Name: "pdx", ServerID: 102, Zone: "az-pdx", LoadBalancerIP: "10.0.0.2",
+					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "lion.example.com", TTLSeconds: 60},
 			Backup: &v1alpha1.BackupSpec{
@@ -197,10 +196,10 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 						Name: "daily-local",
 						Storage: v1alpha1.BackupStorage{
 							Type: v1alpha1.BackupStoragePVC,
-							PVC: &v1alpha1.PVCStorage{
-								StorageClassName: "fast",
-								Size:             resource.MustParse("50Gi"),
-							},
+							PVC: &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{
+								StorageClassName: new("fast"),
+								Size:             "50Gi",
+							}},
 						},
 					},
 				},
@@ -303,6 +302,34 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 	}
 	if cSC == nil || cSC.ReadOnlyRootFilesystem == nil || !*cSC.ReadOnlyRootFilesystem {
 		t.Errorf("container SecurityContext.ReadOnlyRootFilesystem should be true: %+v", cSC)
+	}
+}
+
+// A-18: a PVC profile that names neither a claimName nor provisioned (an
+// object stored before admission required one) is refused with the fix,
+// instead of mounting the owned claim name, which nothing provisions.
+func TestBuildBackupJob_PVCWithoutClaimIsRefused(t *testing.T) {
+	fg := fgWithBackup()
+	profile := *fg.Spec.Backup.Profiles[1].DeepCopy()
+	profile.Storage.PVC = &v1alpha1.PVCStorage{SubPath: "orders"}
+	mb := &v1alpha1.MysqlBackup{
+		ObjectMeta: metav1.ObjectMeta{Name: "lion-daily-xyz", Namespace: "ns"},
+		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: profile.Name},
+	}
+	_, err := BuildBackupJob(BackupJobInputs{
+		DumpKeySecretName:    testDumpKeySecret,
+		FailoverGroup:        fg,
+		Profile:              profile,
+		Backup:               mb,
+		SourceSite:           "iad",
+		CredsSecretName:      "mysqlbackup-lion-daily-xyz-creds",
+		ScriptsConfigMapName: "mysql-lion-backup-scripts",
+	})
+	if err == nil || !strings.Contains(err.Error(), "sets neither storage.pvc.claimName nor storage.pvc.provisioned") {
+		t.Fatalf("BuildBackupJob = %v, want the claimName|provisioned refusal", err)
+	}
+	if _, owned := ownedProfileClaim(fg.Name, &profile); owned {
+		t.Fatal("a profile without provisioned must not resolve to an owned claim to provision")
 	}
 }
 

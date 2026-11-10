@@ -99,7 +99,9 @@ const (
 	// group references holds the keys backup, restore and cleanup Jobs require.
 	// Those Jobs fail rather than fall back to ambient (IRSA, Workload Identity,
 	// instance-profile) credentials, so a Secret that relied on the fallback
-	// would otherwise surface only when the next scheduled Job fails.
+	// would otherwise surface only when the next scheduled Job fails. The
+	// spec.initFromBackup.source.s3 Secret counts only until the bootstrap
+	// restore succeeds: nothing reads it after that.
 	ConditionS3CredentialsReady = "S3CredentialsReady"
 	// ConditionUpdating is True while an ordered update runs, with the
 	// update phase as its reason, and True/OrderedUpdateStalled while it is
@@ -259,7 +261,11 @@ const (
 
 // MysqlBackup condition reasons.
 const (
-	ReasonBackupJobConflict         = "BackupJobConflict"
+	ReasonBackupJobConflict = "BackupJobConflict"
+	// ReasonBackupStorageMismatch fails a MysqlBackup whose profile's
+	// owned claim has another StorageClass or a smaller request than
+	// pvc.provisioned.
+	ReasonBackupStorageMismatch     = "BackupStorageMismatch"
 	ReasonCleanupFailed             = "CleanupFailed"
 	ReasonCleanupJobConflict        = "CleanupJobConflict"
 	ReasonCleanupJobInvalid         = "CleanupJobInvalid"
@@ -372,7 +378,7 @@ const (
 	ReasonFailed                 = "Failed"                 // MysqlBackup, MysqlBackupVerification
 	ReasonGroupNotFound          = "GroupNotFound"          // MysqlBackup, MysqlBackupVerification
 	// ReasonMetadataVersionUnsupported: an internal annotation payload
-	// (A-80) carries a schemaVersion this operator does not know. On a
+	// carries a schemaVersion this operator does not know. On a
 	// MysqlFailoverGroup it is a Degraded reason; on a
 	// MysqlBackupVerification the Verified reason of the failed run.
 	ReasonMetadataVersionUnsupported = "MetadataVersionUnsupported" // MysqlFailoverGroup, MysqlBackupVerification

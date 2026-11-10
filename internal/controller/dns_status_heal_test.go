@@ -486,7 +486,7 @@ func TestReconcileDNS_DeniedPromotionFlipHealsWithoutRefailover(t *testing.T) {
 
 	record, writes := dns.current()
 	if record != "2.2.2.2" {
-		t.Errorf("DNS should heal to the promoted site lbIP 2.2.2.2, got %q", record)
+		t.Errorf("DNS should heal to the promoted site loadBalancerIP 2.2.2.2, got %q", record)
 	}
 	if writes != 1 {
 		t.Errorf("DNS writes=%d, want 1", writes)
@@ -533,7 +533,7 @@ func TestReconcileDNS_HealsWithoutRecordReadCapability(t *testing.T) {
 	pollN(tm, 1)
 
 	if got := dns.getLastIP(); got != "2.2.2.2" {
-		t.Errorf("denied flip should heal to the promoted site lbIP 2.2.2.2, got %q", got)
+		t.Errorf("denied flip should heal to the promoted site loadBalancerIP 2.2.2.2, got %q", got)
 	}
 	dns.mu.Lock()
 	calls := dns.calls
