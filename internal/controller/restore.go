@@ -575,6 +575,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		}
 		return 0, nil
 	}
+	// A restore that ended (Succeeded or Failed) no longer reads its
+	// source backup: release the hold it took (holdRestoreBackup).
+	r.releaseTerminalRestoreHold(ctx, fg, restoreKindInit)
 	if initRestoreSucceeded(fg) {
 		return 0, nil
 	}
@@ -766,6 +769,29 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 	if err := controllerutil.SetControllerReference(fg, built, r.Scheme); err != nil {
 		return 0, fmt.Errorf("set restore job owner ref: %w", err)
 	}
+	// Hold the source backup against retention, artifact cleanup and the
+	// PITR binlog cutoff before the Job that reads it exists (#275). The
+	// hold is taken only now, once the Job can be built, so a restore
+	// that keeps failing its build holds nothing.
+	if ref := fg.Spec.InitFromBackup.Source.BackupRef; ref != nil {
+		refusal, retry, err := r.holdRestoreBackup(ctx, fg, restoreKindInit, ref.Name, built.Annotations[v1alpha1.RestoreBackupUIDAnnotation], targetSite)
+		if err != nil {
+			return 0, fmt.Errorf("hold the restore's source backup: %w", err)
+		}
+		if retry {
+			return restoreHoldRetry, nil
+		}
+		if refusal != "" {
+			msg := fmt.Sprintf("initFromBackup.source.backupRef=%q cannot be held for the restore: %s", ref.Name, refusal)
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestoreBuildFailed, "%s", msg)
+			r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
+				Phase:      v1alpha1.BackupPhaseFailed,
+				TargetSite: targetSite,
+				Message:    msg,
+			})
+			return 0, nil
+		}
+	}
 	if err := r.Create(ctx, built); err != nil {
 		return 0, fmt.Errorf("create restore job: %w", err)
 	}
@@ -826,6 +852,14 @@ func deploymentRolledOut(deploy *appsv1.Deployment) bool {
 // path to keep running rather than crash-looping the reconciler on a
 // transient status write failure.
 func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, rs *v1alpha1.RestoreStatus) bool {
+	// The pinned source backup stays with the attempt, and on the terminal
+	// status that ends it. A status that starts a new attempt after a
+	// terminal one does not inherit it: holdRestoreBackup pins again,
+	// under a new hold ID.
+	if prev := fg.Status.Restore; rs != nil && rs.BackupRef == nil && prev != nil && prev.BackupRef != nil &&
+		(!initRestoreTerminal(prev) || initRestoreTerminal(rs)) {
+		rs.BackupRef = prev.BackupRef.DeepCopy()
+	}
 	patch := client.MergeFrom(fg.DeepCopy())
 	fg.Status.Restore = rs
 	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
@@ -1045,6 +1079,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		// dumpSrc is where dump-meta reads the dump's identity; set only
 		// for a point-in-time restore.
 		dumpSrc *pitrDumpSource
+		// sourceBackupUID is the UID of the backupRef backup the Job is
+		// built from, recorded on the Job (RestoreBackupUIDAnnotation).
+		sourceBackupUID string
 	)
 
 	// A point-in-time target that does not parse, or a schema-filtered
@@ -1074,6 +1111,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded {
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded", ref.Name)
 		}
+		sourceBackupUID = string(ref.UID)
 		// The artifact is read at the destination its producing Job
 		// recorded, never at the profile's current one (a bucket,
 		// endpoint, claim or prefix edited since the backup ran).
@@ -1669,6 +1707,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				},
 			},
 		},
+	}
+	if sourceBackupUID != "" {
+		// The Job is created only once the restore holds exactly this
+		// backup (holdRestoreBackup).
+		job.Annotations = map[string]string{v1alpha1.RestoreBackupUIDAnnotation: sourceBackupUID}
 	}
 	setTerminationMessageLimit(&job.Spec.Template.Spec)
 	return job, nil

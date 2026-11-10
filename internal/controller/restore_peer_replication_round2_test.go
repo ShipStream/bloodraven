@@ -48,6 +48,7 @@ func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing
 	iad := &mockMySQL{readOnly: false, gtidExecuted: restoreRoundTwoUUID + ":1-10"}
 	pdx := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: restoreRoundTwoUUID + ":1-5"}
 	r, c := newReconciler(fg)
+	createRestoreSeedBackup(t, c, fg.Namespace)
 	r.Recorder = record.NewFakeRecorder(200)
 	r.Runner = plannedDrainRunner(nn, iad, pdx)
 	r.Runner.client, r.Runner.recorder = c, r.Recorder

@@ -339,6 +339,9 @@ func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 // error when it has already stamped a terminal status (i.e. the
 // reconciler should not crash-loop on a user-recoverable error).
 func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
+	// A run that ended (Succeeded or Failed) no longer reads its source
+	// backup: release the hold it took (holdRestoreBackup).
+	r.releaseTerminalRestoreHold(ctx, fg, restoreKindInPlace)
 	if fg.Spec.RestoreInPlace == nil {
 		return r.reconcileInPlaceRestoreWithoutSpec(ctx, fg)
 	}
@@ -505,6 +508,14 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed, err.Error(), v1alpha1.EventRestoreInPlaceRejected)
 		return 0, nil
 	}
+	// Pin and hold the source backup before anything waits or is fenced
+	// (#275): from here on retention, artifact cleanup and the PITR binlog
+	// cutoff leave it alone until the run ends, and a backup that cannot be
+	// held ends the run before applications are evicted.
+	if ended, wait, err := r.holdInPlaceRestoreBackup(ctx, fg, ""); ended || wait > 0 || err != nil {
+		return wait, err
+	}
+	cur = fg.Status.RestoreInPlace
 	if m := r.deploymentLeaseManager(); m != nil {
 		hold, err := m.BeginPlanned(ctx, fg, deploymentOperationRestoreInPlace)
 		var le *DeploymentLeaseError
@@ -863,6 +874,14 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if err := controllerutil.SetControllerReference(fg, built, r.Scheme); err != nil {
 			return 0, fmt.Errorf("set in-place restore job owner ref: %w", err)
 		}
+		// Last look before the Job exists: the backup it was built from
+		// must be the one this run pinned in Preflight, still held and not
+		// being deleted (holdRestoreBackup). A run that entered Restoring
+		// under an operator that did not pin takes its hold here.
+		if ended, wait, err := r.holdInPlaceRestoreBackup(ctx, fg, built.Annotations[v1alpha1.RestoreBackupUIDAnnotation]); ended || wait > 0 || err != nil {
+			return wait, err
+		}
+		cur = fg.Status.RestoreInPlace
 		// Write-ahead: record that the Job may start, with the confirm it
 		// is built with, before it exists. A crash or a lost status write
 		// right after Create then still shows that this run may have
@@ -1111,6 +1130,13 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 		// destructive work. The phase and generation commit atomically.
 		if s != nil && s.Phase == v1alpha1.RestoreInPlaceFencing && (fresh.Status.RestoreInPlace == nil || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing) {
 			fresh.Status.TopologyGeneration++
+		}
+		// The pinned source backup stays with the run, and on the terminal
+		// status that ends it. A status that starts a new run does not
+		// inherit it: the run pins again in Preflight, under a new hold ID.
+		if prev := fresh.Status.RestoreInPlace; s != nil && s.BackupRef == nil && prev != nil && prev.BackupRef != nil &&
+			!inPlaceRestoreTerminal(prev) && prev.Phase != "" {
+			s.BackupRef = prev.BackupRef.DeepCopy()
 		}
 		fresh.Status.RestoreInPlace = s
 		if err := r.Status().Update(ctx, fresh); err != nil {

@@ -59,8 +59,8 @@ type MysqlBackupReconciler struct {
 	Clientset kubernetes.Interface
 
 	// APIReader is an uncached reader for retention and cleanup decisions
-	// that must see verification holds as they are now, not as the
-	// informer cache last saw them. SetupWithManager defaults it to
+	// that must see verification and restore holds as they are now, not
+	// as the informer cache last saw them. SetupWithManager defaults it to
 	// mgr.GetAPIReader(); unit tests leave it nil and read the client.
 	APIReader client.Reader
 
@@ -87,6 +87,7 @@ func (r *MysqlBackupReconciler) clock() time.Time {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications,verbs=get;list;watch
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 
 func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -160,11 +161,19 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := r.acknowledgeTerminalGeneration(ctx, &backup); err != nil {
 			return ctrl.Result{}, err
 		}
+		// A restore hold whose restore ended without releasing it, or
+		// whose group was deleted, is stripped here; while one is live
+		// the backup is looked at again (nothing else reports a deleted
+		// group to this reconciler).
+		holdRequeue, err := r.stripDeadRestoreHolds(ctx, &backup)
+		if err != nil {
+			logger.Error(err, "strip dead restore holds")
+		}
 		requeue, err := r.pruneRetention(ctx, &backup)
 		if err != nil {
 			logger.Error(err, "retention prune")
 		}
-		recovery.RequeueAfter = shorterRequeue(recovery.RequeueAfter, requeue)
+		recovery.RequeueAfter = shorterRequeue(shorterRequeue(recovery.RequeueAfter, requeue), holdRequeue)
 		return recovery, nil
 	}
 
@@ -826,9 +835,10 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			return r.retainArtifact(ctx, backup)
 		}
 	}
-	// A hold whose verification can no longer read (its finalizer was
-	// removed by hand, say) would keep the PITR cutoff pinned for as long
-	// as cleanup stays blocked. Drop it first.
+	// A hold whose verification or restore can no longer read (the
+	// verification's finalizer was removed by hand, say, or the restoring
+	// group was deleted) would keep the PITR cutoff pinned for as long as
+	// cleanup stays blocked. Drop it first.
 	if stripped, err := r.stripDeadHolds(ctx, backup); err != nil {
 		return false, 0, err
 	} else if !stripped {
@@ -996,8 +1006,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			}
 			return false, 10 * time.Second, nil
 		}
-		// A verification may still be reading the artifact (a manual
-		// delete during a run, or a hold retention could not see).
+		// A verification or a restore may still be reading the artifact
+		// (a manual delete during a run, or a hold retention could not
+		// see).
 		if wait, err := r.waitForArtifactReaders(ctx, backup, false); err != nil || wait > 0 {
 			return false, wait, err
 		}
@@ -1315,30 +1326,35 @@ func lateRetainNote(backup *v1alpha1.MysqlBackup) string {
 	return "; deletionPolicy was changed to Retain after the cleanup started, so it was not applied"
 }
 
-// waitForArtifactReaders returns a requeue while a verification may still
-// be reading backup's artifact, recording why on the ArtifactCleanup
-// condition (HeldByVerification) and emitting ArtifactCleanupDeferred when
-// the readers change. retain says the wait only holds the release of a
-// Retain backup, whose artifact stays in storage, not a cleanup.
+// waitForArtifactReaders returns a requeue while a verification or a
+// restore may still be reading backup's artifact, recording why on the
+// ArtifactCleanup condition (HeldByVerification, or HeldByRestore when only
+// restores read it) and emitting ArtifactCleanupDeferred when the readers
+// change. retain says the wait only holds the release of a Retain backup,
+// whose artifact stays in storage, not a cleanup.
 func (r *MysqlBackupReconciler) waitForArtifactReaders(ctx context.Context, backup *v1alpha1.MysqlBackup, retain bool) (time.Duration, error) {
-	readers, err := artifactReaders(ctx, r.apiReader(), backup)
+	readers, err := artifactReaderRefs(ctx, r.apiReader(), backup)
 	if err != nil {
 		return 0, err
 	}
 	if len(readers) == 0 {
 		return 0, nil
 	}
-	message := fmt.Sprintf("verification %s may still be reading the artifact", strings.Join(readers, ", "))
+	reason := v1alpha1.ReasonHeldByVerification
+	if verifications, _ := splitReaders(readers); len(verifications) == 0 {
+		reason = v1alpha1.ReasonHeldByRestore
+	}
+	message := fmt.Sprintf("%s may still be reading the artifact", describeReaders(readers))
 	event := "cleanup waits: " + message
 	if retain {
 		message += "; deletionPolicy is Retain, so the artifact stays in storage and only the release of this backup waits"
 		event = "release waits: " + message
 	}
 	previous := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
-	if previous == nil || previous.Reason != v1alpha1.ReasonHeldByVerification || previous.Message != message {
+	if previous == nil || previous.Reason != reason || previous.Message != message {
 		r.Recorder.Event(backup, corev1.EventTypeNormal, v1alpha1.EventArtifactCleanupDeferred, event)
 	}
-	if err := r.setArtifactCleanupCondition(ctx, backup, v1alpha1.ReasonHeldByVerification, message); err != nil {
+	if err := r.setArtifactCleanupCondition(ctx, backup, reason, message); err != nil {
 		return 0, err
 	}
 	return 30 * time.Second, nil
@@ -2175,8 +2191,8 @@ func resolveRetention(profile *v1alpha1.BackupProfile) backupRetentionPolicy {
 //     successful backup is never deleted), or
 //   - keepWithin > 0 and its completion time is within that window.
 //
-// A CR no rule keeps is deleted unless a verification may still be
-// reading its artifact (deleteUnreadBackup).
+// A CR no rule keeps is deleted unless a verification or a restore may
+// still be reading its artifact (deleteUnreadBackup).
 func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alpha1.MysqlBackup, keepLast int32, keepWithin time.Duration) error {
 	keepLast = max(keepLast, 1)
 	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
@@ -2207,8 +2223,8 @@ func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alp
 				continue
 			}
 		}
-		// Not kept by any rule => delete, unless a verification may still
-		// be reading the artifact.
+		// Not kept by any rule => delete, unless a verification or a
+		// restore may still be reading the artifact.
 		victim := b
 		if checker == nil {
 			checker = NewBackupReadChecker(r.apiReader())

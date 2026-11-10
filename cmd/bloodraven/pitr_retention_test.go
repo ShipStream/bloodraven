@@ -208,8 +208,100 @@ func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 	}
 }
 
+// TestPITRCutoffKeepsTerminatingBackupARestoreReads pins #275: a backup
+// deleted while a restore reads it (here a point-in-time initFromBackup of
+// another group in the namespace) keeps its artifact until the restore
+// ends, so it must keep bounding binlog retention for that long too: the
+// replay reads the binlogs after it. The restore is matched by the UID it
+// pinned, and stops counting once it is Succeeded or Failed.
+func TestPITRCutoffKeepsTerminatingBackupARestoreReads(t *testing.T) {
+	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	restoring := func(phase v1alpha1.BackupPhase, pinnedUID string) *v1alpha1.MysqlFailoverGroup {
+		fg := &v1alpha1.MysqlFailoverGroup{
+			ObjectMeta: metav1.ObjectMeta{Name: "restored", Namespace: "ns", UID: "uid-restored"},
+			Spec: v1alpha1.MysqlFailoverGroupSpec{InitFromBackup: &v1alpha1.InitFromBackupSpec{
+				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "deleting"}},
+				PointInTime: &v1alpha1.PointInTimeSpec{},
+			}},
+		}
+		if phase != "" {
+			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: phase, JobName: "mysql-restored-iad-restore"}
+			if pinnedUID != "" {
+				fg.Status.Restore.BackupRef = &v1alpha1.RestoreBackupRef{Name: "deleting", UID: pinnedUID, HoldID: "hold-1"}
+			}
+		}
+		return fg
+	}
+	for _, tc := range []struct {
+		name      string
+		held      bool
+		group     *v1alpha1.MysqlFailoverGroup
+		listError bool
+		cutoff    time.Time
+		wantErr   bool
+	}{
+		{name: "stamped hold", held: true, cutoff: start},
+		{name: "unstamped, pinned restore running", group: restoring(v1alpha1.BackupPhaseRunning, "uid-deleting"), cutoff: start},
+		{name: "unstamped, unpinned restore running (older operator)", group: restoring(v1alpha1.BackupPhaseRunning, ""), cutoff: start},
+		{name: "restore succeeded", group: restoring(v1alpha1.BackupPhaseSucceeded, "uid-deleting"), cutoff: start.Add(time.Hour)},
+		{name: "restore failed", group: restoring(v1alpha1.BackupPhaseFailed, "uid-deleting"), cutoff: start.Add(time.Hour)},
+		{name: "restore pinned to an earlier backup of this name", group: restoring(v1alpha1.BackupPhaseRunning, "uid-deleting-previous"), cutoff: start.Add(time.Hour)},
+		{name: "restore not started cannot pin a backup being deleted", group: restoring("", ""), cutoff: start.Add(time.Hour)},
+		{name: "group lookup fails closed", listError: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := clientgoscheme.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := v1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			deleting := retentionBoundaryBackup("deleting", retentionTestSID+":1-10", start)
+			deleting.UID = "uid-deleting"
+			now := metav1.Now()
+			deleting.DeletionTimestamp = &now
+			deleting.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+			if tc.held {
+				deleting.Annotations = map[string]string{v1alpha1.RestoreHoldAnnotationPrefix + "hold-1": "restored"}
+			}
+			kept := retentionBoundaryBackup("kept", retentionTestSID+":1-20", start.Add(time.Hour))
+			objs := []client.Object{deleting, kept}
+			if tc.group != nil {
+				objs = append(objs, tc.group)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+			var holdReader client.Reader = c
+			if tc.listError {
+				holdReader = interceptor.NewClient(c, interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*v1alpha1.MysqlFailoverGroupList); ok {
+							return errors.New("injected")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+			}
+			resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", cutoffTestArchive)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("an unknown reader set produced a cutoff: %v", resp)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp["cutoffTime"] != tc.cutoff.Format(time.RFC3339) {
+				t.Fatalf("cutoff %v, want %s", resp["cutoffTime"], tc.cutoff.Format(time.RFC3339))
+			}
+		})
+	}
+}
+
 // TestPITRCutoffListsVerificationsOnce pins that a lookup with many stuck
-// Terminating backups costs one uncached verification List, not one each.
+// Terminating backups costs one uncached List of verifications and one of
+// failover groups, not one each.
 func TestPITRCutoffListsVerificationsOnce(t *testing.T) {
 	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
 	scheme := runtime.NewScheme()
@@ -229,11 +321,14 @@ func TestPITRCutoffListsVerificationsOnce(t *testing.T) {
 		objs = append(objs, b)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	lists := 0
+	lists, groupLists := 0, 0
 	holdReader := interceptor.NewClient(c, interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if _, ok := list.(*v1alpha1.MysqlBackupVerificationList); ok {
+			switch list.(type) {
+			case *v1alpha1.MysqlBackupVerificationList:
 				lists++
+			case *v1alpha1.MysqlFailoverGroupList:
+				groupLists++
 			}
 			return c.List(ctx, list, opts...)
 		},
@@ -242,8 +337,8 @@ func TestPITRCutoffListsVerificationsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lists != 1 {
-		t.Fatalf("verification Lists = %d, want 1 per request", lists)
+	if lists != 1 || groupLists != 1 {
+		t.Fatalf("verification Lists = %d, failover group Lists = %d, want 1 of each per request", lists, groupLists)
 	}
 	if resp["archive"] != cutoffTestArchive {
 		t.Fatalf("response echoes archive %v, want %s", resp["archive"], cutoffTestArchive)

@@ -1325,6 +1325,13 @@ type RestoreInPlaceStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
+	// BackupRef pins the MysqlBackup the run reads when
+	// spec.restoreInPlace.source.backupRef is set. It is recorded in
+	// Preflight, before the backup is held and before anything is fenced,
+	// and kept on the terminal status. See RestoreBackupRef.
+	// +optional
+	BackupRef *RestoreBackupRef `json:"backupRef,omitempty"`
+
 	// Provenance records what the restore loaded and what the target held
 	// afterwards. An in-place restore never replays binary logs, so its
 	// provenance.pointInTime stays unset.
@@ -1334,6 +1341,34 @@ type RestoreInPlaceStatus struct {
 	// Message is a human-readable status line.
 	// +optional
 	Message string `json:"message,omitempty"`
+}
+
+// RestoreBackupRef pins the MysqlBackup a restore reads through
+// source.backupRef: the object the name resolved to when the restore took
+// its hold. The restore Job is only created from that object, so a backup
+// deleted and created again under the same name is never read in its place.
+//
+// The pin is written before the hold annotation
+// (`restore-hold.bloodraven.shipstream.io/<holdID>`) is stamped on the
+// backup, and the hold before the restore Job is created. While the
+// restore is neither Succeeded nor Failed, retention, artifact cleanup and
+// the PITR binlog cutoff treat it as a reader of that backup.
+type RestoreBackupRef struct {
+	// Name of the MysqlBackup.
+	// +required
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// UID of the MysqlBackup when the restore pinned it.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	UID string `json:"uid,omitempty"`
+
+	// HoldID is the suffix of the hold annotation this restore stamped on
+	// the backup. Each attempt takes a new one.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	HoldID string `json:"holdID,omitempty"`
 }
 
 // RestoreProvenance is the provenance of a restore: the backup it loaded,
@@ -1430,6 +1465,14 @@ type RestoreStatus struct {
 	// CompletionTime is when the restore Job reached a terminal state.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// BackupRef pins the MysqlBackup the restore reads when
+	// spec.initFromBackup.source.backupRef is set. It is recorded once the
+	// restore Job can be built, before the backup is held and the Job is
+	// created, and kept on the terminal status. A retry (the failed Job
+	// deleted) pins again. See RestoreBackupRef.
+	// +optional
+	BackupRef *RestoreBackupRef `json:"backupRef,omitempty"`
 
 	// Provenance records what the restore loaded, what the target held
 	// afterwards and, with spec.initFromBackup.pointInTime, the certified

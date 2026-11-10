@@ -377,6 +377,7 @@ func ultraARestoreFixture(t *testing.T, mutate func(fg *v1alpha1.MysqlFailoverGr
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
+	createRestoreSeedBackup(t, m.client, fg.Namespace)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	if mutate != nil {
 		mutate(fg)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -92,8 +93,18 @@ func verificationReading(ctx context.Context, reader client.Reader, v *v1alpha1.
 	return !stopped, err
 }
 
-// artifactReader identifies a verification that may still read a backup.
+// The kinds of artifactReader.
+const (
+	readerVerification = "verification"
+	readerRestore      = "restore"
+)
+
+// artifactReader identifies a verification, or a group whose restore
+// (initFromBackup or restoreInPlace), that may still read a backup. For a
+// restore, Name and UID are the restoring group's; UID is empty when only
+// a stamped hold names the group (it is gone, or its status moved on).
 type artifactReader struct {
+	Kind string
 	Name string
 	UID  string
 }
@@ -116,8 +127,9 @@ func holdLive(ctx context.Context, reader client.Reader, namespace, uid, name st
 	}
 }
 
-// artifactReaders returns the names of the verifications that may still be
-// reading the backup's artifact. See artifactReaderRefs.
+// artifactReaders returns the names of the verifications, and of the
+// groups whose restore, may still be reading the backup's artifact. See
+// artifactReaderRefs.
 func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]string, error) {
 	refs, err := artifactReaderRefs(ctx, reader, backup)
 	if err != nil {
@@ -142,31 +154,42 @@ func readerUIDs(refs []artifactReader) []string {
 	return uids
 }
 
-// artifactReaderRefs returns the verifications that may still be reading
-// the backup's artifact, read through the uncached reader, sorted by name.
-// Any API error is returned so that callers fail closed.
+// artifactReaderRefs returns the verifications and the restoring groups
+// that may still be reading the backup's artifact, read through the
+// uncached reader, verifications first, each sorted by name. Any API error
+// is returned so that callers fail closed.
 //
-// It honours stamped holds and also scans verifications directly, which
-// covers verifications started by an operator that did not stamp holds and
-// the window before a new one stamps.
+// It honours stamped holds and also scans verifications and failover
+// groups directly, which covers runs started by an operator that did not
+// stamp holds and the window before a new one stamps.
 func artifactReaderRefs(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]artifactReader, error) {
-	var list v1alpha1.MysqlBackupVerificationList
-	if err := reader.List(ctx, &list, client.InNamespace(backup.Namespace)); err != nil {
-		return nil, fmt.Errorf("list verifications: %w", err)
-	}
-	return artifactReaderRefsFromList(ctx, reader, backup, &list)
+	return NewBackupReadChecker(reader).readers(ctx, backup)
 }
 
 // artifactReaderRefsFromList is artifactReaderRefs with the namespace's
-// verifications already listed, so several backups share one List.
-func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, list *v1alpha1.MysqlBackupVerificationList) ([]artifactReader, error) {
+// verifications and failover groups already listed, so several backups
+// share one List of each.
+func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, list *v1alpha1.MysqlBackupVerificationList, groups *v1alpha1.MysqlFailoverGroupList) ([]artifactReader, error) {
 	readers := map[string]string{}
+	restores := map[string]string{}
 	seen := map[types.UID]bool{}
 	// An unpinned verification only ever pins a live Succeeded backup
 	// (resolveBackup skips Terminating ones and stampVerificationHold
-	// refuses them), so it is a prospective reader of nothing else.
+	// refuses them), so it is a prospective reader of nothing else. The
+	// same holds for a restore that has no Job yet (holdRestoreBackup).
 	pickable := backup.DeletionTimestamp.IsZero() && backup.Status.Phase == v1alpha1.BackupPhaseSucceeded
 	for key, name := range backup.Annotations {
+		if holdID, ok := strings.CutPrefix(key, v1alpha1.RestoreHoldAnnotationPrefix); ok {
+			// The value is the restoring group's name.
+			live, err := restoreHoldLive(ctx, reader, backup, holdID, name)
+			if err != nil {
+				return nil, err
+			}
+			if live {
+				restores[name] = ""
+			}
+			continue
+		}
 		uid, ok := strings.CutPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix)
 		if !ok {
 			continue
@@ -203,29 +226,35 @@ func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backu
 			readers[v.Name] = string(v.UID)
 		}
 	}
-	out := make([]artifactReader, 0, len(readers))
-	for name, uid := range readers {
-		out = append(out, artifactReader{Name: name, UID: uid})
+
+	// Restores: a group whose initFromBackup or restoreInPlace is not
+	// terminal and resolves to this backup (groupRestoreReads). The group
+	// need not be the one the backup belongs to.
+	for i := range groups.Items {
+		fg := &groups.Items[i]
+		if _, held := restores[fg.Name]; held || groupRestoreReads(fg, backup, pickable) {
+			restores[fg.Name] = string(fg.UID)
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return sortedReaders(readers, restores), nil
 }
 
 // deadHoldKeys returns the hold annotations on the backup whose holder can
 // no longer read it (for example a verification whose finalizer was
-// removed by hand). They would otherwise keep the PITR cutoff pinned.
-func deadHoldKeys(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]string, error) {
+// removed by hand, or a restore of a group that was deleted). They would
+// otherwise keep the PITR cutoff pinned. With prefixes, only holds of
+// those kinds are looked at.
+func deadHoldKeys(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, prefixes ...string) ([]string, error) {
 	var dead []string
-	for key, name := range backup.Annotations {
-		uid, ok := strings.CutPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix)
-		if !ok {
+	for key, value := range backup.Annotations {
+		if len(prefixes) > 0 && !slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(key, p) }) {
 			continue
 		}
-		live, err := holdLive(ctx, reader, backup.Namespace, uid, name)
+		hold, live, err := readHoldLive(ctx, reader, backup, key, value)
 		if err != nil {
 			return nil, err
 		}
-		if !live {
+		if hold && !live {
 			dead = append(dead, key)
 		}
 	}
@@ -249,34 +278,57 @@ func (r *MysqlBackupReconciler) stripDeadHolds(ctx context.Context, backup *v1al
 		if apierrors.IsConflict(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("remove dead verification holds: %w", err)
+		return false, fmt.Errorf("remove dead holds: %w", err)
 	}
-	log.FromContext(ctx).Info("removed dead verification holds", "namespace", backup.Namespace, "backup", backup.Name, "holds", dead)
+	// One line per kind: the verification line's fields are a log contract.
+	var verifications, restores []string
+	for _, key := range dead {
+		if strings.HasPrefix(key, v1alpha1.RestoreHoldAnnotationPrefix) {
+			restores = append(restores, key)
+		} else {
+			verifications = append(verifications, key)
+		}
+	}
+	if len(verifications) > 0 {
+		log.FromContext(ctx).Info("removed dead verification holds", "namespace", backup.Namespace, "backup", backup.Name, "holds", verifications)
+	}
+	if len(restores) > 0 {
+		log.FromContext(ctx).Info("removed dead restore holds", "namespace", backup.Namespace, "backup", backup.Name, "holds", restores)
+	}
 	return true, nil
 }
 
-// BackupReadChecker answers whether verifications may still be reading
-// backups, through an (uncached) reader. It lists each namespace's
-// verifications once, so checking many backups costs one List plus the
-// reads for the verifications that reference them. API errors are
-// returned so that callers fail closed.
+// BackupReadChecker answers whether verifications or restores may still
+// be reading backups, through an (uncached) reader. It lists each
+// namespace's verifications and failover groups once (a restore reads a
+// backup of its own namespace only: source.backupRef is a local
+// reference), so checking many backups costs one List of each plus the
+// reads for the holders that reference them. API errors are returned so
+// that callers fail closed.
 type BackupReadChecker struct {
 	reader client.Reader
 	lists  map[string]*v1alpha1.MysqlBackupVerificationList
+	groups map[string]*v1alpha1.MysqlFailoverGroupList
 }
 
 // NewBackupReadChecker returns a checker for one decision (one request).
 func NewBackupReadChecker(reader client.Reader) *BackupReadChecker {
-	return &BackupReadChecker{reader: reader, lists: map[string]*v1alpha1.MysqlBackupVerificationList{}}
+	return &BackupReadChecker{
+		reader: reader,
+		lists:  map[string]*v1alpha1.MysqlBackupVerificationList{},
+		groups: map[string]*v1alpha1.MysqlFailoverGroupList{},
+	}
 }
 
-// BeingRead reports whether any verification may still read the backup.
+// BeingRead reports whether any verification or restore may still read
+// the backup.
 func (c *BackupReadChecker) BeingRead(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
 	readers, err := c.readers(ctx, backup)
 	return len(readers) > 0, err
 }
 
-// readers returns the verifications that may still read the backup.
+// readers returns the verifications and the restoring groups that may
+// still read the backup.
 func (c *BackupReadChecker) readers(ctx context.Context, backup *v1alpha1.MysqlBackup) ([]artifactReader, error) {
 	list, ok := c.lists[backup.Namespace]
 	if !ok {
@@ -286,7 +338,15 @@ func (c *BackupReadChecker) readers(ctx context.Context, backup *v1alpha1.MysqlB
 		}
 		c.lists[backup.Namespace] = list
 	}
-	return artifactReaderRefsFromList(ctx, c.reader, backup, list)
+	groups, ok := c.groups[backup.Namespace]
+	if !ok {
+		groups = &v1alpha1.MysqlFailoverGroupList{}
+		if err := c.reader.List(ctx, groups, client.InNamespace(backup.Namespace)); err != nil {
+			return nil, fmt.Errorf("list failover groups: %w", err)
+		}
+		c.groups[backup.Namespace] = groups
+	}
+	return artifactReaderRefsFromList(ctx, c.reader, backup, list, groups)
 }
 
 // stampVerificationHold records v's hold on its pinned backup. The patch
@@ -402,13 +462,14 @@ func (r *MysqlBackupReconciler) apiReader() client.Reader {
 	return r.Client
 }
 
-// deleteUnreadBackup deletes a retention victim unless a verification may
-// still be reading it. It re-reads the victim uncached, refuses to act on
-// a same-name replacement, and deletes with UID and resourceVersion
-// preconditions so a hold stamped after the read wins. checker is shared
-// across one prune pass so the namespace's verifications are listed once;
-// a verification that pins after that List must stamp a hold (bumping the
-// resourceVersion) before it reads, so the precondition still protects it.
+// deleteUnreadBackup deletes a retention victim unless a verification or
+// a restore may still be reading it. It re-reads the victim uncached,
+// refuses to act on a same-name replacement, and deletes with UID and
+// resourceVersion preconditions so a hold stamped after the read wins.
+// checker is shared across one prune pass so the namespace's verifications
+// and failover groups are listed once; a verification or restore that pins
+// after that List must stamp a hold (bumping the resourceVersion) before
+// it reads, so the precondition still protects it.
 func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *v1alpha1.MysqlBackup, checker *BackupReadChecker) error {
 	var fresh v1alpha1.MysqlBackup
 	if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(victim), &fresh); err != nil {
@@ -422,12 +483,23 @@ func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *
 		return fmt.Errorf("check readers of backup %s: %w", fresh.Name, err)
 	}
 	if len(readers) > 0 {
-		log.FromContext(ctx).Info("backup prune held by verification",
-			"namespace", fresh.Namespace, "backup", fresh.Name, "backupUID", string(fresh.UID),
-			"fg", fresh.Spec.FailoverGroupRef.Name, "profile", fresh.Spec.ProfileName,
-			"verifications", readerNames(readers), "verificationUIDs", readerUIDs(readers))
+		// One line per kind: the verification line's fields are a log
+		// contract.
+		verifications, restores := splitReaders(readers)
+		if len(verifications) > 0 {
+			log.FromContext(ctx).Info("backup prune held by verification",
+				"namespace", fresh.Namespace, "backup", fresh.Name, "backupUID", string(fresh.UID),
+				"fg", fresh.Spec.FailoverGroupRef.Name, "profile", fresh.Spec.ProfileName,
+				"verifications", readerNames(verifications), "verificationUIDs", readerUIDs(verifications))
+		}
+		if len(restores) > 0 {
+			log.FromContext(ctx).Info("backup prune held by restore",
+				"namespace", fresh.Namespace, "backup", fresh.Name, "backupUID", string(fresh.UID),
+				"fg", fresh.Spec.FailoverGroupRef.Name, "profile", fresh.Spec.ProfileName,
+				"restoreGroups", readerNames(restores))
+		}
 		r.Recorder.Eventf(&fresh, corev1.EventTypeNormal, v1alpha1.EventRetentionDeferred,
-			"retention keeps this backup while verification %s may be reading it", strings.Join(readerNames(readers), ", "))
+			"retention keeps this backup while %s may be reading it", describeReaders(readers))
 		return nil
 	}
 	uid, rv := fresh.UID, fresh.ResourceVersion
