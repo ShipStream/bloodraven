@@ -386,6 +386,10 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 		return
 	}
 	hold := m.holdUnobservedActive(&fg, snap)
+	if master := dragonflyMasterOverEmptyRecord(&fg, snap); master != "" && plannedTakeoverMasterSite(&fg) == "" {
+		m.logger.Info("dragonfly: recorded active site holds no keys; following the master on the MySQL active site",
+			"site", recordedDragonflyActiveSite(&fg), "master", master)
+	}
 	m.patchStatus(ctx, snap, hold)
 
 	if m.paused() || m.shouldYield() {
@@ -819,9 +823,12 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 // still observed as a raw Dragonfly master; otherwise a single observed raw
 // master self-heals stale status after operator upgrades or restarts.
 //
-// One case is excepted (dragonflyHeldOverEmptyMaster): with holdUnobserved,
-// a persisted active site that could not be observed at all keeps the role
-// when the single raw master holds no keys.
+// Two cases are excepted, both on the key count: with holdUnobserved, a
+// persisted active site that could not be observed at all keeps the role
+// when the single raw master holds no keys (dragonflyHeldOverEmptyMaster);
+// and a persisted active site that holds no keys gives way to the master
+// on the MySQL active site that holds the cache
+// (dragonflyMasterOverEmptyRecord).
 func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) string {
 	if site := plannedTakeoverMasterSite(fg); site != "" {
 		demoted := false
@@ -847,6 +854,9 @@ func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps [
 	if recorded != "" {
 		for _, site := range rawMasters {
 			if site == recorded {
+				if master := dragonflyMasterOverEmptyRecord(fg, snaps); master != "" {
+					return master
+				}
 				return site
 			}
 		}
@@ -894,6 +904,42 @@ func dragonflyHeldOverEmptyMaster(fg *v1alpha1.MysqlFailoverGroup, snaps []Drago
 		other = s.Name
 	}
 	return other
+}
+
+// dragonflyMasterOverEmptyRecord returns the MySQL active site when its
+// Dragonfly reports the master role and holds keys while the recorded
+// active site (status.dragonfly.activeSite) is another site that reports
+// the master role and holds none, or "".
+//
+// That is a promotion whose record was lost: the operator promoted the
+// Dragonfly on the MySQL active site and died before recording it, and the
+// old master, whose process exits in a takeover, restarted empty. The
+// record then names the empty instance. Honoring it leaves the group with
+// two masters for good, since the site with the cache is not reattached to
+// an empty one (reconcileReplication), and before that check existed it
+// emptied the cache. The site that has both MySQL and the cache is the
+// master; the empty one is reattached to it.
+//
+// Both conditions are needed. A recorded site on the MySQL active site is
+// never displaced, whatever another master holds (a pod restarted from a
+// snapshot holds keys too), and an unread key count decides nothing.
+func dragonflyMasterOverEmptyRecord(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) string {
+	recorded := recordedDragonflyActiveSite(fg)
+	mysqlActive := fg.Status.ActiveSite
+	if recorded == "" || mysqlActive == "" || mysqlActive == recorded {
+		return ""
+	}
+	rec, master := dragonflySnapshotOf(snaps, recorded), dragonflySnapshotOf(snaps, mysqlActive)
+	if rec == nil || master == nil {
+		return ""
+	}
+	if !rec.Reachable || rec.Info.Role != "master" || !rec.holdsNoKeys() {
+		return ""
+	}
+	if !master.Reachable || master.Info.Role != "master" || !master.holdsKeys() {
+		return ""
+	}
+	return mysqlActive
 }
 
 // holdsKeys reports whether the instance was observed with at least one
@@ -1087,7 +1133,9 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			// which is what a wrongly recorded active site looks like.
 			// The stale master stays as it is (out of the active
 			// Service) until the active site holds a key or someone
-			// decides.
+			// decides. When the stale master is on the MySQL active
+			// site it does not come to this: it is the active site
+			// (dragonflyMasterOverEmptyRecord).
 			//
 			// And nothing is reattached to an active site that is held
 			// although unobserved: if it never returns, the empty

@@ -334,6 +334,91 @@ func TestDragonflyManager_Tick_MasterReturningAfterGraceIsNotEmptied(t *testing.
 	}
 }
 
+// Scenario 23 (operator killed right after an emergency failover): the
+// Dragonfly on the new MySQL active site was promoted and the record of
+// it was lost, and the old master restarted empty. The record names the
+// empty instance, which was itself the last recorded promotion target.
+// The site with MySQL and the cache is the active one; nothing it holds
+// is discarded.
+func TestDragonflyManager_Tick_EmptyRecordedSiteGivesWayToMasterOnMySQLActiveSite(t *testing.T) {
+	fg := fgAfterDragonflyTakeover()
+	fg.Status.ActiveSite = "dc2"
+	fg.Status.Dragonfly.LastPromotionTarget = "dc1"
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	mgr := NewDragonflyManager(c, record.NewFakeRecorder(16), slog.Default(), key, 50*time.Millisecond)
+
+	dc1 := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", ConnectedSlaves: 1}}
+	dc2 := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}, keys: 5}
+	dc3 := &fakeDragonflyConn{info: dragonflyReplicaOf("lion-dragonfly-dc1.shared-lion.svc.cluster.local")}
+	conn := newFakeConnector()
+	conn.program(holdTestDC1, dc1)
+	conn.program(holdTestDC2, dc2)
+	conn.program(holdTestDC3, dc3)
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	if st := dragonflyStatusOf(t, c, key); st.ActiveSite != "dc2" {
+		t.Fatalf("activeSite = %q, want dc2: it has MySQL and the cache", st.ActiveSite)
+	}
+	if dc2.replicaOfArgs != nil {
+		t.Fatalf("dc2 got REPLICAOF %v: the site holding the cache was emptied", dc2.replicaOfArgs)
+	}
+	if dc3.replicaOfArgs == nil || !contains(dc3.replicaOfArgs[0], "lion-dragonfly-dc2.") {
+		t.Errorf("reader REPLICAOF = %v, want it pointed at dc2", dc3.replicaOfArgs)
+	}
+
+	// The reader left dc1, so nothing is attached to it: it is reattached.
+	dc1.info.ConnectedSlaves = 0
+	mgr.Tick(context.Background())
+	if dc1.replicaOfArgs == nil || !contains(dc1.replicaOfArgs[0], "lion-dragonfly-dc2.") {
+		t.Errorf("dc1 REPLICAOF = %v, want the empty site reattached to dc2", dc1.replicaOfArgs)
+	}
+	if dc2.replicaOfArgs != nil {
+		t.Fatalf("dc2 got REPLICAOF %v", dc2.replicaOfArgs)
+	}
+}
+
+func TestDragonflyMasterOverEmptyRecord(t *testing.T) {
+	keys := func(n int64) *int64 { return &n }
+	master := func(name string, k *int64) DragonflySiteSnapshot {
+		return DragonflySiteSnapshot{Name: name, Reachable: true, Info: dragonfly.ReplicationInfo{Role: "master"}, Keys: k}
+	}
+	replica := func(name string) DragonflySiteSnapshot {
+		return DragonflySiteSnapshot{Name: name, Reachable: true, Info: dragonfly.ReplicationInfo{Role: "slave"}}
+	}
+
+	// status.dragonfly.activeSite is dc1 in every case.
+	for _, tc := range []struct {
+		name        string
+		mysqlActive string
+		snaps       []DragonflySiteSnapshot
+		want        string
+	}{
+		{name: "empty record, cache on the MySQL active site", mysqlActive: "dc2", snaps: []DragonflySiteSnapshot{master("dc1", keys(0)), master("dc2", keys(3))}, want: "dc2"},
+		// A recorded site on the MySQL active site is never displaced: the
+		// other master may be a pod restarted from a snapshot.
+		{name: "record on the MySQL active site", mysqlActive: "dc1", snaps: []DragonflySiteSnapshot{master("dc1", keys(0)), master("dc2", keys(3))}, want: "dc1"},
+		{name: "record holds keys", mysqlActive: "dc2", snaps: []DragonflySiteSnapshot{master("dc1", keys(1)), master("dc2", keys(3))}, want: "dc1"},
+		{name: "record's key count unknown", mysqlActive: "dc2", snaps: []DragonflySiteSnapshot{master("dc1", nil), master("dc2", keys(3))}, want: "dc1"},
+		{name: "MySQL active site holds nothing", mysqlActive: "dc2", snaps: []DragonflySiteSnapshot{master("dc1", keys(0)), master("dc2", keys(0))}, want: "dc1"},
+		{name: "MySQL active site's key count unknown", mysqlActive: "dc2", snaps: []DragonflySiteSnapshot{master("dc1", keys(0)), master("dc2", nil)}, want: "dc1"},
+		{name: "MySQL active site is a replica", mysqlActive: "dc2", snaps: []DragonflySiteSnapshot{master("dc1", keys(0)), replica("dc2")}, want: "dc1"},
+		{name: "cache on a third site, not the MySQL active one", mysqlActive: "dc2", snaps: []DragonflySiteSnapshot{master("dc1", keys(0)), replica("dc2"), master("dc3", keys(3))}, want: "dc1"},
+		{name: "no MySQL active site", snaps: []DragonflySiteSnapshot{master("dc1", keys(0)), master("dc2", keys(3))}, want: "dc1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := fgWithDragonflyEnabledAndActive()
+			fg.Status.ActiveSite = tc.mysqlActive
+			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+			if got := activeDragonflySiteFromObservation(fg, tc.snaps, true); got != tc.want {
+				t.Errorf("active = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestActiveDragonflySiteFromObservation_UnobservedRecordedSite(t *testing.T) {
 	keys := func(n int64) *int64 { return &n }
 	master := func(name string, k *int64) DragonflySiteSnapshot {
