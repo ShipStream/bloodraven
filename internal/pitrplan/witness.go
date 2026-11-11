@@ -148,12 +148,14 @@ func (p *planner) groundTruth(c GTID) (*groundTruth, error) {
 // anchoredTruth accepts a replica occurrence through an anchor (D-39):
 //
 //	Anchor(w) = ∪ {R.gtidExecuted : R a promotion record of s that provably precedes w}
+//	          ∪ P(R*), R* the promotion record of s whose episode committed w
 //	          ∪ exec(q), q the latest archived origin occurrence of s in pred(o_r)
 //
 // and accepts o_r iff every g ∈ pred(o_r) ∖ X ∖ Anchor(w) has sid(g) = sid(w).
 // anchorRecords says which promotion records provably precede w and are
 // not fenced off by a later record of their site (round-1 G1, N3
-// revised); q is fenced the same way (originAnchor).
+// revised), and containmentAnchor which record's promotion set P does
+// (issue #269); q is fenced the same way (originAnchor).
 func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error) {
 	uuid := c.UUID()
 	first := occs[0].f.txn(occs[0].i)
@@ -261,6 +263,13 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 	if len(choice.shrunk) > 0 {
 		msg += "; " + strings.Join(choice.shrunk, "; ")
 	}
+	if cr := choice.contained; cr != nil {
+		// P anchored the copy and still does not explain r.g.
+		msg += fmt.Sprintf("; the promotion record %s proves by containment only its promotion set (promotionGtidExecuted), which does not hold %s: %s reached %s's server after its sidecar's last read-only observation and the promotion-time binlog rotation was not acknowledged, or %s is not part of %s's history",
+			cr.name(), r.g, r.g, c, r.g, c)
+	} else if choice.uncontained != "" {
+		msg += "; " + choice.uncontained
+	}
 	return nil, refuse(pitrarchive.TokenStopAmbiguous, "%s", msg)
 }
 
@@ -339,6 +348,11 @@ type anchorChoice struct {
 	shrunk []string
 	// sites are the sites whose records name s.
 	sites map[string]bool
+	// contained is the record whose promotion set anchors w by
+	// containment (issue #269). uncontained says, when no record does and
+	// w lies in a record's lag window, why that record could not.
+	contained   *promoRef
+	uncontained string
 }
 
 // anchorRecords selects the promotion records of s = (uuid(w), srv) that
@@ -353,6 +367,10 @@ type anchorChoice struct {
 // sidecar records every episode and every incarnation change it observes.
 // Earlier records of the site add nothing: within one incarnation they
 // are subsets of R.
+//
+// A record that this rule cannot order against w (it holds w, or it was
+// observed within δ of w or after it) may still anchor w with its
+// promotion set: containmentAnchor.
 func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 	uuid := c.UUID()
 	out := anchorChoice{set: Set{}, sites: map[string]bool{}}
@@ -402,7 +420,163 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 		out.set = out.set.Union(best.set)
 		out.names = append(out.names, name)
 	}
+	out.contained, out.uncontained = p.containmentAnchor(c, srv, oct, out.pending)
+	if out.contained != nil {
+		out.set = out.set.Union(out.contained.proven)
+		out.names = append(out.names, out.contained.name())
+	}
 	return out
+}
+
+// containmentAnchor finds the promotion record of s = (uuid(w), srv) whose
+// promotion set P anchors w by containment (issue #269), or says why the
+// record in whose lag window w lies does not. pending is anchorRecords'
+// pending record.
+//
+// A promotion record R carries P ⊆ R.gtidExecuted (recordEvidence): every
+// member of P was executed by R's server incarnation before any
+// transaction under the server's own server_uuid outside the read-only
+// observation G_ro that directly preceded R's episode, and G_ro ⊆ P. The
+// record may also carry a confirmation: a later sample C ⊇ R.gtidExecuted
+// of the same incarnation and the same continuously writable episode. So
+//
+//	w ∉ P  and  (w ∈ R.gtidExecuted  or  w ∈ C)   ⇒   P ⊆ pred_s(w):
+//
+// w is in a sample of the incarnation the sidecar observed without a gap
+// from G_ro on, so that incarnation executed it, and it did so by
+// committing it: a server never applies an event with its own server_id
+// through replication (replicate_same_server_id is off, as the origin
+// test Srv == WriterServerID already assumes). w is outside G_ro, so it
+// was committed after G_ro was read, and outside the Previous_gtids of
+// the binlog file the rest of P comes from, so after that file was
+// opened (internal/sidecar promotionSet has the derivation). Every member
+// of P was executed before one of the two. No clock orders R and w here.
+// It covers the two cases the time rule refuses: w committed before R
+// was observed ("lag": R holds w) and w committed within δ after it
+// ("pending": the confirmation holds w).
+//
+// What the sets cannot show is that the archived transaction named w is
+// the one that episode committed: a server that loses a transaction (a
+// reset, a restored data directory) issues its GTID again. That is what
+// records and clocks are for, as for every other anchor, and each check
+// below only ever withdraws the anchor:
+//
+//   - R is the earliest record of s, of any kind and on any site, that
+//     holds w (in its sample or its confirmation). An earlier one means
+//     the GTID was issued before R's episode. A record of s on another
+//     site observed less than δ after R counts as earlier;
+//   - w's commit time lies inside the episode as the record dates it:
+//     after R.observedAt − R.probeInterval − δ (the episode began after
+//     the sidecar's previous observation) and before the sample that
+//     holds w, plus δ. An unknown probeInterval is no window;
+//   - no fence (fenceOf) from oct(w) − δ on, which is at or before
+//     R.observedAt: another record of R's site that is not provably
+//     before w (observed at or after oct(w) − δ) and not provably after it
+//     (observed up to oct(w) + its probe interval + δ), or another
+//     server's promotion record around w that lacks w. Later records
+//     fence as for a time anchor: the archived w may belong to a later
+//     incarnation whose records are in the window, or missing (review
+//     F062). Earlier records fence here too: the archived w may have been
+//     committed before the change such a record reports, by an earlier
+//     incarnation than the one P describes;
+//   - R is not the oldest record of a manifest that is at its cap
+//     (MaxPromotionRecords): the cap drops the oldest records, and for
+//     this rule a dropped record could be such an earlier fence or holder.
+//
+// X plays no part (N1): excluding a transaction neither sets a record
+// aside nor makes one an anchor.
+func (p *planner) containmentAnchor(w GTID, srv uint32, oct int64, pending *promoRef) (*promoRef, string) {
+	uuid := w.UUID()
+	var holder *promoRef
+	for i := range p.fences {
+		f := &p.fences[i]
+		if f.rec.ServerUUID != uuid || f.rec.ServerID != srv || !f.holds(w) {
+			continue
+		}
+		if holder == nil || f.rec.ObservedAt.Before(holder.rec.ObservedAt) {
+			holder = f
+		}
+	}
+	// The record in whose lag window w lies: the earliest holder when it
+	// is the kind of record the time rule cannot order against w, else the
+	// pending record, which lacks w and has no confirmation that holds it.
+	r := pending
+	if holder != nil && holder.rec.Kind == pitrarchive.RecordPromotion &&
+		(holder.set.Has(w) || holder.rec.ObservedAt.UnixMicro()+p.delta >= oct) {
+		r = holder
+	}
+	if r == nil || (r != holder && holder != nil && !holder.rec.ObservedAt.After(r.rec.ObservedAt)) {
+		// No record of s is in question, or w was already held before the
+		// pending record: w is no transaction of that record's episode.
+		return nil, ""
+	}
+	at := r.rec.ObservedAt.UTC().Format(microLayout)
+	no := func(format string, args ...any) (*promoRef, string) {
+		return nil, fmt.Sprintf("the promotion record %s (observed at %s) does not anchor %s by containment: ", r.name(), at, w) + fmt.Sprintf(format, args...)
+	}
+	observed := r.rec.ObservedAt.UnixMicro()
+	pi := time.Duration(r.rec.ProbeInterval).Microseconds()
+	// inWindow: by the clocks, w is not older than r's episode can be.
+	inWindow := pi > 0 && oct > observed-pi-p.delta
+	if r != holder || r.proven == nil {
+		// r does not hold w outside a promotion set. Say why only when w
+		// lies in r's window: a record observed long after w is not the
+		// record of w's episode, with or without this evidence.
+		switch {
+		case !inWindow || (r.proven != nil && r.proven.Has(w)):
+			return nil, ""
+		case r.unusable != "":
+			return no("%s", r.unusable)
+		case r.proven == nil:
+			return no("it carries no promotion set (promotionGtidExecuted): the sidecar did not observe the server read-only directly before the episode, could not read the local binlog headers in time, or predates this evidence")
+		case r.confirmed == nil:
+			return no("%s is not in it and it has no confirmation (confirmedAt): the sidecar or the server stopped, or the episode ended, within about %s of the record", w, pitrarchive.PromotionConfirmDelay)
+		}
+		return no("neither it nor its confirmation at %s holds %s", r.rec.ConfirmedAt.UTC().Format(microLayout), w)
+	}
+	if r.proven.Has(w) {
+		// Executed before r's episode began: not a transaction of it.
+		return nil, ""
+	}
+	for i := range p.fences {
+		f := &p.fences[i]
+		if f.site == r.site || f.rec.ServerUUID != uuid || f.rec.ServerID != srv || !f.holds(w) {
+			continue
+		}
+		if f.rec.ObservedAt.UnixMicro() < observed+p.delta {
+			return no("%s, a record of the same server on another site observed at %s, also holds %s and is not provably later", f.name(), f.rec.ObservedAt.UTC().Format(microLayout), w)
+		}
+	}
+	records, oldest := 0, true
+	for i := range p.fences {
+		if f := &p.fences[i]; f.site == r.site {
+			records++
+			oldest = oldest && !f.rec.ObservedAt.Before(r.rec.ObservedAt)
+		}
+	}
+	if oldest && records >= pitrarchive.MaxPromotionRecords {
+		return no("it is the oldest of site %s's %d records, the most a manifest keeps, so an earlier record that would set it aside may have been dropped", r.site, records)
+	}
+	if pi <= 0 {
+		return no("its probe interval is unknown, so it does not date its episode")
+	}
+	if !inWindow {
+		return no("%s was committed at %s, more than the record's probe interval (%s) and the %s clock-skew margin before it was observed, so before its episode can have begun: the archived transaction is not the one that episode committed (the GTID was issued twice)",
+			w, fmtMicros(oct), time.Duration(r.rec.ProbeInterval), p.deltaString())
+	}
+	sampled := observed
+	if !r.set.Has(w) {
+		sampled = r.rec.ConfirmedAt.UnixMicro()
+	}
+	if oct >= sampled+p.delta {
+		return no("%s was committed at %s, the %s clock-skew margin or more after the sample that holds it (%s): the archived transaction is not the one that sample saw (the GTID was issued twice, or the clocks differ by more than the margin)",
+			w, fmtMicros(oct), p.deltaString(), fmtMicros(sampled))
+	}
+	if fc := p.fenceOf(r.site, r, w, srv, min(observed, oct-p.delta), oct, 0); fc != nil {
+		fc.earlier = !fc.role && fc.rec.rec.ObservedAt.Before(r.rec.ObservedAt)
+		return nil, fc.explain(fmt.Sprintf("the promotion record %s (observed at %s) does not anchor %s by containment", r.name(), at, w), w)
+	}
+	return r, ""
 }
 
 func (pr *promoRef) name() string { return fmt.Sprintf("%s#%d", pr.site, pr.index) }
@@ -413,6 +587,9 @@ type fence struct {
 	// role: another server's promotion record (F062), not a record of
 	// the anchor's own site.
 	role bool
+	// earlier: a record of the anchor's site observed before the anchor
+	// record (containmentAnchor only).
+	earlier bool
 }
 
 // explain completes "<anchor> is not an anchor" with the fence's reason.
@@ -431,6 +608,10 @@ func (f *fence) explain(what string, w GTID) string {
 	window := "an unknown time"
 	if pi := time.Duration(f.rec.rec.ProbeInterval); pi > 0 {
 		window = "up to " + pi.String()
+	}
+	if f.earlier {
+		return fmt.Sprintf("%s, because an earlier record of site %s, %s (%s observed at %s, reporting a change that happened %s before it), is not provably before %s: %s may have been committed before that change, by an earlier episode or server incarnation than the one the promotion set describes",
+			what, f.rec.site, f.rec.name(), kind, at, window, w, w)
 	}
 	return fmt.Sprintf("%s, because a later record of site %s, %s (%s observed at %s, reporting a change that happened %s before it), is not provably after %s: %s may belong to a later episode or server incarnation, whose history need not hold the anchor",
 		what, f.rec.site, f.rec.name(), kind, at, window, w, w)

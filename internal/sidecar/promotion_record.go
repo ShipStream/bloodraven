@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,7 +30,7 @@ type RoleObservation struct {
 // maxRoleProbeSpread bounds how long a role probe may run for its
 // observation to open a promotion record. The record's time is when the
 // probe returned, so a slow probe would spend part of the planner's
-// clock-skew margin δ (pitrplan.DefaultClockSkewMargin, 5s) on the gap
+// clock-skew margin δ (pitrarchive.ClockSkewMargin, 5s) on the gap
 // between the GTID snapshot and its time; a slower one waits for the next.
 const maxRoleProbeSpread = time.Second
 
@@ -101,9 +102,19 @@ type roleTimeline struct {
 	// readOnly is the latest observation while it is read-only;
 	// readOnlyBefore is the gtid_executed of the read-only observation
 	// directly before the epoch, of the same server ("" when there was
-	// none). It is recorded, not used by the planner (N5).
-	readOnly       *RoleObservation
-	readOnlyBefore string
+	// none). It is recorded, and it is the first source of the record's
+	// promotion set (promotionSet, issue #269). readOnlyObserved says
+	// there was one: a server that has executed nothing reports "".
+	readOnly         *RoleObservation
+	readOnlyBefore   string
+	readOnlyObserved bool
+	// confirm is the epoch's first observation whose read started at least
+	// confirmDelay after first returned (issue #269). Every observation
+	// between the two showed the server writable and of first's
+	// incarnation (anything else ends the epoch), so its gtid_executed
+	// contains first's. nil until there is one.
+	confirm      *RoleObservation
+	confirmDelay time.Duration
 	// firstSince is when the server read the gtid_executed of the
 	// complete observation directly before first (zero: none in this
 	// process). The episode began after it.
@@ -140,12 +151,14 @@ const maxPendingResets = 16
 
 // roleSnapshot is a copy of the timeline.
 type roleSnapshot struct {
-	epoch          uint64
-	state          roleState
-	complete       bool
-	first          *RoleObservation
-	firstSince     time.Time
-	readOnlyBefore string
+	epoch            uint64
+	state            roleState
+	complete         bool
+	first            *RoleObservation
+	firstSince       time.Time
+	readOnlyBefore   string
+	readOnlyObserved bool
+	confirm          *RoleObservation
 }
 
 // observe feeds one probe result. An observation that finished before the
@@ -173,24 +186,29 @@ func (t *roleTimeline) observe(obs RoleObservation, complete bool, err error) {
 	}
 	switch {
 	case err != nil:
-		t.state, t.readOnly, t.first = roleUnknown, nil, nil
+		t.state, t.readOnly, t.first, t.confirm = roleUnknown, nil, nil, nil
 	case obs.ReadOnly:
 		ro := obs
-		t.state, t.readOnly, t.first = roleReadOnly, &ro, nil
+		t.state, t.readOnly, t.first, t.confirm = roleReadOnly, &ro, nil, nil
 	default:
 		if t.state != roleWritable || !complete || !t.complete || !sameIncarnation(t.last, obs) {
-			before := ""
+			before, observed := "", false
 			if t.state == roleReadOnly && complete && t.readOnly != nil &&
 				t.readOnly.ServerUUID == obs.ServerUUID && t.readOnly.ServerID == obs.ServerID {
-				before = t.readOnly.GTIDExecuted
+				before, observed = t.readOnly.GTIDExecuted, true
 			}
 			t.epoch++
-			t.first, t.readOnlyBefore = nil, before
+			t.first, t.confirm, t.readOnlyBefore, t.readOnlyObserved = nil, nil, before, observed
 		}
 		t.state, t.last, t.complete, t.readOnly = roleWritable, obs, complete, nil
-		if t.first == nil && identified && obs.Took <= maxRoleProbeSpread {
+		switch {
+		case t.first == nil && identified && obs.Took <= maxRoleProbeSpread:
 			first := obs
 			t.first, t.firstSince = &first, prevStart
+		case t.first != nil && t.confirm == nil && identified && t.confirmDelay > 0 &&
+			!readStart(obs).Before(t.first.ObservedAt.Add(t.confirmDelay)):
+			confirm := obs
+			t.confirm = &confirm
 		}
 	}
 	if !identified {
@@ -297,10 +315,15 @@ func sameIncarnation(prev, next RoleObservation) bool {
 func (t *roleTimeline) snapshot() roleSnapshot {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	s := roleSnapshot{epoch: t.epoch, state: t.state, complete: t.complete, firstSince: t.firstSince, readOnlyBefore: t.readOnlyBefore}
+	s := roleSnapshot{epoch: t.epoch, state: t.state, complete: t.complete, firstSince: t.firstSince,
+		readOnlyBefore: t.readOnlyBefore, readOnlyObserved: t.readOnlyObserved}
 	if t.first != nil {
 		first := *t.first
 		s.first = &first
+	}
+	if t.confirm != nil {
+		confirm := *t.confirm
+		s.confirm = &confirm
 	}
 	return s
 }
@@ -313,6 +336,9 @@ type promotionEpisode struct {
 	epoch    uint64
 	pending  *PromotionRecord // the episode's record, kept across write retries
 	recorded bool
+	// confirmed: the record's confirmation is saved, or will never be
+	// (confirmEpisode).
+	confirmed bool
 }
 
 // probeRole runs the role probe, falling back to IsReadOnly for checkers
@@ -434,13 +460,20 @@ func (a *BinlogArchiver) observeRole(ctx context.Context, snap roleSnapshot) err
 			}
 		}
 		at := first.ObservedAt.UTC().Truncate(time.Microsecond)
+		// The promotion set is derived once, here, and never delays the
+		// record beyond its bound: a record without one is complete.
+		promotionSet, why := a.promotionSet(ctx, snap, first)
+		if promotionSet == "" {
+			a.logger.Info("promotion set not recorded", "serverUuid", first.ServerUUID, "serverId", first.ServerID, "reason", why)
+		}
 		a.episode.pending = &PromotionRecord{
-			ServerUUID:           first.ServerUUID,
-			ServerID:             first.ServerID,
-			GTIDExecuted:         first.GTIDExecuted,
-			ObservedAt:           at,
-			ProbeInterval:        a.probeInterval(at, since),
-			ReadOnlyGTIDExecuted: snap.readOnlyBefore,
+			ServerUUID:            first.ServerUUID,
+			ServerID:              first.ServerID,
+			GTIDExecuted:          first.GTIDExecuted,
+			ObservedAt:            at,
+			ProbeInterval:         a.probeInterval(at, since),
+			ReadOnlyGTIDExecuted:  snap.readOnlyBefore,
+			PromotionGTIDExecuted: promotionSet,
 		}
 	}
 	if err := a.writePromotionRecord(ctx, *a.episode.pending); err != nil {
@@ -456,8 +489,274 @@ func (a *BinlogArchiver) observeRole(ctx context.Context, snap roleSnapshot) err
 	a.promotionRecordedAt = rec.ObservedAt
 	a.mu.Unlock()
 	a.logger.Info("promotion recorded",
-		"serverUuid", rec.ServerUUID, "serverId", rec.ServerID, "gtidExecuted", rec.GTIDExecuted)
+		"serverUuid", rec.ServerUUID, "serverId", rec.ServerID, "gtidExecuted", rec.GTIDExecuted,
+		"promotionGtidExecuted", rec.PromotionGTIDExecuted)
 	return nil
+}
+
+// promotionSetReadBound and promotionSetMaxFiles bound the local file
+// reads of one promotion-set derivation: the record gates the episode's
+// uploads and must not wait for a slow volume or a long run of files.
+// Each header read is itself capped (localBinlogHeader: 1 MiB).
+const (
+	promotionSetReadBound = time.Second
+	promotionSetMaxFiles  = 64
+)
+
+// promotionSetReader is how promotionSet reads local binlog headers;
+// tests replace its parts.
+type promotionSetReader struct {
+	header func(path string) (binlogHeader, error) // nil: localBinlogHeader
+	bound  time.Duration                           // 0: promotionSetReadBound
+}
+
+// promotionSet derives the promotion set P of the record that first opens
+// (issue #269, PromotionRecord.PromotionGTIDExecuted): a set every member
+// of which this server incarnation executed before any transaction under
+// its own server_uuid that the read-only observation directly before the
+// episode (G_ro, snap.readOnlyBefore) does not hold. It returns the set in
+// canonical form, or "" and why there is none.
+//
+//	P = G_ro ∪ Previous_gtids(F*)
+//
+// G_ro is in P because gtid_executed only grows within one incarnation:
+// whatever G_ro lacks was executed after it was read. F* is the newest
+// local binlog file whose Previous_gtids hold no transaction under the
+// server's own server_uuid (plain or tagged) beyond G_ro, and nothing
+// first's gtid_executed lacks. A file's Previous_gtids are the
+// transactions the server had logged when it opened the file, so a
+// transaction outside them was executed after the file was opened; that
+// makes every boundary of this incarnation sound, and this choice the
+// useful one: F* was opened before the episode's first own transaction,
+// so all of the episode's own transactions are outside P. After an
+// acknowledged promotion-time FLUSH BINARY LOGS, F* is the file it opened
+// and P is the promotion GTID set. Without one F* is an older file and P
+// is smaller; with none at all P is G_ro.
+//
+// What keeps a file of another incarnation out (binlog numbering restarts
+// after a clone or a reset): G_ro and first must be one incarnation with
+// no incarnation change pending; the files from F* on must still be in
+// the index, in order, when the reads are done; and a role probe taken
+// after the reads must show first's incarnation, still writable, in the
+// same epoch. A header that cannot be read (an encrypted or truncated
+// file, a file a purge removed) ends the derivation: the file might be
+// F*. The reads run on their own goroutine and are abandoned at the
+// bound; the role probe itself is never touched.
+func (a *BinlogArchiver) promotionSet(ctx context.Context, snap roleSnapshot, first *RoleObservation) (set, why string) {
+	if !snap.readOnlyObserved {
+		return "", "the sidecar did not observe this server read-only directly before the episode"
+	}
+	if len(a.roles.pendingResets()) > 0 {
+		return "", "the server changed incarnation and the change is not recorded yet"
+	}
+	gro, err := internalmysql.ParseGTIDSet(snap.readOnlyBefore)
+	if err != nil {
+		return "", fmt.Sprintf("the read-only gtid_executed is not a GTID set: %v", err)
+	}
+	recorded, err := internalmysql.ParseGTIDSet(first.GTIDExecuted)
+	if err != nil {
+		return "", fmt.Sprintf("the record's gtid_executed is not a GTID set: %v", err)
+	}
+	if !recorded.Contains(gro) {
+		return "", "the record's gtid_executed does not contain the read-only observation's: another incarnation"
+	}
+	read := a.promotionSets.header
+	if read == nil {
+		read = localBinlogHeader
+	}
+	bound := a.promotionSets.bound
+	if bound <= 0 {
+		bound = promotionSetReadBound
+	}
+	type boundary struct {
+		previous internalmysql.GTIDSet
+		err      error
+	}
+	done := make(chan boundary, 1)
+	dir, index, uuid, deadline := a.cfg.BinlogDir, a.cfg.BinlogIndex, first.ServerUUID, time.Now().Add(bound)
+	go func() {
+		previous, err := promotionBoundary(dir, index, uuid, gro, recorded, read, deadline)
+		done <- boundary{previous, err}
+	}()
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	var previous internalmysql.GTIDSet
+	select {
+	case b := <-done:
+		if b.err != nil {
+			return "", b.err.Error()
+		}
+		previous = b.previous
+	case <-timer.C:
+		return "", fmt.Sprintf("reading the local binlog headers took longer than %s", bound)
+	case <-ctx.Done():
+		return "", ctx.Err().Error()
+	}
+	p := UnionBinlogGTIDs(gro, previous)
+	if !recorded.Contains(p) {
+		return "", "the binlog boundary holds transactions the record's gtid_executed lacks"
+	}
+	// The incarnation must be first's after the last file read.
+	probeCtx, cancel := context.WithTimeout(ctx, maxRoleProbeSpread)
+	obs, complete, err := a.sampleRole(probeCtx)
+	cancel()
+	switch now := a.roles.snapshot(); {
+	case err != nil:
+		return "", fmt.Sprintf("the role probe after the binlog headers were read failed: %v", err)
+	case !complete || obs.ReadOnly || !sameIncarnation(*first, obs) || now.state != roleWritable || now.epoch != snap.epoch:
+		return "", "the server left the episode or changed incarnation while the binlog headers were read"
+	case len(a.roles.pendingResets()) > 0:
+		return "", "the server changed incarnation while the binlog headers were read"
+	case p.IsEmpty():
+		// An empty set anchors nothing, and "" is the absent field.
+		return "", "the promotion set is empty: the server had executed nothing before the episode"
+	}
+	return p.String(), ""
+}
+
+// promotionBoundary returns Previous_gtids(F*) for promotionSet: of the
+// newest file in the binlog index, the active one included, whose
+// Previous_gtids hold no transaction under uuid beyond gro and nothing
+// recorded lacks. It returns an empty set when no file in the index
+// qualifies (the boundary was purged), and an error when a header cannot
+// be read, the bound is exceeded, or the files from F* on are no longer
+// the index's when the reads are done.
+func promotionBoundary(dir, index, uuid string, gro, recorded internalmysql.GTIDSet, read func(string) (binlogHeader, error), deadline time.Time) (internalmysql.GTIDSet, error) {
+	indexPath := filepath.Join(dir, index)
+	entries, err := readBinlogIndex(indexPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("the binlog index lists no file")
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if len(entries)-i > promotionSetMaxFiles {
+			return nil, fmt.Errorf("none of the %d newest binlog files was opened before the episode's first transaction", promotionSetMaxFiles)
+		}
+		if !time.Now().Before(deadline) {
+			return nil, errors.New("reading the local binlog headers exceeded its bound")
+		}
+		name := filepath.Base(entries[i])
+		header, err := read(filepath.Join(dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("read the header of %s: %w", name, err)
+		}
+		previous, err := internalmysql.ParseGTIDSet(header.previous)
+		if err != nil {
+			return nil, fmt.Errorf("Previous_gtids of %s: %w", name, err)
+		}
+		if hasSourceUUID(previous.Subtract(gro), uuid) || !recorded.Contains(previous) {
+			continue
+		}
+		again, err := readBinlogIndex(indexPath)
+		if err != nil {
+			return nil, err
+		}
+		if !indexStillHolds(again, entries[i:]) {
+			return nil, fmt.Errorf("the binlog index changed while %s was read", name)
+		}
+		return previous, nil
+	}
+	return internalmysql.GTIDSet{}, nil
+}
+
+// indexStillHolds reports whether index holds run as a contiguous run, in
+// order. A rotation appends to the index and a purge removes from its
+// front; a reset or a clone restarts it.
+func indexStillHolds(index, run []string) bool {
+	for i := range index {
+		if filepath.Base(index[i]) != filepath.Base(run[0]) {
+			continue
+		}
+		if len(index)-i < len(run) {
+			return false
+		}
+		for k := range run {
+			if filepath.Base(index[i+k]) != filepath.Base(run[k]) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// confirmEpisode adds the confirmation to the recorded episode's
+// promotion record (issue #269): once, from the timeline's confirming
+// observation (roleTimeline.confirm), through the same manifest save with
+// read-back as the record itself. It only runs for a recorded episode, so
+// it never stands between an episode and its first upload; a failed save
+// is retried on the next tick or scan, and saveManifest refuses it once
+// the timeline has ended the episode. A record whose sidecar or server
+// stops first simply has no confirmation.
+func (a *BinlogArchiver) confirmEpisode(ctx context.Context, snap roleSnapshot) {
+	if !a.episode.recorded || a.episode.confirmed || a.episode.pending == nil {
+		return
+	}
+	if snap.state != roleWritable || snap.epoch != a.episode.epoch || snap.confirm == nil {
+		return
+	}
+	rec := *a.episode.pending
+	// The epoch guarantees containment; an unparsable set proves nothing.
+	recorded, err := internalmysql.ParseGTIDSet(rec.GTIDExecuted)
+	if err != nil {
+		a.episode.confirmed = true
+		return
+	}
+	confirmed, err := internalmysql.ParseGTIDSet(snap.confirm.GTIDExecuted)
+	if err != nil || !confirmed.Contains(recorded) || snap.confirm.ServerUUID != rec.ServerUUID || snap.confirm.ServerID != rec.ServerID {
+		a.episode.confirmed = true
+		return
+	}
+	at := snap.confirm.ObservedAt.UTC().Truncate(time.Microsecond)
+	if at.Before(rec.ObservedAt.Add(a.roles.confirmDelay)) {
+		// The timeline orders observations by the monotonic clock; the
+		// record carries wall-clock times. A wall clock that stepped back
+		// in between would date the confirmation before its delay, which a
+		// reader takes for damaged evidence: write none.
+		a.episode.confirmed = true
+		return
+	}
+	added := confirmed.Subtract(recorded).String()
+	m, err := a.loadManifest(ctx)
+	if err != nil {
+		a.logger.Debug("promotion record not confirmed yet", "error", err)
+		return
+	}
+	i := promotionRecordIndex(m.Promotions, rec)
+	if i < 0 {
+		// The cap dropped the record; there is nothing to confirm.
+		a.episode.confirmed = true
+		return
+	}
+	if m.Promotions[i].ConfirmedAt.IsZero() {
+		m.Promotions[i].ConfirmedAt, m.Promotions[i].ConfirmedGTIDAdded = at, added
+		if err := a.saveManifest(ctx, m); err != nil {
+			a.logger.Debug("promotion record not confirmed yet", "error", err)
+			return
+		}
+		if i = promotionRecordIndex(m.Promotions, rec); i < 0 || !m.Promotions[i].ConfirmedAt.Equal(at) || m.Promotions[i].ConfirmedGTIDAdded != added {
+			a.logger.Debug("promotion record not confirmed yet", "error", "the saved manifest does not hold the confirmation")
+			return
+		}
+	}
+	saved := m.Promotions[i]
+	a.episode.pending.ConfirmedAt, a.episode.pending.ConfirmedGTIDAdded = saved.ConfirmedAt, saved.ConfirmedGTIDAdded
+	a.episode.confirmed = true
+	a.logger.Info("promotion record confirmed", "serverUuid", saved.ServerUUID, "serverId", saved.ServerID,
+		"observedAt", saved.ObservedAt, "confirmedAt", saved.ConfirmedAt, "confirmedGtidAdded", saved.ConfirmedGTIDAdded)
+}
+
+// promotionRecordIndex is the index of rec in records (hasPromotionRecord's
+// identity), or -1.
+func promotionRecordIndex(records []PromotionRecord, rec PromotionRecord) int {
+	for i, r := range records {
+		if r.Kind == rec.Kind && r.ServerUUID == rec.ServerUUID && r.ServerID == rec.ServerID && r.GTIDExecuted == rec.GTIDExecuted && r.ObservedAt.Equal(rec.ObservedAt) {
+			return i
+		}
+	}
+	return -1
 }
 
 // writePromotionRecord appends rec to this site's manifest through the
@@ -485,12 +784,7 @@ func (a *BinlogArchiver) writePromotionRecord(ctx context.Context, rec Promotion
 }
 
 func hasPromotionRecord(records []PromotionRecord, rec PromotionRecord) bool {
-	for _, r := range records {
-		if r.Kind == rec.Kind && r.ServerUUID == rec.ServerUUID && r.ServerID == rec.ServerID && r.GTIDExecuted == rec.GTIDExecuted && r.ObservedAt.Equal(rec.ObservedAt) {
-			return true
-		}
-	}
-	return false
+	return promotionRecordIndex(records, rec) >= 0
 }
 
 // errStartCheckPending: the start-up incarnation check against the
@@ -611,7 +905,8 @@ func (a *BinlogArchiver) roleTick(ctx context.Context) {
 }
 
 // recordTick records a promotion promptly instead of waiting for the next
-// scan, and ends the episode the timeline ended; the scan reports errors.
+// scan, confirms a recorded one, and ends the episode the timeline ended;
+// the scan reports errors.
 func (a *BinlogArchiver) recordTick(ctx context.Context) {
 	snap := a.syncEpisode()
 	// Establishing or re-opening the archive is the scan's job; the tick
@@ -623,12 +918,24 @@ func (a *BinlogArchiver) recordTick(ctx context.Context) {
 	if err := a.recordResets(ctx, snap); err != nil {
 		a.logger.Debug("incarnation reset record not written yet", "error", err)
 	}
-	if snap.state != roleWritable || a.episode.recorded {
+	if snap.state != roleWritable {
 		return
 	}
-	if err := a.observeRole(ctx, snap); err != nil {
-		a.logger.Debug("promotion record not written yet", "error", err)
+	if !a.episode.recorded {
+		if err := a.observeRole(ctx, snap); err != nil {
+			a.logger.Debug("promotion record not written yet", "error", err)
+			return
+		}
 	}
+	a.confirmEpisode(ctx, snap)
+}
+
+// promotionConfirmDelay is the configured confirmation delay.
+func promotionConfirmDelay(cfg *PITRConfig) time.Duration {
+	if cfg.PromotionConfirmDelay > 0 {
+		return cfg.PromotionConfirmDelay
+	}
+	return pitrarchive.PromotionConfirmDelay
 }
 
 func roleProbeInterval(cfg *PITRConfig) time.Duration {

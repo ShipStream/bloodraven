@@ -83,6 +83,9 @@ type BinlogArchiver struct {
 	session     *ArchiveSession
 	identityErr error
 	episode     promotionEpisode
+	// promotionSets reads local binlog headers for a promotion record's
+	// promotion set (promotion_record.go).
+	promotionSets promotionSetReader
 	// startChecked: this process's first identified role observation was
 	// checked against the site's latest record (recordResets).
 	startChecked bool
@@ -192,6 +195,7 @@ func NewBinlogArchiver(cfg *PITRConfig, site string, mysql roleChecker, store Ar
 		logger: logger.With("component", "binlog-archiver", "site", site),
 		now:    time.Now,
 	}
+	a.roles.confirmDelay = promotionConfirmDelay(cfg)
 	a.session, a.identityErr = newArchiveSession(store, cfg.ManifestPrefix, cfg.Archive, site, a.logger)
 	if a.identityErr != nil {
 		a.identityErr = fmt.Errorf("archive identity: %w", a.identityErr)
@@ -488,6 +492,9 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// episode's promotion record and any upload (N3 revised).
 	resetErr := a.recordResets(ctx, snap)
 	recordErr := a.observeRole(ctx, snap)
+	if recordErr == nil {
+		a.confirmEpisode(ctx, snap)
+	}
 	if integrityErr != nil {
 		a.incUploadFailures()
 		a.setError(integrityErr.Error())

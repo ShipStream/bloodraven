@@ -23,7 +23,17 @@ package component
 //     transaction anchors, ArchiveGap only when the model's history is not
 //     fully archived from the backup's position, and so on.
 //
-// PITR_PLAN_SEED=<n> replays one trial.
+// Promotions are the operator's (#229, #269): the new primary drains its
+// relay log, rotates its binlog (most of the time; the rotation may not be
+// acknowledged) and becomes writable, and it may commit before its
+// sidecar's next role probe, so that its promotion record already holds its
+// first transactions (the lag window). Sometimes its applier is still
+// running then and adds copies after its first own commit. The targets
+// include those first transactions. Every promotion record's promotion set
+// and confirmation are held to the model as well: the set must precede the
+// episode's first own transaction in the server's own log.
+//
+// PITR_PLAN_SEED=<n> replays one trial; PITR_PLAN_SEEDS=<n> runs seeds 1..n.
 
 import (
 	"bytes"
@@ -32,6 +42,7 @@ import (
 	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -111,15 +122,45 @@ type propTrial struct {
 	lossy   bool
 	backup  backupmeta.DumpMeta
 	targets []time.Time
+	// promoted are the promotions made by failover, in order.
+	promoted []propPromoted
+	// inverted: a promoted server applied copies after its first own
+	// commit, so its log and the old primary's order them differently.
+	inverted bool
+}
+
+// propPromotion is how a failover promotes the replica.
+type propPromotion struct {
+	// rotate: the operator's promotion-time FLUSH BINARY LOGS was
+	// acknowledged (#229).
+	rotate bool
+	// lag is how many transactions the new primary commits before its
+	// sidecar's next role probe: its promotion record holds them.
+	lag int
+	// late is how many copies of the old primary's last transactions the
+	// new primary applies after its first own commit (a server that is
+	// writable and still replicating).
+	late int
+}
+
+// propPromoted is one promotion as the model saw it.
+type propPromoted struct {
+	site   string
+	record int // index of its promotion record in the site's manifest
+	rotate bool
+	// set is what the server had executed when it became writable.
+	set pitrplan.Set
 }
 
 // newPropTrial starts a writable a and a replicating b, each with a real
-// archiver, and waits for a's first promotion record.
-func newPropTrial(t *testing.T) *propTrial {
+// archiver, and waits for a's first promotion record. confirmDelay is the
+// archivers' promotion-record confirmation delay (0: production's).
+func newPropTrial(t *testing.T, confirmDelay time.Duration) *propTrial {
 	p := &propTrial{w: newWriterArchive(t), srv: map[string]*simServer{}, arch: map[string]*sidecar.BinlogArchiver{},
 		model: &propModel{log: map[string][]propCommit{}, oct: map[pitrplan.GTID]int64{}, origin: map[pitrplan.GTID]string{}},
 		uuid:  map[string]string{"a": writerUUIDA, "b": writerUUIDB}, id: map[string]uint32{"a": 101, "b": 102},
 		records: map[string]int{"a": 1, "b": 0}, queue: map[string][]binlogtest.Txn{"b": {}}, dead: pitrplan.Set{}}
+	p.w.confirmDelay = confirmDelay
 	p.srv["a"] = newSimServer(t, writerUUIDA, 101, false)
 	p.srv["b"] = newSimServer(t, writerUUIDB, 102, true)
 	ident := p.w.identity(writerGroup, p.w.dest)
@@ -131,6 +172,12 @@ func newPropTrial(t *testing.T) *propTrial {
 }
 
 func (p *propTrial) commit(primary string) {
+	p.srv[primary].apply(p.newCommit(primary))
+}
+
+// newCommit is primary's next transaction, committed now in the model; the
+// caller executes it on the server.
+func (p *propTrial) newCommit(primary string) binlogtest.Txn {
 	gno := int64(1)
 	for _, c := range p.model.log[primary] {
 		if c.g.SID == p.uuid[primary] && c.g.GNO >= gno {
@@ -140,7 +187,6 @@ func (p *propTrial) commit(primary string) {
 	at := p.model.tick()
 	txn := binlogtest.Txn{SID: p.uuid[primary], GNO: gno, Commit: at, ServerID: p.id[primary]}
 	g := pitrplan.GTID{SID: txn.SID, GNO: gno}
-	p.srv[primary].apply(txn)
 	p.model.log[primary] = append(p.model.log[primary], propCommit{g, at.UnixMicro()})
 	p.model.oct[g] = at.UnixMicro()
 	p.model.origin[g] = primary
@@ -149,6 +195,23 @@ func (p *propTrial) commit(primary string) {
 			p.queue[site] = append(p.queue[site], txn)
 		}
 	}
+	return txn
+}
+
+// copied records that site executed the copies txns, in order.
+func (p *propTrial) copied(site string, txns []binlogtest.Txn) {
+	for _, txn := range txns {
+		p.model.log[site] = append(p.model.log[site], propCommit{pitrplan.GTID{SID: txn.SID, GNO: txn.GNO}, txn.Commit.UnixMicro()})
+	}
+}
+
+// executed is everything site has executed in the model.
+func (p *propTrial) executed(site string) pitrplan.Set {
+	s := pitrplan.Set{}
+	for _, c := range p.model.log[site] {
+		s = s.Union(pitrplan.SetOf(c.g))
+	}
+	return s
 }
 
 // lastCommit is the newest commit of primary.
@@ -210,8 +273,10 @@ func (p *propTrial) takeBackup(site string) {
 // failover moves the primary role to replica. drop > 0 loses the last drop
 // queued copies with the old primary (lossy); archiveTail first seals and
 // uploads the old primary's tail, so the lost transactions are archived.
-// It returns the new primary's promotion record time.
-func (p *propTrial) failover(primary, replica string, drop int, archiveTail bool) time.Time {
+// how is the promotion; each transaction the new primary commits in its lag
+// window becomes a target. It returns the new primary's promotion record
+// time.
+func (p *propTrial) failover(primary, replica string, drop int, archiveTail bool, how propPromotion) time.Time {
 	p.waitUploaded(primary)
 	if drop > 0 {
 		p.lossy = true
@@ -220,20 +285,50 @@ func (p *propTrial) failover(primary, replica string, drop int, archiveTail bool
 			p.waitUploaded(primary)
 		}
 	}
-	p.drain(replica, drop)
+	// The replica's relay log: the copies it applies before it is
+	// promoted, those a still-running applier adds after its first own
+	// commit, and those lost with the old primary.
+	q := p.queue[replica]
+	keep := len(q) - drop
+	late := 0
+	if how.lag > 0 && drop == 0 {
+		late = min(how.late, keep)
+	}
+	drained, held := q[:keep-late], q[keep-late:keep]
+	for _, txn := range q[keep:] {
+		p.dead = p.dead.Union(pitrplan.SetOf(pitrplan.GTID{SID: txn.SID, GNO: txn.GNO}))
+	}
+	p.queue[replica] = nil
 	p.srv[primary].setReadOnly(true)
 	p.w.waitDemoted(p.arch[primary])
-	p.srv[replica].setReadOnly(false)
-	p.records[replica]++
-	p.w.waitRecords(replica, p.records[replica])
-	p.waitUploaded(replica)
 	if p.lossy {
 		// The old primary is down for good: no further copies.
 		p.queue[primary] = nil
 	} else {
 		p.queue[primary] = []binlogtest.Txn{}
 	}
-	p.queue[replica] = nil
+	p.copied(replica, drained)
+	p.promoted = append(p.promoted, propPromoted{site: replica, record: p.records[replica], rotate: how.rotate, set: p.executed(replica)})
+	var own []binlogtest.Txn
+	p.srv[replica].promote(how.rotate, drained, func() []binlogtest.Txn {
+		var early []binlogtest.Txn
+		for i := 0; i < how.lag; i++ {
+			txn := p.newCommit(replica)
+			own, early = append(own, txn), append(early, txn)
+			if i == 0 && len(held) > 0 {
+				p.copied(replica, held)
+				early = append(early, held...)
+				p.inverted = true
+			}
+		}
+		return early
+	})
+	for _, txn := range own {
+		p.targets = append(p.targets, txn.Commit.Add(-time.Microsecond))
+	}
+	p.records[replica]++
+	p.w.waitRecords(replica, p.records[replica])
+	p.waitUploaded(replica)
 	recs := p.w.manifest(replica).Promotions
 	return recs[len(recs)-1].ObservedAt
 }
@@ -244,12 +339,19 @@ func sleepPast(at time.Time, d time.Duration) {
 	time.Sleep(time.Until(at.Add(d + 200*time.Millisecond)))
 }
 
-func runPropTrial(t *testing.T, seed int64) (planned, refused int) {
+// propConfirmDelay is the sweep's confirmation delay: its episodes last
+// milliseconds, and a record is confirmed a few role probes after it.
+const propConfirmDelay = 30 * time.Millisecond
+
+func runPropTrial(t *testing.T, seed int64) (planned, refused, contained int) {
 	r := rand.New(rand.NewSource(seed))
-	p := newPropTrial(t)
+	p := newPropTrial(t, propConfirmDelay)
 	primary, replica := "a", "b"
 	eras := 2 + r.Intn(3)
 	n0 := 3 + r.Intn(5)
+	// quiet: this era's primary never seals a binlog of its own accord, so
+	// its transactions are archived only as the other site's copies.
+	quiet := false
 	// The backup is taken inside era 0, so every trial plans.
 	backupAt := 2 + r.Intn(n0-1)
 	backupSite := []string{"a", "b"}[r.Intn(2)]
@@ -262,7 +364,7 @@ func runPropTrial(t *testing.T, seed int64) (planned, refused int) {
 		for i := 0; i < n; i++ {
 			p.commit(primary)
 			commits++
-			if r.Intn(5) == 0 {
+			if r.Intn(5) == 0 && !quiet {
 				p.srv[primary].rotate()
 			}
 			if r.Intn(4) == 0 && p.queue[replica] != nil {
@@ -285,7 +387,18 @@ func runPropTrial(t *testing.T, seed int64) (planned, refused int) {
 			drop = 1 + r.Intn(len(p.queue[replica]))
 			archiveTail = r.Intn(2) == 0
 		}
-		p.failover(primary, replica, drop, archiveTail)
+		// The promotion: usually with the rotation, often with commits
+		// in the lag window, sometimes with a late applier.
+		how := propPromotion{rotate: r.Intn(4) != 0}
+		quiet = false
+		if r.Intn(3) != 0 {
+			how.lag = 1 + r.Intn(2)
+			quiet = r.Intn(2) == 0
+			if r.Intn(4) == 0 {
+				how.late = 1 + r.Intn(2)
+			}
+		}
+		p.failover(primary, replica, drop, archiveTail, how)
 		primary, replica = replica, primary
 	}
 	if r.Intn(3) != 0 {
@@ -297,19 +410,26 @@ func runPropTrial(t *testing.T, seed int64) (planned, refused int) {
 	}
 	p.targets = append(p.targets, time.Now().UTC().Add(time.Hour))
 	o := newPropOracle(t, p, time.Microsecond)
-	t.Logf("seed %d: %d eras, backup on %s, lossy=%v (lost %s), archived %s", seed, eras, backupSite, p.lossy, p.dead, o.archived)
+	t.Logf("seed %d: %d eras, backup on %s, lossy=%v (lost %s), inverted=%v, archived %s", seed, eras, backupSite, p.lossy, p.dead, p.inverted, o.archived)
+	if os.Getenv("PITR_PLAN_SEED") != "" {
+		o.describe()
+	}
+	o.checkRecords(fmt.Sprintf("seed %d", seed))
 	res := o.run(fmt.Sprintf("seed %d", seed))
 	for _, r := range res {
 		if r.err != nil {
 			refused++
 		} else {
 			planned++
+			if o.byContainment(r.plan) {
+				contained++
+			}
 		}
 	}
 	if planned+refused == 0 {
 		t.Fatalf("seed %d: the oracle checked nothing", seed)
 	}
-	return planned, refused
+	return planned, refused, contained
 }
 
 // propOracle holds the reference model's view of one finished trial.
@@ -354,6 +474,28 @@ func newPropOracle(t *testing.T, p *propTrial, delta time.Duration) *propOracle 
 		o.maxOctB = max(o.maxOctB, p.model.oct[g])
 	}
 	return o
+}
+
+// describe logs the trial for a replay: every server's log in the model,
+// and every site's archived rows and records.
+func (o *propOracle) describe() {
+	short := func(g pitrplan.GTID) string { return fmt.Sprintf("%s:%d", g.SID[:1], g.GNO) }
+	for _, site := range []string{"a", "b"} {
+		var log []string
+		for _, c := range o.p.model.log[site] {
+			log = append(log, short(c.g))
+		}
+		o.t.Logf("model %s executed: %s", site, strings.Join(log, " "))
+	}
+	for _, sm := range o.arch.Sites {
+		for _, row := range sm.Rows {
+			o.t.Logf("row %s/%s: previous %s, holds %s", row.Site, row.Name, row.Hints.Previous, row.Hints.GTIDs)
+		}
+		for i, rec := range sm.Promotions {
+			o.t.Logf("record %s#%d: %+v", sm.Site, i, rec)
+		}
+	}
+	o.t.Logf("backup on %s: %s; lost %s", o.p.backup.Stamp.Site, o.B, o.p.dead)
 }
 
 // fetcher reads rows from the archive store, authenticating them like
@@ -480,6 +622,161 @@ func (o *propOracle) anchorable(w pitrplan.GTID) bool {
 	return false
 }
 
+// contained is the model of the containment anchor (#269): a promotion
+// record of w's origin site with a promotion set that does not hold w,
+// whose own observation or confirmation holds w, anchors w with that set.
+// The model is generous to refusals: any other record of the site observed
+// around w, and any record of the other site around w that lacks w, sets
+// the record aside. The set must also explain every predecessor of w that
+// is not under w's own server_uuid.
+func (o *propOracle) contained(w pitrplan.GTID, X, lambda pitrplan.Set) bool {
+	site := o.p.model.origin[w]
+	octW := o.p.model.oct[w]
+	d := o.delta.Microseconds()
+	slack := propProbeSlack.Microseconds()
+	for i, rec := range o.promotions(site) {
+		if rec.Kind != pitrarchive.RecordPromotion || rec.PromotionGTIDExecuted == "" {
+			continue
+		}
+		set := pitrplan.MustParseSet(rec.GTIDExecuted)
+		held := set.Has(w) || (!rec.ConfirmedAt.IsZero() && pitrplan.MustParseSet(rec.ConfirmedGTIDAdded).Has(w))
+		promotionSet := pitrplan.MustParseSet(rec.PromotionGTIDExecuted)
+		if !held || promotionSet.Has(w) {
+			continue
+		}
+		clear := true
+		for _, sm := range o.arch.Sites {
+			for j, other := range sm.Promotions {
+				obs := other.ObservedAt.UnixMicro()
+				if sm.Site == site {
+					pi := time.Duration(other.ProbeInterval).Microseconds()
+					if j != i && obs >= octW-d-slack && obs <= octW+d+slack+pi {
+						clear = false
+					}
+					continue
+				}
+				if obs >= octW-2*d-slack && obs <= octW+d+slack && !pitrplan.MustParseSet(other.GTIDExecuted).Has(w) {
+					clear = false
+				}
+			}
+		}
+		rest := lambda.Subtract(X).Subtract(promotionSet)
+		if clear && rest.Subtract(rest.OfUUID(w.SID)).IsEmpty() {
+			return true
+		}
+	}
+	return false
+}
+
+// copiesDisagree reports whether every archived replica copy of w sits on
+// a server that executed w after a different set than w's origin did (a
+// promoted server whose applier was still running): no copy yields Λ.
+func (o *propOracle) copiesDisagree(w pitrplan.GTID, X, lambda pitrplan.Set) bool {
+	origin := o.p.model.origin[w]
+	copies, agree := 0, 0
+	for site := range o.p.model.log {
+		if site == origin {
+			continue
+		}
+		archived := false
+		for _, row := range o.rows {
+			archived = archived || (row.Site == site && row.Hints.GTIDs.Has(w))
+		}
+		if !archived {
+			continue
+		}
+		copies++
+		if pred, ok := o.p.model.executedBefore(site, w); ok && pred.Subtract(X).Equal(lambda.Subtract(X)) {
+			agree++
+		}
+	}
+	return copies > 0 && agree == 0
+}
+
+// byContainment reports whether plan's witness is anchored by a promotion
+// record that the time rule cannot order against it: one that holds the
+// witness, or was observed within δ of it.
+func (o *propOracle) byContainment(plan *pitrplan.Plan) bool {
+	if plan == nil || plan.Witness == nil || plan.Witness.GroundTruth != pitrplan.GroundTruthAnchored {
+		return false
+	}
+	w := plan.Witness.GTID
+	for _, name := range plan.Witness.AnchorRecords {
+		for _, sm := range o.arch.Sites {
+			for i, rec := range sm.Promotions {
+				if name != fmt.Sprintf("%s#%d", sm.Site, i) {
+					continue
+				}
+				if pitrplan.MustParseSet(rec.GTIDExecuted).Has(w) || rec.ObservedAt.UnixMicro()+o.delta.Microseconds() >= plan.Witness.CommitTime {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// checkRecords holds the #269 evidence of every promotion record to the
+// model. A promotion set is contained in the record's gtid_executed,
+// contains the read-only observation, and every member of it was executed,
+// in the server's own log, before the first transaction under the server's
+// uuid outside that observation: the episode's first own transaction. A
+// promotion the model made after a read-only period has one (unless it is
+// empty), and with the rotation it is exactly what the server had executed
+// when it became writable. A confirmation was observed no earlier than the delay after the
+// record, adds nothing the record holds, and holds only what the server
+// executed.
+func (o *propOracle) checkRecords(label string) {
+	t, p := o.t, o.p
+	for _, sm := range o.arch.Sites {
+		uuid := p.uuid[sm.Site]
+		for i, rec := range sm.Promotions {
+			if rec.Kind != pitrarchive.RecordPromotion {
+				continue
+			}
+			set := pitrplan.MustParseSet(rec.GTIDExecuted)
+			if rec.PromotionGTIDExecuted != "" {
+				promotionSet := pitrplan.MustParseSet(rec.PromotionGTIDExecuted)
+				gro := pitrplan.MustParseSet(rec.ReadOnlyGTIDExecuted)
+				before := pitrplan.Set{}
+				for _, c := range p.model.log[sm.Site] {
+					if c.g.SID == uuid && !gro.Has(c.g) {
+						break
+					}
+					before = before.Union(pitrplan.SetOf(c.g))
+				}
+				if !set.Contains(promotionSet) || !promotionSet.Contains(gro) || !before.Contains(promotionSet) {
+					t.Fatalf("%s: %s#%d has promotion set %s (read-only %s, recorded %s); before its episode's first own transaction the server had executed %s",
+						label, sm.Site, i, promotionSet, gro, set, before)
+				}
+			}
+			if !rec.ConfirmedAt.IsZero() {
+				added := pitrplan.MustParseSet(rec.ConfirmedGTIDAdded)
+				if added.Overlaps(set) || !p.executed(sm.Site).Contains(set.Union(added)) || rec.ConfirmedAt.Before(rec.ObservedAt.Add(propConfirmDelay)) {
+					t.Fatalf("%s: %s#%d is confirmed at %s (observed at %s) with %s beyond %s; the server executed %s",
+						label, sm.Site, i, rec.ConfirmedAt, rec.ObservedAt, added, set, p.executed(sm.Site))
+				}
+			}
+		}
+	}
+	for _, pr := range p.promoted {
+		recs := o.promotions(pr.site)
+		if pr.record >= len(recs) {
+			t.Fatalf("%s: %s has %d records, the model promoted it %d times", label, pr.site, len(recs), pr.record+1)
+		}
+		rec := recs[pr.record]
+		// An empty promotion set is recorded as none: without the
+		// rotation it is the read-only observation, which is empty for a
+		// server that had executed nothing when it was last probed.
+		if rec.PromotionGTIDExecuted == "" && ((pr.rotate && !pr.set.IsEmpty()) || rec.ReadOnlyGTIDExecuted != "") {
+			t.Fatalf("%s: %s#%d, a promotion after a read-only period, carries no promotion set: %+v", label, pr.site, pr.record, rec)
+		}
+		if got := pitrplan.MustParseSet(rec.PromotionGTIDExecuted); pr.rotate && !got.Equal(pr.set) {
+			t.Fatalf("%s: %s#%d was promoted with the rotation at %s, its promotion set is %s", label, pr.site, pr.record, pr.set, got)
+		}
+	}
+}
+
 // bPositioned reports whether some archived file reaches exactly B at a
 // position (its start, or after one of its transactions in its server's
 // order): the search needs one to start replay from.
@@ -507,9 +804,14 @@ func (o *propOracle) bPositioned() bool {
 // record of another site was observed, missing from that record and not
 // excluded. The planner counts those of them in the head's Λ.
 func (o *propOracle) modelLost(X pitrplan.Set) pitrplan.Set {
+	return o.modelLostIn(X, o.rows)
+}
+
+// modelLostIn is modelLost over the archived copies in rows.
+func (o *propOracle) modelLostIn(X pitrplan.Set, rows map[pitrplan.RowRef]pitrplan.Row) pitrplan.Set {
 	lost := pitrplan.Set{}
 	d := o.delta.Microseconds()
-	for _, row := range o.rows {
+	for _, row := range rows {
 		for _, g := range row.Hints.GTIDs.GTIDs() {
 			for _, sm := range o.arch.Sites {
 				if sm.Site == row.Site {
@@ -545,6 +847,10 @@ func (o *propOracle) run(label string) []propResult {
 				mode = pitrplan.ModeLatest
 			}
 			budget := pitrplan.NewBudget(64 << 20)
+			// The rows this query downloads.
+			o.mu.Lock()
+			o.fetched = map[pitrplan.RowRef]*pitrplan.FileIndex{}
+			o.mu.Unlock()
 			plan, err := pitrplan.Run(context.Background(), pitrplan.Request{Mode: mode, Stop: T, Exclude: X, Delta: o.delta, Dump: p.backup, Budget: budget},
 				o.arch, o.fetcher(budget))
 			what := fmt.Sprintf("%s δ=%s %s T=%s X=%s lossy=%v", label, o.delta, mode, T.Format(time.RFC3339Nano), X, p.lossy)
@@ -573,6 +879,16 @@ func (o *propOracle) refusal(what string, err error, justified map[pitrarchive.T
 	if !ok {
 		o.t.Fatalf("%s: non-refusal error %v", what, err)
 	}
+	if o.p.inverted {
+		// A promoted server that applied copies after its first own commit
+		// ordered them differently than the old primary did. The two
+		// sites' binlogs then disagree, and the planner may refuse for any
+		// of the reasons that follows from (an order inversion, a backup
+		// whose state no archived order passes through, a transaction
+		// committed before the witness outside its history). The model
+		// does not predict which; every certified plan is still checked.
+		return
+	}
 	if !justified[ref.Token] {
 		o.t.Fatalf("%s: the model does not justify the refusal (justified: %v): %v", what, justified, err)
 	}
@@ -598,7 +914,7 @@ func (o *propOracle) checkTimestamp(what string, T time.Time, X pitrplan.Set, pl
 		t.Fatalf("%s: model witness %s is not in its origin's log", what, w)
 	}
 	refD := o.refD(T, lambda)
-	if !o.originCopy(w) && !o.anchorable(w) {
+	if !o.originCopy(w) && ((!o.anchorable(w) && !o.contained(w, X, lambda)) || o.copiesDisagree(w, X, lambda)) {
 		justified[pitrarchive.TokenStopAmbiguous] = true
 	}
 	if !lambda.Contains(o.B) {
@@ -667,8 +983,21 @@ func (o *propOracle) checkLatest(what string, X pitrplan.Set, plan *pitrplan.Pla
 	if l := lost.Intersect(plan.Lineage); !l.IsEmpty() {
 		t.Fatalf("%s: certified Λ %s although the model's loss evidence %s is not excluded", what, plan.Lineage, l)
 	}
-	if want := o.modelLost(pitrplan.Set{}).Intersect(plan.Lineage); !plan.Lost.Equal(want) || !p.dead.Contains(plan.Lost) {
-		t.Fatalf("%s: reported loss evidence %s; the model's is %s, the lost transactions %s", what, plan.Lost, want, p.dead)
+	// The planner reports the loss evidence it read (lossEvidence: a
+	// downloaded occurrence). A file that holds only excluded transactions
+	// is not downloaded, so the report holds every lost transaction of the
+	// head with a copy in a downloaded file, and nothing that was not lost.
+	o.mu.Lock()
+	read := map[pitrplan.RowRef]pitrplan.Row{}
+	for ref := range o.fetched {
+		if row, ok := o.rows[ref]; ok {
+			read[ref] = row
+		}
+	}
+	o.mu.Unlock()
+	all := o.modelLost(pitrplan.Set{}).Intersect(plan.Lineage)
+	if want := o.modelLostIn(pitrplan.Set{}, read).Intersect(plan.Lineage); !plan.Lost.Contains(want) || !all.Contains(plan.Lost) || !p.dead.Contains(plan.Lost) {
+		t.Fatalf("%s: reported loss evidence %s; the model's is %s (%s in the downloaded files), the lost transactions %s", what, plan.Lost, all, want, p.dead)
 	}
 	o.checkSegments(what, X, plan)
 }
@@ -742,37 +1071,64 @@ func TestPITRPlanProperty(t *testing.T) {
 		}
 		seeds = append(seeds, n)
 	} else {
-		for s := int64(1); s <= 10; s++ {
+		// 20 seeds: the first trial in which a planner that anchored with a
+		// whole promotion record instead of its promotion set certifies a
+		// wrong history is seed 19 (8 of the first 300 seeds do).
+		last := int64(20)
+		if v := os.Getenv("PITR_PLAN_SEEDS"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last = n
+		}
+		for s := int64(1); s <= last; s++ {
 			seeds = append(seeds, s)
 		}
 	}
-	planned, refused := 0, 0
+	planned, refused, contained := 0, 0, 0
 	for _, seed := range seeds {
 		t.Run(strconv.FormatInt(seed, 10), func(t *testing.T) {
-			pl, rf := runPropTrial(t, seed)
+			pl, rf, ct := runPropTrial(t, seed)
 			planned += pl
 			refused += rf
+			contained += ct
 		})
 	}
-	t.Logf("%d certified plans, %d refusals over %d trials", planned, refused, len(seeds))
+	t.Logf("%d certified plans (%d through a containment anchor), %d refusals over %d trials", planned, contained, refused, len(seeds))
 	if len(seeds) > 1 && planned < len(seeds) {
 		t.Errorf("the sweep certified only %d plans; the generator is not exercising the planner", planned)
+	}
+	if len(seeds) >= 10 && contained == 0 {
+		t.Errorf("no plan of the sweep needed a containment anchor; the generator is not exercising the lag window")
 	}
 }
 
 // TestPITRPlanPropertyProductionMargin plans with the production clock-skew
-// margin (F231) over a planned failover to b and failback to a in which b
-// never seals a binlog, so b's era is archived only as replica copies in
-// a's file and every target inside it needs b's promotion record as
-// anchor. Spaced, b commits more than δ after its record and those targets
-// are certified; unspaced, b commits within δ and they refuse
-// PITRStopAmbiguous. The model oracle checks every other answer.
+// margin (F231) and the production confirmation delay over a planned
+// failover to b and failback to a in which b never seals a binlog of its
+// era, so the era is archived only as replica copies in a's file and every
+// target inside it needs b's promotion record as anchor.
+//
+//   - spaced: b commits more than δ after its record, which anchors those
+//     targets by time;
+//   - unspaced: b commits within δ of its record and is demoted before the
+//     record is confirmed, so the targets refuse PITRStopAmbiguous;
+//   - confirmed (#269): b commits within δ of its record and stays primary
+//     until its sidecar confirms the record (2δ later). The confirmation
+//     holds b's commits and the record's promotion set does not, so the
+//     record anchors them by containment.
+//
+// The model oracle checks every other answer.
 func TestPITRPlanPropertyProductionMargin(t *testing.T) {
 	delta := pitrplan.DefaultClockSkewMargin
-	for _, spaced := range []bool{true, false} {
-		t.Run(fmt.Sprintf("spaced=%v", spaced), func(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		spaced, confirm bool
+	}{{"spaced", true, false}, {"unspaced", false, false}, {"confirmed", false, true}} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p := newPropTrial(t)
+			p := newPropTrial(t, 0)
 			first := p.w.manifest("a").Promotions[0].ObservedAt
 			for range 3 {
 				p.commit("a")
@@ -782,12 +1138,17 @@ func TestPITRPlanPropertyProductionMargin(t *testing.T) {
 				p.commit("a")
 				p.target("a")
 			}
-			if spaced {
+			switch {
+			case tc.spaced:
 				// b's record must not fall within δ of a's.
 				sleepPast(first, delta)
+			case tc.confirm:
+				// a's record, another server's, must be more than 2δ
+				// before b's commits to be no fence of b's record.
+				sleepPast(first, 2*delta)
 			}
-			recB := p.failover("a", "b", 0, false)
-			if spaced {
+			recB := p.failover("a", "b", 0, false, propPromotion{rotate: true})
+			if tc.spaced {
 				sleepPast(recB, delta)
 			}
 			var eraB []time.Time
@@ -795,13 +1156,23 @@ func TestPITRPlanPropertyProductionMargin(t *testing.T) {
 				p.commit("b")
 				eraB = append(eraB, p.target("b"))
 			}
-			p.failover("b", "a", 0, false)
+			if tc.confirm {
+				p.w.eventually("the confirmation of b's record", func() bool { return !p.w.manifest("b").Promotions[0].ConfirmedAt.IsZero() })
+			}
+			p.failover("b", "a", 0, false, propPromotion{rotate: true})
 			for range 2 {
 				p.commit("a")
 				p.target("a")
 			}
 			p.srv["a"].rotate()
 			p.waitUploaded("a")
+			rec := p.w.manifest("b").Promotions[0]
+			if rec.ConfirmedAt.IsZero() == tc.confirm {
+				t.Fatalf("b's record: %+v", rec)
+			}
+			if tc.confirm && rec.ConfirmedAt.Before(rec.ObservedAt.Add(pitrarchive.PromotionConfirmDelay)) {
+				t.Fatalf("b's record was confirmed %s after it was observed", rec.ConfirmedAt.Sub(rec.ObservedAt))
+			}
 			o := newPropOracle(t, p, delta)
 			for _, T := range eraB {
 				w, _ := o.witness(T, pitrplan.Set{})
@@ -809,7 +1180,7 @@ func TestPITRPlanPropertyProductionMargin(t *testing.T) {
 					t.Fatalf("the fixture archived b's commit %s on b", w)
 				}
 			}
-			res := o.run(fmt.Sprintf("spaced=%v", spaced))
+			res := o.run(tc.name)
 			for _, r := range res {
 				inB := false
 				for _, T := range eraB {
@@ -818,11 +1189,20 @@ func TestPITRPlanPropertyProductionMargin(t *testing.T) {
 				switch {
 				case r.mode == pitrplan.ModeLatest && r.err != nil:
 					t.Errorf("latest mode refused: %v", r.err)
-				case inB && spaced && r.err != nil:
-					t.Errorf("T=%s inside b's era, more than δ after b's record: %v", r.T.Format(time.RFC3339Nano), r.err)
-				case inB && !spaced:
-					if ref, ok := pitrplan.RefusalOf(r.err); !ok || ref.Token != pitrarchive.TokenStopAmbiguous {
+				case inB && tc.spaced:
+					if r.err != nil || o.byContainment(r.plan) {
+						t.Errorf("T=%s inside b's era, more than δ after b's record: want a plan anchored by time, got %+v %v", r.T.Format(time.RFC3339Nano), r.plan, r.err)
+					}
+				case inB && tc.confirm:
+					if r.err != nil || !o.byContainment(r.plan) || len(r.plan.Witness.AnchorRecords) != 1 || r.plan.Witness.AnchorRecords[0] != "b#0" {
+						t.Errorf("T=%s inside b's era, within δ of b's confirmed record: want a plan anchored by b#0, got %+v %v", r.T.Format(time.RFC3339Nano), r.plan, r.err)
+					}
+				case inB:
+					ref, ok := pitrplan.RefusalOf(r.err)
+					if !ok || ref.Token != pitrarchive.TokenStopAmbiguous {
 						t.Errorf("T=%s inside b's era, within δ of b's record: want PITRStopAmbiguous, got %v", r.T.Format(time.RFC3339Nano), r.err)
+					} else if !strings.Contains(ref.Message, "it has no confirmation (confirmedAt)") {
+						t.Errorf("T=%s: the refusal does not say what b's record lacks: %s", r.T.Format(time.RFC3339Nano), ref.Message)
 					}
 				}
 			}

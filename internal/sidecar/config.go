@@ -138,6 +138,13 @@ type PITRConfig struct {
 	// to write promotion records (D-43). The sidecar sets it to
 	// PEER_CHECK_INTERVAL; zero means defaultPeerCheckInterval.
 	RoleProbeInterval time.Duration
+
+	// PromotionConfirmDelay is how long after a promotion record's
+	// observation the read of the observation that confirms it must start
+	// (issue #269). Zero means pitrarchive.PromotionConfirmDelay (2δ),
+	// which is what the planner's rules assume; no environment variable
+	// sets it. Tests that run episodes in milliseconds shorten it.
+	PromotionConfirmDelay time.Duration
 }
 
 // ArchiveIdentity is what a writer expects the archive descriptor to hold.

@@ -103,6 +103,23 @@ func (s *simServer) setViolation(v pitrarchive.HistoryViolation, detail string) 
 func (s *simServer) apply(txns ...binlogtest.Txn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.applyLocked(txns)
+	s.writeLocked()
+}
+
+// rotate seals the active binlog (FLUSH BINARY LOGS).
+func (s *simServer) rotate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rotateLocked()
+	s.writeLocked()
+}
+
+func (s *simServer) rotateLocked() {
+	s.files = append(s.files, binlogtest.File{ServerID: s.serverID, Created: writerClock, Previous: s.executed.String()})
+}
+
+func (s *simServer) applyLocked(txns []binlogtest.Txn) {
 	active := &s.files[len(s.files)-1]
 	for _, txn := range txns {
 		active.Txns = append(active.Txns, txn)
@@ -112,15 +129,46 @@ func (s *simServer) apply(txns ...binlogtest.Txn) {
 		}
 		s.executed = sidecar.UnionBinlogGTIDs(s.executed, set)
 	}
-	s.writeLocked()
 }
 
-// rotate seals the active binlog (FLUSH BINARY LOGS).
-func (s *simServer) rotate() {
+// promote is a promotion as the server executes it, in one step that no
+// role probe can split: the last copies of its relay log (drained), the
+// operator's FLUSH BINARY LOGS when rotate (#229), read_only=OFF, and then
+// whatever the server executes before its sidecar's next probe: early
+// returns those transactions (its first own commits, copies a still-running
+// applier adds), stamped on the wall clock while the server is locked, so
+// they commit after every read-only probe and before the first writable
+// one. With rotate the new file's Previous_gtids are the promotion GTID
+// set. The promotion record of the episode then already holds early: the
+// lag window (#269).
+func (s *simServer) promote(rotate bool, drained []binlogtest.Txn, early func() []binlogtest.Txn) []binlogtest.Txn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.files = append(s.files, binlogtest.File{ServerID: s.serverID, Created: writerClock, Previous: s.executed.String()})
+	s.applyLocked(drained)
+	if rotate {
+		s.rotateLocked()
+	}
+	s.readOnly = false
+	var txns []binlogtest.Txn
+	if early != nil {
+		txns = early()
+		s.applyLocked(txns)
+	}
 	s.writeLocked()
+	return txns
+}
+
+// nowTxns are origin uuid's transactions from..to committed now, 10 µs
+// apart; it returns once the last has committed. Call it where the commits
+// happen (simServer.promote's early).
+func nowTxns(uuid string, serverID uint32, from, to int64) []binlogtest.Txn {
+	start := time.Now().UTC().Truncate(time.Microsecond)
+	var out []binlogtest.Txn
+	for gno := from; gno <= to; gno++ {
+		out = append(out, binlogtest.Txn{SID: uuid, GNO: gno, ServerID: serverID, Commit: start.Add(time.Duration(gno-from) * 10 * time.Microsecond)})
+	}
+	time.Sleep(time.Until(out[len(out)-1].Commit.Add(time.Microsecond)))
+	return out
 }
 
 // reclone replaces the datadir with a clone of donor: every local binlog is
@@ -223,6 +271,13 @@ func planSet(t *testing.T, s string) pitrplan.Set {
 // indexed and authenticated against its content ID. T zero is latest mode.
 func (w *writerArchive) plan(dump backupmeta.DumpMeta, T time.Time, exclude string) (*pitrplan.Plan, error) {
 	w.t.Helper()
+	return w.planEdited(dump, T, exclude, nil)
+}
+
+// planEdited is plan over the archive after edit changed what the planner
+// reads from the manifests (nil: nothing).
+func (w *writerArchive) planEdited(dump backupmeta.DumpMeta, T time.Time, exclude string, edit func(*pitrplan.Archive)) (*pitrplan.Plan, error) {
+	w.t.Helper()
 	keys, err := w.store.List(context.Background(), "binlogs/")
 	if err != nil {
 		w.t.Fatal(err)
@@ -236,6 +291,9 @@ func (w *writerArchive) plan(dump backupmeta.DumpMeta, T time.Time, exclude stri
 			}
 			arch.Sites = append(arch.Sites, sm)
 		}
+	}
+	if edit != nil {
+		edit(&arch)
 	}
 	budget := pitrplan.NewBudget(64 << 20)
 	fetch := pitrplan.FetchFunc(func(ctx context.Context, ref pitrplan.RowRef) (*pitrplan.FileIndex, error) {
@@ -307,6 +365,9 @@ type writerArchive struct {
 	store sidecar.ArchiveStore
 	dest  pitrarchive.Destination
 	wg    sync.WaitGroup
+	// confirmDelay, when set, is the archivers' promotion-record
+	// confirmation delay (default: the production 2δ, 10 s).
+	confirmDelay time.Duration
 }
 
 func newWriterArchive(t *testing.T) *writerArchive {
@@ -339,6 +400,7 @@ func (w *writerArchive) start(site string, srv *simServer, store sidecar.Archive
 	cfg := &sidecar.PITRConfig{
 		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
 		PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond, Archive: identity,
+		PromotionConfirmDelay: w.confirmDelay,
 	}
 	a := sidecar.NewBinlogArchiver(cfg, site, srv, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.wg.Add(1)
@@ -1383,4 +1445,181 @@ func TestArchiveWritersLossyRecloneWithSameServerUUIDFailsClosed(t *testing.T) {
 	if mb := w.manifest("b"); mb.Epoch != nil {
 		t.Fatalf("b set a reuse guard: %+v", mb.Epoch)
 	}
+}
+
+// #269, the promotion-record lag window. b is promoted while its relay log
+// still holds A:7-8, commits B:1-2 before its sidecar's next role probe (so
+// its promotion record already holds them, with A:7-8) and dies before it
+// seals a file of its era: the era is archived only as replica copies in
+// a's mixed file. A target whose witness is B:1 or B:2 has no record
+// provably before it. With the operator's promotion-time rotation the
+// record's promotion set is the promotion GTID set A:1-8, read from the
+// file the rotation opened, and it anchors both witnesses by containment;
+// before #269 they refused PITRStopAmbiguous. Without the rotation the
+// promotion set is only what the sidecar last saw read-only, which lacks
+// A:7-8, and the targets still refuse, with the safe target.
+func TestArchiveWritersPromotionLagWindow(t *testing.T) {
+	A, B := writerUUIDA, writerUUIDB
+	for _, rotate := range []bool{true, false} {
+		t.Run(fmt.Sprintf("rotation=%v", rotate), func(t *testing.T) {
+			t.Parallel()
+			w := newWriterArchive(t)
+			srvA := newSimServer(t, A, 101, false)
+			srvB := newSimServer(t, B, 102, true)
+			id := w.identity(writerGroup, w.dest)
+			a := w.start("a", srvA, w.store, id)
+			b := w.start("b", srvB, w.store, id)
+
+			w.waitRecords("a", 1)
+			era1 := liveTxns(A, 101, 1, 5)
+			srvA.apply(era1...)
+			srvB.apply(era1...)
+			dump := writerDump(t, "a", 101, A+":1-5")
+			tail := liveTxns(A, 101, 6, 8)
+			srvA.apply(tail...)
+			srvB.apply(tail[0]) // A:7-8 stay in b's relay log
+			// b's sidecar observes it read-only with A:1-6 at most.
+			time.Sleep(100 * time.Millisecond)
+
+			srvA.setReadOnly(true)
+			w.waitDemoted(a)
+			lag := srvB.promote(rotate, tail[1:], func() []binlogtest.Txn { return nowTxns(B, 102, 1, 2) })
+			w.waitRecords("b", 1)
+			srvA.apply(lag...)
+			era2 := liveTxns(B, 102, 3, 5)
+			srvB.apply(era2...)
+			srvA.apply(era2...)
+
+			rec := w.manifest("b").Promotions[0]
+			assertRecord(t, rec, B, 102, A+":1-8,"+B+":1-2")
+			promotionSet := planSet(t, rec.PromotionGTIDExecuted)
+			if rotate {
+				if !promotionSet.Equal(planSet(t, A+":1-8")) {
+					t.Fatalf("promotion set %q, want the promotion GTID set %s:1-8", rec.PromotionGTIDExecuted, A)
+				}
+			} else if rec.PromotionGTIDExecuted == "" || !planSet(t, A+":1-6").Contains(promotionSet) {
+				t.Fatalf("promotion set %q, want what b held read-only (within %s:1-6)", rec.PromotionGTIDExecuted, A)
+			}
+
+			// b dies before it seals its era; a takes over again and its
+			// flush seals the mixed file.
+			srvB.setReadOnly(true)
+			w.waitDemoted(b)
+			srvA.setReadOnly(false)
+			w.waitRecords("a", 2)
+			era3 := liveTxns(A, 101, 9, 10)
+			srvA.apply(era3...)
+			srvA.rotate()
+			w.eventually("a's mixed file archived", func() bool { return len(w.manifest("a").Files) == 1 })
+			for _, row := range w.manifest("b").Files {
+				if c := row.GTIDCoverage; c == nil || planSet(t, c.GTIDs).Overlaps(planSet(t, B+":1-5")) {
+					t.Fatalf("b archived a file of its own era: %+v", row)
+				}
+			}
+
+			// Without the #269 evidence (a record of an older sidecar) both
+			// targets refuse, whatever the rotation did.
+			strip := func(arch *pitrplan.Archive) {
+				for i := range arch.Sites {
+					for j := range arch.Sites[i].Promotions {
+						r := &arch.Sites[i].Promotions[j]
+						r.PromotionGTIDExecuted, r.ConfirmedAt, r.ConfirmedGTIDAdded = "", time.Time{}, ""
+					}
+				}
+			}
+			for i, want := range []string{A + ":1-8", A + ":1-8," + B + ":1"} {
+				witness := fmt.Sprintf("%s:%d", B, i+1)
+				_, err := w.planEdited(dump, before(lag[i]), "", strip)
+				ref := assertRefusal(t, witness+" without a promotion set", err, pitrarchive.TokenStopAmbiguous)
+				if !strings.Contains(ref.Message, "in the window") || !strings.Contains(ref.Message, "it carries no promotion set (promotionGtidExecuted)") {
+					t.Fatalf("%s without a promotion set: %s", witness, ref.Message)
+				}
+				plan, err := w.plan(dump, before(lag[i]), "")
+				if !rotate {
+					ref := assertRefusal(t, witness+" without the rotation", err, pitrarchive.TokenStopAmbiguous)
+					for _, sub := range []string{"or choose a target after", "the promotion record b#0 proves by containment only its promotion set (promotionGtidExecuted), which does not hold " + A + ":7",
+						"the promotion-time binlog rotation was not acknowledged"} {
+						if !strings.Contains(ref.Message, sub) {
+							t.Fatalf("%s without the rotation: %q lacks %q", witness, ref.Message, sub)
+						}
+					}
+					continue
+				}
+				assertPlan(t, witness+" in the lag window", plan, err, want, witness, pitrplan.GroundTruthAnchored)
+				if got := plan.Witness.AnchorRecords; len(got) != 1 || got[0] != "b#0" || plan.Witness.AnchorOriginRow != "" {
+					t.Fatalf("%s anchored by %v / %q, want b's record b#0 alone", witness, got, plan.Witness.AnchorOriginRow)
+				}
+			}
+			// After the record and its margin the time rule anchors, with or
+			// without the rotation, as before.
+			plan, err := w.plan(dump, before(era2[1]), "")
+			assertPlan(t, "after the lag window", plan, err, A+":1-8,"+B+":1-3", B+":4", pitrplan.GroundTruthAnchored)
+			plan, err = w.plan(dump, time.Time{}, "")
+			assertPlan(t, "latest", plan, err, A+":1-10,"+B+":1-5", "", "")
+			w.assertOneDescriptor()
+		})
+	}
+}
+
+// #269, a promoted server whose applier is still running. b is promoted
+// with the rotation, commits B:1, and only then applies A:8, the last
+// transaction of a's era, from its relay log; all of it before its sidecar's
+// next probe, so its promotion record holds A:1-8 and B:1. On a, A:8
+// precedes B:1. b never seals its era, so B:1 is archived only as a's copy,
+// whose predecessors are A:1-8, while b committed B:1 on A:1-7. The record's
+// promotion set is A:1-7 (the file the rotation opened), not what the record
+// holds: it does not explain A:8, and the target refuses PITRStopAmbiguous
+// instead of certifying a history b never had. A planner that anchored with
+// the whole record would certify A:1-8.
+func TestArchiveWritersPromotionLagWindowLateApplier(t *testing.T) {
+	A, B := writerUUIDA, writerUUIDB
+	w := newWriterArchive(t)
+	srvA := newSimServer(t, A, 101, false)
+	srvB := newSimServer(t, B, 102, true)
+	id := w.identity(writerGroup, w.dest)
+	a := w.start("a", srvA, w.store, id)
+	b := w.start("b", srvB, w.store, id)
+
+	w.waitRecords("a", 1)
+	era1 := liveTxns(A, 101, 1, 5)
+	srvA.apply(era1...)
+	srvB.apply(era1...)
+	dump := writerDump(t, "a", 101, A+":1-5")
+	tail := liveTxns(A, 101, 6, 8)
+	srvA.apply(tail...)
+	srvB.apply(tail[:2]...)
+	time.Sleep(100 * time.Millisecond)
+
+	srvA.setReadOnly(true)
+	w.waitDemoted(a)
+	early := srvB.promote(true, nil, func() []binlogtest.Txn { return append(nowTxns(B, 102, 1, 1), tail[2]) })
+	w.waitRecords("b", 1)
+	rec := w.manifest("b").Promotions[0]
+	assertRecord(t, rec, B, 102, A+":1-8,"+B+":1")
+	if !planSet(t, rec.PromotionGTIDExecuted).Equal(planSet(t, A+":1-7")) {
+		t.Fatalf("promotion set %q, want %s:1-7: what b had executed before its first own transaction", rec.PromotionGTIDExecuted, A)
+	}
+	srvA.apply(early[0])
+	era2 := liveTxns(B, 102, 2, 4)
+	srvB.apply(era2...)
+	srvA.apply(era2...)
+
+	srvB.setReadOnly(true)
+	w.waitDemoted(b)
+	srvA.setReadOnly(false)
+	w.waitRecords("a", 2)
+	srvA.apply(liveTxns(A, 101, 9, 10)...)
+	srvA.rotate()
+	w.eventually("a's mixed file archived", func() bool { return len(w.manifest("a").Files) == 1 })
+
+	_, err := w.plan(dump, before(early[0]), "")
+	ref := assertRefusal(t, "B:1, committed before b applied A:8", err, pitrarchive.TokenStopAmbiguous)
+	for _, sub := range []string{"predecessors include " + A + ":8", "the promotion record b#0 proves by containment only its promotion set (promotionGtidExecuted), which does not hold " + A + ":8"} {
+		if !strings.Contains(ref.Message, sub) {
+			t.Fatalf("refusal %q lacks %q", ref.Message, sub)
+		}
+	}
+	// After the record and its margin b had A:8, and the record says so.
+	plan, err := w.plan(dump, before(era2[1]), "")
+	assertPlan(t, "after the lag window", plan, err, A+":1-8,"+B+":1-2", B+":3", pitrplan.GroundTruthAnchored)
 }

@@ -154,6 +154,61 @@ type promoRef struct {
 	index int
 	rec   pitrarchive.PromotionRecord
 	set   Set
+	// proven is the record's promotion set P (promotionGtidExecuted,
+	// issue #269) when the record carries a usable one, else nil, and
+	// unusable then says why a carried one was ignored. confirmed is the
+	// gtid_executed of the record's confirmation (set ∪ confirmedGtidAdded),
+	// nil without one. Both are nil for a record that is no promotion
+	// record (recordEvidence).
+	proven    Set
+	confirmed Set
+	unusable  string
+}
+
+// holds reports whether the record's server held g when the sidecar
+// sampled it for the record or for its confirmation.
+func (pr *promoRef) holds(g GTID) bool {
+	return pr.set.Has(g) || (pr.confirmed != nil && pr.confirmed.Has(g))
+}
+
+// recordEvidence reads a promotion record's containment evidence (issue
+// #269): its promotion set P and its confirmation. Evidence that is absent
+// or does not hold together leaves the record exactly what it is without
+// it (a time anchor, loss evidence, a fence), so a record of an older
+// sidecar, and one that a writer or a tool damaged, plan as before:
+//
+//   - P must be a GTID set contained in the record's gtidExecuted;
+//   - a confirmation (confirmedAt) needs P, must not precede observedAt,
+//     and its confirmedGtidAdded must be a GTID set; an addition without
+//     confirmedAt is no confirmation, and makes P unusable too.
+//
+// The confirmed set is gtidExecuted ∪ confirmedGtidAdded, so it contains
+// gtidExecuted by construction.
+func recordEvidence(rec pitrarchive.PromotionRecord, set Set) (proven, confirmed Set, unusable string) {
+	if rec.Kind != pitrarchive.RecordPromotion || rec.PromotionGTIDExecuted == "" {
+		return nil, nil, ""
+	}
+	p, err := ParseSet(rec.PromotionGTIDExecuted)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("its promotionGtidExecuted is not a GTID set (%v)", err)
+	}
+	if !set.Contains(p) {
+		return nil, nil, fmt.Sprintf("its promotionGtidExecuted holds %s, which its gtidExecuted lacks", p.Subtract(set).bounded(256))
+	}
+	if rec.ConfirmedAt.IsZero() {
+		if rec.ConfirmedGTIDAdded != "" {
+			return nil, nil, "it carries confirmedGtidAdded without confirmedAt"
+		}
+		return p, nil, ""
+	}
+	if rec.ConfirmedAt.Before(rec.ObservedAt) {
+		return nil, nil, fmt.Sprintf("its confirmedAt %s precedes its observedAt", rec.ConfirmedAt.UTC().Format(microLayout))
+	}
+	added, err := ParseSet(rec.ConfirmedGTIDAdded)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("its confirmedGtidAdded is not a GTID set (%v)", err)
+	}
+	return p, set.Union(added), ""
 }
 
 type planner struct {
@@ -249,6 +304,12 @@ func newPlanner(ctx context.Context, req Request, archive Archive, fetcher Fetch
 				return nil, err
 			}
 			ref := promoRef{site: sm.Site, index: i, rec: rec, set: set}
+			ref.proven, ref.confirmed, ref.unusable = recordEvidence(rec, set)
+			for _, evidence := range []Set{ref.proven, ref.confirmed} {
+				if err := p.budget.chargeSet(evidence, "promotion records"); err != nil {
+					return nil, err
+				}
+			}
 			p.fences = append(p.fences, ref)
 			if rec.Kind == pitrarchive.RecordPromotion {
 				p.promos = append(p.promos, ref)

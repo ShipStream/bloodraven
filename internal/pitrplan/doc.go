@@ -23,6 +23,22 @@
 //
 // Every refusal carries a pitrarchive.Token; §4.11 fixes their precedence.
 //
+// A witness archived only as a replica copy is accepted through an anchor
+// (witness.go): a set its origin server provably executed before it. A
+// promotion record of the origin anchors by time, with its gtidExecuted,
+// when it lacks the witness and was observed more than δ before the
+// witness committed. The promotion record of the witness's own episode
+// anchors by containment (issue #269), with its promotion set
+// (promotionGtidExecuted, which the sidecar derives from its last
+// read-only observation and the binlog file opened before the episode's
+// first transaction), when that set lacks the witness and the record's
+// observation or its confirmation holds it: no clock has to order the
+// record and the witness, which covers the transactions a new primary
+// commits before and shortly after its record is observed. An archived
+// origin file of the same server anchors too. Every anchor is fenced by
+// the records around it (fenceOf), and exclusions never set a record
+// aside (N1). A record's readOnlyGtidExecuted is not read.
+//
 // Every downloaded copy of a GTID is compared with the others as it arrives
 // (ingest, plan.go): commit time, origin server, emptiness, and the effect
 // digest of its row changes when both copies have one (EffectDigest, issue

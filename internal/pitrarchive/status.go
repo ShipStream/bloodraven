@@ -37,6 +37,19 @@ type ArchiveStatus struct {
 	KeyRevision string `json:"keyRevision,omitempty"`
 }
 
+// ClockSkewMargin is δ (D-50): the fixed margin of every comparison that
+// crosses clocks (a sidecar's record time against a server's commit time,
+// two sites' records). The planner's default δ and the sidecar's
+// confirmation delay both derive from it, so they cannot drift apart.
+const ClockSkewMargin = 5 * time.Second
+
+// PromotionConfirmDelay is how long after a promotion record's ObservedAt
+// the read of the observation that confirms the record must start: 2δ. A
+// witness the record's time cannot order (committed no later than
+// ObservedAt + δ on the server's clock) was committed before ObservedAt +
+// 2δ on the sidecar's, so the confirmation holds it (issue #269).
+const PromotionConfirmDelay = 2 * ClockSkewMargin
+
 // MaxPromotionRecords is how many records (promotion and reset records
 // together) a manifest keeps (newest last). Dropping an older record only
 // removes anchors and loss evidence, so the cap fails closed (D-43).
@@ -67,6 +80,19 @@ const (
 // mode, and every record of a site as a fence: a record observed after an
 // anchor and not provably after the witness means the witness may belong
 // to a later episode or server incarnation.
+//
+// A promotion record anchors a witness w in two ways (pitrplan/witness.go):
+// by time, with GTIDExecuted, when w is not in it and it was observed more
+// than δ before w committed; and by containment (issue #269), with
+// PromotionGTIDExecuted, when w is outside that set and inside GTIDExecuted
+// or the confirmation. The second needs no clock to order the record and
+// w, so it covers the transactions an episode commits before and shortly
+// after its record is observed.
+//
+// The fields added for issue #269 are optional. A record without them (an
+// older sidecar's, or one whose evidence could not be established) loads
+// and behaves as before; a writer that does not know them drops them when
+// it rewrites the manifest, which only removes that evidence.
 type PromotionRecord struct {
 	// Kind is RecordPromotion (omitted) or RecordReset. A reader treats
 	// any other kind as a fence only.
@@ -93,8 +119,47 @@ type PromotionRecord struct {
 	// observation of the same server directly before this episode, when
 	// the sidecar saw one ("" otherwise: a sidecar start while writable, a
 	// failed probe in between, or a new server incarnation while writable).
-	// Recorded for diagnosis; the planner does not use it.
+	// The planner does not read it: it is the first of the two sources of
+	// PromotionGTIDExecuted, which is the field that carries the proof,
+	// and is kept beside it for diagnosis.
 	ReadOnlyGTIDExecuted string `json:"readOnlyGtidExecuted,omitempty"`
+	// PromotionGTIDExecuted is the promotion set P of a promotion record
+	// (issue #269): a set every member of which this server incarnation
+	// executed before any transaction under its own server_uuid that
+	// ReadOnlyGTIDExecuted does not hold, so before every transaction this
+	// episode committed under the server's own server_uuid. The sidecar
+	// derives it when it opens the record, as
+	//
+	//	P = ReadOnlyGTIDExecuted ∪ Previous_gtids(F*)
+	//
+	// F* being the newest local binlog file whose Previous_gtids hold no
+	// transaction under the server's own server_uuid beyond
+	// ReadOnlyGTIDExecuted and nothing GTIDExecuted lacks: a file the
+	// server opened before the episode's first own transaction. When the
+	// operator's promotion-time FLUSH BINARY LOGS was acknowledged, F* is
+	// the file it opened and P is the promotion GTID set; otherwise F* is
+	// an older file and P is smaller. "" (absent) when the sidecar could
+	// not establish it: no ReadOnlyGTIDExecuted, an unreadable binlog
+	// header, a read that exceeded its bound, or a server that changed
+	// while it was derived. Always a subset of GTIDExecuted; a reader
+	// ignores one that is not.
+	PromotionGTIDExecuted string `json:"promotionGtidExecuted,omitempty"`
+	// ConfirmedAt and ConfirmedGTIDAdded are the record's confirmation
+	// (issue #269), added once by the sidecar that wrote the record:
+	// ConfirmedAt is its clock when a later role probe of the same
+	// episode returned, a probe whose read started at least
+	// PromotionConfirmDelay after ObservedAt, with the server writable in
+	// every observation in between, of the same incarnation, and a
+	// gtid_executed containing GTIDExecuted. ConfirmedGTIDAdded is what
+	// that gtid_executed held beyond GTIDExecuted ("" when nothing): the
+	// confirmed set is GTIDExecuted ∪ ConfirmedGTIDAdded. Only the
+	// difference is stored: the confirmed set contains GTIDExecuted by
+	// construction, and a full copy would add one more whole GTID set per
+	// record to every manifest save. A zero ConfirmedAt means no
+	// confirmation: the sidecar or the server stopped, or the episode
+	// ended, before that probe.
+	ConfirmedAt        time.Time `json:"confirmedAt,omitzero"`
+	ConfirmedGTIDAdded string    `json:"confirmedGtidAdded,omitempty"`
 }
 
 // Duration is a time.Duration that JSON-encodes as a Go duration string

@@ -287,7 +287,8 @@ func TestGTIDAuditManifestCandidates(t *testing.T) {
 		b = "4e11fa47-71ca-11e1-9e33-c80aa9429562"
 	)
 	manifest := `{"version":2,"site":"dc1","archiveId":"x",
-	  "promotions":[{"serverUuid":"` + b + `","serverId":2,"observedAt":"2026-11-05T10:00:00Z","gtidExecuted":"` + a + `:1-10","probeInterval":"5s","readOnlyGtidExecuted":"` + a + `:1-9"},
+	  "promotions":[{"serverUuid":"` + b + `","serverId":2,"observedAt":"2026-11-05T10:00:00Z","gtidExecuted":"` + a + `:1-10","probeInterval":"5s","readOnlyGtidExecuted":"` + a + `:1-9",
+	                 "promotionGtidExecuted":"` + a + `:1-10","confirmedAt":"2026-11-05T10:00:10Z","confirmedGtidAdded":"` + b + `:1-4"},
 	                {"kind":"Reset","serverUuid":"` + b + `","serverId":2,"observedAt":"2026-11-05T11:00:00Z","gtidExecuted":"` + a + `:1-3"}],
 	  "divergent":[{"name":"mysql-bin.000004","id":"r4","missingGtids":"` + a + `:11-12"},
 	               {"name":"mysql-bin.000005","id":"r5","missingGtids":"x'); DROP TABLE t; -- "},
@@ -303,8 +304,8 @@ func TestGTIDAuditManifestCandidates(t *testing.T) {
 	out, _ := e.run(t, scriptPath("gtid-audit.sh"), "-n", "orders", "--manifest", path, "lion")
 	joined := a + ":11-12," + b + ":1-4"
 	for _, want := range []string{
-		"Promotion " + b + " 2 2026-11-05T10:00:00Z 5s " + a + ":1-10 [read-only before: " + a + ":1-9]",
-		"Reset " + b + " 2 2026-11-05T11:00:00Z unknown " + a + ":1-3",
+		"Promotion " + b + " 2 2026-11-05T10:00:00Z 5s " + a + ":1-10 [read-only before: " + a + ":1-9] [promotion set: " + a + ":1-10] [confirmed at 2026-11-05T10:00:10Z: +" + b + ":1-4]",
+		"Reset " + b + " 2 2026-11-05T11:00:00Z unknown " + a + ":1-3\n",
 		"mysql-bin.000007 r7 2026-11-05T09:00:00Z lost [divergent: " + b + ":1-4]",
 		"divergent row mysql-bin.000005: missingGtids is not a GTID set, not used",
 		"divergent row mysql-bin.000006: missingGtids is not a GTID set, not used",

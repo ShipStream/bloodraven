@@ -144,6 +144,28 @@ func TestExample3FailbackWithoutReclone(t *testing.T) {
 	w.check("3ii lag, after the record", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
 		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
 
+	// Issue #269: the same history with a record that carries its
+	// promotion set A:1-100 (the operator's rotation at b's promotion) and
+	// a confirmation taken 10.2 s after it. R_b holds Bu:2 and its
+	// promotion set does not, so b executed A:1-100 before Bu:2; Bu:5 is
+	// not in R_b but in its confirmation. Both plan, and so does every
+	// later target, by time as before.
+	w = example3(t, true)
+	rb := &w.manifest("b").Promotions[0]
+	rb.PromotionGTIDExecuted = w.set("A:1-100").String()
+	rb.ConfirmedAt, rb.ConfirmedGTIDAdded = tauB.Add(10200*time.Millisecond), w.set("Bu:4-13").String()
+	p = w.check("3ii lag, promotion set", query{stop: w.in("Bu:2")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:2",
+		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1", ""}}})
+	if a := p.Witness; len(a.AnchorRecords) != 1 || a.AnchorRecords[0] != "b#0" || a.AnchorOriginRow != "" {
+		t.Errorf("3ii lag anchor = %+v, want R_b only", a)
+	}
+	w.check("3ii lag, the era's first commit", query{stop: w.in("Bu:1")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:1",
+		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100", ""}}})
+	w.check("3ii lag, inside the margin, confirmed", query{stop: w.in("Bu:5")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:5",
+		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-4", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-4", ""}}})
+	w.check("3ii lag, after the record, promotion set", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
+		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
+
 	// N3 revised: a reset record of b (b recloned, a sidecar restart that
 	// found b's history replaced) observed after R_b and not provably
 	// after Bu:36's episode began fences R_b off; one observed long enough
