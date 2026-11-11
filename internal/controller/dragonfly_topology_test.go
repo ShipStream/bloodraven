@@ -293,6 +293,9 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 	rec := record.NewFakeRecorder(8)
 	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
 
+	// What a killed master leaves: the replica holds the cache and reports
+	// its link to the master down. That is promoted on the first missed
+	// observation (dragonflyMasterLossCorroborated).
 	target := &fakeDragonflyConn{
 		info: dragonfly.ReplicationInfo{
 			Role:                   "slave",
@@ -302,6 +305,7 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 			MasterLastIOSecondsAgo: 1,
 			SlaveReplOffset:        100,
 		},
+		keys: 5,
 	}
 	conn := newFakeConnector()
 	conn.dialFails("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", errors.New("connection refused"))

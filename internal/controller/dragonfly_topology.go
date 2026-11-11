@@ -67,6 +67,19 @@ type DragonflyManager struct {
 	activeUnobservedSite  string
 	activeUnobservedSince time.Time
 	activeHoldLogged      bool
+	// The Dragonfly-only promotion waits for the active master to be
+	// missed in masterLossThreshold consecutive observations; see
+	// noteActiveMaster and dragonflyOnlyPromotionCandidate.
+	// masterMissSite is the active site being missed, masterMisses the
+	// consecutive observations that missed it, and masterWaitLogged is set
+	// once the wait has been logged for this outage. Guarded by mu.
+	// corroboratedMasterLossThreshold is the threshold when the replica
+	// itself reports the master gone. Both are fields so tests can set
+	// them; zero means the default.
+	masterMissSite                  string
+	masterMisses                    int
+	masterWaitLogged                bool
+	corroboratedMasterLossThreshold int
 	// unobservedSites holds the sites whose failed observation has been
 	// logged, so a site that stays down is logged once; keyCountFailed
 	// is the same for a site whose key count cannot be read. Guarded by
@@ -164,8 +177,10 @@ func NewDragonflyManager(c client.Client, recorder record.EventRecorder, logger 
 		lastStaleMasterAt:   make(map[string]time.Time),
 		staleMasterEventTTL: 5 * time.Minute,
 		activeHoldGrace:     defaultDragonflyActiveHoldGrace,
-		unobservedSites:     make(map[string]bool),
-		keyCountFailed:      make(map[string]bool),
+
+		corroboratedMasterLossThreshold: defaultDragonflyCorroboratedMasterLossThreshold,
+		unobservedSites:                 make(map[string]bool),
+		keyCountFailed:                  make(map[string]bool),
 
 		emergencyTakeoverTimeout:    defaultEmergencyTakeoverTimeout,
 		emergencyWaits:              defaultEmergencyWaits,
@@ -390,6 +405,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 		return
 	}
 	hold := m.holdUnobservedActive(&fg, snap)
+	m.noteActiveMaster(&fg, snap, hold)
 	if master := dragonflyMasterOverEmptyRecord(&fg, snap); master != "" && plannedTakeoverMasterSite(&fg) == "" {
 		m.logger.Info("dragonfly: recorded active site holds no keys; following the master on the MySQL active site",
 			"site", recordedDragonflyActiveSite(&fg), "master", master)
@@ -1182,6 +1198,91 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 	}
 }
 
+// defaultDragonflyMasterLossThreshold is how many consecutive observations
+// must miss the active Dragonfly master before the Dragonfly-only promotion
+// replaces it, when spec.failureThreshold is not set. It is the default of
+// that field, which is what the MySQL monitor counts before it calls a site
+// Unreachable: the cache does not fail over on less evidence than the
+// database.
+const defaultDragonflyMasterLossThreshold = 3
+
+// defaultDragonflyCorroboratedMasterLossThreshold is the threshold when the
+// replica to promote also says the master is gone: it holds keys, and it
+// reports the link to the active master down (dragonflyMasterLossCorroborated).
+//
+// 1 keeps what the manager did before the threshold existed, for this case
+// only, and it is what saves the cache when the master's process dies. A
+// killed master closes the replication connection at once (the replica
+// reports the link down within 200ms), and its pod is back within seconds as
+// an empty master. From then on the recorded site answers as a master
+// again, no promotion is made, and the replica is reattached to it, which
+// discards the cache. The promotion has to come before the pod does.
+//
+// Set it to defaultDragonflyMasterLossThreshold to make every Dragonfly-only
+// promotion wait the same; a killed master pod that restarts within the
+// wait then costs the cache.
+const defaultDragonflyCorroboratedMasterLossThreshold = 1
+
+// dragonflyMasterLossThreshold is the number of consecutive observations
+// that must miss the active master before a replica is promoted in its
+// place on the operator's observation alone: spec.failureThreshold.
+func dragonflyMasterLossThreshold(fg *v1alpha1.MysqlFailoverGroup) int {
+	if fg.Spec.FailureThreshold > 0 {
+		return int(fg.Spec.FailureThreshold)
+	}
+	return defaultDragonflyMasterLossThreshold
+}
+
+// dragonflyMasterMissed reports whether this cycle's observation missed the
+// active master: the site did not answer, or answered without saying that
+// it is a master or a replica. An answer as a replica is not a miss: the
+// site was reached and says it is no longer the master.
+func dragonflyMasterMissed(s *DragonflySiteSnapshot) bool {
+	if s == nil {
+		return false
+	}
+	return !s.Reachable || (s.Info.Role != "master" && s.Info.Role != "slave")
+}
+
+// noteActiveMaster counts the consecutive observations that missed the
+// active Dragonfly master. Any observation that reaches it, as a master or
+// as a replica, ends the count, and so does a change of the active site.
+//
+// The count is this process's: a restarted operator starts from zero, so a
+// master that was already gone is replaced one threshold after the restart.
+func (m *DragonflyManager) noteActiveMaster(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) {
+	active := activeDragonflySiteFromObservation(fg, snaps, holdUnobserved)
+	missed := active != "" && dragonflyMasterMissed(dragonflySnapshotOf(snaps, active))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !missed {
+		m.masterMissSite, m.masterMisses, m.masterWaitLogged = "", 0, false
+		return
+	}
+	if m.masterMissSite != active {
+		m.masterMissSite, m.masterMisses, m.masterWaitLogged = active, 0, false
+	}
+	m.masterMisses++
+}
+
+// dragonflyMasterLossCorroborated reports whether the replica s says, by
+// itself, that the active master is gone and that there is a cache to save:
+// it holds keys, it replicates from the active site, and it reports that
+// link down. An unread key count or an unreported link state is not that.
+//
+// A Dragonfly replica reports the link down when the connection was closed
+// or reset, which is what a dying master process does. It keeps reporting
+// it up through a silent loss (a partition, a node that lost power): there
+// the operator's own observations are all there is, and the full threshold
+// applies.
+func dragonflyMasterLossCorroborated(fg *v1alpha1.MysqlFailoverGroup, s *DragonflySiteSnapshot, active string) bool {
+	if s == nil || !s.Reachable || !s.holdsKeys() || s.Info.MasterLinkStatus != "down" {
+		return false
+	}
+	host, port := splitHostPort(dragonflyAddr(fg, active), dragonflyPort(fg.Spec.Dragonfly))
+	return s.Info.MasterHost == host && s.Info.MasterPort == int(port)
+}
+
 // dragonflyOnlyPromotionCandidate returns the single healthy replica to
 // promote when the current Dragonfly master is unreachable but MySQL has not
 // failed over. The emergency gate is intentionally looser than planned
@@ -1194,6 +1295,21 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 // less than the grace, and a promotion would add a third master. Before
 // the hold existed that observation made the empty master the active
 // site, so no replica was promoted in it either.
+//
+// One missed observation of the master is not its loss. The promotion
+// waits until dragonflyMasterLossThreshold consecutive observations have
+// missed it (noteActiveMaster), as the MySQL monitor does before it calls a
+// site Unreachable; the wait is logged once per outage. Two observations
+// are evidence and do not wait for more:
+//   - the active site answers as a replica: it was reached and is not the
+//     master;
+//   - the replica to promote holds keys and reports its link to the active
+//     master down (dragonflyMasterLossCorroborated): two observers lost the
+//     master, and waiting risks the cache. That case needs
+//     corroboratedMasterLossThreshold misses.
+//
+// The MySQL-follow promotions (Enqueue, mysqlActivePromotionCandidate) rest
+// on MySQL's own decision and do not come through here.
 func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) (target, oldSource string, ok bool) {
 	active := activeDragonflySiteFromObservation(fg, snaps, holdUnobserved)
 	if active == "" {
@@ -1218,6 +1334,32 @@ func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFai
 		}
 	}
 	if !activeObserved || activeHealthyMaster || len(candidates) != 1 {
+		return "", "", false
+	}
+	if !dragonflyMasterMissed(dragonflySnapshotOf(snaps, active)) {
+		// Reached, and not a master: evidence, not a miss.
+		return candidates[0], active, true
+	}
+	need := dragonflyMasterLossThreshold(fg)
+	corroborated := dragonflyMasterLossCorroborated(fg, dragonflySnapshotOf(snaps, candidates[0]), active)
+	if corroborated {
+		need = m.corroboratedMasterLossThreshold
+		if need <= 0 {
+			need = defaultDragonflyCorroboratedMasterLossThreshold
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	misses := 0
+	if m.masterMissSite == active {
+		misses = m.masterMisses
+	}
+	if misses < need {
+		if !m.masterWaitLogged {
+			m.masterWaitLogged = true
+			m.logger.Info("dragonfly: active master not observed; waiting before promoting a replica",
+				"site", active, "target", candidates[0], "misses", misses, "threshold", need, "fg", m.fgKey.String())
+		}
 		return "", "", false
 	}
 	return candidates[0], active, true
