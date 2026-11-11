@@ -21,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
 // Dragonfly-specific labels and constants.
@@ -888,30 +887,42 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 	return promoter.rolloutPromoteFG(context.WithoutCancel(ctx), fresh, target, oldSource), false
 }
 
+// dragonflyRolloutSyncWait is how long one rollout readiness check waits
+// for the target to reach the position it read from the source, and
+// dragonflyRolloutSyncPoll how often it looks. The source takes writes all
+// the while, and a replica is always a network round trip behind it, so a
+// target read once right after the source would often be "behind" on a
+// busy cache and the rollout would not move.
+const (
+	dragonflyRolloutSyncWait = 2 * time.Second
+	dragonflyRolloutSyncPoll = 200 * time.Millisecond
+)
+
+// dragonflyRolloutCandidateSyncReady reports whether target can take over
+// from source for a rollout: it reads the source's replication position,
+// then waits up to dragonflyRolloutSyncWait for the target to be linked
+// and to have reached it on every flow (dragonflyTargetReached). An error
+// means a site could not be read; the caller retries on its next pass.
 func (r *MysqlFailoverGroupReconciler) dragonflyRolloutCandidateSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) (bool, error) {
-	sourceConn, err := r.dragonflyDial(ctx, fg, source)
+	pos, err := r.dragonflySourcePosition(ctx, fg, source)
 	if err != nil {
-		return false, fmt.Errorf("dial source: %w", err)
+		return false, err
 	}
-	sourceInfo, err := sourceConn.InfoReplication(ctx)
-	_ = sourceConn.Close()
-	if err != nil {
-		return false, fmt.Errorf("source INFO replication: %w", err)
+	deadline := time.Now().Add(dragonflyRolloutSyncWait)
+	for {
+		ready, _, err := r.dragonflyTargetReached(ctx, fg, target, pos)
+		if err != nil || ready {
+			return ready, err
+		}
+		if !time.Now().Add(dragonflyRolloutSyncPoll).Before(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(dragonflyRolloutSyncPoll):
+		}
 	}
-
-	targetConn, err := r.dragonflyDial(ctx, fg, target)
-	if err != nil {
-		return false, fmt.Errorf("dial target: %w", err)
-	}
-	targetInfo, err := targetConn.InfoReplication(ctx)
-	if err != nil {
-		_ = targetConn.Close()
-		return false, fmt.Errorf("target INFO replication: %w", err)
-	}
-	targetPersist, _ := targetConn.InfoPersistence(ctx)
-	_ = targetConn.Close()
-
-	return dragonfly.CandidateSyncReady(targetInfo, targetPersist, sourceInfo.MasterReplOffset), nil
 }
 
 func (r *MysqlFailoverGroupReconciler) dragonflyRolloutPromotionBackoff(fg *v1alpha1.MysqlFailoverGroup, target, source string) time.Duration {

@@ -121,6 +121,10 @@ type DragonflyConnection interface {
 	InfoPersistence(ctx context.Context) (dragonfly.PersistenceInfo, error)
 	// KeyCount returns the number of keys in all databases.
 	KeyCount(ctx context.Context) (int64, error)
+	// ReplicationPosition returns the instance's position in the
+	// replication journal, per flow (see dragonfly.Position). An error
+	// means no position, never position zero.
+	ReplicationPosition(ctx context.Context) (dragonfly.Position, error)
 	ReplicaOf(ctx context.Context, host string, port int32) error
 	ReplicaOfNoOne(ctx context.Context) error
 	ReplTakeover(ctx context.Context, timeout time.Duration) error

@@ -45,14 +45,34 @@ type ReplicationInfo struct {
 	// distinguishable from an absent field.
 	MasterLastIOReported bool
 
-	// SlaveReplOffset is the replica's applied offset (bytes).
+	// SlaveReplOffset is `slave_repl_offset`: on a Dragonfly replica the
+	// number of journal records it has executed, summed over its flows
+	// (one per master shard). It is not a byte offset. Dragonfly prints
+	// the line only once the full sync is done. 0 when absent; see
+	// SlaveReplOffsetReported.
 	SlaveReplOffset int64
 
+	// SlaveReplOffsetReported is true when slave_repl_offset was on the
+	// wire and parsed.
+	SlaveReplOffsetReported bool
+
 	// MasterReplOffset is the `master_repl_offset` field, 0 when absent.
-	// Dragonfly v1.38 reports it in neither role (a master prints role,
-	// connected_slaves, its slaveN lines and master_replid; a replica
-	// prints slave_repl_offset), so 0 does not mean "nothing written".
+	// Dragonfly v1.38 and v2.1 report it in neither role (a master prints
+	// role, connected_slaves, its slaveN lines and master_replid; a
+	// replica prints slave_repl_offset), so 0 does not mean "nothing
+	// written". A master's position is read with DFLY REPLICAOFFSET
+	// (Client.ReplicationPosition).
 	MasterReplOffset int64
+
+	// MasterReplOffsetReported is true when master_repl_offset was on the
+	// wire and parsed (a Redis-style server).
+	MasterReplOffsetReported bool
+
+	// MasterReplID is `master_replid`: on a master its own replication
+	// id, on a replica the id of the master it syncs from. A master gets
+	// a new id when its process starts, so a replica whose id differs
+	// from its master's follows an earlier incarnation of it.
+	MasterReplID string
 
 	// ConnectedSlaves is the count of replicas currently linked to this
 	// instance. Reported on masters; meaningless on replicas. One of the
@@ -116,9 +136,15 @@ func ParseInfoReplication(body string) ReplicationInfo {
 				info.MasterLastIOSecondsAgo, info.MasterLastIOReported = n, true
 			}
 		case "slave_repl_offset", "replica_repl_offset":
-			info.SlaveReplOffset = atoi64OrZero(value)
+			if n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && n >= 0 {
+				info.SlaveReplOffset, info.SlaveReplOffsetReported = n, true
+			}
 		case "master_repl_offset":
-			info.MasterReplOffset = atoi64OrZero(value)
+			if n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && n >= 0 {
+				info.MasterReplOffset, info.MasterReplOffsetReported = n, true
+			}
+		case "master_replid":
+			info.MasterReplID = strings.TrimSpace(value)
 		case "connected_slaves", "connected_replicas":
 			info.ConnectedSlaves = atoiOrZero(value)
 		}
@@ -231,14 +257,6 @@ func splitKV(line string) (string, string, bool) {
 
 func atoiOrZero(s string) int {
 	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
-func atoi64OrZero(s string) int64 {
-	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil {
 		return 0
 	}

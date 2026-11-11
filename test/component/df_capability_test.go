@@ -37,7 +37,10 @@ func (s *stubDF) InfoReplication(context.Context) (dragonfly.ReplicationInfo, er
 func (s *stubDF) InfoPersistence(context.Context) (dragonfly.PersistenceInfo, error) {
 	return dragonfly.PersistenceInfo{}, nil
 }
-func (s *stubDF) KeyCount(context.Context) (int64, error)        { return 0, nil }
+func (s *stubDF) KeyCount(context.Context) (int64, error) { return 0, nil }
+func (s *stubDF) ReplicationPosition(context.Context) (dragonfly.Position, error) {
+	return dragonfly.Position{Role: s.info.Role, Flows: []int64{0}}, nil
+}
 func (s *stubDF) ReplicaOf(context.Context, string, int32) error { return nil }
 func (s *stubDF) ReplicaOfNoOne(context.Context) error           { return nil }
 func (s *stubDF) ReplTakeover(context.Context, time.Duration) error {

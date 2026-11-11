@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -37,6 +38,11 @@ type fakeDragonflyConn struct {
 	// that holds nothing.
 	keys    int64
 	keysErr error
+	// position, when set, is the replication position the instance
+	// reports; otherwise it is derived from info (fakeDragonflyPosition).
+	// positionErr fails the read.
+	position    *dragonfly.Position
+	positionErr error
 
 	replicaOfErr  error
 	replicaOfArgs []string
@@ -70,6 +76,31 @@ func (c *fakeDragonflyConn) InfoPersistence(_ context.Context) (dragonfly.Persis
 }
 
 func (c *fakeDragonflyConn) KeyCount(_ context.Context) (int64, error) { return c.keys, c.keysErr }
+
+func (c *fakeDragonflyConn) ReplicationPosition(_ context.Context) (dragonfly.Position, error) {
+	switch {
+	case c.positionErr != nil:
+		return dragonfly.Position{}, c.positionErr
+	case c.infoErr != nil:
+		return dragonfly.Position{}, c.infoErr
+	case c.position != nil:
+		return *c.position, nil
+	}
+	return fakeDragonflyPosition(c.info)
+}
+
+// fakeDragonflyPosition is the one-flow position of a fake instance: a
+// master's MasterReplOffset, a replica's SlaveReplOffset. Like the real
+// client, an instance that reports neither role has no position.
+func fakeDragonflyPosition(info dragonfly.ReplicationInfo) (dragonfly.Position, error) {
+	switch info.Role {
+	case "master":
+		return dragonfly.Position{Role: "master", Flows: []int64{info.MasterReplOffset}, ReplID: info.MasterReplID}, nil
+	case "slave":
+		return dragonfly.Position{Role: "slave", Flows: []int64{info.SlaveReplOffset}, ReplID: info.MasterReplID}, nil
+	}
+	return dragonfly.Position{}, fmt.Errorf("dragonfly: no replication position for role %q", info.Role)
+}
 
 func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32) error {
 	c.replicaOfArgs = []string{host, formatInt(port)}
@@ -1030,7 +1061,10 @@ func (panicOnInfoConn) InfoReplication(_ context.Context) (dragonfly.Replication
 func (panicOnInfoConn) InfoPersistence(_ context.Context) (dragonfly.PersistenceInfo, error) {
 	return dragonfly.PersistenceInfo{}, nil
 }
-func (panicOnInfoConn) KeyCount(_ context.Context) (int64, error)            { return 0, nil }
+func (panicOnInfoConn) KeyCount(_ context.Context) (int64, error) { return 0, nil }
+func (panicOnInfoConn) ReplicationPosition(_ context.Context) (dragonfly.Position, error) {
+	return dragonfly.Position{}, nil
+}
 func (panicOnInfoConn) ReplicaOf(_ context.Context, _ string, _ int32) error { return nil }
 func (panicOnInfoConn) ReplicaOfNoOne(_ context.Context) error               { return nil }
 func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
