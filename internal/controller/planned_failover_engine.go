@@ -2096,12 +2096,15 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 			reason = v1alpha1.PlannedFailoverReasonExecuteFailed
 		}
 		if out.RollbackIfUnrecorded && !plannedOwnRecordDurable(fg, pf, e.clk.Now()) {
-			// The DST-3 ruling: the target was replaced before this process
-			// saw any promotion statement, the run's own failover record is
-			// not durable (so it never reached RecordPlannedPromotion and DNS
-			// never pointed at the target), the source still holds all of F
-			// under the run's fence, and no site is writable. Roll back; §9
-			// still decides whether the source is unfenced.
+			// The DST-3 ruling: the target was replaced (another server_uuid,
+			// read-only, nothing outside F) after a clear may have been sent,
+			// by this process or an earlier one; the run's own failover record
+			// is not durable (so it never reached RecordPlannedPromotion and
+			// DNS never pointed at the target; this process did not confirm
+			// the promotion either, or it would be in the confirmed tail), the
+			// source still holds all of F under the run's fence, and no site
+			// is writable. Roll back; §9 still decides whether the source is
+			// unfenced.
 			log.FromContext(ctx).Info("planned failover: target replaced before the promotion was recorded; rolling back",
 				"fg", fg.Namespace+"/"+fg.Name, "runId", pf.RunID, "target", pf.TargetSite, "targetServerUUID", out.TargetServerUUID)
 			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonTargetChanged)

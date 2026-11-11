@@ -83,6 +83,15 @@ type runnerPlannedTopology struct {
 	// window decides.
 	sourceLoss         map[string]time.Time
 	rollbackTargetLoss map[string]time.Time
+	// peerAnswers is, per run, the last answer this process read from each
+	// site other than the target at or after the pre-write gate: true when
+	// it answered read-only (for the source: read-only with nothing past the
+	// fenced set), false when it answered writable (or, the source, with
+	// transactions past the fenced set). The gate's probes, the confirm's
+	// probes and the re-proof's writable findings feed it. The confirmation
+	// reads it for a promotable site that does not answer (§7.3): only a
+	// site whose last answer was read-only is the documented residual.
+	peerAnswers map[string]map[string]bool
 }
 
 // NewPlannedFailoverTopology returns the production facade over reg. The
@@ -102,6 +111,7 @@ func newRunnerPlannedTopology(reg ManagerRegistry) *runnerPlannedTopology {
 		sourceUnsealedNoted: make(map[string]bool),
 		sourceLoss:          make(map[string]time.Time),
 		rollbackTargetLoss:  make(map[string]time.Time),
+		peerAnswers:         make(map[string]map[string]bool),
 	}
 }
 
@@ -144,6 +154,40 @@ func (p *runnerPlannedTopology) forgetRun(runID string) {
 	delete(p.sourceUnsealedNoted, runID)
 	delete(p.sourceLoss, runID)
 	delete(p.rollbackTargetLoss, runID)
+	delete(p.peerAnswers, runID)
+}
+
+// notePeerAnswer records the answer this process just read from site for
+// runID: readOnly is false for a site that answered writable (or a source
+// that holds transactions past the fenced set).
+func (p *runnerPlannedTopology) notePeerAnswer(runID, site string, readOnly bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m := p.peerAnswers[runID]
+	if m == nil {
+		m = make(map[string]bool)
+		p.peerAnswers[runID] = m
+	}
+	m[site] = readOnly
+}
+
+// notePeerProbes records every answer in probes (notePeerAnswer); a site
+// that did not answer keeps its last answer.
+func (p *runnerPlannedTopology) notePeerProbes(runID string, probes []plannedProbe) {
+	for _, pr := range probes {
+		if pr.err == nil {
+			p.notePeerAnswer(runID, pr.name, pr.readOnly)
+		}
+	}
+}
+
+// peerAnswerFor returns the last answer this process read from site for
+// runID (notePeerAnswer); known is false when it never read one.
+func (p *runnerPlannedTopology) peerAnswerFor(runID, site string) (readOnly, known bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	readOnly, known = p.peerAnswers[runID][site]
+	return readOnly, known
 }
 
 // lossExpired records a failed read of runID's server in window (the
@@ -1372,10 +1416,23 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 		case ferr == nil && sourceAdvancedPast(id, F, plannedPromotionUUID(pf)):
 			failed, sourceWrote = reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged), true
 		}
+		if err == nil && pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && (!id.readOnly || sourceWrote) {
+			// A second writer this process saw: a confirmation that later
+			// cannot read the source counts it as writable still (§7.3).
+			p.notePeerAnswer(ref.RunID, ref.Source, false)
+		}
 	}
 	// Check 3: the probe set, with the source read-only.
 	v := classifyPlannedPeers(tm.plannedProbeSites(ctx, ref.Source, ref.Target))
 	foreignWritable := len(v.writable) > 0
+	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting {
+		// Only the writable findings are recorded: a read-only answer here
+		// is not the pre-write gate's, and the confirmation's residual is
+		// for a site the gate or an earlier confirmation read (§7.3).
+		for _, site := range v.writable {
+			p.notePeerAnswer(ref.RunID, site, false)
+		}
+	}
 	if failed == nil && foreignWritable {
 		failed = reasonPtr(v1alpha1.PlannedFailoverReasonForeignWritable)
 	}
@@ -1843,12 +1900,33 @@ func ownExtras(extra mysql.GTIDSet, u string) bool {
 }
 
 // classifyPromotionStage is §7.1's table: from the target's live state on
-// the pinned session, the fenced set F, the intent's @@server_uuid U and
-// whether this process's memo proves super_read_only=OFF was never sent,
-// it returns the stage to resume from and a nil outcome, or, for the
-// Aborted and Inconsistent rows, the final outcome the promotion returns
-// without sending anything.
-func classifyPromotionStage(live promotionLive, F mysql.GTIDSet, U string, memoNoWrite bool) (PromotionStage, *PromoteOutcome) {
+// the pinned session, the fenced set F, the intent's @@server_uuid U,
+// whether this process's memo proves super_read_only=OFF was never sent
+// (memoNoWrite) and whether this process has a promotion memo for the run
+// at all (haveMemo: false in a process that did not write the Promoting
+// intent), it returns the stage to resume from and a nil outcome, or, for
+// the Aborted and Inconsistent rows, the final outcome the promotion
+// returns without sending anything.
+//
+// The writable-with-a-channel row. The run clears the target's read-only
+// flags in one place only (promoteVerifiedFrom), on the pinned session on
+// which the pre-write gate has just read the target without a channel, and
+// nothing in Promoting configures one. So a channel on a writable target
+// was either there before the run's RESET REPLICA ALL, and then no process
+// of the run cleared the flags, or someone outside the operator configured
+// it after the run's clears (MySQL accepts CHANGE REPLICATION SOURCE on a
+// writable server). Only a process with a memo can tell the two apart:
+//   - the memo proves no clear was sent: someone else made the target
+//     writable. Aborted{ForeignWritable}, SourceLeftFenced;
+//   - the memo says this process sent a clear: the run made the target
+//     writable and someone then gave it a channel. Inconsistent, a hold;
+//   - no memo (another process wrote the intent): the first outcome,
+//     without a hold. In either reading the run sends nothing more: the
+//     source stays fenced and is not unfenced, and the target is neither
+//     reset nor re-pointed, so the run makes no second writer and discards
+//     no transaction. The writable target is the topology manager's to
+//     adopt, as after any external read_only=0.
+func classifyPromotionStage(live promotionLive, F mysql.GTIDSet, U string, memoNoWrite, haveMemo bool) (PromotionStage, *PromoteOutcome) {
 	abort := func(reason v1alpha1.PlannedFailoverReason, terminal v1alpha1.PlannedFailoverOutcome) (PromotionStage, *PromoteOutcome) {
 		return PromotionStageTargetReplaced, &PromoteOutcome{Kind: PromoteAborted, Stage: PromotionStageTargetReplaced, Reason: reason,
 			Terminal: terminal, TargetServerUUID: live.uuid, TargetReachable: true}
@@ -1867,7 +1945,7 @@ func classifyPromotionStage(live promotionLive, F mysql.GTIDSet, U string, memoN
 		}
 		return inconsistent(v1alpha1.PlannedFailoverReasonExecuteFailed)
 	case !live.readOnly && live.repl != nil:
-		if memoNoWrite {
+		if memoNoWrite || !haveMemo {
 			return abort(v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
 		}
 		return inconsistent(v1alpha1.PlannedFailoverReasonForeignWritable)
@@ -1991,9 +2069,13 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		return unconfirmed(""), nil
 	}
 	_, haveMemo := p.promoteMemoFor(ref.RunID)
-	stage, verdict := classifyPromotionStage(live, F, U, p.memoProvesNoWrite(ref.RunID))
+	stage, verdict := classifyPromotionStage(live, F, U, p.memoProvesNoWrite(ref.RunID), haveMemo)
 	if verdict != nil {
-		if verdict.Kind == PromoteInconsistent && !haveMemo && live.readOnly && !strings.EqualFold(live.uuid, U) {
+		if verdict.Kind == PromoteInconsistent && replacedTargetWithinFence(live, F, U) {
+			// The DST-3 ruling, in whichever process decides: the process
+			// that sent a clear to the server the intent names knows no more
+			// about what that server accepted than one that must assume a
+			// clear was sent.
 			verdict.RollbackIfUnrecorded = tm.replacedTargetRollbackSafe(ctx, p, ref, pf, F)
 		}
 		return *verdict, nil
@@ -2011,7 +2093,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		// (in an earlier pass or process). Authority moves as on the path
 		// that sends them, before the confirm.
 		tm.deploymentPromotionExecuted(ref.Target)
-		out := tm.confirmPlannedPromotion(ctx, p.hooks, ref, pf, sess, F, U)
+		out := tm.confirmPlannedPromotion(ctx, p, ref, pf, sess, F, U)
 		out.Stage = PromotionStageWritable
 		if out.Kind == PromoteConfirmed {
 			// The pre-clear snapshot of the pass that cleared the fences is
@@ -2093,7 +2175,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		promotionGtid = gateGtid
 	}
 	tm.deploymentPromotionExecuted(ref.Target)
-	out := tm.confirmPlannedPromotion(ctx, p.hooks, ref, pf, sess, F, U)
+	out := tm.confirmPlannedPromotion(ctx, p, ref, pf, sess, F, U)
 	out.Stage = stage
 	out.Warnings = mergeWarnings(gateWarnings, out.Warnings)
 	if out.Kind == PromoteUnconfirmed {
@@ -2136,8 +2218,21 @@ func (tm *TopologyManager) checkPlannedPromotionManager(p *runnerPlannedTopology
 	return nil
 }
 
+// replacedTargetWithinFence reports whether live is a replaced target the
+// DST-3 ruling may roll back over: another server than the one the intent
+// names (@@server_uuid is not U), read-only, holding nothing outside the
+// fenced set F. The last condition tells a replaced data directory from the
+// intent's server restarted under a new server_uuid (auto.cnf removed): that
+// server keeps its data, so a transaction it accepted after the run's clear
+// is still in its GTID set, outside F, and the hold stands.
+func replacedTargetWithinFence(live promotionLive, F mysql.GTIDSet, U string) bool {
+	return live.readOnly && !strings.EqualFold(live.uuid, U) && live.gtid.Subtract(F).IsEmpty()
+}
+
 // replacedTargetRollbackSafe is the facade's half of the DST-3 ruling for
-// a cross-process re-run that finds the target replaced: the source still
+// a promotion attempt that finds the target replaced after a clear may have
+// been sent (replacedTargetWithinFence), whether or not this process wrote
+// the Promoting intent: the source still
 // reads read-only under the run's attributable fence (the intent's
 // @@server_uuid with super_read_only=ON) and holds all of F, and no other
 // site reads writable. The engine adds the durable-record half.
@@ -2256,8 +2351,14 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 		// was written to the target; the rollback catches it up.
 		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonAuthorityChanged, "", []string{ref.Source})
 	}
+	// The source passed: it answered read-only with nothing past F. That
+	// answer, and the peers' below, are what a later confirmation falls back
+	// on for a site that no longer answers (§7.3).
+	p.notePeerAnswer(ref.RunID, ref.Source, true)
 	// 4. Every other site.
-	v := classifyPlannedPeers(tm.plannedProbeSites(ctx, ref.Source, ref.Target))
+	probes := tm.plannedProbeSites(ctx, ref.Source, ref.Target)
+	p.notePeerProbes(ref.RunID, probes)
+	v := classifyPlannedPeers(probes)
 	p.hooks.yield(YieldGateProbeForSim)
 	switch {
 	case len(v.writable) > 0 && wasWritable:
@@ -2277,7 +2378,27 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 
 // confirmPlannedPromotion is §7.3: every check live, on the session that
 // was written and on the other sites.
-func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, hooks SimHooks, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus,
+//
+// A site that answers writable (or a source that answers with transactions
+// past F) is a second writer: Inconsistent. A read-only reader that does
+// not answer is allowed, with the warning UnreachablePeers (§4.1). The
+// source, or a primary-candidate or dr-only peer, that does not answer is
+// judged by the last answer this process read from it for the run, at the
+// pre-write gate or since (peerAnswers):
+//   - read-only: the documented residual, "answered read-only at the gate
+//     and not at the confirm". The promotion is confirmed with the warning
+//     UnreachablePeers;
+//   - writable: the run saw a second writer after its own write and now
+//     cannot see it (the hold it decided then did not commit, say). It
+//     counts as writable still: Inconsistent, a hold. This holds for a
+//     reader too;
+//   - none: this process never read it for the run. A process that did not
+//     pass the gate itself (it found the target already writable, made so
+//     by an earlier process's clears or by an external writer) has no
+//     evidence that the site is not the writer. Unconfirmed: the run stays
+//     Promoting and tries again, and ends PromotedUnconfirmed at the
+//     promotion deadline.
+func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus,
 	sess mysql.Session, F mysql.GTIDSet, U string) PromoteOutcome {
 	out := PromoteOutcome{TargetServerUUID: U, TargetReachable: true, MayHaveWritten: true}
 	live, err := readPromotionLive(ctx, sess)
@@ -2298,27 +2419,70 @@ func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, hooks Si
 		out.Kind, out.Reason = PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed
 		return out
 	}
+	// lastWritable and neverRead are the promotable sites that did not
+	// answer and are not the residual; residual marks one that is.
+	var lastWritable, neverRead []string
+	residual := false
+	unreadable := func(site string) {
+		readOnly, known := p.peerAnswerFor(ref.RunID, site)
+		switch {
+		case !known:
+			neverRead = append(neverRead, site)
+		case !readOnly:
+			lastWritable = append(lastWritable, site)
+		default:
+			residual = true
+		}
+	}
 	if src := tm.getSite(ref.Source); src != nil {
 		id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 		switch {
 		case err != nil:
-			out.Warnings = append(out.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
+			unreadable(ref.Source)
 		case !id.readOnly, sourceAdvancedPast(id, F, U):
 			// A writable source, or one whose history moved past F after
 			// the fence: two sites hold history the other lacks.
+			p.notePeerAnswer(ref.RunID, ref.Source, false)
 			out.Kind, out.Reason = PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable
 			return out
-		case pf.Fence == nil || id.uuid != pf.Fence.SourceServerUUID:
-			out.Warnings = append(out.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
+		default:
+			p.notePeerAnswer(ref.RunID, ref.Source, true)
+			if pf.Fence == nil || id.uuid != pf.Fence.SourceServerUUID {
+				out.Warnings = append(out.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
+			}
 		}
 	}
-	v := classifyPlannedPeers(tm.plannedProbeSites(ctx, ref.Source, ref.Target))
-	hooks.yield(YieldConfirmProbeForSim)
+	probes := tm.plannedProbeSites(ctx, ref.Source, ref.Target)
+	p.notePeerProbes(ref.RunID, probes)
+	v := classifyPlannedPeers(probes)
+	p.hooks.yield(YieldConfirmProbeForSim)
 	if len(v.writable) > 0 {
 		out.Kind, out.Reason = PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable
 		return out
 	}
-	if len(v.allUnreadable()) > 0 && !slices.Contains(out.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers) {
+	for _, site := range v.unreadable {
+		unreadable(site)
+	}
+	for _, site := range v.unreadableReaders {
+		// An unreadable reader is allowed (§4.1), but not one this process
+		// last read writable: a writable reader blocks like any writer.
+		if readOnly, known := p.peerAnswerFor(ref.RunID, site); known && !readOnly {
+			lastWritable = append(lastWritable, site)
+		}
+	}
+	switch {
+	case len(lastWritable) > 0:
+		tm.logger.Warn("planned failover: a site last seen writable did not answer at the confirmation",
+			"runId", ref.RunID, "sites", lastWritable)
+		out.Kind, out.Reason, out.Sites = PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, lastWritable
+		return out
+	case len(neverRead) > 0:
+		tm.logger.Warn("planned failover: promotion not confirmed; a site this process has not read did not answer",
+			"runId", ref.RunID, "sites", neverRead)
+		out.Kind, out.Reason, out.Sites = PromoteUnconfirmed, v1alpha1.PlannedFailoverReasonPromotionUnconfirmed, neverRead
+		return out
+	}
+	if residual || len(v.unreadableReaders) > 0 {
 		out.Warnings = append(out.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
 	}
 	out.Kind, out.Reason = PromoteConfirmed, ""

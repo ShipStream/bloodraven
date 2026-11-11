@@ -716,13 +716,15 @@ type PromoteOutcome struct {
 	TargetReachable  bool // feeds the target-loss window
 	MayHaveWritten   bool // the memo, or the stage, says SRO=OFF may have been sent
 	// RollbackIfUnrecorded marks an Inconsistent verdict for a target
-	// found replaced (@@server_uuid ≠ the intent's, no memo) where the
-	// source still holds all of F under the run's attributable fence and no
-	// site is writable (the DST-3 ruling). The engine rolls back instead of
-	// holding when the run's own failover record is not durable either: the
-	// run never reached RecordPlannedPromotion, so DNS never pointed at the
-	// target, and anything only the replaced pod could hold was written
-	// after the fence (the async-DR RPO).
+	// found replaced after a clear may have been sent (@@server_uuid ≠ the
+	// intent's, read-only, nothing outside F; with or without this
+	// process's memo) where the source still holds all of F under the run's
+	// attributable fence and no site is writable (the DST-3 ruling). The
+	// engine rolls back instead of holding when the run's own failover
+	// record is not durable either: the run never reached
+	// RecordPlannedPromotion, so DNS never pointed at the target, and
+	// anything only the replaced pod could hold was written after the fence
+	// (the async-DR RPO).
 	RollbackIfUnrecorded bool
 	// Sites are the sites the refusal classified (a writable or unreadable
 	// peer, the target, the source): the hold of a ManualRecoveryRequired
