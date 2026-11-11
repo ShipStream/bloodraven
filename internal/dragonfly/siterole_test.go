@@ -72,62 +72,56 @@ func TestClassifySiteRole(t *testing.T) {
 
 func TestCandidateSyncReady(t *testing.T) {
 	cases := []struct {
-		name         string
-		info         ReplicationInfo
-		persistence  PersistenceInfo
-		sourceOffset int64
-		want         bool
+		name        string
+		info        ReplicationInfo
+		persistence PersistenceInfo
+		want        bool
 	}{
 		{
-			name:         "ready: link up, not syncing, not loading, offset matched",
-			info:         ReplicationInfo{MasterLinkStatus: "up", SlaveReplOffset: 100},
-			sourceOffset: 100,
-			want:         true,
+			name: "ready: link up, not syncing, not loading",
+			info: ReplicationInfo{MasterLinkStatus: "up"},
+			want: true,
 		},
 		{
-			name:         "ready: replica overshot source",
-			info:         ReplicationInfo{MasterLinkStatus: "up", SlaveReplOffset: 500},
-			sourceOffset: 100,
-			want:         true,
+			name: "not ready: link down",
+			info: ReplicationInfo{MasterLinkStatus: "down"},
+			want: false,
 		},
 		{
-			name:         "not ready: link down",
-			info:         ReplicationInfo{MasterLinkStatus: "down", SlaveReplOffset: 100},
-			sourceOffset: 100,
-			want:         false,
+			name: "not ready: link state not reported",
+			info: ReplicationInfo{},
+			want: false,
 		},
 		{
-			name:         "not ready: full sync in progress",
-			info:         ReplicationInfo{MasterLinkStatus: "up", MasterSyncInProgress: true, SlaveReplOffset: 100},
-			sourceOffset: 100,
-			want:         false,
+			name: "not ready: full sync in progress",
+			info: ReplicationInfo{MasterLinkStatus: "up", MasterSyncInProgress: true},
+			want: false,
 		},
 		{
-			name:         "not ready: loading from disk",
-			info:         ReplicationInfo{MasterLinkStatus: "up", SlaveReplOffset: 100},
-			persistence:  PersistenceInfo{Loading: true, LoadState: "rdb-restore"},
-			sourceOffset: 100,
-			want:         false,
-		},
-		{
-			name:         "not ready: replica behind",
-			info:         ReplicationInfo{MasterLinkStatus: "up", SlaveReplOffset: 99},
-			sourceOffset: 100,
-			want:         false,
+			name:        "not ready: loading from disk",
+			info:        ReplicationInfo{MasterLinkStatus: "up"},
+			persistence: PersistenceInfo{Loading: true, LoadState: "rdb-restore"},
+			want:        false,
 		},
 		{
 			name: "not ready: link up but never received any IO",
 			// MasterLastIOSecondsAgo=-1 is Dragonfly's "never synced"
 			// sentinel — link_status flips to "up" the moment TCP
 			// handshakes, well before any replication payload arrives.
-			info:         ReplicationInfo{MasterLinkStatus: "up", MasterLastIOSecondsAgo: -1, SlaveReplOffset: 100},
-			sourceOffset: 100,
-			want:         false,
+			info: ReplicationInfo{MasterLinkStatus: "up", MasterLastIOSecondsAgo: -1},
+			want: false,
+		},
+		{
+			// The replica's offset is not this function's: a replica far
+			// behind passes here and is refused by Position.ReachedBy.
+			name: "ready whatever the offset says",
+			info: ReplicationInfo{MasterLinkStatus: "up", SlaveReplOffset: 2, SlaveReplOffsetReported: true},
+			want: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := CandidateSyncReady(tc.info, tc.persistence, tc.sourceOffset)
+			got := CandidateSyncReady(tc.info, tc.persistence)
 			if got != tc.want {
 				t.Errorf("CandidateSyncReady() = %v, want %v", got, tc.want)
 			}

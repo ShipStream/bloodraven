@@ -237,7 +237,11 @@ func TestDragonflyManager_Tick_NoReplicaPromotedWhileActiveHeldOverEmptyMaster(t
 			conn.program(holdTestDC3, &fakeDragonflyConn{info: dragonflyReplicaOf("lion-dragonfly-dc1.shared-lion.svc.cluster.local")})
 			mgr.SetConnector(conn.connect)
 
-			mgr.Tick(context.Background())
+			// The promotion waits for the master-loss threshold; the hold
+			// over the empty master outlasts it (all inside the grace).
+			for i := 0; i < defaultDragonflyMasterLossThreshold; i++ {
+				mgr.Tick(context.Background())
+			}
 
 			if st := dragonflyStatusOf(t, c, key); st.LastPromotionTarget != tc.wantPromoted {
 				t.Errorf("lastPromotionTarget = %q, want %q", st.LastPromotionTarget, tc.wantPromoted)

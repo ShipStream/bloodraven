@@ -8032,9 +8032,10 @@ spec:
                         type: string
                       sourceOffset:
                         description: |-
-                          SourceOffset is the source Dragonfly's master replication offset,
-                          the catch-up target of the sync wait. Set iff sourceOffsetState is
-                          Captured.
+                          SourceOffset is the source Dragonfly's replication position when
+                          the sync wait began: the journal records its shards had written,
+                          summed. The wait compares the target with it shard by shard; the
+                          sum is kept for the record. Set iff sourceOffsetState is Captured.
                         format: int64
                         type: integer
                       sourceOffsetState:
@@ -8085,6 +8086,10 @@ spec:
                             - Failed
                             type: string
                           targetOffset:
+                            description: |-
+                              TargetOffset is the promoted target's replication position right
+                              after a successful takeover, on the scale of sourceOffset. Absent
+                              when the target gave none.
                             format: int64
                             type: integer
                         required:

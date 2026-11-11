@@ -1131,7 +1131,7 @@ func (r *MysqlFailoverGroupReconciler) dragonflySiteReadyOnImage(ctx context.Con
 	if wantMaster {
 		return info.Role == "master", fmt.Sprintf("site %s role=%s", siteName, info.Role), nil
 	}
-	ready := dragonfly.CandidateSyncReady(info, probe.persist, 0)
+	ready := dragonfly.CandidateSyncReady(info, probe.persist)
 	return ready, fmt.Sprintf("site %s role=%s link=%s sync=%v", siteName, info.Role, info.MasterLinkStatus, info.MasterSyncInProgress), nil
 }
 
