@@ -26,6 +26,6 @@
 
   <text x="40" y="310" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#7f1d1d">Fatal if they fail (promotion aborts)</text>
   <text x="40" y="334" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#991b1b">STOP REPLICA  ·  RESET REPLICA ALL  ·  super_read_only=OFF  ·  read_only=OFF</text>
-  <text x="40" y="366" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#334155">Fence, kill connections, drain, and the GTID read only warn. Promotion continues.</text>
+  <text x="40" y="366" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#334155">Fence, kill connections, drain, the GTID read and the binlog rotation only warn. Promotion continues.</text>
   <text x="40" y="396" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#64748b">Playground cooldown is 30 s. Shipped default is 5 m. Timings here are real. The cooldown is not.</text>
 </svg>

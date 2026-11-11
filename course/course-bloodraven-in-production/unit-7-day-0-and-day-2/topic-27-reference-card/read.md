@@ -36,7 +36,7 @@ quote a version, an issue number or a documentation defect.
 | `backup.pitr.maxBinlogSize` | `100M` | — | Written *before* `spec.mysqlConf`, so your override wins. |
 | `backup.retention` | `7` | — | Backups kept per profile. |
 | Measured failover, clean | **12.0 s** | — | Nine-plus recorded runs, 12.004–12.02 s, one outlier at 13.008 s. |
-| Failover worst case, full drain | **36 s** | — | 6 s detection + a drain that spent its whole 30 s budget, because the candidate could not apply its received backlog in time. |
+| Failover worst case, full drain | **36–37 s** | — | 6 s detection + a drain that spent its whole 30 s budget, because the candidate could not apply its received backlog in time, + the binary log rotation (about 12 ms, bounded at 1 s). |
 
 ## The five condition reasons
 
@@ -56,7 +56,7 @@ Replication adds its own reasons to `Degraded`: `ReplicationLagging`, `Replicati
 **Evaluation order** (a row fires only if every row above declined):
 fence-first early return → `TotalLoss` → `SplitBrain` → failover → `NoPrimary` → degraded-with-peer-down → `Healthy`.
 
-## The nine promotion steps, with fatality
+## The ten promotion steps, with fatality
 
 `FailoverController.Execute`, in order. **Fatal** means the promotion aborts; everything else logs and
 carries on.
@@ -69,9 +69,10 @@ carries on.
 | 4 | `STOP REPLICA` on the candidate | **fatal** |
 | 5 | `RESET REPLICA ALL` on the candidate | **fatal** |
 | 6 | `SELECT @@global.gtid_executed` → `lastFailover.promotionGtidExecuted` | warns only |
-| 7 | `SET GLOBAL super_read_only = OFF` | **fatal** |
-| 8 | `SET GLOBAL read_only = OFF` | **fatal** |
-| 9 | Writable confirmation, synchronously | logs, skips the DNS flip, returns |
+| 7 | `FLUSH BINARY LOGS` on the candidate, own connection, bounded at 1 s | warns only |
+| 8 | `SET GLOBAL super_read_only = OFF` | **fatal** |
+| 9 | `SET GLOBAL read_only = OFF` | **fatal** |
+| 10 | Writable confirmation, synchronously | logs, skips the DNS flip, returns |
 
 Then, outside the sequence: the durable failover record and the counter are stamped **before** DNS.
 Node taints and source convergence are poll neighbours, not steps.

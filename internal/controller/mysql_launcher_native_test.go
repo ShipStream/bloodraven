@@ -185,6 +185,16 @@ func (s *launcherNativeServer) writeMounted(dir, name, content string) {
 // escrowed: the component config says read_only and the keyring volume is
 // mounted read-only, as the Secret that holds a sealed keyring is.
 func (s *launcherNativeServer) runContainer(sealed bool) {
+	s.env.t.Helper()
+	s.runContainerKeyring(sealed, sealed)
+}
+
+// runContainerKeyring is runContainer with the two halves of the sealed
+// rendering chosen apart: configReadOnly is the component config's
+// "read_only", mountReadOnly the keyring volume's mount. The operator
+// never renders them apart; runSealed does, to pin which of the two stops
+// mysqld from writing the keyring.
+func (s *launcherNativeServer) runContainerKeyring(configReadOnly, mountReadOnly bool) {
 	e := s.env
 	e.t.Helper()
 	command, args := mysqlLauncher(e.fg, mysqlServerArgs(s.serverID, false))
@@ -199,11 +209,11 @@ func (s *launcherNativeServer) runContainer(sealed bool) {
 		run = append(run, "--user", e.user, "--cap-drop", "ALL", "--security-opt", "no-new-privileges")
 	}
 	if e.fg.Spec.EncryptionEnabled() {
-		for name, content := range keyringConfigMapData(e.fg, sealed) {
+		for name, content := range keyringConfigMapData(e.fg, configReadOnly) {
 			s.writeMounted(s.keyringSrc, name, content)
 		}
 		keyringMount := s.keyringVolume + ":" + e.fg.Spec.EffectiveKeyring().DataFileDir
-		if sealed {
+		if mountReadOnly {
 			keyringMount += ":ro"
 		}
 		run = append(run,
@@ -225,6 +235,12 @@ func (s *launcherNativeServer) runContainer(sealed bool) {
 // starts empty.
 func (s *launcherNativeServer) recreate(sealed bool) string {
 	s.env.t.Helper()
+	return s.recreateKeyring(sealed, sealed)
+}
+
+// recreateKeyring is recreate over runContainerKeyring.
+func (s *launcherNativeServer) recreateKeyring(configReadOnly, mountReadOnly bool) string {
+	s.env.t.Helper()
 	if s.running() {
 		if out, err := exec.Command(s.env.docker, "stop", "-t", "60", s.name).CombinedOutput(); err != nil {
 			s.env.t.Fatalf("stop %s: %v %s", s.name, err, out)
@@ -233,8 +249,33 @@ func (s *launcherNativeServer) recreate(sealed bool) string {
 	if out, err := exec.Command(s.env.docker, "rm", "-f", s.name).CombinedOutput(); err != nil {
 		s.env.t.Fatalf("remove %s: %v %s", s.name, err, out)
 	}
-	s.runContainer(sealed)
+	s.runContainerKeyring(configReadOnly, mountReadOnly)
 	return s.waitUp()
+}
+
+// keyringKeys are the IDs of the keys in the server's keyring, sorted.
+func (s *launcherNativeServer) keyringKeys() string {
+	s.env.t.Helper()
+	return s.sql("SELECT IFNULL(GROUP_CONCAT(KEY_ID ORDER BY KEY_ID), '') FROM performance_schema.keyring_keys")
+}
+
+// keyringReadOnlyStatus is the component's Read_only status ("Yes"/"No").
+func (s *launcherNativeServer) keyringReadOnlyStatus() string {
+	s.env.t.Helper()
+	return s.sql("SELECT STATUS_VALUE FROM performance_schema.keyring_component_status WHERE STATUS_KEY = 'Read_only'")
+}
+
+// rotateInnoDBMasterKey asks the server for a new InnoDB master key, which
+// it must store in the keyring, and returns the statement's error output
+// ("" when it succeeded).
+func (s *launcherNativeServer) rotateInnoDBMasterKey() string {
+	s.env.t.Helper()
+	out, err := s.trySQL("SET GLOBAL read_only = 0; SET SESSION sql_log_bin = 0; ALTER INSTANCE ROTATE INNODB MASTER KEY")
+	s.sql("SET GLOBAL read_only = 1")
+	if err == nil {
+		return ""
+	}
+	return out
 }
 
 // trySQL runs q as root over TCP. The image's first-boot initialization
@@ -669,8 +710,17 @@ func (e *launcherNativeEnv) runSealed(donor, recipient *launcherNativeServer) {
 	if got := recipient.recreate(true); got != last {
 		t.Fatalf("server_uuid changed across the sealing roll: %s -> %s", last, got)
 	}
-	if got := recipient.sql("SELECT STATUS_VALUE FROM performance_schema.keyring_component_status WHERE STATUS_KEY = 'Read_only'"); got != "Yes" {
+	if got := recipient.keyringReadOnlyStatus(); got != "Yes" {
 		t.Fatalf("the sealed recipient's keyring read_only = %q, want Yes", got)
+	}
+	// The sealed rendering stops mysqld from adding a key: a master key
+	// rotation is refused and the keyring holds what it held.
+	sealedKeys := recipient.keyringKeys()
+	if out := recipient.rotateInnoDBMasterKey(); !strings.Contains(out, "ERROR 3185") {
+		t.Fatalf("ALTER INSTANCE ROTATE INNODB MASTER KEY on a sealed keyring: %q, want ERROR 3185 (the key cannot be stored)", out)
+	}
+	if got := recipient.keyringKeys(); got != sealedKeys {
+		t.Fatalf("the sealed keyring changed: %q -> %q", sealedKeys, got)
 	}
 	recipient.sql("SET GLOBAL read_only = 0; INSERT INTO app.t VALUES (200); SET GLOBAL read_only = 1")
 	if got := recipient.sql("SELECT GROUP_CONCAT(id ORDER BY id) FROM app.t"); got != "1,2,3,4,200" {
@@ -678,6 +728,44 @@ func (e *launcherNativeEnv) runSealed(donor, recipient *launcherNativeServer) {
 	}
 	if lines := recipient.launcherLines(); len(lines) != 0 {
 		t.Fatalf("the launcher logged on a sealed start with nothing staged: %q", lines)
+	}
+
+	// What stops the write is the read-only mount, not the component
+	// config. Each half of the sealed rendering alone, on the same data:
+	//   - only the mount read-only (the config says read_only false): the
+	//     rotation is refused as above;
+	//   - only the config's "read_only": true, on a writable volume: mysqld
+	//     reports Read_only = Yes and stores the new key all the same
+	//     (measured on 8.4.11 and 9.7.4).
+	// So the operator's guarantee rests on the Secret volume being mounted
+	// read-only, and Read_only = Yes only shows that mysqld loaded the
+	// sealed config. If a MySQL release starts to enforce the config, the
+	// second half fails here: update the encryption-at-rest page then, and
+	// keep the mount.
+	if got := recipient.recreateKeyring(false, true); got != last {
+		t.Fatalf("server_uuid changed across a roll onto a read-only keyring mount: %s -> %s", last, got)
+	}
+	if got := recipient.keyringReadOnlyStatus(); got != "No" {
+		t.Fatalf("keyring Read_only = %q with read_only false in the component config, want No", got)
+	}
+	if out := recipient.rotateInnoDBMasterKey(); !strings.Contains(out, "ERROR 3185") {
+		t.Fatalf("ALTER INSTANCE ROTATE INNODB MASTER KEY on a read-only keyring mount: %q, want ERROR 3185", out)
+	}
+	if got := recipient.keyringKeys(); got != sealedKeys {
+		t.Fatalf("the keyring on a read-only mount changed: %q -> %q", sealedKeys, got)
+	}
+	if got := recipient.recreateKeyring(true, false); got != last {
+		t.Fatalf("server_uuid changed across a roll onto a writable keyring with a read_only config: %s -> %s", last, got)
+	}
+	if got := recipient.keyringReadOnlyStatus(); got != "Yes" {
+		t.Fatalf("keyring Read_only = %q with read_only true in the component config, want Yes", got)
+	}
+	if out := recipient.rotateInnoDBMasterKey(); out != "" {
+		t.Fatalf("ALTER INSTANCE ROTATE INNODB MASTER KEY with only the component config read_only: %q; "+
+			"this MySQL enforces the config, see the comment above", out)
+	}
+	if got := recipient.keyringKeys(); got == sealedKeys {
+		t.Fatalf("the rotation succeeded and the keyring did not change (%q)", got)
 	}
 
 	// A clone whose restart did not happen before the site was sealed

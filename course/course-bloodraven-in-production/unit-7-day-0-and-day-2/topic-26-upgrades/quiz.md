@@ -18,7 +18,7 @@ At 02:14 you are paged: `BloodravenFailoverOccurred` on the `ledger` group, `act
 
 **Explanation:**
 
-An ordered update's `Failover` phase runs the ordinary nine-step promotion and its completion callback stamps the durable record and increments `bloodraven_failovers_total`. From the metric alone a rollout and a dead primary look identical, and `status.updatePhase` is the one field that separates them at a glance. Option 2 reasons from the wrong gate: the ordered-update handoff is not cooldown-gated at all, so an in-cooldown promotion is evidence of a rollout rather than of a human. Option 3 is not reliable — divergence depends on what the demoted site committed, not on why it was demoted. Option 4 invents a condition reason; there are exactly five, and `Updating` is not among them. (objective 7)
+An ordered update's `Failover` phase runs the ordinary ten-step promotion and its completion callback stamps the durable record and increments `bloodraven_failovers_total`. From the metric alone a rollout and a dead primary look identical, and `status.updatePhase` is the one field that separates them at a glance. Option 2 reasons from the wrong gate: the ordered-update handoff is not cooldown-gated at all, so an in-cooldown promotion is evidence of a rollout rather than of a human. Option 3 is not reliable — divergence depends on what the demoted site committed, not on why it was demoted. Option 4 invents a condition reason; there are exactly five, and `Updating` is not among them. (objective 7)
 
 ## Question 2
 

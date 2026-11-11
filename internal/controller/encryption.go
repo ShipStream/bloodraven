@@ -173,6 +173,14 @@ fi`, strings.TrimRight(keyringLocalManifestJSON(), "\n"))
 // initialize if either is missing. read_local_config is set false for
 // the same reason as the manifest: a local config under the data
 // directory must not override the operator-managed global file.
+//
+// read_only is a status, not a protection. With it true and the data file
+// on a writable volume, MySQL 8.4.11 and 9.7.4 report Read_only = Yes in
+// performance_schema.keyring_component_status and still store new keys
+// (ALTER INSTANCE ROTATE INNODB MASTER KEY, ROTATE BINLOG MASTER KEY, the
+// binary log key of a new server_uuid). What keeps a sealed keyring from
+// changing is the read-only mount of its Secret volume
+// (buildEncryptionFragments); TestMySQLLauncherNative pins both halves.
 func keyringComponentConfigJSON(dataFilePath string, readOnly bool) string {
 	return fmt.Sprintf("{\n  \"read_local_config\": false,\n  \"path\": %q,\n  \"read_only\": %t\n}\n", dataFilePath, readOnly)
 }
@@ -209,8 +217,11 @@ func encryptionMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string 
 // site.
 //
 //   - sealed=true renders the steady state: the keyring is a read-only
-//     projection of escrowSecret and the component config carries
-//     "read_only": true, so mysqld cannot add keys at all.
+//     projection of escrowSecret, mounted read-only, so mysqld cannot add
+//     keys at all. The component config carries "read_only": true as
+//     well, which the operator reads back as the sign that mysqld runs
+//     the sealed config; it does not stop a write by itself
+//     (keyringComponentConfigJSON).
 //   - sealed=false renders an unsealed site: the keyring is a
 //     memory-backed emptyDir, seeded from escrowSecret when one exists
 //     (clone/rotation) or created empty (fresh bootstrap), and the

@@ -102,7 +102,7 @@ valid setting and therefore always reads as “violates the minimum”</li>
 <span class="line"><span>brprep: ledger-db/ledger</span></span>
 <span class="line"><span>plan: mysql:9.7 -> mysql:9.8</span></span>
 <span class="line"><span>1. upgrade standby pdx first (a replica may run a newer MySQL than its source; a source may not run a newer MySQL than its replica)</span></span>
-<span class="line"><span>2. promote pdx through the ordinary nine-step sequence</span></span>
+<span class="line"><span>2. promote pdx through the ordinary ten-step sequence</span></span>
 <span class="line"><span>3. upgrade the former active iad, now a standby</span></span>
 <span class="line"><span>active site after this rollout: pdx</span></span>
 <span class="line"><span>expect: bloodraven_failovers_total increments</span></span>

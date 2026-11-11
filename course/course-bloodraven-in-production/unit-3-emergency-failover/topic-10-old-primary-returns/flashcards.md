@@ -3,9 +3,9 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Front:** A returning old primary: what single test decides whether it rejoins automatically?
+**Front:** A returning old primary: what decides whether it rejoins automatically?
 
-**Back:** Whether the NEW primary's GTID set contains the OLD primary's. Contains it — auto-rejoin. Does not — RecoveryBlocked.
+**Back:** Whether the NEW primary's GTID set contains the OLD primary's, and whether the old primary still holds every transaction it issued itself. Both hold — auto-rejoin. New does not contain old — RecoveryBlocked. The old primary lost transactions of its own — RecloneRequired, and the operator reclones it.
 
 ---
 

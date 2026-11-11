@@ -13,8 +13,10 @@ import (
 //   - In steady state ("sealed"), the keyring data file is projected
 //     read-only from a per-site Kubernetes Secret. kubelet materializes
 //     Secret volumes on node-local tmpfs, so the key never lands on a
-//     persistent disk, and `"read_only": true` in the component config
-//     means mysqld physically cannot add keys.
+//     persistent disk, and mounts them read-only, so mysqld cannot add
+//     keys. The component config also says `"read_only": true`, which
+//     only makes mysqld report Read_only = Yes: MySQL 8.4 and 9.7 still
+//     store keys in a writable file with it set (measured).
 //   - Key-creating operations (initial bootstrap, CLONE INSTANCE into a
 //     recipient, master-key rotation) require an "unsealed" pod: the
 //     keyring lives on a memory-backed emptyDir, seeded from the escrow

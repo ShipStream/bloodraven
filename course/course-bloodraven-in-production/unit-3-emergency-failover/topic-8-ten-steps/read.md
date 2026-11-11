@@ -1,4 +1,4 @@
-# The nine steps of a promotion
+# The ten steps of a promotion
 
 `playground` is healthy. `iad` is writable, `pdx` and `reader` are read-only, and the counter application is
 reading and writing through `mysql-playground-primary` without complaint. You can already predict which
@@ -36,14 +36,14 @@ completing the failover. The genuine no-failover cases are different in kind:
 ## The sequence the code actually runs
 
 `FailoverController.Execute` in `internal/controller/failover.go` is the whole promotion, and it is
-short enough to read in one sitting. There are nine steps. What matters about each is not what it
+short enough to read in one sitting. There are ten steps. What matters about each is not what it
 does — you can guess most of that — but whether an error aborts the failover or merely produces a log
 line.
 
 ```widget
 {
   "type": "order",
-  "title": "Order the nine steps of Execute()",
+  "title": "Order the ten steps of Execute()",
   "items": [
     "Fence the old primary — SET GLOBAL super_read_only = ON — Warns only. The old primary is usually unreachable — that is the whole reason you are here.",
     "Kill application connections on the old primary — Warns only. Undocumented. SELECT id FROM information_schema.processlist WHERE id != CONNECTION_ID() AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID'), then KILL per row.",
@@ -51,6 +51,7 @@ line.
     "STOP REPLICA — Fatal. Execute returns the error and no promotion happens.",
     "RESET REPLICA ALL — Fatal. Returns immediately on error.",
     "Record the promotion GTID — SELECT @@global.gtid_executed — Non-fatal. A warning only; promotion continues without the record.",
+    "Rotate the candidate's binary log — FLUSH BINARY LOGS — Non-fatal. Best effort, on a connection of its own, bounded at 1 s: an error or a timeout is a warning and the promotion continues. What the site logged as a replica is then in sealed files, and its first write as the primary opens a new one.",
     "SET GLOBAL super_read_only = OFF — Fatal.",
     "SET GLOBAL read_only = OFF — Fatal.",
     "Writable confirmation — Synchronous, in the same call stack. On failure the operator logs that promotion succeeded but DNS was not flipped, and returns."
@@ -59,7 +60,8 @@ line.
 ```
 
 Read the fatality column as a design statement. Fencing failure does **not** block promotion; neither
-does a failed connection kill, an exhausted drain, or a GTID read that errors. The only statements the
+does a failed connection kill, an exhausted drain, a GTID read that errors, or a binary log rotation
+that fails or times out. The only statements the
 operator refuses to proceed past are the four that change the candidate's own replication and
 read-only state. Note too what the kill query's `WHERE` clause protects: `Binlog Dump` threads are
 excluded, so killing application sessions does not tear down replication.
@@ -136,7 +138,8 @@ with whatever the candidate had applied, and `RESET REPLICA ALL`, two steps late
 
 A clean primary kill flips `activeSite` in **12.0 s**, reproducible across nine-plus independent runs
 (12.004 s to 12.02 s, one outlier at 13.008 s). The other end of the range is arithmetic: 6 s of
-detection plus a drain that spends its whole 30 s budget is **36 s**.
+detection plus a drain that spends its whole 30 s budget is **36 s**. The binary log rotation of step
+7 adds about 12 ms to either figure, and at most the 1 s it is bounded at.
 
 The difference is entirely the drain. Both pay the same 6 s of detection — `pollInterval` 2 s ×
 `failureThreshold` 3. In the 12 s case the candidate is already caught up and the drain returns on its
@@ -145,7 +148,7 @@ that backlog takes, and the drain spends its whole budget only when the applier 
 30 s: a deep backlog, a slow applier, or a deliberate `SOURCE_DELAY`. Scenario 14 builds the backlog
 case on purpose: it sets `SOURCE_DELAY` on the replica, seeds five seconds of writes, kills the
 primary, and asserts that the new primary holds every seeded row. Learn 12 s typical and roughly 37 s
-worst case (6 s detect + 30 s drain), and be able to say which you are looking at. Published wall-clock figures for
+worst case (6 s detect + 30 s drain + at most 1 s for the binary log rotation), and be able to say which you are looking at. Published wall-clock figures for
 failover — anyone's, including Bloodraven's own pages — are estimates; the run recorded under
 `playground/chaos-results/` is the measurement, and it is the one you can produce yourself. One caveat before you trust your own stopwatch: the
 playground overrides `failoverCooldown` to 30 s against a shipped default of 5 m. The timings here are

@@ -27,7 +27,7 @@ type Plan struct {
 	PostStop            Set // Q
 	Divergent           Set // D (⊆ X on success; the set to exclude on a DivergentHistory refusal)
 	OnHistoryExclusions Set // D-48
-	Lost                Set // latest-mode loss evidence (⊆ X on success)
+	Lost                Set // latest-mode loss evidence (⊆ X on success), whichever rows were downloaded
 
 	// BackupNewestCommit is maxOct(B) in µs; 0 means −∞ (no archived
 	// member of B was read). BackupFrontierProven is false when it is only
@@ -42,7 +42,8 @@ type Plan struct {
 	Files    []PlanFile
 	Segments []Segment
 
-	// Downloaded counts rows fetched (each at most once).
+	// Downloaded counts rows fetched (each at most once), including rows
+	// read only for the loss report.
 	Downloaded          int
 	IndexedTransactions int64
 	Sites               []string
@@ -240,7 +241,11 @@ type planner struct {
 
 	files  map[*Row]*file
 	failed map[*Row]error
-	order  []*file
+	// reportRead are the rows read only to complete a report
+	// (reportIndex): their index, or nil when the row could not be read.
+	// They are not files of the planner.
+	reportRead map[*Row]*FileIndex
+	order      []*file
 	// occ is the occurrence registry (occ.go), keyed by the planner's
 	// index of a GTID's source identifier and its GNO.
 	occ occTable
@@ -282,7 +287,7 @@ func newPlanner(ctx context.Context, req Request, archive Archive, fetcher Fetch
 		req.Delta = DefaultClockSkewMargin
 	}
 	p := &planner{ctx: ctx, req: req, fetcher: fetcher, budget: req.Budget,
-		marked: map[string]*pitrarchive.HistoryIntegrity{}, files: map[*Row]*file{}, failed: map[*Row]error{},
+		marked: map[string]*pitrarchive.HistoryIntegrity{}, files: map[*Row]*file{}, failed: map[*Row]error{}, reportRead: map[*Row]*FileIndex{},
 		occ: newOccTable(req.Budget), sidIndex: map[string]uint32{}, used: map[*Row]bool{}, maxOctB: math.MinInt64, delta: req.Delta.Microseconds()}
 	p.X = req.Exclude
 	if p.X == nil {
@@ -399,14 +404,21 @@ func (p *planner) fetch(r *Row) (*file, error) {
 		}
 		p.budget.Release(est)
 	}
-	var idx *FileIndex
+	// A row already read for a report (reportIndex) is not downloaded
+	// again. Such a row holds no member of P, so it is never staged and the
+	// read's mayStage=false stands.
+	idx := p.reportRead[r]
 	var err error
-	if sf, ok := p.fetcher.(StagingFetcher); ok {
-		idx, err = sf.FetchForPlan(p.ctx, r.ref(), p.mayStage(r))
+	if idx != nil {
+		delete(p.reportRead, r)
 	} else {
-		idx, err = p.fetcher.Fetch(p.ctx, r.ref())
+		if sf, ok := p.fetcher.(StagingFetcher); ok {
+			idx, err = sf.FetchForPlan(p.ctx, r.ref(), p.mayStage(r))
+		} else {
+			idx, err = p.fetcher.Fetch(p.ctx, r.ref())
+		}
+		p.plan.Downloaded++
 	}
-	p.plan.Downloaded++
 	if err != nil {
 		if ref, ok := RefusalOf(err); ok && ref.Token != pitrarchive.TokenArchiveObjectInvalid {
 			// Semantic (NamespaceReuse, ReplayUnsupported) and resource

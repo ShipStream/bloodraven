@@ -2006,17 +2006,16 @@ func (l *episodeLayout) targets() (names []string, at map[string]time.Time) {
 // verdict from both. The verdicts that matter are stated as well, so two
 // equal wrong answers do not pass.
 //
-// One layout is left out, because its verdicts do differ: b is promoted
-// again while it still holds B:3, which a never had (lostIn with finish
-// "b": a transaction the group lost returns with its site, which the
-// operator prevents by recloning such a site first). There the recorded
-// history refuses latest mode on the third episode's record, the evidence
-// that B:3 was lost at that promotion; without the record the planner has
-// no such evidence and restores the head, which holds B:3. Timestamp
-// targets agree in that layout too. The difference comes from the
-// promotion nobody observed, not from which record the drain uploads
-// under: the same rows uploaded later, at a's next promotion, would carry
-// no record of the third episode either.
+// The last layout once differed: b is promoted again while it still holds
+// B:3, which a never had (lostIn with finish "b": a transaction the group
+// lost returns with its site, which the operator prevents by recloning
+// such a site first). The recorded history refuses latest mode on the
+// third episode's record, the evidence that B:3 was lost at that
+// promotion. Without the record the planner had no such evidence and
+// restored the head, which holds B:3. The episode's own file carries the
+// same evidence: a's server committed A:9-11 in a file whose
+// Previous_gtids lack B:3, which b had committed before. Latest mode reads
+// it (pitrplan's ownWrites), so both histories refuse, and name B:3.
 func TestArchiveWritersUnrecordedEpisodePlansAsRecorded(t *testing.T) {
 	A, B := writerUUIDA, writerUUIDB
 	for _, tc := range []struct {
@@ -2054,6 +2053,16 @@ func TestArchiveWritersUnrecordedEpisodePlansAsRecorded(t *testing.T) {
 			"episode 2, before B:3":  "TargetCovered lineage=A:1-8,B:1-2 witness=B:3 (Anchored) in a/mysql-bin.000004",
 			"episode 3, before A:10": "TargetCovered lineage=A:1-9,B:1-3 witness=A:10 (Origin) in a/mysql-bin.000004",
 			"latest":                 "ArchiveHead lineage=A:1-11,B:1-3",
+		}},
+		{"the episode starts without b's last transaction, b is promoted again with it", episodeOptions{lostIn: true, finish: "b"}, map[string]string{
+			"episode 3, before A:10":               "refused PITRArchiveDivergentHistory divergent=B:3",
+			"episode 3, before A:10 excluding B:3": "TargetCovered lineage=A:1-9,B:1-2 witness=A:10 (Origin) in a/mysql-bin.000004",
+			"episode 4, before its transaction 2":  "TargetCovered lineage=A:1-11,B:1-4 witness=B:5 (Origin) in b/mysql-bin.000003",
+			"latest":                               "refused PITRArchiveDivergentHistory divergent=B:3 lost=B:3",
+			"latest excluding B:3":                 "ArchiveHead lineage=A:1-11,B:1-6 lost=B:3",
+			// Excluding one of the episode's own transactions sets neither
+			// the record nor the file aside (N1).
+			"latest excluding A:11": "refused PITRArchiveDivergentHistory divergent=B:3 lost=B:3",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

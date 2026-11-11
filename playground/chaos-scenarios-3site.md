@@ -129,7 +129,7 @@ done
 kubectl -n $NS scale deployment mysql-playground-iad --replicas=0
 ```
 
-**Verify**: After ~37s, operator logs should read
+**Verify**: After up to ~38s, operator logs should read
 `failover picker: selected promotion target by GTID freshness
 site=fra ...`. `status.activeSite` should be `fra`, not `pdx`, even
 though `pdx` is first in `sitePriorities`. DNS should point to
@@ -206,7 +206,7 @@ PrimaryCandidate replicas.
 ./playground/chaos.sh kill-site iad
 ```
 
-**Verify**: After failover settles (~37s), both `pdx` (the new
+**Verify**: After failover settles (up to ~38s), both `pdx` (the new
 primary) and `fra` (DisasterRecovery) should be reachable.
 ```bash
 # New primary:
