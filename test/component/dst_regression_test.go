@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -529,10 +530,11 @@ func (f recorderFunc) RecordFailoverState(ctx context.Context, r controller.Fail
 // ---------------------------------------------------------------------------
 //
 // Findings of the actors-on DST sweep (internal/dst TestDST_PlannedQuick,
-// GeneratePlannedTrial) that this PR fixes are pinned below, one test per
+// GeneratePlannedTrial) that were fixed are pinned below, one test per
 // finding, named TestDSTPF_<what the operator must do>, with the shrunk
-// trial's shape in the doc comment (seed numbers shift whenever the actor
-// generator changes, so they are recorded for history only). Build them on
+// trial's shape in the doc comment. No test here runs a DST seed or depends
+// on one: a seed's schedule changes whenever a fault or actor generator
+// does, so the shape is written out and built by hand. Build them on
 // the planned-failover harness in planned_failover_claim_test.go: the real
 // TopologyManagers, the production facade over a test ManagerRegistry, the
 // real engine and the in-memory store with scripted faults, and mockMySQL's
@@ -545,9 +547,9 @@ func (f recorderFunc) RecordFailoverState(ctx context.Context, r controller.Fail
 // operator findings, and are pinned in internal/dst (TestReplacePod_* and
 // TestRegistry_*).
 
-// TestDSTPF_CrossProcessReplacedTargetRuling pins the DST-3 ruling (actors-on
-// DST seed 3217 at the time; K195) across a process restart and a target
-// pod replaced under a new server_uuid with regressed data:
+// TestDSTPF_CrossProcessReplacedTargetRuling pins the DST-3 ruling (K195)
+// across a process restart and a target pod replaced under a new
+// server_uuid with regressed data:
 //
 //   - The process that wrote the Promoting intent dies before any promotion
 //     statement. The run's own failover record is not durable (it never
@@ -561,9 +563,31 @@ func (f recorderFunc) RecordFailoverState(ctx context.Context, r controller.Fail
 //     record: Succeeded. It never rolls back beside a target that was
 //     writable, so the source stays fenced and the replaced pod gets
 //     nothing; the manager's recovery owns the replacement from here.
+//   - The record is not durable and a promotable peer does not answer the
+//     new process. Its re-proof finds the replaced pod read-only inside the
+//     fenced set, which says nothing about what a clear let onto the pod
+//     that is gone, and the ruling's evidence is incomplete (a peer that
+//     does not answer may be a writer): the run holds, as the process that
+//     sent the clear does in the same state
+//     (TestDSTPF_ReplacedTargetAfterALostClearRollsBack). The re-proof used
+//     to roll back there and unfence the source.
 func TestDSTPF_CrossProcessReplacedTargetRuling(t *testing.T) {
 	regressed := pfUUIDA + ":1-60"
 	replaced := podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004", gtidExecuted: &regressed}
+	t.Run("recordNotDurableAPeerDownHolds", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{third: state.SiteRoleDROnly})
+		h.request("dc2")
+		h.runToPromotingIntent()
+		h.newProcess()
+		h.tgt.replacePod(replaced)
+		h.third.setError(errors.New("dial tcp: i/o timeout"))
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed)
+		if !h.holdCondition() || !h.src.isSuperReadOnly() || h.tgt.writableGrants() != 0 {
+			t.Fatalf("hold %v, source fenced %v, target grants %d; want the hold, the source fenced, nothing sent to the new pod",
+				h.holdCondition(), h.src.isSuperReadOnly(), h.tgt.writableGrants())
+		}
+	})
 	t.Run("recordNotDurableRollsBack", func(t *testing.T) {
 		h := newPFHarness(t, pfOpts{})
 		h.request("dc2")
@@ -607,8 +631,8 @@ func TestDSTPF_CrossProcessReplacedTargetRuling(t *testing.T) {
 // TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld pins DST-2: with this
 // process's slot holding the run and no manager registered, EnsureClaim
 // returned Granted, so every pass cleared and re-marked the
-// manager-absent-since annotation and the §6.3 deadline never fired (actors-on
-// DST seed 31 at the time: mark/clear alternating every pass). The run must
+// manager-absent-since annotation and the §6.3 deadline never fired (the
+// trial showed mark and clear alternating every pass). The run must
 // keep one durable start and end SourceLeftFenced{ManagerUnavailable} after
 // five minutes.
 func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
@@ -636,8 +660,8 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonManagerUnavailable)
 }
 
-// TestDSTPF_ConfirmedRunReleasesBeforePublishing pins DST-4 (actors-on DST
-// seed 2252 at the time): the run confirmed dc2 and recorded the promotion,
+// TestDSTPF_ConfirmedRunReleasesBeforePublishing pins DST-4: the run
+// confirmed dc2 and recorded the promotion,
 // an external writer then made the old source dc1 writable, and a status
 // outage kept the Publishing write from landing. The claim was held until
 // Publishing committed, so the topology manager's split-brain fence of dc1
@@ -685,8 +709,8 @@ func TestDSTPF_ConfirmedRunReleasesBeforePublishing(t *testing.T) {
 	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
 }
 
-// TestDSTPF_RetiredManagerHandoffReachesReplacement pins DST-1 (actors-on
-// DST seeds 1945, 196, 180 at the time): an ordered update started on
+// TestDSTPF_RetiredManagerHandoffReachesReplacement pins DST-1: an ordered
+// update started on
 // manager A hands the primary off to dc2 after A was replaced. The handoff
 // was recorded only in A's memory: A's status writes are dropped (it is not
 // the current manager) and its out-of-band flush was denied, so the
@@ -735,15 +759,13 @@ func TestDSTPF_RetiredManagerHandoffReachesReplacement(t *testing.T) {
 	}
 }
 
-// The three findings below are from a planned sweep of seeds 1-112,000
-// (about one trial in 15,000). Each changed a documented outcome row; the
-// reasoning is in the planned-failover documentation and on the code the
-// test names.
+// The three findings below are from a wider planned sweep (about one trial
+// in 15,000). Each changed a documented outcome row; the reasoning is in the
+// planned-failover documentation and on the code the test names.
 
 // TestDSTPF_WritableTargetWithChannelLeavesSourceFenced pins
-// HoldWithoutDataAtRisk(writableTargetWithChannel) (actors-on DST seeds
-// 12285 and 77871 at the time; 77871 shrunk with DST_SKIP=2,3,4,5,6
-// DST_ACTOR_SKIP=0,2,3): the operator dies in Promoting right after STOP
+// HoldWithoutDataAtRisk(writableTargetWithChannel). The shrunk trial: the
+// operator dies in Promoting right after STOP
 // REPLICA, an external read_only=0 makes the target writable, and the new
 // process, which has no promotion memo, classifies a writable target with
 // its replication channel. It used to end ManualRecoveryRequired with the
@@ -799,9 +821,8 @@ func TestDSTPF_WritableTargetWithChannelLeavesSourceFenced(t *testing.T) {
 }
 
 // TestDSTPF_ReplacedTargetAfterALostClearRollsBack pins
-// HoldWithoutDataAtRisk(replacedTargetSameProcess) (actors-on DST seeds
-// 29144, 59761 and 78553 at the time; 78553 shrunk with DST_SKIP=1,2,3,4
-// DST_ACTOR_SKIP=1,2,4,6,7,8): super_read_only=OFF is applied on the target
+// HoldWithoutDataAtRisk(replacedTargetSameProcess). The shrunk trial:
+// super_read_only=OFF is applied on the target
 // but answers with an error, and the target pod is then replaced under a new
 // server_uuid, read-only, with a data directory inside the fenced set. The
 // process that sent the clear used to hold (no writable site until a human
@@ -868,19 +889,17 @@ func TestDSTPF_ReplacedTargetAfterALostClearRollsBack(t *testing.T) {
 }
 
 // TestDSTPF_NoSuccessBesideAnUnreadWriter pins
-// OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)
-// (actors-on DST seeds 9297 and 104013 at the time; shrunk with
-// DST_SKIP=0,1,2,4,5,6,7 DST_ACTOR_SKIP=2,3,4,5,6,7,8 and DST_SKIP=0,2,4,5
-// DST_ACTOR_SKIP=1,2,3,5,6,7). The confirmation used to take every
+// OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer),
+// which two trials reached in two ways. The confirmation used to take every
 // primary-candidate that did not answer as a warning. That is the
 // documented residual only for a site that answered read-only at the gate:
 //
-//   - seed 9297: the run's confirmation sees a peer writable beside its own
+//   - a writer the run saw: the run's confirmation sees a peer writable beside its own
 //     write and decides ManualRecoveryRequired, the status write is refused,
 //     and the peer then stops answering. The next pass confirmed and the run
 //     ended Succeeded beside the second writer. A site last seen writable
 //     now counts as writable until it answers read-only.
-//   - seed 104013: a new process finds the target writable with exactly the
+//   - a site never read: a new process finds the target writable with exactly the
 //     fenced set and no channel (an external writer, after the first process
 //     got as far as RESET REPLICA ALL) and cannot read the source, which an
 //     external writer made writable too. It confirmed. A process that passed
@@ -915,7 +934,7 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 			t.Fatalf("hold condition %v, hold %+v; want the hold naming dc3", h.holdCondition(), hold)
 		}
 	})
-	// newProcessBesideAnUnreadSource is seed 104013's state: the first
+	// newProcessBesideAnUnreadSource is the second trial's state: the first
 	// process got as far as RESET REPLICA ALL, external writers then made
 	// the target and the source writable, and the source does not answer the
 	// new process.
@@ -972,6 +991,232 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
 		if !slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers) {
 			t.Fatalf("warnings %v, want UnreachablePeers", pf.Result.Warnings)
+		}
+	})
+}
+
+// The findings below are from the sweeps run after the model learned that a
+// site can restart on an older data directory under the same server_uuid
+// (internal/dst/README.md, "A site that lost its own transactions").
+
+// TestDSTPF_RollbackHoldsOverASourceThatLostTransactions pins
+// RepointDivergent. The shrunk trial: the run fences dc1; dc1 restarts on
+// an older data directory under the same server_uuid and comes up writable
+// (a pod that boots writable, or an external read_only=0); the run rolls
+// back (the pre-write gate refuses a source that is not fenced, or the lag
+// wait times out). The rollback's "source already writable" branch checked
+// only the server_uuid and gave the target, which holds the transactions
+// the source lost, a channel from that source: the source issues those
+// GTIDs again and the target skips them without an error.
+//
+// The rollback now compares the source with the fenced set and with what
+// the target holds. A writable source that lacks part of either has begun
+// a second history: the run ends ManualRecoveryRequired{SourceUnfenced}
+// with the automation hold, names the lost transactions, sends nothing to
+// the source, and neither creates nor starts the target's channel. The
+// hold also keeps the topology manager from joining the target to the
+// source afterwards.
+func TestDSTPF_RollbackHoldsOverASourceThatLostTransactions(t *testing.T) {
+	short := pfUUIDA + ":1-97"
+	lost := pfUUIDA + ":98-100"
+	// regressSource restarts dc1 on the older directory, writable.
+	regressSource := func(h *pfHarness) {
+		h.src.setGtidExecuted(short)
+		h.src.respawn(false)
+	}
+	wantHold := func(t *testing.T, h *pfHarness, pf *v1alpha1.PlannedFailoverStatus, sentBefore int) {
+		t.Helper()
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonSourceUnfenced)
+		if !h.holdCondition() {
+			t.Fatal("no automation hold over a source that began a second history")
+		}
+		if !strings.Contains(pf.Message, lost) {
+			t.Fatalf("message %q does not name the lost transactions %s", pf.Message, lost)
+		}
+		for range 10 {
+			h.tick() // the hold defers the manager's convergence of dc2 onto dc1
+		}
+		for _, s := range h.tgt.statements()[sentBefore:] {
+			if s == "ChangeReplicationSource" || s == "StartReplica" {
+				t.Fatalf("target statements %v: the target was joined to a source that lacks %s", h.tgt.statements(), lost)
+			}
+		}
+		if got := h.src.statements(); slices.Contains(got, "SetSuperReadOnly:off") || slices.Contains(got, "SetReadOnly:off") {
+			t.Fatalf("source statements %v: the run unfenced a source it did not find fenced", got)
+		}
+	}
+	t.Run("after RESET REPLICA ALL", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{})
+		h.request("dc2")
+		h.runToPromotingIntent()
+		h.tgt.failNextCalls("SetSuperReadOnly", 1) // the promotion gets as far as RESET REPLICA ALL
+		h.pass()
+		if got := h.tgt.statements(); !slices.Equal(got, []string{"StopReplica", "ResetReplicaAll"}) {
+			t.Fatalf("setup: target statements %v", got)
+		}
+		regressSource(h)
+		pf := h.runUntil(40, terminal)
+		wantHold(t, h, pf, 2)
+		if !slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
+			t.Fatalf("warnings %v, want TargetReplicationNotRestored", pf.Result.Warnings)
+		}
+	})
+	t.Run("during the lag wait", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{})
+		h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // lags: the run waits, then rolls back
+		h.request("dc2")
+		h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+		regressSource(h)
+		pf := h.runUntil(60, terminal)
+		wantHold(t, h, pf, 0)
+	})
+	t.Run("a writable source that holds everything is still rolled back onto", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{})
+		h.request("dc2")
+		h.runToPromotingIntent()
+		h.tgt.failNextCalls("SetSuperReadOnly", 1)
+		h.pass()
+		h.src.respawn(false) // restarted writable on its own data
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonSourceUnfenced)
+		if h.holdCondition() {
+			t.Fatal("a hold over a source that lost nothing")
+		}
+		if got := h.tgt.statements(); !slices.Equal(got[2:], []string{"ChangeReplicationSource", "StartReplica"}) {
+			t.Fatalf("target statements %v, want its channel restored from the source", got)
+		}
+	})
+}
+
+// TestDSTPF_FenceKnownOnlyByItsIntentIsHealed pins FencedSourceNeverHealed.
+// The shrunk trial: the run's fence lands on dc1, its Draining record never
+// commits, dc1 is cut off from the operator, the operator restarts, and the
+// run ends SourceLeftFenced{SourceLost} with only the fence intent durable.
+// dc2 is down too, so nothing fails over. Both sites then return: dc1 is
+// healthy, complete and still behind the run's fence, and every site is
+// read-only. The process that ended the run had neither the fence memo nor
+// an Applied record, so it did not name dc1 for the re-assert, and nothing
+// ever lifted the fence: no writable site, no hold and no warning.
+//
+// The run now names its source from the durable intent, bound to the
+// server the intent names, as a restarted manager already did from the same
+// record. The re-assert lifts the fence under its usual preconditions
+// (every site reachable and read-only, the source complete, no hold), and
+// only from that server: a replaced one is left for a human.
+func TestDSTPF_FenceKnownOnlyByItsIntentIsHealed(t *testing.T) {
+	down := errors.New("dial tcp: i/o timeout")
+	// leftFenced runs the trial up to the terminal record.
+	leftFenced := func(t *testing.T) *pfHarness {
+		h := newPFHarness(t, pfOpts{third: state.SiteRoleDROnly})
+		h.request("dc2")
+		h.runUntil(20, inPhase(v1alpha1.PlannedFailoverPhaseFencing))
+		h.store.LoseWrites(1) // the Draining record
+		h.pass()
+		if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseFencing || pf.Fence.State != v1alpha1.PlannedFailoverFenceIntended ||
+			!h.src.isSuperReadOnly() {
+			t.Fatalf("setup: phase %s, fence %s, dc1 fenced %v; want the fence landed and only its intent durable",
+				pf.Phase, pf.Fence.State, h.src.isSuperReadOnly())
+		}
+		h.src.setError(down)
+		h.tgt.setError(down)
+		h.newProcess()
+		pf := h.runUntil(60, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonSourceLost)
+		if pf.Fence.State != v1alpha1.PlannedFailoverFenceIntended {
+			t.Fatalf("setup: fence state %s at the end, want only the intent", pf.Fence.State)
+		}
+		if slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) || h.holdCondition() {
+			t.Fatalf("warnings %v, hold %v", pf.Result.Warnings, h.holdCondition())
+		}
+		if !strings.Contains(pf.Message, "may or may not have sent") {
+			t.Fatalf("message %q does not say the fence was never read back", pf.Message)
+		}
+		return h
+	}
+	t.Run("the source returns behind the run's fence", func(t *testing.T) {
+		h := leftFenced(t)
+		h.src.setError(nil)
+		h.tgt.setError(nil)
+		healed := false
+		for range 20 {
+			h.tick()
+			h.pass()
+			if !h.src.isReadOnly() {
+				healed = true
+				break
+			}
+		}
+		if !healed {
+			t.Fatalf("dc1 stayed fenced with every site read-only; dc1 statements %v", h.src.statements())
+		}
+		if !h.tgt.isReadOnly() {
+			t.Fatal("dc2 was made writable")
+		}
+	})
+	t.Run("another server returns in its place, fenced", func(t *testing.T) {
+		h := leftFenced(t)
+		h.src.replacePod(podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004"})
+		h.src.setRO(true, true) // read-only behind a fence that is not the run's
+		h.tgt.setError(nil)
+		for range 20 {
+			h.tick()
+			h.pass()
+			if !h.src.isReadOnly() {
+				t.Fatalf("the re-assert lifted a fence from a server the run never fenced; dc1 statements %v", h.src.statements())
+			}
+		}
+	})
+}
+
+// TestDSTPF_RegressedTargetAfterAPossibleClearRollsBack pins
+// HoldWithoutDataAtRisk(regressedTarget). The shrunk trial: the operator
+// dies in Promoting after RESET REPLICA ALL; the target then restarts on an
+// older data directory under the same server_uuid, so it reads read-only,
+// without a channel, with part of the fenced set missing and nothing
+// outside it. A new process cannot prove that no clear was sent, and used
+// to hold: no writable site until a human acted, with the source intact
+// under the run's fence. A target on an older copy of its data is the same
+// finding as a replaced pod (what a clear let onto the promoted copy is
+// gone either way), so the same ruling now decides: with the run's record
+// not durable, the source holding the fenced set under the run's fence and
+// every promotable peer answering read-only, the run rolls back; without
+// that evidence the hold stands.
+func TestDSTPF_RegressedTargetAfterAPossibleClearRollsBack(t *testing.T) {
+	regressed := pfUUIDA + ":1-60"
+	afterReset := func(t *testing.T, o pfOpts) *pfHarness {
+		h := newPFHarness(t, o)
+		h.request("dc2")
+		h.runToPromotingIntent()
+		h.tgt.failNextCalls("SetSuperReadOnly", 1)
+		h.pass()
+		if got := h.tgt.statements(); !slices.Equal(got, []string{"StopReplica", "ResetReplicaAll"}) {
+			t.Fatalf("setup: target statements %v", got)
+		}
+		h.newProcess()
+		h.tgt.replacePod(podReplacement{gtidExecuted: &regressed}) // the same server_uuid, older data
+		return h
+	}
+	t.Run("the ruling's evidence", func(t *testing.T) {
+		h := afterReset(t, pfOpts{})
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+		if h.src.isReadOnly() || !h.tgt.isReadOnly() || h.holdCondition() || h.tgt.writableGrants() != 0 {
+			t.Fatalf("source read-only %v, target read-only %v, hold %v, target grants %d; want the source writable again and no hold",
+				h.src.isReadOnly(), h.tgt.isReadOnly(), h.holdCondition(), h.tgt.writableGrants())
+		}
+		// The restarted target boots at super_read_only=OFF: it goes back
+		// behind it before it gets its channel.
+		if got := h.tgt.statements(); !slices.Equal(got[2:], []string{"SetSuperReadOnly:on", "ChangeReplicationSource", "StartReplica"}) {
+			t.Fatalf("target statements %v, want its channel restored from the source, which holds everything it holds", got)
+		}
+	})
+	t.Run("a promotable peer does not answer", func(t *testing.T) {
+		h := afterReset(t, pfOpts{third: state.SiteRoleDROnly})
+		h.third.setError(errors.New("dial tcp: i/o timeout"))
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed)
+		if !h.holdCondition() || !h.src.isSuperReadOnly() {
+			t.Fatalf("hold %v, source fenced %v; want the hold and the source left fenced", h.holdCondition(), h.src.isSuperReadOnly())
 		}
 	})
 }
