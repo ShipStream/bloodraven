@@ -1661,6 +1661,24 @@ Every reclone (`bloodraven.shipstream.io/reclone-site=<a>:confirm=<group>:uid=<u
 
 **Timing**: 75-minute timeout. **Cleanup** (32-minute budget plus 12 minutes for the repair reclone): if the run got as far as applying the delay, clears b's `SOURCE_DELAY` only while b is still a read-only replica whose channel carries a delay (judged from b's live state, so a partly applied delay is cleared and a promoted b is not touched), reclones any `RecoveryBlocked` site (with PITR still enabled each such reclone first waits, at most 2 minutes, for the site's tail), then as §37. **Status**: written and compiled; first live runs in the e2e `pitr` job on the #206 PR (see §37). The #264 changes (L', step 4 and the reclones' tail assertions) and the #265 changes (steps 5 and 6) have not run on a cluster yet.
 
+### 71. Old Primary Lost Its Own Transactions {#71-old-primary-lost-own-transactions}
+**Category**: Old-primary recovery | **Risk**: High | **Automated**: `71-old-primary-lost-own-transactions` (full profile, `ResetBeforeRunAll`)
+
+**Hypothesis**: When the old primary comes back after a failover lacking transactions it issued itself that the new primary holds, the operator does not rejoin it by replication. It reports `OwnTransactionsLost` with the exact set (`status.sites[].recoveryState: RecloneRequired`, `lostGtid`), reclones the site without a request, and the site ends as a healthy replica under a new `server_uuid` that holds the lost transactions again.
+
+**Injection**: Write ten single-row transactions on the primary, wait for the replica to hold them, scale the primary to 0 and wait for the failover. The new primary writes three rows of its own. Then scale the operator to 0, scale the old primary back up and, on the read-only server, run `RESET BINARY LOGS AND GTIDS` and set `gtid_purged` to its former set minus its newest three own transactions. Scale the operator back to 1.
+
+A real cluster loses such a tail with a volume that comes back older. The playground cannot swap a volume's contents under a stopped pod, so the scenario gives the site the GTID state of the older volume instead. The rows of the three transactions stay in its tables, which an older volume would not have; the operator decides on GTID sets alone, and the reclone replaces the site's data either way.
+
+**Verify**:
+
+- An `OwnTransactionsLost` Warning names the old primary and counts three transactions.
+- The site reaches `recoveryState` empty with `lostGtid` empty, replicating from the new primary, while the active site does not move.
+- Its `server_uuid` differs from the one it had (it was cloned), an `OwnTransactionsLostResolved` Event exists, and no `OldPrimaryRecovered` Event names it (that Event announces a rejoin by replication).
+- `GTID_SUBTRACT(<lost set>, @@gtid_executed)` is empty on the site, and the marker table has 13 rows on both sites.
+
+**Status**: written and compiled, not yet run on a live cluster. It is in the full profile only; move it to the release profile after its first green run.
+
 ### Recorded, not automated
 
 - **Write stall is invisible (F9)**: `FLUSH TABLES WITH READ LOCK` held on the primary for 75s stalled every write for 75s, with no state change, condition, event or alert. Health is `SELECT @@read_only`, and nothing measures whether a write can commit. A write-heartbeat probe, metric and condition is the proposal.
