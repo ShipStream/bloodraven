@@ -267,11 +267,18 @@ func (tm *TopologyManager) restorePeerHeldSite(site string) bool {
 // op returns, so StopRestorePeerReplication (write side) waits for every
 // start already admitted, and no start is admitted once the hold is set.
 // Calls must not nest.
+//
+// A site known to lack transactions it issued itself is refused too
+// (errOwnTransactionsLost): its receiver would drop them, so starting its
+// replication only makes the hole look healthy.
 func (tm *TopologyManager) withReplicaStartGate(site string, op func() error) error {
 	tm.peerStartMu.RLock()
 	defer tm.peerStartMu.RUnlock()
 	if tm.restorePeerHeldSite(site) {
 		return errRestorePeerHeld
+	}
+	if tm.ownLossSite(site) {
+		return errOwnTransactionsLost
 	}
 	return op()
 }

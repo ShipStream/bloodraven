@@ -40,6 +40,35 @@ const (
 	// The old primary recovered after a failover and is now replicating
 	// from the new primary.
 	EventOldPrimaryRecovered = "OldPrimaryRecovered"
+	// A site lacks transactions it issued itself under a `server_uuid` it
+	// has had, and the primary holds them: its volume came back older, or
+	// a crash lost them. Replication cannot bring them back, because the
+	// site's receiver drops events that carry its own `server_id`, and a
+	// promoted site would issue the same GTIDs again. The message names
+	// the site, the set (`status.sites[].lostGtid`) and the primary it was
+	// compared with. The operator does not start the site's replication,
+	// does not promote it and reclones it (`recoveryState:
+	// RecloneRequired`); a site that also holds transactions the primary
+	// lacks stays `RecoveryBlocked` for an administrator. Emitted on
+	// detection and when the set changes. See [A returning site that lost
+	// its own transactions](/docs/operations/failover#a-returning-site-that-lost-its-own-transactions).
+	EventOwnTransactionsLost = ReasonOwnTransactionsLost
+	// A site's `OwnTransactionsLost` report was cleared: it was recloned,
+	// or a new comparison found it holds everything it issued.
+	EventOwnTransactionsLostResolved = "OwnTransactionsLostResolved"
+	// Automatic promotion refused: the remaining candidates lack
+	// transactions they issued themselves (`recoveryState:
+	// RecloneRequired`) and would issue those GTIDs again. The group stays
+	// without a writable primary until the primary returns (the sites are
+	// then recloned from it) or an administrator promotes one by hand.
+	EventPromotionRefusedOwnTransactionsLost = "PromotionRefusedOwnTransactionsLost"
+	// A site carrying an `OwnTransactionsLost` report became the primary
+	// without a reclone (an administrator made it writable). Unless its
+	// `server_uuid` was changed first, it issues the lost GTIDs again:
+	// the same GTID then names two transactions, replicas that hold the
+	// first skip the second, and the PITR archive of the group cannot be
+	// trusted across them. The message names the site and the set.
+	EventOwnTransactionsLostSitePromoted = "OwnTransactionsLostSitePromoted"
 	// Both sites are writable (split brain). Also emitted when a second
 	// site answers writable before the debounce confirms it; the message
 	// names the unconfirmed sites, and fencing waits for the confirmation.

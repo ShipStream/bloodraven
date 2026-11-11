@@ -9385,6 +9385,21 @@ spec:
                         polled.
                       format: date-time
                       type: string
+                    lostGtid:
+                      description: |-
+                        LostGtid is the GTID set of transactions this site issued under a
+                        server_uuid it has had, that the primary holds and the site no
+                        longer does (its volume came back older, or a crash lost them).
+                        Replication cannot bring them back: the site's receiver drops
+                        events that carry its own server_id. Populated while the loss
+                        stands, with RecoveryState RecloneRequired, or RecoveryBlocked when
+                        the site also holds transactions the primary lacks.
+                      type: string
+                    lostTransactionCount:
+                      description: LostTransactionCount is the number of transactions
+                        in LostGtid.
+                      format: int64
+                      type: integer
                     name:
                       description: |-
                         Name is the site identifier, mirrored from spec: the key of
@@ -9399,10 +9414,14 @@ spec:
                         RecoveryBlocked means the site holds transactions the primary lacks
                         (see DivergenceDetectedBy): it is not promoted by an ordered update or
                         a planned failover, and it must be recloned or the primary made to
-                        contain the set. Replication may still be running.
+                        contain the set. Replication may still be running. RecloneRequired
+                        means the site lacks transactions it issued itself (LostGtid) and
+                        holds nothing the primary lacks: it is not promoted, its replication
+                        is not started, and the operator reclones it.
                       enum:
                       - RecoveryInProgress
                       - RecoveryBlocked
+                      - RecloneRequired
                       type: string
                     replication:
                       description: |-
@@ -9436,6 +9455,7 @@ spec:
                       - MutationFailed
                       - GTIDDiverged
                       - RestorePeerHold
+                      - OwnTransactionsLost
                       type: string
                     sourceConvergenceState:
                       description: |-

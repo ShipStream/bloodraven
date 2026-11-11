@@ -3120,6 +3120,11 @@ func (in *SiteStatus) DeepCopyInto(out *SiteStatus) {
 		*out = new(int64)
 		**out = **in
 	}
+	if in.LostTransactionCount != nil {
+		in, out := &in.LostTransactionCount, &out.LostTransactionCount
+		*out = new(int64)
+		**out = **in
+	}
 	if in.DivergentTransactionCount != nil {
 		in, out := &in.DivergentTransactionCount, &out.DivergentTransactionCount
 		*out = new(int64)

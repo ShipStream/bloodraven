@@ -256,6 +256,21 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 		return unverified(fmt.Errorf("parse primary GTID set: %w", err)), true
 	}
 	extra := followerSet.Subtract(primarySet)
+	// What the follower lacks of the transactions it issued itself. This
+	// direction needs no ordering of the reads: whatever the primary holds
+	// under a server_uuid of the follower was committed on the follower
+	// first, so lag cannot explain it (own_transactions_lost.go).
+	var lost mysql.GTIDSet
+	var ownUUIDs []string
+	identityKnown := followerSnap.ServerUUID != ""
+	if identityKnown {
+		ownUUIDs = tm.noteSiteServerUUID(ctx, follower.name, followerSnap.ServerUUID)
+		lost = ownLostTransactions(primarySet, followerSet, ownUUIDs)
+	}
+	if primarySnap.ServerUUID != "" {
+		// The primary issues transactions under this server_uuid now.
+		tm.noteSiteServerUUID(ctx, active.name, primarySnap.ServerUUID)
+	}
 
 	tm.mu.Lock()
 	if tm.authorityEpoch != epoch || tm.activeSiteLocked() != active.name || tm.gtidAuditSuppressedLocked() {
@@ -273,16 +288,28 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 		tm.gtidAuditPrimaryUUID = uuid
 	}
 	tm.stampGTIDAuditLocked(follower.name)
+	lossChanged := false
+	var lossLog func()
+	if identityKnown {
+		lossChanged, lossLog = tm.settleOwnLossLocked(follower.name, lost, active.name, divergenceDetectedByAudit, ownUUIDs)
+	}
+	reportLoss := func() {
+		if lossLog != nil {
+			lossLog()
+		}
+	}
 	rec := tm.recovery[follower.name]
 	wasBlocked := rec != nil && rec.state == v1alpha1.RecoveryStateBlocked
 
 	if extra.IsEmpty() {
 		if !wasBlocked {
 			tm.mu.Unlock()
-			return false, false
+			reportLoss()
+			return lossChanged, false
 		}
 		delete(tm.recovery, follower.name)
 		tm.mu.Unlock()
+		reportLoss()
 		metrics.DivergentTransactions.WithLabelValues(follower.name).Set(0)
 		tm.logger.Info("divergence cleared: replica holds no transactions the primary lacks",
 			"site", follower.name, "primary", active.name)
@@ -313,6 +340,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 	rec.detectedBy = detectedBy
 	rec.comparedTo = active.name
 	tm.mu.Unlock()
+	reportLoss()
 
 	metrics.DivergentTransactions.WithLabelValues(follower.name).Set(float64(count))
 	if !sameSet {
@@ -325,7 +353,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 			"detectedBy", detectedBy,
 			"primary", active.name)
 	}
-	return !sameSet || !sameProvenance, false
+	return !sameSet || !sameProvenance || lossChanged, false
 }
 
 func (tm *TopologyManager) stampGTIDAudit(site string) {
