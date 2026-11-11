@@ -203,40 +203,51 @@ func (p *planner) anyRowMeets(s Set) bool {
 // episode, a healthy failback, a mid-era record) is never evidence, and
 // inside ±δ of the record the order is unknown, so the window is not
 // evidence either. The record's own site's rows are its own later history.
+//
+// A binlog proves the same without a record (ownWrites): a file of site s
+// that holds a replayed transaction its own server originated shows that
+// server writable at that transaction's commit time, having executed at
+// most exec(f). A record is one sample of a writable server's state and
+// such a file is another, read from verified bytes, so a writable episode
+// that no sidecar observed leaves the same loss evidence as a recorded one
+// once its file is archived.
 func (p *planner) lossEvidence() error {
 	pl := p.plan
 	goal := p.lambda.Subtract(p.X)
+	points, err := p.lossPoints()
+	if err != nil {
+		return err
+	}
 	evidence := Set{}
-	var lostAt *promoRef
-	for i := range p.promos {
+	var lostAt *lossPoint
+	for i := range points {
 		if err := p.ctx.Err(); err != nil {
 			return err
 		}
-		pr := &p.promos[i]
-		// Only the head's transactions the record lacks can be lost by it
-		// (review F053: records without candidates cost nothing).
-		cand := p.lambda.Subtract(pr.set)
+		pt := &points[i]
+		// Only the head's transactions the server lacked can be lost by it
+		// (review F053: points without candidates cost nothing).
+		cand := p.lambda.Subtract(pt.have)
 		if cand.IsEmpty() {
 			continue
 		}
-		bound := pr.rec.ObservedAt.UnixMicro() - p.delta
 		for _, f := range p.order {
-			if f.row.Site == pr.site || f.idx.CommitMin >= bound || !f.idx.GTIDs.Overlaps(cand) {
+			if f.row.Site == pt.site || f.idx.CommitMin >= pt.bound || !f.idx.GTIDs.Overlaps(cand) {
 				continue
 			}
 			for j, t := range f.idx.Txns {
-				if t.OCT >= bound {
+				if t.OCT >= pt.bound {
 					continue
 				}
 				if g := f.gtid(j); cand.Has(g) && evidence.add(g) && lostAt == nil && !p.X.Has(g) {
-					lostAt = pr
+					lostAt = pt
 				}
 			}
 		}
 	}
 	// The report is complete: excluded transactions in rows this plan did
 	// not download are flagged too.
-	evidence, err := p.lossEvidenceUnread(evidence)
+	evidence, err = p.lossEvidenceUnread(points, evidence)
 	if err != nil {
 		return err
 	}
@@ -261,8 +272,7 @@ func (p *planner) lossEvidence() error {
 	pl.Divergent = lost.Union(audit)
 	sort.Strings(auditRows)
 	if !lost.IsEmpty() {
-		msg := fmt.Sprintf("the newest archived state includes %s, committed before %s was promoted at %s without them; they were lost at that failover",
-			lost.bounded(1024), lostAt.site, lostAt.rec.ObservedAt.UTC().Format(microLayout))
+		msg := fmt.Sprintf("the newest archived state includes %s, %s", lost.bounded(1024), lostAt.describe())
 		if !audit.IsEmpty() {
 			msg += fmt.Sprintf("; the divergence audit also found %s missing from the history (rows %s)", audit.bounded(512), strings.Join(auditRows, ", "))
 		}
@@ -270,6 +280,81 @@ func (p *planner) lossEvidence() error {
 	}
 	return refuse(pitrarchive.TokenArchiveDivergentHistory, "the newest archived state includes %s, which the divergence audit found missing from the history (rows %s); add them to excludeGtids to restore what the cluster kept, or restore to a timestamp",
 		audit.bounded(1024), strings.Join(auditRows, ", "))
+}
+
+// lossPoint is one sample of a writable server's state: at bound + δ the
+// server of site had executed at most have. It is a promotion record, or a
+// binlog holding a transaction the server originated (ownWrites).
+type lossPoint struct {
+	site  string
+	have  Set
+	bound int64 // µs: a transaction committed before it is provably older
+	rec   *promoRef
+	// file and own are set for a binlog: own is the newest replayed
+	// transaction the file's server originated, committed at ownOCT.
+	file   *file
+	own    GTID
+	ownOCT int64
+}
+
+// describe is the half of the refusal that names the evidence.
+func (pt *lossPoint) describe() string {
+	if pt.rec != nil {
+		return fmt.Sprintf("committed before %s was promoted at %s without them; they were lost at that failover",
+			pt.site, pt.rec.rec.ObservedAt.UTC().Format(microLayout))
+	}
+	return fmt.Sprintf("committed before %s committed %s at %s in %s, whose server had not executed them; they were lost at a failover to %s that left no promotion record",
+		pt.site, pt.own, fmtMicros(pt.ownOCT), pt.file.row.Label(), pt.site)
+}
+
+// lossPoints are the promotion records, then the binlogs with own writes.
+func (p *planner) lossPoints() ([]lossPoint, error) {
+	points := make([]lossPoint, 0, len(p.promos))
+	for i := range p.promos {
+		pr := &p.promos[i]
+		points = append(points, lossPoint{site: pr.site, have: pr.set, bound: pr.rec.ObservedAt.UnixMicro() - p.delta, rec: pr})
+	}
+	for k, f := range p.order {
+		if k%1024 == 0 {
+			if err := p.ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		if g, oct, ok := p.ownWrites(f); ok {
+			points = append(points, lossPoint{site: f.row.Site, have: f.exec, bound: oct - p.delta, file: f, own: g, ownOCT: oct})
+		}
+	}
+	return points, nil
+}
+
+// ownWrites returns the newest replayed transaction of f that f's own
+// server originated (its origin server_id is the file's writer), and its
+// commit time. Such a transaction was written on that server by a client,
+// so the server was writable then, and it had executed at most exec(f):
+// what the bytes of f prove about a writable episode, with or without a
+// promotion record of it.
+//
+// Only an active row of an unmarked site counts (a marked site's bytes
+// cannot certify history, and a quarantined row is waived evidence), and
+// only a transaction of P = Λ ∖ (B ∪ X): every row that may hold one is
+// downloaded before the evidence pass, so this evidence does not depend on
+// which other rows a plan happened to read.
+func (p *planner) ownWrites(f *file) (GTID, int64, bool) {
+	if f.marked || f.row.State != RowActive || !f.idx.GTIDs.Overlaps(p.plan.Replay) {
+		return GTID{}, 0, false
+	}
+	var own GTID
+	var newest int64
+	found := false
+	for j, t := range f.idx.Txns {
+		if !f.origin(j) || (found && t.OCT <= newest) {
+			continue
+		}
+		if g := f.gtid(j); p.plan.Replay.Has(g) {
+			own, newest, found = g, t.OCT, true
+		}
+	}
+	return own, newest, found
 }
 
 // lossEvidenceUnread adds to evidence the excluded transactions that
@@ -283,7 +368,7 @@ func (p *planner) lossEvidence() error {
 // These transactions are in X, so they change the report and never the
 // answer, and the pass is built so that it cannot change the answer either:
 //
-//   - A row whose manifest commit times lie on one side of the record's
+//   - A row whose manifest commit times lie on one side of the point's
 //     bound is decided from them (hmin/hmax are bound to the row's content
 //     and are what every unread row is planned on).
 //   - A row whose times straddle the bound, or are unknown, is read for its
@@ -295,22 +380,23 @@ func (p *planner) lossEvidence() error {
 //
 // Members of B are outside this pass (X ∩ B = ∅): see
 // TestKnownLimitationLossEvidenceInsideTheBackup.
-func (p *planner) lossEvidenceUnread(evidence Set) (Set, error) {
-	if p.X.IsEmpty() {
+func (p *planner) lossEvidenceUnread(points []lossPoint, evidence Set) (Set, error) {
+	excluded := p.lambda.Intersect(p.X)
+	if excluded.IsEmpty() {
 		return evidence, nil
 	}
-	for i := range p.promos {
+	for i := range points {
 		if err := p.ctx.Err(); err != nil {
 			return nil, err
 		}
-		pr := &p.promos[i]
-		want := p.lambda.Intersect(p.X).Subtract(pr.set)
+		pt := &points[i]
+		want := excluded.Subtract(pt.have)
 		if want.IsEmpty() {
 			continue
 		}
-		bound := pr.rec.ObservedAt.UnixMicro() - p.delta
+		bound := pt.bound
 		for _, r := range p.rows {
-			if r.Site == pr.site || r.State != RowActive || p.isMarked(r.Site) || p.files[r] != nil || p.failed[r] != nil ||
+			if r.Site == pt.site || r.State != RowActive || p.isMarked(r.Site) || p.files[r] != nil || p.failed[r] != nil ||
 				!r.Hints.Known || r.Hints.lo() >= bound || !r.Hints.GTIDs.Overlaps(want) {
 				continue
 			}
