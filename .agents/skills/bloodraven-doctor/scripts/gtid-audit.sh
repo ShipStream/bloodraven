@@ -236,8 +236,10 @@ for site in $SITES; do
     # follower's server_uuid was committed on the follower first, and its
     # replication receiver drops events with its own server_id, so they
     # never come back by replication. Only the current server_uuid is
-    # checked here; the operator also compares under the earlier ones it
-    # recorded (annotation bloodraven.shipstream.io/server-uuid-history).
+    # checked here, against the primary; the operator also compares under
+    # the earlier ones it recorded (annotation
+    # bloodraven.shipstream.io/server-uuid-history), and with a site that
+    # holds transactions the primary lacks.
     MISSING=$(run_sql "$PRIMARY_POD" "SELECT REPLACE(GTID_SUBTRACT(@@GLOBAL.gtid_executed, '$FOLLOWER_GTID'), '\n', '')" || true)
     OWN_LOST=$(printf '%s' "$MISSING" | tr ',' '\n' | grep -i "^${FOLLOWER_UUID}:" | paste -sd, - || true)
     if [[ -n "$OWN_LOST" ]]; then
@@ -249,8 +251,10 @@ for site in $SITES; do
             echo "      The operator has not recorded this yet (an operator release without this check, or its first comparison is pending)."
         fi
     elif [[ -n "$RECORDED_LOST" ]]; then
-        echo "   The operator records lostGtid for $site, but under its current server_uuid it lacks nothing of its own:"
-        echo "      the loss is under an earlier server_uuid of the site, or the site was just recloned and the record clears within ~30s."
+        echo "   The operator records lostGtid for $site, but the primary holds nothing $site issued under its current server_uuid and lacks."
+        echo "      Either the loss is under an earlier server_uuid of the site, or another site holds them and the primary does not"
+        echo "      (the OwnTransactionsLost condition names it: $site keeps replicating, is not promoted, and is not recloned automatically),"
+        echo "      or the site was just recloned and the record clears within ~30s."
     fi
     if [[ -z "$EXTRA" ]]; then
         echo "   ✅ CLEAN: $site holds no transactions the primary ($ACTIVE_SITE) lacks"

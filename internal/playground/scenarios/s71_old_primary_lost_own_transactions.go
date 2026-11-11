@@ -48,11 +48,20 @@ type s71State struct {
 // the scenario gives the site the GTID state of the older volume instead:
 // with the operator scaled to 0, it runs RESET BINARY LOGS AND GTIDS on
 // the returned (read-only, fenced) old primary and sets gtid_purged to
-// its former set minus its newest s71Lost own transactions. That works
+// the part of its former set the new primary holds, minus the newest
+// s71Lost transactions it issued that the new primary holds. That works
 // under super_read_only (measured on MySQL 9.7). The rows of those
 // transactions stay in the site's tables, which an older volume would not
 // have; the operator decides on GTID sets alone, and the reclone it runs
 // replaces the site's data either way.
+//
+// Both sets are taken from what the new primary holds, not from what the
+// old primary held when it was stopped: the playground's counter app
+// writes to the primary all the time, and a write it lands between the
+// scenario's catch-up wait and the scale-down reaches the old primary
+// only. With that transaction left in its GTID state the site would come
+// back holding a transaction the new primary lacks, which is another
+// case (RecoveryBlocked, an administrator's decision) and not this one.
 //
 // Asserted: the operator reports the site (OwnTransactionsLost with the
 // exact set, recoveryState RecloneRequired), never announces a rejoin by
@@ -146,14 +155,6 @@ func s71SeedAndFailover(st *s71State) runner.Step {
 			if err := waitForReplicaGTID(ctx, env, a, b); err != nil {
 				return fmt.Errorf("%s did not receive %s's transactions: %w", b, a, err)
 			}
-			full, err := primary.GtidExecuted(ctx)
-			if err != nil {
-				return err
-			}
-			if st.lost, err = s71NewestOwn(full, st.uuidBefore, s71Lost); err != nil {
-				return err
-			}
-			env.Capture.Note(fmt.Sprintf("%s (server_uuid %s) will come back without %s", a, st.uuidBefore, st.lost))
 
 			if err := env.Chaos.ScaleSiteToZero(ctx, a); err != nil {
 				return err
@@ -179,13 +180,18 @@ func s71SeedAndFailover(st *s71State) runner.Step {
 					return fmt.Errorf("insert on %s: %w", b, err)
 				}
 			}
-			missing, err := newPrimary.ScalarString(ctx, "SELECT GTID_SUBTRACT(?, @@GLOBAL.gtid_executed)", st.lost)
+			// What the old primary is to lose is chosen among the
+			// transactions it issued that the new primary holds: whatever
+			// the old primary committed after its last transaction reached
+			// the new primary (a counter-app write) is not part of this.
+			held, err := newPrimary.GtidExecuted(ctx)
 			if err != nil {
 				return err
 			}
-			if missing != "" {
-				return fmt.Errorf("precondition not met: the new primary %s lacks %s of the set the old primary is to lose", b, missing)
+			if st.lost, err = s71NewestOwn(held, st.uuidBefore, s71Lost); err != nil {
+				return err
 			}
+			env.Capture.Note(fmt.Sprintf("%s (server_uuid %s) will come back without %s, which %s holds", a, st.uuidBefore, st.lost, b))
 			return nil
 		},
 	}
@@ -264,7 +270,28 @@ func s71ReturnWithoutOwnTail(st *s71State) runner.Step {
 			if !ro {
 				return fmt.Errorf("%s came back writable; the scenario needs the read_only boot", st.a)
 			}
-			kept, err := old.ScalarString(ctx, "SELECT GTID_SUBTRACT(@@GLOBAL.gtid_executed, ?)", st.lost)
+			// The GTID state of the older volume: what the site holds that
+			// the new primary holds too, without the lost tail. A
+			// transaction the site committed that never reached the new
+			// primary is newer than that volume and is dropped with it.
+			newPrimary, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, st.b, env.Creds)
+			if err != nil {
+				return err
+			}
+			held, err := newPrimary.GtidExecuted(ctx)
+			_ = newPrimary.Close()
+			if err != nil {
+				return err
+			}
+			unreplicated, err := old.ScalarString(ctx, "SELECT GTID_SUBTRACT(@@GLOBAL.gtid_executed, ?)", held)
+			if err != nil {
+				return err
+			}
+			if unreplicated != "" {
+				env.Capture.Note(fmt.Sprintf("%s committed %s after its last transaction reached %s; left out of its GTID state like the lost tail",
+					st.a, truncGtid(unreplicated), st.b))
+			}
+			kept, err := old.ScalarString(ctx, "SELECT GTID_SUBTRACT(GTID_SUBTRACT(@@GLOBAL.gtid_executed, ?), ?)", unreplicated, st.lost)
 			if err != nil {
 				return err
 			}
@@ -286,6 +313,11 @@ func s71ReturnWithoutOwnTail(st *s71State) runner.Step {
 			}
 			if stillThere != st.lost {
 				return fmt.Errorf("%s still holds part of %s after the reset (gtid_executed %s)", st.a, st.lost, after)
+			}
+			if extra, err := old.ScalarString(ctx, "SELECT GTID_SUBTRACT(@@GLOBAL.gtid_executed, ?)", held); err != nil {
+				return err
+			} else if extra != "" {
+				return fmt.Errorf("%s holds %s, which the new primary %s lacks: it would come back divergent, not lossy", st.a, extra, st.b)
 			}
 			uuid, err := old.ScalarString(ctx, "SELECT @@GLOBAL.server_uuid")
 			if err != nil {
