@@ -50,6 +50,8 @@ type TopologySite struct {
 	RecoveryState             string `json:"recoveryState,omitempty"`
 	DivergentGtid             string `json:"divergentGtid,omitempty"`
 	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
+	LostGtid                  string `json:"lostGtid,omitempty"`
+	LostTransactionCount      *int64 `json:"lostTransactionCount,omitempty"`
 }
 
 // Hub manages websocket connections and broadcasts state changes.

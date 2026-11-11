@@ -1546,3 +1546,46 @@ Do not:
 - Remove the mysql container's `command` or edit the Deployment: the operator renders it and rolls the pod back.
 - Remove the `bloodraven.shipstream.io/clone-server-uuid` annotation while a clone has no outcome: the clone is then never checked, and with encryption at rest the recipient may be sealed before the restart that installs the clone.
 
+
+## 48. A site lacks transactions it issued itself (`OwnTransactionsLost`, `recoveryState: RecloneRequired`)
+
+### Symptoms
+- Warning Event `OwnTransactionsLost` on the group: "`<site>` lacks N transactions it issued itself that `<other site>` holds (`<set>`); replication cannot bring them back and a promotion would issue their GTIDs again. …".
+- `status.sites[].recoveryState: RecloneRequired` with `lostGtid` and `lostTransactionCount`; `RecoveryPending=True` and `Degraded=True` with reason `OwnTransactionsLost`; `bloodraven_own_transactions_lost{site}` above 0; the deployment API reports `unstableReason: RecloneRequired`.
+- Operator log WARN `own transactions lost` (`site`, `lostGtid`, `comparedTo`, `serverUUIDs`, `detectedBy`, `remedy`), then INFO `reclone requested for a site that lacks transactions it issued itself` and the usual `starting bootstrap` with `source=reclone`.
+- The site is read-only and fenced. If it has no replication channel, none is configured; `sourceConvergenceReason: OwnTransactionsLost` on a site whose stopped channel is not restarted.
+- A site with `lostGtid` and `recoveryState: RecoveryBlocked` both lacks transactions it issued and holds transactions the primary lacks: playbook 2 or 33 applies first, and nothing is cloned over it automatically.
+- A planned failover that ended `SourceLeftFenced` with operator WARN `planned failover: rollback leaves the source fenced, it lacks transactions it held` found the same condition on its source during the rollback (playbook 37 for the run; the source is then reported here).
+- With the primary lost: Warning `PromotionRefusedOwnTransactionsLost`, `Degraded` reason `NoPrimary` with "refusing to promote `<site>` (lacks transactions it issued itself; …)".
+
+### Cause
+The site came back with fewer transactions than it issued: its volume came back older (a snapshot rollback, a restore outside the operator, `RESET BINARY LOGS AND GTIDS`), or a crash lost the end of the redo log and the binary log together. Another site still holds them. A MySQL replication receiver drops every event that carries the replica's own `server_id` (the filter is by `server_id`, not by `server_uuid`; verified on MySQL 9.7: the events never reach the relay log, `Retrieved_Gtid_Set` never lists them, both threads report `Yes`, no error). So replication can never return them: the site would look healthy with a permanent hole and, promoted, issue the same GTIDs for other transactions.
+
+The operator compares each site with the primary under every `server_uuid` the site has had (recorded in the group annotation `bloodraven.shipstream.io/server-uuid-history`, because a site keeps its `server_id` across reclones and changes its `server_uuid` at each). It runs the comparison before it configures or restarts a site's replication, in the replica GTID audit (every 30 s per replicating site), and when it chooses a promotion target (against every site that answers). The evidence does not depend on lag: whatever another site holds under a site's `server_uuid`, that site committed first.
+
+### Diagnostic steps
+1. What the operator recorded:
+   ```bash
+   kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{range .status.sites[*]}{.name}{": "}{.recoveryState}{" lost="}{.lostTransactionCount}{" "}{.lostGtid}{" divergent="}{.divergentGtid}{"\n"}{end}'
+   kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="RecoveryPending")].message}'
+   ```
+   The `RecoveryPending` message says whether the operator is recloning the site, or why not ("automatic reclone waiting: …").
+2. Confirm on the servers (read-only): `./scripts/gtid-audit.sh -n <ns> <group>` prints `OWN TRANSACTIONS LOST` with the set for a follower that lacks transactions under its current `server_uuid`. By hand, on the site: `SELECT @@server_uuid, GTID_SUBTRACT('<primary gtid_executed>', @@GLOBAL.gtid_executed)` and keep the intervals of the site's own uuid.
+3. The recorded identities: `kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/server-uuid-history}'`. A lost set under a uuid the site no longer runs under means its volume came back from before a reclone.
+4. Why the volume regressed is outside the operator: check the storage layer (snapshot restores, a PV re-bound to an older volume) and the site's mysqld log around its last start.
+
+### Safe remediation
+- Usually none: the operator reclones the site from the primary and the report clears (`OwnTransactionsLostResolved`, INFO `own transactions lost cleared: the site was recloned`). The clone discards the site's data; by the comparison the site holds nothing the primary lacks. With PITR the site's binary log tail is archived first (playbook 46 if that fails).
+- If the automatic reclone is waiting:
+  - "the last automatic reclone did not complete": `Degraded` reads `BootstrapFailed` with the clone's error. Fix the cause (the `BootstrapFailed` row of the alert matrix); the operator asks again after 5 minutes, or reclone now: `kubectl bloodraven reclone <group> <site> -n <ns> --cold`.
+  - "an in-place restore holds the site": its reclone queue reclones the site (playbook 20).
+  - "there is no confirmed writable primary to clone from": restore the primary first (next item).
+  - "another reclone is pending" / "another clone is running": it starts when that one ends.
+- The primary is lost and the remaining site is `RecloneRequired`. The operator will not promote it. Prefer bringing the primary back: the site is then recloned from it. If the primary is gone for good, the site is the best copy left and you accept the loss of everything it lacks: stop its mysqld, remove `auto.cnf` from its data directory so it starts under a new `server_uuid` (this is the one case where that is right: under its old identity it would issue the lost GTIDs again), start it, and make it writable (`SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF`). The operator adopts the unique writable site and records `OwnTransactionsLostSitePromoted`. Start a new PITR archive prefix and take a full backup afterwards (playbook 41).
+- The recorded primary itself restarted without part of its history and a replica holds it (all sites read-only, the primary `RecloneRequired` compared with the replica): the operator elects nobody. Make the replica that holds everything writable by hand; the operator adopts it and reclones the former primary.
+
+Do not:
+- Configure or start replication on the site by hand (`CHANGE REPLICATION SOURCE`, `START REPLICA`). It will run without errors and never apply the lost transactions; the replica GTID audit reports it again.
+- Inject the lost GTIDs as empty transactions on the site to make the sets equal: the site then claims transactions whose changes it does not hold.
+- Remove the `bloodraven.shipstream.io/server-uuid-history` annotation: a site back on a volume from before a reclone is then compared under its current `server_uuid` only.
+- Remove `status.sites[].lostGtid` by hand to make the site a failover candidate.

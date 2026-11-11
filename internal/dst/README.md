@@ -70,7 +70,10 @@ dimension rather than one per statement.
    (`recloneWait`) are drawn from a PRNG stream of their own
    (`flushFaults`), so they add ops to a seed's schedule without changing
    the ones it had before they existed
-   (`TestGenerateTrial_FlushFaultsOnlyAdd`). Execution consumes no
+   (`TestGenerateTrial_FlushFaultsOnlyAdd`). The data-directory regress
+   (`regressSite`, with the `regressBoot` that boots the site again) is
+   drawn from a third stream (`ownLossFaults`,
+   `TestGenerateTrial_OwnLossFaultsOnlyAdd`). Execution consumes no
    randomness after generation.
 2. The harness builds a production `TopologyManager` via
    `NewTopologyManagerWithClock` with a `FakeClock`, the simulated
@@ -400,6 +403,79 @@ clock: the harness builds the controller with
   (rotated, not rotated); why it did not rotate is repro detail, and a late
   rotation is the model's doing, like a fault.
 
+## A site that lost its own transactions, and its reclone
+
+A MySQL replication receiver drops every event that carries the replica's
+own `server_id`, whatever `server_uuid` issued it (measured on MySQL 9.7).
+A site that restarts on an older data directory while another site holds
+what it issued can therefore never get those transactions back by
+replication: it replicates everything else, both threads run, no error is
+raised, and promoted it issues the same GTIDs again. The operator's answer
+is `controller/own_transactions_lost.go`: compare the site with the
+primary (or with every site that answers, when a promotion target is
+chosen) under each `server_uuid` the site has had, never start its
+replication, never promote it, and reclone it.
+
+- **The model** (`ownloss.go`). `Cluster.Tick` no longer lets a site fetch
+  a stream it owns: the stream under its original uuid and under every
+  `server_uuid` a pod replacement or a clone gave it (`ownsStream`).
+  Without that the model let a regressed site refetch its own lost tail,
+  which no server does, and the defect could not show.
+- **The fault.** `regressSite site k` crashes the site and rolls its data
+  directory back `k` ticks under the same `server_uuid` (a volume that came
+  back older); `regressBoot` boots it one to twelve polls later, fenced or
+  with the read_only boot. One trial in four has one, three times out of
+  five on the initial primary. Like `replacePod`'s regress it never
+  destroys the last copy of a transaction. Unlike it, the site keeps its
+  identity and may have been the writable primary.
+- **The reclone.** CLONE is modelled as its effect, applied in one step
+  inside the `Poll` that starts it: `Cluster.Reclone` gives the recipient
+  the donor's executed set, no channel and a new `server_uuid`, and refuses
+  when the operator cannot reach the recipient or the recipient cannot
+  reach a running donor. The operator's side is production code up to that
+  point: the request (`requestOwnLossReclone`), `checkReclone`'s donor
+  confirmation, its claim checks and the pre-reclone archive-tail wait.
+  `SetRecloneRunnerForSim` replaces only the bootstrap goroutine (CLONE
+  INSTANCE, the wait for the restart, the replication setup), which runs
+  on wall-clock retries a trial cannot replay. After the clone the site has
+  no channel, and old-primary recovery configures it on a later poll, as
+  after an operator restart between a clone and its replication setup.
+  Not covered: a clone that fails or is killed part-way, an operator
+  restart during a clone, the clone identity record and the keyring hold;
+  unit and component tests cover those
+  (`own_transactions_lost_test.go`, `clone_server_uuid_record_test.go`,
+  `test/component/own_transactions_lost_test.go`).
+- **Durable state.** The `server_uuid`s each site has run under outlive
+  every manager of a trial (`simSiteIdentityStore`, the group annotation
+  in production).
+- **Invariant `PromotedWithoutOwnTransactions`** (model-level, at the
+  statement). An operator actor never makes a site writable while a site
+  the operator can read holds transactions of one of that site's own
+  streams that the site lacks. A statement on a site that was writable
+  already is no grant. A holder the operator cannot read (crashed, or cut
+  off from it) is not counted: with no evidence the promotion is the
+  documented residual, see below. With the comparison switched off
+  (`ownLostTransactions` returning nothing) the 400-seed quick sweep fails
+  35 trials `NonConvergence` (a replica with both threads running that
+  never holds the primary's set) and one `PromotedWithoutOwnTransactions`;
+  with it the sweep is clean (also seeds 1–6,000, and 1–4,000 with the
+  actors on).
+- **What the sweep found in the operator**, fixed with the change: an
+  emergency failover promoted the regressed candidate although a
+  disaster-recovery site that answered held its lost transactions (the
+  picker now reads the other sites too), and a planned failover's rollback
+  unfenced a source that had restarted on an older data directory under
+  the same `server_uuid` (it now ends `SourceLeftFenced`).
+- **Residual, by design.** A site promoted while every holder of its lost
+  transactions is down or unreachable: the operator cannot know. A trial
+  then ends with one GTID naming two transactions, which the model's
+  per-stream counters cannot show and no invariant flags. A recorded
+  primary that restarts in place without part of its history while its
+  replica holds it ends with no writable site and the primary reported
+  `RecloneRequired`: re-assert refuses a target a peer is ahead of, and the
+  operator elects nobody among read-only sites (`WedgedNoPrimary` exempts a
+  target that is not GTID-complete, as before).
+
 ## Invariants
 
 Per poll:
@@ -414,6 +490,9 @@ Per poll:
   or split-brain priorities), must be fenced within a grace window.
 - **RepointDivergent** (model-level) — `CHANGE REPLICATION SOURCE` must never
   point a site at a source missing that site's transactions.
+- **PromotedWithoutOwnTransactions** (model-level) — an operator actor never
+  makes a site writable while a site the operator can read holds
+  transactions the site issued itself and lacks (see above).
 
 At end of trial (post-heal, post-settle):
 - **EndSplitBrain / WedgedNoPrimary / NonConvergence** — the cluster
@@ -467,9 +546,11 @@ and would risk unwinding through one of `Poll`'s per-site goroutines. The
 sidecars are unaffected: they are separate processes, and a dead operator is
 exactly what their lease rule exists for.
 
-Not modeled (excluded from trials, guarded by loud errors): CLONE /
-bootstrap (the bootstrap controller is real and production-shaped, but the
-model never produces an empty site so no clone goroutine can start, and a
+Not modeled (excluded from trials, guarded by loud errors): the bootstrap
+goroutine and CLONE INSTANCE as statements (the bootstrap controller is
+real and production-shaped, but the model never produces an empty site so
+no clone goroutine can start; a reclone the operator requests for a site
+that lost its own transactions is applied as its effect, see above; and a
 scripted reclone request is withdrawn before its pre-reclone wait ends),
 Dragonfly (the engine skips its Dragonfly phases with no Dragonfly ops; the
 Dragonfly rows of the #235 table are controller unit tests), deployment
@@ -561,7 +642,8 @@ and promoted anyway.
 
 - The cluster is always seeded with baseline data, so **empty/fresh sites
   never occur in trials** — the operator's empty-site guards and clone paths
-  are covered by component tests only (CLONE is unmodeled).
+  are covered by component tests only (CLONE is modeled only as the effect
+  of a reclone of a site that lost its own transactions).
 - Fault injection applies to mutations; **reads never fail independently**,
   so "mutation applied, subsequent read fails" interleavings inside a single
   operator action are unexplored. The sidecar shares the operator's

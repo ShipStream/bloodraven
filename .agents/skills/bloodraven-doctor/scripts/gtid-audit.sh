@@ -175,7 +175,8 @@ for site in $SITES; do
     RECORDED_STATE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].recoveryState}" 2>/dev/null || true)
     RECORDED_GTID=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].divergentGtid}" 2>/dev/null || true)
     RECORDED_BY=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].divergenceDetectedBy}" 2>/dev/null || true)
-    echo "   Operator record: recoveryState=${RECORDED_STATE:-none} divergenceDetectedBy=${RECORDED_BY:-none} divergentGtid=${RECORDED_GTID:-none}"
+    RECORDED_LOST=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].lostGtid}" 2>/dev/null || true)
+    echo "   Operator record: recoveryState=${RECORDED_STATE:-none} divergenceDetectedBy=${RECORDED_BY:-none} divergentGtid=${RECORDED_GTID:-none} lostGtid=${RECORDED_LOST:-none}"
 
     if [[ -n "$PRIMARY_PROBLEM" ]]; then
         echo "   ❔ UNKNOWN: $PRIMARY_PROBLEM"
@@ -230,6 +231,27 @@ for site in $SITES; do
 
     echo "   follower server_uuid: $FOLLOWER_UUID"
     echo "   follower gtid_executed: $FOLLOWER_GTID"
+    # What the follower lacks of the transactions it issued itself. Lag
+    # cannot explain these: whatever the primary holds under the
+    # follower's server_uuid was committed on the follower first, and its
+    # replication receiver drops events with its own server_id, so they
+    # never come back by replication. Only the current server_uuid is
+    # checked here; the operator also compares under the earlier ones it
+    # recorded (annotation bloodraven.shipstream.io/server-uuid-history).
+    MISSING=$(run_sql "$PRIMARY_POD" "SELECT REPLACE(GTID_SUBTRACT(@@GLOBAL.gtid_executed, '$FOLLOWER_GTID'), '\n', '')" || true)
+    OWN_LOST=$(printf '%s' "$MISSING" | tr ',' '\n' | grep -i "^${FOLLOWER_UUID}:" | paste -sd, - || true)
+    if [[ -n "$OWN_LOST" ]]; then
+        echo "   🟠 OWN TRANSACTIONS LOST: $site lacks transactions it issued itself that the primary ($ACTIVE_SITE) holds:"
+        echo "      $OWN_LOST"
+        echo "      Replication cannot return them, and promoted it would issue these GTIDs again. The operator reclones the site"
+        echo "      (recoveryState=RecloneRequired); by hand: kubectl bloodraven reclone $MFG_NAME $site -n $NAMESPACE --cold"
+        if [[ -z "$RECORDED_LOST" ]]; then
+            echo "      The operator has not recorded this yet (an operator release without this check, or its first comparison is pending)."
+        fi
+    elif [[ -n "$RECORDED_LOST" ]]; then
+        echo "   The operator records lostGtid for $site, but under its current server_uuid it lacks nothing of its own:"
+        echo "      the loss is under an earlier server_uuid of the site, or the site was just recloned and the record clears within ~30s."
+    fi
     if [[ -z "$EXTRA" ]]; then
         echo "   ✅ CLEAN: $site holds no transactions the primary ($ACTIVE_SITE) lacks"
         CLEAN=$((CLEAN + 1))

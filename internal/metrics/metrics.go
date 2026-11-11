@@ -143,10 +143,20 @@ var (
 		Help: "Number of transactions on a site that the primary lacks (old-primary recovery or replica GTID audit). 0 when healthy.",
 	}, []string{"site"})
 
-	// RecloneOperations counts admin-triggered reclone operations per site.
+	// OwnTransactionsLost is the number of transactions a site issued
+	// itself that the primary holds and the site no longer does. 0 when
+	// healthy.
+	OwnTransactionsLost = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_own_transactions_lost",
+		Help: "Number of transactions a site issued under a server_uuid it has had, that the primary holds and the site lacks (status.sites[].lostGtid). The site is recloned; 0 when healthy.",
+	}, []string{"site"})
+
+	// RecloneOperations counts reclone operations per site: requested by
+	// an administrator, by an in-place restore's reclone queue, or by the
+	// operator for a site that lost transactions it issued.
 	RecloneOperations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "bloodraven_reclone_operations_total",
-		Help: "Total number of admin-triggered reclone operations per site.",
+		Help: "Total number of reclone operations per site (an administrator's, an in-place restore's reclone queue, or the operator's for a site that lost its own transactions).",
 	}, []string{"site"})
 
 	// --- Backup metrics ------------------------------------------------
@@ -518,7 +528,7 @@ func Register(reg prometheus.Registerer) {
 		DeployLeasesActive, DeployLeaseGrantsTotal, DeployLeaseExpirationsTotal,
 		DeployLeaseRevocationsTotal, DeployLeaseAgeSeconds, PlannedFailoversDeferredTotal,
 		SplitBrainAutoResolveTotal, PrimaryReassertTotal,
-		ReplicationLag, ReplicationRunning, ReplicationSourceState, SiteState, DivergentTransactions, RecloneOperations,
+		ReplicationLag, ReplicationRunning, ReplicationSourceState, SiteState, DivergentTransactions, OwnTransactionsLost, RecloneOperations,
 		RestoreReclonePending,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,

@@ -738,6 +738,18 @@ func TestRollbackPreconditions(t *testing.T) {
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.down = true }, outcome: ""},
 		{name: "possible write, target extras", phase: v1alpha1.PlannedFailoverPhasePromoting, reason: v1alpha1.PlannedFailoverReasonPromotionAborted,
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDB + ":1" }, outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired},
+		// The source restarted during the run on an older data directory
+		// under the same server_uuid: it is not unfenced, and the target is
+		// not pointed at it.
+		{name: "source no longer holds the set it was fenced with", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced(); f.src.gtid, f.tgt.gtid = opsUUIDA+":1-7", opsUUIDA+":1-7" },
+			outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
+			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored},
+		// ... or before the fence was read, so the recorded set is the
+		// short one: the target holds what the source issued and lost.
+		{name: "source lacks its own transactions the target holds", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsUUIDA + ":1-13" }, outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
+			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored},
 		{name: "divergent target before Promoting still unfences", reason: v1alpha1.PlannedFailoverReasonDivergentTarget,
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDC + ":1" }, outcome: v1alpha1.PlannedFailoverOutcomeRolledBack,
 			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored, unfenced: true},

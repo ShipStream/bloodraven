@@ -154,9 +154,9 @@ type SiteSnapshot struct {
 	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
 	ClassificationOverdue bool
 
-	// Per-site old-primary recovery state ("", RecoveryInProgress, or
-	// RecoveryBlocked) with the divergence report when blocked. Multiple
-	// sites can carry recovery state at once.
+	// Per-site old-primary recovery state ("", RecoveryInProgress,
+	// RecoveryBlocked, or RecloneRequired) with the divergence report when
+	// blocked. Multiple sites can carry recovery state at once.
 	RecoveryState     v1alpha1.SiteRecoveryState
 	DivergentGtid     string
 	DivergentTxnCount int64
@@ -165,6 +165,16 @@ type SiteSnapshot struct {
 	// set was computed against.
 	DivergenceDetectedBy v1alpha1.DivergenceDetector
 	DivergenceComparedTo string
+	// LostGtid and LostTxnCount report the transactions the site issued
+	// itself and no longer holds (own_transactions_lost.go), compared
+	// with LostComparedTo. RecoveryState is then RecloneRequired, or
+	// RecoveryBlocked when the site also holds transactions the primary
+	// lacks. RecloneWaiting says why no automatic reclone runs ("" while
+	// one is requested or running).
+	LostGtid       string
+	LostTxnCount   int64
+	LostComparedTo string
+	RecloneWaiting string
 }
 
 // SourceConvergenceState is the persisted per-follower source state.
@@ -181,6 +191,7 @@ const (
 	sourceReasonMutationFailed = v1alpha1.SourceReasonMutationFailed
 	sourceReasonGTIDDiverged   = v1alpha1.SourceReasonGTIDDiverged
 	sourceReasonRestoreHold    = v1alpha1.SourceReasonRestorePeerHold
+	sourceReasonOwnLoss        = v1alpha1.SourceReasonOwnTransactionsLost
 )
 
 // TopologySnapshot captures the topology state at a point in time.
@@ -238,7 +249,7 @@ type TopologySnapshot struct {
 	// Sites[].RecoveryState/DivergentGtid/DivergentTxnCount — consult those
 	// when more than one site can be in recovery at once.
 	RecoverySite         string
-	RecoveryState        v1alpha1.SiteRecoveryState // absent, RecoveryInProgress, or RecoveryBlocked
+	RecoveryState        v1alpha1.SiteRecoveryState // absent, RecoveryInProgress, RecoveryBlocked, or RecloneRequired
 	DivergentGtid        string
 	DivergentTxnCount    int64
 	DivergenceDetectedBy v1alpha1.DivergenceDetector
@@ -261,6 +272,12 @@ type TopologySnapshot struct {
 	// yet (status.restoreReclones.pending). Used by the runner to emit
 	// Events; not persisted on the CR.
 	RestoreReclonePromotionRefused []string
+
+	// OwnLossPromotionRefused names promotion candidates the last decision
+	// refused because they lack transactions they issued themselves
+	// (status.sites[].lostGtid). Used by the runner to emit Events; not
+	// persisted on the CR.
+	OwnLossPromotionRefused []string
 
 	// BootstrapRefusedRestoreHold is the last site a clone into was
 	// refused because an in-place restore holds it ("" once a clone
@@ -855,6 +872,21 @@ type TopologyManager struct {
 	// cloneIdentity holds the recorded pre-clone server_uuids whose clone
 	// has no outcome yet (clone_server_uuid.go). It has its own locks.
 	cloneIdentity cloneIdentityTracker
+	// ownLoss holds, by site, the report of a site that lacks transactions
+	// it issued itself (own_transactions_lost.go), and
+	// ownLossPromotionRefused the candidates the last promotion decision
+	// refused for it. Protected by mu.
+	ownLoss                 map[string]*ownLossRecord
+	ownLossPromotionRefused []string
+	// siteIdentity holds the server_uuids each site has run under. It has
+	// its own lock.
+	siteIdentity siteIdentityTracker
+	// recloneForSim, when set, stands in for the clone of a reclone
+	// (topology_sim.go). Never set in production.
+	recloneForSim func(donor, recipient string) bool
+	// ownLossWitnessGrace overrides the constant of the same name when
+	// positive (tests and simulations, whose reads never hang).
+	ownLossWitnessGrace time.Duration
 	// recloneTail is the pre-reclone wait in progress and
 	// recloneTailSettled the site whose wait ended while its clone has not
 	// started yet. Only Poll's goroutine (checkReclone) uses them. The
@@ -909,6 +941,8 @@ type SiteStatusEntry struct {
 	DivergentTransactionCount *int64                           `json:"divergentTransactionCount,omitempty"`
 	DivergenceDetectedBy      v1alpha1.DivergenceDetector      `json:"divergenceDetectedBy,omitempty"`
 	DivergenceComparedTo      string                           `json:"divergenceComparedTo,omitempty"`
+	LostGtid                  string                           `json:"lostGtid,omitempty"`
+	LostTransactionCount      *int64                           `json:"lostTransactionCount,omitempty"`
 }
 
 // StatusResponse is returned by the /status endpoint.
@@ -1278,6 +1312,16 @@ func (tm *TopologyManager) Status() StatusResponse {
 				}
 				sites[i].DivergenceDetectedBy = rec.detectedBy
 				sites[i].DivergenceComparedTo = rec.comparedTo
+			}
+		}
+		if loss := tm.ownLoss[tm.sites[i].name]; loss != nil {
+			if sites[i].RecoveryState != v1alpha1.RecoveryStateBlocked {
+				sites[i].RecoveryState = v1alpha1.RecoveryStateRecloneRequired
+			}
+			sites[i].LostGtid = loss.lostGtid
+			if loss.lostCount > 0 {
+				c := loss.lostCount
+				sites[i].LostTransactionCount = &c
 			}
 		}
 	}
@@ -1802,6 +1846,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	// Retry a failed Clone-hold release before starting any new clone.
 	tm.releaseCloneHold(ctx)
 
+	// A site that lacks transactions it issued itself is recloned.
+	tm.requestOwnLossReclone()
+
 	// Process pending reclone annotation.
 	recloneStarted := tm.checkReclone(ctx)
 
@@ -2234,6 +2281,8 @@ func (tm *TopologyManager) observations() []state.SiteObservation {
 			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedRotation
 		} else if tm.restoreReclonePendingLocked(tm.sites[i].name) {
 			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedPendingReclone
+		} else if tm.ownLossLocked(tm.sites[i].name) {
+			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedOwnTransactionsLost
 		}
 		out[i] = obs
 	}
@@ -2285,6 +2334,17 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 				sites[i].DivergenceComparedTo = rec.comparedTo
 			}
 		}
+		if loss := tm.ownLoss[tm.sites[i].name]; loss != nil {
+			// A divergence block outranks the loss: it needs an
+			// administrator, and the reclone they ask for repairs both.
+			if sites[i].RecoveryState != v1alpha1.RecoveryStateBlocked {
+				sites[i].RecoveryState = v1alpha1.RecoveryStateRecloneRequired
+			}
+			sites[i].LostGtid = loss.lostGtid
+			sites[i].LostTxnCount = loss.lostCount
+			sites[i].LostComparedTo = loss.comparedTo
+			sites[i].RecloneWaiting = loss.recloneWaiting
+		}
 	}
 
 	var updatePhase v1alpha1.UpdatePhase
@@ -2315,6 +2375,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		KeyringPromotionRefused: append([]string(nil), tm.keyringPromotionRefused...),
 
 		RestoreReclonePromotionRefused: append([]string(nil), tm.restoreReclonePromotionRefused...),
+		OwnLossPromotionRefused:        append([]string(nil), tm.ownLossPromotionRefused...),
 		BootstrapRefusedRestoreHold:    tm.bootstrapRefusedSite,
 		BootstrapFailureResolved:       tm.bootstrapFailureResolvedLocked(),
 	}
@@ -2327,12 +2388,16 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	// divergent transactions await a human, and the RecoveryPending
 	// condition's reason must not mask that behind a routine rejoin.
 	// An old primary's block outranks a replica-audit block: it is the one
-	// that also gates the deployment API, so the condition names it.
+	// that also gates the deployment API, so the condition names it. A
+	// site that lost its own transactions (RecloneRequired) ranks below
+	// either block and above a routine rejoin.
 	rank := func(s SiteSnapshot) int {
 		switch {
 		case s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy != divergenceDetectedByAudit:
-			return 3
+			return 4
 		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
+			return 3
+		case s.RecoveryState == v1alpha1.RecoveryStateRecloneRequired:
 			return 2
 		case s.RecoveryState != "":
 			return 1
@@ -2404,6 +2469,16 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 					c := rec.divergentCount
 					s.DivergentTransactionCount = &c
 				}
+			}
+		}
+		if loss := tm.ownLoss[tm.sites[i].name]; loss != nil {
+			if s.RecoveryState != string(v1alpha1.RecoveryStateBlocked) {
+				s.RecoveryState = string(v1alpha1.RecoveryStateRecloneRequired)
+			}
+			s.LostGtid = loss.lostGtid
+			if loss.lostCount > 0 {
+				c := loss.lostCount
+				s.LostTransactionCount = &c
 			}
 		}
 		sites = append(sites, s)
@@ -2666,6 +2741,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.mu.RLock()
 			winnerBlocked := tm.keyringRotationBlockedLocked(winner)
 			winnerPending := tm.restoreReclonePendingLocked(winner)
+			winnerLost := tm.ownLossLocked(winner)
 			tm.mu.RUnlock()
 			if winnerBlocked {
 				tm.logger.Warn("promotion refused: split-brain winner is mid-keyring-rotation",
@@ -2679,6 +2755,11 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
 					"sites", []string{winner})
 				tm.recordRestoreReclonePromotionRefused([]string{winner})
+				tm.clearKeyringRotationBlockedDirty()
+				return
+			}
+			if winnerLost {
+				tm.refuseOwnLossPromotion([]string{winner})
 				tm.clearKeyringRotationBlockedDirty()
 				return
 			}
@@ -2715,6 +2796,9 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
 				"sites", refused)
 			tm.recordRestoreReclonePromotionRefused(refused)
+		}
+		if refused := tm.ownLossCandidates(); len(refused) > 0 {
+			tm.refuseOwnLossPromotion(refused)
 		}
 	}
 	if promote == "" && (strings.Contains(action.Alert, "UnsealReason=Rotation") || len(tm.rotationBlockedCandidates()) > 0 && action.Reason == "NoPrimary") {
@@ -2798,6 +2882,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.recordKeyringPromotionDecision(nil, nil)
 		}
 		tm.recordRestoreReclonePromotionRefused(nil)
+		tm.recordOwnLossPromotionRefused(nil)
 		tm.clearKeyringRotationBlockedDirty()
 
 		// Pick an old primary for fencing: prefer the last failover
@@ -2986,7 +3071,7 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 			return false
 		}
 		tm.mu.RLock()
-		winnerBlocked := tm.keyringRotationBlockedLocked(winner) || tm.restoreReclonePendingLocked(winner)
+		winnerBlocked := tm.keyringRotationBlockedLocked(winner) || tm.restoreReclonePendingLocked(winner) || tm.ownLossLocked(winner)
 		tm.mu.RUnlock()
 		if winnerBlocked {
 			return false
@@ -3097,6 +3182,9 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 		name string
 		gtid mysql.GTIDSet
 		ok   bool
+		// uuid is the candidate's server_uuid, "" when its checker cannot
+		// report it.
+		uuid string
 	}
 
 	infos := make([]candidateInfo, len(candidates))
@@ -3115,21 +3203,31 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 			defer wg.Done()
 			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			raw, err := checker.GetGtidExecuted(queryCtx)
+			snap, identityKnown, err := readSiteGTIDSnapshot(queryCtx, checker)
 			if err != nil {
 				tm.logger.Warn("failover picker: failed to query GTID", "site", infos[i].name, "error", err)
 				return
 			}
-			parsed, err := mysql.ParseGTIDSet(raw)
+			parsed, err := mysql.ParseGTIDSet(snap.GtidExecuted)
 			if err != nil {
 				tm.logger.Warn("failover picker: failed to parse GTID", "site", infos[i].name, "error", err)
 				return
 			}
 			infos[i].gtid = parsed
 			infos[i].ok = true
+			if identityKnown {
+				infos[i].uuid = snap.ServerUUID
+			}
 		}()
 	}
+	// The other sites are read too (a disaster-recovery site, a reader,
+	// the failed primary if it answers again): one of them may hold
+	// transactions a candidate issued and no longer has
+	// (refuseOwnLossCandidate). They never hold the decision for longer
+	// than ownLossWitnessGrace.
+	collectWitnesses := tm.readOwnLossWitnesses(ctx, candidates)
 	wg.Wait()
+	witnesses := collectWitnesses()
 
 	tm.mu.RLock()
 	lastPromotionRaw := tm.promotionGtidExecuted
@@ -3145,6 +3243,33 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 				"promotionGtid", lastPromotionRaw, "reason", reason)
 			infos[i].ok = false
 		}
+	}
+	// A candidate that lacks transactions it issued itself, by the
+	// evidence of any site that answers, is no candidate: its next write
+	// would be issued under a GTID that already names another
+	// transaction.
+	sets := make(map[string]mysql.GTIDSet, len(infos)+len(witnesses))
+	for name, set := range witnesses {
+		sets[name] = set
+	}
+	for i := range infos {
+		if infos[i].ok {
+			sets[infos[i].name] = infos[i].gtid
+		}
+	}
+	var lostCandidates []string
+	for i := range infos {
+		if !infos[i].ok || infos[i].uuid == "" {
+			continue
+		}
+		if tm.refuseOwnLossCandidate(infos[i].name, infos[i].uuid, infos[i].gtid, sets) {
+			infos[i].ok = false
+			lostCandidates = append(lostCandidates, infos[i].name)
+		}
+	}
+	if len(lostCandidates) > 0 {
+		tm.refuseOwnLossPromotion(lostCandidates)
+		tm.RequestStatusRefresh()
 	}
 
 	// A candidate with a recorded divergence block holds transactions the
@@ -3487,6 +3612,14 @@ func (tm *TopologyManager) SetRecloneSiteFor(site, owner string) bool {
 			(tm.bootstrapPhase == BootstrapPhaseCloning || tm.bootstrapPhase == BootstrapPhaseRestarting || tm.bootstrapPhase == BootstrapPhaseSetupRepl)
 		if owner != "" && tm.reclonePendingOwner == "" && !running {
 			tm.reclonePendingOwner = owner
+		}
+		if tm.reclonePendingOwner == recloneOwnerOwnLoss && !running {
+			// The operator's own request for a site that lost its
+			// transactions: an administrator's or a restore queue's
+			// request for the same site takes it over, so its annotation
+			// is consumed and its queue told when the clone ends.
+			tm.reclonePendingOwner = owner
+			return true
 		}
 		return false
 	}
@@ -4676,7 +4809,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 			}
 		}
 		var recloneCallbackErr error
-		if source == "reclone" && tm.RecloneCompleteCallback != nil {
+		if source == "reclone" && tm.RecloneCompleteCallback != nil && recloneOwner != recloneOwnerOwnLoss {
 			outcome := RecloneOutcome{Owner: recloneOwner, Err: err}
 			if callbackErr := tm.RecloneCompleteCallback(ctx, recipient, outcome); callbackErr != nil {
 				tm.logger.Error("could not consume reclone annotation after bootstrap attempt",
@@ -4697,6 +4830,11 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 			tm.bootstrapFailureResolved = false
 			tm.bootstrapErr = err
 			tm.bootstrapFailedTarget = recipient
+			if rec := tm.ownLoss[recipient]; rec != nil {
+				// The operator asks again for a site that lacks its own
+				// transactions, but not at poll frequency.
+				rec.recloneRetryAfter = tm.clock.Now().Add(ownLossRecloneRetryDelay)
+			}
 			tm.logger.Error("bootstrap failed", "source", source, "error", err)
 		} else {
 			tm.bootstrapPhase = BootstrapPhaseDone
@@ -4725,7 +4863,7 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 	// CLONE but failed at SetupReplication). If the primary's GTID set contains
 	// the replica's, the data is already in sync and we can skip directly to
 	// replication setup.
-	if allowSkipClone && tm.canSkipClone(ctx, primary, replica) {
+	if allowSkipClone && tm.canSkipClone(ctx, primary, replica, replicaSite) {
 		tm.logger.Info("replica already has primary data (prior clone detected), skipping clone phase")
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseSetupRepl
@@ -4745,6 +4883,8 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 	// new server_uuid on the restart, and the check after the clone
 	// compares against this one.
 	uuidBefore := tm.cloneServerUUIDBefore(ctx, replica, replicaSite)
+	// The identity the site gives up is one it issued transactions under.
+	tm.noteSiteServerUUID(ctx, replicaSite, uuidBefore)
 	// ... and durably, before the clone is issued: a clone can finish
 	// after this manager is gone, and the check must still be made.
 	if err := tm.recordCloneIdentity(ctx, replicaSite, uuidBefore, prevClone, prevErr); err != nil {
@@ -4795,6 +4935,9 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		return fmt.Errorf("clone: %w", verifyErr)
 	}
 	tm.cloneCompletedInProcess(ctx, replica, replicaSite, uuidBefore)
+	// The recipient is a copy of the donor now: whatever it lacked of its
+	// own transactions it holds again.
+	tm.clearOwnLossAfterClone(replicaSite)
 
 	// Phase 3: Configure and start replication.
 	tm.mu.Lock()
@@ -4890,12 +5033,12 @@ func (tm *TopologyManager) verifyCloneOutcome(ctx context.Context, donor, recipi
 // recipient/replica GTID set, meaning the recipient is equal to or behind the
 // donor and cannot contain extra divergent transactions. Recipient supersets,
 // disjoint sets, empty sets, and malformed sets force a destructive clone.
-func (tm *TopologyManager) canSkipClone(ctx context.Context, primary, replica mysql.Checker) bool {
+func (tm *TopologyManager) canSkipClone(ctx context.Context, primary, replica mysql.Checker, replicaSite string) bool {
 	pRaw, err := primary.GetGtidExecuted(ctx)
 	if err != nil {
 		return false
 	}
-	rRaw, err := replica.GetGtidExecuted(ctx)
+	rSnap, identityKnown, err := readSiteGTIDSnapshot(ctx, replica)
 	if err != nil {
 		return false
 	}
@@ -4903,11 +5046,24 @@ func (tm *TopologyManager) canSkipClone(ctx context.Context, primary, replica my
 	if err != nil || pGtid.IsEmpty() {
 		return false
 	}
-	rGtid, err := mysql.ParseGTIDSet(rRaw)
+	rGtid, err := mysql.ParseGTIDSet(rSnap.GtidExecuted)
 	if err != nil || rGtid.IsEmpty() {
 		return false
 	}
-	return pGtid.Contains(rGtid)
+	if !pGtid.Contains(rGtid) {
+		return false
+	}
+	// A recipient that lacks transactions it issued itself is a subset
+	// too, and replication would never fill that hole: clone.
+	if identityKnown {
+		uuids := tm.noteSiteServerUUID(ctx, replicaSite, rSnap.ServerUUID)
+		if lost := ownLostTransactions(pGtid, rGtid, uuids); !lost.IsEmpty() {
+			tm.logger.Warn("clone not skipped: the recipient lacks transactions it issued itself",
+				"site", replicaSite, "lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()))
+			return false
+		}
+	}
+	return true
 }
 
 // setupReplicationForBootstrap runs only the replication setup phase of bootstrap.
@@ -5233,6 +5389,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	tm.mu.RLock()
 	targetBlocked := tm.keyringRotationBlockedLocked(target)
 	targetPending := tm.restoreReclonePendingLocked(target)
+	targetLost := tm.ownLossLocked(target)
 	tm.mu.RUnlock()
 	if targetBlocked {
 		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",
@@ -5244,6 +5401,10 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
 			"sites", []string{target})
 		tm.recordRestoreReclonePromotionRefused([]string{target})
+		return false
+	}
+	if targetLost {
+		tm.refuseOwnLossPromotion([]string{target})
 		return false
 	}
 
@@ -5260,12 +5421,13 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 
 	gtidCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	targetGtidStr, err := targetSite.mysql.GetGtidExecuted(gtidCtx)
+	targetSnap, targetIdentityKnown, err := readSiteGTIDSnapshot(gtidCtx, targetSite.mysql)
 	cancel()
 	if err != nil {
 		tm.logger.Warn("primary re-assert: failed to read target GTID_EXECUTED", "site", target, "error", err)
 		return false
 	}
+	targetGtidStr := targetSnap.GtidExecuted
 	targetGtid, err := mysql.ParseGTIDSet(targetGtidStr)
 	if err != nil {
 		tm.logger.Warn("primary re-assert: failed to parse target GTID_EXECUTED", "site", target, "error", err)
@@ -5347,6 +5509,25 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 			}
 			tm.logger.Warn("primary re-assert refused: peer has transactions the target lacks — divergence needs human review",
 				"site", s.name, "peerGtid", peerGtidStr, "targetGtid", targetGtidStr)
+			if targetIdentityKnown {
+				// When what the target lacks are transactions it issued
+				// itself, the target came back without part of its own
+				// history (an older volume): say so, and keep it out of
+				// promotion and replication until it is recloned from
+				// whichever site an administrator makes the primary.
+				uuids := tm.noteSiteServerUUID(ctx, target, targetSnap.ServerUUID)
+				if lost := ownLostTransactions(peerGtid, targetGtid, uuids); !lost.IsEmpty() {
+					tm.mu.Lock()
+					changed, lossLog := tm.settleOwnLossLocked(target, lost, s.name, divergenceDetectedByRecovery, uuids)
+					tm.mu.Unlock()
+					if lossLog != nil {
+						lossLog()
+					}
+					if changed {
+						tm.RequestStatusRefresh()
+					}
+				}
+			}
 			return false
 		}
 	}
@@ -5692,7 +5873,10 @@ func (tm *TopologyManager) sharesHistory(ctx context.Context, gtid mysql.GTIDSet
 }
 
 // initiateRecovery fences the old primary, compares GTID sets, and either
-// auto-recovers (no divergence) or blocks with metadata (divergence).
+// auto-recovers (no divergence), blocks with metadata (divergence), or,
+// for a site that lacks transactions it issued itself, records that and
+// leaves the site without replication for its reclone
+// (own_transactions_lost.go).
 //
 // Returns (changed, acted): acted=false means the site was merely SKIPPED
 // (empty datadir, pre-probe failure) without spending the one-recovery-
@@ -5775,12 +5959,16 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	}
 	// Re-read after the fence: this is the authoritative set the divergence
 	// comparison runs against (the fence guarantees it can no longer grow).
-	oldGtidStr, err := oldPrimary.mysql.GetGtidExecuted(ctx)
+	// It is read with the server's identity, so the set is known to be
+	// that server's: the comparison below also asks which of its own
+	// transactions the site lacks.
+	oldSnap, oldIdentityKnown, err := readSiteGTIDSnapshot(ctx, oldPrimary.mysql)
 	if err != nil {
 		tm.logger.Error("recovery: failed to get old primary GTID", "site", oldPrimary.name, "error", err)
 		tm.stampRecoveryBackoff(oldPrimary.name)
 		return false, true, false
 	}
+	oldGtidStr := oldSnap.GtidExecuted
 	newGtidStr, err := newPrimary.mysql.GetGtidExecuted(ctx)
 	if err != nil {
 		tm.logger.Error("recovery: failed to get new primary GTID", "site", newPrimary.name, "error", err)
@@ -5809,12 +5997,55 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		return false, false, false
 	}
 
+	// What the site lacks of the transactions it issued itself. Its
+	// receiver would drop them (they carry its own server_id), so a site
+	// with a non-empty set is never rejoined by replication, whatever
+	// else the comparison finds (own_transactions_lost.go). A checker
+	// that cannot report the server's identity (a test double) is not
+	// compared.
+	var lost mysql.GTIDSet
+	var ownUUIDs []string
+	if oldIdentityKnown {
+		ownUUIDs = tm.noteSiteServerUUID(ctx, oldPrimary.name, oldSnap.ServerUUID)
+		lost = ownLostTransactions(newGtid, oldGtid, ownUUIDs)
+	}
+
 	if newGtid.Contains(oldGtid) {
 		if tm.restorePeerHeldSite(oldPrimary.name) {
 			// Awaiting its post-restore reclone, replication held stopped:
 			// do not record a recovery that the replication gate refuses.
 			tm.logger.Info("old primary recovery deferred: replication held by an in-place restore", "site", oldPrimary.name)
 			return false, false, false
+		}
+		if oldIdentityKnown {
+			tm.mu.Lock()
+			lossChanged, lossLog := tm.settleOwnLossLocked(oldPrimary.name, lost, newPrimary.name, divergenceDetectedByRecovery, ownUUIDs)
+			if !lost.IsEmpty() {
+				// Not rejoined: replication is not configured, the site
+				// stays fenced, and requestOwnLossReclone reclones it. The
+				// marker only paces the next comparison; a divergence
+				// block that no longer holds is dropped with it.
+				rec := tm.recovery[oldPrimary.name]
+				if rec == nil {
+					rec = &siteRecovery{}
+					tm.recovery[oldPrimary.name] = rec
+				}
+				wasRecovering := rec.state != ""
+				rec.state = ""
+				rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
+				rec.divergentGtid, rec.divergentCount = "", 0
+				rec.detectedBy, rec.comparedTo = "", ""
+				tm.mu.Unlock()
+				metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
+				if lossLog != nil {
+					lossLog()
+				}
+				return lossChanged || wasRecovering, true, false
+			}
+			tm.mu.Unlock()
+			if lossLog != nil {
+				lossLog()
+			}
 		}
 		tm.logger.Info("no GTID divergence, auto-recovering old primary as replica", "site", oldPrimary.name)
 		tm.mu.Lock()
@@ -5876,10 +6107,23 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	rec.divergentCount = count
 	rec.detectedBy = divergenceDetectedByRecovery
 	rec.comparedTo = newPrimary.name
+	// A site can both hold transactions the primary lacks and lack some
+	// it issued. The block wins: those transactions need an
+	// administrator's decision, so nothing is cloned over them. The loss
+	// is reported beside it, and the reclone that resolves the block
+	// repairs it too.
+	lossChanged := false
+	var lossLog func()
+	if oldIdentityKnown {
+		lossChanged, lossLog = tm.settleOwnLossLocked(oldPrimary.name, lost, newPrimary.name, divergenceDetectedByRecovery, ownUUIDs)
+	}
 	tm.mu.Unlock()
+	if lossLog != nil {
+		lossLog()
+	}
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(float64(count))
-	return !sameReport, true, false
+	return !sameReport || lossChanged, true, false
 }
 
 // executeRecovery reconfigures the old primary as a replica of the new primary.
@@ -6081,6 +6325,12 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 		return false
 	}
 
+	if tm.recloneForSim != nil {
+		// A simulation models the clone's effect itself
+		// (SetRecloneRunnerForSim); everything up to here is the
+		// production path.
+		return tm.finishRecloneForSim(donor.name, recipient)
+	}
 	if !tm.startBootstrapByName(ctx, donor.name, recipient.name, "reclone") {
 		return false
 	}

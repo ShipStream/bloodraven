@@ -643,3 +643,43 @@ func gtidSetsEqual(a, b GTIDSet) bool {
 	}
 	return true
 }
+
+func TestGTIDSet_OriginatedBy(t *testing.T) {
+	const a, b = "3e11fa47-71ca-11e1-9e33-c80aa9429562", "4f22fb58-82db-22f2-af44-d91bb9530673"
+	set, err := ParseGTIDSet(a + ":1-10:20-30," + a + ":blue:1-5," + b + ":1-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		uuids []string
+		want  string
+	}{
+		{"one uuid, its tagged transactions included", []string{a}, a + ":1-10:20-30," + a + ":blue:1-5"},
+		{"the other uuid", []string{b}, b + ":1-7"},
+		{"both", []string{a, b}, a + ":1-10:20-30," + a + ":blue:1-5," + b + ":1-7"},
+		{"case and blanks in the wanted uuid", []string{" " + "3E11FA47-71CA-11E1-9E33-C80AA9429562"}, a + ":1-10:20-30," + a + ":blue:1-5"},
+		{"an unknown uuid", []string{"00000000-0000-0000-0000-000000000000"}, ""},
+		{"no uuid", nil, ""},
+		{"an empty uuid matches nothing", []string{""}, ""},
+		{"a tag is not a uuid", []string{"blue"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want, err := ParseGTIDSet(tt.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := set.OriginatedBy(tt.uuids...)
+			if got.String() != want.String() {
+				t.Fatalf("OriginatedBy(%v) = %q, want %q", tt.uuids, got.String(), want.String())
+			}
+		})
+	}
+	// The result does not alias the receiver.
+	got := set.OriginatedBy(b)
+	got[b][0].End = 99
+	if set[b][0].End != 7 {
+		t.Fatal("OriginatedBy aliases the receiver's intervals")
+	}
+}

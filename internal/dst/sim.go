@@ -1091,6 +1091,12 @@ func (c *Cluster) Tick() {
 				s.ioWant = false
 			} else if !c.fetchStalled[s.name] {
 				for u, n := range src.executed {
+					if ownsStream(s, u) {
+						// The receiver drops events that carry the
+						// replica's own server_id (ownloss.go): a site
+						// never refetches what it issued itself.
+						continue
+					}
 					from := s.retrieved[u]
 					if s.executed[u] > from {
 						from = s.executed[u]

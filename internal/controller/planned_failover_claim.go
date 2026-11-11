@@ -359,6 +359,10 @@ func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d
 		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetUnhealthy,
 			"site %q still awaits its post-restore reclone", req.Target), "", true
 	}
+	if rec := tm.ownLoss[req.Target]; rec != nil {
+		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetUnhealthy,
+			"site %q lacks %d transactions it issued itself (%s) and awaits its reclone", req.Target, rec.lostCount, truncateGtidSet(rec.lostGtid)), "", true
+	}
 	polled = tm.activeSiteLocked()
 	switch {
 	case polled == req.Target:

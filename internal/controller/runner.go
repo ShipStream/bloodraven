@@ -81,6 +81,9 @@ type managedTopology struct {
 	// lastRestoreReclonePromotionRefused is the same for promotions
 	// refused because the candidates await their post-restore reclone.
 	lastRestoreReclonePromotionRefused []string
+	// lastOwnLossPromotionRefused is the same for promotions refused
+	// because the candidates lack transactions they issued themselves.
+	lastOwnLossPromotionRefused []string
 	// lastBootstrapRefusedRestoreHold is the last site a
 	// BootstrapRefusedRestoreHold Event was emitted for.
 	lastBootstrapRefusedRestoreHold string
@@ -1126,6 +1129,18 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		if site.SourceConvergenceState != "" || site.SourceHost != "" {
 			tm.SetSourceConvergence(site.Name, site.SourceHost, site.SourceConvergenceState, site.SourceConvergenceReason)
 		}
+		if site.LostGtid != "" {
+			// A site that lacks transactions it issued itself stays out of
+			// replication and promotion across the restart; the next
+			// comparison with a confirmed primary confirms or clears it.
+			var lost int64
+			if site.LostTransactionCount != nil {
+				lost = *site.LostTransactionCount
+			}
+			tm.SetOwnTransactionsLost(site.Name, site.LostGtid, lost)
+			r.logger.Info("restored own transactions lost state from CR status",
+				"fg", nn, "site", site.Name, "lostGtid", site.LostGtid, "lostTransactions", lost)
+		}
 		if site.RecoveryState != v1alpha1.RecoveryStateBlocked && site.RecoveryState != v1alpha1.RecoveryStateInProgress && site.DivergentGtid == "" {
 			continue
 		}
@@ -1226,6 +1241,10 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// The recipient's server_uuid before each clone is recorded on the
 	// group, so a clone that finishes after this manager is still checked.
 	tm.SetCloneIdentityStore(r.cloneIdentityStore(nn))
+	// The server_uuids each site has run under are recorded on the group
+	// too: a site that returns on a volume from before a reclone is
+	// compared under the server_uuid it had afterwards.
+	tm.SetSiteIdentityStore(r.siteIdentityStore(nn))
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})
@@ -2009,6 +2028,16 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				Reason:  v1alpha1.ReasonDivergentTransactions,
 				Message: msg,
 			})
+		} else if msg := ownLossMessage(snap, freshFG.Name); msg != "" {
+			// A site that lost transactions it issued is out of
+			// replication and promotion until it is recloned: the group
+			// has one failover candidate fewer.
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
+				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
+				ObservedGeneration: gen, LastTransitionTime: now,
+				Reason:  v1alpha1.ReasonOwnTransactionsLost,
+				Message: msg,
+			})
 		}
 	}
 	// A refusal the reasons above outrank still shows, with its remedy.
@@ -2095,6 +2124,15 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			LastTransitionTime: now,
 			Reason:             v1alpha1.ReasonDivergentTransactions,
 			Message:            msg,
+		})
+	} else if snap.RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionRecoveryPending,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: gen,
+			LastTransitionTime: now,
+			Reason:             v1alpha1.ReasonOwnTransactionsLost,
+			Message:            ownLossMessage(snap, freshFG.Name),
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
@@ -2340,6 +2378,12 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 			st.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
 			st.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
 		}
+		st.Sites[i].LostGtid = s.LostGtid
+		st.Sites[i].LostTransactionCount = nil
+		if s.LostGtid != "" && s.LostTxnCount > 0 {
+			c := s.LostTxnCount
+			st.Sites[i].LostTransactionCount = &c
+		}
 	}
 
 	st.UpdatePhase = snap.UpdatePhase
@@ -2561,7 +2605,9 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	oldDetectedBy := make(map[string]v1alpha1.DivergenceDetector, len(existingStatus.Sites))
 	oldSet := make(map[string]string, len(existingStatus.Sites))
 	oldComparedTo := make(map[string]string, len(existingStatus.Sites))
+	oldLost := make(map[string]string, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
+		oldLost[s.Name] = s.LostGtid
 		oldState[s.Name] = s.RecoveryState
 		oldDetectedBy[s.Name] = s.DivergenceDetectedBy
 		oldSet[s.Name], oldComparedTo[s.Name] = s.DivergentGtid, s.DivergenceComparedTo
@@ -2573,6 +2619,27 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		return st == v1alpha1.RecoveryStateInProgress || st == v1alpha1.RecoveryStateBlocked
 	}
 	for _, s := range snap.Sites {
+		// A site lacks transactions it issued itself: announced when the
+		// report appears and when its set changes, and closed when it is
+		// gone. A report that ends with the site writable was not
+		// repaired: the site was made the primary as it is.
+		switch prev := oldLost[s.Name]; {
+		case s.LostGtid != "" && s.LostGtid != prev:
+			what := fmt.Sprintf("The operator does not replicate or promote it and reclones it (by hand: kubectl bloodraven reclone %s %s --cold)", fg.Name, s.Name)
+			if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+				what = fmt.Sprintf("It also holds transactions the primary lacks, so it is not recloned automatically: decide about those, then reclone it (kubectl bloodraven reclone %s %s)", fg.Name, s.Name)
+			}
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLost,
+				"%s lacks %d transactions it issued itself that %s holds (%s); replication cannot bring them back and a promotion would issue their GTIDs again. %s",
+				s.Name, s.LostTxnCount, lostHeldBy(s.LostComparedTo), truncateGtidHint(s.LostGtid), what)
+		case s.LostGtid == "" && prev != "" && s.State == state.StateWritable:
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLostSitePromoted,
+				"%s is the primary although it lacks transactions it issued itself (%s) and was not recloned; unless its server_uuid was changed first it issues their GTIDs again",
+				s.Name, truncateGtidHint(prev))
+		case s.LostGtid == "" && prev != "":
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventOwnTransactionsLostResolved,
+				"%s holds every transaction it issued again", s.Name)
+		}
 		// Data loss detected: RecoveryBlocked appeared where it wasn't before,
 		// or the periodic re-verification found the divergent set has CHANGED
 		// while the site stayed blocked (it respawned writable, took writes,
@@ -2611,7 +2678,10 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// marker cleared because the site became WRITABLE (promotion or
 		// re-assert) is not a recovery completion — the site did not rejoin
 		// as a replica — so no Normal event is emitted for it.
-		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable {
+		// Nor is a rejoin that turned into a reclone: the site lacks
+		// transactions it issued, and OwnTransactionsLost says so above.
+		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable &&
+			s.RecoveryState != v1alpha1.RecoveryStateRecloneRequired {
 			if oldState[s.Name] == v1alpha1.RecoveryStateBlocked && oldDetectedBy[s.Name] == divergenceDetectedByAudit {
 				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDivergenceResolved,
 					"Replica %s no longer holds transactions the primary lacks", s.Name)
@@ -2795,6 +2865,15 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 		}
 		mt.lastRestoreReclonePromotionRefused = append([]string(nil), snap.RestoreReclonePromotionRefused...)
 	}
+	if !stringSlicesEqual(snap.OwnLossPromotionRefused, mt.lastOwnLossPromotionRefused) {
+		if len(snap.OwnLossPromotionRefused) > 0 {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPromotionRefusedOwnTransactionsLost,
+				"automatic promotion refused: %s lack transactions they issued themselves (status.sites[].lostGtid) and would issue their GTIDs again; "+
+					"bring the primary back so they can be recloned from it",
+				strings.Join(snap.OwnLossPromotionRefused, ", "))
+		}
+		mt.lastOwnLossPromotionRefused = append([]string(nil), snap.OwnLossPromotionRefused...)
+	}
 	if snap.BootstrapRefusedRestoreHold != mt.lastBootstrapRefusedRestoreHold {
 		if snap.BootstrapRefusedRestoreHold != "" {
 			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventBootstrapRefusedRestoreHold,
@@ -2841,7 +2920,8 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSplitBrainDetected,
 			"Both sites are writable: %s", snap.Alert)
 	case v1alpha1.ReasonNoPrimary:
-		if strings.Contains(snap.Alert, "UnsealReason=Rotation") || strings.Contains(snap.Alert, "pending post-restore reclone") {
+		if strings.Contains(snap.Alert, "UnsealReason=Rotation") || strings.Contains(snap.Alert, "pending post-restore reclone") ||
+			strings.Contains(snap.Alert, "lacks transactions it issued itself") {
 			// KeyringPromotionRefused / PromotionRefusedPendingReclone is
 			// the specific Event; the generic "Both sites are read-only"
 			// wording is wrong for this shape (usually one unreachable
@@ -2995,6 +3075,46 @@ func divergenceDegradedMessage(snap TopologySnapshot) string {
 	}
 	return strings.Join(parts, "; ") +
 		". Replication may still be running. Ordered updates and planned failovers will not promote it: reclone it (kubectl bloodraven reclone) to discard the transactions, or make the primary contain them to keep them."
+}
+
+// ownLossMessage describes every site that lacks transactions it issued
+// itself, or returns "" when none does. It is the RecoveryPending and
+// Degraded message for OwnTransactionsLost.
+func ownLossMessage(snap TopologySnapshot, group string) string {
+	var parts []string
+	for _, s := range snap.Sites {
+		if s.LostGtid == "" {
+			continue
+		}
+		part := fmt.Sprintf("%s lacks %d transactions it issued itself that %s holds (%s)",
+			s.Name, s.LostTxnCount, lostHeldBy(s.LostComparedTo), truncateGtidHint(s.LostGtid))
+		byHand := fmt.Sprintf(" (by hand: kubectl bloodraven reclone %s %s --cold)", group, s.Name)
+		switch {
+		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
+			part += "; it also holds transactions the primary lacks, so it is not recloned automatically"
+			byHand = fmt.Sprintf(" (decide about those, then: kubectl bloodraven reclone %s %s)", group, s.Name)
+		case s.RecloneWaiting != "":
+			part += "; automatic reclone waiting: " + s.RecloneWaiting
+		default:
+			part += "; the operator is recloning it"
+		}
+		part += byHand
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "; ") +
+		". Replication cannot bring these transactions back (the site's receiver drops events with its own server_id), so the site is not replicated and not promoted until it is recloned."
+}
+
+// lostHeldBy names the site a lost set was computed against: the primary,
+// or, when no site was writable, the peer that holds the transactions.
+func lostHeldBy(comparedTo string) string {
+	if comparedTo == "" {
+		return "another site"
+	}
+	return comparedTo
 }
 
 func divergentPromotionMessage(note DivergentPromotion) string {

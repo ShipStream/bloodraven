@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"sort"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -189,5 +190,10 @@ func (tm *TopologyManager) cancelPendingReclone(site string) {
 		(tm.bootstrapPhase == BootstrapPhaseCloning || tm.bootstrapPhase == BootstrapPhaseRestarting || tm.bootstrapPhase == BootstrapPhaseSetupRepl)
 	if tm.reclonePendingSite == site && !running {
 		tm.reclonePendingSite, tm.reclonePendingOwner = "", ""
+		// A withdrawn request did not fail: a site that lacks its own
+		// transactions is asked for again as soon as nothing forbids it.
+		if rec := tm.ownLoss[site]; rec != nil {
+			rec.recloneRetryAfter = time.Time{}
+		}
 	}
 }

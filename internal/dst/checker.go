@@ -221,6 +221,7 @@ func (m *simChecker) CheckSuperReadOnly(_ context.Context) (bool, error) {
 func (m *simChecker) Promote(ctx context.Context) error {
 	// STOP REPLICA; RESET REPLICA ALL; SET GLOBAL read_only = 0.
 	return m.mutate(ctx, EvPromote, "", func() error {
+		m.c.checkOwnHistoryAtGrantLocked(m.s, !m.s.readOnly)
 		m.s.ioWant = false
 		m.s.sqlWant = false
 		m.s.ioErr = ""
@@ -306,6 +307,7 @@ func (m *simChecker) SetReadOnly(ctx context.Context, on bool) error {
 		if on {
 			m.s.readOnly = true
 		} else {
+			m.c.checkOwnHistoryAtGrantLocked(m.s, !m.s.readOnly)
 			m.s.readOnly = false
 			m.s.superReadOnly = false // read_only=OFF implies super_read_only=OFF
 		}

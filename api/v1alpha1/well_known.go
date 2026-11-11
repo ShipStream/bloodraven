@@ -190,6 +190,23 @@ const (
 	// Stability: Internal (may change).
 	CloneServerUUIDAnnotation = "bloodraven.shipstream.io/clone-server-uuid"
 
+	// ServerUUIDHistoryAnnotation records the server_uuid values the
+	// operator has seen each site run under, newest last (at most 8 per
+	// site). A site's replication receiver drops events that carry the
+	// site's own server_id, whatever server_uuid issued them, so a site
+	// whose volume came back from before a reclone lacks the transactions
+	// it issued under its later server_uuid and cannot get them by
+	// replication. The operator compares a returning site with the
+	// primary under every recorded server_uuid (status.sites[].lostGtid).
+	// Removing the annotation narrows that check to the site's current
+	// server_uuid until the operator has seen the others again.
+	//
+	// On: MysqlFailoverGroup.
+	// Writer: operator.
+	// Value: `{"<site>":["<uuid>", ...]}`.
+	// Stability: Internal (may change).
+	ServerUUIDHistoryAnnotation = "bloodraven.shipstream.io/server-uuid-history"
+
 	// PlannedFailoverStatusFenceAnnotation is bumped with a write
 	// conditioned on the resourceVersion an ambiguous status write was
 	// made against. Its success proves that write can never commit. Each

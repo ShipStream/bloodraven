@@ -50,6 +50,10 @@ type TrialResult struct {
 func (r TrialResult) Failed() bool { return len(r.Violations) > 0 }
 
 type trialRunner struct {
+	// siteIdentities is the durable record of the sites' server_uuids
+	// (ownloss.go).
+	siteIdentities simSiteIdentityStore
+
 	trial   Trial
 	cluster *Cluster
 	dns     *simDNS
@@ -359,6 +363,18 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 	// that started it, so the model sees one actor at a time and a trial
 	// replays exactly.
 	tm.ArchiveTail = simArchiveTail{r: r}
+	// A site that lacks transactions it issued itself is recloned. The
+	// operator's request and checkReclone's decisions are the production
+	// ones; the clone itself is the model's (Cluster.Reclone), applied
+	// inside the Poll that starts it. The server_uuids the sites have run
+	// under are recorded where they outlive every manager of the trial.
+	tm.SetSiteIdentityStore(&r.siteIdentities)
+	tm.SetRecloneRunnerForSim(r.cluster.Reclone)
+	// A promotion decision also reads the sites that are no candidates.
+	// In the model a read returns at once, so the grace it gives them is
+	// never spent; it is long here so that a loaded machine cannot change
+	// a trial.
+	tm.SetOwnLossWitnessGraceForSim(time.Minute)
 	tm.SetRecloneTailStepRunnerForSim(func(step func()) { step() })
 	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
 		// A wait that reaches its bound goes on to CLONE, which the model
@@ -754,6 +770,10 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 	case OpRecloneWait:
 		r.recloneWait = &simRecloneWait{site: op.Site, until: poll + op.N, sidecar: op.K}
 		r.recloneTold = nil
+	case OpRegressSite:
+		r.cluster.RegressSite(op.Site, op.K)
+	case OpRegressBoot:
+		r.cluster.Recover(op.Site, op.Fenced, false)
 	case OpFailFlush:
 		r.cluster.AddFlushFailures(op.Site, op.N)
 	case OpSlowFlush:

@@ -306,6 +306,31 @@ func (g GTIDSet) HasCommonUUIDs(other GTIDSet) bool {
 	return false
 }
 
+// OriginatedBy returns the transactions of g that were issued under one of
+// the given server UUIDs, tagged ones included. UUIDs are compared without
+// regard to case; an empty UUID matches nothing.
+func (g GTIDSet) OriginatedBy(uuids ...string) GTIDSet {
+	want := make(map[string]struct{}, len(uuids))
+	for _, u := range uuids {
+		if u = strings.ToLower(strings.TrimSpace(u)); u != "" {
+			want[u] = struct{}{}
+		}
+	}
+	result := make(GTIDSet)
+	if len(want) == 0 {
+		return result
+	}
+	for sid, intervals := range g {
+		if _, ok := want[strings.ToLower(sourceUUID(sid))]; !ok || len(intervals) == 0 {
+			continue
+		}
+		cp := make([]Interval, len(intervals))
+		copy(cp, intervals)
+		result[sid] = cp
+	}
+	return result
+}
+
 // sourceUUID returns the server UUID of a source identifier, dropping any
 // ":tag" suffix.
 func sourceUUID(sid string) string {

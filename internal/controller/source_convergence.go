@@ -91,6 +91,13 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 			continue
 		}
 
+		if tm.ownLossSite(site.name) {
+			// It lacks transactions it issued itself: its replication is
+			// not restarted or repointed, it is recloned
+			// (own_transactions_lost.go).
+			changed = tm.setSourceConvergence(site, repl, sourceConvergenceBlocked, sourceReasonOwnLoss, active.host) || changed
+			continue
+		}
 		if tm.restorePeerHeldSite(site.name) {
 			// Awaiting its post-restore reclone: its replication stays
 			// stopped (restore_peer_replication.go).
@@ -131,6 +138,8 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 			stateValue, reason := sourceConvergencePending, sourceReasonMutationFailed
 			if strings.Contains(err.Error(), string(sourceReasonGTIDDiverged)) {
 				stateValue, reason = sourceConvergenceBlocked, sourceReasonGTIDDiverged
+			} else if strings.Contains(err.Error(), string(sourceReasonOwnLoss)) || errors.Is(err, errOwnTransactionsLost) {
+				stateValue, reason = sourceConvergenceBlocked, sourceReasonOwnLoss
 			} else if strings.Contains(err.Error(), string(sourceReasonProbeFailed)) {
 				reason = sourceReasonProbeFailed
 			}
@@ -189,7 +198,7 @@ func (tm *TopologyManager) repointReplica(ctx context.Context, active, follower 
 	if err := tm.ensureGTIDContained(ctx, active, follower, "post-stop-gtid"); err != nil {
 		// The unchanged channel is safe to resume when the failure was a probe;
 		// divergence deliberately remains stopped for operator review.
-		if !strings.Contains(err.Error(), string(sourceReasonGTIDDiverged)) {
+		if !strings.Contains(err.Error(), string(sourceReasonGTIDDiverged)) && !strings.Contains(err.Error(), string(sourceReasonOwnLoss)) {
 			_ = follower.mysql.StartReplica(rollbackCtx)
 		}
 		return err
@@ -214,11 +223,12 @@ func (tm *TopologyManager) ensureGTIDContained(ctx context.Context, active, foll
 		tm.logSourceFailure(follower, active, stage, err)
 		return fmt.Errorf("%s: %w", sourceReasonProbeFailed, err)
 	}
-	followerRaw, err := follower.mysql.GetGtidExecuted(ctx)
+	followerSnap, identityKnown, err := readSiteGTIDSnapshot(ctx, follower.mysql)
 	if err != nil {
 		tm.logSourceFailure(follower, active, stage, err)
 		return fmt.Errorf("%s: %w", sourceReasonProbeFailed, err)
 	}
+	followerRaw := followerSnap.GtidExecuted
 	activeGTID, activeErr := mysql.ParseGTIDSet(activeRaw)
 	followerGTID, followerErr := mysql.ParseGTIDSet(followerRaw)
 	if activeErr != nil || followerErr != nil {
@@ -234,6 +244,22 @@ func (tm *TopologyManager) ensureGTIDContained(ctx context.Context, active, foll
 			"site", follower.name, "activeSite", active.name, "stage", stage,
 			"followerGtid", followerRaw, "activeGtid", activeRaw, "fg", tm.cfg.Name)
 		return fmt.Errorf("%s: active does not contain follower GTID", sourceReasonGTIDDiverged)
+	}
+	if identityKnown {
+		// A follower whose channel is about to be started or repointed
+		// and that lacks transactions it issued itself (it restarted on an
+		// older volume) would drop them again: record it and leave the
+		// channel alone. It is recloned.
+		uuids := tm.noteSiteServerUUID(ctx, follower.name, followerSnap.ServerUUID)
+		if lost := ownLostTransactions(activeGTID, followerGTID, uuids); !lost.IsEmpty() {
+			tm.mu.Lock()
+			_, lossLog := tm.settleOwnLossLocked(follower.name, lost, active.name, divergenceDetectedByAudit, uuids)
+			tm.mu.Unlock()
+			if lossLog != nil {
+				lossLog()
+			}
+			return fmt.Errorf("%s: the follower lacks transactions it issued itself", sourceReasonOwnLoss)
+		}
 	}
 	return nil
 }

@@ -71,7 +71,9 @@ const (
 	// MetadataVersionUnsupported: an internal annotation payload with an
 	// unknown schemaVersion), a per-site replication problem
 	// (ReplicationBroken, ReplicationError, ReplicationLagging,
-	// ReplicationSourceMismatch) or RestoreReclonePending.
+	// ReplicationSourceMismatch), RestoreReclonePending or
+	// OwnTransactionsLost (a site lacks transactions it issued itself and
+	// awaits its reclone).
 	ConditionDegraded = "Degraded"
 	// ConditionDivergentPromotion records that a site holding transactions its
 	// former primary lacked was promoted. Set by the operator, removed only by
@@ -232,7 +234,11 @@ const (
 	// ReasonOrderedUpdateStalled is the Updating condition reason, and the
 	// Warning Event reason, for an ordered update stopped on a site whose pod
 	// is not Ready.
-	ReasonOrderedUpdateStalled      = "OrderedUpdateStalled"
+	ReasonOrderedUpdateStalled = "OrderedUpdateStalled"
+	// ReasonOwnTransactionsLost is the RecoveryPending and Degraded reason,
+	// and the Warning Event reason, for a site that lacks transactions it
+	// issued itself (status.sites[].lostGtid).
+	ReasonOwnTransactionsLost       = "OwnTransactionsLost"
 	ReasonPITRUnsafeSettingRefused  = "PITRUnsafeSettingRefused"
 	ReasonRecoveryInProgress        = "RecoveryInProgress"
 	ReasonReplicationBroken         = "ReplicationBroken"
@@ -519,6 +525,7 @@ const (
 	// A site's status.sites[].recoveryState gates.
 	UnstableReasonRecoveryInProgress = RecoveryStateInProgress
 	UnstableReasonRecoveryBlocked    = RecoveryStateBlocked
+	UnstableReasonRecloneRequired    = RecoveryStateRecloneRequired
 
 	// Lease refusals only (423): another coordinated operation holds the
 	// group, the topology has not been persisted or observed yet, or it
