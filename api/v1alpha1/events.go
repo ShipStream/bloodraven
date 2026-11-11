@@ -334,14 +334,16 @@ const (
 	// writable, but cached data and sessions may be lost.
 	EventDragonflySessionsLost = "DragonflySessionsLost"
 	// A Dragonfly site other than the active one reports the master role.
-	// The operator reattaches it as a replica only if it never accepted
-	// writes (`connected_slaves=0` and `master_repl_offset=0`); otherwise
-	// it stays out of the active Service until you decide whether its data
-	// can be discarded. Repeated at most every 5 minutes per site.
+	// The operator reattaches it as a replica, which discards what it
+	// holds, only if no replica is attached to it (`connected_slaves=0`),
+	// and not while it holds keys and the active site holds none;
+	// otherwise it stays out of the active Service until you decide
+	// whether its data can be discarded. Repeated at most every 5 minutes
+	// per site.
 	EventDragonflyStaleMasterDetected = "DragonflyStaleMasterDetected"
-	// A stale Dragonfly master on a non-active site that provably never
-	// accepted writes (`connected_slaves=0` and `master_repl_offset=0`)
-	// was reattached as a replica of the active master.
+	// A stale Dragonfly master on a non-active site with no replica
+	// attached (`connected_slaves=0`) was reattached as a replica of the
+	// active master.
 	EventDragonflyOldSiteReconfigured = "DragonflyOldSiteReconfigured"
 	// Dragonfly advertises `REPLTAKEOVER` again after a
 	// `DragonflyReplTakeoverUnsupported` Warning, typically after an image

@@ -119,6 +119,16 @@ func (c *Client) InfoPersistence(ctx context.Context) (PersistenceInfo, error) {
 	return ParseInfoPersistence(body), nil
 }
 
+// KeyCount issues `INFO keyspace` and returns the number of keys in all
+// databases. `DBSIZE` counts the selected database only.
+func (c *Client) KeyCount(ctx context.Context) (int64, error) {
+	body, err := c.execReply(ctx, "INFO", "keyspace")
+	if err != nil {
+		return 0, err
+	}
+	return ParseInfoKeyspace(body)
+}
+
 // ReplicaOf wires this Dragonfly to follow the given master endpoint.
 // Uses the modern REPLICAOF verb (Dragonfly accepts SLAVEOF as an alias
 // but REPLICAOF is the canonical form).

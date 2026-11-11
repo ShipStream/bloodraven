@@ -3,6 +3,8 @@
 package dragonfly
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -46,17 +48,19 @@ type ReplicationInfo struct {
 	// SlaveReplOffset is the replica's applied offset (bytes).
 	SlaveReplOffset int64
 
-	// MasterReplOffset is the master's published offset (bytes). Both
-	// masters and replicas publish a value; the master's is the
-	// authoritative high-water mark for catch-up.
+	// MasterReplOffset is the `master_repl_offset` field, 0 when absent.
+	// Dragonfly v1.38 reports it in neither role (a master prints role,
+	// connected_slaves, its slaveN lines and master_replid; a replica
+	// prints slave_repl_offset), so 0 does not mean "nothing written".
 	MasterReplOffset int64
 
 	// ConnectedSlaves is the count of replicas currently linked to this
-	// instance. Reported on masters; meaningless on replicas. Used to
-	// gate stale-master auto-reconfigure: a stale master with
-	// connected_slaves=0 has provably never been used by any replica
-	// since restart, which combined with master_repl_offset=0 is the
-	// upstream-blessed signal that no writes were accepted.
+	// instance. Reported on masters; meaningless on replicas. One of the
+	// gates of the stale-master auto-reconfigure: an instance replicas
+	// are attached to is not reattached automatically. It is not a sign
+	// of an empty instance: a target just promoted from a replica holds
+	// the whole cache with connected_slaves=0. The key count
+	// (ParseInfoKeyspace) is what tells the two apart.
 	ConnectedSlaves int
 }
 
@@ -138,6 +142,67 @@ func ParseInfoPersistence(body string) PersistenceInfo {
 		}
 	}
 	return info
+}
+
+// ParseInfoKeyspace returns the number of keys an `INFO keyspace` body
+// reports, summed over its `dbN:keys=...` lines. A keyspace section with
+// no database line is an instance with no keys (Dragonfly v1.38 prints
+// `db0:keys=0` for one, Redis prints the header alone). A body with
+// neither the section header nor a database line, and a database line
+// without a readable `keys=` field, are errors: the callers decide on
+// "this instance holds nothing", and a reply this parser does not know
+// (a server without the section answers with an empty body) must not
+// read as that.
+func ParseInfoKeyspace(body string) (int64, error) {
+	var total int64
+	section := false
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), "# Keyspace") {
+			section = true
+		}
+	}
+	for _, line := range splitInfoLines(body) {
+		key, value, ok := splitKV(line)
+		if !ok || !isKeyspaceDB(key) {
+			continue
+		}
+		section = true
+		keys, found := int64(0), false
+		for _, field := range strings.Split(value, ",") {
+			name, v, ok := strings.Cut(strings.TrimSpace(field), "=")
+			if !ok || name != "keys" {
+				continue
+			}
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil || n < 0 {
+				return 0, fmt.Errorf("dragonfly: INFO keyspace: unreadable key count in %q", line)
+			}
+			keys, found = n, true
+		}
+		if !found {
+			return 0, fmt.Errorf("dragonfly: INFO keyspace: no key count in %q", line)
+		}
+		total += keys
+	}
+	if !section {
+		return 0, errors.New("dragonfly: INFO keyspace: no keyspace section in the reply")
+	}
+	return total, nil
+}
+
+// isKeyspaceDB reports whether key is a keyspace database name: "db"
+// followed by digits.
+func isKeyspaceDB(key string) bool {
+	digits, ok := strings.CutPrefix(key, "db")
+	if !ok || digits == "" {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // splitInfoLines splits an INFO response on either CRLF or LF and trims

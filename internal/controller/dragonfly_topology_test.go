@@ -33,6 +33,10 @@ type fakeDragonflyConn struct {
 	info       dragonfly.ReplicationInfo
 	persist    dragonfly.PersistenceInfo
 	persistErr error
+	// keys is the instance's key count; the zero value is an instance
+	// that holds nothing.
+	keys    int64
+	keysErr error
 
 	replicaOfErr  error
 	replicaOfArgs []string
@@ -64,6 +68,8 @@ func (c *fakeDragonflyConn) InfoReplication(_ context.Context) (dragonfly.Replic
 func (c *fakeDragonflyConn) InfoPersistence(_ context.Context) (dragonfly.PersistenceInfo, error) {
 	return c.persist, c.persistErr
 }
+
+func (c *fakeDragonflyConn) KeyCount(_ context.Context) (int64, error) { return c.keys, c.keysErr }
 
 func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32) error {
 	c.replicaOfArgs = []string{host, formatInt(port)}
@@ -1024,6 +1030,7 @@ func (panicOnInfoConn) InfoReplication(_ context.Context) (dragonfly.Replication
 func (panicOnInfoConn) InfoPersistence(_ context.Context) (dragonfly.PersistenceInfo, error) {
 	return dragonfly.PersistenceInfo{}, nil
 }
+func (panicOnInfoConn) KeyCount(_ context.Context) (int64, error)            { return 0, nil }
 func (panicOnInfoConn) ReplicaOf(_ context.Context, _ string, _ int32) error { return nil }
 func (panicOnInfoConn) ReplicaOfNoOne(_ context.Context) error               { return nil }
 func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
