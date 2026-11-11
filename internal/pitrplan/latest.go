@@ -191,7 +191,8 @@ func (p *planner) anyRowMeets(s Set) bool {
 //	oct(g) < R.observedAt − δ,  g ∉ R
 //
 // and refuses unless every such g is excluded (coverage.json records the
-// excluded ones as lost).
+// excluded ones as lost; lossEvidenceUnread completes that report with the
+// excluded transactions of rows the plan did not download).
 //
 // R's server became writable without g, so a history holding g is a branch
 // R's site abandoned (a lost tail) or a concurrent writer's. Whether R
@@ -233,6 +234,12 @@ func (p *planner) lossEvidence() error {
 			}
 		}
 	}
+	// The report is complete: excluded transactions in rows this plan did
+	// not download are flagged too.
+	evidence, err := p.lossEvidenceUnread(evidence)
+	if err != nil {
+		return err
+	}
 	// The divergence audit is negative evidence too.
 	audit := Set{}
 	var auditRows []string
@@ -263,6 +270,109 @@ func (p *planner) lossEvidence() error {
 	}
 	return refuse(pitrarchive.TokenArchiveDivergentHistory, "the newest archived state includes %s, which the divergence audit found missing from the history (rows %s); add them to excludeGtids to restore what the cluster kept, or restore to a timestamp",
 		audit.bounded(1024), strings.Join(auditRows, ", "))
+}
+
+// lossEvidenceUnread adds to evidence the excluded transactions that
+// lossEvidence's rule flags and whose copies are in rows the plan did not
+// download. Every active row of an unmarked site that may hold a member of
+// P = Λ ∖ (B ∪ X) is downloaded before the evidence pass, so a row left
+// unread holds, of Λ ∖ B, only excluded transactions: without this pass
+// coverage.json's lost list depended on where the files were cut (lost
+// A:2-5 in three files was reported as A:2,A:5).
+//
+// These transactions are in X, so they change the report and never the
+// answer, and the pass is built so that it cannot change the answer either:
+//
+//   - A row whose manifest commit times lie on one side of the record's
+//     bound is decided from them (hmin/hmax are bound to the row's content
+//     and are what every unread row is planned on).
+//   - A row whose times straddle the bound, or are unknown, is read for its
+//     commit times only (reportIndex). It is not ingested: its copies are
+//     not compared with others, it is in no order check and not in the
+//     closure, so a row read for the report cannot cause a refusal.
+//   - A row that cannot be read is left out of the report. A store error
+//     that says nothing about the row ends planning, as in every download.
+//
+// Members of B are outside this pass (X ∩ B = ∅): see
+// TestKnownLimitationLossEvidenceInsideTheBackup.
+func (p *planner) lossEvidenceUnread(evidence Set) (Set, error) {
+	if p.X.IsEmpty() {
+		return evidence, nil
+	}
+	for i := range p.promos {
+		if err := p.ctx.Err(); err != nil {
+			return nil, err
+		}
+		pr := &p.promos[i]
+		want := p.lambda.Intersect(p.X).Subtract(pr.set)
+		if want.IsEmpty() {
+			continue
+		}
+		bound := pr.rec.ObservedAt.UnixMicro() - p.delta
+		for _, r := range p.rows {
+			if r.Site == pr.site || r.State != RowActive || p.isMarked(r.Site) || p.files[r] != nil || p.failed[r] != nil ||
+				!r.Hints.Known || r.Hints.lo() >= bound || !r.Hints.GTIDs.Overlaps(want) {
+				continue
+			}
+			in := r.Hints.GTIDs.Intersect(want).Subtract(evidence)
+			if in.IsEmpty() {
+				continue
+			}
+			if r.Hints.hi() < bound {
+				evidence = evidence.Union(in)
+				continue
+			}
+			idx, err := p.reportIndex(r)
+			if err != nil {
+				return nil, err
+			}
+			if idx == nil {
+				continue
+			}
+			found := Set{}
+			for j, t := range idx.Txns {
+				if t.OCT < bound {
+					if g := idx.GTID(j); in.Has(g) {
+						found.add(g)
+					}
+				}
+			}
+			evidence = evidence.Union(found)
+		}
+	}
+	return evidence, nil
+}
+
+// reportIndex downloads and indexes r for a report, without making it one
+// of the planner's files. It returns nil when the row cannot be read. The
+// index stays charged to the budget and is kept: a later fetch of the row
+// ingests it instead of downloading the row again.
+func (p *planner) reportIndex(r *Row) (*FileIndex, error) {
+	if idx, ok := p.reportRead[r]; ok {
+		return idx, nil
+	}
+	if err := p.ctx.Err(); err != nil {
+		return nil, err
+	}
+	var idx *FileIndex
+	var err error
+	if sf, ok := p.fetcher.(StagingFetcher); ok {
+		idx, err = sf.FetchForPlan(p.ctx, r.ref(), false)
+	} else {
+		idx, err = p.fetcher.Fetch(p.ctx, r.ref())
+	}
+	p.plan.Downloaded++
+	if err != nil {
+		if p.ctx.Err() != nil {
+			return nil, p.ctx.Err()
+		}
+		if IsTransient(err) {
+			return nil, err
+		}
+		idx = nil
+	}
+	p.reportRead[r] = idx
+	return idx, nil
 }
 
 // maxSegmentGTIDBytes bounds a segment's canonical GTID set, which

@@ -1340,21 +1340,14 @@ func (o *propOracle) checkLatest(what string, X pitrplan.Set, plan *pitrplan.Pla
 	if l := lost.Intersect(plan.Lineage); !l.IsEmpty() {
 		t.Fatalf("%s: certified Λ %s although the model's loss evidence %s is not excluded", what, plan.Lineage, l)
 	}
-	// The planner reports the loss evidence it read (lossEvidence: a
-	// downloaded occurrence). A file that holds only excluded transactions
-	// is not downloaded, so the report holds every lost transaction of the
-	// head with a copy in a downloaded file, and nothing that was not lost.
-	o.mu.Lock()
-	read := map[pitrplan.RowRef]pitrplan.Row{}
-	for ref := range o.fetched {
-		if row, ok := o.rows[ref]; ok {
-			read[ref] = row
-		}
-	}
-	o.mu.Unlock()
+	// The planner reports every lost transaction of the head, whichever
+	// files it downloaded: a file that holds only excluded transactions is
+	// not needed for the replay, and its lost transactions are reported all
+	// the same (coverage.json's lost list once held only those with a copy
+	// in a downloaded file: lost B:2-5 was reported as B:2,B:5).
 	all := o.modelLost(pitrplan.Set{}).Intersect(plan.Lineage)
-	if want := o.modelLostIn(pitrplan.Set{}, read).Intersect(plan.Lineage); !plan.Lost.Contains(want) || !all.Contains(plan.Lost) || !p.dead.Contains(plan.Lost) {
-		t.Fatalf("%s: reported loss evidence %s; the model's is %s (%s in the downloaded files), the lost transactions %s", what, plan.Lost, all, want, p.dead)
+	if !plan.Lost.Equal(all) || !p.dead.Contains(plan.Lost) || !X.Contains(plan.Lost) {
+		t.Fatalf("%s: reported loss evidence %s; the model's is %s, the lost transactions %s", what, plan.Lost, all, p.dead)
 	}
 	o.checkSegments(what, X, plan)
 }

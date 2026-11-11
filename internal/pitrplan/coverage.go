@@ -110,7 +110,11 @@ type Coverage struct {
 	OnHistoryExclusions string `json:"onHistoryExclusions"`
 	// Lost is latest mode's loss evidence (D-37): on success, the flagged
 	// transactions X excludes; on a PITRArchiveDivergentHistory refusal,
-	// every flagged transaction.
+	// every flagged transaction. The list does not depend on which files
+	// the plan downloaded: an excluded transaction in a file the replay
+	// does not need is dated from the row's manifest commit times, or from
+	// a read of the file when those cannot decide. Only a file that cannot
+	// be read is left out.
 	Lost string `json:"lost"`
 
 	// Witness is set in timestamp mode with outcome TargetCovered.
