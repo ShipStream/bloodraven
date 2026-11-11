@@ -1,0 +1,11 @@
+mixed-schema	uncomparable	e4fdffc9-dd54-11f1-84ed-960509437cc4:3-12
+mixed-plain	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:13-15
+mixed-fk-setup	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:16-18
+mixed-fk-update-cascade	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:19
+mixed-fk-delete-cascade	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:20
+mixed-fk-set-null	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:21
+mixed-trigger	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:22
+mixed-partitioned	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:23-25
+mixed-nopk-fill	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:26
+mixed-nopk-update-key-order	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:27
+mixed-end	equal	e4fdffc9-dd54-11f1-84ed-960509437cc4:28

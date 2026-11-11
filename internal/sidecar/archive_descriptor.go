@@ -74,7 +74,8 @@ var errArchiveIdentityConfig = errors.New("archive identity")
 
 // manifestGuard is what this session last saw or wrote in a site manifest.
 // Saves never drop a history-integrity marker or a promotion record the
-// session knows about, even when a caller saves a stale copy (D-34, D-43).
+// session knows about, nor a record's promotion set or confirmation (issue
+// #269), even when a caller saves a stale copy (D-34, D-43).
 type manifestGuard struct {
 	marker     *HistoryIntegrity
 	promotions []PromotionRecord
@@ -101,9 +102,54 @@ func (g *manifestGuard) merge(base []PromotionRecord, appended string) []Promoti
 	if g.evicted == nil {
 		g.evicted = map[string]time.Time{}
 	}
-	out := mergePromotionRecords(g.filterEvicted(base, appended), g.promotions, g.evicted)
+	out := mergePromotionRecords(g.filterEvicted(g.withKnownEvidence(base), appended), g.promotions, g.evicted)
 	g.promotions = append([]PromotionRecord(nil), out...)
 	g.pruneEvicted()
+	return out
+}
+
+// withKnownEvidence returns base with the promotion set and the
+// confirmation the guard knows for a record that base holds without them.
+// Both are written once and never change, so a copy that lacks one is a
+// stale copy (loaded before the confirmation was saved), not a newer one.
+// base itself is not modified.
+func (g *manifestGuard) withKnownEvidence(base []PromotionRecord) []PromotionRecord {
+	var known map[string]PromotionRecord
+	for _, r := range g.promotions {
+		if r.PromotionGTIDExecuted != "" || !r.ConfirmedAt.IsZero() {
+			if known == nil {
+				known = map[string]PromotionRecord{}
+			}
+			known[promotionRecordKey(r)] = r
+		}
+	}
+	if known == nil {
+		return base
+	}
+	var out []PromotionRecord
+	for i, r := range base {
+		k, ok := known[promotionRecordKey(r)]
+		if !ok {
+			continue
+		}
+		merged := r
+		if merged.PromotionGTIDExecuted == "" {
+			merged.PromotionGTIDExecuted = k.PromotionGTIDExecuted
+		}
+		if merged.ConfirmedAt.IsZero() {
+			merged.ConfirmedAt, merged.ConfirmedGTIDAdded = k.ConfirmedAt, k.ConfirmedGTIDAdded
+		}
+		if merged == r {
+			continue
+		}
+		if out == nil {
+			out = append([]PromotionRecord(nil), base...)
+		}
+		out[i] = merged
+	}
+	if out == nil {
+		return base
+	}
 	return out
 }
 

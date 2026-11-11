@@ -24,7 +24,8 @@ func TestUninspectableRowDoesNotHotLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	row := ManifestEntry{Name: "mysql-bin.000001", ContentID: strings.Repeat("c", 64), LastEventTime: time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC)}
+	// The row's identity is not its object's: every inspection fails.
+	row := ManifestEntry{Name: "mysql-bin.000001", ID: strings.Repeat("c", 64), LastEventTime: time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC)}
 	key, _ := ArchiveEntryKey("binlogs", "iad", row)
 	row.RemotePath = key
 	if err := store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload))); err != nil {
@@ -61,10 +62,8 @@ func (s *inspectionFailureStore) Open(ctx context.Context, key string) (io.ReadC
 func archiverWithInspectionFailures(t *testing.T, mode string, logger *slog.Logger) (*BinlogArchiver, *inspectionFailureStore, ManifestEntry, string) {
 	t.Helper()
 	store := &inspectionFailureStore{ArchiveStore: newMemStore(), reads: make(map[string]int)}
-	row := ManifestEntry{Name: "mysql-bin.000000", ContentID: strings.Repeat("c", 64), LastEventTime: time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC)}
-	if mode == "corrupt" {
-		row.ContentID = ""
-	}
+	// A row with unbound coverage whose identity is not its object's.
+	row := ManifestEntry{Name: "mysql-bin.000000", ID: strings.Repeat("c", 64), LastEventTime: time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC)}
 	key, err := ArchiveEntryKey("binlogs", "iad", row)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +126,8 @@ func TestFailedRowDoesNotRepeatDuringHealthyBackfill(t *testing.T) {
 	}
 	m := &Manifest{Site: "iad", Files: []ManifestEntry{row}}
 	for i := 1; i <= 16; i++ {
-		f := ManifestEntry{Name: fmt.Sprintf("mysql-bin.%06d", i), LastEventTime: row.LastEventTime}
+		f := unboundRow(fmt.Sprintf("mysql-bin.%06d", i), payload)
+		f.LastEventTime = row.LastEventTime
 		key, err := ArchiveEntryKey("binlogs", "iad", f)
 		if err != nil {
 			t.Fatal(err)
@@ -171,17 +171,25 @@ func TestFailedRowDoesNotRepeatDuringHealthyBackfill(t *testing.T) {
 func TestInspectionFailureStateFollowsManifestIdentity(t *testing.T) {
 	a, store, row, key := archiverWithInspectionFailures(t, "mismatch", slog.Default())
 	a.maybeRunRetention(context.Background())
-	actual, err := fileContentID("testdata/incarnation-b.bin")
+	payload, err := os.ReadFile("testdata/incarnation-b.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	row.ContentID = actual
+	// The row is replaced by one that names the object's real identity.
+	row.ID = unboundRow(row.Name, payload).ID
+	repaired, err := ArchiveEntryKey("binlogs", "iad", row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(context.Background(), repaired, bytes.NewReader(payload), int64(len(payload))); err != nil {
+		t.Fatal(err)
+	}
 	if err := seedManifest(context.Background(), store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
 		t.Fatal(err)
 	}
 	a.lastRetentionRun = time.Time{}
 	a.maybeRunRetention(context.Background())
-	if store.reads[key] != 2 || len(a.retentionInspectionFailures) != 0 {
+	if store.reads[key] != 1 || store.reads[repaired] != 1 || len(a.retentionInspectionFailures) != 0 {
 		t.Fatal("changed proof identity inherited stale failure cooldown")
 	}
 	m, err := loadManifest(context.Background(), store, "binlogs", "iad")

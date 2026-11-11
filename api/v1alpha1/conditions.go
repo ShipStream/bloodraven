@@ -278,6 +278,7 @@ const (
 	ReasonDestinationUnavailable    = "DestinationUnavailable"
 	ReasonDumpKeySnapshotConflict   = "DumpKeySnapshotConflict"
 	ReasonForegroundDeletion        = "ForegroundDeletion"
+	ReasonHeldByRestore             = "HeldByRestore"
 	ReasonHeldByVerification        = "HeldByVerification"
 	ReasonLocationMismatch          = "LocationMismatch"
 	ReasonNoHealthySource           = "NoHealthySource"

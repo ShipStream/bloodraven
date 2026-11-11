@@ -167,14 +167,41 @@ type ArchiverStatusResponse struct {
 	// key revision. nil from a sidecar without PITR.
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count those rows in the site's own
-	// manifest.
+	// manifest. A divergent row is evidence, not an archiver error.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
+	// ReissuableGTIDs is the part of those rows' transactions the site's
+	// server no longer holds and could issue again (the ones under its own
+	// current server_uuid): "" when the last history audit found none, nil
+	// when there is no verdict (no audit yet, a server with no history, or
+	// a sidecar that predates the field).
+	ReissuableGTIDs *string `json:"reissuableGtids,omitempty"`
 	// PromotionRecordedAt is the confirmed promotion record of the current
 	// writable episode; zero while none is confirmed (or read-only).
 	PromotionRecordedAt time.Time `json:"promotionRecordedAt"`
 	// HistoryIntegrity is the site's persisted history-integrity marker.
 	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
+	// Tail is the site's archive tail (#264): whether every sealed local
+	// binary log the site has to archive is in its manifest. nil until a
+	// scan has read the binlog index, and from a sidecar that predates the
+	// field.
+	Tail *ArchiverTailResponse `json:"tail,omitempty"`
+}
+
+// ArchiverTailResponse mirrors internal/mysql.ArchiverTailStatus, the
+// `tail` block of /archiver/status.
+type ArchiverTailResponse struct {
+	// State is "Drained", "Pending" or "Blocked" (the
+	// internal/mysql.ArchiverTail* constants).
+	State string `json:"state"`
+	// ActiveFile is the binary log the server was writing at the last
+	// scan, and NewestSealedFile the one before it.
+	ActiveFile       string `json:"activeFile,omitempty"`
+	NewestSealedFile string `json:"newestSealedFile,omitempty"`
+	// PendingFiles counts the sealed files the site still has to archive.
+	PendingFiles int64 `json:"pendingFiles"`
+	// Reason says why the state is Blocked.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ArchiverStatus calls GET /archiver/status and decodes the JSON response.

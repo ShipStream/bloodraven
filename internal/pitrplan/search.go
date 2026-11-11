@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"runtime"
 	"sort"
 	"strings"
+	"unsafe"
 
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
@@ -109,24 +109,139 @@ func (h *keyHasher) set(s Set) uint64 {
 // searchHashOverride lets tests force hash collisions.
 var searchHashOverride func(sid string, gno int64) uint64
 
+// posRec is one search position: the additive hash and the size of its
+// key, and the exact-key bucket it belongs to.
+type posRec struct {
+	hash  uint64
+	count int64
+	// v is the position's node number.
+	v int32
+	// lead is the first position (in node order) of v's (hash, count)
+	// bucket when the bucket needs exact keys, else -1. Every position of
+	// such a bucket has the same lead, and equal keys share a bucket.
+	lead int32
+}
+
+// classRec is one exact-key class.
+type classRec struct {
+	// The key's spelling in the key store.
+	chunk, off, n uint32
+	// next is the next class of the same bucket (another key with the
+	// same hash and size: a collision), or -1.
+	next int32
+	// first is the file of the class's first member; multi says a member
+	// lies in another file.
+	first int32
+	multi bool
+}
+
+// classState is a class's BFS state.
+type classState struct {
+	pass      uint8
+	firstFile int32
+}
+
+// keyStore holds the spellings of the exact keys, appended to chunks that
+// never move.
+type keyStore struct {
+	b      *Budget
+	chunks []arr[byte]
+	used   int
+}
+
+const (
+	keyChunkMin = 4 << 10
+	keyChunkMax = 1 << 20
+	// keyChunkBytes is charged per chunk for its entry in the store.
+	keyChunkBytes = 64
+)
+
+// put appends s and returns its place.
+func (k *keyStore) put(s string) (chunk, off uint32, err error) {
+	if int64(len(s)) > math.MaxUint32 {
+		return 0, 0, refuse(pitrarchive.TokenPlanTooLarge, "a plan search key is %d bytes long; the planner's limit is %d", len(s), uint32(math.MaxUint32))
+	}
+	if last := len(k.chunks) - 1; last < 0 || k.used+len(s) > len(k.chunks[last].s) {
+		size := keyChunkMin
+		if last >= 0 {
+			size = min(2*len(k.chunks[last].s), keyChunkMax)
+		}
+		if err := k.b.Charge(keyChunkBytes, "plan search keys"); err != nil {
+			return 0, 0, err
+		}
+		c, err := alloc[byte](k.b, max(size, len(s)), "plan search keys")
+		if err != nil {
+			k.b.Release(keyChunkBytes)
+			return 0, 0, err
+		}
+		k.chunks = append(k.chunks, c)
+		k.used = 0
+	}
+	last := len(k.chunks) - 1
+	at := k.used
+	k.chunks[last].copyIn(at, unsafe.Slice(unsafe.StringData(s), len(s)))
+	k.used += len(s)
+	return uint32(last), uint32(at), nil //nolint:gosec // chunks and offsets are bounded by the store's size
+}
+
+// equal reports whether the key stored at (chunk, off) with length n is s.
+func (k *keyStore) equal(chunk, off, n uint32, s string) bool {
+	return int(n) == len(s) && string(k.chunks[chunk].s[off:off+n]) == s
+}
+
+func (k *keyStore) free() {
+	for i := range k.chunks {
+		k.chunks[i].free()
+		k.b.Release(keyChunkBytes)
+	}
+	k.chunks = nil
+}
+
+// searchGraph is the search's state. Every array that has an entry per
+// position or per class is allocated through the budget, so it can spill
+// (issue #266); free releases them all.
 type searchGraph struct {
-	files  []*file
-	off    []int // node offset of each file; off[len(files)] = N
-	stepOK [][]bool
-	inX    [][]bool
-	hash   []uint64
-	count  []int64
-	class  []int32
-	start  []bool
-	goal   []bool
-	// members[c] lists class c's nodes in node order; only classes with
-	// nodes in at least two files are kept.
-	members [][]int32
-	dist    []int32
+	b     *Budget
+	files []*file
+	off   []int // node offset of each file; off[len(files)] = N
+	// Per position v = off[k] + i (position i of file k, 0 ≤ i ≤ n_k).
+	// stepOK and inX describe transaction i, and are unused at i = n_k.
+	pos    arr[posRec]
+	stepOK arr[bool]
+	inX    arr[bool]
+	class  arr[int32]
+	start  arr[bool]
+	goal   arr[bool]
+	dist   arr[int32]
+	// Per class. members(c) lists class c's nodes in node order; only
+	// classes with nodes in at least two files have any.
+	classes vec[classRec]
+	keys    keyStore
+	memOff  arr[int32]
+	mem     arr[int32]
+}
+
+func (g *searchGraph) free() {
+	g.pos.free()
+	g.stepOK.free()
+	g.inX.free()
+	g.class.free()
+	g.start.free()
+	g.goal.free()
+	g.dist.free()
+	g.classes.free()
+	g.keys.free()
+	g.memOff.free()
+	g.mem.free()
 }
 
 func (g *searchGraph) fileOf(v int) int {
 	return sort.Search(len(g.files), func(k int) bool { return g.off[k+1] > v }) //nolint:gosec
+}
+
+// members are the nodes of class c, when it spans two files.
+func (g *searchGraph) members(c int32) []int32 {
+	return g.mem.s[g.memOff.s[c]:g.memOff.s[c+1]]
 }
 
 // search runs §4.6 for goal G. On failure the result still lists the
@@ -151,14 +266,17 @@ func (p *planner) search(goal Set) (*searchResult, error) {
 		res.files = nil
 		return res, nil
 	}
-	g, err := p.buildGraph(fs, goal, &held)
-	if err != nil {
+	g := &searchGraph{b: p.budget, files: fs, off: make([]int, len(fs)+1), classes: newVec[classRec](p.budget), keys: keyStore{b: p.budget}}
+	defer g.free()
+	if err := p.buildGraph(g, goal, &held); err != nil {
 		return res, err
 	}
-	p.bfs(g)
+	if err := p.bfs(g); err != nil {
+		return res, err
+	}
 	best := -1
-	for v, s := range g.start {
-		if s && g.dist[v] >= 0 && (best < 0 || g.dist[v] < g.dist[best]) {
+	for v, s := range g.start.s {
+		if s && g.dist.s[v] >= 0 && (best < 0 || g.dist.s[v] < g.dist.s[best]) {
 			best = v
 		}
 	}
@@ -171,23 +289,23 @@ func (p *planner) search(goal Set) (*searchResult, error) {
 	k := g.fileOf(v)
 	segStart := v - g.off[k]
 	var segs []rawSegment
-	for !g.goal[v] {
+	for !g.goal.s[v] {
 		i := v - g.off[k]
-		if i < g.files[k].n() && g.stepOK[k][i] && g.dist[v+1] == g.dist[v] {
+		if i < g.files[k].n() && g.stepOK.s[v] && g.dist.s[v+1] == g.dist.s[v] {
 			v++
 			continue
 		}
 		next := -1
-		if c := g.class[v]; c >= 0 && g.members[c] != nil {
-			for _, u := range g.members[c] {
-				if int(u) != v && g.fileOf(int(u)) != k && g.dist[u] == g.dist[v]-1 {
+		if c := g.class.s[v]; c >= 0 {
+			for _, u := range g.members(c) {
+				if int(u) != v && g.fileOf(int(u)) != k && g.dist.s[u] == g.dist.s[v]-1 {
 					next = int(u)
 					break
 				}
 			}
 		}
 		if next < 0 {
-			return res, fmt.Errorf("pitrplan: internal error: no successor at %s position %d (distance %d)", g.files[k].row.Label(), i, g.dist[v])
+			return res, fmt.Errorf("pitrplan: internal error: no successor at %s position %d (distance %d)", g.files[k].row.Label(), i, g.dist.s[v])
 		}
 		segs = append(segs, rawSegment{k, segStart, i})
 		v = next
@@ -199,7 +317,7 @@ func (p *planner) search(goal Set) (*searchResult, error) {
 	for _, s := range segs {
 		include := false
 		for i := s.start; i < s.end; i++ {
-			if !g.inX[s.file][i] {
+			if !g.inX.s[g.off[s.file]+i] {
 				include = true
 				break
 			}
@@ -212,8 +330,29 @@ func (p *planner) search(goal Set) (*searchResult, error) {
 	return res, nil
 }
 
-func (p *planner) buildGraph(fs []*file, goal Set, held *charges) (*searchGraph, error) {
-	g := &searchGraph{files: fs, off: make([]int, len(fs)+1)}
+// cmpBucket orders positions by (hash, |Key|, node): the positions of a
+// bucket are adjacent, in node order. cmpNode restores node order. Both
+// are strict total orders: node numbers are distinct.
+func cmpBucket(x, y posRec) int {
+	switch {
+	case x.hash != y.hash:
+		if x.hash < y.hash {
+			return -1
+		}
+		return 1
+	case x.count != y.count:
+		if x.count < y.count {
+			return -1
+		}
+		return 1
+	}
+	return int(x.v) - int(y.v)
+}
+
+func cmpNode(x, y posRec) int { return int(x.v) - int(y.v) }
+
+func (p *planner) buildGraph(g *searchGraph, goal Set, held *charges) error {
+	fs := g.files
 	// Besides the per-position arrays: one file's running key at a time
 	// (at most exec(f)), the hasher's coefficients per source identifier,
 	// and the spellings of B and G (review F047).
@@ -224,234 +363,336 @@ func (p *planner) buildGraph(fs []*file, goal Set, held *charges) (*searchGraph,
 		sources += int64(len(f.prev) + len(f.idx.SIDs))
 	}
 	n := g.off[len(fs)]
-	if err := held.charge(int64(n)*nodeBytes+keyBytes+sources*sourceBytes, "plan search positions"); err != nil {
-		return nil, err
+	// Nodes are numbered in int32.
+	if n > math.MaxInt32 {
+		return refuse(pitrarchive.TokenPlanTooLarge, "the plan search covers %d positions (one per transaction of every binlog file that holds a transaction of the backup or of the replay), and the planner's limit is %d; choose a backup closer to the target", n, math.MaxInt32)
 	}
+	if err := held.charge(keyBytes+sources*sourceBytes, "plan search positions"); err != nil {
+		return err
+	}
+	var err error
+	if g.pos, err = alloc[posRec](p.budget, n, "plan search positions"); err != nil {
+		return err
+	}
+	if g.stepOK, err = alloc[bool](p.budget, n, "plan search positions"); err != nil {
+		return err
+	}
+	if g.inX, err = alloc[bool](p.budget, n, "plan search positions"); err != nil {
+		return err
+	}
+	if g.class, err = alloc[int32](p.budget, n, "plan search positions"); err != nil {
+		return err
+	}
+	if g.start, err = alloc[bool](p.budget, n, "plan search positions"); err != nil {
+		return err
+	}
+	if g.goal, err = alloc[bool](p.budget, n, "plan search positions"); err != nil {
+		return err
+	}
+	if g.dist, err = alloc[int32](p.budget, n, "plan search positions"); err != nil {
+		return err
+	}
+	g.class.fill(0, n, -1)
 	h := &keyHasher{coeff: map[string][3]uint64{}, force: searchHashOverride}
-	g.hash, g.count = make([]uint64, n), make([]int64, n)
-	g.class, g.start, g.goal, g.dist = make([]int32, n), make([]bool, n), make([]bool, n), make([]int32, n)
 	allowed := p.lambda.Union(p.X)
 	for k, f := range fs {
 		key := f.prev.Subtract(p.X)
 		hv, cv := h.set(key), key.Count()
-		ok, inX := make([]bool, f.n()), make([]bool, f.n())
 		for i := 0; i <= f.n(); i++ {
 			v := g.off[k] + i
-			g.hash[v], g.count[v], g.class[v] = hv, cv, -1
+			g.pos.set(v, posRec{hash: hv, count: cv, v: int32(v), lead: -1}) //nolint:gosec // n fits int32
 			if i == f.n() {
 				break
 			}
 			gt := f.gtid(i)
-			ok[i] = allowed.Has(gt)
-			inX[i] = p.X.Has(gt)
-			if !inX[i] {
+			if allowed.Has(gt) {
+				g.stepOK.set(v, true)
+			}
+			if p.X.Has(gt) {
+				g.inX.set(v, true)
+			} else {
 				hv += h.term(gt.SID, gt.GNO)
 				cv++
 			}
 		}
-		g.stepOK, g.inX = append(g.stepOK, ok), append(g.inX, inX)
 	}
 	// Bucket positions by (hash, |Key|); a bucket spanning two files holds
-	// candidate jumps, which the exact compare below confirms.
+	// candidate jumps, and the buckets of B and of G hold the candidate
+	// starts and goals. The exact compare below confirms them. Positions
+	// are sorted into buckets and back into node order, so that both the
+	// bucketing and the sweep read the array in order: a spilled array is
+	// then read from disk in order too.
 	hB, cB, hG, cG := h.set(p.B), p.B.Count(), h.set(goal), goal.Count()
-	needed := make([]bool, n)
-	idx := make([]int32, n)
-	for v := range idx {
-		idx[v] = int32(v) //nolint:gosec // n is budget-bounded
-	}
-	sort.Slice(idx, func(a, b int) bool {
-		x, y := idx[a], idx[b]
-		if g.hash[x] != g.hash[y] {
-			return g.hash[x] < g.hash[y]
-		}
-		if g.count[x] != g.count[y] {
-			return g.count[x] < g.count[y]
-		}
-		return x < y
-	})
+	g.pos.sortFunc(cmpBucket)
+	leaders := 0
 	for a := 0; a < n; {
+		first := g.pos.s[a]
 		b := a + 1
-		for b < n && g.hash[idx[b]] == g.hash[idx[a]] && g.count[idx[b]] == g.count[idx[a]] {
+		for b < n && g.pos.s[b].hash == first.hash && g.pos.s[b].count == first.count {
 			b++
 		}
-		if b-a > 1 && g.fileOf(int(idx[a])) != g.fileOf(int(idx[b-1])) {
-			for _, v := range idx[a:b] {
-				needed[v] = true
+		spans := b-a > 1 && g.fileOf(int(first.v)) != g.fileOf(int(g.pos.s[b-1].v))
+		if spans || (first.hash == hB && first.count == cB) || (first.hash == hG && first.count == cG) {
+			leaders++
+			for c := a; c < b; c++ {
+				rec := g.pos.s[c]
+				rec.lead = first.v
+				g.pos.set(c, rec)
 			}
 		}
 		a = b
 	}
-	for v := 0; v < n; v++ {
-		if (g.hash[v] == hB && g.count[v] == cB) || (g.hash[v] == hG && g.count[v] == cG) {
-			needed[v] = true
-		}
-	}
+	g.pos.sortFunc(cmpNode)
 	// Exact keys: sweep each file once, materializing Key only at the
-	// needed positions; equal keys share one class. A class records the
-	// file of its first member and whether a member lies in another file;
-	// only such spanning classes keep a member list (a jump needs two
-	// files).
+	// positions of those buckets; equal keys share one class. A class
+	// records the file of its first member and whether a member lies in
+	// another file; only such spanning classes get a member list (a jump
+	// needs two files). The classes of a bucket are chained from the class
+	// of its first position, so a key is compared only with the keys that
+	// share its hash and size: one, unless hashes collide.
 	bStr, gStr := p.B.String(), goal.String()
 	if err := held.charge(int64(len(bStr)+len(gStr)), "plan search keys"); err != nil {
-		return nil, err
+		return err
 	}
-	classes := map[string]int32{}
-	var classFirst []int32
-	var classMulti []bool
+	if err := g.classes.reserve(leaders, "plan search keys"); err != nil {
+		return err
+	}
 	for k, f := range fs {
 		cur := f.prev.Subtract(p.X)
 		for i := 0; i <= f.n(); i++ {
 			v := g.off[k] + i
-			if needed[v] {
+			if lead := g.pos.s[v].lead; lead >= 0 {
 				s := cur.String()
-				switch s {
-				case bStr:
-					g.start[v] = true
+				if s == bStr {
+					g.start.set(v, true)
 				}
 				if s == gStr {
-					g.goal[v] = true
+					g.goal.set(v, true)
 				}
-				c, ok := classes[s]
-				if !ok {
-					if err := held.charge(int64(len(s))+classBytes, "plan search keys"); err != nil {
-						return nil, err
-					}
-					c = int32(len(classFirst)) //nolint:gosec // bounded by n
-					classes[s] = c
-					classFirst = append(classFirst, int32(k)) //nolint:gosec // bounded by the file count
-					classMulti = append(classMulti, false)
-				} else if classFirst[c] != int32(k) { //nolint:gosec
-					classMulti[c] = true
+				c, err := g.classOf(s, int32(v), lead, int32(k)) //nolint:gosec // bounded by n and the file count
+				if err != nil {
+					return err
 				}
-				g.class[v] = c
+				g.class.set(v, c)
 			}
-			if i < f.n() && !g.inX[k][i] {
+			if i < f.n() && !g.inX.s[v] {
 				cur.add(f.gtid(i))
 			}
 		}
 	}
-	g.members = make([][]int32, len(classFirst))
+	// Member lists, by counting: memOff[c] is where class c's list starts.
+	nc := g.classes.n
+	classes := g.classes.items()
+	if g.memOff, err = alloc[int32](p.budget, nc+1, "plan search keys"); err != nil {
+		return err
+	}
 	for v := 0; v < n; v++ {
-		if c := g.class[v]; c >= 0 && classMulti[c] {
-			g.members[c] = append(g.members[c], int32(v)) //nolint:gosec
+		if c := g.class.s[v]; c >= 0 && classes[c].multi {
+			g.memOff.set(int(c)+1, g.memOff.s[c+1]+1)
 		}
 	}
+	for c := 0; c < nc; c++ {
+		g.memOff.set(c+1, g.memOff.s[c+1]+g.memOff.s[c])
+	}
+	if g.mem, err = alloc[int32](p.budget, int(g.memOff.s[nc]), "plan search keys"); err != nil {
+		return err
+	}
+	// Filling advances memOff[c] to the end of c's list, which is where
+	// c+1's starts: shifting the offsets up by one class restores them.
+	for v := 0; v < n; v++ {
+		if c := g.class.s[v]; c >= 0 && classes[c].multi {
+			at := g.memOff.s[c]
+			g.mem.set(int(at), int32(v)) //nolint:gosec
+			g.memOff.set(int(c), at+1)
+		}
+	}
+	for c := nc; c > 0; c-- {
+		g.memOff.set(c, g.memOff.s[c-1])
+	}
+	if nc > 0 {
+		g.memOff.set(0, 0)
+	}
 	probeMemory()
-	// The probe measures the build's peak: keep its locals live.
-	runtime.KeepAlive(classes)
-	runtime.KeepAlive(classFirst)
-	runtime.KeepAlive(classMulti)
-	runtime.KeepAlive(needed)
-	runtime.KeepAlive(idx)
-	return g, nil
+	return nil
+}
+
+// classOf returns the class of the key s at position v of file k, whose
+// bucket starts at position lead, creating the class when s is new.
+func (g *searchGraph) classOf(s string, v, lead, k int32) (int32, error) {
+	last := int32(-1)
+	if lead != v {
+		c := g.class.s[lead]
+		if c < 0 {
+			return 0, fmt.Errorf("pitrplan: internal error: position %d follows its bucket's first position %d, which has no class", v, lead)
+		}
+		for ; c >= 0; c = g.classes.items()[c].next {
+			rec := g.classes.items()[c]
+			if g.keys.equal(rec.chunk, rec.off, rec.n, s) {
+				if rec.first != k && !rec.multi {
+					rec.multi = true
+					g.classes.set(int(c), rec)
+				}
+				return c, nil
+			}
+			last = c
+		}
+	}
+	chunk, off, err := g.keys.put(s)
+	if err != nil {
+		return 0, err
+	}
+	rec := classRec{chunk: chunk, off: off, n: uint32(len(s)), next: -1, first: k} //nolint:gosec // put bounds the length
+	c := int32(g.classes.n)                                                        //nolint:gosec // at most one class per position
+	if err := g.classes.push(rec, "plan search keys"); err != nil {
+		return 0, err
+	}
+	if last >= 0 {
+		rec := g.classes.items()[last]
+		rec.next = c
+		g.classes.set(int(last), rec)
+	}
+	return c, nil
 }
 
 // bfs computes d(v), the fewest jumps from v to a goal, by a 0-1 BFS over
 // the reversed edges. Each class is relaxed at most twice: from its first
 // finalized node (for the other files' members), and from the first
 // finalized node of another file (for the first node's file).
-func (p *planner) bfs(g *searchGraph) {
-	n := len(g.dist)
-	for v := range g.dist {
-		g.dist[v] = -1
+func (p *planner) bfs(g *searchGraph) error {
+	n := len(g.dist.s)
+	g.dist.fill(0, n, -1)
+	done, err := alloc[bool](p.budget, n, "plan search positions")
+	if err != nil {
+		return err
 	}
-	done := make([]bool, n)
-	type classState struct {
-		pass      uint8
-		firstFile int32
+	defer done.free()
+	state, err := alloc[classState](p.budget, g.classes.n, "plan search keys")
+	if err != nil {
+		return err
 	}
-	state := make([]classState, len(g.members))
-	dq := newDeque(n)
+	defer state.free()
+	dq, err := newDeque(p.budget, n)
+	if err != nil {
+		return err
+	}
+	defer dq.free()
 	for v := 0; v < n; v++ {
-		if g.goal[v] {
-			g.dist[v] = 0
-			dq.pushBack(int32(v)) //nolint:gosec
-		}
-	}
-	relax := func(u int, d int32, front bool) {
-		if g.dist[u] < 0 || g.dist[u] > d {
-			g.dist[u] = d
-			if front {
-				dq.pushFront(int32(u)) //nolint:gosec
-			} else {
-				dq.pushBack(int32(u)) //nolint:gosec
+		if g.goal.s[v] {
+			g.dist.set(v, 0)
+			if err := dq.pushBack(int32(v)); err != nil { //nolint:gosec
+				return err
 			}
 		}
+	}
+	relax := func(u int, d int32, front bool) error {
+		if g.dist.s[u] < 0 || g.dist.s[u] > d {
+			g.dist.set(u, d)
+			if front {
+				return dq.pushFront(int32(u)) //nolint:gosec
+			}
+			return dq.pushBack(int32(u)) //nolint:gosec
+		}
+		return nil
 	}
 	for !dq.empty() {
 		v := int(dq.popFront())
-		if done[v] {
+		if done.s[v] {
 			continue
 		}
-		done[v] = true
+		done.set(v, true)
 		k := g.fileOf(v)
-		if i := v - g.off[k]; i > 0 && g.stepOK[k][i-1] {
-			relax(v-1, g.dist[v], true)
+		if i := v - g.off[k]; i > 0 && g.stepOK.s[v-1] {
+			if err := relax(v-1, g.dist.s[v], true); err != nil {
+				return err
+			}
 		}
-		c := g.class[v]
-		if c < 0 || g.members[c] == nil {
+		c := g.class.s[v]
+		if c < 0 || len(g.members(c)) == 0 {
 			continue
 		}
-		st := &state[c]
+		st := state.s[c]
 		switch {
 		case st.pass == 0:
-			st.pass, st.firstFile = 1, int32(k) //nolint:gosec // bounded by the file count
-			for _, u := range g.members[c] {
+			state.set(int(c), classState{pass: 1, firstFile: int32(k)}) //nolint:gosec // bounded by the file count
+			for _, u := range g.members(c) {
 				if g.fileOf(int(u)) != k {
-					relax(int(u), g.dist[v]+1, false)
+					if err := relax(int(u), g.dist.s[v]+1, false); err != nil {
+						return err
+					}
 				}
 			}
 		case st.pass == 1 && int32(k) != st.firstFile: //nolint:gosec
-			st.pass = 2
-			for _, u := range g.members[c] {
+			state.set(int(c), classState{pass: 2, firstFile: st.firstFile})
+			for _, u := range g.members(c) {
 				if g.fileOf(int(u)) == int(st.firstFile) {
-					relax(int(u), g.dist[v]+1, false)
+					if err := relax(int(u), g.dist.s[v]+1, false); err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
 	probeMemory()
-	runtime.KeepAlive(done)
-	runtime.KeepAlive(state)
-	runtime.KeepAlive(dq)
+	return nil
 }
 
+// deque is a ring buffer of nodes that doubles when it is full.
 type deque struct {
-	buf        []int32
+	buf        arr[int32]
 	head, size int
 }
 
-func newDeque(capHint int) *deque { return &deque{buf: make([]int32, max(16, capHint))} }
+func newDeque(b *Budget, capHint int) (*deque, error) {
+	buf, err := alloc[int32](b, max(16, capHint), "plan search queue")
+	if err != nil {
+		return nil, err
+	}
+	return &deque{buf: buf}, nil
+}
+
+func (d *deque) free() { d.buf.free() }
 
 func (d *deque) empty() bool { return d.size == 0 }
 
-func (d *deque) grow() {
-	if d.size < len(d.buf) {
-		return
+func (d *deque) grow() error {
+	if d.size < len(d.buf.s) {
+		return nil
 	}
-	nb := make([]int32, 2*len(d.buf))
-	for i := 0; i < d.size; i++ {
-		nb[i] = d.buf[(d.head+i)%len(d.buf)]
+	nb, err := alloc[int32](d.buf.b, 2*len(d.buf.s), "plan search queue")
+	if err != nil {
+		return err
 	}
+	// Unrolled from the head: the two runs of the ring, in order.
+	tail := d.buf.s[d.head:]
+	nb.copyIn(0, tail)
+	nb.copyIn(len(tail), d.buf.s[:d.head])
+	d.buf.free()
 	d.buf, d.head = nb, 0
+	return nil
 }
 
-func (d *deque) pushBack(v int32) {
-	d.grow()
-	d.buf[(d.head+d.size)%len(d.buf)] = v
+func (d *deque) pushBack(v int32) error {
+	if err := d.grow(); err != nil {
+		return err
+	}
+	d.buf.set((d.head+d.size)%len(d.buf.s), v)
 	d.size++
+	return nil
 }
 
-func (d *deque) pushFront(v int32) {
-	d.grow()
-	d.head = (d.head - 1 + len(d.buf)) % len(d.buf)
-	d.buf[d.head] = v
+func (d *deque) pushFront(v int32) error {
+	if err := d.grow(); err != nil {
+		return err
+	}
+	d.head = (d.head - 1 + len(d.buf.s)) % len(d.buf.s)
+	d.buf.set(d.head, v)
 	d.size++
+	return nil
 }
 
 func (d *deque) popFront() int32 {
-	v := d.buf[d.head]
-	d.head = (d.head + 1) % len(d.buf)
+	v := d.buf.s[d.head]
+	d.head = (d.head + 1) % len(d.buf.s)
 	d.size--
 	return v
 }
@@ -471,15 +712,17 @@ func (p *planner) noPlan(g *searchGraph, goal Set) error {
 		}
 	}
 	anyStart := false
-	for _, s := range g.start {
+	for _, s := range g.start.s {
 		anyStart = anyStart || s
 	}
 	if !anyStart {
 		return refuse(pitrarchive.TokenArchiveGap, "no archived position has exactly the backup's GTID set %s; the backup is newer than every archived position of its history, or its server committed in an order no archived binlog has",
 			p.B.bounded(1024))
 	}
-	reach, lastOCT, furthest := p.forwardReach(g)
-	_ = reach
+	lastOCT, furthest, err := p.forwardReach(g)
+	if err != nil {
+		return err
+	}
 	if !missing.IsEmpty() {
 		return p.gapRefusal(missing, lastOCT)
 	}
@@ -489,7 +732,7 @@ func (p *planner) noPlan(g *searchGraph, goal Set) error {
 		f := g.files[k]
 		key = f.prev.Subtract(p.X)
 		for i := 0; i < furthest-g.off[k]; i++ {
-			if !g.inX[k][i] {
+			if !g.inX.s[g.off[k]+i] {
 				key.add(f.gtid(i))
 			}
 		}
@@ -498,49 +741,66 @@ func (p *planner) noPlan(g *searchGraph, goal Set) error {
 		key.bounded(1024), goal.Subtract(key).bounded(512))
 }
 
-// forwardReach marks the positions reachable from a start, the newest
-// commit time applied on the way, and the reachable node with the largest
-// key.
-func (p *planner) forwardReach(g *searchGraph) ([]bool, int64, int) {
-	n := len(g.dist)
-	reach := make([]bool, n)
-	var queue []int32
-	for v, s := range g.start {
+// forwardReach walks the positions reachable from a start and returns the
+// newest commit time applied on the way and the reachable node with the
+// largest key.
+func (p *planner) forwardReach(g *searchGraph) (int64, int, error) {
+	n := len(g.dist.s)
+	reach, err := alloc[bool](p.budget, n, "plan search diagnosis")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer reach.free()
+	// A node enters the queue once, when it is first reached.
+	queue, err := alloc[int32](p.budget, n, "plan search diagnosis")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer queue.free()
+	seenClass, err := alloc[bool](p.budget, g.classes.n, "plan search diagnosis")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer seenClass.free()
+	head, tail := 0, 0
+	for v, s := range g.start.s {
 		if s {
-			reach[v] = true
-			queue = append(queue, int32(v)) //nolint:gosec
+			reach.set(v, true)
+			queue.set(tail, int32(v)) //nolint:gosec
+			tail++
 		}
 	}
-	seenClass := make([]bool, len(g.members))
 	var lastOCT int64 = math.MinInt64
 	furthest := -1
-	for len(queue) > 0 {
-		v := int(queue[0])
-		queue = queue[1:]
-		if furthest < 0 || g.count[v] > g.count[furthest] {
+	for head < tail {
+		v := int(queue.s[head])
+		head++
+		if furthest < 0 || g.pos.s[v].count > g.pos.s[furthest].count {
 			furthest = v
 		}
 		k := g.fileOf(v)
-		if i := v - g.off[k]; i < g.files[k].n() && g.stepOK[k][i] {
-			if !g.inX[k][i] {
+		if i := v - g.off[k]; i < g.files[k].n() && g.stepOK.s[v] {
+			if !g.inX.s[v] {
 				lastOCT = max(lastOCT, g.files[k].txn(i).OCT)
 			}
-			if !reach[v+1] {
-				reach[v+1] = true
-				queue = append(queue, int32(v+1)) //nolint:gosec
+			if !reach.s[v+1] {
+				reach.set(v+1, true)
+				queue.set(tail, int32(v+1)) //nolint:gosec
+				tail++
 			}
 		}
-		if c := g.class[v]; c >= 0 && g.members[c] != nil && !seenClass[c] {
-			seenClass[c] = true
-			for _, u := range g.members[c] {
-				if !reach[u] {
-					reach[u] = true
-					queue = append(queue, u)
+		if c := g.class.s[v]; c >= 0 && len(g.members(c)) > 0 && !seenClass.s[c] {
+			seenClass.set(int(c), true)
+			for _, u := range g.members(c) {
+				if !reach.s[u] {
+					reach.set(int(u), true)
+					queue.set(tail, u)
+					tail++
 				}
 			}
 		}
 	}
-	return reach, lastOCT, furthest
+	return lastOCT, furthest, nil
 }
 
 // gapRefusal is PITRArchiveGap with the §4.11 hints.
@@ -582,7 +842,7 @@ func (p *planner) gapRefusal(missing Set, lastOCT int64) error {
 			}
 		}
 		sort.Strings(sites)
-		fmt.Fprintf(&b, "; it was committed on %s and never archived (an unarchived tail at a failover or reclone, FU-1); it is in the base of %s", strings.Join(sites, ", "), holder.row.Label())
+		fmt.Fprintf(&b, "; it was committed on %s and never archived (an unarchived tail: its writer died, or was recloned before its sidecar archived it); it is in the base of %s", strings.Join(sites, ", "), holder.row.Label())
 		if lastOCT != math.MinInt64 {
 			fmt.Fprintf(&b, "; choose a target at or before %s", fmtMicros(lastOCT))
 		}

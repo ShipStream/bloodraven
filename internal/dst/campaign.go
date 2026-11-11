@@ -103,6 +103,16 @@ func fingerprint(violations []Violation) string {
 		if v.Invariant == "DualWritableUnresolved" && strings.Contains(v.Detail, confirmedClaimMarker) {
 			key = "DualWritableUnresolved(confirmedClaim)"
 		}
+		// The open planned-failover findings (README) are classes of their
+		// own, so a sweep names the finding a trial hit.
+		switch {
+		case v.Invariant == "HoldWithoutDataAtRisk" && strings.Contains(v.Detail, writableTargetWithChannelMarker):
+			key = "HoldWithoutDataAtRisk(writableTargetWithChannel)"
+		case v.Invariant == "HoldWithoutDataAtRisk" && strings.Contains(v.Detail, replacedTargetSameProcessMarker):
+			key = "HoldWithoutDataAtRisk(replacedTargetSameProcess)"
+		case (v.Invariant == "OutcomeDishonest" || v.Invariant == "SucceededBesideWritable") && strings.Contains(v.Detail, unreadablePeerMarker):
+			key = v.Invariant + "(unreadablePeer)"
+		}
 		set[key] = struct{}{}
 	}
 	keys := make([]string, 0, len(set))

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // JUnitTestSuite is the surefire-flavor JUnit XML structure.
@@ -25,6 +26,9 @@ type JUnitTestCase struct {
 	Classname string        `xml:"classname,attr"`
 	Time      float64       `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
+	// SystemOut carries the scenario's measurements (Result.Measurements),
+	// one per line; absent when it recorded none.
+	SystemOut string `xml:"system-out,omitempty"`
 }
 
 type junitFailure struct {
@@ -46,6 +50,7 @@ func WriteJUnit(path string, results []Result) error {
 			Name:      r.ID,
 			Classname: "playground-chaos",
 			Time:      r.Duration.Seconds(),
+			SystemOut: strings.Join(r.Measurements, "\n"),
 		}
 		if !r.Passed {
 			suite.Failures++

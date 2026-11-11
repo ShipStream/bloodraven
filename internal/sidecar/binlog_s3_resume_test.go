@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -99,49 +98,5 @@ func TestS3ResumeRejectsChangedObject(t *testing.T) {
 	_ = r.Close()
 	if err == nil || !strings.Contains(err.Error(), "object changed") {
 		t.Fatalf("mixed bytes of different objects: %v", err)
-	}
-}
-
-type resumableRemoteReader struct {
-	io.Reader
-	closed chan struct{}
-}
-
-func (r *resumableRemoteReader) Close() error {
-	select {
-	case <-r.closed:
-	default:
-		close(r.closed)
-	}
-	return nil
-}
-
-type resumableRemoteStore struct {
-	ArchiveStore
-	first  *resumableRemoteReader
-	opened bool
-}
-
-func (s *resumableRemoteStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
-	if strings.HasSuffix(key, "mysql-bin.000001") && !s.opened {
-		s.opened = true
-		return s.first, nil
-	}
-	return s.ArchiveStore.Open(ctx, key)
-}
-func TestLegacyScanClosesStreamWithoutAnotherScan(t *testing.T) {
-	a, base, _ := historyBudgetFixture(t, 1)
-	r := &resumableRemoteReader{Reader: io.LimitReader(historyZeroReader{}, 100<<20), closed: make(chan struct{})}
-	a.store = &resumableRemoteStore{ArchiveStore: base, first: r}
-	defer func() {
-		if a.historyTask != nil {
-			a.historyTask.close()
-		}
-	}()
-	a.scanAndArchive(context.Background())
-	select {
-	case <-r.closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("legacy verification parked a remote GET until the next scan")
 	}
 }

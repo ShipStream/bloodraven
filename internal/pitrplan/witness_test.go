@@ -388,17 +388,35 @@ func TestWitnessCopiesDisagree(t *testing.T) {
 	_, err := s.run(ModeTimestamp, 7.5, "", false)
 	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "A:8 has origin copies with different predecessor sets (a/a1 and z/z1)")
 
-	// Two accepted replica copies that disagree modulo X: R_a explains
-	// b's D:1, and c's copy lacks it.
+	// Two accepted replica copies that disagree modulo X: both follow all
+	// of R_a, and c's copy does not follow A:51.
+	s = newSynth(t)
+	s.promote("a", "A", 101, "A:1-50,D:1", 50.5)
+	s.file("b", "b1", 102, "A:1-50,D:1", "", run("A", 51, 60, 51, 101))
+	s.file("c", "c1", 103, "A:1-50,D:1", "", run("A", 52, 60, 52, 101))
+	s.backup("A:1-40", "b", 102, 50.8)
+	_, err = s.run(ModeTimestamp, 55.7, "", false)
+	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "A:56 has replica copies with different predecessor sets (b/b1 and c/c1)")
+	// Excluding A:51 makes them agree (the plan then fails later: no
+	// archived position equals this backup).
+	_, err = s.run(ModeTimestamp, 55.7, "A:51", false)
+	if r, ok := RefusalOf(err); !ok || r.Token == pitrarchive.TokenStopAmbiguous {
+		t.Fatalf("A:51 excluded: %v", err)
+	}
+
+	// A copy that does not follow everything its anchor holds is not the
+	// origin's history, whether or not another copy does (review r5): R_a
+	// holds D:1, and c's copy lacks it.
 	s = newSynth(t)
 	s.promote("a", "A", 101, "A:1-50,D:1", 50.5)
 	s.file("b", "b1", 102, "A:1-50,D:1", "", run("A", 51, 60, 51, 101))
 	s.file("c", "c1", 103, "A:1-50", "", run("A", 51, 60, 51, 101))
 	s.backup("A:1-40", "b", 102, 50.8)
 	_, err = s.run(ModeTimestamp, 55.7, "", false)
-	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "A:56 has replica copies with different predecessor sets (b/b1 and c/c1)")
-	// Excluding D:1 makes them agree (the plan then fails later: no
-	// archived position equals this backup).
+	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "is archived only as a replica copy. Its copy in c/c1 does not follow D:1, which A:56's origin had executed before it: the promotion record a#0, observed at 2026-11-01T12:00:50.500000Z, before A:56, holds them",
+		"Exclude D:1 (the restore then holds none of them)")
+	// Excluding D:1 waives it, as it waives a predecessor the anchor does
+	// not explain.
 	_, err = s.run(ModeTimestamp, 55.7, "D:1", false)
 	if r, ok := RefusalOf(err); !ok || r.Token == pitrarchive.TokenStopAmbiguous {
 		t.Fatalf("D:1 excluded: %v", err)

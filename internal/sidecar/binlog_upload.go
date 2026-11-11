@@ -12,9 +12,13 @@ import (
 )
 
 func (a *BinlogArchiver) archiveOne(ctx context.Context, path, name, id string) error {
-	return a.archivePinned(ctx, path, name, id, false)
+	return a.archivePinned(ctx, path, name, id)
 }
-func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id string, replaceLegacy bool) error {
+
+// archivePinned uploads the sealed binlog at path, whose content identity
+// is id, and publishes its manifest row. A row that already holds this
+// identity and whose object is readable is left as it is.
+func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id string) error {
 	manifest, err := a.loadManifest(ctx)
 	if err != nil {
 		return err
@@ -25,9 +29,6 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 			reader, openErr := a.store.Open(ctx, key)
 			if openErr == nil {
 				_ = reader.Close()
-				if replaceLegacy {
-					return a.publishBinlog(ctx, row, true)
-				}
 				return nil
 			}
 			if !errors.Is(openErr, os.ErrNotExist) && !isS3NotFound(openErr) {
@@ -43,6 +44,12 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 	before, err := file.Stat()
 	if err != nil {
 		return err
+	}
+	// A read-only site's tail drain uploads only the files it examined.
+	if a.tailUpload != nil {
+		if err := a.tailUpload.check(name, before); err != nil {
+			return err
+		}
 	}
 	base := ""
 	if source, ok := a.mysql.(binlogBaseReader); ok {
@@ -75,7 +82,7 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 	if pending, ok := a.session.takeUnpublished(key); ok && pending.ID == id && pending.Name == name {
 		if reader, openErr := a.store.Open(ctx, key); openErr == nil {
 			_ = reader.Close()
-			if err := a.publishBinlog(ctx, pending, replaceLegacy); err != nil {
+			if err := a.publishBinlog(ctx, pending); err != nil {
 				a.session.noteUnpublished(key, pending)
 				return err
 			}
@@ -101,7 +108,7 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 	meta.GTIDCoverage.ContentID = id
 	entry := ManifestEntry{BaseGTIDs: base, Name: name, ID: id, RemotePath: key, Size: meta.Size, FirstEventTime: meta.FirstEventTime, LastEventTime: meta.LastEventTime, PreviousGTIDs: meta.PreviousGTIDs, GTIDCoverage: meta.GTIDCoverage, ArchivedAt: time.Now().UTC()}
 
-	if err := a.publishBinlog(ctx, entry, replaceLegacy); err != nil {
+	if err := a.publishBinlog(ctx, entry); err != nil {
 		a.session.noteUnpublished(key, entry)
 		return err
 	}
@@ -110,7 +117,7 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 func stableBinlogFile(before, after os.FileInfo) bool {
 	return after != nil && os.SameFile(before, after) && before.Size() == after.Size() && before.ModTime() == after.ModTime()
 }
-func (a *BinlogArchiver) publishBinlog(ctx context.Context, entry ManifestEntry, replaceLegacy bool) error {
+func (a *BinlogArchiver) publishBinlog(ctx context.Context, entry ManifestEntry) error {
 	m, err := a.loadManifest(ctx)
 	if err != nil {
 		return err
@@ -121,9 +128,6 @@ func (a *BinlogArchiver) publishBinlog(ctx context.Context, entry ManifestEntry,
 		if row.identity() == entry.identity() {
 			kept = append(kept, entry)
 			found = true
-			continue
-		}
-		if replaceLegacy && row.Name == entry.Name && row.ID == "" && (row.ContentID == entry.ID || a.store.BinlogContentID(row.ContentID) == entry.ID) {
 			continue
 		}
 		kept = append(kept, row)

@@ -19,6 +19,7 @@ DST_SEED=61 go test ./internal/dst -run PlannedRepro -v  # replay one seed with 
 DST_SEED=61 DST_SKIP=2 DST_ACTOR_SKIP=0,4 go test ./internal/dst -run PlannedRepro -v  # mask fault ops and actor ops
 DST_SEED=61 DST_LOG=1 go test ./internal/dst -run PlannedRepro -v  # with topology-manager and engine logs
 DST_PLANNED=1 make dst                  # saturation campaign over actors-on trials, shrunk over both schedules
+DST_PLANNED_START=16001 DST_PLANNED_TRIALS=16000 go test ./internal/dst -run 'TestDST_PlannedQuick$' -v  # a wider planned sweep, one range per process
 ```
 
 `make test` also runs `TestDST_PlannedQuick`: 300 seeds with the
@@ -64,7 +65,12 @@ dimension rather than one per statement.
    fetch/apply stalls, relay-drain stalls, rogue fences, rogue `read_only=0`,
    CR-status write outages, out-of-band anti-flap store outages, DNS
    outages). Fault kinds are drawn from the `faultWeights` table, whose
-   weights must sum to 100 (checked at `init`). Execution consumes no
+   weights must sum to 100 (checked at `init`). The binary log rotation
+   faults (`failFlush`, `slowFlush`) and the pre-reclone wait
+   (`recloneWait`) are drawn from a PRNG stream of their own
+   (`flushFaults`), so they add ops to a seed's schedule without changing
+   the ones it had before they existed
+   (`TestGenerateTrial_FlushFaultsOnlyAdd`). Execution consumes no
    randomness after generation.
 2. The harness builds a production `TopologyManager` via
    `NewTopologyManagerWithClock` with a `FakeClock`, the simulated
@@ -126,8 +132,10 @@ production planned-failover path end to end:
   `resourceVersion`; a no-op write does not move it.
   The snapshot write is the runner's two steps (`updateCRStatus`): read and
   merge, a scheduler yield (`store.snapshotCommit`), then a re-read that
-  keeps only the planned block, the hold and `AutomaticFailoverHeld` from
-  the fresh object.
+  keeps the planned block, the hold and `AutomaticFailoverHeld` from the
+  fresh object and merges the failover record again over the fresh one
+  (K058), so a newer record committed between the two steps (a run's
+  terminal write) is not moved back.
 - **Restore.** Every manager start reads the object uncached through the
   store (`startView`), so a read outage or a dead process fails it, as the
   runner's `plannedFailoverView` does: a fresh start with an empty slot
@@ -233,6 +241,13 @@ production planned-failover path end to end:
     run's own last peer probe is the §18 R2 residual (`RogueRaceResidual`),
     not a violation; a writable peer the operator cannot read does not
     block a rollback's unfence (§9 step 1; `UnfenceBesideUnreadable`);
+  - a read-only reader the operator cannot read is allowed at the fence,
+    the gate and the confirmation (§4.1: only primary-candidate and dr-only
+    peers must answer), so a reader made writable where the operator cannot
+    see it does not count against `PlannedFenceWithoutAuthority`,
+    `PlannedPromoteBesideWritable`, `SucceededBesideWritable` or
+    `OutcomeDishonest` (`UnreadableReaderWritable`); a reader it can read,
+    and every promotable site, still count;
   - a target unfence needs a pre-write gate probe in the same engine pass;
     the gate window closes at the end of the pass and of the run;
   - a run ended by its terminal marker is judged when the marker commits,
@@ -242,19 +257,54 @@ production planned-failover path end to end:
     standing hold like the topology manager;
   - outcomes are judged with what the run could know: `Succeeded` at its
     confirm probe (the claim is released at Publishing), `SourceLeftFenced`
-    with an unreachable source by its reason (§6.2), and a cross-process
-    re-run's `PromotedUnconfirmed` / `ManualRecoveryRequired` without the
-    promotion memo (§7.1);
+    with an unreachable source by its reason (§6.2) or ended while no
+    manager was registered, and a cross-process re-run's
+    `PromotedUnconfirmed` / `ManualRecoveryRequired` without the promotion
+    memo (§7.1). `RolledBack` over a source that is not writable is honest
+    when the source was writable at a yield of the rollback (the run read
+    it so; its sidecar may fence it again before the record commits), and
+    a `read_only=OFF` the process died before sending does not make a
+    `RolledBack` dishonest;
+  - a hold is justified (`HoldWithoutDataAtRisk` is quiet) when a promotion
+    intent exists, the deciding pass cannot read the target and another
+    site is writable (`UnreadableTargetHold`): the target may hold the
+    run's writes beside that writer;
   - `FencedSourceNeverHealed` judges only the run's own fence (landed, in
     the source's current incarnation, still set, never healed) under the
-    re-assert's preconditions;
+    re-assert's preconditions, and only until the topology manager takes
+    authority away from the source: it counts another site as the group's
+    primary (its `Status().ActiveSite` after a poll names another site:
+    the one writable promotable site it observed, or one it promoted), or
+    it fences the source or repoints it at another site itself. After that
+    the re-assert no longer names the source and the manager owns it. A
+    site that is only writable for a while without being adopted does not
+    count: a read-only reader an external writer opened (the manager fences
+    it and never adopts it), or a site writable while no manager polled;
+  - `UnconfirmedBlocksEmergency` is judged over a window in which, at every
+    poll, no site was writable, the target stayed unreachable, an operator
+    with a manager ran, and the source was reachable and complete; the
+    operator owes the source's promotion within the grace of such a window.
+    The window opens when the run ends `PromotedUnconfirmed`, whether or
+    not its target answers at that moment.
+    The source becoming writable, or the manager counting any site as the
+    primary, ends the judgment. Everything else only starts the window
+    again, at that poll: a target that answers (for one poll or for good),
+    a writable site the manager has not adopted, an operator death or
+    restart, a poll without a manager, and an injected fault on a promotion
+    statement the manager sent to the source (the relay drain, `STOP
+    REPLICA`, `RESET REPLICA ALL`, the two read-only clears). A failing or
+    abandoned `FLUSH BINARY LOGS` does not: a rotation never stops a
+    promotion;
   - a standing automation hold is the documented manual-recovery state: the
     end-state convergence invariants and the dual-writable check do not
     judge it, but every acknowledged transaction must still exist on some
     site (`SilentDataLoss`);
   - while a run holds the claim with its status writes stalled, the
     manager's split-brain fence is deferred up to the 2m stall deadline
-    (§6.4), and `DualWritableUnresolved` counts only past it;
+    (§6.4), and `DualWritableUnresolved` counts only past it; the same
+    holds while a run that is rolling back keeps the claim, up to the 30s
+    rollback deadline (§9: it retries a target it cannot read back at
+    `super_read_only=ON`);
   - a request annotation left unconsumed after the settle window is
     `PlannedRunStuck`.
 
@@ -264,12 +314,101 @@ production planned-failover path end to end:
   update is not held by the cooldown (it is a maintenance handoff); and a
   window with no registered manager is no operator, like a dead one.
 
+## Binary log rotations (#229, #264)
+
+The operator's best-effort `FLUSH BINARY LOGS` (the promotion candidate
+before its writes are enabled, the fenced source at a planned failover or an
+ordered update's handoff, a reclone recipient before CLONE) runs through the
+production `FailoverController.rotateBinlog`, bounded by the trial's fake
+clock: the harness builds the controller with
+`NewFailoverControllerWithClock`.
+
+- **The model.** Each site has a file counter and the active file's
+  `Previous_gtids` (the executed set when a rotation opened it). A rotation
+  changes nothing else, works on a fenced replica, and spends neither the
+  mutation-fault counters nor the mid-`Execute` crash countdown, so a fault
+  armed for a promotion statement still hits that statement.
+- **Faults.** `failFlush site n`: the next n rotations fail, nothing
+  rotated. `slowFlush site n [k=1]`: the next n outlive the operator's
+  bound. The simulated call advances the fake clock by
+  `controller.BinlogRotationTimeout`, which fires the operator's timer, and
+  then blocks until the operator cancels it; with `k=1` the server completes
+  the rotation at the next tick, after the operator has moved on (the
+  promotion may have enabled writes by then). `rotateBinlog` calls the
+  flush from a goroutine and waits for it or the timer, so the model still
+  sees one actor at a time, and nothing touches the model after the
+  cancellation.
+- **Time inside a poll.** A slow rotation takes one second of fake time
+  inside a poll, so a poll is no longer always one second. The cooldown
+  invariant is judged on the fake clock for that reason (the window of each
+  promotion's poll), not on poll numbers.
+- **The pre-reclone wait.** `recloneWait site n k` requests a reclone of a
+  site with PITR archiving "on": the manager's `checkReclone` reads the
+  site's simulated sidecar status, rotates the site's binary log
+  (`RotateBinaryLog`, which also names the file the rotation opened) and
+  waits for a Drained scan of that file. In production each step of the
+  wait (the status request and the rotation) runs on a goroutine of its own
+  and a later poll picks its result up; a trial runs the step inline
+  (`SetRecloneTailStepRunnerForSim`), inside the Poll that started it, so
+  the model still sees one actor at a time and a seed replays exactly. What
+  that leaves out, a step that returns between two polls or never, is
+  covered by controller and component tests
+  (`reclone_archive_tail_test.go`,
+  `TestReclone_HungRecipientDoesNotSlowThePollLoop`). The simulated sidecar
+  never reports the tail archived (k: unreachable, still uploading, blocked,
+  or a scan from before the rotation), and the harness withdraws the request
+  n polls later or at heal-all, before the wait's deadline (2 minutes after
+  the acknowledged rotation), because CLONE is not modelled
+  (`HarnessRecloneWaitExpired` guards that). The request is applied again
+  to every manager that replaces the one it was given to, as the annotation
+  would be, so a restart or a manager replacement mid-wait starts the wait
+  over. What is covered: the wait interleaved with failovers, planned runs
+  and restarts. What is not: a wait that ends (archived, or at its bound)
+  and the clone after it; component tests cover those
+  (`test/component/binlog_rotation_test.go`).
+- **Invariants.** `FlushAfterWriteGrant`: an actor never rotates a site
+  after it enabled that site's writes. The grant stands until the site is
+  fenced again by anyone (an operator actor, its sidecar, an external
+  writer) or its server restarts or is replaced. A rotation that failed or
+  was abandoned counts like one that rotated; one the server completes late
+  does not. A planned failover's and an ordered update's grants are carried
+  across polls while the site stays writable (a `super_read_only` clear
+  that left `read_only` on ends with its poll, so a new process that finds
+  the target read-only may rotate it again). The topology manager's are
+  judged inside the poll only: its promotion is one call in one poll, and
+  the two rotations it sends to a site it made writable in an earlier poll
+  are by design. The split-brain priorities path fences the losers and runs
+  the whole promotion on the policy winner, which is already writable, so
+  that rotation lands on a writable site and the file it opens need not
+  start at the recorded promotion GTID (carried across polls, the rule
+  flagged it in 85 of 112,000 planned trials; nothing writes inside a poll
+  in the model, so a trial cannot show the difference). The pre-reclone
+  rotation's recipient can be a former primary an operator partition has
+  kept writable. With
+  the actors on: a planned run's rotation of a target it made writable,
+  while that target is still writable or holds its own transactions
+  outside F, is `RepeatedPromotion` (a promotion resumed from `WasWritable`
+  or `Writable` sends none; a target that restarted read-only with exactly
+  F before any write landed is `ReplicaReset` again, and a new process
+  rotates it once more); every rotation by the planned
+  path belongs to a live run (`PlannedMutationWithoutRun`,
+  `MarkedRunResumed`), and a run that ends `NotStarted` sent none
+  (`OutcomeDishonest`); a rotation by the topology manager or an ordered
+  update while a planned run holds the claim is `ForeignMutationUnderClaim`
+  (the pre-reclone rotation waits for the claim for this reason).
+- **Signature.** A rotation adds two keys to the behavior signature
+  (rotated, not rotated); why it did not rotate is repro detail, and a late
+  rotation is the model's doing, like a fault.
+
 ## Invariants
 
 Per poll:
 - **PromoteWhileObservedWritable** — never grant writability while another
   site is observed writable, unless it was fenced in the same cycle.
 - **FenceAfterPromote** — fencing of other sites precedes the writable grant.
+  A fence sent before the grant counts whatever its outcome (the same poll
+  retries a failed one after the grant), and a site an external writer made
+  writable after the grant is not a fence the promotion owed.
 - **DualWritableUnresolved** — a dual-writable state that is fully
   operator-observable, with a resolution policy available (failover history
   or split-brain priorities), must be fenced within a grace window.
@@ -299,7 +438,12 @@ At every operator restart:
   post-promotion copy either. The operator writes the out-of-band record at
   promotion time and retries it every poll, so a healthy store means a
   current record; and a status write the promoting process landed without
-  the record is the operator dropping it, not the path failing.
+  the record is the operator dropping it, not the path failing. Only a
+  snapshot taken after the record was made counts: a status write already
+  in flight when an ordered update records its handoff commits without it.
+  A planned run's Publishing record that commits after a later promotion
+  does not move the harness's target back, as it does not move the
+  operator's.
 
 ## Model fidelity notes
 
@@ -325,7 +469,8 @@ exactly what their lease rule exists for.
 
 Not modeled (excluded from trials, guarded by loud errors): CLONE /
 bootstrap (the bootstrap controller is real and production-shaped, but the
-model never produces an empty site so no clone goroutine can start),
+model never produces an empty site so no clone goroutine can start, and a
+scripted reclone request is withdrawn before its pre-reclone wait ends),
 Dragonfly (the engine skips its Dragonfly phases with no Dragonfly ops; the
 Dragonfly rows of the #235 table are controller unit tests), deployment
 leases, and wall-clock `context.WithTimeout` expiry (timeouts are modeled as
@@ -381,6 +526,23 @@ Fixed findings, now regressions (`TestDST_PlannedQuick` fails on them):
 (`plannedAllowedClasses` in `planned_test.go`); anything else fails it. When
 a finding is fixed, pin its shrunk trial in
 `test/component/dst_regression_test.go`.
+
+### Open planned-failover findings
+
+`TestDST_PlannedQuick`'s 300 seeds are clean, and so were the 3,000 seeds
+swept for #235. A sweep of seeds 1–112,000 is not: after the harness
+defects it also found were fixed (`sweep_artifacts_test.go`), about one
+trial in 15,000 still fails, in three classes. They are the operator's, they
+are on `main` (none comes from the binary log rotations), each needs an
+external writer or a pod replacement inside a planned failover plus a
+restart or an outage, and none is allowed by the gate: a 300-seed run that
+hits one fails. Each has a fingerprint of its own:
+
+| Fingerprint | What happens | Verdict |
+|---|---|---|
+| `HoldWithoutDataAtRisk(writableTargetWithChannel)` | The operator restarts in `Promoting` before `RESET REPLICA ALL`; before the new process classifies the target, an external `read_only=0` makes it writable. Writable with a channel and no memo is `Inconsistent(ForeignWritable)`: a hold, although the channel proves no process of the run cleared `super_read_only` (the same process, with its memo, ends `SourceLeftFenced` without a hold). | Over-conservative hold; documented (`ManualRecoveryRequired`: "a writable target with a replication channel"). Needs a design decision. |
+| `HoldWithoutDataAtRisk(replacedTargetSameProcess)` | `super_read_only=OFF` is applied but answers with an error, then the target pod is replaced under a new `server_uuid` and reads read-only inside F. The same process holds (`Inconsistent(ExecuteFailed)`), where a new process would roll back by the DST-3 ruling on the same evidence (record not durable, source fenced with F, nobody writable). | Inconsistent with the DST-3 ruling; documented ("a replaced server after a possible write"). Needs a design decision. |
+| `OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)` | The confirmation takes an unreadable primary-candidate as a warning. That is the documented residual for a peer that answered read-only at the gate; it is wrong when the run had seen that peer writable after its own write (its `ManualRecoveryRequired` write did not commit, then the peer stopped answering), and when a new process finds the target writable with exactly F and no channel (made so by an external writer, not by the run) and confirms beside a source it cannot read. | Dishonest `Succeeded` beside a second writer. Needs a design decision (what the confirmation requires after an uncommitted decision or without a gate in this process). |
 
 `CooldownViolated` splits three ways so the inherent class cannot absorb a
 regression, and only the third is expected:

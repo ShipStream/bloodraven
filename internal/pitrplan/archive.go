@@ -153,8 +153,9 @@ func (f FetchFunc) Fetch(ctx context.Context, row RowRef) (*FileIndex, error) { 
 // it is the hook for #205.
 type PlanRule func(*Plan) error
 
-// DefaultClockSkewMargin is δ (D-50).
-const DefaultClockSkewMargin = 5 * time.Second
+// DefaultClockSkewMargin is δ (D-50). The sidecar times a promotion
+// record's confirmation by the same constant (pitrarchive).
+const DefaultClockSkewMargin = pitrarchive.ClockSkewMargin
 
 // Request is what pitr-download asks for.
 type Request struct {

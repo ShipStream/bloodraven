@@ -1210,6 +1210,22 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	archiver := r.newPITRArchiverPoller(ctx, fg, nn, buildSidecarClients(fg), prev)
 	archiver.awaitingRollout = tm.SpecDriftSites
 	archiver.rolloutKnown = tm.specDriftComputed
+	// A reclone waits, bounded, for its recipient's sidecar to archive the
+	// binary log tail CLONE wipes; a reclone that goes ahead without that
+	// is announced with an Event.
+	tm.ArchiveTail = archiver
+	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
+		r.emitPITRArchiveTailNotArchived(tmCtx, nn, site, reason)
+	}
+	// A clone recipient that kept its server_uuid is announced with an
+	// Event: the launcher that rotates it runs in the pod, out of the
+	// operator's reach.
+	tm.CloneServerUUIDNotRotatedCallback = func(site, serverUUID string) {
+		r.emitCloneServerUUIDNotRotated(tmCtx, nn, site, serverUUID)
+	}
+	// The recipient's server_uuid before each clone is recorded on the
+	// group, so a clone that finishes after this manager is still checked.
+	tm.SetCloneIdentityStore(r.cloneIdentityStore(nn))
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})
@@ -2609,10 +2625,19 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 
 // emitPITRArchiveReissueRisk fires when a status write persisted an
 // active-site change (a failover, a planned failover or a re-promotion) to a
-// site whose last archiver status reports divergent or quarantined rows in
-// its own manifest. Rotating server_uuid on reclone is FU-4: until then a
-// site recloned after a lossy failover reissues the lost GTIDs once
-// promoted, and the archive can only be restarted (D-46).
+// site whose server could reissue GTIDs its archive already holds: its last
+// archiver status reports transactions of its own manifest (divergent or
+// quarantined rows) that the server no longer has and that were issued
+// under its current server_uuid (reissuableGtids). A clone recipient starts
+// with a new server_uuid (#265), so this is a server that lost history
+// without a clone (a restored or reset data directory) or was cloned by a
+// release that kept the recipient's server_uuid; its first writes reuse the
+// lost GTIDs, and the archive can only be restarted (D-46).
+//
+// A status without that verdict (a sidecar that predates the field, or one
+// whose history audit has not evaluated its server) falls back to the row
+// counts: any divergent or quarantined row warns, saying the risk could
+// not be evaluated.
 //
 // Two writers persist status.activeSite: the topology status writer and the
 // planned-failover engine's Succeeded terminal write, which takes the
@@ -2635,33 +2660,72 @@ func (r *TopologyManagerRunner) emitPITRArchiveReissueRisk(fg *v1alpha1.MysqlFai
 	if from == "" && fg.Status.LastFailoverTime() == nil && fg.Status.LastFailoverTarget() == "" {
 		return
 	}
-	rows, ok := r.pitrArchiveSuspectRows(FailoverGroupNamespacedName(fg), promoted)
-	if !ok || rows == 0 {
+	s := r.pitrArchiverStatus(FailoverGroupNamespacedName(fg), promoted)
+	if s == nil {
 		return
 	}
-	r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveReissueRiskDetected,
-		"site %s was promoted while its archive manifest holds %d divergent/quarantined rows. If %s was recloned after a lossy failover, it reissues the lost GTIDs, and every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup.",
-		promoted, rows, promoted)
+	switch {
+	case s.ReissuableGTIDs != nil && *s.ReissuableGTIDs != "":
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveReissueRiskDetected,
+			"site %s was promoted while its archive holds transactions its server no longer has and issued under the server_uuid it still has: %s. Its new writes reuse those GTIDs, and once they are archived every restore from this archive refuses PITRArchiveHistoryReset. Start a new archive prefix and take a full backup.",
+			promoted, truncateGtidSet(*s.ReissuableGTIDs))
+	case s.ReissuableGTIDs == nil && s.DivergentRows+s.QuarantinedRows > 0:
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveReissueRiskDetected,
+			"site %s was promoted while its archive manifest holds %d divergent/quarantined rows, and its sidecar has not reported whether its server can reissue their GTIDs. If the server lost those transactions and kept its server_uuid, its new writes reuse their GTIDs, and every restore from this archive then refuses PITRArchiveHistoryReset: check reissuableGtids in the site's /archiver/status, and if it is not empty start a new archive prefix and take a full backup.",
+			promoted, s.DivergentRows+s.QuarantinedRows)
+	}
 }
 
-// pitrArchiveSuspectRows is divergentRows+quarantinedRows from site's latest
-// (or last good) archiver status, or false when the poller has none.
-func (r *TopologyManagerRunner) pitrArchiveSuspectRows(nn types.NamespacedName, site string) (int64, bool) {
+// emitPITRArchiveTailNotArchived records the Warning Event of a reclone
+// that started without its recipient's binary log tail confirmed archived
+// (TopologyManager.recloneArchiveTailSettled).
+func (r *TopologyManagerRunner) emitPITRArchiveTailNotArchived(ctx context.Context, nn types.NamespacedName, site, reason string) {
+	if r == nil || r.recorder == nil {
+		return
+	}
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := r.client.Get(ctx, nn, &fg); err != nil {
+		r.logger.Warn("could not record the PITRArchiveTailNotArchived event", "fg", nn, "site", site, "error", err)
+		return
+	}
+	r.recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveTailNotArchived,
+		"site %s is being recloned although its binary log tail was not confirmed archived in time: %s. CLONE wipes the site's binary logs; a point-in-time restore whose window needs transactions only they held refuses PITRArchiveGap.",
+		site, reason)
+}
+
+// emitCloneServerUUIDNotRotated records the Warning Event of a clone whose
+// recipient came back with the server_uuid it had before
+// (TopologyManager.verifyCloneServerUUIDRotated).
+func (r *TopologyManagerRunner) emitCloneServerUUIDNotRotated(ctx context.Context, nn types.NamespacedName, site, serverUUID string) {
+	if r == nil || r.recorder == nil {
+		return
+	}
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := r.client.Get(ctx, nn, &fg); err != nil {
+		r.logger.Warn("could not record the CloneServerUUIDNotRotated event", "fg", nn, "site", site, "error", err)
+		return
+	}
+	r.recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventCloneServerUUIDNotRotated,
+		"site %s was cloned and kept its server_uuid %s: the mysql container's launcher did not remove auto.cnf on the restart that installed the clone. "+
+			"The pod may predate the launcher (it rolls with the group's pending update), spec.image may start mysqld without it, or the launcher could not remove the file (its line in the mysql container's log starts with %q). "+
+			"The site replicates normally. Promoted after it lost transactions as a primary, it can reissue their GTIDs (PITRArchiveReissueRiskDetected). Reclone the site once its pod runs the launcher.",
+		site, serverUUID, mysqlLauncherLogPrefix)
+}
+
+// pitrArchiverStatus is site's latest (or last good) archiver status, or
+// nil when the poller has none.
+func (r *TopologyManagerRunner) pitrArchiverStatus(nn types.NamespacedName, site string) *internalmysql.ArchiverStatus {
 	r.mu.RLock()
 	mt, ok := r.managers[nn]
 	r.mu.RUnlock()
 	if !ok || mt.archiver == nil {
-		return 0, false
+		return nil
 	}
 	snaps, lastGood, _ := mt.archiver.view()
-	s := snaps[site]
-	if s == nil {
-		s = lastGood[site]
+	if s := snaps[site]; s != nil {
+		return s
 	}
-	if s == nil {
-		return 0, false
-	}
-	return s.DivergentRows + s.QuarantinedRows, true
+	return lastGood[site]
 }
 
 func orderedUpdateStalledMessage(stall string) string {

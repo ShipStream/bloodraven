@@ -54,14 +54,24 @@ func persistPlannedSucceeded(t *testing.T, c client.Client, runner *TopologyMana
 // G4 / D-46: status.activeSite has two writers, the topology status writer
 // and the planned-failover engine's Succeeded terminal write. Whichever
 // persists a planned promotion first, PITRArchiveReissueRiskDetected fires
-// exactly once for it.
+// exactly once for it when the promoted site's server could reissue GTIDs
+// its archive holds, and not at all when its divergent rows are only
+// evidence (#271).
 func TestPITRArchiveReissueRiskBothWriterOrderings(t *testing.T) {
-	for _, plannedFirst := range []bool{true, false} {
-		name := "topology writer first"
-		if plannedFirst {
-			name = "planned failover persists first"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		plannedFirst bool
+		// reissuable: pdx's server kept the server_uuid that issued the
+		// transactions it lost. Otherwise it has a new one (a clone).
+		reissuable bool
+	}{
+		{"topology writer first", false, true},
+		{"planned failover persists first", true, true},
+		{"topology writer first, new server_uuid", false, false},
+		{"planned failover persists first, new server_uuid", true, false},
+	} {
+		plannedFirst := tc.plannedFirst
+		t.Run(tc.name, func(t *testing.T) {
 			fg := identityFG()
 			fg.Status.ActiveSite = "iad"
 			fg.Status.TopologyGeneration = 5
@@ -70,8 +80,12 @@ func TestPITRArchiveReissueRiskBothWriterOrderings(t *testing.T) {
 				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
 				WithObjects(fg).Build()
 			rec := record.NewFakeRecorder(50)
+			reissuable := ""
+			if tc.reissuable {
+				reissuable = "bbbbbbbb-0000-4000-8000-00000000000b:9-10"
+			}
 			runner := newRunnerWithArchiverSnapshots(t, nn, map[string]*internalmysql.ArchiverStatus{
-				"pdx": {Enabled: true, DivergentRows: 2},
+				"pdx": {Enabled: true, DivergentRows: 2, ReissuableGTIDs: &reissuable},
 			})
 			runner.client = c
 			runner.managers[nn].tm = &TopologyManager{}
@@ -98,8 +112,12 @@ func TestPITRArchiveReissueRiskBothWriterOrderings(t *testing.T) {
 					got = append(got, e)
 				}
 			}
-			if len(got) != 1 || !strings.Contains(got[0], "site pdx was promoted") {
-				t.Fatalf("reissue warnings = %v, want exactly one for pdx", got)
+			if !tc.reissuable {
+				if len(got) != 0 {
+					t.Fatalf("reissue warnings = %v, want none: pdx's server cannot reissue its divergent rows", got)
+				}
+			} else if len(got) != 1 || !strings.Contains(got[0], "site pdx was promoted") || !strings.Contains(got[0], "bbbbbbbb-0000-4000-8000-00000000000b:9-10") {
+				t.Fatalf("reissue warnings = %v, want exactly one for pdx naming the reissuable set", got)
 			}
 			var live v1alpha1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &live); err != nil {
@@ -140,6 +158,7 @@ func TestPITRArchiveReissueRiskAfterPersistedNoPrimary(t *testing.T) {
 				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
 				WithObjects(fg).Build()
 			rec := record.NewFakeRecorder(50)
+			// No verdict from the sidecar: the row count decides.
 			runner := newRunnerWithArchiverSnapshots(t, nn, map[string]*internalmysql.ArchiverStatus{
 				"pdx": {Enabled: true, QuarantinedRows: 1},
 			})

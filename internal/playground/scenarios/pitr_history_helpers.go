@@ -27,8 +27,16 @@ package scenarios
 // era's primary across each era's marker, fence and witness marker. It is
 // stopped (its last insert committed) before every flush, failover, reclone,
 // scale-down and backup, so the archive boundaries the scenarios assert stay
-// exact: in particular nothing commits on b between s68 cycle 1's flush of b
-// and the reclone of a, which would otherwise be an unarchived tail.
+// exact.
+//
+// A scenario flush is not the only thing that seals a binlog. The operator
+// rotates a promotion candidate's binary log before its writes are enabled
+// (#229), the fenced primary's at a planned failover and a reclone
+// recipient's before the clone (#264), and a read-only site's sidecar
+// archives the tail of its last writable era. So an era a scenario never
+// flushes is archived when its primary is fenced by a planned failover
+// (s37, s68 cycle 2) or comes back after it was lost (s70); see
+// pitr_tail_helpers.go.
 
 import (
 	"bytes"
@@ -96,9 +104,11 @@ func pitrServerNow(ctx context.Context, q interface {
 }
 
 // pitrScenarioMaxBinlogSize keeps the counter app from rotating a binlog by
-// size during a scenario: the scenarios decide exactly which files are
-// sealed (and so archived) with explicit FLUSH BINARY LOGS, and an unplanned
-// rotation of a short era would archive it early.
+// size during a scenario: a binlog is sealed (and so archived) only by a
+// scenario's explicit FLUSH BINARY LOGS or by one of the operator's
+// rotations, at a promotion, a planned failover's fence and before a
+// reclone. A rotation by size in the middle of a short era would archive
+// part of it early.
 const pitrScenarioMaxBinlogSize = "64M"
 
 // pitrBackupSpec is backupProfileSpec with PITR on, the scenario's binlog
@@ -702,15 +712,6 @@ func pitrSiteGTID(ctx context.Context, env *runner.Env, site string) (string, er
 	return strings.ReplaceAll(g, "\n", ""), err
 }
 
-func pitrServerUUID(ctx context.Context, env *runner.Env, site string) (string, error) {
-	c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
-	if err != nil {
-		return "", err
-	}
-	defer c.Close()
-	return c.ScalarString(ctx, "SELECT @@server_uuid")
-}
-
 // gtidSetsEqual compares two GTID sets as sets of transactions.
 func gtidSetsEqual(a, b string) (bool, error) {
 	as, err := brmysql.ParseGTIDSet(a)
@@ -1232,7 +1233,25 @@ func pitrWaitClockPast(ctx context.Context, q interface {
 // request (pitrWaitPromotionRecorded; tolerateDivergence as there). It
 // returns the confirmed promotionRecordedAt. The request time is read on
 // target's server clock, the clock its sidecar records with.
+//
+// It also waits until the outgoing primary's binary log tail is archived
+// (#264): the operator rotates the fenced primary's binary log, and its
+// sidecar, by then read-only, uploads what that sealed and reports the tail
+// Drained (pitrTailWatch).
 func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, tolerateDivergence bool) (time.Time, error) {
+	return pitrPlannedFailoverTail(ctx, env, target, tolerateDivergence, false)
+}
+
+// pitrPlannedFailoverArchivingTail is pitrPlannedFailover for a failover
+// whose outgoing primary wrote an era no flush sealed. That era's only
+// sealed copy is the file the operator's rotation seals at the fence, so
+// the wait also requires a new row for that file in the outgoing primary's
+// manifest.
+func pitrPlannedFailoverArchivingTail(ctx context.Context, env *runner.Env, target string, tolerateDivergence bool) (time.Time, error) {
+	return pitrPlannedFailoverTail(ctx, env, target, tolerateDivergence, true)
+}
+
+func pitrPlannedFailoverTail(ctx context.Context, env *runner.Env, target string, tolerateDivergence, wantTailRow bool) (time.Time, error) {
 	if err := pitrWaitCooldown(ctx, env); err != nil {
 		return time.Time{}, err
 	}
@@ -1242,10 +1261,28 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, to
 	if err := pitrWaitSiteReplicating(ctx, env, target); err != nil {
 		return time.Time{}, err
 	}
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return time.Time{}, err
+	}
+	source := mfg.Status.ActiveSite
+	if source == "" || source == target {
+		return time.Time{}, fmt.Errorf("planned failover to %s: the active site is %q", target, source)
+	}
+	// Followed from before the request, so a failed rotation's line is
+	// there to quote if the tail wait times out.
+	if _, err := env.Logs("operator"); err != nil {
+		env.Capture.Note("operator log not followed for the planned failover to " + target + ": " + err.Error())
+	}
+	tail, err := pitrStartTailWatch(ctx, env, source)
+	if err != nil {
+		return time.Time{}, err
+	}
 	requested, err := pitrSiteNow(ctx, env, target)
 	if err != nil {
 		return time.Time{}, err
 	}
+	requestedLocal := time.Now()
 	if err := env.Chaos.AnnotatePlannedFailover(ctx, target); err != nil {
 		return time.Time{}, err
 	}
@@ -1269,6 +1306,9 @@ func pitrPlannedFailover(ctx context.Context, env *runner.Env, target string, to
 		return time.Time{}, err
 	}
 	env.Capture.Note(fmt.Sprintf("planned failover to %s succeeded; promotion recorded at %s", target, recorded.Format(time.RFC3339Nano)))
+	if err := tail.wait(ctx, env, wantTailRow, requestedLocal); err != nil {
+		return time.Time{}, err
+	}
 	return recorded, nil
 }
 
@@ -1437,14 +1477,17 @@ func pitrNewRecloneRejection(before map[string]int32, events []corev1.Event, gro
 	return corev1.Event{}, false
 }
 
-func pitrRecloneRejectedSnapshot(ctx context.Context, env *runner.Env) (map[string]int32, []corev1.Event, error) {
+// pitrRecloneEventSnapshot lists the namespace's recent Events and the
+// counts, by Event UID, of those a reclone wait looks for (RecloneRejected,
+// PITRArchiveTailNotArchived), so a later look can tell new ones apart.
+func pitrRecloneEventSnapshot(ctx context.Context, env *runner.Env) (map[string]int32, []corev1.Event, error) {
 	events, err := env.Kube.RecentEvents(ctx, env.Namespace, 200)
 	if err != nil {
 		return nil, nil, err
 	}
 	seen := map[string]int32{}
 	for _, ev := range events {
-		if ev.Reason == v1alpha1.EventRecloneRejected {
+		if ev.Reason == v1alpha1.EventRecloneRejected || ev.Reason == v1alpha1.EventPITRArchiveTailNotArchived {
 			seen[string(ev.UID)] = ev.Count
 		}
 	}
@@ -1455,6 +1498,19 @@ func pitrRecloneRejectedSnapshot(ctx context.Context, env *runner.Env) (map[stri
 // clone to finish. expectDivergent selects the confirmation
 // (pitrRecloneRequest): true for a RecoveryBlocked former primary, false
 // for a healthy replica.
+//
+// With PITR enabled the operator first rotates site's binary log and waits
+// until site's sidecar reports its tail archived, at most
+// pitrPreRecloneTailWait, and only then clones (#264). The reclone fails
+// here when the operator announces, by a PITRArchiveTailNotArchived Event
+// or its WARN line, that it cloned without that confirmation, and when it
+// completes without the operator's "pre-reclone archive tail archived"
+// line: CLONE wipes site's binary logs, and a tail it wiped unarchived is
+// a PITRArchiveGap for every restore that needs it.
+//
+// Every reclone must also give site a new server_uuid (#265, cloneIdentity):
+// a recloned former primary that kept the one its lost transactions were
+// issued under would reissue their GTIDs once promoted again.
 func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDivergent bool) error {
 	readyCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
@@ -1467,21 +1523,53 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 	if err != nil {
 		return err
 	}
-	rejectedBefore, _, err := pitrRecloneRejectedSnapshot(ctx, env)
+	identity, err := startCloneIdentity(ctx, env, site)
+	if err != nil {
+		return err
+	}
+	eventsBefore, _, err := pitrRecloneEventSnapshot(ctx, env)
 	if err != nil {
 		return fmt.Errorf("list events before the reclone of %s: %w", site, err)
+	}
+	// The archive-tail wait applies only while PITR archiving is enabled.
+	// The operator's log is followed from before the request, and read on
+	// every poll below, so its lines about the wait are seen however much
+	// it logs during the clone.
+	archivesTail := pitrSpecProfile(mfg) != ""
+	var operatorLog logSource
+	if archivesTail {
+		tailer, err := env.Logs("operator")
+		if err != nil {
+			return fmt.Errorf("follow the operator's log for the reclone of %s: %w", site, err)
+		}
+		operatorLog = operatorLogSince(tailer, time.Now().Add(-logClockSlack))
 	}
 	watch := newPitrRecloneWatch(findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping))
 	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
 		return err
 	}
 	env.Capture.Note("requested reclone-site=" + value)
-	cloneCtx, cloneCancel := context.WithTimeout(ctx, 8*time.Minute)
+	// The clone's own budget, plus the archive-tail wait that now precedes
+	// it (at least one operator poll and one sidecar scan after the
+	// rotation, at most pitrPreRecloneTailWait).
+	cloneBudget := 8 * time.Minute
+	if archivesTail {
+		cloneBudget += pitrPreRecloneTailWait
+	}
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, cloneBudget)
 	defer cloneCancel()
+	tailArchived := false
 	if _, err := env.Wait.UntilCR(cloneCtx, env.Namespace, "reclone of "+site+" completes", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		if _, events, err := pitrRecloneRejectedSnapshot(cloneCtx, env); err == nil {
-			if ev, rejected := pitrNewRecloneRejection(rejectedBefore, events, env.FG, site); rejected {
+		if _, events, err := pitrRecloneEventSnapshot(cloneCtx, env); err == nil {
+			if ev, rejected := pitrNewRecloneRejection(eventsBefore, events, env.FG, site); rejected {
 				return false, ev.Message, fmt.Errorf("reclone-site=%s was rejected: %s", value, ev.Message)
+			}
+			if archivesTail {
+				out, err := pitrRecloneTailCheck(eventsBefore, events, operatorLog(), env.FG, site)
+				if err != nil {
+					return false, err.Error(), err
+				}
+				tailArchived = tailArchived || out.Archived
 			}
 		}
 		replicating := false
@@ -1494,11 +1582,17 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 		if err != nil {
 			return false, msg, fmt.Errorf("reclone of %s: %w", site, err)
 		}
-		return done, msg, nil
+		return done, fmt.Sprintf("%s tailArchived=%t", msg, tailArchived), nil
 	}); err != nil {
 		return err
 	}
 	env.Capture.Note("reclone of " + site + " completed")
+	if _, err := identity.assertRotated(ctx, env); err != nil {
+		return err
+	}
+	if archivesTail {
+		return pitrAssertRecloneTailArchived(ctx, env, operatorLog, eventsBefore, site, pitrPreRecloneLogWait)
+	}
 	return nil
 }
 
@@ -1840,9 +1934,10 @@ func pitrCheckTargetAfterBackup(env *runner.Env, e pitrExpectation) error {
 }
 
 // pitrDivergenceAuditError matches the sidecar's history-audit LastError for
-// archived rows the server no longer has (internal/sidecar
-// binlog_history.go auditArchive), possibly behind an unsafe-history prefix.
-var pitrDivergenceAuditError = regexp.MustCompile(`site \S+ name \S+ id \S* P=\S* divergent transactions=\S+; preserve objects and use pitr-quarantine`)
+// archived transactions the server issued, no longer has and could reissue
+// (internal/sidecar binlog_history.go auditArchive), possibly behind an
+// unsafe-history prefix. A loss under another server_uuid is no error.
+var pitrDivergenceAuditError = regexp.MustCompile(`site \S+: server_uuid \S+ no longer has archived transactions \S+ that it issued \(row \S+ id \S*\) and reuses their GTIDs`)
 
 // pitrPromotionReady reports whether an archiver status shows site's
 // promotion confirmed: primary on the active prefix and the expected
@@ -1851,9 +1946,9 @@ var pitrDivergenceAuditError = regexp.MustCompile(`site \S+ name \S+ id \S* P=\S
 // (pitrSiteNow), which the sidecar shares, so no cross-host slack is
 // needed (F182). With tolerateDivergence the divergence audit's LastError
 // is accepted while the site's manifest holds divergent or quarantined
-// rows: the audit keeps reporting rows a lossy failover deliberately left
-// behind (s70), and that error never clears. Any other error, or the audit
-// error with no such rows, is not ready (F181).
+// rows: the audit keeps reporting a loss the server could reissue (a site
+// that kept its server_uuid), and that error never clears. Any other
+// error, or the audit error with no such rows, is not ready (F181).
 func pitrPromotionReady(st *pgsidecar.ArchiverStatusResponse, prefix, archiveID string, notBefore time.Time, tolerateDivergence bool) (bool, string) {
 	if st == nil {
 		return false, "no status"

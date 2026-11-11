@@ -31,6 +31,12 @@ type mockMySQL struct {
 	replicaStatusErr         error
 	gtidExecuted             string
 	gtidExecutedErr          error
+	flushBinaryLogsErr       error
+	flushBinaryLogsFn        func(ctx context.Context) error
+	flushBinaryLogsCalls     int
+	binlogSeq                int
+	binlogFileErr            error
+	binlogFileName           string
 	partialRevokesErr        error
 	partialRevokesCalls      int
 	gtidExecutedHadDeadline  bool
@@ -397,6 +403,41 @@ func (m *mockMySQL) StartReplica(ctx context.Context) error {
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
+
+// FlushBinaryLogs counts the call; flushBinaryLogsFn, when set, runs without
+// the mock's lock so it can block until ctx ends.
+func (m *mockMySQL) FlushBinaryLogs(ctx context.Context) error {
+	m.mu.Lock()
+	m.flushBinaryLogsCalls++
+	fn, err := m.flushBinaryLogsFn, m.flushBinaryLogsErr
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx)
+	}
+	return err
+}
+
+// RotateBinaryLog is FlushBinaryLogs plus the active file's name:
+// "binlog.<binlogSeq>", where binlogSeq counts up by one per acknowledged
+// flush (a mock that starts at 0 writes binlog.000001 after its first).
+// binlogFileErr fails the name read of an acknowledged flush, and
+// binlogFileName, when set, is the name reported instead.
+func (m *mockMySQL) RotateBinaryLog(ctx context.Context) (string, error) {
+	if err := m.FlushBinaryLogs(ctx); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.binlogSeq++
+	if m.binlogFileErr != nil {
+		return "", m.binlogFileErr
+	}
+	if m.binlogFileName != "" {
+		return m.binlogFileName, nil
+	}
+	return fmt.Sprintf("binlog.%06d", m.binlogSeq), nil
+}
+
 func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

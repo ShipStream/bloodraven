@@ -10,20 +10,13 @@ import (
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
-type archiveEvidenceKey struct{ name, id, content string }
-type archiveReuseKey struct{ first, second archiveEvidenceKey }
+// archiveReuseKey names one piece of issuance work: the comparison of two
+// rows, or (second zero) the inspection that binds one row's coverage to
+// its content identity.
+type archiveReuseKey struct{ first, second binlogIdentity }
 
-func evidenceKey(e ManifestEntry) archiveEvidenceKey {
-	return archiveEvidenceKey{e.Name, e.ID, e.ContentID}
-}
 func sameArchiveBytes(store ArchiveStore, a, b ManifestEntry) bool {
 	x, y := a.ID, b.ID
-	if x == "" {
-		x = a.ContentID
-	}
-	if y == "" {
-		y = b.ContentID
-	}
 	return x != "" && y != "" && (x == y || store.BinlogContentID(x) == y || store.BinlogContentID(y) == x)
 }
 
@@ -63,14 +56,12 @@ func copyEvidence(e ManifestEntry) ManifestEntry {
 	}
 	return e
 }
-func bindArchiveEvidence(store ArchiveStore, entry ManifestEntry, e BinlogEvidence) ManifestEntry {
-	id := entry.ID
-	if id == "" {
-		id = store.BinlogContentID(e.Digest)
-		entry.ContentID = id
-	}
+
+// bindArchiveEvidence replaces entry's observations with those of its
+// inspected bytes; the caller has matched e's digest to entry.ID.
+func bindArchiveEvidence(entry ManifestEntry, e BinlogEvidence) ManifestEntry {
 	entry.GTIDCoverage = e.Metadata.GTIDCoverage
-	entry.GTIDCoverage.ContentID = id
+	entry.GTIDCoverage.ContentID = entry.ID
 	entry.Size = e.Metadata.Size
 	entry.FirstEventTime = e.Metadata.FirstEventTime
 	entry.LastEventTime = e.Metadata.LastEventTime
@@ -78,11 +69,11 @@ func bindArchiveEvidence(store ArchiveStore, entry ManifestEntry, e BinlogEviden
 	return entry
 }
 func (a *BinlogArchiver) chooseArchiveReuseWork(m *Manifest, ignoreCooldown bool) *archiveReuseWork {
-	active := make(map[archiveEvidenceKey]bool, len(m.Files))
+	active := make(map[binlogIdentity]bool, len(m.Files))
 	var index BinlogTransactionIndex
 	var bound []int
 	for i, row := range m.Files {
-		active[evidenceKey(row)] = true
+		active[row.identity()] = true
 		if coverageBoundToEntry(row) {
 			tx, err := internalmysql.ParseGTIDSet(observedArchiveGTIDs(row))
 			if err == nil && !tx.IsEmpty() {
@@ -91,7 +82,7 @@ func (a *BinlogArchiver) chooseArchiveReuseWork(m *Manifest, ignoreCooldown bool
 		}
 	}
 	for key := range a.reuseFailed {
-		if !active[key.first] || (key.second != (archiveEvidenceKey{}) && !active[key.second]) {
+		if !active[key.first] || (key.second != (binlogIdentity{}) && !active[key.second]) {
 			delete(a.reuseFailed, key)
 			delete(a.reuseErrors, key)
 		}
@@ -110,7 +101,7 @@ func (a *BinlogArchiver) chooseArchiveReuseWork(m *Manifest, ignoreCooldown bool
 			if sameArchiveBytes(a.store, old, row) {
 				continue
 			}
-			key := archiveReuseKey{evidenceKey(old), evidenceKey(row)}
+			key := archiveReuseKey{old.identity(), row.identity()}
 			if a.reuseCompared[key] || !eligible(key) {
 				continue
 			}
@@ -141,12 +132,13 @@ func (a *BinlogArchiver) chooseArchiveReuseWork(m *Manifest, ignoreCooldown bool
 		if coverageBoundToEntry(row) {
 			continue
 		}
-		key := archiveReuseKey{first: evidenceKey(row)}
+		key := archiveReuseKey{first: row.identity()}
 		if !eligible(key) {
 			continue
 		}
-		// Unknown legacy observations remain pending even when every row
-		// predates proof binding. Two representatives avoid a quadratic scan.
+		// A row whose coverage is not bound to its content identity proves
+		// nothing about its GTIDs, so it stays pending until its object is
+		// inspected. Two representatives avoid a quadratic scan.
 		different := func(peer ManifestEntry) bool {
 			return peer.identity() != row.identity() && !sameArchiveBytes(a.store, row, peer)
 		}
@@ -158,7 +150,7 @@ func (a *BinlogArchiver) chooseArchiveReuseWork(m *Manifest, ignoreCooldown bool
 	return nil
 }
 func (a *BinlogArchiver) runArchiveReuseWork(ctx context.Context, w *archiveReuseWork, input io.Reader) archiveReuseResult {
-	if w.key.second != (archiveEvidenceKey{}) {
+	if w.key.second != (binlogIdentity{}) {
 		proof, err := CheckArchiveIssuance(ctx, a.store, a.cfg.ManifestPrefix, a.site, w.first, w.second, w.overlap)
 		return archiveReuseResult{proof: proof, err: err}
 	}
@@ -166,14 +158,10 @@ func (a *BinlogArchiver) runArchiveReuseWork(ctx context.Context, w *archiveReus
 	if err != nil {
 		return archiveReuseResult{err: err}
 	}
-	id := w.first.ID
-	if id == "" {
-		id = w.first.ContentID
+	if !MatchesBinlogDigest(a.store, w.first.ID, e.Digest) {
+		return archiveReuseResult{err: fmt.Errorf("archived binlog identity mismatch for %s", w.first.Name)}
 	}
-	if id != "" && !MatchesBinlogDigest(a.store, id, e.Digest) {
-		return archiveReuseResult{err: fmt.Errorf("legacy identity mismatch for %s", w.first.Name)}
-	}
-	return archiveReuseResult{entry: bindArchiveEvidence(a.store, w.first, e)}
+	return archiveReuseResult{entry: bindArchiveEvidence(w.first, e)}
 }
 func (a *BinlogArchiver) beginArchiveReuseWork(ctx context.Context, w *archiveReuseWork) {
 	ctx, w.cancel = context.WithCancel(ctx)
@@ -186,7 +174,7 @@ func (a *BinlogArchiver) beginArchiveReuseWork(ctx context.Context, w *archiveRe
 		w.cancel()
 		close(w.done)
 	}
-	if w.key.second != (archiveEvidenceKey{}) {
+	if w.key.second != (binlogIdentity{}) {
 		if w.first.Size > 0 && w.second.Size > 0 && w.first.Size+w.second.Size <= 64<<10 {
 			finish(a.runArchiveReuseWork(ctx, w, nil))
 		} else {
@@ -204,7 +192,7 @@ func (a *BinlogArchiver) beginArchiveReuseWork(ctx context.Context, w *archiveRe
 		finish(archiveReuseResult{err: err})
 		return
 	}
-	// At most 64 KiB is held. Unknown or stale legacy Size metadata cannot turn
+	// At most 64 KiB is held. Unknown or stale Size metadata cannot turn
 	// synchronous reconciliation into an unbounded read on the scan goroutine.
 	prefix := make([]byte, (64<<10)+1)
 	n, err := io.ReadFull(w.source, prefix)
@@ -255,10 +243,10 @@ jobsLoop:
 				}
 				a.reuseErrors[w.key] = fmt.Errorf("site %s name %s id %s: verify archived GTID issuance: %w; preserve objects, repair archive access/bytes or use pitr-quarantine with a canonical full-backup bound", a.site, w.first.Name, w.first.ID, result.err)
 				firstError = a.reuseErrors[w.key]
-			} else if w.key.second != (archiveEvidenceKey{}) {
-				present := make(map[archiveEvidenceKey]bool)
+			} else if w.key.second != (binlogIdentity{}) {
+				present := make(map[binlogIdentity]bool)
 				for _, row := range m.Files {
-					present[evidenceKey(row)] = true
+					present[row.identity()] = true
 				}
 				if present[w.key.first] && present[w.key.second] {
 					if result.proof != nil {
@@ -276,20 +264,12 @@ jobsLoop:
 					if row.identity() != w.first.identity() {
 						continue
 					}
-					if evidenceKey(row) != w.key.first && !sameArchiveBytes(a.store, row, result.entry) {
-						break
-					}
 					// Preserve current base/provenance and administrative state; merge only
 					// observations verified against this immutable object's content identity.
 					next := result.entry
 					next.BaseGTIDs = row.BaseGTIDs
 					next.ArchivedAt = row.ArchivedAt
 					m.Files[i] = next
-					for j, d := range m.Divergent {
-						if d.Name == row.Name && d.ID == row.ID {
-							m.Divergent[j].ContentID = next.ContentID
-						}
-					}
 					changed = true
 					break
 				}
@@ -297,9 +277,6 @@ jobsLoop:
 			if m.Epoch != nil && m.Epoch.ResetReason != "" {
 				break
 			}
-		}
-		if a.historyTask != nil && a.historyTask.remote {
-			break
 		}
 		w := a.chooseArchiveReuseWork(m, false)
 		if w == nil {

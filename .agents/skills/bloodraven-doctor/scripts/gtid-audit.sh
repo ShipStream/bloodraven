@@ -291,8 +291,8 @@ if [[ ${#MANIFESTS[@]} -gt 0 ]]; then
             jq -r '"📄 site=\(.site // "?") version=\(.version // "?") archiveId=\(.archiveId // "")" +
                 (if .historyIntegrity then "\n   historyIntegrity: \(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at); this site cannot certify history (playbook 40)" else "" end) +
                 (if (.epoch.resetReason // "") != "" then "\n   epoch.resetReason: \(.epoch.resetReason); every restore refuses PITRArchiveHistoryReset" else "" end)' "$m"
-            echo "   Records (kind serverUuid serverId observedAt probeInterval gtidExecuted [readOnlyGtidExecuted]):"
-            jq -r '(.promotions // [])[] | "     \(.kind // "Promotion") \(.serverUuid) \(.serverId) \(.observedAt) \(.probeInterval // "unknown") \(.gtidExecuted)" + (if (.readOnlyGtidExecuted // "") != "" then " [read-only before: \(.readOnlyGtidExecuted)]" else "" end)' "$m"
+            echo "   Records (kind serverUuid serverId observedAt probeInterval gtidExecuted [readOnlyGtidExecuted] [promotionGtidExecuted] [confirmedAt +confirmedGtidAdded]):"
+            jq -r '(.promotions // [])[] | "     \(.kind // "Promotion") \(.serverUuid) \(.serverId) \(.observedAt) \(.probeInterval // "unknown") \(.gtidExecuted)" + (if (.readOnlyGtidExecuted // "") != "" then " [read-only before: \(.readOnlyGtidExecuted)]" else "" end) + (if (.promotionGtidExecuted // "") != "" then " [promotion set: \(.promotionGtidExecuted)]" else "" end) + (if (.confirmedAt // "") != "" then " [confirmed at \(.confirmedAt): +\(.confirmedGtidAdded // "")]" else "" end)' "$m"
             echo "   Divergent rows (name id missingGtids):"
             jq -r '(.divergent // [])[] | "     \(.name) \(.id // "legacy") \(.missingGtids)"' "$m"
             echo "   Quarantined rows (name id at reason [missingGtids]):"

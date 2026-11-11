@@ -27,6 +27,7 @@ type FakeReplica struct {
 	mu         sync.Mutex
 	state      FakeReplicaState
 	onPoll     func(poll int, s *FakeReplicaState)
+	onFlush    func(ctx context.Context) error
 	polls      int
 	statements []string
 }
@@ -65,6 +66,14 @@ type FakeReplicaState struct {
 	// Grants are the SHOW GRANTS lines. Empty reports
 	// "GRANT ALL PRIVILEGES ON *.* TO `operator`@`%`".
 	Grants []string
+	// BinlogPreviousGtids holds, for every FLUSH BINARY LOGS that rotated
+	// the binary log, the Previous_gtids header of the file it opened: the
+	// executed set at that moment. RESET REPLICA ALL keeps it.
+	BinlogPreviousGtids []string
+	// BinlogStatusErr fails SHOW BINARY LOG STATUS. Without it the
+	// statement reports the active file "binlog.NNNNNN", numbered from
+	// 000001 plus one per rotation in BinlogPreviousGtids.
+	BinlogStatusErr error
 }
 
 // NewFakeReplica returns a fake replica in the given state.
@@ -81,9 +90,19 @@ func (f *FakeReplica) OnPoll(fn func(poll int, s *FakeReplicaState)) {
 	f.onPoll = fn
 }
 
+// OnFlush registers fn to run when FLUSH BINARY LOGS arrives, before the
+// rotation and without the fake's lock, with the statement's context: fn
+// can block until that context ends (a slow flush) or return an error (a
+// failing one). The rotation happens only when fn returns nil.
+func (f *FakeReplica) OnFlush(fn func(ctx context.Context) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onFlush = fn
+}
+
 // Checker returns a real mysql.Checker connected to this fake.
 func (f *FakeReplica) Checker() mysql.Checker {
-	return mysql.NewCheckerFromPools(sql.OpenDB(f), sql.OpenDB(f))
+	return mysql.NewCheckerFromPools(sql.OpenDB(f), sql.OpenDB(f), f)
 }
 
 // Mutate applies fn to the replica state under its lock, for a test that
@@ -139,11 +158,28 @@ func (c *fakeReplicaConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("fake replica: transactions not modelled")
 }
 
-func (c *fakeReplicaConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+func (c *fakeReplicaConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if len(args) > 0 {
 		return nil, fmt.Errorf("fake replica: statement arguments not modelled: %q", query)
 	}
 	f := c.f
+	if query == "FLUSH BINARY LOGS" {
+		f.mu.Lock()
+		f.statements = append(f.statements, query)
+		onFlush := f.onFlush
+		f.mu.Unlock()
+		if onFlush != nil {
+			if err := onFlush(ctx); err != nil {
+				return nil, err
+			}
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		// The statement is not written to the binary log and adds no GTID;
+		// it works under super_read_only.
+		f.state.BinlogPreviousGtids = append(f.state.BinlogPreviousGtids, f.state.ExecutedGtidSet)
+		return driver.RowsAffected(0), nil
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statements = append(f.statements, query)
@@ -189,7 +225,7 @@ func (c *fakeReplicaConn) ExecContext(_ context.Context, query string, args []dr
 		*s = FakeReplicaState{
 			ExecutedGtidSet: s.ExecutedGtidSet, ReadOnly: s.ReadOnly,
 			SuperReadOnly: s.SuperReadOnly, Discarded: s.Discarded,
-			ServerUUID: s.ServerUUID,
+			ServerUUID: s.ServerUUID, BinlogPreviousGtids: s.BinlogPreviousGtids,
 		}
 	case strings.HasPrefix(query, "SET GLOBAL super_read_only = "):
 		on := strings.TrimPrefix(query, "SET GLOBAL super_read_only = ") == "ON"
@@ -231,6 +267,14 @@ func (c *fakeReplicaConn) QueryContext(_ context.Context, query string, args []d
 		return &fakeRows{cols: replicaStatusColumns, rows: [][]driver.Value{replicaStatusRow(s)}}, nil
 	case "SELECT @@global.gtid_executed":
 		return &fakeRows{cols: []string{"@@global.gtid_executed"}, rows: [][]driver.Value{{s.ExecutedGtidSet}}}, nil
+	case "SHOW BINARY LOG STATUS":
+		if s.BinlogStatusErr != nil {
+			return nil, s.BinlogStatusErr
+		}
+		return &fakeRows{
+			cols: []string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"},
+			rows: [][]driver.Value{{fmt.Sprintf("binlog.%06d", 1+len(s.BinlogPreviousGtids)), int64(158), "", "", s.ExecutedGtidSet}},
+		}, nil
 	case "SELECT @@server_uuid, @@global.gtid_executed":
 		return &fakeRows{cols: []string{"@@server_uuid", "@@global.gtid_executed"}, rows: [][]driver.Value{{s.ServerUUID, s.ExecutedGtidSet}}}, nil
 	case "SHOW GRANTS":

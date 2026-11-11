@@ -7,6 +7,7 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -46,6 +47,20 @@ type FakeMySQL struct {
 	// GtidExecutedVal and GtidExecutedErr are returned by GetGtidExecuted.
 	GtidExecutedVal string
 	GtidExecutedErr error
+
+	// FlushBinaryLogsErr is returned by FlushBinaryLogs. FlushBinaryLogsFn,
+	// when set, runs instead (without the fake's lock) with the caller's
+	// context, so a test can block it until that context ends.
+	// BinlogFlushes counts the calls that returned nil.
+	FlushBinaryLogsErr error
+	FlushBinaryLogsFn  func(ctx context.Context) error
+	BinlogFlushes      int
+	// BinlogFirstSeq numbers the binary log the fake "writes" before any
+	// flush (0 is file 000001); RotateBinaryLog reports
+	// "binlog.<BinlogFirstSeq+BinlogFlushes>" as the active file, or fails
+	// with BinlogFileErr after a successful flush.
+	BinlogFirstSeq int
+	BinlogFileErr  error
 
 	// Error injection per method
 	FenceErr        error
@@ -242,6 +257,43 @@ func (m *FakeMySQL) GetGtidExecuted(_ context.Context) (string, error) {
 	defer m.mu.Unlock()
 	m.record("GetGtidExecuted")
 	return m.GtidExecutedVal, m.GtidExecutedErr
+}
+
+// FlushBinaryLogs records the call and rotates nothing: the fake has no
+// binary log, only the count of successful flushes.
+func (m *FakeMySQL) FlushBinaryLogs(ctx context.Context) error {
+	m.mu.Lock()
+	m.record("FlushBinaryLogs")
+	fn, err := m.FlushBinaryLogsFn, m.FlushBinaryLogsErr
+	m.mu.Unlock()
+	if fn != nil {
+		err = fn(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.BinlogFlushes++
+	m.mu.Unlock()
+	return nil
+}
+
+// RotateBinaryLog is FlushBinaryLogs plus the name of the file the fake
+// "writes" after it (see BinlogFirstSeq).
+func (m *FakeMySQL) RotateBinaryLog(ctx context.Context) (string, error) {
+	if err := m.FlushBinaryLogs(ctx); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.BinlogFileErr != nil {
+		return "", m.BinlogFileErr
+	}
+	first := m.BinlogFirstSeq
+	if first == 0 {
+		first = 1
+	}
+	return fmt.Sprintf("binlog.%06d", first+m.BinlogFlushes), nil
 }
 
 func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 type binlogStateReader interface {
@@ -67,27 +68,54 @@ func (a *BinlogArchiver) noteArchiveEpoch(ctx context.Context, m *Manifest, entr
 	// bytes. Current server state is used by the separate divergence audit.
 	return a.detectArchiveReuse(ctx, m, entry)
 }
+
+// auditArchive is the maintenance pass's history audit of this site's own
+// manifest. It runs on every site and in every role, and it never stops
+// uploads or retention. What it returns is reported as the archiver's
+// LastError; what it only records is evidence.
+//
+// Fail closed (an error):
+//   - a recorded GTID namespace reuse (Epoch.ResetReason): the archive
+//     holds two different transactions under one GTID, and no reader can
+//     tell which of them a backup contains;
+//   - an overlapping issuance between two rows that cannot be verified
+//     (reconcileArchiveReuse): the same, undecided;
+//   - a server whose state cannot be read: nothing below is known;
+//   - reissuable divergence: this server no longer holds archived
+//     transactions that were issued under its own current server_uuid, so
+//     it issues those GTIDs again as soon as it writes. The reuse is in
+//     the server and its active binlog, not yet in any archived byte, so
+//     no restore can see it until the replacement is sealed and uploaded
+//     (and then the whole archive is reset). It is the one divergence that
+//     needs action before the site is promoted.
+//
+// Recorded, not an error: any other divergence. A row whose transactions
+// the server no longer holds, issued under another server_uuid (the tail a
+// former primary archived before it was recloned, since a clone starts
+// with a new server_uuid), is correct archive content. The manifest keeps
+// the evidence in Divergent[], which the planner reads (pitrplan
+// Row.Divergent): a restore whose window crosses those transactions
+// refuses PITRArchiveDivergentHistory until excludeGtids lists them.
+//
+// The verdict on what this server could reissue (/archiver/status
+// reissuableGtids) is this pass's or none. Every return that did not
+// evaluate the server leaves no verdict: an earlier pass's "none" says
+// nothing about a server that has changed since, and the runner reads it as
+// no risk when the site is promoted.
 func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
+	evaluated := false
+	defer func() {
+		if !evaluated {
+			a.setReissuable(nil)
+		}
+	}()
 	auditError := a.archiveReuseError()
-	// Raw identity repair and proof inspection share one bounded history lane.
+	// Proof inspection shares one bounded history lane with the scan.
 	if !a.historyScanBusy {
 		auditError = a.reconcileArchiveReuse(ctx, m)
 	}
 	if m.Epoch != nil && m.Epoch.ResetReason != "" {
 		return fmt.Errorf("site %s: %s", a.site, m.Epoch.ResetReason)
-	}
-	// Check one unresolved legacy row per cycle even on replicas or when its
-	// local binlog has already left the index. Never sweep remote history here.
-	if len(m.Files) > 0 {
-		row := m.Files[a.historyNextAudit%len(m.Files)]
-		a.historyNextAudit = (a.historyNextAudit + 1) % len(m.Files)
-		if row.ID == "" && row.ContentID == "" {
-			if err := a.legacyExists(ctx, row); err != nil {
-				if auditError == nil {
-					auditError = fmt.Errorf("site %s name %s id %s P=%s object missing or unreadable, digest unknown: %w; preserve objects and use pitr-quarantine with a canonical full-backup bound", a.site, row.Name, row.ID, row.PreviousGTIDs, err)
-				}
-			}
-		}
 	}
 	source, ok := a.mysql.(binlogStateReader)
 	if !ok {
@@ -101,7 +129,8 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 	if err != nil {
 		return err
 	}
-	// Empty execution is a fresh/bootstrap observation, not divergence evidence.
+	// Empty execution is a fresh/bootstrap observation, not divergence
+	// evidence, and says nothing about what this server could reissue.
 	if current.IsEmpty() {
 		return auditError
 	}
@@ -116,46 +145,123 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 	}
 	// A same-source number can return while its replacement is still active and
 	// therefore absent from the archive. Preserve known loss for that issuer;
-	// a fresh-PVC UUID cannot reissue the old source's GTIDs.
+	// a server with another server_uuid cannot reissue the old source's GTIDs.
 	prior := make(map[binlogIdentity]internalmysql.GTIDSet, len(m.Divergent))
 	for _, d := range m.Divergent {
 		set, err := internalmysql.ParseGTIDSet(d.MissingGTIDs)
 		if err != nil {
 			return err
 		}
-		for sid := range set {
-			sourceUUID, _, _ := strings.Cut(sid, ":")
-			if uuid != "" && !strings.EqualFold(sourceUUID, uuid) {
-				delete(set, sid)
-			}
-		}
 		key := binlogIdentity{d.Name, d.ID}
-		prior[key] = UnionBinlogGTIDs(prior[key], set)
+		prior[key] = UnionBinlogGTIDs(prior[key], issuedBy(set, uuid))
 	}
 	var divergent []ArchiveDivergence
-	firstError := auditError
-	for _, row := range m.Files {
-		tx, err := internalmysql.ParseGTIDSet(strings.Join([]string{row.PreviousGTIDs, row.BaseGTIDs, observedArchiveGTIDs(row)}, ","))
+	missingAll, reissuable := internalmysql.GTIDSet{}, internalmysql.GTIDSet{}
+	var reissuableRow *ManifestEntry
+	for i, row := range m.Files {
+		tx, err := archivedRowGTIDs(row)
 		if err != nil {
 			return err
 		}
 		missing := UnionBinlogGTIDs(tx.Subtract(current), prior[row.identity()])
-		if !missing.IsEmpty() {
-			divergent = append(divergent, ArchiveDivergence{Name: row.Name, ID: row.ID, ContentID: row.ContentID, MissingGTIDs: missing.String()})
-			if firstError == nil {
-				firstError = fmt.Errorf("site %s name %s id %s P=%s divergent transactions=%s; preserve objects and use pitr-quarantine with a canonical full-backup bound", a.site, row.Name, row.ID, row.PreviousGTIDs, missing.String())
+		if missing.IsEmpty() {
+			continue
+		}
+		divergent = append(divergent, ArchiveDivergence{Name: row.Name, ID: row.ID, MissingGTIDs: missing.String()})
+		missingAll = UnionBinlogGTIDs(missingAll, missing)
+		if own := issuedBy(missing, uuid); !own.IsEmpty() {
+			reissuable = UnionBinlogGTIDs(reissuable, own)
+			if reissuableRow == nil {
+				reissuableRow = &m.Files[i]
 			}
 		}
 	}
+	// A quarantine moves only metadata: this server can reissue a
+	// quarantined row's transactions as well as an active row's
+	// (detectArchiveReuse compares both). Quarantined rows carry no
+	// Divergent[] entry; the evidence kept with the quarantine is their
+	// sticky part, and a loss this server could reissue is added to it, so
+	// that it survives the numbers' return as an active row's does.
+	quarantineChanged := false
+	for i, q := range m.Quarantined {
+		tx, err := archivedRowGTIDs(q.Entry)
+		if err != nil {
+			return err
+		}
+		var known internalmysql.GTIDSet
+		if q.Divergent != nil {
+			if known, err = internalmysql.ParseGTIDSet(q.Divergent.MissingGTIDs); err != nil {
+				return err
+			}
+		}
+		own := issuedBy(UnionBinlogGTIDs(tx.Subtract(current), known), uuid)
+		if own.IsEmpty() {
+			continue
+		}
+		reissuable = UnionBinlogGTIDs(reissuable, own)
+		if reissuableRow == nil {
+			reissuableRow = &m.Quarantined[i].Entry
+		}
+		if !known.Contains(own) {
+			m.Quarantined[i].Divergent = &ArchiveDivergence{Name: q.Entry.Name, ID: q.Entry.ID, MissingGTIDs: UnionBinlogGTIDs(known, own).String()}
+			quarantineChanged = true
+		}
+	}
+	// The server was evaluated: the verdict stands whether or not the
+	// evidence below can be saved.
+	a.setReissuable(reissuable)
+	evaluated = true
 	before, _ := json.Marshal(m.Divergent)
 	after, _ := json.Marshal(divergent)
-	if string(before) != string(after) {
+	if string(before) != string(after) || quarantineChanged {
 		m.Divergent = divergent
 		if err := a.saveManifest(ctx, m); err != nil {
 			return fmt.Errorf("save divergence evidence: %w", err)
 		}
+		a.logger.Info("archive divergence evidence recorded", "rows", len(divergent),
+			"missingGtids", missingAll.String(), "reissuableGtids", reissuable.String())
 	}
-	return firstError
+	if auditError != nil {
+		return auditError
+	}
+	if !reissuable.IsEmpty() {
+		return fmt.Errorf("site %s: server_uuid %s no longer has archived transactions %s that it issued (row %s id %s) and reuses their GTIDs when it writes; once the reused GTIDs are archived, every restore from this archive refuses %s. Reclone this site before it is promoted (a clone starts with a new server_uuid); if it is already the primary, start a new archive prefix and take a full backup",
+			a.site, uuid, reissuable.String(), reissuableRow.Name, reissuableRow.ID, pitrarchive.TokenArchiveHistoryReset)
+	}
+	return nil
+}
+
+// archivedRowGTIDs is every transaction a row vouches for: the ones it
+// holds and the ones it builds on.
+func archivedRowGTIDs(row ManifestEntry) (internalmysql.GTIDSet, error) {
+	return internalmysql.ParseGTIDSet(strings.Join([]string{row.PreviousGTIDs, row.BaseGTIDs, observedArchiveGTIDs(row)}, ","))
+}
+
+// issuedBy is the part of set a server with server_uuid uuid issues GTIDs
+// in: the plain and tagged source identifiers under uuid. An unknown uuid
+// keeps the whole set: without it nothing proves the server cannot.
+func issuedBy(set internalmysql.GTIDSet, uuid string) internalmysql.GTIDSet {
+	out := make(internalmysql.GTIDSet, len(set))
+	for sid, intervals := range set {
+		source, _, _ := strings.Cut(sid, ":")
+		if uuid == "" || strings.EqualFold(source, uuid) {
+			out[sid] = intervals
+		}
+	}
+	return out
+}
+
+// setReissuable publishes the audit's verdict on what this server could
+// reissue for /archiver/status; nil when this pass did not evaluate it.
+func (a *BinlogArchiver) setReissuable(set internalmysql.GTIDSet) {
+	var text *string
+	if set != nil {
+		s := set.String()
+		text = &s
+	}
+	a.mu.Lock()
+	a.reissuableGTIDs = text
+	a.mu.Unlock()
 }
 
 // QuarantineArchive moves metadata only. Objects remain available for recovery.
@@ -317,14 +423,10 @@ func AcknowledgeArchiveHistory(ctx context.Context, session *ArchiveSession, sit
 		if readErr != nil {
 			return readErr
 		}
-		id := entry.ID
-		if id == "" {
-			id = entry.ContentID
-		}
-		if id != "" && !MatchesBinlogDigest(store, id, e.Digest) {
+		if !MatchesBinlogDigest(store, entry.ID, e.Digest) {
 			return fmt.Errorf("identity mismatch for %s", entry.Name)
 		}
-		entry = bindArchiveEvidence(store, entry, e)
+		entry = bindArchiveEvidence(entry, e)
 		for _, other := range issued.Overlaps(e.GTIDs) {
 			prior := verified[other]
 			if sameArchiveBytes(store, prior, entry) {

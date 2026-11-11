@@ -181,6 +181,10 @@ jobs:
   # Opt-in native PITR replay tests (#206): restore.py's segment replay and
   # pitr-download's planner against a real mysql:9.7 container, with the
   # captured binlog fixtures. Needs docker, which ubuntu-latest provides.
+  # The job also runs the native MySQL launcher test (#265): the rendered
+  # mysql container launcher against real servers through first boot,
+  # restarts, clones and a killed clone. It reads MySQL-internal file names
+  # in the data directory, so this is where an upstream change shows.
   test-pitr-native:
     needs: changes
     if: needs.changes.outputs.pitr == 'true'
@@ -204,6 +208,10 @@ jobs:
         run: docker pull mysql:9.7
       - name: Run native PITR tests
         run: go test ./cmd/bloodraven ./internal/controller -run 'TestPITRNative' -v
+      - name: Run native MySQL launcher test
+        env:
+          BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
+        run: go test ./internal/controller -run 'TestMySQLLauncherNative' -v -timeout 20m
 
   test-envtest:
     needs: changes

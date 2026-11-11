@@ -20,7 +20,7 @@ type pitrLookupResult struct {
 
 // resolvePITRCutoff computes the binlog retention cutoff. holdReader is an
 // uncached reader used only to decide whether a backup being deleted is
-// still read by a verification.
+// still read by a verification or a restore.
 func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, namespace, group, archive string) (map[string]any, error) {
 	var list v1alpha1.MysqlBackupList
 	// Specs are authoritative: labels and the PITR profile do not delimit which
@@ -32,8 +32,9 @@ func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, na
 	var cutoff *time.Time
 	var retained []string
 	unknown, inFlight := false, false
-	// One verification List per request, however many backups are stuck
-	// Terminating (a wedged cleanup can leave many).
+	// One List of verifications and one of failover groups per request,
+	// however many backups are stuck Terminating (a wedged cleanup can
+	// leave many).
 	var readers *controller.BackupReadChecker
 	for i := range list.Items {
 		b := &list.Items[i]
@@ -41,22 +42,25 @@ func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, na
 			continue
 		}
 		// A backup being deleted no longer bounds retention, unless a
-		// verification may be reading it: its artifact is kept until that
-		// run stops, and so must be the binlogs a PITR replay reads after
-		// it. A stamped hold is enough; otherwise (a run started by an
-		// older operator) ask the API server, and fail closed on errors.
-		// Holds are only taken on Succeeded backups, so a deleted backup in
-		// any other phase is skipped without asking the API server.
+		// verification or a restore (initFromBackup or restoreInPlace of
+		// any group in the namespace) may be reading it: its artifact is
+		// kept until that run stops, and so must be the binlogs a PITR
+		// replay reads after it. A stamped hold is enough (the backup's
+		// finalizer strips a dead one before it does anything else);
+		// otherwise (a run started by an older operator) ask the API
+		// server, and fail closed on errors. Holds are only taken on
+		// Succeeded backups, so a deleted backup in any other phase is
+		// skipped without asking the API server.
 		if !b.DeletionTimestamp.IsZero() && b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
 			continue
 		}
-		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasVerificationHold(b) {
+		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasReadHold(b) {
 			if readers == nil {
 				readers = controller.NewBackupReadChecker(holdReader)
 			}
 			read, err := readers.BeingRead(ctx, b)
 			if err != nil {
-				return nil, fmt.Errorf("check verification readers of backup %s: %w", b.Name, err)
+				return nil, fmt.Errorf("check readers of backup %s: %w", b.Name, err)
 			}
 			if !read {
 				continue

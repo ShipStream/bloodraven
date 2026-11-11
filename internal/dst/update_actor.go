@@ -126,6 +126,9 @@ func (a *updateActor) stepOnce(ctx context.Context) {
 			return
 		}
 		a.fenced = g
+		// ExecuteHandoff rotates the fenced source's binary log here, best
+		// effort; its outcome changes nothing.
+		a.upd.RotateSourceBinlogForSim(ctx, activeC, a.upd.Active())
 		a.step = updCatchUp
 	case updCatchUp:
 		have, err := standbyC.GetGtidExecuted(ctx)
@@ -156,6 +159,9 @@ func (a *updateActor) stepOnce(ctx context.Context) {
 			a.abort(ctx)
 			return
 		}
+		// promoteVerifiedFrom rotates the candidate's binary log before the
+		// clears, on a connection of its own (the pooled checker here).
+		a.upd.RotateCandidateBinlogForSim(ctx, standbyC, a.standby)
 		a.step = updClearRO
 	case updClearRO:
 		if err := a.sess.SetReadOnly(ctx, false); err != nil {

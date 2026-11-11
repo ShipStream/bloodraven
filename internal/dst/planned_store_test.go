@@ -477,3 +477,56 @@ func TestMergeSnapshot_TwoStepWrite(t *testing.T) {
 		t.Fatalf("the concurrent planned block, hold or condition was overwritten: %+v", st)
 	}
 }
+
+// TestMergeSnapshot_ReMergesTheFailoverRecord: the snapshot write's second
+// step merges the failover record again over the live one, as
+// updateCRStatus does (K058). A planned run's terminal write that applies a
+// newer record between the two steps keeps it: the snapshot, taken before
+// the manager's own next poll, still carries the older record and must not
+// move status.lastFailover back. A snapshot with a newer record than the
+// live one still moves it forward.
+func TestMergeSnapshot_ReMergesTheFailoverRecord(t *testing.T) {
+	ctx := context.Background()
+	s, clk := newTestStore(t)
+	old := clk.Now().Add(-2 * time.Hour)
+	stale := controller.TopologySnapshot{ActiveSite: "alpha", LastFailover: old, LastFailoverTarget: "alpha", ObservedAt: clk.Now()}
+	if err := s.MergeSnapshot(stale); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := metav1.NewTime(clk.Now())
+	const watermark = "00000000-0000-0000-0000-000000000001:1-9"
+	pf := v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseSucceeded, TargetSite: "beta"}
+	yielded := false
+	s.yield = func(point string) {
+		if point != YieldSnapshotCommit || yielded {
+			return
+		}
+		yielded = true
+		if out, err := s.Write(ctx, mustLoad(t, s), pf, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+			st.SetLastFailover(&confirmed, "beta", watermark)
+		}); out != controller.WriteCommitted {
+			t.Fatalf("concurrent terminal write: %s %v", out, err)
+		}
+	}
+	if err := s.MergeSnapshot(stale); err != nil {
+		t.Fatal(err)
+	}
+	if !yielded {
+		t.Fatal("the snapshot write did not yield between its read and its commit")
+	}
+	st := s.Object().Status
+	if lf := st.LastFailoverTime(); lf == nil || !lf.Time.Equal(confirmed.Time) || st.LastFailoverTarget() != "beta" ||
+		st.PromotionGtidExecuted() != watermark {
+		t.Fatalf("the snapshot write replaced the newer failover record: %+v", st.LastFailover)
+	}
+	s.yield = nil
+	later := clk.Now().Add(time.Minute)
+	if err := s.MergeSnapshot(controller.TopologySnapshot{ActiveSite: "alpha", LastFailover: later, LastFailoverTarget: "alpha",
+		ObservedAt: later}); err != nil {
+		t.Fatal(err)
+	}
+	st = s.Object().Status
+	if lf := st.LastFailoverTime(); lf == nil || !lf.Time.Equal(later) || st.LastFailoverTarget() != "alpha" {
+		t.Fatalf("a newer snapshot record did not move status.lastFailover forward: %+v", st.LastFailover)
+	}
+}

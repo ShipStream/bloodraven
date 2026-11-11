@@ -47,10 +47,18 @@ type ArchiverStatus struct {
 	// reason and key revision. nil when PITR is not configured.
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count the Divergent and
-	// Quarantined entries in this site's own manifest. The runner warns
-	// PITRArchiveReissueRiskDetected when a site with a non-zero sum is promoted.
+	// Quarantined entries in this site's own manifest. A divergent row is
+	// evidence the planner reads, not an archiver failure.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
+	// ReissuableGTIDs is the part of those rows' transactions the site's
+	// server no longer holds and could issue again: the ones under its own
+	// current server_uuid. The runner warns PITRArchiveReissueRiskDetected
+	// when a site that reports a non-empty set is promoted. The empty
+	// string means the sidecar's last history audit found none. nil means
+	// no verdict: the sidecar predates the field, no audit has completed
+	// in its process, or its server has no history yet.
+	ReissuableGTIDs *string `json:"reissuableGtids,omitempty"`
 	// PromotionRecordedAt is the ObservedAt of the promotion record that
 	// gates the current writable episode's uploads; zero while no record
 	// is confirmed (D-43).
@@ -60,6 +68,51 @@ type ArchiverStatus struct {
 	// detected before the manifest existed (held for the pod's lifetime
 	// only); nil when unmarked.
 	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
+	// Tail is what the archiver's last scan decided about the sealed local
+	// binary logs this site still has to archive. nil when PITR is not
+	// configured, before the first scan that read the binary log index, and
+	// from a sidecar that predates the field (which archives nothing while
+	// its server is read-only).
+	Tail *ArchiverTailStatus `json:"tail,omitempty"`
+}
+
+// The states of ArchiverTailStatus.
+const (
+	// ArchiverTailDrained: at the last scan every sealed local binary log
+	// this site has to archive was in its manifest. A writable site has to
+	// archive every sealed file; a read-only one only its writable-era
+	// tail, the sealed files up to the last one that holds a transaction
+	// the server originated. A read-only site with no such file is Drained.
+	ArchiverTailDrained = "Drained"
+	// ArchiverTailPending: at least one such file is not archived yet and
+	// the archiver is working on it (PendingFiles).
+	ArchiverTailPending = "Pending"
+	// ArchiverTailBlocked: the scan could not decide or could not upload
+	// (the role probe or the archive session failed, the history-integrity
+	// marker is set, the site's records do not allow the upload, ...).
+	// Reason says why.
+	ArchiverTailBlocked = "Blocked"
+)
+
+// ArchiverTailStatus is the `tail` block of /archiver/status. The operator
+// waits on it before a reclone wipes a site's binary logs: after its own
+// FLUSH BINARY LOGS it needs a scan that saw the rotation (ActiveFile is
+// the file the server wrote after that FLUSH, or a later one) and ended
+// Drained.
+type ArchiverTailStatus struct {
+	// State is ArchiverTailDrained, ArchiverTailPending or
+	// ArchiverTailBlocked.
+	State string `json:"state"`
+	// ActiveFile is the binary log the server was writing at the last
+	// scan (the last entry of the index), and NewestSealedFile the entry
+	// before it ("" when there is none). Both are of the index read State
+	// is about, and "" from a scan that could not read the index.
+	ActiveFile       string `json:"activeFile,omitempty"`
+	NewestSealedFile string `json:"newestSealedFile,omitempty"`
+	// PendingFiles counts the sealed files the site still has to archive.
+	PendingFiles int64 `json:"pendingFiles"`
+	// Reason says why the state is Blocked.
+	Reason string `json:"reason,omitempty"`
 }
 
 // KeyringComponentStatus mirrors the sidecar's view of

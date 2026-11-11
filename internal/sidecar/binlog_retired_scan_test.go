@@ -13,108 +13,94 @@ import (
 )
 
 func TestRetiredLocalBinlogIsNotReuploaded(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		for _, pending := range []bool{false, true} {
-			label := "ID-aware"
-			if legacy {
-				label = "legacy"
+	for _, pending := range []bool{false, true} {
+		t.Run(map[bool]string{false: "acknowledged", true: "pending"}[pending], func(t *testing.T) {
+			ctx := context.Background()
+			store, factory, status, _, keys := newRetentionRetryFixture(t)
+			a := factory()
+			m, err := loadManifest(ctx, store, "binlogs", "iad")
+			if err != nil {
+				t.Fatal(err)
 			}
+			m.Files = m.Files[1:]
+			if err := seedManifest(ctx, store, "binlogs", m); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ArchiveStore.Delete(ctx, keys[0]); err != nil {
+				t.Fatal(err)
+			}
+			const initialUploads = 1
+			oldBytes, err := os.ReadFile("testdata/incarnation-a.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			localFile := filepath.Join(a.cfg.BinlogDir, "mysql-bin.000001")
+			if err := os.WriteFile(localFile, oldBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex), []byte("mysql-bin.000001\nmysql-bin.000003\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			counted := &identityCountingStore{ArchiveStore: store}
+			a.store = counted
 			if pending {
-				label += "/pending"
-			} else {
-				label += "/acknowledged"
+				store.failDelete[keys[0]] = 1
 			}
-			t.Run(label, func(t *testing.T) {
-				ctx := context.Background()
-				store, factory, status, _, keys := newRetentionRetryFixture(t, legacy)
-				a := factory()
-				initialUploads := 0
-				if !legacy {
-					m, err := loadManifest(ctx, store, "binlogs", "iad")
-					if err != nil {
-						t.Fatal(err)
-					}
-					m.Files = m.Files[1:]
-					if err := seedManifest(ctx, store, "binlogs", m); err != nil {
-						t.Fatal(err)
-					}
-					if err := store.ArchiveStore.Delete(ctx, keys[0]); err != nil {
-						t.Fatal(err)
-					}
-					initialUploads = 1
-				}
-				oldBytes, err := os.ReadFile("testdata/incarnation-a.bin")
-				if err != nil {
-					t.Fatal(err)
-				}
-				localFile := filepath.Join(a.cfg.BinlogDir, "mysql-bin.000001")
-				if err := os.WriteFile(localFile, oldBytes, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex), []byte("mysql-bin.000001\nmysql-bin.000003\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				counted := &identityCountingStore{ArchiveStore: store}
-				a.store = counted
-				if pending {
-					store.failDelete[keys[0]] = 1
-				}
-				a.scanAndArchive(ctx)
-				if rows := readRetentionPendingRows(t, store); len(rows) != 1 {
-					t.Fatalf("initial sweep did not retire the file: %+v", rows)
-				}
-				if counted.puts != initialUploads {
-					t.Fatalf("initial archive uploads=%d, want %d", counted.puts, initialUploads)
-				}
-				status.Store(http.StatusServiceUnavailable)
-				a.scanAndArchive(ctx)
-				restarted := factory()
-				restarted.store = counted
-				restarted.scanAndArchive(ctx)
-				if counted.puts != initialUploads {
-					t.Errorf("retired local bytes were re-uploaded %d times", counted.puts-initialUploads)
-				}
-				m, err := loadManifest(ctx, store, "binlogs", "iad")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(m.Files) != 1 || m.Files[0].Name != "mysql-bin.000002" {
-					t.Errorf("retired live row returned: %+v", m.Files)
-				}
-				if snap := restarted.Snapshot(ctx); snap.BacklogFiles != 0 || snap.ManifestFileCount != 1 || snap.ManifestBytes != 360 || snap.LastError != "" {
-					t.Errorf("retirement counted as active coverage/backlog: %+v", snap)
-				}
-				_, exists, err := store.Get(ctx, keys[0])
-				if err != nil || exists {
-					t.Errorf("retired object remains after resumed cleanup: %t, %v", exists, err)
-				}
-				// Identical headers are insufficient to suppress a new incarnation.
-				replacement, err := os.ReadFile("testdata/same-header.bin")
-				if err != nil {
-					t.Fatal(err)
-				}
-				tmp := localFile + ".replacement"
-				if err := os.WriteFile(tmp, replacement, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Rename(tmp, localFile); err != nil {
-					t.Fatal(err)
-				}
-				restarted.retentionCfg = nil // Isolate upload identity from the fixtures' old dates.
-				counted.puts = 0
-				restarted.scanAndArchive(ctx)
-				if counted.puts != 1 {
-					t.Errorf("new content reusing a retired name was not archived: %d uploads", counted.puts)
-				}
-			})
-		}
+			a.scanAndArchive(ctx)
+			if rows := readRetentionPendingRows(t, store); len(rows) != 1 {
+				t.Fatalf("initial sweep did not retire the file: %+v", rows)
+			}
+			if counted.puts != initialUploads {
+				t.Fatalf("initial archive uploads=%d, want %d", counted.puts, initialUploads)
+			}
+			status.Store(http.StatusServiceUnavailable)
+			a.scanAndArchive(ctx)
+			restarted := factory()
+			restarted.store = counted
+			restarted.scanAndArchive(ctx)
+			if counted.puts != initialUploads {
+				t.Errorf("retired local bytes were re-uploaded %d times", counted.puts-initialUploads)
+			}
+			m, err = loadManifest(ctx, store, "binlogs", "iad")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(m.Files) != 1 || m.Files[0].Name != "mysql-bin.000002" {
+				t.Errorf("retired live row returned: %+v", m.Files)
+			}
+			if snap := restarted.Snapshot(ctx); snap.BacklogFiles != 0 || snap.ManifestFileCount != 1 || snap.ManifestBytes != 360 || snap.LastError != "" {
+				t.Errorf("retirement counted as active coverage/backlog: %+v", snap)
+			}
+			_, exists, err := store.Get(ctx, keys[0])
+			if err != nil || exists {
+				t.Errorf("retired object remains after resumed cleanup: %t, %v", exists, err)
+			}
+			// Identical headers are insufficient to suppress a new incarnation.
+			replacement, err := os.ReadFile("testdata/same-header.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmp := localFile + ".replacement"
+			if err := os.WriteFile(tmp, replacement, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, localFile); err != nil {
+				t.Fatal(err)
+			}
+			restarted.retentionCfg = nil // Isolate upload identity from the fixtures' old dates.
+			counted.puts = 0
+			restarted.scanAndArchive(ctx)
+			if counted.puts != 1 {
+				t.Errorf("new content reusing a retired name was not archived: %d uploads", counted.puts)
+			}
+		})
 	}
 }
 
 func TestSiteRetentionDoesNotDependOnUploadRoleOrSealedIndex(t *testing.T) {
 	for _, name := range []string{"read-only", "no sealed logs", "role unavailable"} {
 		t.Run(name, func(t *testing.T) {
-			store, factory, _, _, keys := newRetentionRetryFixture(t, false)
+			store, factory, _, _, keys := newRetentionRetryFixture(t)
 			a := factory()
 			switch name {
 			case "read-only":
@@ -210,7 +196,7 @@ func TestRetirementCompactionRequiresAcknowledgementAndLocalAbsence(t *testing.T
 
 func TestFailedRetirementCompactionPreservesDurableSuppression(t *testing.T) {
 	ctx := context.Background()
-	store, factory, _, entries, keys := newRetentionRetryFixture(t, false)
+	store, factory, _, entries, keys := newRetentionRetryFixture(t)
 	a := factory()
 	a.retentionCfg = nil
 	a.mysql = &stubRoleChecker{readOnly: true}
@@ -250,13 +236,13 @@ func TestFailedRetirementCompactionPreservesDurableSuppression(t *testing.T) {
 
 func TestMalformedRetirementIdentityDoesNotSuppressNewData(t *testing.T) {
 	ctx := context.Background()
-	store, factory, _, entries, _ := newRetentionRetryFixture(t, false)
+	store, factory, _, entries, _ := newRetentionRetryFixture(t)
 	a := factory()
 	a.retentionCfg = nil
 	// Matching names and header metadata cannot substitute for a valid content ID.
 	records := []PrunedEntry{
-		{Name: entries[0].Name, Deleted: true, PreviousGTIDs: entries[0].PreviousGTIDs, FirstEventTime: entries[0].FirstEventTime},
-		{Name: entries[0].Name, ID: "../../outside", Deleted: true},
+		{Name: entries[0].Name, ID: "../../outside", Deleted: true, PreviousGTIDs: entries[0].PreviousGTIDs, FirstEventTime: entries[0].FirstEventTime},
+		{Name: entries[0].Name, ID: strings.Repeat("g", 64), Deleted: true},
 	}
 	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Pruned: records}); err != nil {
 		t.Fatal(err)

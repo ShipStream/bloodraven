@@ -116,18 +116,23 @@ func TestInitialGTIDsAreNotCompletedBootstrap(t *testing.T) {
 	if len(m.Divergent) != 0 {
 		t.Fatal("local initialization transactions were mistaken for completed clone state")
 	}
+	// A server with no history yet has no verdict on what it could reissue.
+	if st := a.Snapshot(ctx); st.ReissuableGTIDs != nil || st.LastError != "" {
+		t.Fatalf("a server awaiting its clone was audited: %+v", st)
+	}
+	// The completed bootstrap lacks an archived transaction. The server has
+	// another server_uuid, so that is recorded and is not an error.
 	state.ready = true
 	state.executed = coverageTestSID + ":1-20"
 	a.scanAndArchive(ctx)
-	if a.Snapshot(ctx).LastError == "" {
-		t.Fatal("completed bootstrap with a lost tail was not reported")
+	status := a.Snapshot(ctx)
+	if status.DivergentRows != 1 || status.ReissuableGTIDs == nil || *status.ReissuableGTIDs != "" || status.LastError != "" || status.UploadFailures != 0 {
+		t.Fatalf("completed bootstrap with a lost tail: %+v", status)
 	}
-	failures := a.Snapshot(ctx).UploadFailures
 	state.executed = coverageTestSID + ":1-21"
 	a.scanAndArchive(ctx)
-	a.scanAndArchive(ctx)
-	status := a.Snapshot(ctx)
-	if status.LastError != "" || status.UploadFailures != failures {
-		t.Fatalf("recovery kept stale divergence errors: %+v", status)
+	status = a.Snapshot(ctx)
+	if status.DivergentRows != 0 || status.LastError != "" || status.UploadFailures != 0 {
+		t.Fatalf("restored execution kept stale divergence evidence: %+v", status)
 	}
 }

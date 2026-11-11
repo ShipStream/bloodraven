@@ -61,6 +61,9 @@ const (
 	pitrArchiveRolloutStalledText     = "ordered update still pending after 30m; the pod does not run the PITR configuration (check status.updatePhase and \"ordered update: deferring\" operator logs)"
 	pitrArchiveUnreachableDetailTempl = "archiver status unreachable since %s: %s"
 	pitrArchiveSidecarOutdatedText    = "sidecar archives without an archive identity (it predates archive identity), so its manifests are unusable for restores; set spec.sidecar.image to this operator's release (or clear it) before archiving to a new prefix"
+	// pitrArchiveDivergenceNoteText follows the per-site divergent row
+	// counts in the message of a True condition.
+	pitrArchiveDivergenceNoteText = "divergent rows hold transactions the site's server no longer has, kept as evidence: a restore across them refuses PITRArchiveDivergentHistory until excludeGtids lists them, and the archiver needs no action"
 )
 
 // pitrArchiveFalseReasons is the reason precedence when sites disagree:
@@ -276,6 +279,11 @@ func (h *pitrSiteHistory) resetError() {
 //     never turns False into True.
 //   - False returns to True after pitrArchiveRecoveryRounds consecutive
 //     clean rounds; Unknown needs one.
+//   - Divergent rows a sidecar reports without an error are evidence, not
+//     a failure (the sidecar reports the one divergence that is, a server
+//     that could reissue GTIDs, as lastError). They leave the site clean
+//     and are named in the True condition's message
+//     (pitrArchiveArchivingMessage).
 type pitrArchiveTracker struct {
 	sites       map[string]*pitrSiteHistory
 	verdict     pitrArchiveVerdict
@@ -357,6 +365,7 @@ func (t *pitrArchiveTracker) observe(now time.Time, round []archiverPollResult) 
 	pending := false
 	var bad, rollout []*pitrSiteHistory
 	var badSites, rolloutSites []string
+	archiving := pitrArchiveArchivingMessage(round)
 	for _, r := range round {
 		h := t.sites[r.site]
 		if h == nil {
@@ -407,12 +416,36 @@ func (t *pitrArchiveTracker) observe(now time.Time, round []archiverPollResult) 
 	if t.verdict.Status == metav1.ConditionFalse && t.cleanRounds < pitrArchiveRecoveryRounds {
 		if t.fromSeed {
 			// Unknown would have certified True on this round.
-			t.ownVerdict = pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonArchiving, Message: pitrArchiveArchivingText}
+			t.ownVerdict = pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonArchiving, Message: archiving}
 		}
 		return
 	}
 	t.fromSeed = false
-	t.verdict = pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonArchiving, Message: pitrArchiveArchivingText}
+	t.verdict = pitrArchiveVerdict{Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonArchiving, Message: archiving}
+}
+
+// pitrArchiveArchivingMessage is the message of a True condition for a
+// clean round: pitrArchiveArchivingText, followed by "site: N divergent
+// rows" for every site whose manifest holds divergence evidence, in site
+// order, and what that means. Divergent rows without a sidecar error are
+// informational: the planner reads them, and the sidecar reports the one
+// kind that needs action (a server that could reissue GTIDs) as lastError.
+func pitrArchiveArchivingMessage(round []archiverPollResult) string {
+	var notes []string
+	for _, r := range round {
+		if r.status != nil && r.status.DivergentRows > 0 {
+			noun := "rows"
+			if r.status.DivergentRows == 1 {
+				noun = "row"
+			}
+			notes = append(notes, fmt.Sprintf("%s: %d divergent %s", r.site, r.status.DivergentRows, noun))
+		}
+	}
+	if len(notes) == 0 {
+		return pitrArchiveArchivingText
+	}
+	sort.Strings(notes)
+	return pitrArchiveArchivingText + "; " + strings.Join(notes, "; ") + " (" + pitrArchiveDivergenceNoteText + ")"
 }
 
 func (h *pitrSiteHistory) classify(now time.Time, r archiverPollResult, errorStuckAfter time.Duration) {

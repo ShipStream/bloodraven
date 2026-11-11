@@ -3,9 +3,13 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // Checker checks MySQL read_only status and manages replication.
@@ -27,6 +31,33 @@ type Checker interface {
 
 	// GTID methods:
 	GetGtidExecuted(ctx context.Context) (string, error)
+
+	// FlushBinaryLogs runs FLUSH BINARY LOGS: the server closes its active
+	// binary log file and opens the next one, whose Previous_gtids header
+	// is the server's gtid_executed at that moment. The statement is never
+	// written to the binary log, adds no GTID, and works under
+	// super_read_only; it needs the RELOAD privilege.
+	//
+	// It runs on a connection of its own, never on the primary pool and
+	// never on a pinned Session, so a slow or cancelled flush cannot break
+	// a pinned promotion session or hold a pooled connection a health probe
+	// needs. Callers on the failover path bound it and carry on when it
+	// fails. Cancelling ctx abandons the wait, not necessarily the
+	// statement: the server may still rotate afterwards.
+	FlushBinaryLogs(ctx context.Context) error
+
+	// RotateBinaryLog is FlushBinaryLogs followed, on the same connection,
+	// by a read of the binary log file the server writes now (SHOW BINARY
+	// LOG STATUS). That is the file the FLUSH opened or, when the server
+	// rotated again in between, a later one; every file before it is
+	// sealed. The pre-reclone wait compares the name with the active file
+	// of the site's sidecar's last scan (BinlogFileSeq), which tells a
+	// scan that saw this rotation from one that read the index before it.
+	//
+	// An error means the rotation is unconfirmed, not that it did not
+	// happen: the FLUSH may have run and only the read failed, or the
+	// statement may still complete after a cancelled wait.
+	RotateBinaryLog(ctx context.Context) (activeFile string, err error)
 
 	// PinSession holds one server connection for statements that must all
 	// reach the same server; see Session.
@@ -61,6 +92,10 @@ type checker struct {
 	// per-session net_read_timeout/net_write_timeout set just before the clone
 	// apply to the connection that actually runs it.
 	cloneDB *sql.DB
+	// oneShot dials a connection that is used for one statement and then
+	// closed (FlushBinaryLogs). It carries the primary pool's hard I/O
+	// deadlines, and shares nothing with db or cloneDB.
+	oneShot driver.Connector
 }
 
 // statusNetTimeout is the hard driver-level dial/read/write deadline applied to
@@ -108,7 +143,13 @@ func NewChecker(dsn string) (Checker, error) {
 		db.Close()
 		return nil, err
 	}
-	return &checker{db: db, cloneDB: cloneDB}, nil
+	oneShot, err := oneShotConnector(dsn)
+	if err != nil {
+		db.Close()
+		cloneDB.Close()
+		return nil, err
+	}
+	return &checker{db: db, cloneDB: cloneDB, oneShot: oneShot}, nil
 }
 
 // NewCheckerFromPools returns a Checker over pools the caller opened, such as
@@ -116,8 +157,136 @@ func NewChecker(dsn string) (Checker, error) {
 // and closes both in Close. NewChecker is the production constructor: it is
 // what applies the primary pool's I/O deadlines and pins the clone pool to
 // one connection, and callers of this one are responsible for equivalents.
-func NewCheckerFromPools(db, cloneDB *sql.DB) Checker {
-	return &checker{db: db, cloneDB: cloneDB}
+// oneShot dials the connections FlushBinaryLogs uses, one per call.
+func NewCheckerFromPools(db, cloneDB *sql.DB, oneShot driver.Connector) Checker {
+	return &checker{db: db, cloneDB: cloneDB, oneShot: oneShot}
+}
+
+// oneShotConnector returns the connector for single-statement connections.
+// Its DSN is the primary pool's (primaryDSN), so a dial, read or write on a
+// blackholed address ends within statusNetTimeout whatever the caller's
+// context does; the TLS configuration the DSN names is resolved here, once.
+func oneShotConnector(dsn string) (driver.Connector, error) {
+	pdsn, err := primaryDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := ParseDSN(pdsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse dsn: %w", err)
+	}
+	connector, err := mysqldriver.NewConnector(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open mysql connector: %w", err)
+	}
+	return connector, nil
+}
+
+// FlushBinaryLogs implements Checker. Each call dials its own connection
+// (TCP, the MySQL handshake, TLS when the DSN has it, authentication:
+// a few round trips to the site), runs the statement and closes it. The
+// connection is not pooled: a statement abandoned on a cancelled context
+// has its connection closed by the driver, and here that is the only
+// thing the connection was for.
+func (m *checker) FlushBinaryLogs(ctx context.Context) error {
+	if m.oneShot == nil {
+		return fmt.Errorf("flush binary logs: no one-shot connector configured")
+	}
+	db := sql.OpenDB(m.oneShot)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
+		return fmt.Errorf("flush binary logs: %w", err)
+	}
+	return nil
+}
+
+// RotateBinaryLog implements Checker. Like FlushBinaryLogs it dials a
+// connection of its own and closes it; both statements run on that one
+// connection, so the name read is of the server that rotated.
+func (m *checker) RotateBinaryLog(ctx context.Context) (string, error) {
+	if m.oneShot == nil {
+		return "", fmt.Errorf("rotate binary log: no one-shot connector configured")
+	}
+	db := sql.OpenDB(m.oneShot)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return "", fmt.Errorf("rotate binary log: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
+		return "", fmt.Errorf("rotate binary log: flush binary logs: %w", err)
+	}
+	file, err := activeBinlogFile(ctx, conn)
+	if err != nil {
+		return "", fmt.Errorf("rotate binary log: the flush was acknowledged, but the active file's name was not read: %w", err)
+	}
+	return file, nil
+}
+
+// activeBinlogFile reads the File column of SHOW BINARY LOG STATUS, by
+// column name: the binary log file the server writes now.
+func activeBinlogFile(ctx context.Context, conn *sql.Conn) (string, error) {
+	rows, err := conn.QueryContext(ctx, "SHOW BINARY LOG STATUS")
+	if err != nil {
+		return "", fmt.Errorf("show binary log status: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", fmt.Errorf("show binary log status: %w", err)
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", fmt.Errorf("show binary log status: %w", err)
+		}
+		return "", fmt.Errorf("show binary log status returned no row; binary logging is off")
+	}
+	values := make([]sql.NullString, len(cols))
+	dest := make([]any, len(cols))
+	for i := range values {
+		dest[i] = &values[i]
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return "", fmt.Errorf("show binary log status: %w", err)
+	}
+	for i, col := range cols {
+		if strings.EqualFold(col, "File") {
+			if file := strings.TrimSpace(values[i].String); file != "" {
+				return file, nil
+			}
+			return "", fmt.Errorf("show binary log status reports no file name")
+		}
+	}
+	return "", fmt.Errorf("show binary log status has no File column (columns: %s)", strings.Join(cols, ", "))
+}
+
+// BinlogFileSeq splits a binary log file name into its base name and its
+// numeric suffix ("mysql-bin.000042" is "mysql-bin", 42). The server
+// numbers the files of one log in order, so within one base name a higher
+// suffix is a later file; RESET BINARY LOGS AND GTIDS, or a new data
+// directory, starts the numbering again. ok is false for a name that has no
+// numeric suffix.
+func BinlogFileSeq(name string) (base string, seq uint64, ok bool) {
+	i := strings.LastIndexByte(name, '.')
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
+	}
+	digits := name[i+1:]
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return "", 0, false
+		}
+	}
+	seq, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name[:i], seq, true
 }
 
 // primaryDSN derives the primary pool's DSN from the operational DSN by

@@ -9,200 +9,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 )
 
-type rotationHistoryStore struct {
+// putObserverStore reports each object key just before it is written.
+type putObserverStore struct {
 	ArchiveStore
-	reads    atomic.Int32
-	rotate   func()
-	uploaded func(int32)
-	target   string
+	onPut func(key string)
 }
 
-func (s *rotationHistoryStore) history(key string) {
-	if strings.HasPrefix(key, "binlogs/iad/mysql-bin.") && !strings.Contains(filepath.Base(key)[len("mysql-bin."):], ".") {
-		if s.reads.Add(1) == 1 {
-			s.rotate()
-		}
-	}
-}
-func (s *rotationHistoryStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
-	s.history(key)
-	data, ok, err := s.ArchiveStore.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, os.ErrNotExist
-	}
-	return io.NopCloser(bytes.NewReader(data)), nil
-}
-func (s *rotationHistoryStore) GetFile(ctx context.Context, key, dst string) error {
-	s.history(key)
-	return s.ArchiveStore.GetFile(ctx, key, dst)
-}
-func (s *rotationHistoryStore) Put(ctx context.Context, key string, r io.Reader, size int64) error {
-	err := s.ArchiveStore.Put(ctx, key, r, size)
-	if err == nil && key == s.target {
-		s.uploaded(s.reads.Load())
-	}
-	return err
-}
-func (s *rotationHistoryStore) PutFile(ctx context.Context, key, src string) error {
-	err := s.ArchiveStore.PutFile(ctx, key, src)
-	if err == nil && key == s.target {
-		s.uploaded(s.reads.Load())
-	}
-	return err
-}
-func TestRotationPreemptsColdHistory(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	dir := t.TempDir()
-	cfg := &PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Millisecond}
-	base, err := newPVCStore(testPVCConfig(t.TempDir()), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.ReadFile("testdata/incarnation-a.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	old, err := os.ReadFile("testdata/incarnation-b.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := parseBinlogMetadata("testdata/incarnation-a.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest := &Manifest{Site: "iad"}
-	var names []string
-	for i := 1; i <= 16; i++ {
-		name := fmt.Sprintf("mysql-bin.%06d", i)
-		names = append(names, name)
-		if err := os.WriteFile(filepath.Join(dir, name), original, 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := base.Put(ctx, "binlogs/iad/"+name, bytes.NewReader(original), int64(len(original))); err != nil {
-			t.Fatal(err)
-		}
-		manifest.Files = append(manifest.Files, ManifestEntry{Name: name, Size: meta.Size, PreviousGTIDs: meta.PreviousGTIDs})
-	}
-	oldID, err := fileContentID("testdata/incarnation-b.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	manifest.Files = append(manifest.Files, ManifestEntry{Name: "mysql-bin.000017", ID: oldID, PreviousGTIDs: coverageTestSID + ":1-20", Size: int64(len(old))})
-	if err := seedManifest(ctx, base, "binlogs", manifest); err != nil {
-		t.Fatal(err)
-	}
-	writeIndex := func(extra string) error {
-		return os.WriteFile(filepath.Join(dir, cfg.BinlogIndex), []byte(strings.Join(names, "\n")+"\n"+extra), 0600)
-	}
-	if err := writeIndex("mysql-bin.000017\n"); err != nil {
-		t.Fatal(err)
-	}
-	id, err := fileContentID("testdata/incarnation-a.bin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := make(chan int32, 1)
-	store := &rotationHistoryStore{ArchiveStore: base, target: "binlogs/iad/mysql-bin.000017." + id}
-	store.rotate = func() {
-		if err := os.WriteFile(filepath.Join(dir, "mysql-bin.000017"), original, 0600); err != nil {
-			panic(err)
-		}
-		if err := writeIndex("mysql-bin.000017\nmysql-bin.000018\n"); err != nil {
-			panic(err)
-		}
-	}
-	store.uploaded = func(reads int32) {
-		select {
-		case result <- reads:
-		default:
-		}
-		cancel()
-	}
-	a := newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
-	done := make(chan struct{})
-	go func() { defer close(done); a.Run(ctx) }()
-	select {
-	case reads := <-result:
-		if reads >= 16 {
-			t.Errorf("rotation waited for all %d historical objects", reads)
-		}
-	case <-time.After(10 * time.Second):
-		t.Error("new known/reused-name rotation was not archived")
-		cancel()
-	}
-	<-done
-}
-
-type historyZeroReader struct{}
-
-func (historyZeroReader) Read(p []byte) (int, error) {
-	clear(p)
-	return len(p), nil
-}
-
-type historyBudgetStore struct {
-	gate <-chan struct{}
-
-	ArchiveStore
-	largeKey       string
-	readBytes      atomic.Int64
-	manifestWrites int
-	failSave       bool
-	onPut          func(string)
-}
-type historyReadCounter struct {
-	gate <-chan struct{}
-
-	io.ReadCloser
-	count *atomic.Int64
-}
-
-func (r *historyReadCounter) Read(p []byte) (int, error) {
-	if r.gate != nil && r.count.Load() >= 64<<20 {
-		<-r.gate
-	}
-	n, err := r.ReadCloser.Read(p)
-	r.count.Add(int64(n))
-	return n, err
-}
-func (s *historyBudgetStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
-	if key == s.largeKey {
-		// Content-ID discovery hashes opaque legacy bytes; replay validation is
-		// independent. A virtual object avoids allocating a giant test fixture.
-		return &historyReadCounter{ReadCloser: io.NopCloser(io.LimitReader(historyZeroReader{}, 65<<20)), count: &s.readBytes, gate: s.gate}, nil
-	}
-	return s.ArchiveStore.Open(ctx, key)
-}
-func (s *historyBudgetStore) Put(ctx context.Context, key string, r io.Reader, size int64) error {
-	if key == ManifestKey("binlogs", "iad") {
-		s.manifestWrites++
-		if s.failSave {
-			s.failSave = false
-			return fmt.Errorf("injected manifest failure")
-		}
-	}
+func (s *putObserverStore) Put(ctx context.Context, key string, r io.Reader, size int64) error {
 	if s.onPut != nil {
 		s.onPut(key)
 	}
 	return s.ArchiveStore.Put(ctx, key, r, size)
 }
-func historyBudgetFixture(t *testing.T, count int) (*BinlogArchiver, *historyBudgetStore, []byte) {
+
+// archivedHistoryFixture is a site whose count sealed binlogs (payload
+// each) are all archived, seen by a sidecar that just started: it holds no
+// identity of any local file, so the history lane re-identifies them.
+func archivedHistoryFixture(t *testing.T, count int, payload []byte) (*BinlogArchiver, *putObserverStore) {
 	t.Helper()
+	ctx := context.Background()
 	dir := t.TempDir()
-	data, err := os.ReadFile("testdata/incarnation-a.bin")
+	header, err := os.CreateTemp(t.TempDir(), "header")
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta, err := parseBinlogMetadata("testdata/incarnation-a.bin")
+	if _, err := header.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = header.Close()
+	previous, err := localBinlogHeader(header.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,84 +49,146 @@ func historyBudgetFixture(t *testing.T, count int) (*BinlogArchiver, *historyBud
 	var index []string
 	for i := 1; i <= count; i++ {
 		name := fmt.Sprintf("mysql-bin.%06d", i)
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), payload, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := base.Put(context.Background(), "binlogs/iad/"+name, bytes.NewReader(data), int64(len(data))); err != nil {
+		row := unboundRow(name, payload)
+		row.Size, row.PreviousGTIDs = int64(len(payload)), previous.previous
+		key, err := ArchiveEntryKey("binlogs", "iad", row)
+		if err != nil {
 			t.Fatal(err)
 		}
-		m.Files = append(m.Files, ManifestEntry{Name: name, Size: meta.Size, PreviousGTIDs: meta.PreviousGTIDs})
+		if err := base.Put(ctx, key, bytes.NewReader(payload), int64(len(payload))); err != nil {
+			t.Fatal(err)
+		}
+		m.Files = append(m.Files, row)
 		index = append(index, name)
 	}
 	index = append(index, fmt.Sprintf("mysql-bin.%06d", count+1))
-	if err := os.WriteFile(filepath.Join(dir, "mysql-bin.index"), []byte(strings.Join(index, "\n")+"\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "mysql-bin.index"), []byte(strings.Join(index, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := seedManifest(context.Background(), base, "binlogs", m); err != nil {
+	if err := seedManifest(ctx, base, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
-	store := &historyBudgetStore{ArchiveStore: base}
-	return newTestArchiver(&PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default()), store, data
+	store := &putObserverStore{ArchiveStore: base}
+	cfg := &PITRConfig{BinlogDir: dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs"}
+	return newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.New(slog.NewTextHandler(io.Discard, nil))), store
 }
+
+// seal writes payload as the sealed binlog number and opens number+1.
+func sealHistoryFile(t *testing.T, a *BinlogArchiver, number int, payload []byte) string {
+	t.Helper()
+	name := fmt.Sprintf("mysql-bin.%06d", number)
+	if err := os.WriteFile(filepath.Join(a.cfg.BinlogDir, name), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var index []string
+	for i := 1; i <= number+1; i++ {
+		index = append(index, fmt.Sprintf("mysql-bin.%06d", i))
+	}
+	if err := os.WriteFile(filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex), []byte(strings.Join(index, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+// Re-identifying archived local history is bounded per scan, and a newly
+// sealed binlog is uploaded before the scan returns to it.
+func TestRotationPreemptsColdHistory(t *testing.T) {
+	ctx := context.Background()
+	payload, err := os.ReadFile("testdata/incarnation-a.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, store := archivedHistoryFixture(t, 16, payload)
+	uploads := 0
+	store.onPut = func(key string) {
+		if strings.HasPrefix(key, "binlogs/iad/") {
+			uploads++
+		}
+	}
+	a.scanAndArchive(ctx)
+	if st := a.Snapshot(ctx); st.LastError != "" || uploads != 0 {
+		t.Fatalf("archived history: lastError %q, %d uploads", st.LastError, uploads)
+	}
+	if n := len(a.localIDs); n == 0 || n > 8 {
+		t.Fatalf("one scan re-identified %d historical files, want a bounded batch of 1..8", n)
+	}
+	rotated, err := os.ReadFile("testdata/incarnation-b.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := sealHistoryFile(t, a, 17, rotated)
+	identifiedAtUpload := -1
+	store.onPut = func(key string) {
+		if strings.HasPrefix(key, "binlogs/iad/"+name+".") {
+			identifiedAtUpload = len(a.localIDs)
+		}
+	}
+	a.scanAndArchive(ctx)
+	// The upload identified the rotated file itself.
+	if identifiedAtUpload < 0 || identifiedAtUpload-1 >= 16 {
+		t.Fatalf("the rotation waited for cold history: %d files identified at its upload", identifiedAtUpload)
+	}
+	// The history lane finishes over the following scans without uploading.
+	for i := 0; i < 4; i++ {
+		a.scanAndArchive(ctx)
+	}
+	if st := a.Snapshot(ctx); st.LastError != "" || st.BacklogFiles != 0 || len(a.localIDs) != 17 {
+		t.Fatalf("history not settled: %+v, %d identified", st, len(a.localIDs))
+	}
+	if m, err := loadManifest(ctx, store, "binlogs", "iad"); err != nil || len(m.Files) != 17 {
+		t.Fatalf("manifest: %v, %d rows, want 17", err, len(m.Files))
+	}
+}
+
+// One historical file larger than a scan's byte budget is identified across
+// scans, and a rotation in between is uploaded first.
 func TestRotationPreemptsOneOversizedHistoricalRead(t *testing.T) {
-	a, store, data := historyBudgetFixture(t, 1)
+	ctx := context.Background()
+	header, err := os.ReadFile("testdata/incarnation-a.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, store := archivedHistoryFixture(t, 1, header)
 	defer func() {
 		if a.historyTask != nil {
 			a.historyTask.close()
 		}
 	}()
-	store.largeKey = "binlogs/iad/mysql-bin.000001"
-	gate := make(chan struct{})
-	store.gate = gate
-	defer close(gate)
-	a.scanAndArchive(context.Background())
-	if store.readBytes.Load() <= 0 || store.readBytes.Load() > (64<<20)+(64<<10) || a.historyTask == nil {
-		t.Fatalf("historical read did not yield mid-object: read=%d task=%v", store.readBytes.Load(), a.historyTask)
-	}
-	if err := os.WriteFile(filepath.Join(a.cfg.BinlogDir, "mysql-bin.000002"), data, 0600); err != nil {
+	// The archived file grows a sparse tail past the budget; its row keeps
+	// the size and header the cheap check compares, so it stays history.
+	big := filepath.Join(a.cfg.BinlogDir, "mysql-bin.000001")
+	if err := os.Truncate(big, 65<<20); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex), []byte("mysql-bin.000001\nmysql-bin.000002\nmysql-bin.000003\n"), 0600); err != nil {
+	m, err := loadManifest(ctx, store, "binlogs", "iad")
+	if err != nil {
 		t.Fatal(err)
 	}
+	m.Files[0].Size = 65 << 20
+	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
+		t.Fatal(err)
+	}
+	a.scanAndArchive(ctx)
+	if a.historyTask == nil || a.historyTask.reader == nil || len(a.localIDs) != 0 {
+		t.Fatalf("the historical read did not yield mid-file: task=%+v identified=%d", a.historyTask, len(a.localIDs))
+	}
+	rotated, err := os.ReadFile("testdata/incarnation-b.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := sealHistoryFile(t, a, 2, rotated)
 	preempted := false
 	store.onPut = func(key string) {
-		if strings.HasPrefix(key, "binlogs/iad/mysql-bin.000002.") {
-			preempted = store.readBytes.Load() < 65<<20
+		if strings.HasPrefix(key, "binlogs/iad/"+name+".") {
+			_, identified := a.localIDs["mysql-bin.000001"]
+			preempted = !identified
 		}
 	}
-	a.scanAndArchive(context.Background())
+	a.scanAndArchive(ctx)
 	if !preempted {
-		t.Fatal("new rotation waited for the oversized historical object")
-	}
-}
-func TestLegacyIdentitiesBatchAndRetryManifestSave(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(fmt.Sprint(fail), func(t *testing.T) {
-			a, store, _ := historyBudgetFixture(t, 3)
-			// The episode's promotion record is a manifest write of its own.
-			if err := a.openSession(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			a.roleTick(context.Background())
-			store.manifestWrites = 0
-			store.failSave = fail
-			a.scanAndArchive(context.Background())
-			if store.manifestWrites != 1 {
-				t.Fatalf("identity backfill rewrote manifest %d times", store.manifestWrites)
-			}
-			if fail {
-				a.scanAndArchive(context.Background())
-			}
-			m, err := loadManifest(context.Background(), store, "binlogs", "iad")
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, row := range m.Files {
-				if row.ContentID == "" {
-					t.Fatal("verified identity was not persisted after retry")
-				}
-			}
-		})
+		t.Fatal("the rotation waited for the oversized historical file")
 	}
 }

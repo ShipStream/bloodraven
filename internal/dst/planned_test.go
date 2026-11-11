@@ -11,12 +11,58 @@ import (
 )
 
 // scheduleGolden is sha256 over GenerateTrial(seed).String() for seeds
-// 1..2000, taken at the commit before the planned-failover actors existed.
-// The actors draw from a stream of their own (§15.1, D18); this pins that
-// adding them, or any later actor-stream change, leaves every existing
-// seed's fault schedule byte-identical. A deliberate change to the fault
-// generator updates it knowingly.
-const scheduleGolden = "811becbb1b33126dca8a4eb681871d1b0d7e83215020d0110a690f93514a585a"
+// 1..2000. The actors draw from a stream of their own (§15.1, D18); this
+// pins that adding them, or any later actor-stream change, leaves every
+// existing seed's fault schedule byte-identical. A deliberate change to the
+// fault generator updates it knowingly: it last changed when the binary log
+// rotation faults (failFlush, slowFlush) and the pre-reclone wait
+// (recloneWait) were added.
+const scheduleGolden = "b184a6370e18cf9382b844893e97f7d31d3b86ec9eafea28250131e7411f7c92"
+
+// scheduleGoldenBeforeFlushFaults is the same hash at the commit before the
+// planned-failover actors and the rotation faults existed. The rotation
+// faults draw from a stream of their own too (flushFaults), so a schedule
+// with them removed must still hash to it.
+const scheduleGoldenBeforeFlushFaults = "811becbb1b33126dca8a4eb681871d1b0d7e83215020d0110a690f93514a585a"
+
+// TestGenerateTrial_FlushFaultsOnlyAdd: the rotation faults only add ops.
+// With them removed, every seed's schedule is byte-identical to what it was
+// before they existed, so a seed's other faults land where they always did.
+func TestGenerateTrial_FlushFaultsOnlyAdd(t *testing.T) {
+	h := sha256.New()
+	kinds := map[OpKind]int{}
+	late := 0
+	for seed := uint64(1); seed <= 2000; seed++ {
+		tr := GenerateTrial(seed)
+		kept := tr.Ops[:0:0]
+		for _, op := range tr.Ops {
+			if op.Kind == OpRecloneWait {
+				kinds[op.Kind]++
+				if op.At < tr.WarmupPolls || op.At >= tr.HealAt || op.N < 5 || op.N > 34 || op.K < 0 || op.K > 3 {
+					t.Fatalf("seed %d: reclone wait outside its shape: %s", seed, op)
+				}
+				continue
+			}
+			if op.Kind == OpFailFlush || op.Kind == OpSlowFlush {
+				kinds[op.Kind]++
+				late += op.K
+				if op.At < tr.WarmupPolls || op.At >= tr.HealAt || op.N < 1 || op.N > 3 {
+					t.Fatalf("seed %d: rotation fault outside its shape: %s", seed, op)
+				}
+				continue
+			}
+			kept = append(kept, op)
+		}
+		tr.Ops = kept
+		fmt.Fprint(h, tr.String())
+	}
+	if got := fmt.Sprintf("%x", h.Sum(nil)); got != scheduleGoldenBeforeFlushFaults {
+		t.Fatalf("the rotation faults changed the rest of the schedule: hash %s, want %s", got, scheduleGoldenBeforeFlushFaults)
+	}
+	if kinds[OpFailFlush] < 200 || kinds[OpSlowFlush] < 200 || late < 50 || late == kinds[OpSlowFlush] || kinds[OpRecloneWait] < 400 {
+		t.Fatalf("rotation faults over 2000 seeds: %v (late %d); want both kinds, with and without a late rotation, and reclone waits", kinds, late)
+	}
+}
 
 func TestGenerateTrial_ScheduleUnchangedByActors(t *testing.T) {
 	h := sha256.New()

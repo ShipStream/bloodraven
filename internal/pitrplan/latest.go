@@ -351,6 +351,9 @@ func (p *planner) fillSegments(res *searchResult) error {
 					}
 				}
 				t := f.txn(j)
+				if seg.Transactions == 0 {
+					seg.StartPosition = t.Pos
+				}
 				seg.GTIDs.add(g)
 				seg.Transactions++
 				if seg.FirstCommit == 0 {

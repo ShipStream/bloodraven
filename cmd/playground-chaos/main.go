@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -546,17 +547,27 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout, baselin
 }
 
 func printResult(r runner.Result) {
+	writeResult(os.Stdout, r)
+}
+
+// writeResult prints one scenario's outcome: the PASS/FAIL line, the
+// measurements the scenario recorded (on a pass too, so a green CI log
+// shows them), and the failure and cleanup details.
+func writeResult(w io.Writer, r runner.Result) {
 	status := "PASS"
 	if !r.Passed {
 		status = "FAIL"
 	}
-	fmt.Printf("%s  %s  (%s)  duration=%s\n", status, r.ID, r.Title, r.Duration.Round(time.Millisecond))
+	fmt.Fprintf(w, "%s  %s  (%s)  duration=%s\n", status, r.ID, r.Title, r.Duration.Round(time.Millisecond))
+	for _, m := range r.Measurements {
+		fmt.Fprintf(w, "       measured: %s\n", m)
+	}
 	if !r.Passed {
-		fmt.Printf("       phase=%s step=%q\n       %s\n       forensics: %s\n",
+		fmt.Fprintf(w, "       phase=%s step=%q\n       %s\n       forensics: %s\n",
 			r.Phase, r.StepName, r.Failure, r.CapturePath)
 	}
 	if r.CleanupErr != nil {
-		fmt.Printf("       cleanup: %v\n", r.CleanupErr)
+		fmt.Fprintf(w, "       cleanup: %v\n", r.CleanupErr)
 	}
 }
 

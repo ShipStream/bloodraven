@@ -27,6 +27,27 @@ type stx struct {
 	srv   uint32
 	empty bool
 	xa    bool
+	// fx, when non-zero, is the transaction's effect digest: its tables
+	// part is fx in every byte, and so are its layout and rows parts unless
+	// lay or bag say otherwise. Zero is "not comparable".
+	fx, lay, bag byte
+}
+
+// effect is the synthetic effect digest whose parts all stand for fx.
+func effect(fx byte) EffectDigest { return effectParts(fx, 0, 0) }
+
+// effectParts is the synthetic effect digest of stx{fx, lay, bag}.
+func effectParts(fx, lay, bag byte) EffectDigest {
+	if fx == 0 {
+		return EffectDigest{}
+	}
+	if lay == 0 {
+		lay = fx
+	}
+	if bag == 0 {
+		bag = fx
+	}
+	return NewEffectDigest(uint32(fx)*0x01010101, uint64(lay)*0x0101010101010101, uint32(bag)*0x01010101)
 }
 
 // run builds sequential txns sid:from-to with commit times start, start+1s, …
@@ -37,6 +58,9 @@ func run(sid string, from, to int64, start float64, srv uint32) []stx {
 	}
 	return out
 }
+
+// synthPos is the offset of transaction k in a synthetic file.
+func synthPos(k int) int64 { return 4 + 100*int64(k+1) }
 
 type synth struct {
 	t     *testing.T
@@ -83,20 +107,24 @@ func (s *synth) file(site, name string, fsrv uint32, prev, base string, groups .
 	if err := b.SetPrevious(MustParseSet(prev)); err != nil {
 		s.t.Fatal(err)
 	}
+	// Transaction k of a synthetic file sits at offset synthPos(k).
+	n := 0
 	for _, g := range groups {
 		for _, t := range g {
-			if err := b.BeginTxn(mustGTID(s.t, t.g), t.oct, t.srv); err != nil {
+			if err := b.BeginTxn(mustGTID(s.t, t.g), t.oct, t.srv, synthPos(n)); err != nil {
 				s.t.Fatal(err)
 			}
+			n++
 			if !t.empty {
 				b.MarkData()
 			}
 			if t.xa {
 				b.Mark(TxnXA)
 			}
+			b.SetEffect(effectParts(t.fx, t.lay, t.bag))
 		}
 	}
-	idx, err := b.Finish(fmt.Sprintf("%s-%s", site, name), 100)
+	idx, err := b.Finish(fmt.Sprintf("%s-%s", site, name), synthPos(n))
 	if err != nil {
 		s.t.Fatal(err)
 	}

@@ -322,7 +322,7 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 
 	// ---- Reconcile 2: populate dump + manifest ----------------------------
 	atJSON := `{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":1024}`
-	manifestJSON := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":128,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
+	manifestJSON := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/dc1/b1","size":128,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
 	store.Objects["orders/dump-20260520/@.json"] = []byte(atJSON)
 	store.Objects["orders/binlogs/archive.json"] = standbyTestDescriptor()
 	store.Objects["orders/binlogs/manifest-dc1.json"] = []byte(manifestJSON)
@@ -568,7 +568,7 @@ func newStandbySchemeWithCoreV1(t *testing.T) *runtime.Scheme {
 func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 	const atKey, atJSON = "orders/d1/@.json", `{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100"}`
 	v2 := func(id string) []byte {
-		return []byte(`{"version":2,"archiveId":"` + id + `","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":7}]}`)
+		return []byte(`{"version":2,"archiveId":"` + id + `","site":"dc1","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/dc1/b1","size":7}]}`)
 	}
 	tests := []struct {
 		name        string
@@ -693,7 +693,7 @@ func (v *vanishingStore) List(ctx context.Context, prefix string) ([]string, err
 func TestStandbyCluster_ManifestRefusalsAndMarks(t *testing.T) {
 	const atKey, atJSON = "orders/d1/@.json", `{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100"}`
 	manifest := func(site, extra string) []byte {
-		return []byte(`{"version":2,"archiveId":"` + standbyTestArchiveID + `","site":"` + site + `","files":[{"name":"b1","remotePath":"orders/binlogs/` + site +
+		return []byte(`{"version":2,"archiveId":"` + standbyTestArchiveID + `","site":"` + site + `","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/` + site +
 			`/b1","size":7}]` + extra + `}`)
 	}
 	marker := `,"historyIntegrity":{"violation":"ReplicationFilter","detail":"Replicate_Do_DB=x","at":"2026-05-19T00:00:00Z"}`
@@ -707,6 +707,9 @@ func TestStandbyCluster_ManifestRefusalsAndMarks(t *testing.T) {
 		{name: "newer manifest version", manifests: map[string][]byte{"dc1": []byte(`{"version":3,"archiveId":"` + standbyTestArchiveID + `","site":"dc1","files":[]}`)}, wantReason: "ArchiveVersionUnsupported"},
 		{name: "legacy manifest beside a descriptor", manifests: map[string][]byte{"dc1": []byte(`{"version":1,"site":"dc1","files":[]}`)}, wantReason: "ArchiveLegacy"},
 		{name: "v2 manifest without archive ID", manifests: map[string][]byte{"dc1": []byte(`{"version":2,"site":"dc1","files":[]}`)}, wantReason: "ArchiveObjectInvalid"},
+		// #271: a row without a content identity is refused where the manifest
+		// is loaded; the standby publishes no window computed around it.
+		{name: "v2 manifest row without an id", manifests: map[string][]byte{"dc1": manifest("dc1", ""), "dc2": []byte(`{"version":2,"archiveId":"` + standbyTestArchiveID + `","site":"dc2","files":[{"name":"b1","remotePath":"orders/binlogs/dc2/b1","size":7}]}`)}, wantReason: "ArchiveObjectInvalid"},
 		{name: "reset epoch", manifests: map[string][]byte{"dc1": manifest("dc1", `,"epoch":{"resetReason":"GTID namespace reused after a reclone"}`)}, wantReason: "ArchiveHistoryReset"},
 		{name: "every site marked", manifests: map[string][]byte{"dc1": manifest("dc1", marker), "dc2": manifest("dc2", marker)}, wantReason: "ArchiveUnsafeHistory"},
 		{name: "one site marked", manifests: map[string][]byte{"dc1": manifest("dc1", marker), "dc2": manifest("dc2", "")}, wantReason: "DumpFound", wantFiles: 1},

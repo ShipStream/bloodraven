@@ -41,7 +41,7 @@ const DefaultProfile Profile = ProfileFull
 // operator restart, reader-stall isolation — and complete in roughly
 // 5-8 minutes on a warm playground cluster.
 var smokeScenarios = map[string]bool{
-	"01-clean-primary-kill":                true, // emergency failover
+	"01-clean-primary-kill":                true, // emergency failover, under write load with the RTO measured (#229)
 	"02-planned-switchover":                true, // planned switchover (includes reader repoint assertions)
 	"02-operator-kill-restart":             true, // operator restart durability
 	"42-reader-stall-no-group-degradation": true, // reader stall isolation (issue #115 R4; fast, no clone wait)
@@ -72,8 +72,8 @@ var releaseScenarios = map[string]bool{
 	"30-encrypted-backup-verification-rustfs": true, // encrypt-upload / decrypt-download operator-image containers
 	"31-pitr-verification-rustfs":             true, // RustFS PITR replay verification
 	"37-pitr-planned-failback-no-reclone":     true, // #206: anchored replica-copy era across a planned failback
-	"68-pitr-failback-with-reclone":           true, // #206: failback with reclone; unarchived tail refuses PITRArchiveGap
-	"70-pitr-lossy-failover":                  true, // #206: lost set, excludeGtids, reissue risk, history reset
+	"68-pitr-failback-with-reclone":           true, // #206, #264: failback with reclone; an era nobody flushed is archived as the outgoing primary's tail
+	"70-pitr-lossy-failover":                  true, // #206, #264: lost set, excludeGtids, the returning old primary's unarchived tail, reissue risk, history reset
 	"40-reader-data-loss-reclone":             true, // reader PVC loss, endpoint shedding, and direct-source auto-clone
 	"41-reader-availability-during-failover":  true, // reader keeps serving through unplanned failover, then repoints
 	"43-writable-reader-fence":                true, // writable reader fenced, rejected as target, blocked on divergence

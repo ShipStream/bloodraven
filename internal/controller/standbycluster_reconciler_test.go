@@ -330,7 +330,7 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 	//   orders/orders-nightly-20260520/@.json
 	//   orders/binlogs/manifest-dc1.json
 	atJSON := `{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":1073741824}`
-	manifestJSON := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"mysql-bin.000001","remotePath":"orders/binlogs/dc1/mysql-bin.000001","size":4096,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
+	manifestJSON := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"mysql-bin.000001","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/dc1/mysql-bin.000001","size":4096,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
 
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(atJSON),
@@ -609,8 +609,8 @@ func TestMysqlStandbyCluster_MultiSiteManifests(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 
 	atJSON := `{"end":"2026-05-20T04:00:00Z","totalBytes":500}`
-	manifest1 := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":100,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T01:00:00Z","archivedAt":"2026-05-20T01:01:00Z"}]}`
-	manifest2 := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc2","files":[{"name":"b1","remotePath":"orders/binlogs/dc2/b1","size":200,"firstEventTime":"2026-05-20T01:30:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
+	manifest1 := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/dc1/b1","size":100,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T01:00:00Z","archivedAt":"2026-05-20T01:01:00Z"}]}`
+	manifest2 := `{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc2","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/dc2/b1","size":200,"firstEventTime":"2026-05-20T01:30:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
 
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/dump-2026-05-20/@.json":    []byte(atJSON),
@@ -1085,7 +1085,7 @@ func TestMysqlStandbyCluster_DeadlineDuringReads(t *testing.T) {
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":111}`),
 		"orders/binlogs/archive.json":           standbyTestDescriptor(),
-		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":7,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:00:00Z","archivedAt":"2026-05-20T03:00:01Z"}]}`),
+		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/dc1/b1","size":7,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:00:00Z","archivedAt":"2026-05-20T03:00:01Z"}]}`),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
 
@@ -1149,7 +1149,7 @@ func TestMysqlStandbyCluster_DeadlineDuringManifestLoop(t *testing.T) {
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly-20260520/@.json": []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":111}`),
 		"orders/binlogs/archive.json":           standbyTestDescriptor(),
-		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","remotePath":"orders/binlogs/dc1/b1","size":7,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:00:00Z","archivedAt":"2026-05-20T03:00:01Z"}]}`),
+		"orders/binlogs/manifest-dc1.json":      []byte(`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"dc1","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/dc1/b1","size":7,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:00:00Z","archivedAt":"2026-05-20T03:00:01Z"}]}`),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
 

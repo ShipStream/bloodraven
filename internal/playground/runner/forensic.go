@@ -22,9 +22,10 @@ import (
 type Capture struct {
 	Dir string
 
-	mu        sync.Mutex
-	notes     []string
-	persisted bool
+	mu           sync.Mutex
+	notes        []string
+	measurements []string
+	persisted    bool
 }
 
 // Note appends a structured line to the runner's scenario.log
@@ -33,6 +34,25 @@ func (c *Capture) Note(line string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.notes = append(c.notes, line)
+}
+
+// Measure records one measurement a scenario reports whether it passes or
+// fails (a failover's RTO, say). Notes reach disk only with a failure's
+// forensics; measurements are also carried on the Result, which the CLI
+// prints under the scenario's PASS/FAIL line and WriteJUnit puts in the
+// test case's system-out, so a passing CI run shows them.
+func (c *Capture) Measure(line string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.measurements = append(c.measurements, line)
+	c.notes = append(c.notes, "measured: "+line)
+}
+
+// Measurements returns a copy of the lines recorded with Measure, in order.
+func (c *Capture) Measurements() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.measurements...)
 }
 
 // EnsureDir creates the capture directory lazily. Idempotent.

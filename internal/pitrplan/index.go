@@ -1,6 +1,9 @@
 package pitrplan
 
 import (
+	"encoding/binary"
+	"fmt"
+
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -20,13 +23,101 @@ const (
 	TxnUnsupported
 )
 
+// EffectDigest describes a transaction's row changes independently of the
+// server that logged them (issue #268), so that two archived copies of one
+// GTID can be compared. internal/sidecar's effect digester computes it and
+// defines the canonical form; it has three parts:
+//
+//   - tables (32 bits): which tables the transaction changes, how (write,
+//     update, delete) and in which order;
+//   - layout (64 bits): the tables part plus how each table's row images
+//     are encoded (the columns, their types and which of them are logged);
+//   - rows (32 bits): the row bytes of each table's changes as a multiset,
+//     so that it does not depend on the order of the rows.
+//
+// The zero value means "not comparable": the transaction has no rows
+// events, or holds something a replica does not re-log in a stable form.
+// Compare defines what two digests say about two copies.
+//
+// The split follows from what a hash collision costs. Colliding tables or
+// rows parts make two copies that differ look equal: a missed detection,
+// with probability 2⁻³² for each copy that really differs, and such copies
+// are rare. Colliding layout parts make two copies with different layouts
+// look comparable, and their row bytes then differ: a refusal of a healthy
+// archive. Copies with different layouts are not rare (every transaction of
+// a table during a rolling schema change), so the layout part has 64 bits.
+type EffectDigest [16]byte
+
+// NewEffectDigest assembles a digest from its parts. A digest whose parts
+// are all zero would read as "not comparable"; the digester never passes
+// one (it sets a bit).
+func NewEffectDigest(tables uint32, layout uint64, rows uint32) EffectDigest {
+	var d EffectDigest
+	binary.BigEndian.PutUint32(d[0:4], tables)
+	binary.BigEndian.PutUint64(d[4:12], layout)
+	binary.BigEndian.PutUint32(d[12:16], rows)
+	return d
+}
+
+// IsZero reports whether the transaction's row changes are not comparable.
+func (d EffectDigest) IsZero() bool { return d == EffectDigest{} }
+
+// String prints the parts: tables-layout-rows.
+func (d EffectDigest) String() string {
+	return fmt.Sprintf("%x-%x-%x", d[0:4], d[4:12], d[12:16])
+}
+
+// EffectRelation is what two copies' effect digests say about them.
+type EffectRelation uint8
+
+const (
+	// EffectNotComparable: one copy has no digest, or both change the same
+	// tables with different layouts (the sites' table definitions or row
+	// images differ: binlog_row_image, a column added or widened on one
+	// site, a generated invisible primary key on one site). Nothing is
+	// concluded.
+	EffectNotComparable EffectRelation = iota
+	// EffectEqual: the same tables, layouts and row bytes.
+	EffectEqual
+	// EffectTablesDiffer: the copies change different tables, or the same
+	// tables in other ways or another order.
+	EffectTablesDiffer
+	// EffectRowsDiffer: the same tables and layouts, other row bytes.
+	EffectRowsDiffer
+)
+
+// Compare relates two copies of one GTID. The relation is symmetric but
+// not transitive: a may be not comparable with b and with c while b and c
+// differ, so a set of copies is consistent only when every pair is (the
+// planner's occurrence registry keeps what that takes, occ.go).
+func (d EffectDigest) Compare(o EffectDigest) EffectRelation {
+	switch {
+	case d.IsZero() || o.IsZero():
+		return EffectNotComparable
+	case [4]byte(d[0:4]) != [4]byte(o[0:4]):
+		return EffectTablesDiffer
+	case [8]byte(d[4:12]) != [8]byte(o[4:12]):
+		return EffectNotComparable
+	case [4]byte(d[12:16]) != [4]byte(o[12:16]):
+		return EffectRowsDiffer
+	}
+	return EffectEqual
+}
+
 // Txn is one indexed transaction of a file. Its GTID is
-// (FileIndex.SIDs[SID], GNO).
+// (FileIndex.SIDs[SID], GNO). It is a fixed-size record without pointers,
+// so an index is spilled to disk as is (issue #266).
 type Txn struct {
 	GNO int64
 	// OCT is the original commit timestamp, µs since the Unix epoch. The
 	// index pass refuses 0 (PITRReplayUnsupported).
 	OCT int64
+	// Pos is the file offset of the transaction's GTID event: where
+	// `mysqlbinlog --start-position` starts a segment whose first replayed
+	// transaction this is.
+	Pos int64
+	// Effect describes the transaction's row changes, or is zero.
+	Effect EffectDigest
 	// Srv is the originating server_id (the GTID event header's).
 	Srv   uint32
 	SID   uint32
@@ -49,7 +140,11 @@ type FileIndex struct {
 	// manifest row's baseGtids to form prev(f).
 	Previous Set
 	SIDs     []string
-	Txns     []Txn
+	// Txns are the file's transactions in file order. The array is
+	// read-only once the index is built: with a spilling budget it may be
+	// file-backed memory of the budget's arena (issue #266), valid until
+	// the arena is closed.
+	Txns []Txn
 	// GTIDs, EmptyGTIDs, CommitMin and CommitMax are the content values
 	// the manifest hints must equal.
 	GTIDs      Set
@@ -67,10 +162,15 @@ func (x *FileIndex) GTID(i int) GTID {
 // pass drives it. It charges every transaction to the budget before
 // storing it and enforces the per-file identity rules (§4.9): no GTID
 // repeats, and gtids ∩ prev = ∅.
+//
+// The transactions accumulate in an array that doubles (charged, or
+// spilled, at its capacity) and is cut to its length by Finish, so a
+// finished index holds exactly TxnBytes per transaction.
 type IndexBuilder struct {
 	label  string
 	budget *Budget
 	idx    FileIndex
+	txns   vec[Txn]
 	sids   map[string]uint32
 	open   bool
 	prev   bool
@@ -79,7 +179,7 @@ type IndexBuilder struct {
 // NewIndexBuilder starts a file; label ("<site>/<name>") names it in
 // refusals.
 func NewIndexBuilder(label string, budget *Budget) *IndexBuilder {
-	return &IndexBuilder{label: label, budget: budget, sids: map[string]uint32{},
+	return &IndexBuilder{label: label, budget: budget, sids: map[string]uint32{}, txns: newVec[Txn](budget),
 		idx: FileIndex{GTIDs: Set{}, EmptyGTIDs: Set{}, Previous: Set{}}}
 }
 
@@ -102,10 +202,15 @@ func (b *IndexBuilder) SetPrevious(s Set) error {
 // HasPrevious reports whether PREVIOUS_GTIDS was seen.
 func (b *IndexBuilder) HasPrevious() bool { return b.prev }
 
-// BeginTxn opens the transaction g. oct is µs; srv the event's server_id.
-func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
+// BeginTxn opens the transaction g. oct is µs; srv the event's server_id;
+// pos the file offset of its GTID event, which lies after the 4-byte magic
+// and after every earlier transaction's.
+func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32, pos int64) error {
 	if err := b.closeTxn(); err != nil {
 		return err
+	}
+	if last := b.txns.n - 1; pos < 4 || (last >= 0 && pos <= b.txns.items()[last].Pos) {
+		return refuse(pitrarchive.TokenArchiveObjectInvalid, "%s: transaction %s at offset %d does not follow the previous transaction", b.label, g, pos)
 	}
 	if g.GNO <= 0 || g.GNO > MaxGNO {
 		return refuse(pitrarchive.TokenReplayUnsupported, "%s holds a GTID with GNO %d", b.label, g.GNO)
@@ -116,9 +221,10 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
 	if b.idx.Previous.Has(g) {
 		return refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s: %s is both in the file's Previous_gtids and among its transactions; the GTID was reissued", b.label, g)
 	}
-	// The transaction record, plus (review F047) a new interval of the
-	// GTID set, and a new source identifier's map slots and spelling.
-	charge := TxnBytes
+	// (Review F047) a new interval of the GTID set, and a new source
+	// identifier's map slots and spelling. The transaction record itself
+	// is charged, or spilled, by the array it is appended to.
+	var charge int64
 	sid, ok := b.sids[g.SID]
 	if !ok {
 		charge += indexSourceBytes + sidBytes(g.SID)
@@ -137,7 +243,9 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
 		b.sids[g.SID] = sid
 		b.idx.SIDs = append(b.idx.SIDs, g.SID)
 	}
-	b.idx.Txns = append(b.idx.Txns, Txn{GNO: g.GNO, OCT: oct, Srv: srv, SID: sid, Flags: TxnEmpty})
+	if err := b.txns.push(Txn{GNO: g.GNO, OCT: oct, Pos: pos, Srv: srv, SID: sid, Flags: TxnEmpty}, "transaction index of "+b.label); err != nil {
+		return err
+	}
 	b.budget.indexed++
 	if b.idx.CommitMin == 0 || oct < b.idx.CommitMin {
 		b.idx.CommitMin = oct
@@ -150,17 +258,39 @@ func (b *IndexBuilder) BeginTxn(g GTID, oct int64, srv uint32) error {
 // InTxn reports whether a transaction is open.
 func (b *IndexBuilder) InTxn() bool { return b.open }
 
+// last is the open transaction; setLast stores it back.
+func (b *IndexBuilder) last() Txn { return b.txns.items()[b.txns.n-1] }
+
+func (b *IndexBuilder) setLast(t Txn) { b.txns.set(b.txns.n-1, t) }
+
 // Mark sets flags on the open transaction; MarkData clears TxnEmpty.
 func (b *IndexBuilder) Mark(f TxnFlags) {
 	if b.open {
-		b.idx.Txns[len(b.idx.Txns)-1].Flags |= f
+		if t := b.last(); t.Flags|f != t.Flags {
+			t.Flags |= f
+			b.setLast(t)
+		}
 	}
 }
 
 // MarkData records a data or statement event in the open transaction.
 func (b *IndexBuilder) MarkData() {
 	if b.open {
-		b.idx.Txns[len(b.idx.Txns)-1].Flags &^= TxnEmpty
+		if t := b.last(); t.Flags&TxnEmpty != 0 {
+			t.Flags &^= TxnEmpty
+			b.setLast(t)
+		}
+	}
+}
+
+// SetEffect records the open transaction's effect digest (zero: not
+// comparable).
+func (b *IndexBuilder) SetEffect(d EffectDigest) {
+	if b.open {
+		if t := b.last(); t.Effect != d {
+			t.Effect = d
+			b.setLast(t)
+		}
 	}
 }
 
@@ -169,7 +299,7 @@ func (b *IndexBuilder) closeTxn() error {
 		return nil
 	}
 	b.open = false
-	t := b.idx.Txns[len(b.idx.Txns)-1]
+	t := b.last()
 	if !t.Empty() {
 		return nil
 	}
@@ -196,7 +326,12 @@ func (b *IndexBuilder) Finish(digest string, size int64) (*FileIndex, error) {
 	if !b.prev {
 		return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "%s has no PREVIOUS_GTIDS event", b.label)
 	}
+	// The array keeps exactly its transactions.
+	if err := b.txns.trim("transaction index of " + b.label); err != nil {
+		return nil, err
+	}
 	b.idx.Digest, b.idx.Size = digest, size
 	out := b.idx
+	out.Txns = b.txns.items()
 	return &out, nil
 }

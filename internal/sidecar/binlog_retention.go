@@ -24,16 +24,6 @@ func (a *BinlogArchiver) retryPrunedDeletes(ctx context.Context, m *Manifest) (i
 			continue
 		}
 		key, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: p.ID})
-		contentID := p.ID
-		if contentID == "" {
-			contentID = p.ContentID
-		}
-		if err == nil {
-			_, err = ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: contentID})
-			if contentID == "" {
-				err = fmt.Errorf("missing retired content identity for %s", p.Name)
-			}
-		}
 		if err != nil {
 			a.logger.Warn("retention: delete object", "key", p.Key, "error", err)
 			continue
@@ -71,25 +61,14 @@ func (a *BinlogArchiver) deleteRetired(ctx context.Context, key string) error {
 func (a *BinlogArchiver) retiredBinlogIdentities(m *Manifest) map[binlogIdentity]struct{} {
 	retired := make(map[binlogIdentity]struct{}, len(m.Pruned))
 	for _, p := range m.Pruned {
-		id := p.ID
-		if id == "" {
-			id = p.ContentID
-		}
-		if id == "" {
+		if _, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: p.ID}); err != nil {
 			continue
 		}
-		if _, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: id}); err != nil {
-			continue
-		}
-		retired[binlogIdentity{Name: p.Name, ID: id}] = struct{}{}
+		retired[binlogIdentity{Name: p.Name, ID: p.ID}] = struct{}{}
 	}
 	for _, q := range m.Quarantined {
-		id := q.Entry.ID
-		if id == "" {
-			id = q.Entry.ContentID
-		}
-		if id != "" {
-			retired[binlogIdentity{Name: q.Entry.Name, ID: id}] = struct{}{}
+		if q.Entry.ID != "" {
+			retired[q.Entry.identity()] = struct{}{}
 		}
 	}
 	return retired
@@ -107,15 +86,20 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 	// read, the full prefix listing and every manifest read the scan just
 	// did (F203). A scan that ended before the session (a failed role
 	// probe) still opens it, so retention runs without a role.
+	//
+	// A pass that does not reach the history audit leaves no verdict on
+	// what this server could reissue (auditArchive).
 	if a.session != nil && !a.session.Verified() {
 		a.mu.Lock()
 		scanStart := a.lastScanAt
 		a.mu.Unlock()
 		if a.session.attemptedSince(scanStart) {
+			a.setReissuable(nil)
 			return
 		}
 	}
 	if a.openSession(ctx) != nil {
+		a.setReissuable(nil)
 		return
 	}
 	if manifest, err := a.loadManifest(ctx); err == nil {
@@ -132,9 +116,12 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 			a.mu.Unlock()
 			a.historyAuditError = ""
 		}
-	} else if a.historyAuditError != "" {
-		// An unreadable manifest cannot establish that the prior failure resolved.
-		a.setMaintenanceError(a.historyAuditError)
+	} else {
+		a.setReissuable(nil)
+		if a.historyAuditError != "" {
+			// An unreadable manifest cannot establish that the prior failure resolved.
+			a.setMaintenanceError(a.historyAuditError)
+		}
 	}
 	a.maybeRunRetention(ctx)
 	m, err := a.loadManifest(ctx)

@@ -349,7 +349,7 @@ func TestArchiveSessionManifestChecks(t *testing.T) {
 	if err := s.SaveManifest(ctx, m); err != nil {
 		t.Fatal(err)
 	}
-	stale.Files = append(stale.Files, ManifestEntry{Name: "mysql-bin.000001"})
+	stale.Files = append(stale.Files, ManifestEntry{Name: "mysql-bin.000001", ID: strings.Repeat("a", 64)})
 	if err := s.SaveManifest(ctx, &stale); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestSnapshotCountsDivergentAndQuarantinedRows(t *testing.T) {
 	store := newMemStore()
 	m := &Manifest{Site: "pdx",
 		Divergent:   []ArchiveDivergence{{Name: "a", MissingGTIDs: "u:1"}, {Name: "b", MissingGTIDs: "u:2"}},
-		Quarantined: []ArchiveQuarantine{{Entry: ManifestEntry{Name: "c"}, Reason: "lost", ResumeGTIDs: "u:1-3"}},
+		Quarantined: []ArchiveQuarantine{{Entry: ManifestEntry{Name: "c", ID: strings.Repeat("c", 64)}, Reason: "lost", ResumeGTIDs: "u:1-3"}},
 	}
 	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)

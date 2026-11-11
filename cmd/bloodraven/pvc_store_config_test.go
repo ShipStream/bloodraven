@@ -87,7 +87,7 @@ func TestPITRQuarantineRejectsUnmountedArchive(t *testing.T) {
 	t.Setenv("BLOODRAVEN_PITR_PVC_MOUNT_PATH", t.TempDir())
 	t.Setenv("BLOODRAVEN_PITR_MANIFEST_PREFIX", "binlogs")
 	t.Setenv("BLOODRAVEN_PITR_PASSPHRASE_FILE", "")
-	args := []string{"--site=iad", "--name=mysql-bin.000001", "--id=legacy", "--reason=test", "--confirm"}
+	args := []string{"--site=iad", "--name=mysql-bin.000001", "--id=" + quarantineTestRowID, "--reason=test", "--confirm"}
 	err := pitrQuarantine(context.Background(), args, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "is not a mount point") {
 		t.Fatalf("pitrQuarantine = %v, want a not-a-mount-point error", err)

@@ -172,6 +172,24 @@ const (
 	// Stability: Operator-owned read-only.
 	PromotionGtidExecutedForAnnotation = "bloodraven.shipstream.io/promotion-gtid-executed-for"
 
+	// CloneServerUUIDAnnotation records, before CLONE INSTANCE is issued
+	// into a site, the server_uuid the site had, so the check that every
+	// clone gives its recipient a new one (CloneServerUUIDNotRotated) is
+	// still made when the clone finishes after the operator that issued
+	// it restarted. A site's entry is removed once its clone has an
+	// outcome; the annotation is removed with the last entry. While an
+	// entry exists, the site's keyring stays unsealed under encryption at
+	// rest.
+	//
+	// On: MysqlFailoverGroup.
+	// Writer: operator.
+	// Value: `{"<site>":{"serverUUID":"<uuid>","previousCloneBegin":"<BEGIN_TIME>"}}`,
+	// where previousCloneBegin is BEGIN_TIME of the site's
+	// `performance_schema.clone_status` row before the clone (empty when
+	// it had none, omitted when it could not be read).
+	// Stability: Internal (may change).
+	CloneServerUUIDAnnotation = "bloodraven.shipstream.io/clone-server-uuid"
+
 	// PlannedFailoverStatusFenceAnnotation is bumped with a write
 	// conditioned on the resourceVersion an ambiguous status write was
 	// made against. Its success proves that write can never commit. Each
@@ -249,6 +267,16 @@ const (
 	// Value: the confirm token.
 	// Stability: Internal (may change).
 	RestoreInPlaceConfirmAnnotation = "bloodraven.shipstream.io/restore-confirm"
+
+	// RestoreBackupUIDAnnotation records the MysqlBackup a restore Job was
+	// built from (source.backupRef). The Job is created only when that is
+	// the backup the restore holds (RestoreHoldAnnotationPrefix).
+	//
+	// On: restore Jobs (bootstrap and in-place) with a backupRef source.
+	// Writer: operator.
+	// Value: the MysqlBackup's metadata.uid.
+	// Stability: Internal (may change).
+	RestoreBackupUIDAnnotation = "bloodraven.shipstream.io/restore-backup-uid"
 )
 
 // Keys: Finalizers.
@@ -606,6 +634,23 @@ const (
 	// Value: the verification's name.
 	// Stability: Operator-owned read-only.
 	VerificationHoldAnnotationPrefix = "verification-hold.bloodraven.shipstream.io/"
+
+	// RestoreHoldAnnotationPrefix marks a MysqlBackup that a restore
+	// (spec.initFromBackup or spec.restoreInPlace with source.backupRef)
+	// of a MysqlFailoverGroup in the same namespace is reading. The full
+	// key is the prefix followed by the hold ID the restore recorded in
+	// status.restore.backupRef.holdID or
+	// status.restoreInPlace.backupRef.holdID. Retention, the
+	// artifact-cleanup finalizer and the PITR binlog cutoff leave the
+	// backup alone while the hold is live: until the restore is Succeeded
+	// or Failed and its Job's pods have stopped.
+	//
+	// Key: `restore-hold.bloodraven.shipstream.io/<hold ID>`.
+	// On: MysqlBackup.
+	// Writer: operator.
+	// Value: the restoring group's name.
+	// Stability: Operator-owned read-only.
+	RestoreHoldAnnotationPrefix = "restore-hold.bloodraven.shipstream.io/"
 )
 
 // Keys: PITR archive binding metadata.

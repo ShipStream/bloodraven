@@ -1,0 +1,2 @@
+/usr/sbin/mysqld  Ver 9.7.4 for Linux on x86_64 (MySQL Community Server - GPL)
+/usr/libexec/mysqlsh/mysqlbinlog  Ver 9.7.1 for Linux on x86_64 (MySQL Community Server (GPL))

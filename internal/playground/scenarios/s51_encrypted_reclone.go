@@ -26,6 +26,11 @@ type s51RunState struct {
 	// holds a usable master key and the clone rewraps under that one.
 	escrowBefore int32
 	secretBefore string
+	digestBefore string
+
+	// identity is the replica's server_uuid before the reclone. The clone
+	// must leave it with another one (#265).
+	identity cloneIdentity
 
 	// rowCount is the donor's row count, used to prove the clone carried
 	// real (encrypted) data rather than producing an empty datadir.
@@ -51,10 +56,17 @@ type s51RunState struct {
 // encryption after their topology manager was built. The gate is always
 // set; RequestKeyringUnseal is a no-op while encryption is off.
 //
-// Note what is deliberately NOT asserted: that the clone mints a new
-// escrow version. A recipient seeded from its own escrow already holds a
-// usable master key and the clone rewraps under that one, so the version
-// legitimately stays put (verified against MySQL 9.7).
+// The clone itself writes nothing to the recipient's keyring: a recipient
+// seeded from its own escrow already holds a usable master key and the
+// clone rewraps under that one (verified against MySQL 9.7). The restart
+// that installs the clone does, since #265: the launcher gives the
+// recipient a new server_uuid, and a server with binary log encryption
+// stores a binary log encryption key named after its server_uuid when it
+// starts. That start runs on the unsealed, writable keyring, and the
+// re-seal must be against an escrow that holds the new key: sealed against
+// the pre-clone bytes, mysqld could not start (MY-013288, verified against
+// MySQL 9.7). So the scenario asserts the new server_uuid, and with binary
+// log encryption on, an escrow digest that differs from the pre-clone one.
 //
 // Destructive by design — it wipes and rebuilds the replica's datadir —
 // so it is quarantined out of the batch profiles alongside the other
@@ -65,9 +77,9 @@ func scenario51EncryptedReclone() runner.Scenario {
 		ID:    "51-encrypted-reclone",
 		Title: "Recloning a sealed replica unseals it first, clones through a writable keyring, then re-seals against a verified escrow",
 		Hypothesis: "Annotating reclone-site on a Sealed replica moves it to Unsealed/Clone and re-renders its pod onto a " +
-			"memory-backed keyring BEFORE any CLONE INSTANCE runs; the clone completes; the site returns to Sealed against " +
-			"an escrow no older than the pre-clone one, with a read-only keyring still off the data PVC and the donor's " +
-			"rows readable.",
+			"memory-backed keyring BEFORE any CLONE INSTANCE runs; the clone completes and the recipient has a new " +
+			"server_uuid; the site returns to Sealed against an escrow no older than the pre-clone one that holds the new " +
+			"server's binary log encryption key, with a read-only keyring still off the data PVC and the donor's rows readable.",
 		Risk:    "high",
 		DocLink: "playground/chaos-scenarios.md#51-encrypted-reclone",
 		Timeout: 20 * time.Minute,
@@ -128,6 +140,10 @@ func s51SeedDonorData(state *s51RunState) runner.Step {
 			}
 			state.escrowBefore = before.KeyringVersion
 			state.secretBefore = before.KeyringSecret
+			state.digestBefore = before.KeyringDigest
+			if state.identity, err = startCloneIdentity(ctx, env, state.replicaSite); err != nil {
+				return err
+			}
 
 			db, err := env.MySQL(state.activeSite)
 			if err != nil {
@@ -306,16 +322,11 @@ func s51VerifyResealedAfterClone(state *s51RunState) runner.Step {
 			}
 
 			after := mfg.Status.EncryptionAtRest.SiteEncryptionStatusByName(state.replicaSite)
-			// The escrow version is NOT required to advance. A recipient
-			// that was seeded from its own existing escrow already holds a
-			// usable master key, and CLONE INSTANCE rewraps the donor's
-			// tablespace keys under that same key rather than creating a
-			// new one — so the keyring bytes, and therefore the escrow
-			// version, legitimately stay put. (Verified against MySQL 9.7:
-			// a reclone of a sealed site came back on the same v2.) What
-			// must hold is that it never goes BACKWARDS onto a superseded
-			// version, and that the operator re-verified the digest before
-			// re-sealing, which reaching Sealed already proves.
+			// The escrow must never go BACKWARDS onto a superseded version,
+			// and the operator re-verifies the digest before re-sealing,
+			// which reaching Sealed already proves. Whether the keyring
+			// bytes changed depends on binary log encryption; that is
+			// asserted below, once the recipient answers.
 			if after.KeyringVersion < state.escrowBefore {
 				return fmt.Errorf(
 					"recipient re-sealed against escrow v%d, older than the pre-clone v%d",
@@ -325,12 +336,31 @@ func s51VerifyResealedAfterClone(state *s51RunState) runner.Step {
 				return fmt.Errorf("recipient re-sealed without a recorded escrow: %+v", after)
 			}
 
+			// The clone gave the recipient a new server_uuid, and the sealed
+			// pod that answers now started with it on a read-only keyring.
+			if _, err := state.identity.assertRotated(ctx, env); err != nil {
+				return err
+			}
+
 			// Fresh port-forward: the clone replaced the pod.
 			db, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, state.replicaSite, env.Creds)
 			if err != nil {
 				return fmt.Errorf("open mysql on %s after the clone: %w", state.replicaSite, err)
 			}
 			defer db.Close()
+
+			// With binary log encryption the new server stored its own
+			// binary log encryption key on the clone's restart, so the
+			// escrow it is sealed against cannot be the pre-clone bytes.
+			binlogEncryption, err := db.ScalarInt(ctx, "SELECT @@global.binlog_encryption")
+			if err != nil {
+				return fmt.Errorf("read binlog_encryption on %s: %w", state.replicaSite, err)
+			}
+			if binlogEncryption == 1 && after.KeyringDigest == state.digestBefore {
+				return fmt.Errorf(
+					"recipient %s re-sealed against the pre-clone keyring bytes (%s) although its new server_uuid needs "+
+						"its own binary log encryption key in the keyring", state.replicaSite, after.KeyringDigest)
+			}
 
 			readOnly, err := db.ScalarString(ctx,
 				"SELECT STATUS_VALUE FROM performance_schema.keyring_component_status WHERE STATUS_KEY='Read_only'")

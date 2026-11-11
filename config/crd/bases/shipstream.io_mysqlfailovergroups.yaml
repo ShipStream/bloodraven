@@ -8504,6 +8504,32 @@ spec:
                   Durable: until it records Succeeded the group is treated as still
                   restoring (no DNS, no application endpoints, no fresh-deploy clone).
                 properties:
+                  backupRef:
+                    description: |-
+                      BackupRef pins the MysqlBackup the restore reads when
+                      spec.initFromBackup.source.backupRef is set. It is recorded once the
+                      restore Job can be built, before the backup is held and the Job is
+                      created, and kept on the terminal status. A retry (the failed Job
+                      deleted) pins again. See RestoreBackupRef.
+                    properties:
+                      holdID:
+                        description: |-
+                          HoldID is the suffix of the hold annotation this restore stamped on
+                          the backup. Each attempt takes a new one.
+                        maxLength: 63
+                        type: string
+                      name:
+                        description: Name of the MysqlBackup.
+                        maxLength: 253
+                        type: string
+                      uid:
+                        description: UID of the MysqlBackup when the restore pinned
+                          it.
+                        maxLength: 64
+                        type: string
+                    required:
+                    - name
+                    type: object
                   completionTime:
                     description: CompletionTime is when the restore Job reached a
                       terminal state.
@@ -8800,6 +8826,31 @@ spec:
                   Durable: confirmTokenUsed is the only record that a confirm was
                   consumed, and the run record is what a restarted operator resumes.
                 properties:
+                  backupRef:
+                    description: |-
+                      BackupRef pins the MysqlBackup the run reads when
+                      spec.restoreInPlace.source.backupRef is set. It is recorded in
+                      Preflight, before the backup is held and before anything is fenced,
+                      and kept on the terminal status. See RestoreBackupRef.
+                    properties:
+                      holdID:
+                        description: |-
+                          HoldID is the suffix of the hold annotation this restore stamped on
+                          the backup. Each attempt takes a new one.
+                        maxLength: 63
+                        type: string
+                      name:
+                        description: Name of the MysqlBackup.
+                        maxLength: 253
+                        type: string
+                      uid:
+                        description: UID of the MysqlBackup when the restore pinned
+                          it.
+                        maxLength: 64
+                        type: string
+                    required:
+                    - name
+                    type: object
                   completionTime:
                     description: CompletionTime is when the restore reached a terminal
                       phase.

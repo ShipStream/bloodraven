@@ -166,7 +166,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 			`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100","totalBytes":512000}`),
 		"orders/binlogs/archive.json": envtestArchiveDescriptor(t),
 		"orders/binlogs/manifest-site1.json": []byte(
-			`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"site1","files":[{"name":"b1","remotePath":"orders/binlogs/site1/b1","size":1024,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`),
+			`{"version":2,"archiveId":"ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa","site":"site1","files":[{"name":"b1","id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","remotePath":"orders/binlogs/site1/b1","size":1024,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`),
 	}}
 
 	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")

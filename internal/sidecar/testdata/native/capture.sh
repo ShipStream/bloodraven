@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Requires Docker and the mysql:8.4 image (mysql:9.7 for failback). No ports, credentials or data leave the containers.
+# Requires Docker and the mysql:8.4 image (mysql:9.7 for failback and effect, both for effect-mixed). No ports, credentials or data leave the containers.
 mode=${1:-all}
-[[ "$mode" == all || "$mode" == compression || "$mode" == failback ]] || { echo "usage: $0 [all|compression|failback]" >&2; exit 2; }
+[[ "$mode" == all || "$mode" == compression || "$mode" == failback || "$mode" == effect || "$mode" == effect-mixed ]] || { echo "usage: $0 [all|compression|failback|effect|effect-mixed]" >&2; exit 2; }
 output=$(cd "$(dirname "$0")" && pwd)
+if [[ "$mode" == effect-mixed ]]; then
+ # A MySQL 8.4 source and its MySQL 9.7 replica, one container each on an
+ # internal network. See the "Effect-digest pairs" section of README.md.
+ exec bash "$output/effect-mixed/capture.sh"
+fi
+if [[ "$mode" == effect ]]; then
+ # A source and its replica (log_replica_updates) in one network-less
+ # MySQL 9.7 container: every transaction as an origin copy and as a
+ # replica copy, cut into rows events at different sizes, compressed on one
+ # side only. See the "Effect-digest pairs" section of README.md.
+ docker run --rm -i --network none -v "$output/effect:/fixtures" --entrypoint bash mysql:9.7 -s < "$output/effect/capture-inner.sh"
+ exit
+fi
 if [[ "$mode" == failback ]]; then
  # Two MySQL 9.7 servers in one network-less container (loopback only):
  # a planned failover A→B and failback B→A without reclone, no rotation at

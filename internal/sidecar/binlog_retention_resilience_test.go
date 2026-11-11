@@ -17,7 +17,7 @@ import (
 
 // Preserve the failure throughout cooldown and report the site-wide deferral.
 // Quarantine is the explicit recovery path; never silently discard evidence.
-func TestCorruptLegacyRowDoesNotHaltAllRetention(t *testing.T) {
+func TestCorruptUnboundRowDoesNotHaltAllRetention(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
 	good, err := os.ReadFile("testdata/incarnation-a.bin")
@@ -31,7 +31,9 @@ func TestCorruptLegacyRowDoesNotHaltAllRetention(t *testing.T) {
 	cov := e.Metadata.GTIDCoverage
 	cov.ContentID = e.Digest
 	covered := ManifestEntry{Name: "mysql-bin.000002", ID: e.Digest, PreviousGTIDs: e.Metadata.PreviousGTIDs, FirstEventTime: e.Metadata.FirstEventTime, LastEventTime: e.Metadata.LastEventTime, Size: int64(len(good)), GTIDCoverage: cov}
-	corrupt := ManifestEntry{Name: "mysql-bin.000001", LastEventTime: e.Metadata.LastEventTime.Add(-time.Hour), Size: 200}
+	// A truncated object under its own identity, with no coverage.
+	corrupt := unboundRow("mysql-bin.000001", good[:200])
+	corrupt.LastEventTime, corrupt.Size = e.Metadata.LastEventTime.Add(-time.Hour), 200
 	for _, item := range []struct {
 		row  ManifestEntry
 		data []byte
@@ -88,7 +90,7 @@ func TestCorruptLegacyRowDoesNotHaltAllRetention(t *testing.T) {
 		t.Fatal("manifest outage cleared an unresolved history error")
 	}
 	a.store = store
-	if err := testQuarantine(ctx, store, "binlogs", "iad", corrupt.Name, "", "unrecoverable legacy stream; canonical backup verified", coverageTestSID+":1-11", false); err != nil {
+	if err := testQuarantine(ctx, store, "binlogs", "iad", corrupt.Name, corrupt.ID, "unrecoverable stream; canonical backup verified", coverageTestSID+":1-11", false); err != nil {
 		t.Fatal(err)
 	}
 	a.lastRetentionRun = time.Time{}
@@ -159,16 +161,23 @@ func TestFinishedReuseJobDoesNotSpinOnManifestOutage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Two different byte streams: coverage is only inspected for a row
+	// that some other row's bytes could conflict with.
+	second, err := os.ReadFile("testdata/incarnation-b.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
 	base := newMemStore()
 	store := &flakyManifestStore{ArchiveStore: base, outage: make(chan struct{}), excess: make(chan struct{})}
 	m := &Manifest{Site: "iad"}
 	for i := 0; i < 12; i++ {
-		row := ManifestEntry{Name: fmt.Sprintf("mysql-bin.%06d", i+1)}
+		data := [][]byte{raw, second}[i%2]
+		row := unboundRow(fmt.Sprintf("mysql-bin.%06d", i+1), data)
 		key, err := ArchiveEntryKey("binlogs", "iad", row)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := base.Put(ctx, key, bytes.NewReader(raw), int64(len(raw))); err != nil {
+		if err := base.Put(ctx, key, bytes.NewReader(data), int64(len(data))); err != nil {
 			t.Fatal(err)
 		}
 		m.Files = append(m.Files, row)

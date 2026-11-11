@@ -96,11 +96,7 @@ func (a *BinlogArchiver) archivedOrigins(ctx context.Context, entry ManifestEntr
 	if err != nil {
 		return result, "", err
 	}
-	id := entry.ID
-	if id == "" {
-		id = entry.ContentID
-	}
-	if id != "" && !MatchesBinlogDigest(a.store, id, evidence.Digest) {
+	if !MatchesBinlogDigest(a.store, entry.ID, evidence.Digest) {
 		return result, "", fmt.Errorf("identity mismatch checking GTID issuance for %s", entry.Name)
 	}
 	return result, a.store.BinlogContentID(evidence.Digest), nil
@@ -177,7 +173,6 @@ func (a *BinlogArchiver) detectArchiveReuse(ctx context.Context, m *Manifest, en
 }
 
 // CheckArchiveIssuance verifies both streams before comparing overlapping GTIDs.
-// It also protects restore lower cuts when older manifests lack a reuse guard.
 // A read failure is an *issuanceReadError naming the operand; its message
 // is the underlying error's.
 func CheckArchiveIssuance(ctx context.Context, store ArchiveStore, prefix, site string, first, second ManifestEntry, overlap internalmysql.GTIDSet) (*ArchiveReuseEvidence, error) {
@@ -194,12 +189,6 @@ func CheckArchiveIssuance(ctx context.Context, store ArchiveStore, prefix, site 
 		return nil, nil
 	}
 	if proof := differentOrigins(before, after, overlap.TransactionCount()); proof != "" {
-		if first.ID == "" {
-			first.ContentID = beforeID
-		}
-		if second.ID == "" {
-			second.ContentID = afterID
-		}
 		return &ArchiveReuseEvidence{First: first, Second: second, GTIDs: overlap.String(), Proof: proof}, nil
 	}
 	count := overlap.TransactionCount()

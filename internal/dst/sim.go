@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -110,8 +111,13 @@ const (
 	EvStartSQL     EventKind = "startReplicaSQL"
 	EvDrain        EventKind = "waitRelayDrain"
 	EvKillConns    EventKind = "killAppConns"
-	EvDNSSet       EventKind = "dnsSet"
-	EvStateWrite   EventKind = "failoverStateWrite"
+	// EvFlushBinlog is an operator FLUSH BINARY LOGS (see
+	// simChecker.FlushBinaryLogs). Outcome "" rotated; "failed" and
+	// "unreachable" did not; "timeout" was abandoned at the operator's
+	// bound (Detail late=true: the server rotates at the next tick anyway).
+	EvFlushBinlog EventKind = "flushBinaryLogs"
+	EvDNSSet      EventKind = "dnsSet"
+	EvStateWrite  EventKind = "failoverStateWrite"
 
 	// Sidecar FencingMonitor actions. Distinct from the operator's own
 	// EvSetSuperRO so invariants that ask "did the OPERATOR fence this
@@ -138,6 +144,8 @@ const (
 	EvOperatorDie     EventKind = "fault.operatorDied"
 	EvAmbiguous       EventKind = "fault.ambiguousMutations"
 	EvFailMutations   EventKind = "fault.failMutations"
+	EvFlushFail       EventKind = "fault.failFlush"
+	EvFlushSlow       EventKind = "fault.slowFlush"
 	EvStallApply      EventKind = "fault.stallApply"
 	EvHealApply       EventKind = "fault.healApply"
 	EvStallFetch      EventKind = "fault.stallFetch"
@@ -245,6 +253,13 @@ type siteData struct {
 	executed  gtidVec // applied transactions (durable)
 	retrieved gtidVec // fetched into relay log (durable, purged by RESET REPLICA ALL)
 
+	// The binary log, as far as a rotation shows: binlogSeq counts the
+	// files opened by FLUSH BINARY LOGS and binlogPrev is the active
+	// file's Previous_gtids header, the executed set when it was opened
+	// (nil: the file the site started the trial with).
+	binlogSeq  int
+	binlogPrev gtidVec
+
 	hasData bool
 }
 
@@ -263,11 +278,23 @@ type Cluster struct {
 	dirLinkDown   map[string]bool // key: dirKey(from, to) — from cannot reach to
 	ambiguousMuts map[string]int  // site -> next N mutations apply-but-error
 	failMuts      map[string]int  // site -> next N mutations error-without-apply
-	fetchStalled  map[string]bool
-	applyStalled  map[string]bool
-	drainStalled  map[string]bool
-	dnsDenied     bool
-	statusDenied  bool
+	// FLUSH BINARY LOGS faults, counted apart from failMuts/ambiguousMuts so
+	// a flush never uses up a fault meant for a promotion statement.
+	// flushFail: the next N flushes fail without rotating. flushSlow: the
+	// next N block until the caller gives up; with flushLate the server
+	// still rotates afterwards (lateFlushes, applied by the next Tick).
+	flushFail   map[string]int
+	flushSlow   map[string]int
+	flushLate   map[string]bool
+	lateFlushes map[string]int
+	// advanceClock moves the trial's fake clock; a slow flush uses it to
+	// take simulated time (nil: no clock wired, a slow flush only blocks).
+	advanceClock func(time.Duration)
+	fetchStalled map[string]bool
+	applyStalled map[string]bool
+	drainStalled map[string]bool
+	dnsDenied    bool
+	statusDenied bool
 	// stateDenied rejects writes to the out-of-band anti-flap store. It is
 	// a SEPARATE knob from statusDenied on purpose: the two durable paths
 	// have different RBAC rules and different admission chains in
@@ -332,6 +359,10 @@ func NewCluster(specs []SiteSpec, baselineTxns int64) *Cluster {
 		dirLinkDown:   make(map[string]bool),
 		ambiguousMuts: make(map[string]int),
 		failMuts:      make(map[string]int),
+		flushFail:     make(map[string]int),
+		flushSlow:     make(map[string]int),
+		flushLate:     make(map[string]bool),
+		lateFlushes:   make(map[string]int),
 		fetchStalled:  make(map[string]bool),
 		applyStalled:  make(map[string]bool),
 		drainStalled:  make(map[string]bool),
@@ -476,6 +507,9 @@ type SiteTruth struct {
 	Retrieved     gtidVec
 	ServerUUID    string
 	Incarnation   int
+	// BinlogSeq and BinlogPrev are the binary log model (siteData).
+	BinlogSeq  int
+	BinlogPrev gtidVec
 }
 
 // Writable reports whether the site would accept an application write.
@@ -510,6 +544,8 @@ func (c *Cluster) Truth() []SiteTruth {
 			Retrieved:     s.retrieved.clone(),
 			ServerUUID:    s.serverUUID,
 			Incarnation:   s.incarnation,
+			BinlogSeq:     s.binlogSeq,
+			BinlogPrev:    s.binlogPrev.clone(),
 		})
 	}
 	return out
@@ -533,6 +569,8 @@ func (c *Cluster) truthLocked(s *siteData) SiteTruth {
 		Retrieved:     s.retrieved.clone(),
 		ServerUUID:    s.serverUUID,
 		Incarnation:   s.incarnation,
+		BinlogSeq:     s.binlogSeq,
+		BinlogPrev:    s.binlogPrev.clone(),
 	}
 }
 
@@ -722,6 +760,41 @@ func (c *Cluster) AddFailMutations(site string, n int) {
 	c.event(site, EvFailMutations, fmt.Sprintf("n=%d", n), "")
 }
 
+// AddFlushFailures makes the next n FLUSH BINARY LOGS on site fail without
+// rotating.
+func (c *Cluster) AddFlushFailures(site string, n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushFail[site] += n
+	c.event(site, EvFlushFail, fmt.Sprintf("n=%d", n), "")
+}
+
+// AddSlowFlushes makes the next n FLUSH BINARY LOGS on site block until the
+// operator gives up. With late, the server completes each abandoned
+// rotation at the next tick, after whatever the operator did meanwhile.
+func (c *Cluster) AddSlowFlushes(site string, n int, late bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushSlow[site] += n
+	c.flushLate[site] = late
+	c.event(site, EvFlushSlow, fmt.Sprintf("n=%d late=%v", n, late), "")
+}
+
+// SetClockAdvancer wires the trial's fake clock, so a slow flush takes
+// simulated time (see simChecker.FlushBinaryLogs).
+func (c *Cluster) SetClockAdvancer(advance func(time.Duration)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.advanceClock = advance
+}
+
+// rotateBinlogLocked opens the next binary log file on s. Must be called
+// with c.mu held.
+func (c *Cluster) rotateBinlogLocked(s *siteData) {
+	s.binlogSeq++
+	s.binlogPrev = s.executed.clone()
+}
+
 func (c *Cluster) SetApplyStalled(site string, on bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -867,6 +940,9 @@ func (c *Cluster) ClearInjectedCallFaults() {
 	defer c.mu.Unlock()
 	clear(c.ambiguousMuts)
 	clear(c.failMuts)
+	clear(c.flushFail)
+	clear(c.flushSlow)
+	clear(c.flushLate)
 }
 
 // NoteOperatorRestart records the restart in the event stream.
@@ -971,6 +1047,18 @@ func (c *Cluster) killOperatorLocked(site string, kind EventKind, applied bool) 
 func (c *Cluster) Tick() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Rotations the operator abandoned at its bound complete now, on
+	// whatever the site has become since (possibly a writable primary).
+	for _, s := range c.sites {
+		if n := c.lateFlushes[s.name]; n > 0 {
+			delete(c.lateFlushes, s.name)
+			if !s.crashed {
+				c.rotateBinlogLocked(s)
+				c.event(s.name, EvFlushBinlog, fmt.Sprintf("file=%d", s.binlogSeq), "late")
+			}
+		}
+	}
 
 	// Application writes. They land in the server's current GTID stream,
 	// which is the site's original uuid unless a regressing pod replacement

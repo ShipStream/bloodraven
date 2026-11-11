@@ -271,7 +271,9 @@ func (u *UpdateController) Execute(ctx context.Context,
 	// Phase 3: Hand off to the (now-updated) standby
 	u.setPhase(v1alpha1.UpdatePhaseFailover)
 	u.logger.Info("ordered update: failing over to updated standby", "site", standbySiteName)
-	if _, err := u.failover.ExecuteHandoff(ctx, standbyChecker, activeChecker, standbySiteName, u.handoffOptions()); err != nil {
+	handoffOpts := u.handoffOptions()
+	handoffOpts.SourceSite = activeSiteName
+	if _, err := u.failover.ExecuteHandoff(ctx, standbyChecker, activeChecker, standbySiteName, handoffOpts); err != nil {
 		return fmt.Errorf("failover during update: %w", err)
 	}
 
@@ -429,6 +431,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	// transaction the fenced source committed. On failure the source has its
 	// writes back and the active drift stays queued for a later attempt.
 	opts := u.handoffOptions()
+	opts.SourceSite = active.Name
 	opts.RestoreReplication = mysql.ReplicationSourceOpts{
 		Host: handoff.ExpectedSource, User: active.ReplUser, Password: active.ReplPassword, UseSSL: active.UseSSL,
 	}

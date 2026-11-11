@@ -81,6 +81,10 @@ type trialRunner struct {
 	// stale rehydrate is inherent only when NEITHER durable path could have
 	// preserved the record; this latch is what catches "status could have".
 	statusDroppedPromotion bool
+	// promotionArms counts armPromotion calls. A status write is in flight
+	// across a promotion's record when the count moves between the write's
+	// start (the manager's snapshot) and its commit.
+	promotionArms int
 	// promotionRestarts is len(restartPolls) at the last promotion. A
 	// stale-looking status write from a LATER process generation is
 	// legitimate (the replacement never knew the record), so the latch
@@ -106,6 +110,13 @@ type trialRunner struct {
 	sidecarTick int
 
 	promotionPolls []int
+	// promotionSpans is the fake-clock window of each promotion's poll in
+	// promotionPolls. A poll is one second of fake time unless a slow
+	// FLUSH BINARY LOGS took part of the operator's rotation bound inside
+	// it, so the cooldown is judged on these, not on poll numbers.
+	promotionSpans []clockSpan
+	// pollStartAt is the fake clock at the start of the current poll.
+	pollStartAt time.Time
 	// promotionActors is the actor of each promotion in promotionPolls
 	// (trials with actors only).
 	promotionActors []Actor
@@ -137,10 +148,19 @@ type trialRunner struct {
 	// pendingCrashDown carries the armed crash's down window until the
 	// death actually lands.
 	operatorDeadUntil int
-	pendingCrashDown  int
+
+	// recloneWait is the pre-reclone archive-tail wait in progress
+	// (OpRecloneWait), nil when none; recloneTold is the manager that was
+	// last given its request.
+	recloneWait      *simRecloneWait
+	recloneTold      *controller.TopologyManager
+	pendingCrashDown int
 
 	dualStreak  int
 	dualFlagged bool
+	// flushGrants is FlushAfterWriteGrant's state across polls
+	// (invariants.go).
+	flushGrants flushGrants
 
 	// pl is the planned-failover actor machinery (planned_harness.go); nil
 	// when the trial's actors are disabled, which leaves every code path
@@ -257,6 +277,7 @@ func (r *trialRunner) setup(capture bool) {
 	r.dns = newSimDNS(r.cluster)
 	r.tainter = newSimTainter(r.cluster)
 	r.clk = clock.NewFakeClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	r.cluster.SetClockAdvancer(r.clk.Advance)
 	r.hub = platform.NewHub(r.logger)
 
 	r.cfg = controller.TopologyConfig{
@@ -313,7 +334,9 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 	for i, name := range r.trial.SiteNames {
 		checkers[i] = r.cluster.NewChecker(name)
 	}
-	fc := controller.NewFailoverController(r.logger)
+	// The trial's clock bounds the failover controller's best-effort binary
+	// log rotations, so a slow FLUSH BINARY LOGS is abandoned in fake time.
+	fc := controller.NewFailoverControllerWithClock(r.logger, r.clk)
 	// The bootstrap controller is real and non-nil, exactly as the runner
 	// wires it whenever replication credentials exist — a nil controller
 	// with credentials set is a production-impossible combination that
@@ -328,6 +351,24 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 		r.tainter, r.hub, r.dns, r.logger, r.clk,
 	)
 	tm.SetSleepForTest(func(time.Duration) {})
+	// PITR archiving is "enabled" only while a reclone wait is scripted
+	// (OpRecloneWait); otherwise the source answers disabled and a reclone
+	// would skip the wait, as on a group without PITR. Production runs
+	// each step of the wait (the sidecar status request and the rotation)
+	// on a goroutine of its own; here a step runs inline, inside the Poll
+	// that started it, so the model sees one actor at a time and a trial
+	// replays exactly.
+	tm.ArchiveTail = simArchiveTail{r: r}
+	tm.SetRecloneTailStepRunnerForSim(func(step func()) { step() })
+	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
+		// A wait that reaches its bound goes on to CLONE, which the model
+		// does not have: the harness withdraws every request before that.
+		r.violations = append(r.violations, Violation{
+			Invariant: "HarnessRecloneWaitExpired",
+			Poll:      r.cluster.Poll(),
+			Detail:    fmt.Sprintf("the pre-reclone wait on %s reached its bound (%s); CLONE is not modelled", site, reason),
+		})
+	}
 
 	if r.pl != nil {
 		// Trials with actors run the production restore (runner.go
@@ -406,6 +447,12 @@ func (r *trialRunner) wireStatus(tm *controller.TopologyManager) {
 			tm.MarkStatusWriteResult(errors.New("mysqlfailovergroups/status write forbidden (sim: outage)"))
 			return
 		}
+		// The snapshot was taken before this callback: the promotions armed
+		// so far are the ones it can carry. With actors the write below
+		// yields between its read and its commit, and a promotion recorded
+		// at that yield (an ordered update's handoff: another goroutine in
+		// production) is not in it.
+		armsAtSnapshot := r.promotionArms
 		if r.pl != nil {
 			// The snapshot lands on the simulated object, contending on its
 			// resourceVersion with the planned run's writes; the store also
@@ -422,9 +469,13 @@ func (r *trialRunner) wireStatus(tm *controller.TopologyManager) {
 		}
 		// A successful status write by the promoting process that still
 		// predates its own promotion means the operator dropped the record
-		// from a durable path that was accepting writes.
+		// from a durable path that was accepting writes. Only a snapshot
+		// taken after the promotion was recorded can have dropped it: a
+		// write already in flight when the record was made commits without
+		// it by construction, and the manager's next write (judged here
+		// like any other) carries it.
 		if !r.lastPromotionAt.IsZero() && cp.LastFailover.Before(r.lastPromotionAt) &&
-			len(r.restartPolls) == r.promotionRestarts {
+			len(r.restartPolls) == r.promotionRestarts && armsAtSnapshot == r.promotionArms {
 			r.statusDroppedPromotion = true
 		}
 		if !cp.LastFailover.Before(r.lastPromotionAt) && !r.statusDroppedPromotion {
@@ -444,6 +495,7 @@ func (r *trialRunner) run() {
 		// faults are stamped with the poll they take effect in — the repro
 		// log then matches the schedule's @pNNN annotations exactly.
 		r.cluster.BeginPoll(p)
+		r.pollStartAt = r.clk.Now()
 		if r.pl != nil {
 			r.pl.beginPoll(p)
 		}
@@ -460,6 +512,7 @@ func (r *trialRunner) run() {
 		if p == r.trial.HealAt {
 			r.healAll()
 		}
+		r.driveRecloneWait(p)
 
 		// A process killed mid-Execute is replaced at the start of the poll
 		// its down window expires in — before that poll's sidecar ticks, so
@@ -516,6 +569,85 @@ func (r *trialRunner) run() {
 			Detail:    "trial ended with the operator process still dead",
 		})
 	}
+}
+
+// clockSpan is the fake-clock window of one poll.
+type clockSpan struct{ start, end time.Time }
+
+// simRecloneWait is one scripted pre-reclone wait (OpRecloneWait).
+type simRecloneWait struct {
+	site    string
+	until   int // the poll the request is withdrawn at
+	sidecar int // what the site's sidecar answers (Op.K)
+}
+
+// driveRecloneWait keeps the scripted reclone request on the current
+// manager, as the reclone annotation would after a restart or a manager
+// replacement, and withdraws it when its window ends or the faults heal.
+func (r *trialRunner) driveRecloneWait(p int) {
+	w := r.recloneWait
+	if w == nil {
+		return
+	}
+	if p >= w.until || p >= r.trial.HealAt {
+		if r.recloneTold != nil {
+			r.recloneTold.CancelPendingRecloneForSim(w.site)
+		}
+		if r.tm != nil && r.tm != r.recloneTold {
+			r.tm.CancelPendingRecloneForSim(w.site)
+		}
+		r.recloneWait, r.recloneTold = nil, nil
+		return
+	}
+	if r.tm != nil && r.tm != r.recloneTold {
+		if r.recloneTold != nil {
+			r.recloneTold.CancelPendingRecloneForSim(w.site)
+		}
+		r.tm.SetRecloneSite(w.site)
+		r.recloneTold = r.tm
+	}
+}
+
+// simArchiveTail is the simulated PITR status source of the pre-reclone
+// wait (controller.ArchiveTailSource).
+type simArchiveTail struct{ r *trialRunner }
+
+// ArchivingEnabled: PITR archiving is "on" while a reclone wait is
+// scripted.
+func (s simArchiveTail) ArchivingEnabled() bool { return s.r.recloneWait != nil }
+
+// TailStatus is the simulated sidecar's /archiver/status for the
+// pre-reclone wait. It never reports the tail archived (the wait must not
+// reach CLONE); what it does report is the trial's choice.
+func (s simArchiveTail) TailStatus(_ context.Context, site string) (*mysql.ArchiverStatus, error) {
+	r := s.r
+	w := r.recloneWait
+	if w == nil || w.site != site {
+		// Only the scripted site's sidecar is modelled.
+		return nil, fmt.Errorf("sim: no sidecar status modelled for %s", site)
+	}
+	if r.cluster.OperatorDead() {
+		return nil, errOperatorDead
+	}
+	var truth SiteTruth
+	for _, t := range r.cluster.Truth() {
+		if t.Name == site {
+			truth = t
+		}
+	}
+	if truth.Crashed || w.sidecar == 0 {
+		return nil, fmt.Errorf("dial tcp %s:8080: connect: connection refused", site)
+	}
+	tail := &mysql.ArchiverTailStatus{State: mysql.ArchiverTailPending, PendingFiles: 1,
+		ActiveFile: simBinlogFile(truth.BinlogSeq)}
+	switch w.sidecar {
+	case 2:
+		tail.State, tail.Reason = mysql.ArchiverTailBlocked, "sim: the archive store is unreachable"
+	case 3:
+		// The sidecar has not scanned since the trial began.
+		tail.State, tail.PendingFiles, tail.ActiveFile = mysql.ArchiverTailDrained, 0, simBinlogFile(0)
+	}
+	return &mysql.ArchiverStatus{Enabled: true, Tail: tail}, nil
 }
 
 // restartOperator brings up a replacement process after any kind of death —
@@ -619,6 +751,13 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 		r.cluster.AddAmbiguousMutations(op.Site, op.N)
 	case OpFailMuts:
 		r.cluster.AddFailMutations(op.Site, op.N)
+	case OpRecloneWait:
+		r.recloneWait = &simRecloneWait{site: op.Site, until: poll + op.N, sidecar: op.K}
+		r.recloneTold = nil
+	case OpFailFlush:
+		r.cluster.AddFlushFailures(op.Site, op.N)
+	case OpSlowFlush:
+		r.cluster.AddSlowFlushes(op.Site, op.N, op.K == 1)
 	case OpStallApply:
 		r.cluster.SetApplyStalled(op.Site, true)
 	case OpHealApply:

@@ -66,24 +66,25 @@ func TestNoScratchAcrossEncryptionAndInspection(t *testing.T) {
 			if err := a.archiveOne(ctx, source, "mysql-bin.000001", id); err != nil {
 				t.Fatal(err)
 			}
-			legacy := ManifestEntry{Name: "mysql-bin.000099", LastEventTime: time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)}
-			key, err := ArchiveEntryKey("binlogs", "iad", legacy)
+			// The same bytes under another name, with no coverage yet.
+			unbound := ManifestEntry{Name: "mysql-bin.000099", ID: id, LastEventTime: time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)}
+			key, err := ArchiveEntryKey("binlogs", "iad", unbound)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := store.Put(ctx, key, bytes.NewReader(data), int64(len(data))); err != nil {
 				t.Fatal(err)
 			}
-			if err := appendManifestEntry(ctx, store, "binlogs", "iad", legacy); err != nil {
+			if err := appendManifestEntry(ctx, store, "binlogs", "iad", unbound); err != nil {
 				t.Fatal(err)
 			}
 			got := ""
-			err = a.inspectArchivedBinlog(ctx, legacy, func(evidence BinlogEvidence) error {
+			err = a.inspectArchivedBinlog(ctx, unbound, func(evidence BinlogEvidence) error {
 				got = store.BinlogContentID(evidence.Digest)
 				return nil
 			})
 			if err != nil || got != id {
-				t.Fatalf("legacy verification: %s, %v", got, err)
+				t.Fatalf("archived bytes verification: %s, %v", got, err)
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(pitrCutoffResponse{Coverage: PITRGTIDCoverageProtocol, CutoffTime: "2026-04-17T00:00:00Z", RetainedGTIDs: []string{coverageTestSID + ":1-10"}})
@@ -97,8 +98,8 @@ func TestNoScratchAcrossEncryptionAndInspection(t *testing.T) {
 			}
 			found := false
 			for _, entry := range m.Files {
-				if entry.Name == legacy.Name {
-					found = entry.GTIDCoverage != nil && entry.ContentID == id
+				if entry.Name == unbound.Name {
+					found = coverageBoundToEntry(entry)
 				}
 			}
 			if !found {

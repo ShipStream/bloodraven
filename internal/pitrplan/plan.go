@@ -86,11 +86,18 @@ func (f PlanFile) StagedPath() string {
 	return f.Row.Site + "/" + name
 }
 
-// Segment is `mysqlbinlog --include-gtids=<GTIDs>` over Files[File], over
-// transactions [Start, End) of that file.
+// Segment is `mysqlbinlog --start-position=<StartPosition>
+// --include-gtids=<GTIDs>` over Files[File], over transactions [Start, End)
+// of that file.
 type Segment struct {
-	File              int
-	Start, End        int
+	File       int
+	Start, End int
+	// StartPosition is the file offset of the GTID event of the first
+	// transaction the segment replays (the first of [Start, End) outside
+	// X), so mysqlbinlog does not scan the file from its start (issue
+	// #271). No transaction before it is in GTIDs: a file holds a GTID
+	// once.
+	StartPosition     int64
 	GTIDs             Set
 	StartPredecessors Set
 	Transactions      int64
@@ -105,6 +112,11 @@ type file struct {
 	prev   Set
 	exec   Set
 	marked bool
+	// ord is the file's index in planner.order.
+	ord int
+	// sids maps the file's source identifier indexes (Txn.SID) to the
+	// planner's (planner.sidNames).
+	sids []uint32
 	// posW caches witnessPos.
 	posW     int
 	posWDone bool
@@ -114,12 +126,6 @@ func (f *file) n() int            { return len(f.idx.Txns) }
 func (f *file) gtid(i int) GTID   { return f.idx.GTID(i) }
 func (f *file) txn(i int) Txn     { return f.idx.Txns[i] }
 func (f *file) origin(i int) bool { return f.idx.Txns[i].Srv == f.idx.WriterServerID }
-
-type occRef struct {
-	f *file
-	i int32
-	n uint16
-}
 
 // lostObjectAdvice is the remedy for a row whose object cannot be read
 // (review F063). pitr-quarantine writes only an archive its caller owns,
@@ -148,6 +154,68 @@ type promoRef struct {
 	index int
 	rec   pitrarchive.PromotionRecord
 	set   Set
+	// proven is the record's promotion set P (promotionGtidExecuted,
+	// issue #269) when the record carries a usable one, else nil, and
+	// unusable then says why a carried one was ignored. confirmed is the
+	// gtid_executed of the record's confirmation (set ∪ confirmedGtidAdded),
+	// nil without one. Both are nil for a record that is no promotion
+	// record (recordEvidence).
+	proven    Set
+	confirmed Set
+	unusable  string
+}
+
+// holds reports whether the record's server held g when the sidecar
+// sampled it for the record or for its confirmation.
+func (pr *promoRef) holds(g GTID) bool {
+	return pr.set.Has(g) || (pr.confirmed != nil && pr.confirmed.Has(g))
+}
+
+// recordEvidence reads a promotion record's containment evidence (issue
+// #269): its promotion set P and its confirmation. Evidence that is absent
+// or does not hold together leaves the record exactly what it is without
+// it (a time anchor, loss evidence, a fence), so a record of an older
+// sidecar, and one that a writer or a tool damaged, plan as before:
+//
+//   - P must be a GTID set contained in the record's gtidExecuted;
+//   - the record must carry a probe interval: P is evidence about the
+//     record's episode, and the probe interval is what dates the episode
+//     (containmentAnchor, episodeDates);
+//   - a confirmation (confirmedAt) needs P, must not precede observedAt,
+//     and its confirmedGtidAdded must be a GTID set; an addition without
+//     confirmedAt is no confirmation, and makes P unusable too.
+//
+// The confirmed set is gtidExecuted ∪ confirmedGtidAdded, so it contains
+// gtidExecuted by construction. A confirmation on a record without P is
+// not read: the sidecar writes none, and it would prove nothing here.
+func recordEvidence(rec pitrarchive.PromotionRecord, set Set) (proven, confirmed Set, unusable string) {
+	if rec.Kind != pitrarchive.RecordPromotion || rec.PromotionGTIDExecuted == "" {
+		return nil, nil, ""
+	}
+	p, err := ParseSet(rec.PromotionGTIDExecuted)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("its promotionGtidExecuted is not a GTID set (%v)", err)
+	}
+	if !set.Contains(p) {
+		return nil, nil, fmt.Sprintf("its promotionGtidExecuted holds %s, which its gtidExecuted lacks", p.Subtract(set).bounded(256))
+	}
+	if rec.ProbeInterval <= 0 {
+		return nil, nil, "its probe interval is unknown, so it does not date its episode"
+	}
+	if rec.ConfirmedAt.IsZero() {
+		if rec.ConfirmedGTIDAdded != "" {
+			return nil, nil, "it carries confirmedGtidAdded without confirmedAt"
+		}
+		return p, nil, ""
+	}
+	if rec.ConfirmedAt.Before(rec.ObservedAt) {
+		return nil, nil, fmt.Sprintf("its confirmedAt %s precedes its observedAt", rec.ConfirmedAt.UTC().Format(microLayout))
+	}
+	added, err := ParseSet(rec.ConfirmedGTIDAdded)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("its confirmedGtidAdded is not a GTID set (%v)", err)
+	}
+	return p, set.Union(added), ""
 }
 
 type planner struct {
@@ -170,11 +238,21 @@ type planner struct {
 	T     int64 // µs; 0 in latest mode
 	delta int64 // µs
 
-	files    map[*Row]*file
-	failed   map[*Row]error
-	order    []*file
-	occ      map[GTID]*occRef
+	files  map[*Row]*file
+	failed map[*Row]error
+	order  []*file
+	// occ is the occurrence registry (occ.go), keyed by the planner's
+	// index of a GTID's source identifier and its GNO.
+	occ occTable
+	// kept is scratch space for a GTID's kept copies (compare).
+	kept     []occCopy
+	sidIndex map[string]uint32
+	sidNames []string
 	mismatch *Refusal
+	// broken is the error of an ingest that failed: the registry may then
+	// hold records of a file that is not in order, so every later fetch
+	// returns it and nothing reads the registry again.
+	broken error
 	// reissue is the first downloaded copy of a member of B committed
 	// after the dump finished (D-49 over every downloaded row, review
 	// F050); serverEnd is the dumped server's clock at the dump's end (µs).
@@ -205,7 +283,7 @@ func newPlanner(ctx context.Context, req Request, archive Archive, fetcher Fetch
 	}
 	p := &planner{ctx: ctx, req: req, fetcher: fetcher, budget: req.Budget,
 		marked: map[string]*pitrarchive.HistoryIntegrity{}, files: map[*Row]*file{}, failed: map[*Row]error{},
-		occ: map[GTID]*occRef{}, used: map[*Row]bool{}, maxOctB: math.MinInt64, delta: req.Delta.Microseconds()}
+		occ: newOccTable(req.Budget), sidIndex: map[string]uint32{}, used: map[*Row]bool{}, maxOctB: math.MinInt64, delta: req.Delta.Microseconds()}
 	p.X = req.Exclude
 	if p.X == nil {
 		p.X = Set{}
@@ -239,6 +317,12 @@ func newPlanner(ctx context.Context, req Request, archive Archive, fetcher Fetch
 				return nil, err
 			}
 			ref := promoRef{site: sm.Site, index: i, rec: rec, set: set}
+			ref.proven, ref.confirmed, ref.unusable = recordEvidence(rec, set)
+			for _, evidence := range []Set{ref.proven, ref.confirmed} {
+				if err := p.budget.chargeSet(evidence, "promotion records"); err != nil {
+					return nil, err
+				}
+			}
 			p.fences = append(p.fences, ref)
 			if rec.Kind == pitrarchive.RecordPromotion {
 				p.promos = append(p.promos, ref)
@@ -292,6 +376,9 @@ func (p *planner) fetch(r *Row) (*file, error) {
 	if f := p.files[r]; f != nil {
 		return f, nil
 	}
+	if p.broken != nil {
+		return nil, p.broken
+	}
 	if err := p.failed[r]; err != nil {
 		return nil, err
 	}
@@ -300,7 +387,9 @@ func (p *planner) fetch(r *Row) (*file, error) {
 	}
 	// The up-front estimate from hinted counts refuses before any bytes
 	// are read (D-42). A count too large to multiply is over any budget.
-	if r.Hints.Known {
+	// With a spill arena the index need not fit in memory, and what the
+	// staging volume can take is known only when it is asked.
+	if r.Hints.Known && !p.budget.Spilling() {
 		est := int64(math.MaxInt64)
 		if n := r.Hints.GTIDs.Count(); n <= math.MaxInt64/(TxnBytes+occurrenceBytes) {
 			est = n * (TxnBytes + occurrenceBytes)
@@ -341,6 +430,10 @@ func (p *planner) fetch(r *Row) (*file, error) {
 	}
 	f, err := p.ingest(r, idx)
 	if err != nil {
+		// The registry may hold some of the file's transactions, under a
+		// place in p.order the file never took. Nothing may read them:
+		// planning ends here, for every later fetch too.
+		p.broken = err
 		return nil, err
 	}
 	return f, nil
@@ -382,43 +475,44 @@ func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 			return nil, refuse(pitrarchive.TokenArchiveObjectInvalid, "%s (id %s): the manifest hints disagree with the verified bytes: %v", r.Label(), r.ID, bad)
 		}
 	}
-	if err := p.budget.Charge(int64(len(idx.Txns))*occurrenceBytes, "occurrence registry"); err != nil {
-		return nil, err
-	}
 	// prev and exec (⊆ prev ∪ gtids) are both retained (review F047:
 	// prev was uncharged).
 	if err := p.budget.Charge(2*setBytes(prev)+setBytes(idx.GTIDs), "file sets"); err != nil {
 		return nil, err
 	}
-	f := &file{row: r, idx: idx, prev: prev, exec: prev.Union(idx.GTIDs), marked: p.isMarked(r.Site)}
+	f := &file{row: r, idx: idx, prev: prev, exec: prev.Union(idx.GTIDs), marked: p.isMarked(r.Site), ord: len(p.order)}
+	if err := p.mapSources(f); err != nil {
+		return nil, err
+	}
 	for i, t := range idx.Txns {
-		g := f.gtid(i)
-		if p.reissue == nil && t.OCT > p.serverEnd+p.delta && p.B.Has(g) {
-			p.reissue = p.reissueRefusal(g, f, t.OCT)
+		if p.reissue == nil && t.OCT > p.serverEnd+p.delta {
+			if g := f.gtid(i); p.B.Has(g) {
+				p.reissue = p.reissueRefusal(g, f, t.OCT)
+			}
 		}
-		o := p.occ[g]
-		if o == nil {
-			p.occ[g] = &occRef{f: f, i: int32(i), n: 1}
+		sid := f.sids[t.SID]
+		o, ok := p.occ.get(sid, t.GNO)
+		if !ok {
+			if err := p.occ.put(sid, t.GNO, occRec{file: uint32(f.ord) + 1, i: uint32(i), n: 1}); err != nil { //nolint:gosec // file and transaction counts fit: both index arrays
+				return nil, err
+			}
 			continue
 		}
+		changed := false
 		if o.n < math.MaxUint16 {
 			o.n++
+			changed = true
 		}
 		if p.mismatch == nil {
-			first := o.f.txn(int(o.i))
-			var why []string
-			if first.OCT != t.OCT {
-				why = append(why, fmt.Sprintf("commit time %s vs %s", fmtMicros(first.OCT), fmtMicros(t.OCT)))
+			kept, err := p.compare(f, i, t, &o)
+			if err != nil {
+				return nil, err
 			}
-			if first.Srv != t.Srv {
-				why = append(why, fmt.Sprintf("origin server %d vs %d", first.Srv, t.Srv))
-			}
-			if first.Empty() != t.Empty() {
-				why = append(why, "one copy is empty")
-			}
-			if len(why) > 0 {
-				p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); the GTID was reissued, or one site's history was rewritten",
-					g, o.f.row.Label(), r.Label(), joinComma(why))
+			changed = changed || kept
+		}
+		if changed {
+			if err := p.occ.put(sid, t.GNO, o); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -426,6 +520,141 @@ func (p *planner) ingest(r *Row, idx *FileIndex) (*file, error) {
 	p.order = append(p.order, f)
 	p.plan.IndexedTransactions += int64(len(idx.Txns))
 	return f, nil
+}
+
+// compare checks transaction i of f, a further copy of a GTID, against the
+// GTID's kept copies (occ.go) and records the first disagreement in
+// p.mismatch. It reports whether it changed o, the GTID's record: the copy
+// is kept when no kept copy can vouch for its row changes.
+//
+// What a GTID event says (commit time, origin server) and emptiness are
+// compared with the first kept copy. Row changes (issue #268) are compared
+// with every kept copy until one is equal or differs; a copy without a
+// digest is not compared.
+func (p *planner) compare(f *file, i int, t Txn, o *occRec) (bool, error) {
+	p.kept = p.occ.kept(*o, p.kept[:0])
+	of, first, err := p.copyOf(p.kept[0])
+	if err != nil {
+		return false, err
+	}
+	g := f.gtid(i)
+	var why []string
+	if first.OCT != t.OCT {
+		why = append(why, fmt.Sprintf("commit time %s vs %s", fmtMicros(first.OCT), fmtMicros(t.OCT)))
+	}
+	if first.Srv != t.Srv {
+		why = append(why, fmt.Sprintf("origin server %d vs %d", first.Srv, t.Srv))
+	}
+	if first.Empty() != t.Empty() {
+		why = append(why, "one copy is empty")
+	}
+	// other is the kept copy whose row changes differ from this one's;
+	// vouched is set when a kept copy has the same.
+	var (
+		other   *file
+		effect  Txn
+		differs EffectRelation
+		vouched bool
+	)
+	if !t.Effect.IsZero() {
+		for _, c := range p.kept {
+			kf, kt, err := p.copyOf(c)
+			if err != nil {
+				return false, err
+			}
+			switch rel := kt.Effect.Compare(t.Effect); rel {
+			case EffectEqual:
+				vouched = true
+			case EffectTablesDiffer, EffectRowsDiffer:
+				other, effect, differs = kf, kt, rel
+			}
+			if vouched || other != nil {
+				break
+			}
+		}
+	}
+	switch {
+	case len(why) > 0:
+		// The copies disagree on what their GTID events say.
+		if other == of {
+			why = append(why, effectReason(differs, effect.Effect, t.Effect))
+		}
+		p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); the GTID was reissued, or one site's history was rewritten",
+			g, of.row.Label(), f.row.Label(), joinComma(why))
+	case differs == EffectTablesDiffer:
+		p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); one copy is not a faithful copy of the other: a transaction with other changes was injected under this GTID (a manual repair with SET GTID_NEXT), or one server applied only part of it; %s",
+			g, other.row.Label(), f.row.Label(), effectReason(differs, effect.Effect, t.Effect), effectAdvice)
+	case differs == EffectRowsDiffer:
+		p.mismatch = refuse(pitrarchive.TokenArchiveNamespaceReuse, "%s differs between %s and %s (%s); one copy is not a faithful copy of the other: a transaction with other values was injected under this GTID (a manual repair with SET GTID_NEXT), or the two servers' data had diverged when they applied it; %s",
+			g, other.row.Label(), f.row.Label(), effectReason(differs, effect.Effect, t.Effect), effectAdvice)
+	case t.Effect.IsZero() || vouched:
+	case first.Effect.IsZero():
+		// The first copy with a digest replaces a first copy without one,
+		// which is the only kept copy: copies are kept beside one another
+		// only for their digests.
+		if o.list != 0 {
+			return false, fmt.Errorf("pitrplan: internal error: %s keeps a copy without row changes beside others", g)
+		}
+		o.file, o.i = uint32(f.ord)+1, uint32(i) //nolint:gosec // file and transaction counts fit: both index arrays
+		return true, nil
+	default:
+		// Another layout than every kept copy's: a later copy with this
+		// layout is compared with this one.
+		if err := p.occ.keep(o, occCopy{file: uint32(f.ord) + 1, i: uint32(i)}); err != nil { //nolint:gosec // as above
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// effectAdvice is the remedy for two copies whose row changes differ.
+const effectAdvice = "restore from a full backup taken later, once its newest transactions are archived in binlog files after these two"
+
+// effectReason says in plain words how two copies' row changes differ.
+func effectReason(rel EffectRelation, a, b EffectDigest) string {
+	what := "the same tables with different row data"
+	if rel == EffectTablesDiffer {
+		what = "they change different tables"
+	}
+	return fmt.Sprintf("row changes differ: %s, effect digest %s vs %s", what, a, b)
+}
+
+// copyOf resolves a kept copy to its file and transaction. A copy names a
+// file by its place in p.order, and only a completely ingested file has
+// one (fetch ends planning when ingest fails), so a copy that names no
+// file is a bug, not another file's transaction.
+func (p *planner) copyOf(c occCopy) (*file, Txn, error) {
+	if c.file == 0 || int(c.file) > len(p.order) {
+		return nil, Txn{}, fmt.Errorf("pitrplan: internal error: the occurrence registry names file %d of %d", c.file, len(p.order))
+	}
+	of := p.order[c.file-1]
+	if int(c.i) >= of.n() {
+		return nil, Txn{}, fmt.Errorf("pitrplan: internal error: the occurrence registry names transaction %d of %s, which holds %d", c.i, of.row.Label(), of.n())
+	}
+	return of, of.txn(int(c.i)), nil
+}
+
+// mapSources fills f.sids, registering the file's source identifiers the
+// planner has not seen.
+func (p *planner) mapSources(f *file) error {
+	if err := p.budget.Charge(4*int64(len(f.idx.SIDs)), "file source identifiers"); err != nil {
+		return err
+	}
+	f.sids = make([]uint32, len(f.idx.SIDs))
+	for k, sid := range f.idx.SIDs {
+		id, ok := p.sidIndex[sid]
+		if !ok {
+			if err := p.budget.Charge(sourceBytes+sidBytes(sid), "source identifiers"); err != nil {
+				return err
+			}
+			id = uint32(len(p.sidNames)) //nolint:gosec // one per source identifier, each charged
+			p.sidIndex[sid] = id
+			p.sidNames = append(p.sidNames, sid)
+		}
+		f.sids[k] = id
+	}
+	return nil
 }
 
 // pred materializes pred(f, i).
@@ -514,6 +743,11 @@ func Run(ctx context.Context, req Request, archive Archive, fetcher Fetcher) (*P
 		return &Plan{Mode: req.Mode, Stop: req.Stop, AllowPartial: req.AllowPartial, Excluded: req.Exclude}, err
 	}
 	err = p.run()
+	// A write-back of spilled data that failed makes whatever was computed
+	// over it unreliable, a refusal as much as a plan.
+	if serr := p.budget.SpillErr(); serr != nil {
+		err = serr
+	}
 	if err != nil {
 		p.plan.Files, p.plan.Segments, p.plan.Sites = nil, nil, nil
 	}

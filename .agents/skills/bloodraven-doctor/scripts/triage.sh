@@ -140,7 +140,12 @@ if [[ -n "$PITR_ARCHIVE_ID" && "$PITR_ARCHIVE_ID" != " archiveID= encryption= de
     echo "PITR archive:        $PITR_ARCHIVE_ID"
     # Per-site archive evidence from each sidecar's /archiver/status: the
     # archive block, the last promotion record, the permanent history marker,
-    # and the divergent/quarantined rows in the site's own manifest.
+    # the divergent/quarantined rows in the site's own manifest (evidence, not
+    # an error), reissuableGtids (the archived transactions the site's server
+    # could issue again: an error, playbook 41; absent is "not evaluated"),
+    # and the tail block: what the last scan decided about the sealed binlogs the site
+    # still has to archive (a read-only site archives the tail of its last
+    # writable era). Sidecars that predate the block do not report it.
     if command -v jq >/dev/null 2>&1; then
         for pod in $(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME,app.kubernetes.io/name=mysql" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
             if ! sidecar_http_get "$NAMESPACE" "$pod" /archiver/status; then
@@ -149,11 +154,11 @@ if [[ -n "$PITR_ARCHIVE_ID" && "$PITR_ARCHIVE_ID" != " archiveID= encryption= de
             fi
             ARCHIVER_JSON="$SIDECAR_HTTP_BODY"
             printf '%s' "$ARCHIVER_JSON" | jq -r --arg pod "$pod" \
-                '"  \($pod) site=\(.site // "?") archive=\(.archive.state // "none")/\(.archive.reason // "") id=\(.archive.archiveID // "") promotionRecordedAt=\(.promotionRecordedAt // "none") historyIntegrity=\(if .historyIntegrity then "\(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at)" else "none" end) divergentRows=\(.divergentRows // 0) quarantinedRows=\(.quarantinedRows // 0)"' \
+                '"  \($pod) site=\(.site // "?") archive=\(.archive.state // "none")/\(.archive.reason // "") id=\(.archive.archiveID // "") promotionRecordedAt=\(.promotionRecordedAt // "none") historyIntegrity=\(if .historyIntegrity then "\(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at)" else "none" end) divergentRows=\(.divergentRows // 0) quarantinedRows=\(.quarantinedRows // 0) reissuableGtids=\(if (.reissuableGtids | type) != "string" then "not-evaluated" elif .reissuableGtids == "" then "none" else "\(.reissuableGtids) (this server could reissue archived GTIDs: playbook 41)" end) tail=\(if (.tail | type) == "object" then "\(.tail.state // "?") active=\(.tail.activeFile // "none") newestSealed=\(.tail.newestSealedFile // "none") pending=\(.tail.pendingFiles // 0)\(if (.tail.reason // "") != "" then " reason=\(.tail.reason)" else "" end)\(if .tail.state == "Blocked" and .primary == false then " (read-only site not archiving its tail: playbook 46)" else "" end)" else "not-reported" end)"' \
                 2>/dev/null || echo "  $pod: /archiver/status is not JSON"
         done
     else
-        echo "  Per-site archive, promotionRecordedAt, historyIntegrity, divergentRows and quarantinedRows: sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver"
+        echo "  Per-site archive, promotionRecordedAt, historyIntegrity, divergentRows, quarantinedRows, reissuableGtids and tail: sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver"
     fi
 fi
 # PITR archive encryption bindings (#203): the identity (mode, key snapshot)
@@ -317,7 +322,7 @@ MANAGER_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedOb
     | grep -E 'TopologyManagerStart(ed|Failed)' || true)
 PITR_EVENTS=$(kubectl get events -n "$NAMESPACE" --field-selector "involvedObject.name=$MFG_NAME" --sort-by=.lastTimestamp \
     -o 'custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message' --no-headers 2>/dev/null \
-    | grep -E 'PITRArchive(ReissueRiskDetected|UnsafeHistoryDetected)|PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PITRReplayTruncated|PITRArchive(EncryptionChangeRefused|KeyChangeRefused|BindingRefused|KeySourceRemoved|KeySnapshotRecreated|KeyMaterialLost|KeySnapshotReadFailed|BindingReleaseRefused|BindingReleaseRejected|BindingLimitReached)|BackupScheduleRefused' || true)
+    | grep -E 'PITRArchive(ReissueRiskDetected|UnsafeHistoryDetected|TailNotArchived)|PITR(DivergentHistoryExcluded|OnHistoryTransactionsExcluded)|PITRReplayTruncated|PITRArchive(EncryptionChangeRefused|KeyChangeRefused|BindingRefused|KeySourceRemoved|KeySnapshotRecreated|KeyMaterialLost|KeySnapshotReadFailed|BindingReleaseRefused|BindingReleaseRejected|BindingLimitReached)|BackupScheduleRefused' || true)
 if [[ -n "$MANAGER_EVENTS" ]]; then
     echo "Topology manager start history for $MFG_NAME. History only, not current state, in either direction:"
     echo "  - Warnings are throttled to one per 5 minutes, so a group that recovered and then broke again can still show TopologyManagerStarted last."
@@ -338,7 +343,7 @@ for verification in $(kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "b
     fi
 done
 if [[ -n "$PITR_EVENTS" ]]; then
-    echo "PITR warnings for $MFG_NAME and its verifications (PITRArchiveReissueRiskDetected: playbook 41; PITRArchiveUnsafeHistoryDetected: playbook 40; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PITRReplayTruncated: playbooks 32 and 42; PITRArchive*Refused/KeyMaterialLost/KeySourceRemoved/BindingLimitReached/BackupScheduleRefused: playbook 26):"
+    echo "PITR warnings for $MFG_NAME and its verifications (PITRArchiveReissueRiskDetected: playbook 41; PITRArchiveUnsafeHistoryDetected: playbook 40; PITRArchiveTailNotArchived: playbook 46; PITRDivergentHistoryExcluded, PITROnHistoryTransactionsExcluded, PITRReplayTruncated: playbooks 32 and 42; PITRArchive*Refused/KeyMaterialLost/KeySourceRemoved/BindingLimitReached/BackupScheduleRefused: playbook 26):"
     echo "$PITR_EVENTS"
 fi
 

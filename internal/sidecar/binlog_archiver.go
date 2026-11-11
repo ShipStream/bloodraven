@@ -24,10 +24,12 @@ import (
 // BinlogArchiver uploads sealed binlog files from the local MySQL data
 // directory to remote storage, and keeps a per-site manifest describing
 // what was archived. It runs inside the sidecar on every MySQL pod but
-// is "active" (actually uploading) only when the local MySQL is the
-// primary. That keeps archive ownership unambiguous across failovers
-// without coordinating between sites: whichever side owns the write
-// role also owns its binlog archival.
+// uploads every sealed binlog only while the local MySQL is the primary.
+// That keeps archive ownership unambiguous across failovers without
+// coordinating between sites: whichever side owns the write role also
+// owns its binlog archival. A site whose server turned read-only still
+// archives the sealed tail of its last writable era, and no replica
+// copy (binlog_tail.go).
 //
 // The write path is event-driven via inotify on the binlog index file,
 // with a periodic full scan as a safety net. On each trigger the
@@ -46,10 +48,9 @@ import (
 type BinlogArchiver struct {
 	// Identity work and cursors belong to the scan goroutine, not the status mutex.
 	retentionNextInspection     int
-	retentionInspectionFailures map[retentionInspectionIdentity]time.Time
+	retentionInspectionFailures map[binlogIdentity]time.Time
 	historyTask                 *binlogHistoryTask
 	historyNext                 int
-	historyNextAudit            int
 	historyAuditError           string
 	historyScanBusy             bool
 	reuseWork                   *archiveReuseWork
@@ -58,9 +59,18 @@ type BinlogArchiver struct {
 	reuseErrors                 map[archiveReuseKey]error
 	reuseCompared               map[archiveReuseKey]bool
 	sealedSnapshot              map[string]os.FileInfo
-	legacyChecked               map[string]time.Time
 	localIDs                    map[string]cachedBinlogIdentity
-	cfg                         *PITRConfig
+	// The read-only tail drain (binlog_tail.go): its memory, its running
+	// upload pass, and what the last scanFiles pass uploaded and reconciled.
+	tail         tailDrain
+	tailUpload   *tailUpload
+	scanUploaded []string
+	scanSettled  map[string]bool
+	// uploadFailure is the last pass of uploads that failed, a writable
+	// scan's or a tail drain's, while no later scan has settled it
+	// (binlog_tail.go, tailOutcome).
+	uploadFailure *uploadFailure
+	cfg           *PITRConfig
 	// retentionCfg holds the fields the archiver needs to call the
 	// operator's /pitr-cutoff endpoint for retention decisions. Nil
 	// when those fields weren't passed via env (tests, or a
@@ -77,6 +87,9 @@ type BinlogArchiver struct {
 	session     *ArchiveSession
 	identityErr error
 	episode     promotionEpisode
+	// promotionSets reads local binlog headers for a promotion record's
+	// promotion set (promotion_record.go).
+	promotionSets promotionSetReader
 	// startChecked: this process's first identified role observation was
 	// checked against the site's latest record (recordResets).
 	startChecked bool
@@ -94,8 +107,9 @@ type BinlogArchiver struct {
 	unsafeLogged       bool
 
 	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun,
-	// uploadFailures, lastUploadAt, backlogFiles, and the manifest
-	// aggregates (manifestFileCount/Bytes/oldest/newest).
+	// uploadFailures, lastUploadAt, backlogFiles, tailStatus,
+	// reissuableGTIDs, and the manifest aggregates
+	// (manifestFileCount/Bytes/oldest/newest).
 	mu               sync.Mutex
 	lastError        string
 	lastScanAt       time.Time
@@ -117,6 +131,9 @@ type BinlogArchiver struct {
 	// missing from the manifest at the end of the most recent scan.
 	// Reset every cycle. >0 means the archiver hasn't caught up yet.
 	backlogFiles int64
+	// tailStatus is the tail block of the most recent scan (publishTail);
+	// nil until a scan has read the binlog index.
+	tailStatus *internalmysql.ArchiverTailStatus
 	// manifestFileCount/Bytes and oldest/newestArchivedTime are
 	// aggregates computed from the manifest after each scan.
 	// They power the operator's status.pitr fields.
@@ -125,10 +142,13 @@ type BinlogArchiver struct {
 	oldestArchivedTime time.Time
 	newestArchivedTime time.Time
 	// divergentRows/quarantinedRows count this site's manifest rows;
-	// promotionRecordedAt is the confirmed record of the current writable
-	// episode; historyIntegrity is the site's marker (persisted or pending).
+	// reissuableGTIDs is the last maintenance pass's verdict on what this
+	// server could reissue (nil: not evaluated); promotionRecordedAt is the
+	// confirmed record of the current writable episode; historyIntegrity is
+	// the site's marker (persisted or pending).
 	divergentRows       int64
 	quarantinedRows     int64
+	reissuableGTIDs     *string
 	promotionRecordedAt time.Time
 	historyIntegrity    *HistoryIntegrity
 }
@@ -179,6 +199,7 @@ func NewBinlogArchiver(cfg *PITRConfig, site string, mysql roleChecker, store Ar
 		logger: logger.With("component", "binlog-archiver", "site", site),
 		now:    time.Now,
 	}
+	a.roles.confirmDelay = promotionConfirmDelay(cfg)
 	a.session, a.identityErr = newArchiveSession(store, cfg.ManifestPrefix, cfg.Archive, site, a.logger)
 	if a.identityErr != nil {
 		a.identityErr = fmt.Errorf("archive identity: %w", a.identityErr)
@@ -427,10 +448,15 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	defer a.finishScan()
 	a.historyScanBusy = false
 	defer a.maintainArchive(ctx)
+	// The tail block is published when the scan ends, before its
+	// maintenance pass: every return below sets it.
+	var tail tailScan
+	defer func() { a.publishTail(tail) }()
 
-	// Only the primary uploads; every site maintains its own archive.
-	// On failover the former replica starts uploading on its next scan,
-	// once its promotion record is confirmed (D-43).
+	// The primary uploads every sealed binlog; a read-only site only the
+	// tail of its last writable era (drainTail). Every site maintains its
+	// own archive. On failover the former replica starts uploading on its
+	// next scan, once its promotion record is confirmed (D-43).
 	_, _, err := a.sampleRole(ctx)
 	// The episode follows the timeline before anything below can return:
 	// a read-only or failed observation ends it here.
@@ -442,6 +468,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.incUploadFailures()
 		a.setError(fmt.Sprintf("role check: %v", err))
 		a.logger.Debug("role check failed; skipping scan", "error", err)
+		tail = a.tailBlockedEarly(fmt.Sprintf("role check: %v", err))
 		return
 	}
 	writable := snap.state == roleWritable
@@ -457,6 +484,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.setError(err.Error())
 		a.setBacklog(0)
 		a.logger.Debug("archive session not ready; skipping scan", "error", err)
+		tail = a.tailBlockedEarly(err.Error())
 		return
 	}
 	if verified := a.session != nil && a.session.Verified(); verified && (!verifiedBefore || a.pendingMarker != nil) {
@@ -468,24 +496,30 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// episode's promotion record and any upload (N3 revised).
 	resetErr := a.recordResets(ctx, snap)
 	recordErr := a.observeRole(ctx, snap)
+	if recordErr == nil {
+		a.confirmEpisode(ctx, snap)
+	}
 	if integrityErr != nil {
 		a.incUploadFailures()
 		a.setError(integrityErr.Error())
 		a.setBacklog(0)
+		tail = a.tailBlockedEarly(integrityErr.Error())
 		return
 	}
 	if !writable {
-		// No uploads on a standby. Clear stale errors so a former
-		// primary that failed over cleanly stops reporting noise; a
-		// reset record that cannot be written is reported (a standby
-		// awaiting the writer's descriptor cannot run the check yet).
-		a.setBacklog(0)
+		// A standby uploads only its writable-era tail, and nothing when
+		// it has none: that clears stale errors, so a former primary
+		// that failed over cleanly stops reporting noise. A reset record
+		// that cannot be written is reported (a standby awaiting the
+		// writer's descriptor cannot run the check yet).
 		if resetErr != nil && !errors.Is(resetErr, errStartCheckPending) {
+			a.setBacklog(0)
 			a.incUploadFailures()
 			a.setError(resetErr.Error())
+			tail = a.tailBlockedEarly(resetErr.Error())
 			return
 		}
-		a.setError("")
+		tail = a.drainTail(ctx)
 		return
 	}
 	switch {
@@ -498,6 +532,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.incUploadFailures()
 		a.setError(recordErr.Error())
 		a.logger.Warn("uploads wait for the promotion record", "error", recordErr)
+		tail = a.tailBlockedEarly(recordErr.Error())
 		return
 	}
 
@@ -507,13 +542,16 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.incUploadFailures()
 		a.setError(fmt.Sprintf("read index: %v", err))
 		a.logger.Warn("read binlog index", "path", indexPath, "error", err)
+		tail = tailScan{state: internalmysql.ArchiverTailBlocked, reason: fmt.Sprintf("read index: %v", err)}
 		return
 	}
 	if len(entries) < 2 {
 		// < 2 means either no binlogs yet (len 0) or only the active
 		// one exists (len 1). Nothing sealed to archive.
-		a.setError("")
+		a.uploadFailure = nil
+		a.clearScanError()
 		a.setBacklog(0)
+		tail = tailDrained(entries)
 		return
 	}
 	// Drop the last entry: it is the active binlog (tail of the index
@@ -525,6 +563,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.incUploadFailures()
 		a.setError(wrapKeepToken("load manifest", err).Error())
 		a.logger.Warn("load manifest", "error", err)
+		tail = tailBlocked(entries, 0, a.noteUploadFailure())
 		return
 	}
 	retired := a.retiredBinlogIdentities(manifest)
@@ -544,7 +583,17 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// after a partial failure and the operator's status.pitr Message
 	// would flap clear on every scan.
 	if !hadFileError {
-		a.setError("")
+		a.uploadFailure = nil
+		a.clearScanError()
+	}
+	// A writable site has to archive every sealed file.
+	switch {
+	case hadFileError:
+		tail = tailBlocked(entries, backlog, a.noteUploadFailure())
+	case backlog > 0:
+		tail = tailPending(entries, backlog)
+	default:
+		tail = tailDrained(entries)
 	}
 }
 
@@ -861,10 +910,25 @@ type Status struct {
 	// names the identity error).
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count the Divergent and
-	// Quarantined entries in this site's own manifest. The runner warns
-	// PITRArchiveReissueRiskDetected when a site with a non-zero sum is promoted.
+	// Quarantined entries in this site's own manifest. A divergent row is
+	// evidence, not a failure: the row holds (or builds on) transactions
+	// this site's server no longer has, and a restore across them refuses
+	// PITRArchiveDivergentHistory until excludeGtids lists them.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
+	// ReissuableGTIDs is the part of those transactions (of the active and
+	// the quarantined rows) that this server could issue again: the ones
+	// under its own current server_uuid. Non-empty is an archiver error
+	// (LastError), and the runner warns PITRArchiveReissueRiskDetected when
+	// such a site is promoted. The empty string means the last history
+	// audit found none. nil means the last maintenance pass did not
+	// evaluate it: no audit has run in this process, the audit could not
+	// read the manifest or the server's state, the manifest carries a
+	// recorded GTID reuse (the audit stops there), or the server has no
+	// history yet (empty gtid_executed, a clone in progress, a read-only
+	// server with no replication channel). A verdict never outlives the
+	// pass that made it.
+	ReissuableGTIDs *string `json:"reissuableGtids,omitempty"`
 	// PromotionRecordedAt is the ObservedAt of the promotion record that
 	// gates the current writable episode's uploads; zero while no record
 	// is confirmed (D-43).
@@ -873,6 +937,14 @@ type Status struct {
 	// the one persisted in its manifest, else a violation seen but not
 	// yet persisted (no verified session yet); nil when unmarked.
 	HistoryIntegrity *pitrarchive.HistoryIntegrity `json:"historyIntegrity,omitempty"`
+	// Tail is what the last scan decided about the sealed binlogs this
+	// site still has to archive: every sealed file while writable, the
+	// writable-era tail while read-only (binlog_tail.go). State and the
+	// file names come from one read of the binlog index, so the state is
+	// about the index in which ActiveFile was the active file, not about
+	// rotations after it (publishTail). nil until a scan has read the
+	// binlog index.
+	Tail *internalmysql.ArchiverTailStatus `json:"tail,omitempty"`
 }
 
 // Snapshot returns a copy of the archiver's observable state. The
@@ -905,11 +977,23 @@ func (a *BinlogArchiver) Snapshot(ctx context.Context) Status {
 		copied := *a.historyIntegrity
 		marker = &copied
 	}
+	var tail *internalmysql.ArchiverTailStatus
+	if a.tailStatus != nil {
+		copied := *a.tailStatus
+		tail = &copied
+	}
+	var reissuable *string
+	if a.reissuableGTIDs != nil {
+		copied := *a.reissuableGTIDs
+		reissuable = &copied
+	}
 	return Status{
+		Tail:                   tail,
 		StoreReady:             storeReady,
 		Archive:                archive,
 		DivergentRows:          a.divergentRows,
 		QuarantinedRows:        a.quarantinedRows,
+		ReissuableGTIDs:        reissuable,
 		PromotionRecordedAt:    a.promotionRecordedAt,
 		HistoryIntegrity:       marker,
 		Enabled:                true,
@@ -952,6 +1036,19 @@ func (a *BinlogArchiver) setError(s string) {
 	a.mu.Lock()
 	a.lastError = s
 	a.mu.Unlock()
+}
+
+// clearScanError ends the errors of the scan itself. A standing
+// history-audit error stays: the maintenance pass that follows this scan
+// confirms or clears it, and a status read in between must not show a
+// clean archiver for one that is not (the operator would count that poll
+// as a recovery).
+func (a *BinlogArchiver) clearScanError() {
+	if a.historyAuditError != "" {
+		a.setMaintenanceError(a.historyAuditError)
+		return
+	}
+	a.setError("")
 }
 
 func (a *BinlogArchiver) incUploadFailures() {

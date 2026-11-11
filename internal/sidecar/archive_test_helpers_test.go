@@ -3,6 +3,8 @@ package sidecar
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"time"
@@ -144,4 +146,12 @@ func testPrune(ctx context.Context, store ArchiveStore, prefix, site string, dro
 		return nil, err
 	}
 	return pruneManifest(ctx, s, site, drop)
+}
+
+// unboundRow is a manifest row for data under name with its content
+// identity and nothing else: its coverage is not bound to its bytes, so it
+// proves nothing about its GTIDs until its object is inspected.
+func unboundRow(name string, data []byte) ManifestEntry {
+	sum := sha256.Sum256(data)
+	return ManifestEntry{Name: name, ID: hex.EncodeToString(sum[:])}
 }

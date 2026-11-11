@@ -81,22 +81,30 @@ func awaitArchiverWork(t *testing.T, a *BinlogArchiver) {
 		select {
 		case <-a.reuseWork.done:
 		case <-time.After(5 * time.Second):
-			t.Fatal("legacy verification failed to drain")
+			t.Fatal("coverage verification failed to drain")
 		}
 	}
 }
-func TestLegacyVerificationPreemptsAndResumesWithoutRetention(t *testing.T) {
+
+// Rows whose coverage is not bound to their bytes are inspected in the
+// background: a rotation publishes meanwhile, and after a restart the
+// inspection resumes and the overlap it uncovers is compared.
+func TestUnboundCoverageVerificationPreemptsAndResumesWithoutRetention(t *testing.T) {
 	ctx := context.Background()
 	base := newMemStore()
-	store := &gatedStore{ArchiveStore: base, key: "binlogs/iad/mysql-bin.000001", started: make(chan struct{}), release: make(chan struct{})}
 	large := largeBinlogFixture(t)
+	gated, err := ArchiveEntryKey("binlogs", "iad", unboundRow("mysql-bin.000001", large))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &gatedStore{ArchiveStore: base, key: gated, started: make(chan struct{}), release: make(chan struct{})}
 	m := &Manifest{Site: "iad"}
 	other, err := os.ReadFile("testdata/same-header.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, fixture := range [][]byte{large, other} {
-		row := ManifestEntry{Name: []string{"mysql-bin.000001", "mysql-bin.000002"}[i]}
+		row := unboundRow([]string{"mysql-bin.000001", "mysql-bin.000002"}[i], fixture)
 		key, err := ArchiveEntryKey("binlogs", "iad", row)
 		if err != nil {
 			t.Fatal(err)
@@ -129,7 +137,7 @@ func TestLegacyVerificationPreemptsAndResumesWithoutRetention(t *testing.T) {
 	select {
 	case <-store.started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no background inspection scheduled for all-legacy archive")
+		t.Fatal("no background inspection scheduled for an archive of unbound rows")
 	}
 	// A newly sealed, disjoint transaction must publish while verification waits.
 	data, err := os.ReadFile("testdata/incarnation-b.bin")
@@ -148,7 +156,7 @@ func TestLegacyVerificationPreemptsAndResumesWithoutRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(published.Files) != 3 {
-		t.Fatal("new rotation waited for legacy verification")
+		t.Fatal("new rotation waited for coverage verification")
 	}
 	close(store.release)
 	awaitArchiverWork(t, a)
@@ -167,7 +175,7 @@ func TestLegacyVerificationPreemptsAndResumesWithoutRetention(t *testing.T) {
 		}
 		awaitArchiverWork(t, a)
 	}
-	t.Fatal("legacy overlap was not revisited without retention after restart")
+	t.Fatal("unbound overlap was not revisited without retention after restart")
 }
 func TestAcknowledgementChecksUnrecordedReuse(t *testing.T) {
 	ctx := context.Background()
@@ -178,7 +186,7 @@ func TestAcknowledgementChecksUnrecordedReuse(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		row := ManifestEntry{Name: []string{"mysql-bin.000001", "mysql-bin.000002"}[i]}
+		row := unboundRow([]string{"mysql-bin.000001", "mysql-bin.000002"}[i], data)
 		key, err := ArchiveEntryKey("binlogs", "iad", row)
 		if err != nil {
 			t.Fatal(err)
@@ -191,7 +199,7 @@ func TestAcknowledgementChecksUnrecordedReuse(t *testing.T) {
 	if err := seedManifest(ctx, store, "binlogs", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := testAcknowledge(ctx, store, "binlogs", "iad", "validate legacy guard", coverageTestSID+":1-11"); err == nil || !strings.Contains(err.Error(), "reuse") {
+	if err := testAcknowledge(ctx, store, "binlogs", "iad", "validate obsolete guard", coverageTestSID+":1-11"); err == nil || !strings.Contains(err.Error(), "reuse") {
 		t.Fatalf("unrecorded conflicting issuance acknowledged: %v", err)
 	}
 }
@@ -209,7 +217,8 @@ func TestRetentionWaitsForBackfilledIssuance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		row := ManifestEntry{Name: []string{"mysql-bin.000001", "mysql-bin.000002"}[i], LastEventTime: e.Metadata.LastEventTime}
+		row := unboundRow([]string{"mysql-bin.000001", "mysql-bin.000002"}[i], data)
+		row.LastEventTime = e.Metadata.LastEventTime
 		key, err := ArchiveEntryKey("binlogs", "iad", row)
 		if err != nil {
 			t.Fatal(err)
@@ -233,7 +242,7 @@ func TestRetentionWaitsForBackfilledIssuance(t *testing.T) {
 	}
 	for _, row := range m.Files {
 		if !coverageBoundToEntry(row) {
-			t.Fatal("fixture did not complete legacy backfill")
+			t.Fatal("fixture did not complete the coverage backfill")
 		}
 	}
 	_ = a.auditArchive(ctx, m)
@@ -249,7 +258,8 @@ func TestFailedIssuanceInspectionCoolsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	row := ManifestEntry{Name: "mysql-bin.000001", ContentID: strings.Repeat("c", 64)}
+	// The row names another identity than its object's bytes have.
+	row := ManifestEntry{Name: "mysql-bin.000001", ID: strings.Repeat("c", 64)}
 	peer := ManifestEntry{Name: "mysql-bin.000002", ID: strings.Repeat("d", 64), GTIDCoverage: &BinlogGTIDCoverage{ContentID: strings.Repeat("d", 64)}}
 	key, err := ArchiveEntryKey("binlogs", "iad", row)
 	if err != nil {
@@ -261,7 +271,7 @@ func TestFailedIssuanceInspectionCoolsDown(t *testing.T) {
 	m := &Manifest{Site: "iad", Files: []ManifestEntry{row, peer}}
 	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{}, store, slog.Default())
 	if err := a.reconcileArchiveReuse(ctx, m); err == nil {
-		t.Fatal("invalid legacy identity was accepted")
+		t.Fatal("an object that does not match its row's identity was accepted")
 	}
 	for i := 0; i < 5; i++ {
 		_ = a.reconcileArchiveReuse(ctx, m)

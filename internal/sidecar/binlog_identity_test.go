@@ -61,117 +61,97 @@ func TestBinlogIdentityFixturesParseCompletely(t *testing.T) {
 }
 
 func TestArchiverPreservesReusedBinlogNames(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		for _, replacement := range []string{"incarnation-b.bin", "same-header.bin"} {
-			name := replacement
-			if legacy {
-				name += "/legacy"
+	for _, replacement := range []string{"incarnation-b.bin", "same-header.bin"} {
+		t.Run(replacement, func(t *testing.T) {
+			ctx := context.Background()
+			local := t.TempDir()
+			cfg := &PITRConfig{StorageType: "PVC", BinlogDir: local, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour}
+			pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
+			if err != nil {
+				t.Fatal(err)
 			}
-			t.Run(name, func(t *testing.T) {
-				ctx := context.Background()
-				local := t.TempDir()
-				cfg := &PITRConfig{StorageType: "PVC", BinlogDir: local, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour}
-				pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
-				if err != nil {
-					t.Fatal(err)
+			store := &identityCountingStore{ArchiveStore: pvc}
+			oldBytes, err := os.ReadFile("testdata/incarnation-a.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			newBytes, err := os.ReadFile(filepath.Join("testdata", replacement))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(oldBytes) != len(newBytes) {
+				t.Fatal("regression requires equal-size files")
+			}
+			localFile := filepath.Join(local, "mysql-bin.000001")
+			if err := os.WriteFile(localFile, oldBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(local, cfg.BinlogIndex), []byte("mysql-bin.000001\nmysql-bin.000002\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			newArchiver := func() *BinlogArchiver {
+				return newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
+			}
+			a := newArchiver()
+			a.scanAndArchive(ctx)
+			m, err := loadManifest(ctx, store, "binlogs", "iad")
+			if err != nil || len(m.Files) != 1 {
+				t.Fatalf("initial archive: %+v, %v", m, err)
+			}
+			originalKey := m.Files[0].RemotePath
+			initialPuts := store.puts
+			a.scanAndArchive(ctx)
+			if store.puts != initialPuts {
+				t.Fatal("unchanged original was re-uploaded")
+			}
+			originalInfo, err := os.Stat(localFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacementPath := localFile + ".replacement"
+			if err := os.WriteFile(replacementPath, newBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(replacementPath, originalInfo.ModTime(), originalInfo.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacementPath, localFile); err != nil {
+				t.Fatal(err)
+			}
+			store.failNext = true
+			a.scanAndArchive(ctx)
+			if snap := a.Snapshot(ctx); snap.BacklogFiles != 1 || snap.LastError == "" {
+				t.Fatalf("new incarnation must count as pending after failed upload: %+v", snap)
+			}
+			a.scanAndArchive(ctx)
+			m, err = loadManifest(ctx, store, "binlogs", "iad")
+			if err != nil || len(m.Files) != 2 {
+				t.Fatalf("want both incarnations: %+v, %v", m, err)
+			}
+			if m.Files[0].RemotePath == m.Files[1].RemotePath {
+				t.Fatal("incarnations share an object key")
+			}
+			got, ok, err := store.Get(ctx, originalKey)
+			if err != nil || !ok || !bytes.Equal(got, oldBytes) {
+				t.Fatal("original archive bytes were overwritten")
+			}
+			var foundNew bool
+			for _, row := range m.Files {
+				got, ok, err := store.Get(ctx, row.RemotePath)
+				if err == nil && ok && bytes.Equal(got, newBytes) {
+					foundNew = true
 				}
-				store := &identityCountingStore{ArchiveStore: pvc}
-				oldBytes, err := os.ReadFile("testdata/incarnation-a.bin")
-				if err != nil {
-					t.Fatal(err)
-				}
-				newBytes, err := os.ReadFile(filepath.Join("testdata", replacement))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(oldBytes) != len(newBytes) {
-					t.Fatal("regression requires equal-size files")
-				}
-				localFile := filepath.Join(local, "mysql-bin.000001")
-				if err := os.WriteFile(localFile, oldBytes, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(local, cfg.BinlogIndex), []byte("mysql-bin.000001\nmysql-bin.000002\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				newArchiver := func() *BinlogArchiver {
-					return newTestArchiver(cfg, "iad", &stubRoleChecker{}, store, slog.Default())
-				}
-				a := newArchiver()
-				if legacy {
-					key := binlogObjectKey("binlogs", "iad", "mysql-bin.000001")
-					if err := store.Put(ctx, key, bytes.NewReader(oldBytes), int64(len(oldBytes))); err != nil {
-						t.Fatal(err)
-					}
-					meta, err := parseBinlogMetadata(localFile)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := appendManifestEntry(ctx, store, "binlogs", "iad", ManifestEntry{Name: meta.Name, RemotePath: key, Size: meta.Size, PreviousGTIDs: meta.PreviousGTIDs, FirstEventTime: meta.FirstEventTime, LastEventTime: meta.LastEventTime}); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					a.scanAndArchive(ctx)
-				}
-				m, err := loadManifest(ctx, store, "binlogs", "iad")
-				if err != nil || len(m.Files) != 1 {
-					t.Fatalf("initial archive: %+v, %v", m, err)
-				}
-				originalKey := m.Files[0].RemotePath
-				initialPuts := store.puts
-				a.scanAndArchive(ctx)
-				if store.puts != initialPuts {
-					t.Fatal("unchanged original was re-uploaded")
-				}
-				originalInfo, err := os.Stat(localFile)
-				if err != nil {
-					t.Fatal(err)
-				}
-				replacementPath := localFile + ".replacement"
-				if err := os.WriteFile(replacementPath, newBytes, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chtimes(replacementPath, originalInfo.ModTime(), originalInfo.ModTime()); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Rename(replacementPath, localFile); err != nil {
-					t.Fatal(err)
-				}
-				store.failNext = true
-				a.scanAndArchive(ctx)
-				if snap := a.Snapshot(ctx); snap.BacklogFiles != 1 || snap.LastError == "" {
-					t.Fatalf("new incarnation must count as pending after failed upload: %+v", snap)
-				}
-				a.scanAndArchive(ctx)
-				m, err = loadManifest(ctx, store, "binlogs", "iad")
-				if err != nil || len(m.Files) != 2 {
-					t.Fatalf("want both incarnations: %+v, %v", m, err)
-				}
-				if m.Files[0].RemotePath == m.Files[1].RemotePath {
-					t.Fatal("incarnations share an object key")
-				}
-				got, ok, err := store.Get(ctx, originalKey)
-				if err != nil || !ok || !bytes.Equal(got, oldBytes) {
-					t.Fatal("original archive bytes were overwritten")
-				}
-				var foundNew bool
-				for _, row := range m.Files {
-					got, ok, err := store.Get(ctx, row.RemotePath)
-					if err == nil && ok && bytes.Equal(got, newBytes) {
-						foundNew = true
-					}
-				}
-				if !foundNew {
-					t.Fatal("replacement binlog bytes were not preserved")
-				}
-				before := store.puts
-				a.scanAndArchive(ctx)
-				newArchiver().scanAndArchive(ctx)
-				if store.puts != before {
-					t.Fatal("unchanged content was re-uploaded after scan/restart")
-				}
-			})
-		}
+			}
+			if !foundNew {
+				t.Fatal("replacement binlog bytes were not preserved")
+			}
+			before := store.puts
+			a.scanAndArchive(ctx)
+			newArchiver().scanAndArchive(ctx)
+			if store.puts != before {
+				t.Fatal("unchanged content was re-uploaded after scan/restart")
+			}
+		})
 	}
 }
 
@@ -181,9 +161,9 @@ func TestManifestPrunesOnlySelectedBinlogIdentity(t *testing.T) {
 	first := ManifestEntry{Name: "mysql-bin.000001", ID: strings.Repeat("a", 64), RemotePath: "unrelated/secret", Size: 100}
 	second := first
 	second.ID = strings.Repeat("b", 64)
-	legacy := first
-	legacy.ID = ""
-	for _, entry := range []ManifestEntry{first, second, legacy} {
+	third := first
+	third.ID = strings.Repeat("c", 64)
+	for _, entry := range []ManifestEntry{first, second, third} {
 		if err := appendManifestEntry(ctx, store, "binlogs", "iad", entry); err != nil {
 			t.Fatal(err)
 		}
@@ -221,12 +201,43 @@ func TestManifestPrunesOnlySelectedBinlogIdentity(t *testing.T) {
 
 func TestArchiveEntryKeyRejectsInvalidIdentity(t *testing.T) {
 	for _, entry := range []ManifestEntry{
-		{Name: "../../victim"}, {Name: "mysql-bin.000001", ID: "../../victim"},
+		{Name: "../../victim", ID: strings.Repeat("a", 64)}, {Name: "mysql-bin.000001", ID: "../../victim"},
+		{Name: "mysql-bin.000001"},
 		{Name: "mysql-bin.000001", ID: strings.Repeat("A", 64)},
 		{Name: "mysql-bin.000001", ID: strings.Repeat("a", 63)},
 	} {
 		if key, err := ArchiveEntryKey("binlogs", "iad", entry); err == nil {
 			t.Errorf("accepted unsafe identity: %q", key)
 		}
+	}
+}
+
+func TestEncryptedIdentityIsKeyed(t *testing.T) {
+	plain := newMemStore()
+	file := "testdata/incarnation-a.bin"
+	sha, err := fileContentID(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous, first string
+	for _, pass := range []string{"high entropy key A", "high entropy key B", "high entropy key A"} {
+		store := WrapWithEncryption(plain, []byte(pass))
+		a := newTestArchiver(&PITRConfig{}, "iad", &stubRoleChecker{}, store, slog.Default())
+		id, err := a.localBinlogID(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id == sha || len(id) != 64 {
+			t.Fatalf("encrypted identity exposes plaintext digest: %s", id)
+		}
+		if previous != "" && previous == id {
+			t.Fatal("different keys yield same identity")
+		}
+		if first == "" {
+			first = id
+		} else if pass == "high entropy key A" && first != id {
+			t.Fatal("same key did not produce stable identity")
+		}
+		previous = id
 	}
 }

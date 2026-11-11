@@ -411,6 +411,7 @@ func TestDeploymentLeaseRestoreWaitAndSameSiteInvalidation(t *testing.T) {
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
+	createRestoreSeedBackup(t, m.client, fg.Namespace)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
 	if err := m.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)

@@ -261,7 +261,9 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	pl.newProcess()
 	pl.mon.cur = pl.store.Object()
 	pl.mon.claim = slotView{pl}
-	pl.mon.onRecorded = func(target string, confirmedAt time.Time) { r.armPromotion(target, confirmedAt) }
+	pl.mon.onRecorded = r.armRecordedPromotion
+	pl.mon.noManager = pl.noManager
+	pl.mon.activeSite = pl.managerActiveSite
 	pl.store.dead = r.cluster.OperatorDead
 	pl.store.yield = pl.sched.Yield
 	pl.store.clusterStatusDenied = r.cluster.StatusDenied
@@ -994,6 +996,18 @@ func (pl *plannedHarness) endPoll(p int) {
 // operator's status endpoints answer 503 then (runner.Status not found).
 func (pl *plannedHarness) noManager() bool { return pl.reg.Current() == nil }
 
+// managerActiveSite is the registered manager's view of the group's primary
+// after its last poll (Status().ActiveSite): the one writable promotable
+// site it observed, or the site it has just promoted. "" when it sees none
+// or several, or no manager is registered.
+func (pl *plannedHarness) managerActiveSite() string {
+	tm := pl.reg.Current()
+	if tm == nil {
+		return ""
+	}
+	return tm.Status().ActiveSite
+}
+
 // healAll clears the actor faults at HealAt; a long outage (K036) runs its
 // course, and the trial's settle window starts after it.
 func (pl *plannedHarness) healAll() {
@@ -1198,6 +1212,32 @@ func (pl *plannedHarness) stalledClaimWithinDeadline() bool {
 		return false
 	}
 	return pl.r.clk.Now().Sub(since) <= plannedStatusStallDeadline+stalledClaimSlack
+}
+
+// plannedRollbackDeadline mirrors the engine's 30s rollback deadline
+// (plannedFailoverRollbackDeadline, §9).
+const plannedRollbackDeadline = 30 * time.Second
+
+// rollbackClaimWithinDeadline reports whether the live slot holds a run
+// whose durable block reads RollingBack and whose rollback deadline, plus
+// slack, has not passed. Until then the rollback may keep the claim while
+// it retries a step it cannot verify (a target it cannot read back at
+// super_read_only=ON), and the claim defers the manager's cross-site
+// actions as in every other phase.
+func (pl *plannedHarness) rollbackClaimWithinDeadline() bool {
+	id, hold, ok := pl.reg.Slot(pl.nn).HeldForSim()
+	if !ok || hold {
+		return false
+	}
+	obj := pl.store.Object()
+	if obj == nil || obj.Status.PlannedFailover == nil {
+		return false
+	}
+	pf := obj.Status.PlannedFailover
+	if pf.RunID != id || pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Rollback == nil {
+		return false
+	}
+	return pl.r.clk.Now().Sub(pf.Rollback.IntentTime.Time) <= plannedRollbackDeadline+stalledClaimSlack
 }
 
 // confirmedClaimHeld reports whether the live slot holds a run that has
