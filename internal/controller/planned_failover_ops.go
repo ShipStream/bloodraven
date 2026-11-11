@@ -1958,6 +1958,16 @@ func (tm *TopologyManager) sourceLostTransactionsHold(ctx context.Context, p *ru
 // REPLICA of a channel the promotion stopped: the source answered without
 // transactions the target holds, and a receiver connected to it skips
 // whatever the source later issues under their GTIDs.
+//
+// Measured on MySQL 9.7 (a source restored to a copy of its data directory
+// two transactions old, same server_uuid, the replica holding both): while
+// the source is short the replica's receiver stops with error 13114 (fatal
+// error 1236, "Replica has more GTIDs than the source has, using the
+// source's SERVER_UUID"). Once the source has committed two other
+// transactions, which get the same two GTIDs, the receiver connects with no
+// error, both threads run, the two executed sets are equal, the replica
+// keeps its two rows and never receives the source's two, and every later
+// transaction replicates normally.
 func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, src, tgt *siteTracker,
 	live promotionLive, liveErr error, F mysql.GTIDSet, fErr error, trust plannedSourceTrust, res *RollbackResult) {
 	hooks := p.hooks
