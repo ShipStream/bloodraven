@@ -291,7 +291,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 	lossChanged := false
 	var lossLog func()
 	if identityKnown {
-		lossChanged, lossLog = tm.settleOwnLossLocked(follower.name, lost, active.name, divergenceDetectedByAudit, ownUUIDs)
+		lossChanged, lossLog = tm.settleOwnLossLocked(follower.name, lost, active.name, divergenceDetectedByAudit, ownUUIDs, false)
 	}
 	reportLoss := func() {
 		if lossLog != nil {
@@ -353,7 +353,10 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 			"detectedBy", detectedBy,
 			"primary", active.name)
 	}
-	return !sameSet || !sameProvenance || lossChanged, false
+	// Transactions the follower holds and the primary lacks may be ones
+	// another site issued and no longer has.
+	witnessChanged := tm.crossCheckOwnLoss(ctx, follower, followerSet, extra, active.name)
+	return !sameSet || !sameProvenance || lossChanged || witnessChanged, false
 }
 
 func (tm *TopologyManager) stampGTIDAudit(site string) {

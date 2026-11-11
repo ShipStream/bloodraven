@@ -181,7 +181,9 @@ func (c CloneIdentity) equal(o CloneIdentity) bool {
 type CloneIdentityStore interface {
 	// Load returns the stored records by site.
 	Load(ctx context.Context) (map[string]CloneIdentity, error)
-	// Record stores (or replaces) site's record.
+	// Record stores (or replaces) site's record. The group's store also
+	// adds rec.ServerUUID and the clone marker to the site's server_uuid
+	// timeline in the same write (groupCloneIdentityStore.Record).
 	Record(ctx context.Context, site string, rec CloneIdentity) error
 	// Resolve removes site's record if it still equals rec.
 	Resolve(ctx context.Context, site string, rec CloneIdentity) error
@@ -280,12 +282,20 @@ func (tm *TopologyManager) pendingCloneIdentity(site string) (pendingCloneIdenti
 func (tm *TopologyManager) recordCloneIdentity(ctx context.Context, site, serverUUID string, prev *mysql.CloneStatus, prevErr error) error {
 	store, err := tm.loadCloneIdentities(ctx)
 	if store == nil || err != nil {
+		if err == nil {
+			// No record to write the server_uuid timeline with (a test or
+			// a simulation): it is stored on its own, best effort.
+			tm.noteSiteServerUUID(ctx, site, serverUUID)
+			tm.markSiteCloned(ctx, site)
+		}
 		return err
 	}
 	if serverUUID == "" {
 		// Nothing to compare this clone against. An older record, if any,
 		// stays: a clone completed since it was written with the same
-		// server_uuid is still a clone that did not rotate.
+		// server_uuid is still a clone that did not rotate. The clone is
+		// still marked on the site's timeline, best effort.
+		tm.markSiteCloned(ctx, site)
 		return nil
 	}
 	rec := CloneIdentity{ServerUUID: serverUUID}
@@ -297,11 +307,19 @@ func (tm *TopologyManager) recordCloneIdentity(ctx context.Context, site, server
 		rec.PreviousCloneBegin = &begin
 	}
 	if p, ok := tm.pendingCloneIdentity(site); ok && !p.decided && p.rec.ServerUUID == serverUUID {
+		// The write that stored that record stored the uuid and the
+		// clone marker in the site's timeline too, unless an operator
+		// from before that did it wrote it: make sure, best effort.
+		tm.noteSiteServerUUID(ctx, site, serverUUID)
+		tm.markSiteCloned(ctx, site)
 		return nil
 	}
 	if err := store.Record(ctx, site, rec); err != nil {
 		return fmt.Errorf("record the server_uuid of clone recipient %s: %w", site, err)
 	}
+	// The same write stored the uuid and the clone marker in the site's
+	// timeline.
+	tm.siteCloneRecorded(site, serverUUID)
 	t := &tm.cloneIdentity
 	t.mu.Lock()
 	if t.pending == nil {

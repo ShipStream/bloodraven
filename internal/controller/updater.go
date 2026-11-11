@@ -62,6 +62,14 @@ type UpdateController struct {
 	// TopologyManager.withReplicaStartGate). Set once by the topology
 	// manager before the updater runs.
 	replicaStartGate func(site string, start func() error) error
+
+	// rejoinCheck, when set, compares a site whose replication the update
+	// is about to start with the source it will replicate from, and
+	// returns an error when the site lacks transactions it issued itself
+	// (TopologyManager.refuseRejoinWithoutOwnTransactions): a site the
+	// update just restarted may have come back on an older volume. Set
+	// once by the topology manager before the updater runs.
+	rejoinCheck func(ctx context.Context, site string, replica, source mysql.Checker) error
 }
 
 // SetReplicaStartGate installs the restore hold gate for replication
@@ -70,13 +78,35 @@ func (u *UpdateController) SetReplicaStartGate(gate func(site string, start func
 	u.replicaStartGate = gate
 }
 
-// startReplica restarts site's replication through the gate.
-func (u *UpdateController) startReplica(ctx context.Context, target UpdateTarget) error {
-	start := func() error { return target.Checker.StartReplica(ctx) }
+// SetReplicaRejoinCheck installs the comparison made before the update
+// starts a site's replication. Call before the updater runs.
+func (u *UpdateController) SetReplicaRejoinCheck(check func(ctx context.Context, site string, replica, source mysql.Checker) error) {
+	u.rejoinCheck = check
+}
+
+// gatedReplicaStart runs op, which starts target's replication from
+// source, through the replication start gate, after the rejoin check. A
+// site with an own-loss report is refused by the gate; one that lost
+// transactions since it was last compared (its pod was just replaced) is
+// found by the check, which records the report.
+func (u *UpdateController) gatedReplicaStart(ctx context.Context, target UpdateTarget, source mysql.Checker, op func() error) error {
+	start := func() error {
+		if u.rejoinCheck != nil && source != nil && target.Name != "" {
+			if err := u.rejoinCheck(ctx, target.Name, target.Checker, source); err != nil {
+				return err
+			}
+		}
+		return op()
+	}
 	if u.replicaStartGate == nil {
 		return start()
 	}
 	return u.replicaStartGate(target.Name, start)
+}
+
+// startReplica restarts site's replication from source through the gate.
+func (u *UpdateController) startReplica(ctx context.Context, target UpdateTarget, source mysql.Checker) error {
+	return u.gatedReplicaStart(ctx, target, source, func() error { return target.Checker.StartReplica(ctx) })
 }
 
 // UpdateTarget describes one site in an N-site ordered rollout.
@@ -264,7 +294,7 @@ func (u *UpdateController) Execute(ctx context.Context,
 	// Phase 2: Wait for standby to be ready and replication caught up
 	u.setPhase(v1alpha1.UpdatePhaseWaitReplica)
 	u.logger.Info("ordered update: waiting for standby to be ready", "site", standbySiteName)
-	if err := u.waitForReplicaReady(ctx, standbyChecker, 5*time.Minute); err != nil {
+	if err := u.waitForReplicaReady(ctx, UpdateTarget{Name: standbySiteName, Checker: standbyChecker}, activeChecker, 5*time.Minute); err != nil {
 		return fmt.Errorf("wait for standby ready: %w", err)
 	}
 
@@ -467,7 +497,14 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	if err := u.requireOldActiveContained(ctx, active, *handoff); err != nil {
 		return processed, err
 	}
-	if err := u.failover.RecoverOldPrimary(ctx, active.Checker, handoff.Host, active.ReplUser, active.ReplPassword, active.UseSSL); err != nil {
+	// Through the gate, after the comparison with the new primary: the
+	// old active's pod was just replaced, and one that came back without
+	// transactions it issued is not rejoined by replication. It stays
+	// fenced without a channel, and old-primary recovery takes it from
+	// there once the update has ended.
+	if err := u.gatedReplicaStart(ctx, active, handoff.Checker, func() error {
+		return u.failover.RecoverOldPrimary(ctx, active.Checker, handoff.Host, active.ReplUser, active.ReplPassword, active.UseSSL)
+	}); err != nil {
 		return processed, fmt.Errorf("configure old active %s as replica of %s: %w", active.Name, handoff.Name, err)
 	}
 	u.setPhase(v1alpha1.UpdatePhaseWaitOldPrimary)
@@ -652,7 +689,7 @@ func (u *UpdateController) waitForRolledSite(ctx context.Context, target UpdateT
 	var podErr error
 	deadline := time.Now().Add(timeout)
 	for {
-		replicating := directReplicaReady(ctx, target.Checker, expected, func() error { return u.startReplica(ctx, target) })
+		replicating := directReplicaReady(ctx, target.Checker, expected, func() error { return u.startReplica(ctx, target, primary) })
 		podReady := true
 		if target.PodReady != nil {
 			pod, podErr = u.probePod(ctx, target)
@@ -824,7 +861,8 @@ func (u *UpdateController) setPhase(p UpdatePhase) {
 // It aborts early (~30s) when the standby is observed writable with no replication source,
 // since that condition will never satisfy the happy path and holding updating=true blocks
 // cross-site split-brain recovery.
-func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysql.Checker, timeout time.Duration) error {
+func (u *UpdateController) waitForReplicaReady(ctx context.Context, standby UpdateTarget, source mysql.Checker, timeout time.Duration) error {
+	checker := standby.Checker
 	// Derive the fail-fast tick threshold from duration ÷ tickInterval so the
 	// behaviour is consistent regardless of how tests override the tick cadence.
 	failFastThreshold := 1
@@ -882,7 +920,7 @@ func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysq
 						// --skip-replica-start intentionally leaves the IO/SQL
 						// threads stopped. Ordered updates own this restart window,
 						// so restart the existing channel before continuing to wait.
-						if err := checker.StartReplica(ctx); err != nil {
+						if err := u.startReplica(ctx, standby, source); err != nil {
 							u.logger.Warn("ordered update: failed to start standby replica", "error", err)
 						}
 					}

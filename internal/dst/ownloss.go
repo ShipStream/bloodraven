@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"slices"
+	"strconv"
 	"sync"
+
+	"github.com/shipstream/bloodraven/internal/controller"
 )
 
 // A site that comes back without transactions it issued itself, and the
@@ -25,7 +27,11 @@ import (
 //     had (RegressSite): a volume snapshot that was rolled back, or a crash
 //     that lost the tail of the redo log and the binary log together.
 //   - CLONE INSTANCE makes the recipient a copy of the donor under a new
-//     server_uuid, with no replication channel (Reclone).
+//     server_uuid, with no replication channel (Reclone). From then on the
+//     recipient holds of its earlier streams exactly what the donor held,
+//     and never receives more of them: what another site holds beyond
+//     that the recipient gave up at the clone, it did not lose it
+//     (supersededByClone).
 
 // EvRegress is a site restarting on an older data directory under the
 // server_uuid it had. EvReclone is a clone installed into a site.
@@ -126,20 +132,35 @@ func (c *Cluster) Reclone(donor, recipient string) bool {
 	r.binlogSeq, r.binlogPrev = 0, nil
 	r.incarnation++
 	r.serverUUID = replacementUUID(r.uuid, r.incarnation)
+	r.clonedAt = r.incarnation
 	c.event(recipient, EvReclone, fmt.Sprintf("donor=%s server_uuid=%s executed=%s", donor, r.serverUUID, r.executed), "applied")
 	return true
+}
+
+// supersededByClone reports whether the stream u of site s is one a clone
+// into s superseded: a stream s owned before its last Reclone. The uuid's
+// first group is the incarnation that issued it (replacementUUID), and a
+// clone gives the site the uuid of the incarnation it creates.
+func supersededByClone(s *siteData, u string) bool {
+	if s.clonedAt == 0 || len(u) < 8 {
+		return false
+	}
+	n, err := strconv.ParseUint(u[:8], 16, 64)
+	return err == nil && n < uint64(s.clonedAt)
 }
 
 // checkOwnHistoryAtGrantLocked is the model-level invariant
 // PromotedWithoutOwnTransactions: an operator actor must never make a
 // site writable while another site holds transactions of one of that
-// site's own streams that the site itself lacks. Such a site cannot have
-// them (its receiver drops them), and its next write under its current
-// server_uuid would be issued under a GTID that already names another
-// transaction. wasWritable excludes a statement on a site that was
-// writable already (an external writer's doing, or its boot): nothing is
-// granted by that. Must be called with c.mu held, before the grant is
-// applied.
+// site's own streams that the site itself lost. Such a site cannot get
+// them back (its receiver drops them), and its next write under its
+// current server_uuid would be issued under a GTID that already names
+// another transaction. A stream a clone into the site superseded is not
+// judged: what another site holds of it beyond the site's copy the site
+// gave up at the clone (supersededByClone). wasWritable excludes a
+// statement on a site that was writable already (an external writer's
+// doing, or its boot): nothing is granted by that. Must be called with
+// c.mu held, before the grant is applied.
 func (c *Cluster) checkOwnHistoryAtGrantLocked(s *siteData, wasWritable bool) {
 	if wasWritable {
 		return
@@ -154,7 +175,7 @@ func (c *Cluster) checkOwnHistoryAtGrantLocked(s *siteData, wasWritable bool) {
 			continue
 		}
 		for u, n := range o.executed {
-			if ownsStream(s, u) && n > s.executed[u] {
+			if ownsStream(s, u) && !supersededByClone(s, u) && n > s.executed[u] {
 				c.violate("PromotedWithoutOwnTransactions",
 					fmt.Sprintf("%s made writable with %s:%d although %s holds %s:1-%d: the site lacks transactions it issued itself and can never receive them",
 						s.name, u, s.executed[u], o.name, u, n))
@@ -194,8 +215,9 @@ func ownLossFaults(seed uint64, names []string, warmup, faultWindow, healAt int)
 }
 
 // simSiteIdentityStore is the durable record of the server_uuids each site
-// has run under (the group annotation in production). It outlives every
-// manager of the trial, as the annotation outlives the operator.
+// has run under and of the clones issued into it (the group annotation in
+// production). It outlives every manager of the trial, as the annotation
+// outlives the operator.
 type simSiteIdentityStore struct {
 	mu    sync.Mutex
 	uuids map[string][]string
@@ -217,8 +239,6 @@ func (s *simSiteIdentityStore) Add(_ context.Context, site, serverUUID string) e
 	if s.uuids == nil {
 		s.uuids = map[string][]string{}
 	}
-	if !slices.Contains(s.uuids[site], serverUUID) {
-		s.uuids[site] = append(s.uuids[site], serverUUID)
-	}
+	s.uuids[site] = controller.AppendServerUUIDEntryForSim(s.uuids[site], serverUUID)
 	return nil
 }

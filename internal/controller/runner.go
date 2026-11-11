@@ -1158,6 +1158,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count,
 			"detectedBy", site.DivergenceDetectedBy, "comparedTo", site.DivergenceComparedTo)
 	}
+	if prev != nil {
+		// A manager replaced in this process (a spec or credential change)
+		// hands over how often the automatic reclone of a reported site
+		// has failed, so the replacement does not clone again at once.
+		tm.carryOwnLossRecloneBackoff(prev.tm)
+	}
 
 	tmCtx, cancel := context.WithCancel(ctx)
 	// Set the status callback to update the CR status subresource on state
@@ -1245,6 +1251,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// too: a site that returns on a volume from before a reclone is
 	// compared under the server_uuid it had afterwards.
 	tm.SetSiteIdentityStore(r.siteIdentityStore(nn))
+	// Loaded before the first poll: a manager that starts into an outage
+	// chooses a promotion target without waiting on the API server, and
+	// must know the sites' earlier server_uuids by then. A failure is not
+	// fatal (it was logged); Poll retries in the background.
+	_ = tm.LoadSiteIdentities(ctx)
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})

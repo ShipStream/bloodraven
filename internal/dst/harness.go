@@ -369,12 +369,13 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 	// inside the Poll that starts it. The server_uuids the sites have run
 	// under are recorded where they outlive every manager of the trial.
 	tm.SetSiteIdentityStore(&r.siteIdentities)
+	// As the runner does when it starts a manager.
+	_ = tm.LoadSiteIdentities(context.Background())
 	tm.SetRecloneRunnerForSim(r.cluster.Reclone)
-	// A promotion decision also reads the sites that are no candidates.
-	// In the model a read returns at once, so the grace it gives them is
-	// never spent; it is long here so that a loaded machine cannot change
-	// a trial.
-	tm.SetOwnLossWitnessGraceForSim(time.Minute)
+	// A promotion decision also reads the sites that are no candidates,
+	// and waits for them on the manager's clock. That clock stands still
+	// during a poll, so the decision waits for the reads themselves, which
+	// return at once in the model: a loaded machine cannot change a trial.
 	tm.SetRecloneTailStepRunnerForSim(func(step func()) { step() })
 	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
 		// A wait that reaches its bound goes on to CLONE, which the model

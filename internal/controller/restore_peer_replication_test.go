@@ -398,14 +398,14 @@ func TestUpdater_DirectReplicaReadyStartsThroughGate(t *testing.T) {
 	u.SetReplicaStartGate(tm.withReplicaStartGate)
 	tm.SetRestorePeerHold([]string{"dc2"}, nil, true)
 	target := UpdateTarget{Name: "dc2", Checker: peer}
-	if directReplicaReady(context.Background(), peer, "mysql-dc1", func() error { return u.startReplica(context.Background(), target) }) {
+	if directReplicaReady(context.Background(), peer, "mysql-dc1", func() error { return u.startReplica(context.Background(), target, nil) }) {
 		t.Fatal("held follower reported replicating")
 	}
 	if peer.startReplicaCalls != 0 {
 		t.Fatalf("ordered update started a held follower's replication (%d calls)", peer.startReplicaCalls)
 	}
 	tm.SetRestorePeerHold(nil, nil, true)
-	directReplicaReady(context.Background(), peer, "mysql-dc1", func() error { return u.startReplica(context.Background(), target) })
+	directReplicaReady(context.Background(), peer, "mysql-dc1", func() error { return u.startReplica(context.Background(), target, nil) })
 	if peer.startReplicaCalls != 1 {
 		t.Fatalf("start calls = %d after release, want 1", peer.startReplicaCalls)
 	}

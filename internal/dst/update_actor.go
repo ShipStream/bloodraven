@@ -12,14 +12,27 @@ import (
 // actor"). It uses the real claim API through the …ForSim hooks
 // (BeginOrderedUpdateForSim, ClaimOrderedUpdateForSim, RecordHandoffForSim,
 // FinishOrderedUpdateForSim) and issues the handoff's MySQL statements one
-// per step, each attributed to ActorUpdate and each slow-capable: fence the
-// active site, wait for the standby to catch up (abort after
+// per step, each attributed to ActorUpdate and each slow-capable: confirm
+// that the active site is writable, read the standby's set and then the
+// active site's (ExecuteHandoff's first steps: a source that is read-only
+// is not handed off from, a standby that cannot be read or holds
+// transactions the source lacks is not handed off to, and nothing is
+// touched), fence it, wait for the standby to catch up (abort after
 // updateCatchUpSteps by unfencing), then STOP, RESET and clear read-only on
 // the standby over one pinned session.
+//
+// An abort unfences the active site only if it still holds the set the
+// handoff last read from it, as abortHandoff does: a source that restarted
+// on an older data directory in between is read-only by its own boot, and
+// is left to the topology manager's re-assert.
 //
 // It is honest about fidelity: it exercises the claim protocol, predecessor
 // tracking and their interaction with a planned run, not ExecuteHandoff's
 // internals, which the component tests cover with the production updater.
+// What it does take from production, because the invariants judge it: the
+// standby's handoff eligibility (HandoffRefusalForSim), the reads and
+// refusals before the fence, and the conditions under which an abort
+// gives the source its writes back.
 type updateActor struct {
 	r   *trialRunner
 	tm  *controller.TopologyManager
@@ -29,8 +42,11 @@ type updateActor struct {
 	step    updateStep
 	waited  int
 	fenced  string // the fenced active set, once read
-	sess    mysql.Session
-	done    bool
+	// held is the active site's set as the handoff last read it (before
+	// the fence, then fenced): what an abort requires it to still hold.
+	held mysql.GTIDSet
+	sess mysql.Session
+	done bool
 }
 
 type updateStep int
@@ -87,10 +103,30 @@ func (a *updateActor) finish() {
 
 // abort gives the active site its writes back (before the standby's
 // read_only was touched): super_read_only and read_only both cleared, as
-// abortHandoff does, then finishes.
+// abortHandoff does, then finishes. Like abortHandoff it lifts only the
+// handoff's own fence: a source that restarted since (read_only without
+// super_read_only, or a set that no longer holds what the handoff read
+// from it) is left read-only; a probe that fails is no evidence, and the
+// source is unfenced.
 func (a *updateActor) abort(ctx context.Context) {
 	if a.step > updFence && a.step <= updReset {
 		c := a.r.cluster.NewChecker(a.upd.Active())
+		if sc, ok := c.(interface {
+			CheckSuperReadOnly(context.Context) (bool, error)
+		}); ok {
+			if super, err := sc.CheckSuperReadOnly(ctx); err == nil && !super {
+				if ro, err := c.CheckReadOnly(ctx); err == nil && ro {
+					a.finish()
+					return
+				}
+			}
+		}
+		if raw, err := c.GetGtidExecuted(ctx); err == nil {
+			if now, perr := mysql.ParseGTIDSet(raw); perr == nil && !a.held.Subtract(now).IsEmpty() {
+				a.finish()
+				return
+			}
+		}
 		_ = c.SetSuperReadOnly(ctx, false)
 		_ = c.SetReadOnly(ctx, false)
 	}
@@ -111,6 +147,38 @@ func (a *updateActor) stepOnce(ctx context.Context) {
 			a.finish()
 			return
 		}
+		// ExecuteTargets chooses the handoff target by its live
+		// eligibility: a standby with a recorded block (divergent,
+		// lacking transactions it issued itself, awaiting a reclone) is
+		// not handed off to.
+		if a.upd.HandoffRefusalForSim(a.standby) != nil {
+			a.finish()
+			return
+		}
+		// ExecuteHandoff's first step: the source must be writable (that
+		// is the state an abort restores), and its set is read before the
+		// fence. A refusal here has touched nothing.
+		ro, err := activeC.CheckReadOnly(ctx)
+		if err != nil || ro {
+			a.finish()
+			return
+		}
+		// Candidate first, then source, as ExecuteHandoff reads them: a
+		// candidate that cannot be read, or that holds transactions the
+		// source lacks, is refused before anything is fenced.
+		standbyRaw, err := standbyC.GetGtidExecuted(ctx)
+		standbySet, perr := mysql.ParseGTIDSet(standbyRaw)
+		if err != nil || perr != nil {
+			a.finish()
+			return
+		}
+		raw, err := activeC.GetGtidExecuted(ctx)
+		held, perr := mysql.ParseGTIDSet(raw)
+		if err != nil || perr != nil || !standbySet.Subtract(held).IsEmpty() {
+			a.finish()
+			return
+		}
+		a.held = held
 		a.step = updFence
 	case updFence:
 		if err := activeC.SetSuperReadOnly(ctx, true); err != nil {
@@ -126,6 +194,15 @@ func (a *updateActor) stepOnce(ctx context.Context) {
 			return
 		}
 		a.fenced = g
+		if set, perr := mysql.ParseGTIDSet(g); perr == nil {
+			if !set.Contains(a.held) {
+				// ExecuteHandoff aborts on a fenced set that lacks what the
+				// source held before the fence; the abort leaves it fenced.
+				a.abort(ctx)
+				return
+			}
+			a.held = set
+		}
 		// ExecuteHandoff rotates the fenced source's binary log here, best
 		// effort; its outcome changes nothing.
 		a.upd.RotateSourceBinlogForSim(ctx, activeC, a.upd.Active())

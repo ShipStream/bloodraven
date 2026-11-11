@@ -232,6 +232,10 @@ type siteData struct {
 	// every later call once it moves (the connection broke), however the
 	// address resolves now.
 	incarnation int
+	// clonedAt is the incarnation the site's last clone created (0 when
+	// it was never cloned into): the streams it owned before that are
+	// superseded (supersededByClone).
+	clonedAt int
 	// history is a bounded log of executed-set snapshots, one per tick,
 	// that a regressing pod replacement rolls back to.
 	history []gtidVec

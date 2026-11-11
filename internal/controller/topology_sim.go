@@ -64,6 +64,15 @@ func (u *SimOrderedUpdate) ClaimOrderedUpdateForSim(ctx context.Context) (bool, 
 	return claimed, err
 }
 
+// HandoffRefusalForSim is the standby's handoff eligibility as
+// ExecuteTargets reads it when it chooses the handoff target
+// (UpdateTarget.HandoffBlocked, liveHandoffRefusal): nil, or why site must
+// not receive the handoff (mid-keyring-rotation, awaiting its post-restore
+// reclone, lacking transactions it issued itself, divergent).
+func (u *SimOrderedUpdate) HandoffRefusalForSim(site string) error {
+	return u.tm.liveHandoffRefusal(site)()
+}
+
 // RecordHandoffForSim records a completed handoff to target as the update's
 // goroutine does: recordFailover, then DNS.
 func (u *SimOrderedUpdate) RecordHandoffForSim(ctx context.Context, target, promotionGTID string) {
@@ -306,6 +315,9 @@ func (tm *TopologyManager) finishRecloneForSim(donor string, recipient *siteTrac
 	recipient.servingHealthy = false
 	tm.mu.Unlock()
 	tm.clearRecloneArchiveTail()
+	// The bootstrap marks the clone on the site's server_uuid timeline
+	// with the clone identity record (recordCloneIdentity).
+	tm.markSiteCloned(context.Background(), recipient.name)
 	tm.clearOwnLossAfterClone(recipient.name)
 	return true
 }
@@ -321,10 +333,10 @@ func (tm *TopologyManager) OwnTransactionsLostForSim(site string) string {
 	return ""
 }
 
-// SetOwnLossWitnessGraceForSim sets how long a promotion decision waits
-// for the non-candidate sites' GTID sets after its candidates answered. A
-// simulation, whose reads return at once, passes a long grace so that a
-// loaded machine cannot make a read miss it and change a trial.
-func (tm *TopologyManager) SetOwnLossWitnessGraceForSim(d time.Duration) {
-	tm.ownLossWitnessGrace = d
+// AppendServerUUIDEntryForSim appends entry to a site's server_uuid
+// timeline by the rule the group's store uses (appendServerUUIDEntry), for
+// a simulation's SiteIdentityStore.
+func AppendServerUUIDEntryForSim(timeline []string, entry string) []string {
+	timeline, _ = appendServerUUIDEntry(timeline, entry)
+	return timeline
 }
