@@ -87,6 +87,8 @@ func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
 	// A writable era the archiver never saw, then read-only: the state of
 	// a site whose sidecar starts beside a standby.
 	sql("CREATE DATABASE wp", "CREATE TABLE wp.t (id INT PRIMARY KEY AUTO_INCREMENT, v VARCHAR(32))",
+		// A file of more than 2^16 cipher blocks, for the counter.
+		"CREATE TABLE wp.big (id INT PRIMARY KEY, v LONGTEXT)", "INSERT INTO wp.big VALUES (1, REPEAT('x', 3000000))",
 		"INSERT INTO wp.t (v) VALUES ('one'), ('two')", "FLUSH BINARY LOGS", "SET GLOBAL super_read_only = ON")
 
 	// The file format.
@@ -208,6 +210,7 @@ func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
 	// checksums verified, and together they hold the server's transactions.
 	logged := internalmysql.GTIDSet{}
 	var plain []byte
+	largest := 0
 	for i, entry := range index[:len(index)-1] {
 		data, err := os.ReadFile(filepath.Join(srv.dataDir, filepath.Base(entry)))
 		if err != nil {
@@ -222,14 +225,15 @@ func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
 			t.Fatalf("decrypted %s does not parse: %v", entry, err)
 		}
 		logged = UnionBinlogGTIDs(logged, evidence.GTIDs)
+		largest = max(largest, len(decrypted))
 		if i == 0 {
 			plain = decrypted
 		}
 	}
-	if !hasSourceUUID(logged, uuid) {
-		t.Fatalf("the decrypted files hold %s, nothing of %s", logged, uuid)
+	if !hasSourceUUID(logged, uuid) || largest < 1<<20 {
+		t.Fatalf("the decrypted files hold %s (the largest has %d bytes); want transactions of %s and a file over 1 MiB", logged, largest, uuid)
 	}
-	t.Logf("decrypted %d sealed files: %s", len(index)-1, logged)
+	t.Logf("decrypted %d sealed files (the largest %d bytes): %s", len(index)-1, largest, logged)
 	raw, err = os.ReadFile(sealed)
 	if err != nil {
 		t.Fatal(err)
