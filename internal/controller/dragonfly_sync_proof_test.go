@@ -135,8 +135,8 @@ func TestPlannedFailoverDragonflySync_HealthyLinkBehindSourceDoesNotPass(t *test
 	fg := plannedFailoverFGWithDragonfly("Fail")
 	fg.Status.PlannedFailover.Settings.Dragonfly.MaxSyncWait = metav1.Duration{Duration: time.Hour}
 	r, _, _ := pfDFReconciler(t, fg)
-	target := syncProofReplica("a", 1, 1)
-	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFIad: syncProofMaster("a", 24, 28), pfDFPdx: target})
+	source, target := syncProofMaster("a", 24, 28), syncProofReplica("a", 1, 1)
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFIad: source, pfDFPdx: target})
 	nn := fgNN(fg)
 
 	pfDFPass(t, r, nn)
@@ -144,6 +144,10 @@ func TestPlannedFailoverDragonflySync_HealthyLinkBehindSourceDoesNotPass(t *test
 	if pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetCaptured || pf.Dragonfly.SourceOffset == nil || *pf.Dragonfly.SourceOffset != 52 {
 		t.Fatalf("offset capture = %+v, want Captured with the sum 52", pf.Dragonfly)
 	}
+	// The source writes on. The goal stays the position read when the wait
+	// began: one read again on a later poll would keep moving away on a
+	// source that takes writes.
+	source.position.Flows = []int64{90, 90}
 	for i := 0; i < 3; i++ {
 		pfDFPass(t, r, nn)
 		if pf = fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {

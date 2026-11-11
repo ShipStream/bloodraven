@@ -356,3 +356,28 @@ func TestDragonflyMasterLossCorroborated(t *testing.T) {
 		})
 	}
 }
+
+// The count belongs to the site that was missed: misses counted against
+// another site do not promote a replica of this one.
+func TestDragonflyOnlyPromotionCandidate_MissesOfAnotherSiteDoNotCount(t *testing.T) {
+	h := newThresholdHarness(t, nil)
+	fg := fgWithDragonflyEnabledAndActive()
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	seven := int64(7)
+	snaps := []DragonflySiteSnapshot{
+		{Name: "dc1"},
+		{Name: "dc2", Reachable: true, Info: dragonflyReplicaOf("lion-dragonfly-dc1.shared-lion.svc.cluster.local"), Keys: &seven},
+	}
+	h.mgr.mu.Lock()
+	h.mgr.masterMissSite, h.mgr.masterMisses = "dc9", defaultDragonflyMasterLossThreshold+1
+	h.mgr.mu.Unlock()
+	if target, _, ok := h.mgr.dragonflyOnlyPromotionCandidate(fg, snaps, false); ok {
+		t.Fatalf("candidate = %q on misses counted against another site, want none", target)
+	}
+	h.mgr.mu.Lock()
+	h.mgr.masterMissSite = "dc1"
+	h.mgr.mu.Unlock()
+	if target, source, ok := h.mgr.dragonflyOnlyPromotionCandidate(fg, snaps, false); !ok || target != "dc2" || source != "dc1" {
+		t.Fatalf("candidate = %q from %q ok=%v, want dc2 from dc1", target, source, ok)
+	}
+}
