@@ -158,6 +158,43 @@ func (s *simServer) promote(rotate bool, drained []binlogtest.Txn, early func() 
 	return txns
 }
 
+// tailOwn is how many transactions at the end of the active binlog the
+// server committed itself: what a crash can lose (crash).
+func (s *simServer) tailOwn() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	active := s.files[len(s.files)-1].Txns
+	n := 0
+	for n < len(active) && active[len(active)-1-n].SID == s.uuid && active[len(active)-1-n].ServerID == s.serverID {
+		n++
+	}
+	return n
+}
+
+// crash is a crash that loses the last lose transactions of the active
+// binlog (an unsynced tail, sync_binlog != 1), followed by the restart: the
+// server comes back read-only without them, in one step that no role probe
+// can split, so its sidecar never observes the lost transactions
+// read-only. Sealed files are untouched.
+func (s *simServer) crash(lose int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	active := &s.files[len(s.files)-1]
+	if lose > len(active.Txns) {
+		s.t.Fatalf("crash loses %d transactions, the active binlog holds %d", lose, len(active.Txns))
+	}
+	for _, txn := range active.Txns[len(active.Txns)-lose:] {
+		lost, err := internalmysql.ParseGTIDSet(fmt.Sprintf("%s:%d", txn.SID, txn.GNO))
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		s.executed = s.executed.Subtract(lost)
+	}
+	active.Txns = active.Txns[:len(active.Txns)-lose]
+	s.readOnly = true
+	s.writeLocked()
+}
+
 // nowTxns are origin uuid's transactions from..to committed now, 10 µs
 // apart; it returns once the last has committed. Call it where the commits
 // happen (simServer.promote's early).
@@ -883,12 +920,19 @@ func (w *writerArchive) startStoppable(site string, srv *simServer, identity sid
 
 // startRestartable is startStoppable that also returns the archiver.
 func (w *writerArchive) startRestartable(site string, srv *simServer, identity sidecar.ArchiveIdentity) (*sidecar.BinlogArchiver, func()) {
+	return w.startRestartableOn(site, srv, w.store, identity)
+}
+
+// startRestartableOn is startRestartable over store, a view of the archive
+// store.
+func (w *writerArchive) startRestartableOn(site string, srv *simServer, store sidecar.ArchiveStore, identity sidecar.ArchiveIdentity) (*sidecar.BinlogArchiver, func()) {
 	ctx, cancel := context.WithCancel(w.ctx)
 	cfg := &sidecar.PITRConfig{
 		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
 		PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond, Archive: identity,
+		PromotionConfirmDelay: w.confirmDelay,
 	}
-	a := sidecar.NewBinlogArchiver(cfg, site, srv, w.store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a := sidecar.NewBinlogArchiver(cfg, site, srv, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	done := make(chan struct{})
 	w.wg.Add(1)
 	go func() { defer w.wg.Done(); defer close(done); a.Run(ctx) }()

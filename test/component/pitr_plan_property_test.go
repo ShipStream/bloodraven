@@ -23,6 +23,18 @@ package component
 //     transaction anchors, ArchiveGap only when the model's history is not
 //     fully archived from the backup's position, and so on.
 //
+// A failover may also be a crash of the old primary that loses its last
+// transactions although the replica has applied them (an unsynced binlog
+// tail). The old primary then rejoins by replication, which never gives it
+// its own transactions back, and once it is promoted again it issues their
+// GTIDs to other transactions, which the replica skips. From then on a GTID
+// can name two transactions, so in such a trial the model works on
+// transactions (GTID and commit time): a certified plan must replay, and
+// build on a backup that holds, exactly the transactions the witness's
+// origin had, and the transaction that was lost is not one of them at any
+// target after the loss. The model does not predict which refusal such a
+// trial gets.
+//
 // Promotions are the operator's (#229, #269): the new primary drains its
 // relay log, rotates its binlog (most of the time; the rotation may not be
 // acknowledged) and becomes writable, and it may commit before its
@@ -38,12 +50,15 @@ package component
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,10 +80,54 @@ type propCommit struct {
 
 // propModel is the reference: every server's executed sequence, in order.
 type propModel struct {
-	log    map[string][]propCommit // site → commits it executed, in order
+	log map[string][]propCommit // site → commits it executed, in order
+	// past holds, per site, its log as it was before each crash that lost
+	// its tail: the history of a server incarnation that is gone.
+	past map[string][][]propCommit
+	// oct and origin are by GTID: of the transaction issued last under it.
 	oct    map[pitrplan.GTID]int64
 	origin map[pitrplan.GTID]string // site that committed it
 	last   time.Time
+}
+
+// logs are site's current log and its past ones.
+func (m *propModel) logs(site string) [][]propCommit {
+	return append([][]propCommit{m.log[site]}, m.past[site]...)
+}
+
+// historyBefore is what site had executed, transaction by transaction, just
+// before it executed the transaction g committed at oct, in whichever of
+// its incarnations executed it.
+func (m *propModel) historyBefore(site string, g pitrplan.GTID, oct int64) ([]propCommit, bool) {
+	for _, log := range m.logs(site) {
+		for i, c := range log {
+			if c.g == g && c.oct == oct {
+				return log[:i], true
+			}
+		}
+	}
+	return nil, false
+}
+
+// heldHistories are the states some server held, in any incarnation, whose
+// GTID set is set.
+func (m *propModel) heldHistories(set pitrplan.Set) [][]propCommit {
+	var out [][]propCommit
+	for site := range m.log {
+		for _, log := range m.logs(site) {
+			s := pitrplan.Set{}
+			if s.Equal(set) {
+				out = append(out, nil)
+			}
+			for i, c := range log {
+				s = s.Union(pitrplan.SetOf(c.g))
+				if s.Equal(set) {
+					out = append(out, log[:i+1])
+				}
+			}
+		}
+	}
+	return out
 }
 
 func (m *propModel) tick() time.Time {
@@ -94,25 +153,17 @@ func (m *propModel) executedBefore(site string, g pitrplan.GTID) (pitrplan.Set, 
 
 // heldState reports whether some server held exactly set at some point.
 func (m *propModel) heldState(set pitrplan.Set) bool {
-	for _, log := range m.log {
-		s := pitrplan.Set{}
-		if s.Equal(set) {
-			return true
-		}
-		for _, c := range log {
-			s = s.Union(pitrplan.SetOf(c.g))
-			if s.Equal(set) {
-				return true
-			}
-		}
-	}
-	return false
+	return len(m.heldHistories(set)) > 0
 }
 
 type propTrial struct {
-	w       *writerArchive
-	srv     map[string]*simServer
-	arch    map[string]*sidecar.BinlogArchiver
+	w     *writerArchive
+	ident sidecar.ArchiveIdentity
+	srv   map[string]*simServer
+	arch  map[string]*sidecar.BinlogArchiver
+	// stop stops a site's archiver (its sidecar container).
+	stop    map[string]func()
+	store   map[string]*mutedStore
 	model   *propModel
 	uuid    map[string]string
 	id      map[string]uint32
@@ -121,12 +172,43 @@ type propTrial struct {
 	dead    pitrplan.Set
 	lossy   bool
 	backup  backupmeta.DumpMeta
-	targets []time.Time
+	// backupIssues are the backup's transactions with their commit times,
+	// and backupMaxOct the newest of those.
+	backupIssues map[pitrplan.GTID]int64
+	backupMaxOct int64
+	targets      []time.Time
+	// crashed: an old primary lost its last transactions (lostTail) in a
+	// crash although the replica had applied them, and rejoined as a
+	// replica. reissued: it was promoted again and issued one of their
+	// GTIDs to another transaction.
+	crashed, reissued bool
+	lostTail          pitrplan.Set
 	// promoted are the promotions made by failover, in order.
 	promoted []propPromoted
 	// inverted: a promoted server applied copies after its first own
 	// commit, so its log and the old primary's order them differently.
 	inverted bool
+}
+
+// mutedStore is one site's view of the archive store. Once muted, the
+// site's binlog uploads fail: its sidecar still saves its manifest, and
+// with it its records, but none of its files reaches the archive, as when
+// a new primary is lost before it uploads anything.
+type mutedStore struct {
+	sidecar.ArchiveStore
+	site  string
+	muted atomic.Bool
+}
+
+func (s *mutedStore) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	if s.muted.Load() && strings.HasPrefix(key, "binlogs/"+s.site+"/") {
+		return errors.New("injected: this site's binlog uploads fail")
+	}
+	return s.ArchiveStore.Put(ctx, key, r, size)
+}
+
+func (s *mutedStore) PutIfAbsent(ctx context.Context, key string, r io.Reader, size int64) error {
+	return sidecar.PutIfAbsent(ctx, s.ArchiveStore, key, r, size)
 }
 
 // propPromotion is how a failover promotes the replica.
@@ -141,6 +223,14 @@ type propPromotion struct {
 	// new primary applies after its first own commit (a server that is
 	// writable and still replicating).
 	late int
+	// lose: the old primary does not step down but crashes, and loses its
+	// last lose transactions, which the new primary holds. restart: its
+	// sidecar restarts with it (the pod crashed, not only mysqld). mute:
+	// from this promotion on, none of the new primary's binlogs reaches
+	// the archive.
+	lose    int
+	restart bool
+	mute    bool
 }
 
 // propPromoted is one promotion as the model saw it.
@@ -156,16 +246,17 @@ type propPromoted struct {
 // archiver, and waits for a's first promotion record. confirmDelay is the
 // archivers' promotion-record confirmation delay (0: production's).
 func newPropTrial(t *testing.T, confirmDelay time.Duration) *propTrial {
-	p := &propTrial{w: newWriterArchive(t), srv: map[string]*simServer{}, arch: map[string]*sidecar.BinlogArchiver{},
-		model: &propModel{log: map[string][]propCommit{}, oct: map[pitrplan.GTID]int64{}, origin: map[pitrplan.GTID]string{}},
+	p := &propTrial{w: newWriterArchive(t), srv: map[string]*simServer{}, arch: map[string]*sidecar.BinlogArchiver{}, stop: map[string]func(){}, store: map[string]*mutedStore{},
+		model: &propModel{log: map[string][]propCommit{}, past: map[string][][]propCommit{}, oct: map[pitrplan.GTID]int64{}, origin: map[pitrplan.GTID]string{}},
 		uuid:  map[string]string{"a": writerUUIDA, "b": writerUUIDB}, id: map[string]uint32{"a": 101, "b": 102},
-		records: map[string]int{"a": 1, "b": 0}, queue: map[string][]binlogtest.Txn{"b": {}}, dead: pitrplan.Set{}}
+		records: map[string]int{"a": 1, "b": 0}, queue: map[string][]binlogtest.Txn{"b": {}}, dead: pitrplan.Set{}, lostTail: pitrplan.Set{}}
 	p.w.confirmDelay = confirmDelay
 	p.srv["a"] = newSimServer(t, writerUUIDA, 101, false)
 	p.srv["b"] = newSimServer(t, writerUUIDB, 102, true)
-	ident := p.w.identity(writerGroup, p.w.dest)
+	p.ident = p.w.identity(writerGroup, p.w.dest)
 	for _, s := range []string{"a", "b"} {
-		p.arch[s] = p.w.start(s, p.srv[s], p.w.store, ident)
+		p.store[s] = &mutedStore{ArchiveStore: p.w.store, site: s}
+		p.arch[s], p.stop[s] = p.w.startRestartableOn(s, p.srv[s], p.store[s], p.ident)
 	}
 	p.w.waitRecords("a", 1)
 	return p
@@ -187,15 +278,70 @@ func (p *propTrial) newCommit(primary string) binlogtest.Txn {
 	at := p.model.tick()
 	txn := binlogtest.Txn{SID: p.uuid[primary], GNO: gno, Commit: at, ServerID: p.id[primary]}
 	g := pitrplan.GTID{SID: txn.SID, GNO: gno}
+	if p.lostTail.Has(g) {
+		// The lowest free number is one the server lost.
+		p.reissued = true
+	}
 	p.model.log[primary] = append(p.model.log[primary], propCommit{g, at.UnixMicro()})
 	p.model.oct[g] = at.UnixMicro()
 	p.model.origin[g] = primary
 	for site := range p.srv {
-		if site != primary && p.queue[site] != nil {
+		// A replica skips a GTID it has executed: its copy of a transaction
+		// the primary lost stands in for the one issued again.
+		if site != primary && p.queue[site] != nil && !p.executed(site).Has(g) {
 			p.queue[site] = append(p.queue[site], txn)
 		}
 	}
 	return txn
+}
+
+// crash is the old primary's part of a failover in which it does not step
+// down: it crashes, loses its last lose transactions and restarts
+// read-only without them, with its sidecar when restart. Its log before
+// the crash becomes history. It returns once the site's archiver has
+// finished a scan that began after the restart, so any record the change
+// calls for is written, and counts the site's records anew.
+func (p *propTrial) crash(site string, lose int, restart bool) {
+	log := p.model.log[site]
+	p.model.past[site] = append(p.model.past[site], append([]propCommit(nil), log...))
+	for _, c := range log[len(log)-lose:] {
+		p.lostTail = p.lostTail.Union(pitrplan.SetOf(c.g))
+	}
+	p.model.log[site] = append([]propCommit(nil), log[:len(log)-lose]...)
+	p.crashed = true
+	if restart {
+		p.stop[site]()
+	}
+	p.srv[site].crash(lose)
+	if restart {
+		p.arch[site], p.stop[site] = p.w.startRestartableOn(site, p.srv[site], p.store[site], p.ident)
+	}
+	// LastScanAt is when a scan began: the second one to begin after the
+	// crash shows that the first has ended.
+	at := time.Now()
+	for range 2 {
+		p.w.eventually("a scan of "+site+" after its crash", func() bool {
+			began := p.arch[site].Snapshot(context.Background()).LastScanAt
+			if !began.After(at) {
+				return false
+			}
+			at = began
+			return true
+		})
+	}
+	p.records[site] = len(p.w.manifest(site).Promotions)
+}
+
+// everExecuted is everything site has executed in the model, in any of its
+// incarnations.
+func (p *propTrial) everExecuted(site string) pitrplan.Set {
+	s := pitrplan.Set{}
+	for _, log := range p.model.logs(site) {
+		for _, c := range log {
+			s = s.Union(pitrplan.SetOf(c.g))
+		}
+	}
+	return s
 }
 
 // copied records that site executed the copies txns, in order.
@@ -246,6 +392,9 @@ func (p *propTrial) drain(site string, drop int) {
 func (p *propTrial) sealed(site string) int { return len(p.srv[site].files) - 1 }
 
 func (p *propTrial) waitUploaded(site string) {
+	if p.store[site].muted.Load() {
+		return
+	}
 	p.w.eventually("uploads of "+site, func() bool { return len(p.w.manifest(site).Files) >= p.sealed(site) })
 }
 
@@ -259,10 +408,13 @@ func (p *propTrial) takeBackup(site string) {
 	}
 	b := pitrplan.Set{}
 	var last int64
+	p.backupIssues = map[pitrplan.GTID]int64{}
 	for _, c := range p.model.log[site] {
 		b = b.Union(pitrplan.SetOf(c.g))
 		last = max(last, c.oct)
+		p.backupIssues[c.g] = c.oct
 	}
+	p.backupMaxOct = last
 	end := time.UnixMicro(last + 1).UTC()
 	meta := backupmeta.NewMicroTime(end)
 	p.backup = backupmeta.DumpMeta{Version: 1, GTIDExecuted: b.String(), End: meta, ServerClock: backupmeta.ServerClock{Start: meta, End: meta},
@@ -273,6 +425,8 @@ func (p *propTrial) takeBackup(site string) {
 // failover moves the primary role to replica. drop > 0 loses the last drop
 // queued copies with the old primary (lossy); archiveTail first seals and
 // uploads the old primary's tail, so the lost transactions are archived.
+// how.lose > 0 is the opposite loss: the replica has applied the old
+// primary's last transactions and the old primary loses them in a crash.
 // how is the promotion; each transaction the new primary commits in its lag
 // window becomes a target. It returns the new primary's promotion record
 // time.
@@ -299,7 +453,14 @@ func (p *propTrial) failover(primary, replica string, drop int, archiveTail bool
 		p.dead = p.dead.Union(pitrplan.SetOf(pitrplan.GTID{SID: txn.SID, GNO: txn.GNO}))
 	}
 	p.queue[replica] = nil
-	p.srv[primary].setReadOnly(true)
+	if how.mute {
+		p.store[replica].muted.Store(true)
+	}
+	if how.lose > 0 {
+		p.crash(primary, how.lose, how.restart)
+	} else {
+		p.srv[primary].setReadOnly(true)
+	}
 	p.w.waitDemoted(p.arch[primary])
 	if p.lossy {
 		// The old primary is down for good: no further copies.
@@ -343,7 +504,18 @@ func sleepPast(at time.Time, d time.Duration) {
 // milliseconds, and a record is confirmed a few role probes after it.
 const propConfirmDelay = 30 * time.Millisecond
 
-func runPropTrial(t *testing.T, seed int64) (planned, refused, contained int) {
+// propStats counts one trial's answers.
+type propStats struct {
+	planned, refused int
+	// contained: certified plans whose witness needed a containment anchor.
+	contained int
+	// crashed and reissued are the trial's (propTrial); crashedPlanned are
+	// the plans certified in a crashed trial.
+	crashed, reissued bool
+	crashedPlanned    int
+}
+
+func runPropTrial(t *testing.T, seed int64) (st propStats) {
 	r := rand.New(rand.NewSource(seed))
 	p := newPropTrial(t, propConfirmDelay)
 	primary, replica := "a", "b"
@@ -352,6 +524,7 @@ func runPropTrial(t *testing.T, seed int64) (planned, refused, contained int) {
 	// quiet: this era's primary never seals a binlog of its own accord, so
 	// its transactions are archived only as the other site's copies.
 	quiet := false
+	crashes := 0
 	// The backup is taken inside era 0, so every trial plans.
 	backupAt := 2 + r.Intn(n0-1)
 	backupSite := []string{"a", "b"}[r.Intn(2)]
@@ -398,6 +571,23 @@ func runPropTrial(t *testing.T, seed int64) (planned, refused, contained int) {
 				how.late = 1 + r.Intn(2)
 			}
 		}
+		// The old primary crashes and loses the end of its active binlog,
+		// which the replica has applied; it rejoins as a replica. The trial
+		// then runs long enough for it to be promoted again (and issue the
+		// lost GTIDs again) and for the other site to archive its copies of
+		// that era. Half of the time the new primary never uploads a binlog:
+		// its era, and its copies of what the old primary lost, are then
+		// archived by the old primary alone, which never had the lost
+		// transactions again.
+		if drop == 0 && crashes < 2 && r.Intn(3) == 0 {
+			if n := p.srv[primary].tailOwn(); n > 0 {
+				how.lose = 1 + r.Intn(min(n, 3))
+				how.restart = r.Intn(2) == 0
+				how.mute = r.Intn(2) == 0
+				eras = max(eras, era+3+r.Intn(2))
+				crashes++
+			}
+		}
 		p.failover(primary, replica, drop, archiveTail, how)
 		primary, replica = replica, primary
 	}
@@ -410,26 +600,31 @@ func runPropTrial(t *testing.T, seed int64) (planned, refused, contained int) {
 	}
 	p.targets = append(p.targets, time.Now().UTC().Add(time.Hour))
 	o := newPropOracle(t, p, time.Microsecond)
-	t.Logf("seed %d: %d eras, backup on %s, lossy=%v (lost %s), inverted=%v, archived %s", seed, eras, backupSite, p.lossy, p.dead, p.inverted, o.archived)
+	t.Logf("seed %d: %d eras, backup on %s, lossy=%v (lost %s), inverted=%v, crashed=%v (lost tail %s, issued again: %v), archived %s",
+		seed, eras, backupSite, p.lossy, p.dead, p.inverted, p.crashed, p.lostTail, p.reissued, o.archived)
 	if os.Getenv("PITR_PLAN_SEED") != "" {
 		o.describe()
 	}
 	o.checkRecords(fmt.Sprintf("seed %d", seed))
 	res := o.run(fmt.Sprintf("seed %d", seed))
+	st.crashed, st.reissued = p.crashed, p.reissued
 	for _, r := range res {
 		if r.err != nil {
-			refused++
-		} else {
-			planned++
-			if o.byContainment(r.plan) {
-				contained++
-			}
+			st.refused++
+			continue
+		}
+		st.planned++
+		if o.byContainment(r.plan) {
+			st.contained++
+		}
+		if p.crashed {
+			st.crashedPlanned++
 		}
 	}
-	if planned+refused == 0 {
+	if st.planned+st.refused == 0 {
 		t.Fatalf("seed %d: the oracle checked nothing", seed)
 	}
-	return planned, refused, contained
+	return st
 }
 
 // propOracle holds the reference model's view of one finished trial.
@@ -443,8 +638,19 @@ type propOracle struct {
 	B        pitrplan.Set
 	maxOctB  int64
 
+	// copies are the archived transactions, read from every row's bytes: a
+	// GTID that was issued twice has copies with two commit times.
+	copies []propCopy
+
 	mu      sync.Mutex
 	fetched map[pitrplan.RowRef]*pitrplan.FileIndex
+}
+
+// propCopy is one archived copy of a transaction.
+type propCopy struct {
+	row pitrplan.RowRef
+	g   pitrplan.GTID
+	oct int64
 }
 
 type propResult struct {
@@ -470,9 +676,18 @@ func newPropOracle(t *testing.T, p *propTrial, delta time.Duration) *propOracle 
 		}
 	}
 	o.B = pitrplan.MustParseSet(p.backup.GTIDExecuted)
-	for _, g := range o.B.GTIDs() {
-		o.maxOctB = max(o.maxOctB, p.model.oct[g])
+	o.maxOctB = p.backupMaxOct
+	fetch := o.fetcher(pitrplan.NewBudget(64 << 20))
+	for ref := range o.rows {
+		idx, err := fetch.Fetch(context.Background(), ref)
+		if err != nil {
+			t.Fatalf("read %s/%s: %v", ref.Site, ref.Name, err)
+		}
+		for i := range idx.Txns {
+			o.copies = append(o.copies, propCopy{ref, idx.GTID(i), idx.Txns[i].OCT})
+		}
 	}
+	o.fetched = map[pitrplan.RowRef]*pitrplan.FileIndex{}
 	return o
 }
 
@@ -486,6 +701,18 @@ func (o *propOracle) describe() {
 			log = append(log, short(c.g))
 		}
 		o.t.Logf("model %s executed: %s", site, strings.Join(log, " "))
+		for i, past := range o.p.model.past[site] {
+			log = log[:0]
+			for _, c := range past {
+				log = append(log, short(c.g))
+			}
+			o.t.Logf("model %s before its crash %d: %s", site, i+1, strings.Join(log, " "))
+		}
+	}
+	for _, c := range o.copies {
+		if o.p.lostTail.Has(c.g) {
+			o.t.Logf("copy of %s in %s/%s committed at %s", short(c.g), c.row.Site, c.row.Name, time.UnixMicro(c.oct).UTC().Format(time.RFC3339Nano))
+		}
 	}
 	for _, sm := range o.arch.Sites {
 		for _, row := range sm.Rows {
@@ -752,9 +979,12 @@ func (o *propOracle) checkRecords(label string) {
 			}
 			if !rec.ConfirmedAt.IsZero() {
 				added := pitrplan.MustParseSet(rec.ConfirmedGTIDAdded)
-				if added.Overlaps(set) || !p.executed(sm.Site).Contains(set.Union(added)) || rec.ConfirmedAt.Before(rec.ObservedAt.Add(propConfirmDelay)) {
+				if added.Overlaps(set) || !p.everExecuted(sm.Site).Contains(set.Union(added)) || rec.ConfirmedAt.Before(rec.ObservedAt.Add(propConfirmDelay)) {
 					t.Fatalf("%s: %s#%d is confirmed at %s (observed at %s) with %s beyond %s; the server executed %s",
-						label, sm.Site, i, rec.ConfirmedAt, rec.ObservedAt, added, set, p.executed(sm.Site))
+						label, sm.Site, i, rec.ConfirmedAt, rec.ObservedAt, added, set, p.everExecuted(sm.Site))
+				}
+				if rec.PromotionGTIDExecuted == "" {
+					t.Fatalf("%s: %s#%d is confirmed and carries no promotion set: %+v", label, sm.Site, i, rec)
 				}
 			}
 		}
@@ -837,6 +1067,10 @@ func (o *propOracle) run(label string) []propResult {
 	if !p.dead.IsEmpty() && !p.dead.Overlaps(o.B) {
 		excludes = append(excludes, p.dead)
 	}
+	// Excluding what a crash lost is the remedy the refusals name.
+	if !p.lostTail.IsEmpty() && !p.lostTail.Overlaps(o.B) {
+		excludes = append(excludes, p.lostTail)
+	}
 	var out []propResult
 	// Every query is planned again with spilled arrays (issue #266).
 	spill, spilling := newPropSpill(t)
@@ -894,8 +1128,101 @@ func (o *propOracle) refusal(what string, err error, justified map[pitrarchive.T
 	}
 }
 
+// checkCrashed is the oracle of a trial in which a server lost its last
+// transactions in a crash and rejoined. A GTID may then name two
+// transactions, so the model compares transactions, a GTID with its commit
+// time. A certified timestamp plan has the model's witness: the earliest
+// archived copy at or after T outside B ∪ X. Its history is what that
+// transaction's origin had executed just before it, in the incarnation that
+// committed it; a latest plan's is a state some server held. Λ ∖ X is that
+// history's GTID set, the backup holds the very transactions of that
+// history, and so does every segment: a plan that replays the transaction
+// a server lost, where the history has the one issued under its GTID
+// later (or neither), fails here. Any refusal is accepted: the model does
+// not predict which of the planner's checks sees the loss first.
+func (o *propOracle) checkCrashed(what string, mode pitrplan.Mode, T time.Time, X pitrplan.Set, plan *pitrplan.Plan, err error) {
+	t, p := o.t, o.p
+	if err != nil {
+		if _, ok := pitrplan.RefusalOf(err); !ok {
+			t.Fatalf("%s: non-refusal error %v", what, err)
+		}
+		return
+	}
+	var histories [][]propCommit
+	if mode == pitrplan.ModeTimestamp {
+		var w *propCopy
+		for i := range o.copies {
+			c := &o.copies[i]
+			if c.oct >= T.UnixMicro() && !o.B.Has(c.g) && !X.Has(c.g) && (w == nil || c.oct < w.oct) {
+				w = c
+			}
+		}
+		if w == nil {
+			t.Fatalf("%s: certified %+v, but the model has no witness", what, plan.Witness)
+		}
+		if plan.Witness == nil || plan.Witness.GTID != w.g || plan.Witness.CommitTime != w.oct {
+			t.Fatalf("%s: witness %+v, the model says %s committed at %d", what, plan.Witness, w.g, w.oct)
+		}
+		origin := ""
+		for site, uuid := range p.uuid {
+			if uuid == w.g.SID {
+				origin = site
+			}
+		}
+		h, ok := p.model.historyBefore(origin, w.g, w.oct)
+		if !ok {
+			t.Fatalf("%s: the witness %s committed at %d is no transaction %s committed", what, w.g, w.oct, origin)
+		}
+		histories = [][]propCommit{h}
+	} else {
+		histories = p.model.heldHistories(plan.Lineage)
+		if len(histories) == 0 || plan.Lineage.Subtract(X).Overlaps(p.dead) {
+			t.Fatalf("%s: latest Λ %s is not a server state, or holds lost %s", what, plan.Lineage, p.dead)
+		}
+	}
+	applied := o.checkSegments(what, X, plan)
+	var why []string
+	for _, h := range histories {
+		reason := o.differs(h, X, plan, applied)
+		if reason == "" {
+			return
+		}
+		why = append(why, reason)
+	}
+	t.Fatalf("%s: certified Λ %s with witness %+v and segments %v, which is not the history: %s", what, plan.Lineage, plan.Witness, applied, strings.Join(why, "; "))
+}
+
+// differs says how plan differs from the history h, transaction by
+// transaction, or returns "".
+func (o *propOracle) differs(h []propCommit, X pitrplan.Set, plan *pitrplan.Plan, applied []propCommit) string {
+	want := map[pitrplan.GTID]int64{}
+	set := pitrplan.Set{}
+	for _, c := range h {
+		want[c.g] = c.oct
+		set = set.Union(pitrplan.SetOf(c.g))
+	}
+	if !plan.Lineage.Subtract(X).Equal(set.Subtract(X)) {
+		return fmt.Sprintf("Λ∖X is %s, the history holds %s", plan.Lineage.Subtract(X), set.Subtract(X))
+	}
+	for g, oct := range o.p.backupIssues {
+		if in, ok := want[g]; ok && in != oct {
+			return fmt.Sprintf("the backup holds the %s committed at %d, the history the one committed at %d", g, oct, in)
+		}
+	}
+	for _, c := range applied {
+		if want[c.g] != c.oct {
+			return fmt.Sprintf("a segment replays the %s committed at %d, the history holds the one committed at %d", c.g, c.oct, want[c.g])
+		}
+	}
+	return ""
+}
+
 func (o *propOracle) checkTimestamp(what string, T time.Time, X pitrplan.Set, plan *pitrplan.Plan, err error) {
 	t, m := o.t, o.p.model
+	if o.p.crashed {
+		o.checkCrashed(what, pitrplan.ModeTimestamp, T, X, plan, err)
+		return
+	}
 	justified := map[pitrarchive.Token]bool{}
 	if T.UnixMicro() <= o.maxOctB || T.Before(o.p.backup.ServerClock.End.Add(time.Second)) {
 		justified[pitrarchive.TokenBackupAfterTarget] = true
@@ -945,6 +1272,10 @@ func (o *propOracle) checkTimestamp(what string, T time.Time, X pitrplan.Set, pl
 
 func (o *propOracle) checkLatest(what string, X pitrplan.Set, plan *pitrplan.Plan, err error) {
 	t, p := o.t, o.p
+	if p.crashed {
+		o.checkCrashed(what, pitrplan.ModeLatest, time.Time{}, X, plan, err)
+		return
+	}
 	justified := map[pitrarchive.Token]bool{}
 	lostArchived := p.dead.Intersect(o.archived).Subtract(X)
 	lost := o.modelLost(X)
@@ -1006,10 +1337,12 @@ func (o *propOracle) checkLatest(what string, X pitrplan.Set, plan *pitrplan.Pla
 // it names (F232): its start predecessors are that file's Previous_gtids ∪
 // baseGtids ∪ the transactions before Start, it applies exactly the
 // unexcluded transactions of [Start, End), and applied to B in order the
-// segments yield Λ ∖ X.
-func (o *propOracle) checkSegments(what string, X pitrplan.Set, plan *pitrplan.Plan) {
+// segments yield Λ ∖ X. It returns the transactions the segments apply, as
+// their files hold them.
+func (o *propOracle) checkSegments(what string, X pitrplan.Set, plan *pitrplan.Plan) []propCommit {
 	t := o.t
 	state := o.B
+	var replayed []propCommit
 	for k, s := range plan.Segments {
 		if s.File < 0 || s.File >= len(plan.Files) {
 			t.Fatalf("%s: segment %d names file %d of %d", what, k, s.File, len(plan.Files))
@@ -1041,6 +1374,7 @@ func (o *propOracle) checkSegments(what string, X pitrplan.Set, plan *pitrplan.P
 				continue
 			}
 			applied = applied.Union(pitrplan.SetOf(g))
+			replayed = append(replayed, propCommit{g, idx.Txns[i].OCT})
 			n++
 			if first == 0 {
 				first, start = idx.Txns[i].OCT, idx.Txns[i].Pos
@@ -1060,6 +1394,7 @@ func (o *propOracle) checkSegments(what string, X pitrplan.Set, plan *pitrplan.P
 	if !state.Equal(plan.Lineage.Subtract(X)) {
 		t.Fatalf("%s: final %s, Λ∖X %s", what, state, plan.Lineage.Subtract(X))
 	}
+	return replayed
 }
 
 func TestPITRPlanProperty(t *testing.T) {
@@ -1071,10 +1406,16 @@ func TestPITRPlanProperty(t *testing.T) {
 		}
 		seeds = append(seeds, n)
 	} else {
-		// 20 seeds: the first trial in which a planner that anchored with a
-		// whole promotion record instead of its promotion set certifies a
-		// wrong history is seed 19 (8 of the first 300 seeds do).
-		last := int64(20)
+		// 32 seeds, so that the default run holds the planner to each rule
+		// of an anchored witness. A planner that does not hold a replica
+		// copy to its anchor certifies a history without transactions the
+		// origin had from seed 27 on (a copy that lacks members of the
+		// anchor, or of the record's sample outside its promotion set), and
+		// replays a transaction its origin had lost from seed 32 on (the
+		// predecessors' commit times); the planner of 4c2052dc does both.
+		// A planner that anchors with a whole promotion record instead of
+		// its promotion set fails earlier.
+		last := int64(32)
 		if v := os.Getenv("PITR_PLAN_SEEDS"); v != "" {
 			n, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {
@@ -1087,20 +1428,32 @@ func TestPITRPlanProperty(t *testing.T) {
 		}
 	}
 	planned, refused, contained := 0, 0, 0
+	crashed, reissued, crashedPlanned := 0, 0, 0
 	for _, seed := range seeds {
 		t.Run(strconv.FormatInt(seed, 10), func(t *testing.T) {
-			pl, rf, ct := runPropTrial(t, seed)
-			planned += pl
-			refused += rf
-			contained += ct
+			st := runPropTrial(t, seed)
+			planned += st.planned
+			refused += st.refused
+			contained += st.contained
+			crashedPlanned += st.crashedPlanned
+			if st.crashed {
+				crashed++
+			}
+			if st.reissued {
+				reissued++
+			}
 		})
 	}
-	t.Logf("%d certified plans (%d through a containment anchor), %d refusals over %d trials", planned, contained, refused, len(seeds))
+	t.Logf("%d certified plans (%d through a containment anchor), %d refusals over %d trials; an old primary lost its tail and rejoined in %d trials (%d certified plans), and issued a lost GTID again in %d",
+		planned, contained, refused, len(seeds), crashed, crashedPlanned, reissued)
 	if len(seeds) > 1 && planned < len(seeds) {
 		t.Errorf("the sweep certified only %d plans; the generator is not exercising the planner", planned)
 	}
 	if len(seeds) >= 10 && contained == 0 {
 		t.Errorf("no plan of the sweep needed a containment anchor; the generator is not exercising the lag window")
+	}
+	if len(seeds) >= 30 && (reissued == 0 || crashedPlanned == 0) {
+		t.Errorf("an old primary lost its tail in %d trials and issued a lost GTID again in %d, with %d certified plans; the generator is not exercising a rejoin after a loss", crashed, reissued, crashedPlanned)
 	}
 }
 

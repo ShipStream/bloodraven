@@ -263,7 +263,7 @@ func TestPromotionSetNeedsReadOnlyObservation(t *testing.T) {
 	t.Run("history replaced before the episode", func(t *testing.T) {
 		f := newPSFixture(t, psPeer+":1-5", "", psPeer+":1-3")
 		rec := f.promote(psPeer + ":1-3")
-		f.wantNoSet(rec, "the server changed incarnation and the change is not recorded yet")
+		f.wantNoSet(rec, "the server changed incarnation between the sidecar's last read-only observation and the episode")
 		if rec.ReadOnlyGTIDExecuted != psPeer+":1-5" {
 			t.Fatalf("readOnlyGtidExecuted %q is kept for diagnosis", rec.ReadOnlyGTIDExecuted)
 		}
@@ -340,6 +340,40 @@ func TestPromotionSetReadFailures(t *testing.T) {
 		f.wantNoSet(f.promote(fmt.Sprintf("%s:1-7,%s:1-%d", psPeer, psOwn, promotionSetMaxFiles+1)),
 			fmt.Sprintf("none of the %d newest binlog files was opened before the episode's first transaction", promotionSetMaxFiles))
 	})
+}
+
+// The read-only observation is of one incarnation; the server then loses
+// transactions and becomes writable (review r5). The probe that opens the
+// episode is slower than maxRoleProbeSpread, so it cannot open the record,
+// but it shows the change, which is written as a reset record and
+// forgotten. Before the next probe the server commits a transaction of its
+// own and then applies the lost ones again, so that probe's gtid_executed
+// contains the read-only observation's and no reset is pending. The record
+// it opens must not take that observation for its promotion set: this
+// incarnation executed PEER:4-5 after OWN:1.
+func TestPromotionSetAcrossRecordedIncarnationChange(t *testing.T) {
+	f := newPSFixture(t, psPeer+":1-5", "", psPeer+":1-3")
+	f.role.probe = 2 * time.Second
+	f.set(false, psPeer+":1-3")
+	f.tick(5 * time.Second)
+	recs := f.records()
+	if len(recs) != 1 || recs[0].Kind != pitrarchive.RecordReset || recs[0].GTIDExecuted != psPeer+":1-3" {
+		t.Fatalf("after the slow probe: %+v, want the reset record alone", recs)
+	}
+	f.role.probe = 0
+	f.set(false, psPeer+":1-5,"+psOwn+":1")
+	f.tick(5 * time.Second)
+	recs = f.records()
+	if len(recs) != 2 || recs[1].Kind != pitrarchive.RecordPromotion || recs[1].GTIDExecuted != psPeer+":1-5,"+psOwn+":1" {
+		t.Fatalf("after the prompt probe: %+v, want the episode's promotion record", recs)
+	}
+	f.wantNoSet(recs[1], "the server changed incarnation between the sidecar's last read-only observation and the episode")
+	// A record without a promotion set gets no confirmation either.
+	f.tick(10 * time.Second)
+	f.tick(5 * time.Second)
+	if got := f.records()[1]; !got.ConfirmedAt.IsZero() || got.ConfirmedGTIDAdded != "" {
+		t.Fatalf("the record without a promotion set was confirmed: %+v", got)
+	}
 }
 
 // The server must be the record's incarnation after the last file read: a
@@ -587,16 +621,18 @@ func TestPromotionRecordConfirmationNeedsAnUninterruptedEpisode(t *testing.T) {
 			if !promotions[0].ConfirmedAt.IsZero() {
 				t.Fatalf("the interrupted episode's record was confirmed: %+v", promotions[0])
 			}
-			// The episode after the interruption is confirmed on its own.
-			if promotions[1].ConfirmedAt.IsZero() || (promotions[1].PromotionGTIDExecuted != "") != tt.set {
+			// The episode after the interruption is confirmed on its own,
+			// when it has a promotion set: a confirmation is evidence only
+			// beside one, so a record without one gets none.
+			if (promotions[1].PromotionGTIDExecuted != "") != tt.set || promotions[1].ConfirmedAt.IsZero() == tt.set {
 				t.Fatalf("the new episode's record: %+v", promotions[1])
 			}
 		})
 	}
 }
 
-// A sidecar restart forgets the episode: the old record stays unconfirmed
-// and the restart's record, which has no promotion set, gets its own.
+// A sidecar restart forgets the episode: the old record stays unconfirmed,
+// and so does the restart's record, which has no promotion set.
 func TestPromotionRecordConfirmationAcrossRestart(t *testing.T) {
 	f := newPSFixture(t, psPeer+":1-5", "", psPeer+":1-7")
 	first := f.promote(psPeer + ":1-7")
@@ -608,7 +644,7 @@ func TestPromotionRecordConfirmationAcrossRestart(t *testing.T) {
 	if len(recs) != 2 || recs[0] != first {
 		t.Fatalf("records = %+v", recs)
 	}
-	if recs[1].PromotionGTIDExecuted != "" || recs[1].ConfirmedAt.IsZero() {
+	if recs[1].PromotionGTIDExecuted != "" || !recs[1].ConfirmedAt.IsZero() || recs[1].ConfirmedGTIDAdded != "" {
 		t.Fatalf("the restart's record = %+v", recs[1])
 	}
 }

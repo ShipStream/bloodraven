@@ -234,17 +234,6 @@ func TestWitnessContainmentFences(t *testing.T) {
 			wantUncontained(t, tt.name, s, 52.5, tt.fence)
 		})
 	}
-
-	// The same server recorded on another site: a record there that holds
-	// w and is not provably later than the anchor makes the episode
-	// ambiguous.
-	s := containmentArchive(t, lagRecord())
-	s.site("c").Promotions = append(s.site("c").Promotions, cRec(59.1, "A:1-59,D:1", ""))
-	wantUncontained(t, "same server on another site within δ", s, 52.5,
-		"does not anchor A:53 by containment: c#0, a record of the same server on another site observed at 2026-11-01T12:00:59.100000Z, also holds A:53 and is not provably later")
-	s = containmentArchive(t, lagRecord())
-	s.site("c").Promotions = append(s.site("c").Promotions, cRec(59.3, "A:1-59,D:1", ""))
-	wantContained(t, "same server on another site, later", s, 52.5, "A:53", "A:1-52,D:1", "a#0")
 }
 
 // The cap drops a manifest's oldest records. For a containment anchor a
@@ -276,24 +265,43 @@ func TestWitnessContainmentAtRecordCap(t *testing.T) {
 // The record dates its episode: a transaction committed before the episode
 // can have begun, or after the sample that holds it, is not the one the
 // sidecar sampled (a server that lost a transaction issues its GTID again).
+// The record's times and the commit time are readings of one clock (the
+// sidecar probes the mysqld of its own pod), so the bounds carry no
+// clock-skew margin.
 func TestWitnessContainmentEpisodeWindow(t *testing.T) {
-	// A record observed 500 s later claims A:53 as its episode's own.
-	reissued := cRec(500, "A:1-100,D:1", "A:1-52,A:54-100,D:1")
-	wantUncontained(t, "committed before the episode", containmentArchive(t, reissued), 52.5,
-		"does not anchor A:53 by containment: A:53 was committed at 2026-11-01T12:00:53.000000Z, more than the record's probe interval (5s) and the 5s clock-skew margin before it was observed, so before its episode can have begun",
+	// held is a record observed at second at that holds A:53 (53 s) as its
+	// episode's first transaction.
+	held := func(at float64) pitrarchive.PromotionRecord { return cRec(at, "A:1-53,D:1", "A:1-52,D:1") }
+	wantContained(t, "committed when the record was observed", containmentArchive(t, held(53)), 52.5, "A:53", "A:1-52,D:1", "a#0")
+	wantUncontained(t, "committed after the record was observed", containmentArchive(t, held(52.999999)), 52.5,
+		"does not anchor A:53 by containment: A:53 was committed at 2026-11-01T12:00:53.000000Z, after the record that holds it was observed: the archived transaction is not the one the record saw (the GTID was issued twice, or the server's clock was set back in between)")
+	// The episode began no earlier than the probe interval (5 s) before
+	// the record: a commit at that instant is inside, one µs earlier is not.
+	wantContained(t, "committed at the window's start", containmentArchive(t, held(58)), 52.5, "A:53", "A:1-52,D:1", "a#0")
+	wantUncontained(t, "committed before the window's start", containmentArchive(t, held(58.000001)), 52.5,
+		"does not anchor A:53 by containment: A:53 was committed at 2026-11-01T12:00:53.000000Z, more than the record's probe interval (5s) before the record was observed, so before its episode can have begun",
 		"the GTID was issued twice")
-	// Exactly at the bound (observed − PI − δ) is still outside.
-	bound := cRec(63, "A:1-100,D:1", "A:1-52,A:54-100,D:1")
-	wantUncontained(t, "committed at the window's start", containmentArchive(t, bound), 52.5, "before its episode can have begun")
+	wantUncontained(t, "committed long before the episode", containmentArchive(t, held(500)), 52.5, "before its episode can have begun")
 
 	unknown := lagRecord()
 	unknown.ProbeInterval = 0
-	wantUncontained(t, "unknown probe interval", containmentArchive(t, unknown), 52.5, "does not anchor A:53 by containment: its probe interval is unknown")
+	wantUncontained(t, "unknown probe interval", containmentArchive(t, unknown), 52.5, "does not anchor A:53 by containment: its probe interval is unknown, so it does not date its episode")
 
-	// The record holds A:57, which commits 6.5 s after the record's time.
-	early := cRec(50.5, "A:1-60,D:1", "A:1-50,D:1")
-	wantUncontained(t, "committed after the sample", containmentArchive(t, early), 56.5,
-		"does not anchor A:57 by containment: A:57 was committed at 2026-11-01T12:00:57.000000Z, the 5s clock-skew margin or more after the sample that holds it (2026-11-01T12:00:50.500000Z)")
+	// A witness that only the confirmation holds was committed after the
+	// record's own sample, which the server read at most
+	// PromotionProbeSpread (1 s) before the record's time, and before the
+	// confirmation was read.
+	confirmed := func(at, confirmedAt float64) pitrarchive.PromotionRecord {
+		return cConfirm(cRec(at, "A:1-52,D:1", "A:1-52,D:1"), confirmedAt, "A:53-60")
+	}
+	wantContained(t, "confirmation-held, 1 s before the record", containmentArchive(t, confirmed(54, 64.1)), 52.5, "A:53", "A:1-52,D:1", "a#0")
+	wantUncontained(t, "confirmation-held, more than 1 s before the record", containmentArchive(t, confirmed(54.000001, 64.1)), 52.5,
+		"does not anchor A:53 by containment: A:53 was committed at 2026-11-01T12:00:53.000000Z, more than 1s before the record was observed, yet the record does not hold it and its confirmation does: the archived transaction is not the one the confirmation saw")
+	// The reader does not rely on the writer's confirmation delay: a
+	// confirmation dated before the witness cannot have seen it.
+	wantContained(t, "confirmation-held, committed when it was observed", containmentArchive(t, confirmed(52.5, 53)), 52.6, "A:53", "A:1-52,D:1", "a#0")
+	wantUncontained(t, "confirmation-held, committed after it", containmentArchive(t, confirmed(52.5, 52.999999)), 52.6,
+		"does not anchor A:53 by containment: A:53 was committed at 2026-11-01T12:00:53.000000Z, after the confirmation that holds it was observed (2026-11-01T12:00:52.999999Z)")
 }
 
 // A second promotion of the same server: each record anchors its own

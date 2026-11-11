@@ -39,6 +39,15 @@
 // the records around it (fenceOf), and exclusions never set a record
 // aside (N1). A record's readOnlyGtidExecuted is not read.
 //
+// An anchor proves that the origin had executed a set before the witness;
+// the plan certifies everything the copy follows. So an accepted copy is
+// held to its anchor (copyAgainstAnchor): it follows all of the anchor,
+// and the transactions it follows under the origin's server_uuid outside
+// a promotion set of the origin were committed in that record's episode
+// or later, by their archived copies' commit times. A copy on a server
+// that lost transactions and never got them back, or on a replica that
+// kept transactions its source lost and issued again, refuses.
+//
 // Every downloaded copy of a GTID is compared with the others as it arrives
 // (ingest and compare, plan.go): commit time, origin server, emptiness, and
 // its row changes (EffectDigest, issue #268). Two copies that change other

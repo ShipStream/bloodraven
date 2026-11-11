@@ -178,12 +178,16 @@ func (pr *promoRef) holds(g GTID) bool {
 // sidecar, and one that a writer or a tool damaged, plan as before:
 //
 //   - P must be a GTID set contained in the record's gtidExecuted;
+//   - the record must carry a probe interval: P is evidence about the
+//     record's episode, and the probe interval is what dates the episode
+//     (containmentAnchor, episodeDates);
 //   - a confirmation (confirmedAt) needs P, must not precede observedAt,
 //     and its confirmedGtidAdded must be a GTID set; an addition without
 //     confirmedAt is no confirmation, and makes P unusable too.
 //
 // The confirmed set is gtidExecuted ∪ confirmedGtidAdded, so it contains
-// gtidExecuted by construction.
+// gtidExecuted by construction. A confirmation on a record without P is
+// not read: the sidecar writes none, and it would prove nothing here.
 func recordEvidence(rec pitrarchive.PromotionRecord, set Set) (proven, confirmed Set, unusable string) {
 	if rec.Kind != pitrarchive.RecordPromotion || rec.PromotionGTIDExecuted == "" {
 		return nil, nil, ""
@@ -194,6 +198,9 @@ func recordEvidence(rec pitrarchive.PromotionRecord, set Set) (proven, confirmed
 	}
 	if !set.Contains(p) {
 		return nil, nil, fmt.Sprintf("its promotionGtidExecuted holds %s, which its gtidExecuted lacks", p.Subtract(set).bounded(256))
+	}
+	if rec.ProbeInterval <= 0 {
+		return nil, nil, "its probe interval is unknown, so it does not date its episode"
 	}
 	if rec.ConfirmedAt.IsZero() {
 		if rec.ConfirmedGTIDAdded != "" {

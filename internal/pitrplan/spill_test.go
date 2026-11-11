@@ -775,6 +775,17 @@ var oracleSuites = map[string]func(*testing.T){
 	"TestWitnessRecordContainingWIsNotAnAnchor":            TestWitnessRecordContainingWIsNotAnAnchor,
 	"TestWitnessTies":                                      TestWitnessTies,
 	"TestWitnessUnknownTimeHints":                          TestWitnessUnknownTimeHints,
+	"TestWitnessLostTailReissued":                          TestWitnessLostTailReissued,
+	"TestWitnessLostTailReissuedInAnEarlierEpisode":        TestWitnessLostTailReissuedInAnEarlierEpisode,
+	"TestWitnessLostTailOmitted":                           TestWitnessLostTailOmitted,
+	"TestWitnessContainmentUnorderedPredecessors":          TestWitnessContainmentUnorderedPredecessors,
+	"TestWitnessContainmentCopyBeyondSample":               TestWitnessContainmentCopyBeyondSample,
+	"TestWitnessContainmentEpisodePredecessors":            TestWitnessContainmentEpisodePredecessors,
+	"TestWitnessAnchorConfirmationBeforeWitness":           TestWitnessAnchorConfirmationBeforeWitness,
+	"TestWitnessContainmentSameServerOnTwoSites":           TestWitnessContainmentSameServerOnTwoSites,
+	"TestWitnessContainmentRecordOrder":                    TestWitnessContainmentRecordOrder,
+	"TestWitnessContainmentEarlierHolderByConfirmation":    TestWitnessContainmentEarlierHolderByConfirmation,
+	"TestWitnessContainmentResidualIssuedTwice":            TestWitnessContainmentResidualIssuedTwice,
 	"TestBudgetBoundsLiveHeapManyTags (segments, spilled)": TestBudgetBoundsLiveHeapManyTags,
 }
 

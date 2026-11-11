@@ -32,7 +32,8 @@ type RoleObservation struct {
 // probe returned, so a slow probe would spend part of the planner's
 // clock-skew margin δ (pitrarchive.ClockSkewMargin, 5s) on the gap
 // between the GTID snapshot and its time; a slower one waits for the next.
-const maxRoleProbeSpread = time.Second
+// The planner relies on the bound (pitrarchive.PromotionProbeSpread).
+const maxRoleProbeSpread = pitrarchive.PromotionProbeSpread
 
 // roleProber is the role probe the archiver needs to write promotion
 // records. *LiveMysql implements it; a checker without it can still report
@@ -102,9 +103,11 @@ type roleTimeline struct {
 	// readOnly is the latest observation while it is read-only;
 	// readOnlyBefore is the gtid_executed of the read-only observation
 	// directly before the epoch, of the same server ("" when there was
-	// none). It is recorded, and it is the first source of the record's
-	// promotion set (promotionSet, issue #269). readOnlyObserved says
-	// there was one: a server that has executed nothing reports "".
+	// none). It is recorded. readOnlyObserved says that there was one and
+	// that the observation which opened the epoch continues its
+	// incarnation: only then is it the first source of the record's
+	// promotion set (promotionSet, issue #269). A server that has executed
+	// nothing reports "", so the flag, not the string, says there was one.
 	readOnly         *RoleObservation
 	readOnlyBefore   string
 	readOnlyObserved bool
@@ -192,10 +195,18 @@ func (t *roleTimeline) observe(obs RoleObservation, complete bool, err error) {
 		t.state, t.readOnly, t.first, t.confirm = roleReadOnly, &ro, nil, nil
 	default:
 		if t.state != roleWritable || !complete || !t.complete || !sameIncarnation(t.last, obs) {
+			// The read-only observation counts only when the observation
+			// that opens the epoch continues its incarnation. Every later
+			// observation of the epoch continues the one before it, so the
+			// epoch is then one incarnation from the read-only observation
+			// on. An incarnation change in between is recorded as a reset,
+			// and a set that has grown back over it by the time the record
+			// is opened would otherwise pass for one history (review r5).
+			// It is still recorded for diagnosis when the server is the same.
 			before, observed := "", false
 			if t.state == roleReadOnly && complete && t.readOnly != nil &&
 				t.readOnly.ServerUUID == obs.ServerUUID && t.readOnly.ServerID == obs.ServerID {
-				before, observed = t.readOnly.GTIDExecuted, true
+				before, observed = t.readOnly.GTIDExecuted, sameIncarnation(*t.readOnly, obs)
 			}
 			t.epoch++
 			t.first, t.confirm, t.readOnlyBefore, t.readOnlyObserved = nil, nil, before, observed
@@ -523,10 +534,15 @@ type promotionSetReader struct {
 // whatever G_ro lacks was executed after it was read. F* is the newest
 // local binlog file whose Previous_gtids hold no transaction under the
 // server's own server_uuid (plain or tagged) beyond G_ro, and nothing
-// first's gtid_executed lacks. A file's Previous_gtids are the
-// transactions the server had logged when it opened the file, so a
-// transaction outside them was executed after the file was opened; that
-// makes every boundary of this incarnation sound, and this choice the
+// first's gtid_executed lacks. A file's Previous_gtids are a subset of
+// what the server had executed when it opened the file (on MySQL 9.7 they
+// leave out the GTIDs that are only in mysql.gtid_executed, such as a
+// clone's or an assigned gtid_purged; G_ro supplies those), and they hold
+// every transaction the server itself had committed by then. Only that is
+// used: every member was executed before the file was opened, and a
+// transaction under the server's own server_uuid outside them was
+// committed after it. That makes every boundary of this incarnation
+// sound, and this choice the
 // useful one: F* was opened before the episode's first own transaction,
 // so all of the episode's own transactions are outside P. After an
 // acknowledged promotion-time FLUSH BINARY LOGS, F* is the file it opened
@@ -534,8 +550,9 @@ type promotionSetReader struct {
 // is smaller; with none at all P is G_ro.
 //
 // What keeps a file of another incarnation out (binlog numbering restarts
-// after a clone or a reset): G_ro and first must be one incarnation with
-// no incarnation change pending; the files from F* on must still be in
+// after a clone or a reset): G_ro and every observation from it to first
+// must be one incarnation (roleTimeline.observe), with no incarnation
+// change pending; the files from F* on must still be in
 // the index, in order, when the reads are done; and a role probe taken
 // after the reads must show first's incarnation, still writable, in the
 // same epoch. A header that cannot be read (an encrypted or truncated
@@ -544,6 +561,9 @@ type promotionSetReader struct {
 // bound; the role probe itself is never touched.
 func (a *BinlogArchiver) promotionSet(ctx context.Context, snap roleSnapshot, first *RoleObservation) (set, why string) {
 	if !snap.readOnlyObserved {
+		if snap.readOnlyBefore != "" {
+			return "", "the server changed incarnation between the sidecar's last read-only observation and the episode"
+		}
 		return "", "the sidecar did not observe this server read-only directly before the episode"
 	}
 	if len(a.roles.pendingResets()) > 0 {
@@ -683,7 +703,8 @@ func indexStillHolds(index, run []string) bool {
 }
 
 // confirmEpisode adds the confirmation to the recorded episode's
-// promotion record (issue #269): once, from the timeline's confirming
+// promotion record when that carries a promotion set (issue #269): once,
+// from the timeline's confirming
 // observation (roleTimeline.confirm), through the same manifest save with
 // read-back as the record itself. It only runs for a recorded episode, so
 // it never stands between an episode and its first upload; a failed save
@@ -698,6 +719,13 @@ func (a *BinlogArchiver) confirmEpisode(ctx context.Context, snap roleSnapshot) 
 		return
 	}
 	rec := *a.episode.pending
+	if rec.PromotionGTIDExecuted == "" {
+		// A confirmation is evidence only beside a promotion set (the
+		// planner reads it for nothing else), so a record without one gets
+		// none: a field that is written must count.
+		a.episode.confirmed = true
+		return
+	}
 	// The epoch guarantees containment; an unparsable set proves nothing.
 	recorded, err := internalmysql.ParseGTIDSet(rec.GTIDExecuted)
 	if err != nil {
