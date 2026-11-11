@@ -33,7 +33,7 @@ rollout to the ordered updater, which does this:
     },
     {
       "label": "Failover",
-      "detail": "Promote the freshly-upgraded standby through the ordinary nine-step sequence. Your primary moves here. This records a failover and increments bloodraven_failovers_total."
+      "detail": "Promote the freshly-upgraded standby through the ordinary ten-step sequence. Your primary moves here. This records a failover and increments bloodraven_failovers_total."
     },
     {
       "label": "UpdateOldPrimary",

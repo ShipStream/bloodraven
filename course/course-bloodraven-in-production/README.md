@@ -2,7 +2,7 @@
 
 > Stop treating the loss of a database site as an incident. You will hold a site down and watch Bloodraven promote another one in about 12 seconds, move the primary on purpose at an RPO of exactly zero, read the precise count of transactions an emergency failover cost you off the cluster itself, and roll a MySQL upgrade underneath live traffic without an incident.
 
-Most people meet a failover operator and assume the hard part is the promotion. It is not. Promotion is nine SQL statements and takes about twelve seconds — that number is measured, not estimated, across nine recorded runs against a real cluster. The hard part is everything around it: knowing whether the operator will act at all, proving what the failover cost you, and discovering that a textbook-perfect promotion leaves your application reading yesterday's data on one code path and hard-failing on the other, with nothing anywhere paging anyone.
+Most people meet a failover operator and assume the hard part is the promotion. It is not. Promotion is ten short steps and takes about twelve seconds — that number is measured, not estimated, across nine recorded runs against a real cluster. The hard part is everything around it: knowing whether the operator will act at all, proving what the failover cost you, and discovering that a textbook-perfect promotion leaves your application reading yesterday's data on one code path and hard-failing on the other, with nothing anywhere paging anyone.
 
 You start by standing up a real three-site failover group on your laptop with an application reading and writing through it, and learning to read its status well enough to name the active site. Then you learn the decision loop — a two-second poll and a small table — until you can predict the operator's next move from a status dump alone. Unit 3 makes it real: you hold a site down, time the promotion, and audit the exact GTID set you lost. Unit 4 is where the database meets the application, and where the wall you hit at the end of Unit 3 gets explained. Unit 5 removes the assumption that anyone can see the truth: sidecars that fence themselves, split brain, five shapes of network partition, and the operator itself going away. Unit 6 adds backups, point-in-time recovery, encryption, alerting and a disaster-recovery drill, and finishes with a go-live checklist you would actually sign. Unit 7 is the two days the rest of the course skips: building a group from nothing, the TLS the CRD makes you have, and upgrading MySQL and the operator underneath live traffic.
 
@@ -82,7 +82,7 @@ Under the failover machinery there is a two-second poll loop and a small table. 
 
 You hold a site down and watch the whole sequence run — fence, kill, drain, promote, confirm, record, flip. You time it against a stopwatch rather than against the documentation, then prove exactly what the outage cost you in transactions, and decide what to do with the old primary when it comes back carrying writes nobody else has. It is a textbook-perfect promotion: `pdx` is writable in about twelve seconds and the counter application carries on as if nothing happened. That is the problem. It is still reading from `iad`, the site you just demoted.
 
-**The nine steps of a promotion** — Fence, kill, drain, stop, reset, record, unfence twice, confirm. What the code actually does, which steps are fatal, and why the same failover takes twelve seconds one day and thirty-six the next.
+**The ten steps of a promotion** — Fence, kill, drain, stop, reset, record, rotate, unfence twice, confirm. What the code actually does, which steps are fatal, and why the same failover takes twelve seconds one day and thirty-six the next.
 
   1. Put a site down hard enough to trigger a failover, and say why a container restart may not be enough
   2. Name the steps of the failover sequence in order and say which ones are fatal on error
@@ -94,7 +94,7 @@ You hold a site down and watch the whole sequence run — fence, kill, drain, pr
   5. Read `promotionGtidExecuted` and `divergentGtid` to get an exact lost-transaction count
   6. Pick the right row of the per-failure-mode RPO matrix for an outage in front of you
 
-**The old primary comes back** — One GTID containment test decides everything: rejoin as a replica, or sit in `RecoveryBlocked` holding transactions the new primary never saw. Then the reclone interlock, and the only two sanctioned ways out.
+**The old primary comes back** — One GTID containment test decides almost everything: rejoin as a replica, or sit in `RecoveryBlocked` holding transactions the new primary never saw. A site that came back without transactions of its own is recloned instead. Then the reclone interlock, and the only two sanctioned ways out.
 
   7. Predict whether a returning primary rejoins automatically or lands in `RecoveryBlocked`
   8. Run the reclone interlock with the `divergentGtid` confirmation token
@@ -237,7 +237,7 @@ Six units started from a group somebody else's script created. This one builds o
 **The card you keep** — Every default, reason string, promotion step, Service selector and metric label set on one screen — plus a glossary, and a rule for which facts belong in the dated appendix instead.
 
   10. Recall any shipped default and its playground override from one page
-  11. Name the five condition reasons, the nine promotion steps with fatality, and the four Service kinds without looking them up
+  11. Name the five condition reasons, the ten promotion steps with fatality, and the four Service kinds without looking them up
   12. Use the version appendix to decide whether a fact you remember is still true
 
 *Unit test — Day 0 and day 2* (10 questions, pass at 70%). Quick check: can you build a group from an empty namespace, design a certificate every client can verify against, and roll a MySQL upgrade without turning it into an incident?

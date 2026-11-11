@@ -8,7 +8,7 @@
 
 ## Topic generation prompt
 
-Scale `iad` back up. What happens next is decided by exactly one test, and the learner should be able to predict the outcome before the pod is Ready.
+Scale `iad` back up. What happens next is decided by comparing two GTID sets, and the learner should be able to predict the outcome before the pod is Ready. (Besides containment, the operator checks that the returning site still holds every transaction it issued itself; a site that does not is `RecloneRequired` and is recloned automatically, with a new `server_uuid`.)
 
 **The containment test.** There is no divergence if and only if the **new** primary's GTID set **contains** the old primary's. If it does, the operator logs that there is no GTID divergence and auto-recovers the old primary as a replica. If it does not, the operator computes the set difference — old minus new — and its transaction count, writes them to `status.sites[].divergentGtid`, sets the `bloodraven_divergent_transactions` gauge, and stops.
 

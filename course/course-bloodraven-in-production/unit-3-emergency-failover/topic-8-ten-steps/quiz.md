@@ -1,4 +1,4 @@
-# Quiz — The nine steps of a promotion
+# Quiz — The ten steps of a promotion
 
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
@@ -82,4 +82,4 @@ A strong answer: (a) names detection as the constant 6 s and derives it from pol
 
 **Explanation:**
 
-The gap is entirely the drain: the same 6 s detection, then either a drain that finishes on its first poll or one that spends its full 30 s budget on a backlog the applier could not finish. 12.0 s is measured; 36 s is the 6 s + 30 s ceiling, which is why the worst case is around 37 s rather than a flat 30-45 s. (objectives 2, 3)
+The gap is entirely the drain: the same 6 s detection, then either a drain that finishes on its first poll or one that spends its full 30 s budget on a backlog the applier could not finish. 12.0 s is measured; 36 s is 6 s + 30 s, and the binary log rotation that follows the drain is bounded at 1 s more, which is why the worst case is around 37 s rather than a flat 30-45 s. (objectives 2, 3)

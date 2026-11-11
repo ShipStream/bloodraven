@@ -7,16 +7,17 @@ replicas since you took it down. Bring it back:
 kubectl -n bloodraven-playground scale deployment/mysql-playground-iad --replicas=1
 ```
 
-Everything that follows is decided by exactly one test. You should be able to call the outcome before
-the pod is Ready.
+Everything that follows is decided by comparing two GTID sets. You should be able to call the outcome
+before the pod is Ready.
 
 ## One test, and its direction
 
 On every poll the operator looks for a site that is read-only with no active replication — the
 signature of a former primary — while another site is the directly confirmed writable primary. When
-it finds one it asks a single question: **does the new primary's GTID set contain the old primary's?**
+it finds one it asks its first question: **does the new primary's GTID set contain the old primary's?**
 
-If it does, there is nothing on `iad` that `pdx` has not already got. The operator logs
+If it does, there is nothing on `iad` that `pdx` has not already got. Provided `iad` also still holds
+everything it issued itself (the second check, below), the operator logs
 `no GTID divergence, auto-recovering old primary as replica` and rejoins the site itself. If it does
 not, it computes `divergent := oldGtid.Subtract(newGtid)`, counts the transactions in that difference,
 writes both to `status.sites[].divergentGtid` and `status.sites[].divergentTransactionCount`, sets the
@@ -36,6 +37,22 @@ why: *"Re-read after the fence: this is the authoritative set the divergence com
 
 A returning mysqld is not quiet. Compare two GTID sets while one is still advancing and your answer
 describes a moment already gone. The fence turns a moving target into a fact.
+
+## The second check: its own writes
+
+Containment has a blind spot. A site can come back with *fewer* transactions than it issued: its
+volume came back older, or a crash lost the end of both the redo log and the binary log
+(`innodb_flush_log_at_trx_commit` and `sync_binlog` both other than 1). If `pdx` holds those
+transactions, `iad`'s set is a subset of `pdx`'s and containment passes. A rejoin would still never
+repair it, because a MySQL replica drops every event that carries its own `server_id`: `iad` would
+replicate everything else, report both threads running, and issue the same GTIDs again for different
+transactions the next time it was promoted.
+
+So the operator also asks whether `pdx` holds transactions under `iad`'s `server_uuid` that `iad` no
+longer has. If it does, `iad` is neither rejoined nor promotable. It reads `recoveryState:
+RecloneRequired` with `lostGtid` and `lostTransactionCount`, `RecoveryPending` carries the reason
+`OwnTransactionsLost`, and the operator reclones the site from the primary itself, with no annotation.
+Every clone gives its recipient a new `server_uuid`, so the lost numbers cannot be issued twice.
 
 ## What the gate is not
 
@@ -153,7 +170,7 @@ running on.
 
 | Exit | Mechanism | Cost | Right when |
 | --- | --- | --- | --- |
-| Reclone `iad` from `pdx` | `CLONE INSTANCE` wipes and rebuilds the datadir; divergent transactions are discarded | Time and bytes — a full copy | The divergent set is expendable, or already extracted |
+| Reclone `iad` from `pdx` | `CLONE INSTANCE` wipes and rebuilds the datadir; divergent transactions are discarded, and `iad` comes back with a new `server_uuid` | Time and bytes — a full copy | The divergent set is expendable, or already extracted |
 | Replay the set onto `pdx` | You apply the missing transactions, so `pdx`'s set comes to contain `iad`'s | Cheap — but you must have actually extracted them | Those transactions matter enough to introduce into the surviving timeline |
 | Hand-repoint `iad` | Not sanctioned | — | Never |
 
