@@ -207,7 +207,7 @@ jobs:
       - name: Pull MySQL image
         run: docker pull mysql:9.7
       - name: Run native PITR tests
-        run: go test ./cmd/bloodraven ./internal/controller -run 'TestPITRNative' -v
+        run: go test ./cmd/bloodraven ./internal/controller ./internal/sidecar -run 'TestPITRNative' -v
       - name: Run native MySQL launcher test
         env:
           BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
