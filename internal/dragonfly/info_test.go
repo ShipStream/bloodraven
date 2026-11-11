@@ -167,3 +167,44 @@ func TestParseInfoPersistence(t *testing.T) {
 		})
 	}
 }
+
+func TestParseInfoKeyspace(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		want    int64
+		wantErr bool
+	}{
+		{
+			// Dragonfly v1.38.0, a started instance nothing was written to.
+			name: "dragonfly empty instance",
+			body: "# Keyspace\r\ndb0:keys=0,expires=0,hits=0,misses=0,hit_ratio=0.00,avg_ttl=-1\r\n",
+			want: 0,
+		},
+		{
+			// Dragonfly v1.38.0 after one key in db0 and two in db3.
+			name: "keys in two databases",
+			body: "# Keyspace\r\ndb0:keys=1,expires=0,hits=0,misses=0,hit_ratio=0.00,avg_ttl=-1\r\ndb3:keys=2,expires=0,hits=0,misses=0,hit_ratio=0.00,avg_ttl=-1\r\n",
+			want: 3,
+		},
+		{name: "no database line", body: "# Keyspace\n", want: 0},
+		{name: "other lines ignored", body: "# Keyspace\ndbsize:9\nnoise\ndb1:keys=4,expires=1\n", want: 4},
+		{name: "database line without the header", body: "db0:keys=2,expires=0\n", want: 2},
+		{name: "empty reply", body: "", wantErr: true},
+		{name: "another section", body: "# Replication\nrole:master\n", wantErr: true},
+		{name: "database line without a key count", body: "db0:expires=0\n", wantErr: true},
+		{name: "unreadable key count", body: "db0:keys=many,expires=0\n", wantErr: true},
+		{name: "negative key count", body: "db0:keys=-1\n", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseInfoKeyspace(tc.body)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ParseInfoKeyspace() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ParseInfoKeyspace() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

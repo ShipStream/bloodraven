@@ -375,7 +375,7 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 	fg := pfDFSucceededBlock(v1alpha1.PlannedFailoverPhasePromoting, completed)
 	snaps := []DragonflySiteSnapshot{{Name: "iad", Reachable: true, Info: dragonfly.ReplicationInfo{Role: "master"}},
 		{Name: "pdx", Reachable: true, Info: dragonfly.ReplicationInfo{Role: "master"}}}
-	if effectiveDragonflyMasterSite(fg) != "pdx" || activeDragonflySiteFromObservation(fg, snaps) != "pdx" {
+	if effectiveDragonflyMasterSite(fg) != "pdx" || activeDragonflySiteFromObservation(fg, snaps, false) != "pdx" {
 		t.Fatal("a succeeded takeover does not pin its target")
 	}
 
@@ -386,7 +386,7 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 		if got := effectiveDragonflyMasterSite(fg); got != "iad" {
 			t.Errorf("label master = %q after an emergency promotion to iad, want iad", got)
 		}
-		if got := activeDragonflySiteFromObservation(fg, snaps); got != "iad" {
+		if got := activeDragonflySiteFromObservation(fg, snaps, false); got != "iad" {
 			t.Errorf("observed master = %q after an emergency promotion to iad, want iad", got)
 		}
 		earlier := metav1.NewTime(completed.Add(-time.Minute))
@@ -398,7 +398,7 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 	t.Run("target observed as a replica", func(t *testing.T) {
 		demoted := []DragonflySiteSnapshot{{Name: "iad", Reachable: true, Info: dragonfly.ReplicationInfo{Role: "master"}},
 			{Name: "pdx", Reachable: true, Info: dragonfly.ReplicationInfo{Role: "slave"}}}
-		if got := activeDragonflySiteFromObservation(fg, demoted); got != "iad" {
+		if got := activeDragonflySiteFromObservation(fg, demoted, false); got != "iad" {
 			t.Errorf("observed master = %q with the target a replica, want iad", got)
 		}
 	})
@@ -415,7 +415,7 @@ func TestPlannedTakeoverMasterSite(t *testing.T) {
 	t.Run("runID-less block", func(t *testing.T) {
 		fg := fg.DeepCopy()
 		fg.Status.PlannedFailover.RunID = ""
-		if a, b := effectiveDragonflyMasterSite(fg), activeDragonflySiteFromObservation(fg, snaps[:1]); a != "iad" || b != "iad" {
+		if a, b := effectiveDragonflyMasterSite(fg), activeDragonflySiteFromObservation(fg, snaps[:1], false); a != "iad" || b != "iad" {
 			t.Errorf("runID-less block: label master %q, observed master %q; want both iad", a, b)
 		}
 	})

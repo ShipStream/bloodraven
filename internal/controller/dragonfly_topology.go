@@ -57,6 +57,23 @@ type DragonflyManager struct {
 	lastStaleMasterAt   map[string]time.Time
 	staleMasterEventTTL time.Duration
 
+	// The recorded active site (status.dragonfly.activeSite) keeps the
+	// role for activeHoldGrace while it cannot be observed and the only
+	// other master is empty; see holdUnobservedActive.
+	// activeUnobservedSite and activeUnobservedSince are that site and
+	// when this process first failed to observe it; activeHoldLogged is
+	// set once the hold has been logged for this outage. Guarded by mu.
+	activeHoldGrace       time.Duration
+	activeUnobservedSite  string
+	activeUnobservedSince time.Time
+	activeHoldLogged      bool
+	// unobservedSites holds the sites whose failed observation has been
+	// logged, so a site that stays down is logged once; keyCountFailed
+	// is the same for a site whose key count cannot be read. Guarded by
+	// mu.
+	unobservedSites map[string]bool
+	keyCountFailed  map[string]bool
+
 	// gate is the group's Dragonfly ownership gate (see dragonflyGate).
 	// The runner shares one gate across every manager it starts for the
 	// group; a standalone manager gets its own.
@@ -102,6 +119,8 @@ type DragonflyConnection interface {
 	Ping(ctx context.Context) error
 	InfoReplication(ctx context.Context) (dragonfly.ReplicationInfo, error)
 	InfoPersistence(ctx context.Context) (dragonfly.PersistenceInfo, error)
+	// KeyCount returns the number of keys in all databases.
+	KeyCount(ctx context.Context) (int64, error)
 	ReplicaOf(ctx context.Context, host string, port int32) error
 	ReplicaOfNoOne(ctx context.Context) error
 	ReplTakeover(ctx context.Context, timeout time.Duration) error
@@ -140,6 +159,9 @@ func NewDragonflyManager(c client.Client, recorder record.EventRecorder, logger 
 		connector:           realDragonflyConnector,
 		lastStaleMasterAt:   make(map[string]time.Time),
 		staleMasterEventTTL: 5 * time.Minute,
+		activeHoldGrace:     defaultDragonflyActiveHoldGrace,
+		unobservedSites:     make(map[string]bool),
+		keyCountFailed:      make(map[string]bool),
 
 		emergencyTakeoverTimeout:    defaultEmergencyTakeoverTimeout,
 		emergencyWaits:              defaultEmergencyWaits,
@@ -363,7 +385,12 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 	if m.shouldYield() {
 		return
 	}
-	m.patchStatus(ctx, snap)
+	hold := m.holdUnobservedActive(&fg, snap)
+	if master := dragonflyMasterOverEmptyRecord(&fg, snap); master != "" && plannedTakeoverMasterSite(&fg) == "" {
+		m.logger.Info("dragonfly: recorded active site holds no keys; following the master on the MySQL active site",
+			"site", recordedDragonflyActiveSite(&fg), "master", master)
+	}
+	m.patchStatus(ctx, snap, hold)
 
 	if m.paused() || m.shouldYield() {
 		return
@@ -382,7 +409,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 		m.promoteLocked(workCtx, &fg, target, oldSource, m.emergencyTakeoverTimeout)
 		return
 	}
-	if target, oldSource, ok := m.dragonflyOnlyPromotionCandidate(&fg, snap); ok {
+	if target, oldSource, ok := m.dragonflyOnlyPromotionCandidate(&fg, snap, hold); ok {
 		m.logger.Info("dragonfly-only emergency: active master unreachable; promoting replica", "oldSource", oldSource, "target", target, "fg", m.fgKey.String())
 		if m.recorder != nil {
 			m.recorder.Eventf(&fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionStarted,
@@ -392,7 +419,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 		m.promoteLocked(workCtx, &fg, target, oldSource, m.emergencyTakeoverTimeout)
 		return
 	}
-	m.reconcileReplication(workCtx, &fg, snap)
+	m.reconcileReplication(workCtx, &fg, snap, hold)
 }
 
 // shouldYield reports whether the current unit of work should stop at a
@@ -462,6 +489,11 @@ type DragonflySiteSnapshot struct {
 	Reachable bool
 	Info      dragonfly.ReplicationInfo
 	Persist   dragonfly.PersistenceInfo
+	// Keys is the number of keys in all databases (`INFO keyspace`), nil
+	// when it could not be read. It is what tells an instance that holds
+	// the cache from one that restarted empty: both report role=master,
+	// and a Dragonfly master reports no replication offset (v1.38).
+	Keys *int64
 	// ReplTakeover is the COMMAND INFO probe for this tick. Nil means
 	// the site was not probed (unreachable, INFO failed, or probe I/O
 	// error). True/false are confirmed results and must not flip
@@ -483,6 +515,7 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 		cancel()
 		if err != nil {
 			metrics.DragonflySiteUp.WithLabelValues(fg.Name, site.Name).Set(0)
+			m.noteObservation(site.Name, err)
 			out = append(out, snap)
 			continue
 		}
@@ -498,6 +531,7 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 			// metric exists to alert on would silently report up=1
 			// indefinitely.
 			metrics.DragonflySiteUp.WithLabelValues(fg.Name, site.Name).Set(0)
+			m.noteObservation(site.Name, err)
 			_ = conn.Close()
 			out = append(out, snap)
 			continue
@@ -508,6 +542,11 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 			// disqualify the site, but loading state may be missed.
 			persist = dragonfly.PersistenceInfo{}
 		}
+		keys, keysErr := conn.KeyCount(ctx)
+		if keysErr == nil {
+			snap.Keys = &keys
+		}
+		m.noteKeyCount(site.Name, keysErr)
 		// Probe last so a parser bug cannot desync INFO replies.
 		// A probe error leaves ReplTakeover nil and must not flip
 		// reachability or the up gauge.
@@ -521,6 +560,7 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 		snap.Info = info
 		snap.Persist = persist
 		metrics.DragonflySiteUp.WithLabelValues(fg.Name, site.Name).Set(1)
+		m.noteObservation(site.Name, nil)
 		out = append(out, snap)
 	}
 	return out
@@ -555,7 +595,7 @@ func (m *DragonflyManager) fetchPassword(ctx context.Context, fg *v1alpha1.Mysql
 // patchStatus writes the observed snapshot into status.dragonfly. We
 // only patch when there is a meaningful change, to keep API-server load
 // proportional to actual state transitions.
-func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySiteSnapshot) {
+func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySiteSnapshot, holdUnobserved bool) {
 	var (
 		patched       bool
 		prevSupported *bool
@@ -571,7 +611,7 @@ func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySit
 			return nil
 		}
 
-		desired := buildDragonflyStatus(&fg, snaps)
+		desired := buildDragonflyStatus(&fg, snaps, holdUnobserved)
 		if dragonflyStatusEqual(fg.Status.Dragonfly, &desired) {
 			return nil
 		}
@@ -599,9 +639,9 @@ func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySit
 }
 
 // buildDragonflyStatus converts per-site snapshots into the API-shaped
-// status block.
-func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) v1alpha1.DragonflyStatus {
-	expectedActive := activeDragonflySiteFromObservation(fg, snaps)
+// status block. holdUnobserved is activeDragonflySiteFromObservation's.
+func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) v1alpha1.DragonflyStatus {
+	expectedActive := activeDragonflySiteFromObservation(fg, snaps, holdUnobserved)
 	st := v1alpha1.DragonflyStatus{
 		ActiveSite: expectedActive,
 	}
@@ -782,7 +822,14 @@ func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailover
 // A persisted status.dragonfly.activeSite is honored only when that site is
 // still observed as a raw Dragonfly master; otherwise a single observed raw
 // master self-heals stale status after operator upgrades or restarts.
-func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) string {
+//
+// Two cases are excepted, both on the key count: with holdUnobserved, a
+// persisted active site that could not be observed at all keeps the role
+// when the single raw master holds no keys (dragonflyHeldOverEmptyMaster);
+// and a persisted active site that holds no keys gives way to the master
+// on the MySQL active site that holds the cache
+// (dragonflyMasterOverEmptyRecord).
+func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) string {
 	if site := plannedTakeoverMasterSite(fg); site != "" {
 		demoted := false
 		for _, s := range snaps {
@@ -794,15 +841,22 @@ func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps [
 			return site
 		}
 	}
+	recorded := recordedDragonflyActiveSite(fg)
+	if holdUnobserved && dragonflyHeldOverEmptyMaster(fg, snaps) != "" {
+		return recorded
+	}
 	rawMasters := make([]string, 0, 1)
 	for _, s := range snaps {
 		if s.Reachable && s.Info.Role == "master" {
 			rawMasters = append(rawMasters, s.Name)
 		}
 	}
-	if fg.Status.Dragonfly != nil && fg.Status.Dragonfly.ActiveSite != "" {
+	if recorded != "" {
 		for _, site := range rawMasters {
-			if site == fg.Status.Dragonfly.ActiveSite {
+			if site == recorded {
+				if master := dragonflyMasterOverEmptyRecord(fg, snaps); master != "" {
+					return master
+				}
 				return site
 			}
 		}
@@ -810,10 +864,200 @@ func activeDragonflySiteFromObservation(fg *v1alpha1.MysqlFailoverGroup, snaps [
 	if len(rawMasters) == 1 {
 		return rawMasters[0]
 	}
-	if fg.Status.Dragonfly != nil && fg.Status.Dragonfly.ActiveSite != "" {
-		return fg.Status.Dragonfly.ActiveSite
+	if recorded != "" {
+		return recorded
 	}
 	return fg.Status.ActiveSite
+}
+
+// dragonflyHeldOverEmptyMaster returns the site that reports the master
+// role and holds no keys while the recorded active site
+// (status.dragonfly.activeSite) could not be observed and no other site
+// reports the role, or "". That is the observation in which the recorded
+// site keeps the role for a grace period (holdUnobservedActive).
+//
+// A failed observation is not evidence that a site stopped being the
+// master, and a site that reports the master role is not thereby the
+// master: a Dragonfly pod that restarted without a snapshot reports it
+// too, holding nothing, and the source of a takeover is recreated that
+// way. Without the hold, one missed observation of the master while such
+// a pod is up makes the empty pod the active site: every replica is
+// pointed at it, and so is the master in the next cycle.
+//
+// A single master that holds keys, or whose key count could not be read,
+// is not held off: it replaces the unobserved site at once, as it always
+// did, which repairs a status whose promotion record was lost.
+func dragonflyHeldOverEmptyMaster(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) string {
+	recorded := recordedDragonflyActiveSite(fg)
+	if recorded == "" || plannedTakeoverMasterSite(fg) != "" || dragonflySiteObserved(snaps, recorded) {
+		return ""
+	}
+	other := ""
+	for i := range snaps {
+		s := &snaps[i]
+		if !s.Reachable || s.Info.Role != "master" {
+			continue
+		}
+		if other != "" || !s.holdsNoKeys() {
+			return ""
+		}
+		other = s.Name
+	}
+	return other
+}
+
+// dragonflyMasterOverEmptyRecord returns the MySQL active site when its
+// Dragonfly reports the master role and holds keys while the recorded
+// active site (status.dragonfly.activeSite) is another site that reports
+// the master role and holds none, or "".
+//
+// That is a promotion whose record was lost: the operator promoted the
+// Dragonfly on the MySQL active site and died before recording it, and the
+// old master, whose process exits in a takeover, restarted empty. The
+// record then names the empty instance. Honoring it leaves the group with
+// two masters for good, since the site with the cache is not reattached to
+// an empty one (reconcileReplication), and before that check existed it
+// emptied the cache. The site that has both MySQL and the cache is the
+// master; the empty one is reattached to it.
+//
+// Both conditions are needed. A recorded site on the MySQL active site is
+// never displaced, whatever another master holds (a pod restarted from a
+// snapshot holds keys too), and an unread key count decides nothing.
+func dragonflyMasterOverEmptyRecord(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) string {
+	recorded := recordedDragonflyActiveSite(fg)
+	mysqlActive := fg.Status.ActiveSite
+	if recorded == "" || mysqlActive == "" || mysqlActive == recorded {
+		return ""
+	}
+	rec, master := dragonflySnapshotOf(snaps, recorded), dragonflySnapshotOf(snaps, mysqlActive)
+	if rec == nil || master == nil {
+		return ""
+	}
+	if !rec.Reachable || rec.Info.Role != "master" || !rec.holdsNoKeys() {
+		return ""
+	}
+	if !master.Reachable || master.Info.Role != "master" || !master.holdsKeys() {
+		return ""
+	}
+	return mysqlActive
+}
+
+// holdsKeys reports whether the instance was observed with at least one
+// key; holdsNoKeys, with none. Both are false when the key count could not
+// be read, so neither "it has the cache" nor "it is empty" is concluded
+// from a failed read.
+func (s *DragonflySiteSnapshot) holdsKeys() bool   { return s.Keys != nil && *s.Keys > 0 }
+func (s *DragonflySiteSnapshot) holdsNoKeys() bool { return s.Keys != nil && *s.Keys == 0 }
+
+// recordedDragonflyActiveSite is status.dragonfly.activeSite, or "".
+func recordedDragonflyActiveSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg.Status.Dragonfly == nil {
+		return ""
+	}
+	return fg.Status.Dragonfly.ActiveSite
+}
+
+// dragonflySiteObserved reports whether site answered this cycle's
+// observation, whatever role it reported.
+func dragonflySiteObserved(snaps []DragonflySiteSnapshot, site string) bool {
+	for _, s := range snaps {
+		if s.Name == site {
+			return s.Reachable
+		}
+	}
+	return false
+}
+
+// dragonflySnapshotOf returns site's snapshot of this cycle, or nil.
+func dragonflySnapshotOf(snaps []DragonflySiteSnapshot, site string) *DragonflySiteSnapshot {
+	for i := range snaps {
+		if snaps[i].Name == site {
+			return &snaps[i]
+		}
+	}
+	return nil
+}
+
+// defaultDragonflyActiveHoldGrace is how long the recorded active site keeps
+// the role while it cannot be observed (holdUnobservedActive). It has to
+// outlast a few failed observations: one costs up to the dial timeout
+// (dragonfly.DefaultDialTimeout) or, when the dial succeeds and the reply
+// does not come, the I/O timeout (dragonfly.DefaultIOTimeout), and the
+// cycles follow each other without a pause while one is slow.
+const defaultDragonflyActiveHoldGrace = 15 * time.Second
+
+// holdUnobservedActive reports whether the recorded active site
+// (status.dragonfly.activeSite) has been unobservable to this process for
+// less than activeHoldGrace, counted from its first failed observation.
+// For that long it keeps the role against a single empty master
+// (dragonflyHeldOverEmptyMaster), which is logged once per outage.
+//
+// After the grace the observation decides again, as before: a single site
+// that reports the master role becomes the active site, whatever it holds.
+// That is what brings the cache back when the recorded site never returns.
+//
+// The time is this process's: a restarted operator starts a new grace.
+func (m *DragonflyManager) holdUnobservedActive(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) bool {
+	recorded := recordedDragonflyActiveSite(fg)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if recorded == "" || dragonflySiteObserved(snaps, recorded) {
+		m.activeUnobservedSite = ""
+		m.activeUnobservedSince = time.Time{}
+		m.activeHoldLogged = false
+		return false
+	}
+	now := time.Now()
+	if m.activeUnobservedSite != recorded {
+		m.activeUnobservedSite = recorded
+		m.activeUnobservedSince = now
+		m.activeHoldLogged = false
+	}
+	if now.Sub(m.activeUnobservedSince) >= m.activeHoldGrace {
+		return false
+	}
+	if other := dragonflyHeldOverEmptyMaster(fg, snaps); other != "" && !m.activeHoldLogged {
+		m.activeHoldLogged = true
+		m.logger.Info("dragonfly: active site not observed; keeping its role", "site", recorded, "emptyMaster", other, "grace", m.activeHoldGrace.String())
+	}
+	return true
+}
+
+// noteObservation logs a site's failed observation once, when it starts
+// failing, with the error. The gauge (DragonflySiteUp) says that a site is
+// down; this line says why the operator could not tell, which is what
+// explains a role decision made in that cycle.
+func (m *DragonflyManager) noteObservation(site string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.unobservedSites, site)
+		return
+	}
+	if m.unobservedSites[site] {
+		return
+	}
+	m.unobservedSites[site] = true
+	m.logger.Info("dragonfly: site observation failed", "site", site, "error", err)
+}
+
+// noteKeyCount logs, once when it starts, that a site answers but its key
+// count cannot be read. Without the count the manager cannot tell a master
+// that holds the cache from one that restarted empty, and the two checks
+// that rest on it (dragonflyHeldOverEmptyMaster, the stale-master
+// reattach in reconcileReplication) do not apply to that site.
+func (m *DragonflyManager) noteKeyCount(site string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.keyCountFailed, site)
+		return
+	}
+	if m.keyCountFailed[site] {
+		return
+	}
+	m.keyCountFailed[site] = true
+	m.logger.Warn("dragonfly: key count unavailable", "site", site, "error", err)
 }
 
 func dragonflySiteMessage(s DragonflySiteSnapshot, role dragonfly.SiteRole) string {
@@ -844,12 +1088,17 @@ func dragonflySiteMessage(s DragonflySiteSnapshot, role dragonfly.SiteRole) stri
 // best-effort — failures are logged and retried on the next tick.
 // The caller holds the group's gate; each site's change is skipped once the
 // unit of work should yield.
-func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) {
-	active := activeDragonflySiteFromObservation(fg, snaps)
+func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) {
+	active := activeDragonflySiteFromObservation(fg, snaps, holdUnobserved)
 	if active == "" {
 		// Nothing to align against until MySQL has picked an active site.
 		return
 	}
+	// The active site answered as a master that holds no keys.
+	activeSnap := dragonflySnapshotOf(snaps, active)
+	activeEmpty := activeSnap != nil && activeSnap.Reachable && activeSnap.Info.Role == "master" && activeSnap.holdsNoKeys()
+	// The active site is held although unobserved, over an empty master.
+	heldOverEmpty := holdUnobserved && dragonflyHeldOverEmptyMaster(fg, snaps) != ""
 	password := m.fetchPassword(ctx, fg)
 	masterAddr := dragonflyAddr(fg, active)
 	masterHost, masterPort := splitHostPort(masterAddr, dragonflyPort(fg.Spec.Dragonfly))
@@ -870,12 +1119,30 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			if err := m.setTrafficLabel(ctx, fg, snap.Name, false); err != nil {
 				m.logger.Info("dragonfly: strip stale-master traffic", "site", snap.Name, "error", err)
 			}
-			// Auto-reconfigure only when the stale master provably
-			// never accepted writes since restart: connected_slaves=0
-			// AND master_repl_offset=0. Anything else risks rebinding
-			// a master that has divergent data, so we leave it for
-			// human intervention.
-			if snap.Info.ConnectedSlaves == 0 && snap.Info.MasterReplOffset == 0 {
+			// Auto-reconfigure only a stale master no replica is
+			// attached to (connected_slaves=0). master_repl_offset=0 is
+			// kept from when it was read as "never accepted writes"; it
+			// says nothing, because a Dragonfly master reports no
+			// replication offset (v1.38): a master that holds the whole
+			// cache with no replica attached, like a target just
+			// promoted from a replica, reads as 0 too.
+			//
+			// So one case is refused: the stale master holds keys and
+			// the active site holds none. REPLICAOF would discard the
+			// only copy of the cache in favour of an empty instance,
+			// which is what a wrongly recorded active site looks like.
+			// The stale master stays as it is (out of the active
+			// Service) until the active site holds a key or someone
+			// decides. When the stale master is on the MySQL active
+			// site it does not come to this: it is the active site
+			// (dragonflyMasterOverEmptyRecord).
+			//
+			// And nothing is reattached to an active site that is held
+			// although unobserved: if it never returns, the empty
+			// master becomes the active site when the hold ends, which
+			// it could not as a replica of a site that is gone.
+			keepsOnlyCopy := snap.holdsKeys() && activeEmpty
+			if !keepsOnlyCopy && !heldOverEmpty && snap.Info.ConnectedSlaves == 0 && snap.Info.MasterReplOffset == 0 {
 				m.attemptStaleMasterReconfigure(ctx, fg, snap.Name, password, masterHost, masterPort)
 			}
 			continue
@@ -917,9 +1184,18 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 // failover: if the old master is gone, the replica's link is usually "down",
 // so the durable signal is that it had previously received data
 // (master_last_io_seconds_ago >= 0) and is not in a full sync/load cycle.
-func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) (target, oldSource string, ok bool) {
-	active := activeDragonflySiteFromObservation(fg, snaps)
+//
+// No replica is promoted while the active site is held over an empty
+// master (dragonflyHeldOverEmptyMaster): the active site was missed for
+// less than the grace, and a promotion would add a third master. Before
+// the hold existed that observation made the empty master the active
+// site, so no replica was promoted in it either.
+func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) (target, oldSource string, ok bool) {
+	active := activeDragonflySiteFromObservation(fg, snaps, holdUnobserved)
 	if active == "" {
+		return "", "", false
+	}
+	if holdUnobserved && dragonflyHeldOverEmptyMaster(fg, snaps) != "" {
 		return "", "", false
 	}
 
@@ -951,11 +1227,9 @@ func dragonflyOnlyPromotionReady(s DragonflySiteSnapshot, role dragonfly.SiteRol
 		!s.Persist.Loading
 }
 
-// attemptStaleMasterReconfigure tries to attach a provably-empty stale
-// master back to the active master as a replica. The caller must have
-// already gated this on connected_slaves=0 AND master_repl_offset=0
-// (snap.Info), which is the upstream-blessed signal that the pod has
-// not accepted any writes since restart.
+// attemptStaleMasterReconfigure tries to attach a stale master back to the
+// active master as a replica, which discards what it holds. The caller
+// (reconcileReplication) has already established that this is safe.
 //
 // Best-effort: errors are logged but not propagated. The next tick
 // retries until the stale master becomes a replica or the operator
@@ -978,7 +1252,7 @@ func (m *DragonflyManager) attemptStaleMasterReconfigure(ctx context.Context, fg
 	m.logger.Info("stale-master reconfigure: REPLICAOF applied", "site", siteName, "host", masterHost, "port", masterPort)
 	if m.recorder != nil {
 		m.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyOldSiteReconfigured,
-			"stale Dragonfly master on site %q auto-reconfigured as replica of %s:%d (connected_slaves=0, master_repl_offset=0 — provably never accepted writes)",
+			"stale Dragonfly master on site %q auto-reconfigured as replica of %s:%d (no replica was attached to it)",
 			siteName, masterHost, masterPort)
 	}
 }
@@ -1727,12 +2001,11 @@ func (m *DragonflyManager) recordStaleMaster(fg *v1alpha1.MysqlFailoverGroup, si
 	m.lastStaleMasterAt[siteName] = now
 	m.logger.Warn("dragonfly: stale master on non-active site", "site", siteName, "active", fg.Status.ActiveSite)
 	if m.recorder != nil {
-		// Auto-reconfigure is attempted in reconcileReplication when
-		// connected_slaves=0 AND master_repl_offset=0; this Event fires
-		// on every detection regardless of whether the auto-rejoin gate
-		// passed.
+		// Auto-reconfigure is attempted in reconcileReplication under
+		// its gate; this Event fires on every detection regardless of
+		// whether the auto-rejoin gate passed.
 		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyStaleMasterDetected,
-			"stale Dragonfly master detected on site %q (active=%q); auto-rejoin attempted only when connected_slaves=0 AND master_repl_offset=0",
+			"stale Dragonfly master detected on site %q (active=%q); auto-rejoin is attempted only when no replica is attached to it, and not when it holds keys while the active site holds none",
 			siteName, fg.Status.ActiveSite)
 	}
 }
