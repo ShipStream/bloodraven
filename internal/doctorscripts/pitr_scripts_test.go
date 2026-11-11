@@ -250,7 +250,7 @@ func TestTriageArchiverStatusAndVerificationEvents(t *testing.T) {
 	e.rule(t, "exec -n orders mysql-lion-dc3-0 -c mysql -- curl *", `{"site":"dc3","primary":false,"archive":{"state":"Verified"}}`, false)
 	e.rule(t, "exec *", "", true)
 	e.rule(t, "get events -n orders --field-selector involvedObject.name=lion *",
-		"2026-11-05T11:00:00Z   Warning   PITRArchiveTailNotArchived   1   site dc1 is being recloned although its binary log tail was not confirmed archived within 2m0s\n", false)
+		"2026-11-05T11:00:00Z   Warning   PITRArchiveTailNotArchived   1   site dc1 is being recloned although its binary log tail was not confirmed archived in time\n", false)
 	e.rule(t, "get mysqlbackupverifications -n orders -l bloodraven.shipstream.io/failover-group=lion -o jsonpath=*", "verify-1", false)
 	e.rule(t, "get events -n orders --field-selector involvedObject.kind=MysqlBackupVerification,involvedObject.name=verify-1 *",
 		"2026-11-05T10:00:00Z   Warning   PITROnHistoryTransactionsExcluded   1   excluded 3 transactions on the target history\n", false)

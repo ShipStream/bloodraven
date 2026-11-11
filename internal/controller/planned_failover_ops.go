@@ -69,6 +69,10 @@ type runnerPlannedTopology struct {
 	promoteFlushed map[string]bool
 	// sourceFlushed is the same for the fenced source's rotation.
 	sourceFlushed map[string]bool
+	// sourceUnsealedNoted holds the runs for which this process logged
+	// that it proved the fence without rotating the source's binary log
+	// (noteSourceNotSealed), so the line appears once per run.
+	sourceUnsealedNoted map[string]bool
 	// sourceLoss and rollbackTargetLoss are the first failed read of a
 	// run's loss window inside the facade. sourceLoss is fed by every
 	// source observation the facade makes for the run (the drain's kill
@@ -90,13 +94,14 @@ func NewPlannedFailoverTopology(reg ManagerRegistry) PlannedFailoverTopology {
 
 func newRunnerPlannedTopology(reg ManagerRegistry) *runnerPlannedTopology {
 	return &runnerPlannedTopology{
-		reg:                reg,
-		fenceMemo:          make(map[string]fenceMemoEntry),
-		promoteMemo:        make(map[string]promoteMemoStage),
-		promoteFlushed:     make(map[string]bool),
-		sourceFlushed:      make(map[string]bool),
-		sourceLoss:         make(map[string]time.Time),
-		rollbackTargetLoss: make(map[string]time.Time),
+		reg:                 reg,
+		fenceMemo:           make(map[string]fenceMemoEntry),
+		promoteMemo:         make(map[string]promoteMemoStage),
+		promoteFlushed:      make(map[string]bool),
+		sourceFlushed:       make(map[string]bool),
+		sourceUnsealedNoted: make(map[string]bool),
+		sourceLoss:          make(map[string]time.Time),
+		rollbackTargetLoss:  make(map[string]time.Time),
 	}
 }
 
@@ -136,6 +141,7 @@ func (p *runnerPlannedTopology) forgetRun(runID string) {
 	delete(p.promoteMemo, runID)
 	delete(p.promoteFlushed, runID)
 	delete(p.sourceFlushed, runID)
+	delete(p.sourceUnsealedNoted, runID)
 	delete(p.sourceLoss, runID)
 	delete(p.rollbackTargetLoss, runID)
 }
@@ -714,6 +720,7 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 		if by == FenceUnattributed {
 			return FenceProof{Kind: FenceNotAttributable, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, true
 		}
+		p.noteSourceNotSealed(tm, ref, by)
 		return p.postFenceProof(ctx, tm, ref, id, by), true
 	}
 	// A re-run whose fence may already be in place (a lost Draining write,
@@ -815,11 +822,43 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 // the active file until some later rotation, which an early reclone of the
 // site would never see.
 //
-// It runs once per run and process, in the pass that sent the fence and
-// read it back, on a connection of its own, and only while the run still
-// holds the claim. Its outcome changes nothing: the run continues the same
-// whether the rotation was acknowledged, failed or was abandoned at its
-// bound.
+// It runs at most once per run and process, on a connection of its own,
+// and only while the run still holds the claim. Its outcome changes
+// nothing: the run continues the same whether the rotation was
+// acknowledged, failed or was abandoned at its bound.
+//
+// Only the pass that sent the fence and read it back gets here, so some
+// runs never rotate their source:
+//
+//   - the fence statement applied but its reply or its read-back was lost
+//     (FenceRetry): the next pass proves the fence by this process's memo
+//     and sends nothing;
+//   - the operator restarted between the fence and its Draining record: the
+//     new process proves the fence by the durable intent and the server's
+//     @@server_uuid. Whether the dead process rotated the source first is
+//     not known to it;
+//   - the run lost its claim while the fence was in flight (the check
+//     below): the run sends nothing more, and its fence is the topology
+//     manager's to heal.
+//
+// The first two log noteSourceNotSealed's line. In every case the tail
+// stays in the source's active file until its next rotation: a natural one,
+// the pre-reclone rotation (recloneArchiveTailSettled), or the promotion
+// rotation if the site becomes the primary again.
+//
+// The claim check and the statement are not atomic: leadership can be
+// lost, or the claim released by another goroutine of this process, between
+// the two. The rotation then reaches a read-only source the run no longer
+// owns, which is one more binary log file there and nothing else.
+//
+// The once-per-run memo matters when the fence is sent twice in one
+// process: an external writer cleared the run's fence between two passes
+// (ProveFence reports the source writable and the engine fences it again
+// through Fence). The second fence is not followed by a second rotation,
+// so a run whose fence is fought over cannot add a file, and up to
+// BinlogRotationTimeout of write pause, per pass. The transactions the
+// source took between the two fences then stay in its active file, as in
+// the cases above.
 func (p *runnerPlannedTopology) sealFencedSource(ctx context.Context, tm *TopologyManager, ref PlannedRunRef, src *siteTracker) {
 	if tm.requireRunClaim(p.leader(), ref, false) != nil {
 		return
@@ -830,6 +869,39 @@ func (p *runnerPlannedTopology) sealFencedSource(ctx context.Context, tm *Topolo
 	p.hooks.stmt(true, ref.Source, "FLUSH BINARY LOGS")
 	tm.failover.rotateBinlog(ctx, src.mysql, ref.Source, outgoingPrimaryRotation, "runId", ref.RunID)
 	p.hooks.stmt(false, ref.Source, "FLUSH BINARY LOGS")
+}
+
+// The reasons of noteSourceNotSealed's log line (in the log schema).
+const (
+	// sourceNotSealedFenceReplyLost: this process sent the fence, did not
+	// read it back in that pass, and proved it on a later one.
+	sourceNotSealedFenceReplyLost = "fenceReplyLost"
+	// sourceNotSealedEarlierProcess: an earlier operator process sent the
+	// fence; this one proved it from the durable intent.
+	sourceNotSealedEarlierProcess = "fenceSentByEarlierProcess"
+)
+
+// noteSourceNotSealed logs, once per run and process, that this process
+// proved the run's fence by attribution (by) without having rotated the
+// source's binary log: sealFencedSource runs only in the pass that sends
+// the fence and reads it back. Nothing is sent here. A rotation costs
+// write-pause time, the pass that proves a fence by attribution did not
+// see the source become read-only, and the tail is sealed by the source's
+// next rotation anyway; the line is what tells an operator that the
+// outgoing primary's last binary log is not sealed yet.
+func (p *runnerPlannedTopology) noteSourceNotSealed(tm *TopologyManager, ref PlannedRunRef, by FenceAttribution) {
+	p.mu.Lock()
+	if p.sourceFlushed[ref.RunID] || p.sourceUnsealedNoted[ref.RunID] {
+		p.mu.Unlock()
+		return
+	}
+	p.sourceUnsealedNoted[ref.RunID] = true
+	p.mu.Unlock()
+	reason := sourceNotSealedEarlierProcess
+	if by == FenceByMemo {
+		reason = sourceNotSealedFenceReplyLost
+	}
+	tm.logger.Info("planned failover: fenced source binlog not rotated", "runId", ref.RunID, "site", ref.Source, "reason", reason)
 }
 
 // postFenceProof re-runs the probe set after the fence (§4.3): a writable
@@ -886,6 +958,12 @@ func (p *runnerPlannedTopology) proveFence(ctx context.Context, ref PlannedRunRe
 	by := p.fenceAttribution(ref.RunID, &fence, id.uuid)
 	if by == FenceUnattributed {
 		return FenceProof{Kind: FenceNotAttributable, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
+	}
+	if fence.State == v1alpha1.PlannedFailoverFenceIntended {
+		// The fence's result is not recorded yet: this proof is the one
+		// that establishes it, in place of the pass that would have
+		// rotated the source. A later re-check of a recorded fence is not.
+		p.noteSourceNotSealed(tm, ref, by)
 	}
 	return p.postFenceProof(ctx, tm, ref, id, by), nil
 }

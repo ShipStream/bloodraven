@@ -106,6 +106,12 @@ type mockMySQL struct {
 	// binlogPrevGtids is the executed set at each applied FLUSH BINARY
 	// LOGS (see FlushBinaryLogs).
 	binlogPrevGtids []string
+	// binlogFileErr fails RotateBinaryLog's read of the active file's
+	// name after an applied flush.
+	binlogFileErr error
+	// rotateBinaryLogFn, when set, is RotateBinaryLog's body (run without
+	// the mock's lock), so a test can make the pre-reclone rotation hang.
+	rotateBinaryLogFn func(ctx context.Context) (string, error)
 }
 
 // mutatingStmt are the statements stmtLog records by name; the read-only
@@ -465,6 +471,31 @@ func (m *mockMySQL) FlushBinaryLogs(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// RotateBinaryLog is FlushBinaryLogs plus the active file's name: the mock
+// numbers its files from binlog.000001, one more per applied flush.
+// binlogFileErr fails the name read of an acknowledged flush.
+func (m *mockMySQL) RotateBinaryLog(ctx context.Context) (string, error) {
+	m.mu.Lock()
+	if m.calls == nil {
+		m.calls = map[string]int{}
+	}
+	m.calls["RotateBinaryLog"]++
+	fn := m.rotateBinaryLogFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx)
+	}
+	if err := m.FlushBinaryLogs(ctx); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.binlogFileErr != nil {
+		return "", m.binlogFileErr
+	}
+	return fmt.Sprintf("binlog.%06d", 1+len(m.binlogPrevGtids)), nil
 }
 
 // flushedAt returns the executed set each applied FLUSH BINARY LOGS found.

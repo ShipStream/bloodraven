@@ -172,6 +172,24 @@ const (
 	// Stability: Operator-owned read-only.
 	PromotionGtidExecutedForAnnotation = "bloodraven.shipstream.io/promotion-gtid-executed-for"
 
+	// CloneServerUUIDAnnotation records, before CLONE INSTANCE is issued
+	// into a site, the server_uuid the site had, so the check that every
+	// clone gives its recipient a new one (CloneServerUUIDNotRotated) is
+	// still made when the clone finishes after the operator that issued
+	// it restarted. A site's entry is removed once its clone has an
+	// outcome; the annotation is removed with the last entry. While an
+	// entry exists, the site's keyring stays unsealed under encryption at
+	// rest.
+	//
+	// On: MysqlFailoverGroup.
+	// Writer: operator.
+	// Value: `{"<site>":{"serverUUID":"<uuid>","previousCloneBegin":"<BEGIN_TIME>"}}`,
+	// where previousCloneBegin is BEGIN_TIME of the site's
+	// `performance_schema.clone_status` row before the clone (empty when
+	// it had none, omitted when it could not be read).
+	// Stability: Internal (may change).
+	CloneServerUUIDAnnotation = "bloodraven.shipstream.io/clone-server-uuid"
+
 	// PlannedFailoverStatusFenceAnnotation is bumped with a write
 	// conditioned on the resourceVersion an ambiguous status write was
 	// made against. Its success proves that write can never commit. Each

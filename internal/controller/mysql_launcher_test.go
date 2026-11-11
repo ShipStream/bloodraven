@@ -14,17 +14,38 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 // mysqlLauncherRotationGolden is the server_uuid step every mysql
 // container starts with; %s is the keyring data file ("" without
-// encryption at rest). TestMySQLLauncherNative proves against the real
-// image that this text does what its comments say; this pin makes a change
-// to it a deliberate one.
+// encryption at rest) and %d whether the binary log is encrypted.
+// TestMySQLLauncherNative proves against the real image that this text
+// does what its comments say; this pin makes a change to it a deliberate
+// one.
+//
+// Updating these golden texts has a cost for every user. The launcher's
+// text and the mysqld flags are part of each site's spec hash
+// (ComputeSpecHash), on purpose: a change that did not move the hash would
+// never reach a running pod. So any edit here, a reworded log line
+// included, makes every group roll every site once after the operator
+// upgrade, with a handoff of the primary. Change the launcher only in a
+// release whose notes announce the roll, never in a patch release, and
+// batch such edits. The same holds for the flags TestMySQLServerArgs pins.
 const mysqlLauncherRotationGolden = `log() { echo "bloodraven-launcher: $*" >&2; }
 datadir='/var/lib/mysql'
 keyring='%s'
+binlog_encrypted=%d
 clonedir="$datadir/#clone"
+needs_binlog_key() {
+  [ "$binlog_encrypted" = 1 ] && return 0
+  [ -r "$datadir/mysqld-auto.cnf" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *binlog_encryption*) return 0 ;; esac
+  done < "$datadir/mysqld-auto.cnf"
+  return 1
+}
 if [ -d "$clonedir" ] && { [ ! -r "$clonedir" ] || [ ! -x "$clonedir" ]; }; then
   log "WARNING: cannot inspect $clonedir as uid $(id -u); if a clone is staged there, server_uuid is NOT rotated"
 elif [ -e "$clonedir/#replace_files" ]; then
@@ -36,7 +57,7 @@ elif [ -e "$clonedir/#replace_files" ]; then
   fi
   if [ -e "$clonedir/#status_error" ] || [ -e "$clonedir/#status_in_progress" ]; then
     log "an interrupted clone is staged in $clonedir; mysqld rolls it back and server_uuid stays $previous"
-  elif [ -n "$keyring" ] && [ -e "$keyring" ] && [ ! -w "$keyring" ]; then
+  elif [ -n "$keyring" ] && [ -e "$keyring" ] && [ ! -w "$keyring" ] && needs_binlog_key; then
     log "WARNING: a finished clone is staged in $clonedir but the keyring $keyring is read-only (the site is sealed), and a new server_uuid needs a new binary log encryption key there; server_uuid is NOT rotated (stays $previous)"
   elif rm -f -- "$datadir/auto.cnf" 2>/dev/null && [ ! -e "$datadir/auto.cnf" ]; then
     sync "$datadir" 2>/dev/null || true
@@ -58,7 +79,7 @@ if [ -z "$entrypoint" ]; then
   entrypoint=$(command -v docker-entrypoint.sh 2>/dev/null) || entrypoint=
 fi
 if [ -z "$entrypoint" ]; then
-  log "no MySQL image entrypoint found (looked for /usr/local/bin/docker-entrypoint.sh /entrypoint.sh, then docker-entrypoint.sh on PATH); spec.image must provide one"
+  log "no MySQL image entrypoint found (looked for /usr/local/bin/docker-entrypoint.sh /entrypoint.sh, then docker-entrypoint.sh on PATH); spec.image must provide one. This container cannot start until it does: set spec.image to an image that has it (the Docker Official Image and Oracle's community-server image do), or add the image's entrypoint script at one of those paths"
   exit 127
 fi
 exec "$entrypoint" "$0" "$@"
@@ -88,7 +109,7 @@ func TestMySQLLauncherRendering(t *testing.T) {
 
 	t.Run("without encryption", func(t *testing.T) {
 		command, args := mysqlLauncher(newTestFG(), flags)
-		want := "set -euo pipefail\n" + fmt.Sprintf(mysqlLauncherRotationGolden, "") + mysqlLauncherHandoffGolden
+		want := "set -euo pipefail\n" + fmt.Sprintf(mysqlLauncherRotationGolden, "", 0) + mysqlLauncherHandoffGolden
 		if len(command) != 3 || command[0] != "/bin/bash" || command[1] != "-ec" {
 			t.Fatalf("command = %q, want /bin/bash -ec <script>", command)
 		}
@@ -105,7 +126,7 @@ func TestMySQLLauncherRendering(t *testing.T) {
 		command, args := mysqlLauncher(encTestFG(), flags)
 		// The identity step comes first: it cannot fail the container,
 		// and a failing keyring step must not skip it on a later start.
-		want := "set -euo pipefail\n" + fmt.Sprintf(mysqlLauncherRotationGolden, "/run/mysql-keyring/keyring") + mysqlLauncherEncryptionGolden + mysqlLauncherHandoffGolden
+		want := "set -euo pipefail\n" + fmt.Sprintf(mysqlLauncherRotationGolden, "/run/mysql-keyring/keyring", 1) + mysqlLauncherEncryptionGolden + mysqlLauncherHandoffGolden
 		if len(command) != 3 || command[0] != "/bin/bash" || command[1] != "-ec" {
 			t.Fatalf("command = %q, want /bin/bash -ec <script>", command)
 		}
@@ -115,6 +136,19 @@ func TestMySQLLauncherRendering(t *testing.T) {
 		wantArgs := []string{"mysqld", "--basedir=/usr", "--plugin-dir=/usr/lib64/mysql/plugin", "--server-id=7", "--gtid-mode=ON"}
 		if !reflect.DeepEqual(args, wantArgs) {
 			t.Fatalf("args = %q, want %q", args, wantArgs)
+		}
+	})
+
+	// Without binary log encryption a new server_uuid needs no key, so the
+	// sealed-keyring guard is rendered off (R4 B3).
+	t.Run("with encryption, binary log not covered", func(t *testing.T) {
+		fg := encTestFG()
+		off := false
+		fg.Spec.EncryptionAtRest.Coverage = &v1alpha1.EncryptionCoverageSpec{BinaryLog: &off}
+		command, _ := mysqlLauncher(fg, flags)
+		want := "set -euo pipefail\n" + fmt.Sprintf(mysqlLauncherRotationGolden, "/run/mysql-keyring/keyring", 0) + mysqlLauncherEncryptionGolden + mysqlLauncherHandoffGolden
+		if command[2] != want {
+			t.Fatalf("launcher script\n got:\n%s\nwant:\n%s", command[2], want)
 		}
 	})
 
@@ -129,7 +163,9 @@ func TestMySQLLauncherRendering(t *testing.T) {
 }
 
 // TestMySQLServerArgs pins the mysqld flags: the launcher test and the
-// native test start servers with exactly these.
+// native test start servers with exactly these. They are part of every
+// site's spec hash: a change here rolls every site of every group after
+// the operator upgrade (see mysqlLauncherRotationGolden).
 func TestMySQLServerArgs(t *testing.T) {
 	want := []string{
 		"--server-id=101",
@@ -198,6 +234,10 @@ func TestServerUUIDRotationScript(t *testing.T) {
 		// keyring is the keyring data file's mode with encryption at rest
 		// (0: no encryption, no file).
 		keyring os.FileMode
+		// binlogOff renders the step for coverage.binaryLog=false; persisted
+		// is the content of mysqld-auto.cnf ("" means no such file).
+		binlogOff bool
+		persisted string
 		// lock makes the step's failure paths reachable (non-root only).
 		lock        func(t *testing.T, datadir string)
 		wantRemoved bool
@@ -224,6 +264,24 @@ func TestServerUUIDRotationScript(t *testing.T) {
 			wantLog: "removed auto.cnf so mysqld generates a new server_uuid (previous: " + uuid + ")"},
 		{name: "finished clone, sealed keyring", autoCnf: autoCnf, clone: finished, keyring: 0o444, lock: func(*testing.T, string) {},
 			wantLog: "WARNING: a finished clone is staged in DATADIR/#clone but the keyring KEYRING is read-only (the site is sealed), and a new server_uuid needs a new binary log encryption key there; server_uuid is NOT rotated (stays " + uuid + ")"},
+		// Without binary log encryption a new server_uuid needs no new key:
+		// a sealed pod rotates (R4 B3).
+		{name: "finished clone, sealed keyring, binary log not encrypted", autoCnf: autoCnf, clone: finished, keyring: 0o444, binlogOff: true,
+			lock: func(*testing.T, string) {}, wantRemoved: true,
+			wantLog: "removed auto.cnf so mysqld generates a new server_uuid (previous: " + uuid + ")"},
+		{name: "finished clone, sealed keyring, binary log not encrypted, other variables persisted", autoCnf: autoCnf, clone: finished, keyring: 0o444, binlogOff: true,
+			persisted: `{"Version": 2, "mysql_dynamic_variables": {"max_connections": {"Value": "500"}}}`,
+			lock:      func(*testing.T, string) {}, wantRemoved: true,
+			wantLog: "removed auto.cnf so mysqld generates a new server_uuid (previous: " + uuid + ")"},
+		// ... unless SET PERSIST may have turned it on over the rendered
+		// my.cnf: mysqld would abort on the key it cannot store.
+		{name: "finished clone, sealed keyring, binlog_encryption persisted", autoCnf: autoCnf, clone: finished, keyring: 0o444, binlogOff: true,
+			persisted: `{"Version": 2, "mysql_dynamic_variables": {"binlog_encryption": {"Value": "ON"}}}`,
+			lock:      func(*testing.T, string) {},
+			wantLog:   "is read-only (the site is sealed), and a new server_uuid needs a new binary log encryption key there; server_uuid is NOT rotated (stays " + uuid + ")"},
+		{name: "finished clone, unsealed keyring, binlog_encryption persisted", autoCnf: autoCnf, clone: finished, keyring: 0o600, binlogOff: true,
+			persisted: `{"Version": 2, "mysql_dynamic_variables": {"binlog_encryption": {"Value": "ON"}}}`, wantRemoved: true,
+			wantLog: "removed auto.cnf so mysqld generates a new server_uuid (previous: " + uuid + ")"},
 		{name: "interrupted clone, sealed keyring", autoCnf: autoCnf, clone: interrupted, keyring: 0o444,
 			wantLog: "an interrupted clone is staged in DATADIR/#clone"},
 		{name: "ordinary restart, sealed keyring", autoCnf: autoCnf, clone: persisted, keyring: 0o444},
@@ -273,13 +331,19 @@ func TestServerUUIDRotationScript(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tc.persisted != "" {
+				if err := os.WriteFile(filepath.Join(datadir, "mysqld-auto.cnf"), []byte(tc.persisted), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.lock != nil {
 				tc.lock(t, datadir)
 			}
+			binlogEncrypted := keyring != "" && !tc.binlogOff
 
 			// The step is followed by the rest of the launcher: it must
 			// reach it in every case, whatever it decided.
-			stdout, stderr, code := runLauncherStep(t, serverUUIDRotationScript(datadir, keyring)+"echo handoff\n", nil)
+			stdout, stderr, code := runLauncherStep(t, serverUUIDRotationScript(datadir, keyring, binlogEncrypted)+"echo handoff\n", nil)
 			if code != 0 || stdout != "handoff\n" {
 				t.Fatalf("the step stopped the launcher: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 			}
@@ -319,7 +383,7 @@ func TestServerUUIDRotationScript(t *testing.T) {
 				if err := os.WriteFile(auto, []byte("[auto]\nserver-uuid=new\n"), 0o640); err != nil {
 					t.Fatal(err)
 				}
-				_, stderr, code := runLauncherStep(t, serverUUIDRotationScript(datadir, keyring), nil)
+				_, stderr, code := runLauncherStep(t, serverUUIDRotationScript(datadir, keyring, binlogEncrypted), nil)
 				if got, err := os.ReadFile(auto); code != 0 || stderr != "" || err != nil || string(got) != "[auto]\nserver-uuid=new\n" {
 					t.Fatalf("the start after the clone was installed rotated again: exit %d, stderr %q, auto.cnf %q, %v", code, stderr, got, err)
 				}
@@ -348,7 +412,7 @@ func TestServerUUIDRotationScript_PathsAreNotShell(t *testing.T) {
 	if err != nil {
 		t.Fatal("bash is required")
 	}
-	cmd := exec.Command(bash, "-ec", "set -euo pipefail\n"+serverUUIDRotationScript(datadir, keyring)+"echo handoff\n", "mysqld")
+	cmd := exec.Command(bash, "-ec", "set -euo pipefail\n"+serverUUIDRotationScript(datadir, keyring, true)+"echo handoff\n", "mysqld")
 	cmd.Dir = work
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.HasSuffix(string(out), "handoff\n") {
@@ -430,7 +494,11 @@ func TestMySQLEntrypointHandoffScript(t *testing.T) {
 				if code != 127 || stdout != "" {
 					t.Fatalf("exit %d, stdout %q; want 127 and no entrypoint run", code, stdout)
 				}
-				if want := mysqlLauncherLogPrefix + " no MySQL image entrypoint found (looked for " + missing + ", then docker-entrypoint.sh on PATH); spec.image must provide one\n"; stderr != want {
+				// One line: what was looked for, and what to do about it.
+				want := mysqlLauncherLogPrefix + " no MySQL image entrypoint found (looked for " + missing + ", then docker-entrypoint.sh on PATH); spec.image must provide one. " +
+					"This container cannot start until it does: set spec.image to an image that has it (the Docker Official Image and Oracle's community-server image do), " +
+					"or add the image's entrypoint script at one of those paths\n"
+				if stderr != want {
 					t.Fatalf("stderr = %q, want %q", stderr, want)
 				}
 				return

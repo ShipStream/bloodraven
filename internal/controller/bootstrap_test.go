@@ -128,6 +128,11 @@ func (b *bootstrapMock) FlushBinaryLogs(_ context.Context) error {
 	return nil
 }
 
+func (b *bootstrapMock) RotateBinaryLog(_ context.Context) (string, error) {
+	b.record("RotateBinaryLog")
+	return "binlog.000002", nil
+}
+
 func (b *bootstrapMock) GetGtidExecuted(_ context.Context) (string, error) {
 	b.record("GetGtidExecuted")
 	return "", nil

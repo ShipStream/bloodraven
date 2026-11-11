@@ -1,19 +1,23 @@
 package scenarios
 
 // Measurement of an emergency failover under write load (#229): how long
-// writes are down as a client of the new primary sees it, and what the
-// promotion's FLUSH BINARY LOGS costs of that. Used by
+// writes are down as a client of the new primary sees it, what the
+// promotion's FLUSH BINARY LOGS costs of that, and whether the file that
+// rotation opened starts at the recorded promotion GTID set. Used by
 // 01-clean-primary-kill.
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -102,48 +106,60 @@ const rotationPollInterval = 500 * time.Millisecond
 // errNoRotationLine: the operator has not logged the rotation yet.
 var errNoRotationLine = errors.New("no rotation line yet")
 
-// assessBinlogRotation judges the rotation (done/failed messages) the
-// operator logged for site among lines: it must have been acknowledged
-// (the INFO line, and no WARN line) in less than bound. It returns the
-// acknowledged rotation, errNoRotationLine while neither line is there,
-// and otherwise an error that prints the offending line.
-func assessBinlogRotation(lines []pglogs.Match, site, done, failed string, bound time.Duration) (binlogRotationLog, error) {
-	var acked *binlogRotationLog
+// assessBinlogRotation finds the rotation (done/failed messages) the
+// operator logged for site among lines: the first such line, the INFO line
+// of an acknowledged FLUSH BINARY LOGS or the WARN line of one that failed
+// or timed out. It returns errNoRotationLine while neither is there. The
+// rotation is best effort, so its outcome is a measurement, not a verdict
+// (binlogRotationLog.concern words one that was not acknowledged or was
+// slow); the only error besides errNoRotationLine is an INFO line without a
+// usable durationMs, which breaks the log schema.
+func assessBinlogRotation(lines []pglogs.Match, site, done, failed string) (binlogRotationLog, error) {
 	for _, m := range lines {
 		rec, ok := parseBinlogRotation(m.Line, done, failed)
 		if !ok || rec.Site != site {
 			continue
 		}
-		if rec.Failed {
-			return rec, fmt.Errorf("the operator's FLUSH BINARY LOGS on %s was not acknowledged (timedOut=%v error=%q); the operator logged: %s",
-				site, rec.TimedOut, rec.Error, rec.Line)
+		if !rec.Failed && !rec.DurationKnown {
+			return rec, fmt.Errorf("the operator's %q line for %s carries no usable durationMs: %s", done, site, rec.Line)
 		}
-		if acked == nil {
-			r := rec
-			acked = &r
-		}
+		return rec, nil
 	}
-	if acked == nil {
-		return binlogRotationLog{}, errNoRotationLine
-	}
-	if !acked.DurationKnown {
-		return *acked, fmt.Errorf("the operator's %q line for %s carries no usable durationMs: %s", done, site, acked.Line)
-	}
-	if acked.Duration >= bound {
-		return *acked, fmt.Errorf("the operator's FLUSH BINARY LOGS on %s took %s, not under its %s bound: %s", site, acked.Duration, bound, acked.Line)
-	}
-	return *acked, nil
+	return binlogRotationLog{}, errNoRotationLine
 }
 
-// waitBinlogRotation polls the operator's log until assessBinlogRotation has
-// a verdict on site's rotation, for at most timeout.
-func waitBinlogRotation(ctx context.Context, lines logSource, site, done, failed string, bound, timeout time.Duration) (binlogRotationLog, error) {
+// acknowledged reports whether the line is the INFO line of a rotation the
+// server acknowledged.
+func (r binlogRotationLog) acknowledged() bool { return r.Line != "" && !r.Failed }
+
+// concern says what an operator should know about a rotation that was not
+// acknowledged, or that took bound or longer; "" for one acknowledged
+// under bound. The operator's rotation is best effort and never changes
+// its promotion, handoff or reclone, so a concern is reported, not failed:
+// a loaded cluster can be slow to open a connection or to rotate.
+func (r binlogRotationLog) concern(bound time.Duration) string {
+	switch {
+	case r.Failed:
+		return fmt.Sprintf("the operator's FLUSH BINARY LOGS on %s was not acknowledged (timedOut=%v error=%q); the rotation is best effort and the failover is judged without it; the operator logged: %s",
+			r.Site, r.TimedOut, r.Error, r.Line)
+	case r.DurationKnown && r.Duration >= bound:
+		return fmt.Sprintf("the operator's FLUSH BINARY LOGS on %s took %s, not under its %s bound; the rotation is best effort and the failover is judged without it; the operator logged: %s",
+			r.Site, r.Duration, bound, r.Line)
+	}
+	return ""
+}
+
+// waitBinlogRotation polls the operator's log until it holds site's
+// rotation line (assessBinlogRotation), for at most timeout. The operator
+// logs one of the two lines at every promotion, so neither within timeout
+// is an error: the step was not sent, or its log line was lost.
+func waitBinlogRotation(ctx context.Context, lines logSource, site, done, failed string, timeout time.Duration) (binlogRotationLog, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	tick := time.NewTicker(rotationPollInterval)
 	defer tick.Stop()
 	for {
-		rec, err := assessBinlogRotation(lines(), site, done, failed, bound)
+		rec, err := assessBinlogRotation(lines(), site, done, failed)
 		if !errors.Is(err, errNoRotationLine) {
 			return rec, err
 		}
@@ -347,7 +363,10 @@ func (r failoverRTO) rto() time.Duration { return r.FirstNewAck.Sub(r.FaultAt) }
 func (r failoverRTO) outage() time.Duration { return r.FirstNewAck.Sub(r.LastOldAck) }
 
 // check fails a measurement that is incomplete or outside budget, the
-// failover budget the scenario already had.
+// failover budget the scenario already had. The promotion's rotation is
+// not part of it: an unacknowledged or slow one is reported
+// (rotationReport, binlogRotationLog.concern) and the failover is judged
+// on its writes.
 func (r failoverRTO) check(budget time.Duration) error {
 	switch {
 	case r.LoadAcked == 0 || r.LastOldAck.IsZero():
@@ -379,6 +398,8 @@ func (r failoverRTO) rotationReport(rto time.Duration) string {
 		return fmt.Sprintf("not acknowledged after %dms (timedOut=%v, bound %s)", r.Rotation.Duration.Milliseconds(), r.Rotation.TimedOut, r.RotationBound)
 	case !r.Rotation.DurationKnown:
 		return fmt.Sprintf("not measured (bound %s)", r.RotationBound)
+	case r.Rotation.Duration >= r.RotationBound:
+		return fmt.Sprintf("acknowledged after %dms, not under its bound %s", r.Rotation.Duration.Milliseconds(), r.RotationBound)
 	}
 	share := 0.0
 	if rto > 0 {
@@ -388,3 +409,192 @@ func (r failoverRTO) rotationReport(rto time.Duration) string {
 }
 
 func roundMs(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
+
+// promotionFileVerdict is the outcome of checkPromotionBinlogFile.
+type promotionFileVerdict int
+
+const (
+	// promotionFileNotChecked: the comparison could not be made (no
+	// recorded set, a read failed, the file is gone). Not a finding.
+	promotionFileNotChecked promotionFileVerdict = iota
+	// promotionFileVerified: a binary log file on the promoted server
+	// starts at exactly the recorded promotion GTID set.
+	promotionFileVerified
+	// promotionFileMismatch: the server's files prove that none starts at
+	// the recorded set: one starts before it and the next after it.
+	promotionFileMismatch
+)
+
+// promotionFileCheck is the comparison of a promoted server's binary log
+// files with the promotion GTID set the operator recorded.
+type promotionFileCheck struct {
+	Verdict promotionFileVerdict
+	// File is the file that starts at the recorded set (Verified), or the
+	// newest file that starts before it (Mismatch).
+	File string
+	// Detail says what was found, for the report.
+	Detail string
+}
+
+// binlogHeaderReader reads a server's binary log index and the
+// Previous_gtids header of one of its files.
+type binlogHeaderReader interface {
+	// BinlogFiles lists the server's binary log files, oldest first.
+	BinlogFiles(ctx context.Context) ([]string, error)
+	// PreviousGtids is the file's Previous_gtids header: the server's
+	// gtid_executed when it opened the file.
+	PreviousGtids(ctx context.Context, file string) (string, error)
+}
+
+// checkPromotionBinlogFile checks, on a real server, what the promotion's
+// rotation is for (#229): after an acknowledged FLUSH BINARY LOGS sent
+// between the promotion GTID read and the read-only clears, one binary log
+// file of the promoted server has a Previous_gtids header equal to
+// recorded, status.lastFailover.promotionGtidExecuted.
+//
+// It walks the index from the newest file back. A file that starts past
+// recorded was opened later (the new primary rotated again, or the file is
+// the rotation's and something committed first); the first file that does
+// not is the answer: equal is Verified, a strict subset is a Mismatch (no
+// file starts at recorded, because the next one already starts past it).
+// Everything else is NotChecked: an empty or unparsable record, a failed
+// read, sets that do not nest, or an index whose oldest file already
+// starts past recorded (the file was purged). Only a Mismatch is a
+// finding, and only for a rotation the operator logged as acknowledged:
+// an abandoned rotation may land at any later point.
+func checkPromotionBinlogFile(ctx context.Context, r binlogHeaderReader, recorded string) promotionFileCheck {
+	notChecked := func(format string, args ...any) promotionFileCheck {
+		return promotionFileCheck{Verdict: promotionFileNotChecked, Detail: fmt.Sprintf(format, args...)}
+	}
+	if strings.TrimSpace(recorded) == "" {
+		return notChecked("status.lastFailover.promotionGtidExecuted is empty (the operator could not read the GTID set at the promotion)")
+	}
+	want, err := brmysql.ParseGTIDSet(strings.ReplaceAll(recorded, "\n", ""))
+	if err != nil {
+		return notChecked("the recorded promotion GTID set does not parse: %v", err)
+	}
+	files, err := r.BinlogFiles(ctx)
+	if err != nil {
+		return notChecked("list the binary logs: %v", err)
+	}
+	if len(files) == 0 {
+		return notChecked("the server lists no binary log")
+	}
+	newer := ""
+	for i := len(files) - 1; i >= 0; i-- {
+		file := files[i]
+		raw, err := r.PreviousGtids(ctx, file)
+		if err != nil {
+			return notChecked("read the Previous_gtids of %s: %v", file, err)
+		}
+		prev, err := brmysql.ParseGTIDSet(strings.ReplaceAll(raw, "\n", ""))
+		if err != nil {
+			return notChecked("the Previous_gtids of %s do not parse: %v", file, err)
+		}
+		switch {
+		case prev.Contains(want) && want.Contains(prev):
+			return promotionFileCheck{Verdict: promotionFileVerified, File: file,
+				Detail: fmt.Sprintf("%s starts at the recorded promotion GTID set", file)}
+		case prev.Contains(want):
+			// Opened after the promotion; the file sought is older.
+			newer = file
+		case want.Contains(prev):
+			after := "no later file exists"
+			if newer != "" {
+				after = newer + " starts past it"
+			}
+			missing := want.Subtract(prev)
+			return promotionFileCheck{Verdict: promotionFileMismatch, File: file,
+				Detail: fmt.Sprintf("no binary log file starts at the recorded promotion GTID set: %s starts %d transaction(s) before it (%s) and %s",
+					file, missing.TransactionCount(), missing.String(), after)}
+		default:
+			return notChecked("the Previous_gtids of %s and the recorded promotion GTID set do not nest (each holds transactions the other lacks)", file)
+		}
+	}
+	return notChecked("every local binary log starts past the recorded promotion GTID set (oldest: %s); the file the rotation opened is no longer on the server", files[0])
+}
+
+// binlogFileName is what a binary log file name may consist of; anything
+// else is refused before it is put into a statement.
+var binlogFileName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// sqlBinlogHeaders reads the index and the headers over SQL.
+type sqlBinlogHeaders struct{ db *sql.DB }
+
+func (h sqlBinlogHeaders) BinlogFiles(ctx context.Context) ([]string, error) {
+	rows, err := h.db.QueryContext(ctx, "SHOW BINARY LOGS")
+	if err != nil {
+		return nil, fmt.Errorf("SHOW BINARY LOGS: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	nameCol := -1
+	for i, c := range cols {
+		if strings.EqualFold(c, "Log_name") {
+			nameCol = i
+		}
+	}
+	if nameCol < 0 {
+		return nil, fmt.Errorf("SHOW BINARY LOGS has no Log_name column (columns: %s)", strings.Join(cols, ", "))
+	}
+	var files []string
+	for rows.Next() {
+		vals := make([]sql.NullString, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		files = append(files, vals[nameCol].String)
+	}
+	return files, rows.Err()
+}
+
+// PreviousGtids reads the file's second event, which is its Previous_gtids
+// header (the first is the format description).
+func (h sqlBinlogHeaders) PreviousGtids(ctx context.Context, file string) (string, error) {
+	if !binlogFileName.MatchString(file) {
+		return "", fmt.Errorf("unexpected binary log file name %q", file)
+	}
+	rows, err := h.db.QueryContext(ctx, "SHOW BINLOG EVENTS IN '"+file+"' LIMIT 1, 1")
+	if err != nil {
+		return "", fmt.Errorf("SHOW BINLOG EVENTS IN %s: %w", file, err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", err
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("%s has no second event", file)
+	}
+	vals := make([]sql.NullString, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return "", err
+	}
+	eventType, info, haveInfo := "", "", false
+	for i, c := range cols {
+		switch {
+		case strings.EqualFold(c, "Event_type"):
+			eventType = vals[i].String
+		case strings.EqualFold(c, "Info"):
+			info, haveInfo = vals[i].String, true
+		}
+	}
+	if eventType != "Previous_gtids" || !haveInfo {
+		return "", fmt.Errorf("the second event of %s is %q, not Previous_gtids", file, eventType)
+	}
+	return strings.ReplaceAll(info, "\n", ""), nil
+}

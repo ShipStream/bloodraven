@@ -96,15 +96,17 @@ const (
 
 // ArchiverTailStatus is the `tail` block of /archiver/status. The operator
 // waits on it before a reclone wipes a site's binary logs: after its own
-// FLUSH BINARY LOGS it needs a scan that saw the rotation (ActiveFile
-// changed) and ended Drained.
+// FLUSH BINARY LOGS it needs a scan that saw the rotation (ActiveFile is
+// the file the server wrote after that FLUSH, or a later one) and ended
+// Drained.
 type ArchiverTailStatus struct {
 	// State is ArchiverTailDrained, ArchiverTailPending or
 	// ArchiverTailBlocked.
 	State string `json:"state"`
 	// ActiveFile is the binary log the server was writing at the last
 	// scan (the last entry of the index), and NewestSealedFile the entry
-	// before it ("" when there is none).
+	// before it ("" when there is none). Both are of the index read State
+	// is about, and "" from a scan that could not read the index.
 	ActiveFile       string `json:"activeFile,omitempty"`
 	NewestSealedFile string `json:"newestSealedFile,omitempty"`
 	// PendingFiles counts the sealed files the site still has to archive.

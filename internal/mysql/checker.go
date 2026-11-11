@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,19 @@ type Checker interface {
 	// fails. Cancelling ctx abandons the wait, not necessarily the
 	// statement: the server may still rotate afterwards.
 	FlushBinaryLogs(ctx context.Context) error
+
+	// RotateBinaryLog is FlushBinaryLogs followed, on the same connection,
+	// by a read of the binary log file the server writes now (SHOW BINARY
+	// LOG STATUS). That is the file the FLUSH opened or, when the server
+	// rotated again in between, a later one; every file before it is
+	// sealed. The pre-reclone wait compares the name with the active file
+	// of the site's sidecar's last scan (BinlogFileSeq), which tells a
+	// scan that saw this rotation from one that read the index before it.
+	//
+	// An error means the rotation is unconfirmed, not that it did not
+	// happen: the FLUSH may have run and only the read failed, or the
+	// statement may still complete after a cancelled wait.
+	RotateBinaryLog(ctx context.Context) (activeFile string, err error)
 
 	// PinSession holds one server connection for statements that must all
 	// reach the same server; see Session.
@@ -186,6 +200,93 @@ func (m *checker) FlushBinaryLogs(ctx context.Context) error {
 		return fmt.Errorf("flush binary logs: %w", err)
 	}
 	return nil
+}
+
+// RotateBinaryLog implements Checker. Like FlushBinaryLogs it dials a
+// connection of its own and closes it; both statements run on that one
+// connection, so the name read is of the server that rotated.
+func (m *checker) RotateBinaryLog(ctx context.Context) (string, error) {
+	if m.oneShot == nil {
+		return "", fmt.Errorf("rotate binary log: no one-shot connector configured")
+	}
+	db := sql.OpenDB(m.oneShot)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return "", fmt.Errorf("rotate binary log: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
+		return "", fmt.Errorf("rotate binary log: flush binary logs: %w", err)
+	}
+	file, err := activeBinlogFile(ctx, conn)
+	if err != nil {
+		return "", fmt.Errorf("rotate binary log: the flush was acknowledged, but the active file's name was not read: %w", err)
+	}
+	return file, nil
+}
+
+// activeBinlogFile reads the File column of SHOW BINARY LOG STATUS, by
+// column name: the binary log file the server writes now.
+func activeBinlogFile(ctx context.Context, conn *sql.Conn) (string, error) {
+	rows, err := conn.QueryContext(ctx, "SHOW BINARY LOG STATUS")
+	if err != nil {
+		return "", fmt.Errorf("show binary log status: %w", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", fmt.Errorf("show binary log status: %w", err)
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", fmt.Errorf("show binary log status: %w", err)
+		}
+		return "", fmt.Errorf("show binary log status returned no row; binary logging is off")
+	}
+	values := make([]sql.NullString, len(cols))
+	dest := make([]any, len(cols))
+	for i := range values {
+		dest[i] = &values[i]
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return "", fmt.Errorf("show binary log status: %w", err)
+	}
+	for i, col := range cols {
+		if strings.EqualFold(col, "File") {
+			if file := strings.TrimSpace(values[i].String); file != "" {
+				return file, nil
+			}
+			return "", fmt.Errorf("show binary log status reports no file name")
+		}
+	}
+	return "", fmt.Errorf("show binary log status has no File column (columns: %s)", strings.Join(cols, ", "))
+}
+
+// BinlogFileSeq splits a binary log file name into its base name and its
+// numeric suffix ("mysql-bin.000042" is "mysql-bin", 42). The server
+// numbers the files of one log in order, so within one base name a higher
+// suffix is a later file; RESET BINARY LOGS AND GTIDS, or a new data
+// directory, starts the numbering again. ok is false for a name that has no
+// numeric suffix.
+func BinlogFileSeq(name string) (base string, seq uint64, ok bool) {
+	i := strings.LastIndexByte(name, '.')
+	if i <= 0 || i == len(name)-1 {
+		return "", 0, false
+	}
+	digits := name[i+1:]
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return "", 0, false
+		}
+	}
+	seq, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return name[:i], seq, true
 }
 
 // primaryDSN derives the primary pool's DSN from the operational DSN by

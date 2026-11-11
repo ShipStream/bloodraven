@@ -122,6 +122,10 @@ func (t *trackingMock) SetCloneDonorList(_ context.Context, donor string) error 
 	return nil
 }
 
+func (t *trackingMock) RotateBinaryLog(ctx context.Context) (string, error) {
+	return "binlog.000002", t.FlushBinaryLogs(ctx)
+}
+
 func (t *trackingMock) FlushBinaryLogs(ctx context.Context) error {
 	t.record("FlushBinaryLogs")
 	t.mu.Lock()

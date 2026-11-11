@@ -158,6 +158,9 @@ type trialRunner struct {
 
 	dualStreak  int
 	dualFlagged bool
+	// flushGrants is FlushAfterWriteGrant's state across polls
+	// (invariants.go).
+	flushGrants flushGrants
 
 	// pl is the planned-failover actor machinery (planned_harness.go); nil
 	// when the trial's actors are disabled, which leaves every code path
@@ -349,9 +352,14 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 	)
 	tm.SetSleepForTest(func(time.Duration) {})
 	// PITR archiving is "enabled" only while a reclone wait is scripted
-	// (OpRecloneWait); otherwise the probe answers disabled and a reclone
-	// would skip the wait, as on a group without PITR.
-	tm.ArchiveTailProbe = r.archiveTailProbe
+	// (OpRecloneWait); otherwise the source answers disabled and a reclone
+	// would skip the wait, as on a group without PITR. Production runs
+	// each step of the wait (the sidecar status request and the rotation)
+	// on a goroutine of its own; here a step runs inline, inside the Poll
+	// that started it, so the model sees one actor at a time and a trial
+	// replays exactly.
+	tm.ArchiveTail = simArchiveTail{r: r}
+	tm.SetRecloneTailStepRunnerForSim(func(step func()) { step() })
 	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
 		// A wait that reaches its bound goes on to CLONE, which the model
 		// does not have: the harness withdraws every request before that.
@@ -600,16 +608,26 @@ func (r *trialRunner) driveRecloneWait(p int) {
 	}
 }
 
-// archiveTailProbe is the simulated sidecar's /archiver/status for the
+// simArchiveTail is the simulated PITR status source of the pre-reclone
+// wait (controller.ArchiveTailSource).
+type simArchiveTail struct{ r *trialRunner }
+
+// ArchivingEnabled: PITR archiving is "on" while a reclone wait is
+// scripted.
+func (s simArchiveTail) ArchivingEnabled() bool { return s.r.recloneWait != nil }
+
+// TailStatus is the simulated sidecar's /archiver/status for the
 // pre-reclone wait. It never reports the tail archived (the wait must not
 // reach CLONE); what it does report is the trial's choice.
-func (r *trialRunner) archiveTailProbe(_ context.Context, site string) (*mysql.ArchiverStatus, bool, error) {
+func (s simArchiveTail) TailStatus(_ context.Context, site string) (*mysql.ArchiverStatus, error) {
+	r := s.r
 	w := r.recloneWait
 	if w == nil || w.site != site {
-		return nil, false, nil
+		// Only the scripted site's sidecar is modelled.
+		return nil, fmt.Errorf("sim: no sidecar status modelled for %s", site)
 	}
 	if r.cluster.OperatorDead() {
-		return nil, true, errOperatorDead
+		return nil, errOperatorDead
 	}
 	var truth SiteTruth
 	for _, t := range r.cluster.Truth() {
@@ -618,18 +636,18 @@ func (r *trialRunner) archiveTailProbe(_ context.Context, site string) (*mysql.A
 		}
 	}
 	if truth.Crashed || w.sidecar == 0 {
-		return nil, true, fmt.Errorf("dial tcp %s:8080: connect: connection refused", site)
+		return nil, fmt.Errorf("dial tcp %s:8080: connect: connection refused", site)
 	}
 	tail := &mysql.ArchiverTailStatus{State: mysql.ArchiverTailPending, PendingFiles: 1,
-		ActiveFile: fmt.Sprintf("binlog.%06d", truth.BinlogSeq+1)}
+		ActiveFile: simBinlogFile(truth.BinlogSeq)}
 	switch w.sidecar {
 	case 2:
 		tail.State, tail.Reason = mysql.ArchiverTailBlocked, "sim: the archive store is unreachable"
 	case 3:
 		// The sidecar has not scanned since the trial began.
-		tail.State, tail.PendingFiles, tail.ActiveFile = mysql.ArchiverTailDrained, 0, "binlog.000001"
+		tail.State, tail.PendingFiles, tail.ActiveFile = mysql.ArchiverTailDrained, 0, simBinlogFile(0)
 	}
-	return &mysql.ArchiverStatus{Enabled: true, Tail: tail}, true, nil
+	return &mysql.ArchiverStatus{Enabled: true, Tail: tail}, nil
 }
 
 // restartOperator brings up a replacement process after any kind of death —

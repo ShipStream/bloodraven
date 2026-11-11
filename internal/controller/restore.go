@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -793,6 +794,10 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 		}
 	}
 	if err := r.Create(ctx, built); err != nil {
+		// The attempt keeps its pin and its hold while the create is
+		// retried; say why it has no Job yet (and, through
+		// setRestorePending, that a backup deleted meanwhile waits for it).
+		r.setRestorePending(ctx, fg, targetSite, fmt.Sprintf("creating the restore Job failed: %v", err))
 		return 0, fmt.Errorf("create restore job: %w", err)
 	}
 	now := metav1.Now()
@@ -813,7 +818,15 @@ func (r *MysqlFailoverGroupReconciler) createRestoreJob(ctx context.Context, fg 
 
 // setRestorePending records a Pending restore with msg, skipping the
 // write when status.restore already says exactly that.
+//
+// An attempt that pinned its source backup and then waits (for its target,
+// for the archive's read binding, for a Job create that keeps failing)
+// keeps the pin, so a backup deleted by hand meanwhile stays Terminating
+// for as long as the wait lasts. The backup says which group it waits for
+// (ArtifactCleanup=False/HeldByRestore); the message here names the backup,
+// so the wait is visible from the restore as well.
 func (r *MysqlFailoverGroupReconciler) setRestorePending(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite, msg string) {
+	msg += r.pinnedBackupDeletionNote(ctx, fg)
 	if prev := fg.Status.Restore; prev != nil && prev.Phase == v1alpha1.BackupPhasePending &&
 		prev.TargetSite == targetSite && prev.Message == msg && prev.JobName == "" {
 		return
@@ -823,6 +836,22 @@ func (r *MysqlFailoverGroupReconciler) setRestorePending(ctx context.Context, fg
 		TargetSite: targetSite,
 		Message:    msg,
 	})
+}
+
+// pinnedBackupDeletionNote returns the sentence a waiting restore adds to
+// its message when the backup it pinned is being deleted, or "". It reads
+// through the cache: it only words a message, and decides nothing.
+func (r *MysqlFailoverGroupReconciler) pinnedBackupDeletionNote(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) string {
+	rs := fg.Status.Restore
+	if rs == nil || initRestoreTerminal(rs) || rs.BackupRef == nil || rs.JobName != "" {
+		return ""
+	}
+	var backup v1alpha1.MysqlBackup
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: rs.BackupRef.Name}, &backup); err != nil ||
+		string(backup.UID) != rs.BackupRef.UID || backup.DeletionTimestamp.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf("; MysqlBackup %s, which this restore has pinned, is being deleted, and the deletion waits until this restore has ended (deleting the group gives the backup up)", backup.Name)
 }
 
 // deploymentRolledOut returns true when a Deployment is fully rolled
@@ -845,31 +874,67 @@ func deploymentRolledOut(deploy *appsv1.Deployment) bool {
 	return true
 }
 
-// setRestoreStatus patches fg.status.restore. IsNotFound is treated as
+// setRestoreStatus writes fg.status.restore. IsNotFound is treated as
 // a no-op (the CR was deleted out from under us) and other errors are
 // logged but not propagated: this function is called from multiple
 // places inside reconcileRestoreJob and we want the main Job-observation
 // path to keep running rather than crash-looping the reconciler on a
 // transient status write failure.
+//
+// The write is made against the group as the API server has it, with its
+// resourceVersion as a precondition, never against the copy this pass read
+// from the cache: which pin the new status carries is decided from the
+// stored status (carryRestorePin). A pass whose cached copy is one write
+// behind could otherwise put an ended attempt's pin back on a status that
+// is not terminal, which would turn a hold that readers have seen dead
+// live again, or erase the pin a newer attempt wrote.
 func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, rs *v1alpha1.RestoreStatus) bool {
-	// The pinned source backup stays with the attempt, and on the terminal
-	// status that ends it. A status that starts a new attempt after a
-	// terminal one does not inherit it: holdRestoreBackup pins again,
-	// under a new hold ID.
-	if prev := fg.Status.Restore; rs != nil && rs.BackupRef == nil && prev != nil && prev.BackupRef != nil &&
-		(!initRestoreTerminal(prev) || initRestoreTerminal(rs)) {
-		rs.BackupRef = prev.BackupRef.DeepCopy()
-	}
-	patch := client.MergeFrom(fg.DeepCopy())
-	fg.Status.Restore = rs
-	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
-		log.FromContext(ctx).Error(err, "update restore status",
-			"fg", fg.Name, "phase", rs.Phase)
-		return false
-	} else if apierrors.IsNotFound(err) {
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		var live v1alpha1.MysqlFailoverGroup
+		if err := r.restoreHoldReader().Get(ctx, client.ObjectKeyFromObject(fg), &live); err != nil {
+			return err
+		}
+		if live.UID != fg.UID {
+			// Another group under this name: the restore this status
+			// belongs to is gone with its group.
+			return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), fg.Name)
+		}
+		base := live.DeepCopy()
+		live.Status.Restore = carryRestorePin(live.Status.Restore, rs)
+		if err := r.Status().Patch(ctx, &live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		*fg = live
+		return nil
+	})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			phase := v1alpha1.BackupPhase("")
+			if rs != nil {
+				phase = rs.Phase
+			}
+			log.FromContext(ctx).Error(err, "update restore status", "fg", fg.Name, "phase", phase)
+		}
 		return false
 	}
 	return true
+}
+
+// carryRestorePin returns the status to store for next, given the stored
+// status prev. The pinned source backup stays with the attempt, and on the
+// terminal status that ends it. A status that starts a new attempt after a
+// terminal one does not inherit it: holdRestoreBackup pins again, under a
+// new hold ID. next is not modified.
+func carryRestorePin(prev, next *v1alpha1.RestoreStatus) *v1alpha1.RestoreStatus {
+	if next == nil {
+		return nil
+	}
+	next = next.DeepCopy()
+	if next.BackupRef == nil && prev != nil && prev.BackupRef != nil &&
+		(!initRestoreTerminal(prev) || initRestoreTerminal(next)) {
+		next.BackupRef = prev.BackupRef.DeepCopy()
+	}
+	return next
 }
 
 // ensureRestoreCredsSecret creates or updates the derived Secret used by

@@ -413,17 +413,119 @@ func TestPlannedPromote_RotatesOncePerRun(t *testing.T) {
 	}
 }
 
-// TestPlannedPromote_ClaimLostBeforeTheRotation: a pass whose claim is
-// gone sends nothing, the rotation included.
+// TestPlannedPromote_ClaimLostBeforeTheRotation: the planned promotion
+// holds the claim through STOP REPLICA and RESET REPLICA ALL and loses it
+// while RESET is in flight. The rotation is guarded like a statement, so
+// the pass sends neither the rotation nor anything after it, and returns
+// the guard's error.
 func TestPlannedPromote_ClaimLostBeforeTheRotation(t *testing.T) {
 	f := newOpsFixture(t, "")
+	f.hold(false)
 	f.fenced()
-	// No claim installed: Promote refuses before any statement.
-	if _, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting)); err == nil {
-		t.Fatal("Promote without the claim returned no error")
+	if _, err := f.topo.ReadTargetServerUUID(context.Background(), f.ref); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	f.tgt.onStmt = func(stmt string) {
+		if stmt == "reset" {
+			released = f.reg.slot.release(f.ref.RunID, ReleaseTerminal)
+		}
+	}
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	if !released {
+		t.Fatal("fixture: the claim was not held when RESET REPLICA ALL arrived")
+	}
+	if !errors.Is(err, errClaimLost) {
+		t.Fatalf("Promote = %+v, %v; want the guard's errClaimLost", out, err)
 	}
 	if fl := f.tgt.flushLog(); len(fl) != 0 {
-		t.Fatalf("a pass without the claim rotated the target: %+v", fl)
+		t.Fatalf("a pass that lost its claim after the reset rotated the target: %+v", fl)
+	}
+	if got, want := f.tgt.statements(), []string{"stop", "reset"}; !slices.Equal(got, want) {
+		t.Fatalf("target statements = %v, want %v (nothing after the claim was lost)", got, want)
+	}
+	if fl := f.src.flushLog(); len(fl) != 0 {
+		t.Fatalf("the source was rotated: %+v", fl)
+	}
+}
+
+// TestPlannedFence_ClaimLostBeforeTheSeal: the claim is lost while the
+// fence statement is in flight. The fence was sent under the claim and is
+// read back; the seal that follows is a statement of its own and is not
+// sent to a source the run no longer owns.
+func TestPlannedFence_ClaimLostBeforeTheSeal(t *testing.T) {
+	f := newOpsFixture(t, "")
+	f.hold(false)
+	released := false
+	f.src.onStmt = func(stmt string) {
+		if stmt == "sro=ON" {
+			released = f.reg.slot.release(f.ref.RunID, ReleaseTerminal)
+		}
+	}
+	proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA)
+	if !released {
+		t.Fatal("fixture: the claim was not held when the fence arrived")
+	}
+	if got, want := f.src.statements(), []string{"sro=ON"}; !slices.Equal(got, want) {
+		t.Fatalf("source statements = %v, want %v", got, want)
+	}
+	if fl := f.src.flushLog(); len(fl) != 0 {
+		t.Fatalf("the source was rotated after the run lost its claim: %+v (Fence = %+v, %v)", fl, proof, err)
+	}
+	// Control: the same pass with the claim kept seals the source.
+	g := newOpsFixture(t, "")
+	g.hold(false)
+	if _, err := g.topo.Fence(context.Background(), g.ref, opsUUIDA); err != nil {
+		t.Fatal(err)
+	}
+	if fl := g.src.flushLog(); len(fl) != 1 {
+		t.Fatalf("control: source rotations = %d, want 1", len(fl))
+	}
+}
+
+// TestPlannedFence_ResentFenceSealsOnce: the seal is reached a second time
+// in one process only when the fence is sent a second time, which needs the
+// source to read writable again after the run fenced it (an external
+// read_only=OFF between two passes of a run whose Draining write was lost;
+// a fence that is found in place is proven by attribution and never
+// reaches the seal). The run then fences again and does not rotate again:
+// one rotation per run and process.
+func TestPlannedFence_ResentFenceSealsOnce(t *testing.T) {
+	f := newOpsFixture(t, "")
+	f.hold(false)
+	if proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); err != nil || proof.Kind != FenceApplied {
+		t.Fatalf("Fence = %+v, %v", proof, err)
+	}
+	if got := len(f.src.flushLog()); got != 1 {
+		t.Fatalf("source rotations after the first fence = %d, want 1", got)
+	}
+	// An external writer clears the run's fence.
+	f.src.mu.Lock()
+	f.src.ro, f.src.sro = false, false
+	f.src.mu.Unlock()
+	proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA)
+	if err != nil || proof.Kind != FenceApplied || proof.Attribution != FenceByMemo {
+		t.Fatalf("second Fence = %+v, %v; want the fence sent again and applied", proof, err)
+	}
+	if got, want := f.src.statements(), []string{"sro=ON", "sro=ON"}; !slices.Equal(got, want) {
+		t.Fatalf("source statements = %v, want %v (the fence sent twice)", got, want)
+	}
+	if got := len(f.src.flushLog()); got != 1 {
+		t.Fatalf("source rotations after the fence was sent again = %d, want 1 for the run", got)
+	}
+	// A new run on the same process seals again: the memo is per run.
+	f.reg.slot.release(f.ref.RunID, ReleaseTerminal)
+	f.topo.forgetRun(f.ref.RunID)
+	f.src.mu.Lock()
+	f.src.ro, f.src.sro = false, false
+	f.src.mu.Unlock()
+	f.ref.RunID = "run-2"
+	f.hold(false)
+	if proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); err != nil || proof.Kind != FenceApplied {
+		t.Fatalf("Fence of the next run = %+v, %v", proof, err)
+	}
+	if got := len(f.src.flushLog()); got != 2 {
+		t.Fatalf("source rotations after the next run's fence = %d, want 2", got)
 	}
 }
 
@@ -474,6 +576,131 @@ func TestPlannedFence_SealsTheSourceOnce(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPlannedFence_UnsealedSourceIsLogged: only the pass that sends the
+// fence and reads it back rotates the source. A fence proven by
+// attribution instead (its reply was lost and a later pass of this process
+// proves it, or an earlier operator process sent it) is not followed by a
+// rotation, and the operator says so once per run and process, with the
+// reason. A run that did rotate, and a re-check of a recorded fence, log
+// nothing.
+func TestPlannedFence_UnsealedSourceIsLogged(t *testing.T) {
+	const msg = "planned failover: fenced source binlog not rotated"
+	capture := func(f *opsFixture) *syncBuffer {
+		logs := &syncBuffer{}
+		f.tm.logger = slog.New(slog.NewTextHandler(logs, nil))
+		return logs
+	}
+	count := func(logs *syncBuffer) int { return strings.Count(logs.String(), `msg="`+msg+`"`) }
+	intended := v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, SourceServerUUID: opsUUIDA}
+
+	t.Run("the fence's read-back was lost", func(t *testing.T) {
+		f := newOpsFixture(t, "")
+		logs := capture(f)
+		f.hold(false)
+		// The fence applies, and the read-back that follows it fails.
+		f.src.onStmt = func(stmt string) {
+			if stmt == "sro=ON" {
+				f.src.sroReadErr = errors.New("i/o timeout")
+			}
+		}
+		proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA)
+		if err != nil || proof.Kind != FenceRetry || !proof.Sent {
+			t.Fatalf("Fence = %+v, %v; want a retry of a fence that was sent", proof, err)
+		}
+		if count(logs) != 0 {
+			t.Fatalf("the line was logged before the fence was proven:\n%s", logs.String())
+		}
+		f.src.mu.Lock()
+		f.src.sroReadErr = nil
+		f.src.mu.Unlock()
+		// The next pass proves the fence by this process's memo.
+		if proof, err := f.topo.ProveFence(context.Background(), f.ref, intended); err != nil || proof.Kind != FenceApplied || proof.Attribution != FenceByMemo {
+			t.Fatalf("ProveFence = %+v, %v; want the fence applied, by memo", proof, err)
+		}
+		line := logLine(t, logs.String(), msg)
+		for _, want := range []string{"level=INFO", "runId=run-1", "site=dc1", "reason=fenceReplyLost"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("log line %q lacks %q", line, want)
+			}
+		}
+		// Later proofs of the same run say nothing more.
+		if _, err := f.topo.ProveFence(context.Background(), f.ref, intended); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); err != nil {
+			t.Fatal(err)
+		}
+		if got := count(logs); got != 1 {
+			t.Fatalf("the line was logged %d times for one run, want once", got)
+		}
+		if fl := f.src.flushLog(); len(fl) != 0 {
+			t.Fatalf("a fence proven by attribution rotated the source: %+v", fl)
+		}
+	})
+
+	t.Run("an earlier process sent the fence", func(t *testing.T) {
+		f := newOpsFixture(t, "")
+		logs := capture(f)
+		f.hold(false)
+		f.fenced() // by the process that died before its Draining write
+		proof, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA)
+		if err != nil || proof.Kind != FenceApplied || proof.Attribution != FenceByIntentAndUUID {
+			t.Fatalf("Fence = %+v, %v; want the fence applied, by the intent's server_uuid", proof, err)
+		}
+		line := logLine(t, logs.String(), msg)
+		for _, want := range []string{"level=INFO", "runId=run-1", "site=dc1", "reason=fenceSentByEarlierProcess"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("log line %q lacks %q", line, want)
+			}
+		}
+		if _, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); err != nil {
+			t.Fatal(err)
+		}
+		if got := count(logs); got != 1 {
+			t.Fatalf("the line was logged %d times for one run, want once", got)
+		}
+		if fl := f.src.flushLog(); len(fl) != 0 {
+			t.Fatalf("a fence proven by attribution rotated the source: %+v", fl)
+		}
+		if got := f.src.statements(); len(got) != 0 {
+			t.Fatalf("the proof sent %v to the source", got)
+		}
+	})
+
+	t.Run("a run that rotated its source", func(t *testing.T) {
+		f := newOpsFixture(t, "")
+		logs := capture(f)
+		f.hold(false)
+		if _, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.topo.ProveFence(context.Background(), f.ref, intended); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(f.src.flushLog()); got != 1 || count(logs) != 0 {
+			t.Fatalf("rotations = %d, unsealed lines = %d; want one rotation and no line", got, count(logs))
+		}
+	})
+
+	t.Run("a re-check of a recorded fence", func(t *testing.T) {
+		f := newOpsFixture(t, "")
+		logs := capture(f)
+		f.hold(false)
+		f.fenced()
+		applied := intended
+		applied.State = v1alpha1.PlannedFailoverFenceApplied
+		if proof, err := f.topo.ProveFence(context.Background(), f.ref, applied); err != nil || proof.Kind != FenceApplied {
+			t.Fatalf("ProveFence = %+v, %v", proof, err)
+		}
+		if count(logs) != 0 {
+			t.Fatalf("a re-check of a recorded fence logged the line:\n%s", logs.String())
+		}
+	})
 }
 
 // TestExecuteHandoff_RotatesSourceThenCandidate: a maintenance handoff

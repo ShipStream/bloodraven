@@ -499,6 +499,22 @@ func (m *simChecker) FlushBinaryLogs(ctx context.Context) error {
 	return nil
 }
 
+// RotateBinaryLog is FlushBinaryLogs plus the name of the file the site
+// writes after it (the pre-reclone rotation). The read is not an event of
+// its own: it runs on the flush's connection and has no fault of its own in
+// the model.
+func (m *simChecker) RotateBinaryLog(ctx context.Context) (string, error) {
+	if err := m.FlushBinaryLogs(ctx); err != nil {
+		return "", err
+	}
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	return simBinlogFile(m.s.binlogSeq), nil
+}
+
+// simBinlogFile names the file a site writes after seq rotations.
+func simBinlogFile(seq int) string { return fmt.Sprintf("binlog.%06d", seq+1) }
+
 func (m *simChecker) GetGtidExecuted(_ context.Context) (string, error) {
 	m.c.mu.Lock()
 	defer m.c.mu.Unlock()

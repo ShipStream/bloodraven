@@ -175,7 +175,7 @@ func tailNotArchivedEvent(uid, site string, count int32) corev1.Event {
 		InvolvedObject: corev1.ObjectReference{Kind: "MysqlFailoverGroup", Name: "playground"},
 		Type:           corev1.EventTypeWarning,
 		Reason:         v1alpha1.EventPITRArchiveTailNotArchived,
-		Message: "site " + site + " is being recloned although its binary log tail was not confirmed archived within 2m0s: the site's archiver still had 1 sealed binary log(s) to archive. " +
+		Message: "site " + site + " is being recloned although its binary log tail was not confirmed archived in time: the site's archiver still had 1 sealed binary log(s) to archive. " +
 			"CLONE wipes the site's binary logs; a point-in-time restore whose window needs transactions only they held refuses PITRArchiveGap.",
 		Count: count,
 	}

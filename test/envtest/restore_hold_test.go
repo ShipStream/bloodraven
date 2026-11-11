@@ -3,6 +3,8 @@
 package envtest
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // Restore holds against a real API server (#275): the pin survives the CRD
@@ -317,5 +320,361 @@ func TestEnvtest_RestoreHoldStrippedWhenGroupIsGone(t *testing.T) {
 	}
 	if err := k8sClient.Get(ctx, oKey, older); err != nil || older.DeletionTimestamp.IsZero() {
 		t.Fatalf("backup not pruned once nothing reads it: %v", err)
+	}
+}
+
+// interceptedClient is a client on the test API server whose writes pass
+// through funcs first.
+func interceptedClient(t *testing.T, funcs interceptor.Funcs) client.Client {
+	t.Helper()
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return interceptor.NewClient(base, funcs)
+}
+
+// beforeBackupPatch returns a client that runs fn once, right before the
+// first patch of a MysqlBackup that match accepts reaches the API server,
+// and whether it ran.
+func beforeBackupPatch(t *testing.T, match func(*v1alpha1.MysqlBackup) bool, fn func()) (client.Client, *bool) {
+	t.Helper()
+	ran := new(bool)
+	return interceptedClient(t, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if b, ok := obj.(*v1alpha1.MysqlBackup); ok && !*ran && match(b) {
+				*ran = true
+				fn()
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}), ran
+}
+
+// restoreHoldFixture is a group whose initFromBackup reads the Succeeded
+// backup "lion-nightly-seed", with everything in place for the next group
+// reconcile to pin the backup, hold it and create the restore Job.
+type restoreHoldFixture struct {
+	t      *testing.T
+	ns     string
+	fg     *v1alpha1.MysqlFailoverGroup
+	fgKey  client.ObjectKey
+	seed   *v1alpha1.MysqlBackup
+	seedAt client.ObjectKey
+}
+
+func newRestoreHoldFixture(t *testing.T, name string) *restoreHoldFixture {
+	t.Helper()
+	controller.SetOperatorImageDefaults("registry.test/bloodraven:envtest", "bloodraven")
+	t.Cleanup(func() { controller.SetOperatorImageDefaults("", "") })
+	ns := createNamespace(t, name)
+	ensureSecret(t, ns)
+	fg := newVerificationFG(ns)
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "lion-nightly-seed"}}}
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	f := &restoreHoldFixture{t: t, ns: ns, fg: fg, fgKey: client.ObjectKeyFromObject(fg)}
+	f.seed = createHeldTestBackup(t, ns, fg.Name, "lion-nightly-seed", time.Now().Add(-time.Hour))
+	f.seedAt = client.ObjectKeyFromObject(f.seed)
+	// The first passes create the Deployments; the restore waits.
+	f.reconcileGroup(k8sClient)
+	f.reconcileGroup(k8sClient)
+	if rs := f.fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhasePending || rs.BackupRef != nil {
+		t.Fatalf("status.restore = %+v, want Pending and not pinned before the Job can be built", rs)
+	}
+	f.fg.Status.ActiveSite = "dc1"
+	f.fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
+	if err := k8sClient.Status().Update(ctx, f.fg); err != nil {
+		t.Fatal(err)
+	}
+	var deploy appsv1.Deployment
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: "mysql-lion-dc1"}, &deploy); err != nil {
+		t.Fatal(err)
+	}
+	deploy.Status.Replicas, deploy.Status.ReadyReplicas, deploy.Status.UpdatedReplicas, deploy.Status.AvailableReplicas = 1, 1, 1, 1
+	deploy.Status.ObservedGeneration = deploy.Generation
+	if err := k8sClient.Status().Update(ctx, &deploy); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// reconcileGroup runs one pass of a new group reconciler (an operator
+// restart) through c and reads the group back. A reconcile error is
+// returned, not fatal: some tests inject one.
+func (f *restoreHoldFixture) reconcileGroup(c client.Client) error {
+	f.t.Helper()
+	r := &controller.MysqlFailoverGroupReconciler{Client: c, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(100)}
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: f.fgKey})
+	if getErr := k8sClient.Get(ctx, f.fgKey, f.fg); getErr != nil {
+		f.t.Fatal(getErr)
+	}
+	return err
+}
+
+func (f *restoreHoldFixture) mustReconcileGroup(c client.Client) {
+	f.t.Helper()
+	if err := f.reconcileGroup(c); err != nil {
+		f.t.Fatalf("group reconcile: %v", err)
+	}
+}
+
+func (f *restoreHoldFixture) reconcileBackup(c client.Client) ctrl.Result {
+	f.t.Helper()
+	r := &controller.MysqlBackupReconciler{Client: c, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: f.seedAt})
+	if err != nil {
+		f.t.Fatalf("backup reconcile: %v", err)
+	}
+	return res
+}
+
+func (f *restoreHoldFixture) getSeed() *v1alpha1.MysqlBackup {
+	f.t.Helper()
+	if err := k8sClient.Get(ctx, f.seedAt, f.seed); err != nil {
+		f.t.Fatal(err)
+	}
+	return f.seed
+}
+
+func (f *restoreHoldFixture) restoreJobs() []batchv1.Job {
+	f.t.Helper()
+	var jobs batchv1.JobList
+	if err := k8sClient.List(ctx, &jobs, client.InNamespace(f.ns), client.MatchingLabels{"app.kubernetes.io/name": "mysql-restore"}); err != nil {
+		f.t.Fatal(err)
+	}
+	return jobs.Items
+}
+
+// runToJob reconciles until the restore Job exists and returns it.
+func (f *restoreHoldFixture) runToJob() *batchv1.Job {
+	f.t.Helper()
+	for i := 0; i < 5 && (f.fg.Status.Restore == nil || f.fg.Status.Restore.JobName == ""); i++ {
+		f.mustReconcileGroup(k8sClient)
+	}
+	jobs := f.restoreJobs()
+	if len(jobs) != 1 || f.fg.Status.Restore.BackupRef == nil {
+		f.t.Fatalf("restore Jobs = %d, status.restore = %+v, want one Job and a pinned backup", len(jobs), f.fg.Status.Restore)
+	}
+	return &jobs[0]
+}
+
+func failJob(t *testing.T, job *batchv1.Job) {
+	t.Helper()
+	now := metav1.Now()
+	job.Status.StartTime = &now
+	job.Status.Failed = 1
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "BackoffLimitExceeded"},
+		{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now, Reason: "BackoffLimitExceeded"},
+	}
+	if err := k8sClient.Status().Update(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEnvtest_RestoreHoldWritesArePreconditioned pins, against a real API
+// server, the four conditional writes the restore hold relies on (R4 A1).
+// Each case lets another writer in between the read a write was decided on
+// and the write: the write must lose. Without its resourceVersion
+// precondition the stamp would land on a backup whose cleanup may have
+// started, the pin would overwrite a status this pass never read, and the
+// release and the strip, which remove the last annotation with
+// {"annotations": null}, would drop a hold stamped meanwhile.
+func TestEnvtest_RestoreHoldWritesArePreconditioned(t *testing.T) {
+	t.Run("stamp loses to a delete since its read", func(t *testing.T) {
+		f := newRestoreHoldFixture(t, "restore-hold-stamp")
+		c, deleted := beforeBackupPatch(t, func(*v1alpha1.MysqlBackup) bool { return true }, func() {
+			if err := k8sClient.Delete(ctx, f.getSeed()); err != nil {
+				t.Fatal(err)
+			}
+		})
+		f.mustReconcileGroup(c)
+		if !*deleted {
+			t.Fatal("the stamp was never attempted")
+		}
+		if jobs := f.restoreJobs(); len(jobs) != 0 {
+			t.Fatalf("restore Job %s created from a backup that was deleted before the hold was stamped", jobs[0].Name)
+		}
+		if seed := f.getSeed(); seed.DeletionTimestamp.IsZero() || len(restoreHolds(seed)) != 0 {
+			t.Fatalf("backup deleting = %v, holds = %v, want a Terminating backup without the hold", !seed.DeletionTimestamp.IsZero(), restoreHolds(seed))
+		}
+		// The delete won: the attempt ends, and nothing is created.
+		f.mustReconcileGroup(c)
+		if rs := f.fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(rs.Message, "the backup is being deleted") {
+			t.Fatalf("status.restore = %+v, want Failed (being deleted)", rs)
+		}
+		if jobs := f.restoreJobs(); len(jobs) != 0 {
+			t.Fatalf("restore Job %s created from a backup being deleted that the restore never held", jobs[0].Name)
+		}
+	})
+
+	t.Run("pin loses to a status write since its read", func(t *testing.T) {
+		f := newRestoreHoldFixture(t, "restore-hold-pin")
+		other := v1alpha1.RestoreBackupRef{Name: f.seed.Name, UID: string(f.seed.UID), HoldID: "0d9f1c1e-0000-4000-8000-0000000002a1"}
+		wrote := false
+		c := interceptedClient(t, interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				// The pin is the status patch that carries a new backupRef.
+				if fg, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok && !wrote && fg.Status.Restore != nil && fg.Status.Restore.BackupRef != nil {
+					wrote = true
+					var stored v1alpha1.MysqlFailoverGroup
+					if err := k8sClient.Get(ctx, f.fgKey, &stored); err != nil {
+						t.Fatal(err)
+					}
+					stored.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, JobName: "an-earlier-job",
+						Message: "an attempt this pass did not see", BackupRef: other.DeepCopy()}
+					if err := k8sClient.Status().Update(ctx, &stored); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+			},
+		})
+		f.mustReconcileGroup(c)
+		if !wrote {
+			t.Fatal("the pin was never attempted")
+		}
+		if rs := f.fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhaseFailed || rs.JobName != "an-earlier-job" ||
+			rs.BackupRef == nil || *rs.BackupRef != other {
+			t.Fatalf("status.restore = %+v, want the status written since the read, untouched", rs)
+		}
+		if holds := restoreHolds(f.getSeed()); len(holds) != 0 {
+			t.Fatalf("hold stamped under a pin that was not recorded: %v", holds)
+		}
+		if jobs := f.restoreJobs(); len(jobs) != 0 {
+			t.Fatalf("restore Job %s created under a pin that was not recorded", jobs[0].Name)
+		}
+	})
+
+	t.Run("release keeps a hold stamped since its read", func(t *testing.T) {
+		f := newRestoreHoldFixture(t, "restore-hold-release")
+		job := f.runToJob()
+		own := v1alpha1.RestoreHoldAnnotationPrefix + f.fg.Status.Restore.BackupRef.HoldID
+		failJob(t, job)
+		f.mustReconcileGroup(k8sClient)
+		if rs := f.fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseFailed {
+			t.Fatalf("status.restore = %+v, want Failed", rs)
+		}
+		if seed := f.getSeed(); len(seed.Annotations) != 1 || seed.Annotations[own] != f.fg.Name {
+			t.Fatalf("annotations before the release = %v, want this restore's hold alone", seed.Annotations)
+		}
+		const verification = holdAnnotationPrefix + "uid-v"
+		c, stamped := beforeBackupPatch(t, func(b *v1alpha1.MysqlBackup) bool { _, held := b.Annotations[own]; return !held }, func() {
+			seed := f.getSeed()
+			seed.Annotations[verification] = "v"
+			if err := k8sClient.Update(ctx, seed); err != nil {
+				t.Fatal(err)
+			}
+		})
+		f.mustReconcileGroup(c)
+		if seed := f.getSeed(); !*stamped || seed.Annotations[verification] != "v" {
+			t.Fatalf("stamped = %v, annotations = %v: the release dropped a hold stamped after it read the backup", *stamped, seed.Annotations)
+		}
+		f.mustReconcileGroup(k8sClient)
+		if seed := f.getSeed(); len(seed.Annotations) != 1 || seed.Annotations[verification] != "v" {
+			t.Fatalf("annotations after the retried release = %v, want the other reader's hold alone", seed.Annotations)
+		}
+	})
+
+	t.Run("strip keeps a hold stamped since its read", func(t *testing.T) {
+		f := newRestoreHoldFixture(t, "restore-hold-strip")
+		// A hold whose group is gone, and nothing else on the backup.
+		dead := v1alpha1.RestoreHoldAnnotationPrefix + "0d9f1c1e-0000-4000-8000-0000000002a2"
+		seed := f.getSeed()
+		seed.Annotations = map[string]string{dead: "a-deleted-group"}
+		if err := k8sClient.Update(ctx, seed); err != nil {
+			t.Fatal(err)
+		}
+		// The restore pins, then stamps, while the strip is in flight.
+		var live string
+		c, stamped := beforeBackupPatch(t, func(b *v1alpha1.MysqlBackup) bool { _, has := b.Annotations[dead]; return !has }, func() {
+			job := f.runToJob()
+			live = v1alpha1.RestoreHoldAnnotationPrefix + f.fg.Status.Restore.BackupRef.HoldID
+			if job.Annotations[v1alpha1.RestoreBackupUIDAnnotation] != string(f.seed.UID) {
+				t.Fatalf("restore Job built from %q", job.Annotations[v1alpha1.RestoreBackupUIDAnnotation])
+			}
+		})
+		res := f.reconcileBackup(c)
+		if seed := f.getSeed(); !*stamped || seed.Annotations[live] != f.fg.Name {
+			t.Fatalf("stamped = %v, annotations = %v: the strip dropped a hold stamped after it read the backup", *stamped, seed.Annotations)
+		}
+		if res.RequeueAfter <= 0 || res.RequeueAfter > time.Minute {
+			t.Fatalf("requeue = %s, want another look after the lost strip", res.RequeueAfter)
+		}
+		f.reconcileBackup(k8sClient)
+		if seed := f.getSeed(); len(seed.Annotations) != 1 || seed.Annotations[live] != f.fg.Name {
+			t.Fatalf("annotations after the retried strip = %v, want the live hold alone", seed.Annotations)
+		}
+	})
+}
+
+// TestEnvtest_RestoreHoldOutlastsADelete covers a backup deleted by hand
+// after the restore stamped its hold and before its Job exists (the Job's
+// create is refused once): the backup stays Terminating, both objects name
+// each other, the restore reads the backup it holds, and the deletion goes
+// on once the restore has ended and released (R4 A3, A4).
+func TestEnvtest_RestoreHoldOutlastsADelete(t *testing.T) {
+	f := newRestoreHoldFixture(t, "restore-hold-outlasts-delete")
+	refused := false
+	c := interceptedClient(t, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if job, ok := obj.(*batchv1.Job); ok && !refused && job.Labels["app.kubernetes.io/name"] == "mysql-restore" {
+				refused = true
+				return apierrors.NewForbidden(batchv1.Resource("jobs"), job.Name, errors.New("exceeded quota"))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	if err := f.reconcileGroup(c); err == nil || !refused {
+		t.Fatalf("err = %v, refused = %v, want the refused create", err, refused)
+	}
+	rs := f.fg.Status.Restore
+	if rs == nil || rs.Phase != v1alpha1.BackupPhasePending || rs.BackupRef == nil || !strings.Contains(rs.Message, "creating the restore Job failed") {
+		t.Fatalf("status.restore = %+v, want Pending, pinned, naming the failed create", rs)
+	}
+	ref := *rs.BackupRef
+	holdKey := v1alpha1.RestoreHoldAnnotationPrefix + ref.HoldID
+	if seed := f.getSeed(); seed.Annotations[holdKey] != f.fg.Name {
+		t.Fatalf("hold not stamped before the create: %v", seed.Annotations)
+	}
+
+	// Deleted by hand: the finalizer defers to the restore that holds it.
+	if err := k8sClient.Delete(ctx, f.getSeed()); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcileBackup(k8sClient)
+	seed := f.getSeed()
+	cond := apiMeta.FindStatusCondition(seed.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
+	if seed.DeletionTimestamp.IsZero() || cond == nil || cond.Reason != "HeldByRestore" || !strings.Contains(cond.Message, "the restore of group lion") {
+		t.Fatalf("deleting = %v, ArtifactCleanup = %+v, want a Terminating backup held by the restore of group lion", !seed.DeletionTimestamp.IsZero(), cond)
+	}
+	cleanupKey := client.ObjectKey{Namespace: f.ns, Name: "mysqlcleanup-" + seed.Name}
+	var cleanup batchv1.Job
+	if err := k8sClient.Get(ctx, cleanupKey, &cleanup); !apierrors.IsNotFound(err) {
+		t.Fatalf("cleanup Job created while the restore holds the backup: %v", err)
+	}
+
+	// The restore reads the backup it holds, under the same pin.
+	job := f.runToJob()
+	if got := f.fg.Status.Restore.BackupRef; got == nil || *got != ref || job.Annotations[v1alpha1.RestoreBackupUIDAnnotation] != string(seed.UID) {
+		t.Fatalf("pin = %+v (was %+v), Job built from %q", got, ref, job.Annotations[v1alpha1.RestoreBackupUIDAnnotation])
+	}
+	f.reconcileBackup(k8sClient)
+	if err := k8sClient.Get(ctx, cleanupKey, &cleanup); !apierrors.IsNotFound(err) {
+		t.Fatalf("cleanup Job created while the restore runs: %v", err)
+	}
+
+	// The restore ends: the hold is released and the cleanup starts.
+	failJob(t, job)
+	f.mustReconcileGroup(k8sClient)
+	f.mustReconcileGroup(k8sClient)
+	if seed := f.getSeed(); len(restoreHolds(seed)) != 0 {
+		t.Fatalf("hold not released after the restore ended: %v", seed.Annotations)
+	}
+	f.reconcileBackup(k8sClient)
+	if err := k8sClient.Get(ctx, cleanupKey, &cleanup); err != nil {
+		t.Fatalf("cleanup did not start once the restore had ended: %v", err)
 	}
 }

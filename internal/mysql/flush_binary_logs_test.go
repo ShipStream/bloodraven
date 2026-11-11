@@ -131,6 +131,139 @@ func TestFlushBinaryLogs_ErrorIsWrapped(t *testing.T) {
 	}
 }
 
+// TestRotateBinaryLog_ReportsTheFileTheFlushOpened: RotateBinaryLog flushes
+// and then reads the active file's name, both on one connection of its
+// own: it runs with the primary pool exhausted, and reports the file the
+// rotation opened.
+func TestRotateBinaryLog_ReportsTheFileTheFlushOpened(t *testing.T) {
+	r := testutil.NewFakeReplica(testutil.FakeReplicaState{ExecutedGtidSet: "uuid1:1-100", ReadOnly: true, SuperReadOnly: true})
+	c := productionShapedChecker(t, r)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		sess, err := c.PinSession(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sess.Close()
+	}
+	before := len(r.Statements())
+	rotateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	file, err := c.RotateBinaryLog(rotateCtx)
+	if err != nil {
+		t.Fatalf("RotateBinaryLog with the pool exhausted: %v", err)
+	}
+	// The fake writes binlog.000001 until its first rotation.
+	if file != "binlog.000002" {
+		t.Fatalf("RotateBinaryLog = %q, want the file the rotation opened (binlog.000002)", file)
+	}
+	if got := r.Statements()[before:]; len(got) != 2 || got[0] != "FLUSH BINARY LOGS" || got[1] != "SHOW BINARY LOG STATUS" {
+		t.Fatalf("statements = %q, want the flush and then the status read", got)
+	}
+	if st := r.State(); len(st.BinlogPreviousGtids) != 1 || !st.ReadOnly || !st.SuperReadOnly || st.ExecutedGtidSet != "uuid1:1-100" {
+		t.Fatalf("the rotation changed more than the binary log: %+v", st)
+	}
+	if file, err = c.RotateBinaryLog(rotateCtx); err != nil || file != "binlog.000003" {
+		t.Fatalf("second RotateBinaryLog = %q, %v; want binlog.000003", file, err)
+	}
+}
+
+// TestRotateBinaryLog_Errors: a failing flush rotates nothing and sends no
+// status read; a status read that fails after an acknowledged flush is an
+// error too (the caller cannot name the file), although the server did
+// rotate; a cancelled call returns its context's error.
+func TestRotateBinaryLog_Errors(t *testing.T) {
+	ctx := context.Background()
+	t.Run("the flush fails", func(t *testing.T) {
+		r := testutil.NewFakeReplica(testutil.FakeReplicaState{ExecutedGtidSet: "uuid1:1-100", ReadOnly: true})
+		c := productionShapedChecker(t, r)
+		denied := errors.New("Error 1227 (42000): Access denied; you need (at least one of) the RELOAD privilege(s) for this operation")
+		r.OnFlush(func(context.Context) error { return denied })
+		file, err := c.RotateBinaryLog(ctx)
+		if file != "" || !errors.Is(err, denied) || !strings.HasPrefix(err.Error(), "rotate binary log: flush binary logs: ") {
+			t.Fatalf("RotateBinaryLog = %q, %v; want the wrapped statement error and no name", file, err)
+		}
+		for _, stmt := range r.Statements() {
+			if stmt == "SHOW BINARY LOG STATUS" {
+				t.Fatal("the status read was sent after a failed flush")
+			}
+		}
+		if got := r.State().BinlogPreviousGtids; len(got) != 0 {
+			t.Fatalf("a failed flush rotated: %v", got)
+		}
+	})
+	t.Run("the name cannot be read", func(t *testing.T) {
+		unreadable := errors.New("Error 1227 (42000): Access denied; you need (at least one of) the SUPER, REPLICATION CLIENT privilege(s) for this operation")
+		r := testutil.NewFakeReplica(testutil.FakeReplicaState{ExecutedGtidSet: "uuid1:1-100", ReadOnly: true, BinlogStatusErr: unreadable})
+		c := productionShapedChecker(t, r)
+		file, err := c.RotateBinaryLog(ctx)
+		if file != "" || !errors.Is(err, unreadable) || !strings.Contains(err.Error(), "the flush was acknowledged") {
+			t.Fatalf("RotateBinaryLog = %q, %v; want an error that says the flush ran and no name", file, err)
+		}
+		if got := r.State().BinlogPreviousGtids; len(got) != 1 {
+			t.Fatalf("rotations = %v, want the one the flush made", got)
+		}
+	})
+	t.Run("cancelled", func(t *testing.T) {
+		r := testutil.NewFakeReplica(testutil.FakeReplicaState{ExecutedGtidSet: "uuid1:1-100", ReadOnly: true})
+		c := productionShapedChecker(t, r)
+		entered := make(chan struct{})
+		r.OnFlush(func(flushCtx context.Context) error {
+			close(entered)
+			<-flushCtx.Done()
+			return flushCtx.Err()
+		})
+		rotateCtx, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.RotateBinaryLog(rotateCtx)
+			done <- err
+		}()
+		<-entered
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("RotateBinaryLog = %v, want its context's cancellation", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a cancelled RotateBinaryLog did not return")
+		}
+		if _, err := c.CheckReadOnly(ctx); err != nil {
+			t.Fatalf("pooled probe after an abandoned rotation: %v", err)
+		}
+	})
+}
+
+// TestBinlogFileSeq: a binary log file name splits into its base name and
+// its sequence number; a name without a numeric suffix does not.
+func TestBinlogFileSeq(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		base string
+		seq  uint64
+		ok   bool
+	}{
+		{"binlog.000001", "binlog", 1, true},
+		{"mysql-bin.000042", "mysql-bin", 42, true},
+		{"mysql-bin.1000000", "mysql-bin", 1000000, true},
+		{"db.site-a.000007", "db.site-a", 7, true},
+		{"binlog", "", 0, false},
+		{"binlog.", "", 0, false},
+		{".000001", "", 0, false},
+		{"binlog.00000x", "", 0, false},
+		{"binlog.-00001", "", 0, false},
+		{"binlog.index", "", 0, false},
+		{"binlog.99999999999999999999999", "", 0, false},
+		{"", "", 0, false},
+	} {
+		base, seq, ok := mysql.BinlogFileSeq(tc.name)
+		if base != tc.base || seq != tc.seq || ok != tc.ok {
+			t.Errorf("BinlogFileSeq(%q) = %q, %d, %v; want %q, %d, %v", tc.name, base, seq, ok, tc.base, tc.seq, tc.ok)
+		}
+	}
+}
+
 // TestRealMySQL_FlushBinaryLogs runs FlushBinaryLogs against a real server
 // with binary logging and GTIDs on. It needs
 // BLOODRAVEN_TEST_MYSQL_ADMIN_DSN (an account with ALL PRIVILEGES, as the
@@ -247,6 +380,25 @@ func TestRealMySQL_FlushBinaryLogs(t *testing.T) {
 	}
 	if eventType != "Previous_gtids" || strings.ReplaceAll(info, "\n", "") != gtidBefore {
 		t.Fatalf("the new file's second event is %s %q, want Previous_gtids %q", eventType, info, gtidBefore)
+	}
+
+	// RotateBinaryLog names the file its own flush opened, read on the
+	// connection that sent the flush.
+	rotated, err := checker.RotateBinaryLog(ctx)
+	if err != nil {
+		t.Fatalf("RotateBinaryLog under super_read_only with the pool pinned: %v", err)
+	}
+	fileNow, gtidNow := status()
+	if rotated != fileNow || rotated == fileAfter {
+		t.Fatalf("RotateBinaryLog = %q; the server writes %q now and wrote %q before", rotated, fileNow, fileAfter)
+	}
+	if gtidNow != gtidBefore {
+		t.Fatalf("gtid_executed changed from %q to %q: the rotation was logged", gtidBefore, gtidNow)
+	}
+	base, seq, ok := mysql.BinlogFileSeq(rotated)
+	prevBase, prevSeq, prevOK := mysql.BinlogFileSeq(fileAfter)
+	if !ok || !prevOK || base != prevBase || seq != prevSeq+1 {
+		t.Fatalf("file names %q then %q do not number one log in order", fileAfter, rotated)
 	}
 
 	// RELOAD is required, and SUPER does not imply it.

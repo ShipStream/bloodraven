@@ -30,7 +30,8 @@ import (
 //     restore-hold.bloodraven.shipstream.io/<hold ID>=<group name>, with
 //     the backup's resourceVersion as a precondition, and refuses a backup
 //     that is not Succeeded, is being deleted, or is no longer the pinned
-//     object;
+//     object. Once stamped, the hold outlasts a delete: the backup stays
+//     Terminating and the restore goes on reading it;
 //  3. only then is the restore Job created, from that backup (the Job
 //     carries the UID it was built from, RestoreBackupUIDAnnotation);
 //  4. release: once the terminal status is persisted and the group's
@@ -356,11 +357,22 @@ func (r *MysqlFailoverGroupReconciler) restoreHoldReader() client.Reader {
 // group's restore of kind and stamps the restore's hold on it. It is
 // idempotent, and it is called again right before the restore Job is
 // created: a nil result then means that the backup, read uncached, is the
-// pinned object, is Succeeded, is not being deleted and carries this
-// restore's hold. Retention deletes with the resourceVersion it read
-// before it looked for readers, so a delete that raced the stamp either
-// lost (it conflicts) or won (the stamp conflicts, and the next pass
-// refuses a backup that is being deleted).
+// pinned object, is Succeeded and carries this restore's hold. Retention
+// deletes with the resourceVersion it read before it looked for readers,
+// so a delete that raced the stamp either lost (it conflicts) or won (the
+// stamp conflicts, and the next pass refuses a backup that is being
+// deleted).
+//
+// A backup that is being deleted is refused unless it already carries this
+// restore's hold. The stamp is a write conditioned on the resourceVersion
+// of a backup that was not being deleted, so a hold found on a Terminating
+// backup was there before the deletion: the delete lost. From the stamp on
+// the hold is live (the pin is on a status that is not terminal, as the
+// uncached read below confirms), and every path that releases a
+// Terminating backup waits for its readers (finalize, retainArtifact). The
+// hold exists so that the restore can finish; refusing here would end a
+// restore, for an in-place run after its fence, over a backup that is
+// still protected.
 //
 // builtFromUID is the backup UID the Job about to be created was built
 // from (RestoreBackupUIDAnnotation), or "". The Job is built through the
@@ -377,8 +389,9 @@ func (r *MysqlFailoverGroupReconciler) restoreHoldReader() client.Reader {
 // It returns one of:
 //
 //   - refusal != "": the backup cannot be held (it is gone, not Succeeded,
-//     being deleted, or was replaced by another object of the same name
-//     since this restore pinned it). The caller ends the restore.
+//     being deleted without this restore's hold on it, or was replaced by
+//     another object of the same name since this restore pinned it). The
+//     caller ends the restore.
 //   - retry: look again after restoreHoldRetry.
 //   - err: an API error; nothing may be created.
 func (r *MysqlFailoverGroupReconciler) holdRestoreBackup(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, name, builtFromUID, targetSite string) (refusal string, retry bool, err error) {
@@ -407,12 +420,13 @@ func (r *MysqlFailoverGroupReconciler) holdRestoreBackup(ctx context.Context, fg
 		}
 		pin = nil
 	}
+	held := pin != nil && pin.HoldID != "" && backup.Annotations[restoreHoldKey(pin.HoldID)] == fg.Name
 	switch {
 	case pin != nil && pin.UID != string(backup.UID):
 		return "the backup was replaced by another backup of the same name after this restore pinned it", false, nil
 	case backup.Status.Phase != v1alpha1.BackupPhaseSucceeded:
 		return "the backup is not Succeeded", false, nil
-	case !backup.DeletionTimestamp.IsZero():
+	case !backup.DeletionTimestamp.IsZero() && !held:
 		return "the backup is being deleted", false, nil
 	case builtFromUID != "" && builtFromUID != string(backup.UID):
 		return "", true, nil

@@ -839,10 +839,10 @@ type TopologyManager struct {
 	// if any, requested it.
 	RecloneCompleteCallback func(ctx context.Context, site string, outcome RecloneOutcome) error
 
-	// ArchiveTailProbe reads a site's sidecar archiver status for the
-	// pre-reclone archive-tail wait (recloneArchiveTailSettled). nil skips
-	// the wait: no PITR status source is wired.
-	ArchiveTailProbe ArchiveTailProbe
+	// ArchiveTail is the PITR archiving status source of the pre-reclone
+	// archive-tail wait (recloneArchiveTailSettled). nil skips the wait:
+	// no PITR status source is wired.
+	ArchiveTail ArchiveTailSource
 	// ArchiveTailNotArchivedCallback reports a reclone that goes ahead
 	// without its recipient's binary log tail confirmed archived; the
 	// runner records the PITRArchiveTailNotArchived Event.
@@ -852,11 +852,21 @@ type TopologyManager struct {
 	// (verifyCloneServerUUIDRotated); the runner records the
 	// CloneServerUUIDNotRotated Event.
 	CloneServerUUIDNotRotatedCallback func(site, serverUUID string)
+	// cloneIdentity holds the recorded pre-clone server_uuids whose clone
+	// has no outcome yet (clone_server_uuid.go). It has its own locks.
+	cloneIdentity cloneIdentityTracker
 	// recloneTail is the pre-reclone wait in progress and
 	// recloneTailSettled the site whose wait ended while its clone has not
-	// started yet. Only Poll's goroutine (checkReclone) uses them.
+	// started yet. Only Poll's goroutine (checkReclone) uses them. The
+	// wait's steps run on goroutines of their own (recloneTailWorkers
+	// counts them) and hand their result back under recloneTailMu.
+	// recloneTailRun, when set, runs a step in place of `go`: simulations
+	// and deterministic tests run it inline.
 	recloneTail        *recloneTailWait
 	recloneTailSettled string
+	recloneTailMu      sync.Mutex
+	recloneTailWorkers sync.WaitGroup
+	recloneTailRun     func(step func())
 
 	// EmergencyFailoverCallback is invoked synchronously after a
 	// successful emergency failover Execute, on the same goroutine that
@@ -1784,6 +1794,10 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	// failover, and without replaying a target that a later promotion has
 	// already superseded.
 	tm.reconcileDNS(ctx)
+
+	// Give a clone that finished without this manager's check (it outlived
+	// the manager that issued it) its server_uuid verdict.
+	tm.settlePendingCloneIdentities(ctx)
 
 	// Retry a failed Clone-hold release before starting any new clone.
 	tm.releaseCloneHold(ctx)
@@ -4638,7 +4652,18 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		if err == nil {
 			err = tm.runBootstrap(ctx, donorSite.mysql, recipientSite.mysql, donorSite.host, recipient, allowSkipClone)
 		}
-		if gate := tm.getKeyringGate(); gate != nil {
+		if gate := tm.getKeyringGate(); gate == nil {
+			// No hold to release.
+		} else if tm.cloneRestartUnconfirmed(ctx, recipientSite.mysql, recipient) {
+			// A clone issued into the recipient may still be copying or
+			// waiting for its restart (the bootstrap failed, or this
+			// manager is stopping). Sealing the site now would kill the
+			// copy, or make the start that installs it keep the old
+			// server_uuid. The hold is released when the clone has its
+			// outcome (settleCloneIdentity), also by a later manager.
+			tm.logger.Info("clone restart not confirmed; keeping the recipient's keyring hold",
+				"recipient", recipient, "source", source)
+		} else {
 			notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			notifyErr := gate.NotifyCloneComplete(notifyCtx, nn, recipient)
 			cancel()
@@ -4690,6 +4715,12 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 // runBootstrap performs the clone, waits for the MySQL restart, and
 // sets up replication of recipient from donor.
 func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica mysql.Checker, primaryHost, replicaSite string, allowSkipClone bool) error {
+	// A clone an earlier attempt issued into this recipient and never saw
+	// the end of (the manager stopped, or its wait ran out) gets its
+	// server_uuid check now, before this attempt skips the clone or
+	// issues another.
+	tm.settleCloneIdentity(ctx, replica, replicaSite)
+
 	// Check if the clone already completed (e.g. prior bootstrap succeeded at
 	// CLONE but failed at SetupReplication). If the primary's GTID set contains
 	// the replica's, the data is already in sync and we can skip directly to
@@ -4714,6 +4745,11 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 	// new server_uuid on the restart, and the check after the clone
 	// compares against this one.
 	uuidBefore := tm.cloneServerUUIDBefore(ctx, replica, replicaSite)
+	// ... and durably, before the clone is issued: a clone can finish
+	// after this manager is gone, and the check must still be made.
+	if err := tm.recordCloneIdentity(ctx, replicaSite, uuidBefore, prevClone, prevErr); err != nil {
+		return fmt.Errorf("clone not started: %w", err)
+	}
 
 	// Phase 1: Clone from primary.
 	err := tm.bootstrap.BootstrapReplica(ctx, BootstrapOpts{
@@ -4758,7 +4794,7 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		}
 		return fmt.Errorf("clone: %w", verifyErr)
 	}
-	tm.verifyCloneServerUUIDRotated(ctx, replica, replicaSite, uuidBefore)
+	tm.cloneCompletedInProcess(ctx, replica, replicaSite, uuidBefore)
 
 	// Phase 3: Configure and start replication.
 	tm.mu.Lock()
@@ -5937,6 +5973,14 @@ func (tm *TopologyManager) releaseCloneHold(ctx context.Context) {
 // requested for a specific site, validates preconditions and initiates the
 // bootstrap. Returns true if a reclone was started.
 func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
+	// A poll that does not reach the pre-reclone wait (the request is
+	// gone, dropped or deferred) leaves no step of it in flight.
+	waitDriven := false
+	defer func() {
+		if !waitDriven {
+			tm.pauseRecloneArchiveTail()
+		}
+	}()
 	tm.mu.RLock()
 	site := tm.reclonePendingSite
 	completedSite := tm.recloneCompletedSite
@@ -6022,13 +6066,17 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 	// tail first, bounded (PITR only). Not while another actor holds the
 	// sites (a planned failover's claim, an ordered update): the clone
 	// could not start anyway, and the rotation is a statement on a site
-	// that actor owns. startBootstrapByName decides again below.
+	// that actor owns. The wait's step checks once more right before it
+	// sends the rotation, which narrows the window without closing it
+	// (recloneTailStepReport says why that is harmless), and
+	// startBootstrapByName decides again below.
 	tm.mu.RLock()
 	busy := tm.bootstrapClaimRefusedLocked() != ""
 	tm.mu.RUnlock()
 	if busy {
 		return false
 	}
+	waitDriven = true
 	if !tm.recloneArchiveTailSettled(ctx, recipient) {
 		return false
 	}

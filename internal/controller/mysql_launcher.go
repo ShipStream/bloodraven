@@ -111,11 +111,13 @@ func mysqlServerArgs(serverID uint32, tls bool) []string {
 // Part 1 runs first and cannot fail the container; a failure in part 2
 // leaves the clone staged, and the next start repeats part 1.
 func mysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
-	keyringFile := ""
+	keyringFile, binlogEncrypted := "", false
 	if fg.Spec.EncryptionEnabled() {
 		keyringFile = fg.Spec.KeyringDataFilePath()
+		cov := fg.Spec.EffectiveEncryptionCoverage()
+		binlogEncrypted = cov.BinaryLog != nil && *cov.BinaryLog
 	}
-	script := "set -euo pipefail\n" + serverUUIDRotationScript(mysqlDataDir, keyringFile)
+	script := "set -euo pipefail\n" + serverUUIDRotationScript(mysqlDataDir, keyringFile, binlogEncrypted)
 	args = []string{"mysqld"}
 	if fg.Spec.EncryptionEnabled() {
 		steps, prefix := encryptionMysqlLauncher(fg)
@@ -165,14 +167,23 @@ func mysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command
 //
 // With encryption at rest, keyringFile is the keyring data file ("" without
 // it), and a finished clone found while that file is read-only is not
-// rotated. The operator unseals a site before it clones into it, so the
-// start that installs a clone normally has a writable keyring; a sealed
-// pod finds a staged clone only when that restart did not happen before
-// the site was sealed again. A server with a new server_uuid stores a new
-// binary log encryption key when it starts
-// (MySQLReplicationKey_<server_uuid>), and with a read-only keyring mysqld
-// aborts there (MY-013288, verified on 9.7): keeping the old identity is
-// what lets the site start.
+// rotated if the binary log is encrypted. The operator unseals a site
+// before it clones into it and keeps it unsealed until the clone's restart
+// is confirmed (cloneRestartUnconfirmed), so the start that installs a
+// clone normally has a writable keyring; a sealed pod finds a staged clone
+// only when that hold was lost. A server with a new server_uuid and
+// binlog_encryption=ON stores a new binary log encryption key when it
+// starts (MySQLReplicationKey_<server_uuid>), and with a read-only keyring
+// mysqld aborts there (MY-013288, verified on 9.7): keeping the old
+// identity is what lets the site start.
+//
+// binlogEncrypted says the group renders binlog_encryption=ON
+// (coverage.binaryLog). Without it a new server_uuid needs no key, mysqld
+// starts on the read-only keyring (TestMySQLLauncherNative runs it), and
+// the sealed pod rotates like any other. One exception keeps the step from
+// ever failing the container: a binlog_encryption persisted with SET
+// PERSIST outranks the rendered my.cnf, so a mysqld-auto.cnf that names
+// the variable at all is treated as an encrypted binary log.
 //
 // The step fails safe. If auto.cnf cannot be removed, #clone cannot be
 // inspected or the keyring is sealed, the server starts with its old
@@ -183,11 +194,24 @@ func mysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command
 // datadir is the data directory (mysqlDataDir in a pod; tests run the step
 // against scratch paths). Both paths are written into the script as
 // single-quoted words, so nothing in them is expanded or executed.
-func serverUUIDRotationScript(datadir, keyringFile string) string {
+func serverUUIDRotationScript(datadir, keyringFile string, binlogEncrypted bool) string {
+	binlog := 0
+	if binlogEncrypted {
+		binlog = 1
+	}
 	return fmt.Sprintf(`log() { echo "%[1]s $*" >&2; }
 datadir=%[2]s
 keyring=%[7]s
+binlog_encrypted=%[8]d
 clonedir="$datadir/%[3]s"
+needs_binlog_key() {
+  [ "$binlog_encrypted" = 1 ] && return 0
+  [ -r "$datadir/mysqld-auto.cnf" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *binlog_encryption*) return 0 ;; esac
+  done < "$datadir/mysqld-auto.cnf"
+  return 1
+}
 if [ -d "$clonedir" ] && { [ ! -r "$clonedir" ] || [ ! -x "$clonedir" ]; }; then
   log "WARNING: cannot inspect $clonedir as uid $(id -u); if a clone is staged there, server_uuid is NOT rotated"
 elif [ -e "$clonedir/%[4]s" ]; then
@@ -199,7 +223,7 @@ elif [ -e "$clonedir/%[4]s" ]; then
   fi
   if [ -e "$clonedir/%[5]s" ] || [ -e "$clonedir/%[6]s" ]; then
     log "an interrupted clone is staged in $clonedir; mysqld rolls it back and server_uuid stays $previous"
-  elif [ -n "$keyring" ] && [ -e "$keyring" ] && [ ! -w "$keyring" ]; then
+  elif [ -n "$keyring" ] && [ -e "$keyring" ] && [ ! -w "$keyring" ] && needs_binlog_key; then
     log "WARNING: a finished clone is staged in $clonedir but the keyring $keyring is read-only (the site is sealed), and a new server_uuid needs a new binary log encryption key there; server_uuid is NOT rotated (stays $previous)"
   elif rm -f -- "$datadir/auto.cnf" 2>/dev/null && [ ! -e "$datadir/auto.cnf" ]; then
     sync "$datadir" 2>/dev/null || true
@@ -215,6 +239,7 @@ fi
 		mysqlCloneReplaceFiles,
 		mysqlCloneStatusError, mysqlCloneStatusInProgress,
 		shellSingleQuote(keyringFile),
+		binlog,
 	)
 }
 
@@ -228,8 +253,15 @@ func shellSingleQuote(s string) string {
 // mysqlEntrypointHandoffScript is the launcher's last step: exec the image
 // entrypoint with the launcher's own argv ("mysqld" and the flags). An
 // image without one fails the container with exit code 127 and a line
-// that names what was looked for; falling back to mysqld itself would
-// skip the entrypoint's first-boot initialization and uid switch.
+// that names what was looked for and what to do; falling back to mysqld
+// itself would skip the entrypoint's first-boot initialization and uid
+// switch.
+//
+// The launcher stays a bash script. The image contract already needs
+// bash: the operator's first-boot script (generateInitUsersScript, mounted
+// in /docker-entrypoint-initdb.d) is bash and is sourced by the image's
+// entrypoint, so an image without bash never initialized a site. A POSIX
+// sh launcher would add a shell dialect to test for no image that works.
 func mysqlEntrypointHandoffScript() string {
 	return mysqlEntrypointHandoffScriptFor(mysqlImageEntrypoints)
 }
@@ -250,7 +282,7 @@ if [ -z "$entrypoint" ]; then
   entrypoint=$(command -v docker-entrypoint.sh 2>/dev/null) || entrypoint=
 fi
 if [ -z "$entrypoint" ]; then
-  log "no MySQL image entrypoint found (looked for %[1]s, then docker-entrypoint.sh on PATH); spec.image must provide one"
+  log "no MySQL image entrypoint found (looked for %[1]s, then docker-entrypoint.sh on PATH); spec.image must provide one. This container cannot start until it does: set spec.image to an image that has it (the Docker Official Image and Oracle's community-server image do), or add the image's entrypoint script at one of those paths"
   exit 127
 fi
 exec "$entrypoint" "$0" "$@"

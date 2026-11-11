@@ -263,6 +263,7 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	pl.mon.claim = slotView{pl}
 	pl.mon.onRecorded = r.armRecordedPromotion
 	pl.mon.noManager = pl.noManager
+	pl.mon.activeSite = pl.managerActiveSite
 	pl.store.dead = r.cluster.OperatorDead
 	pl.store.yield = pl.sched.Yield
 	pl.store.clusterStatusDenied = r.cluster.StatusDenied
@@ -994,6 +995,18 @@ func (pl *plannedHarness) endPoll(p int) {
 // noManager reports whether the group has no registered manager now: the
 // operator's status endpoints answer 503 then (runner.Status not found).
 func (pl *plannedHarness) noManager() bool { return pl.reg.Current() == nil }
+
+// managerActiveSite is the registered manager's view of the group's primary
+// after its last poll (Status().ActiveSite): the one writable promotable
+// site it observed, or the site it has just promoted. "" when it sees none
+// or several, or no manager is registered.
+func (pl *plannedHarness) managerActiveSite() string {
+	tm := pl.reg.Current()
+	if tm == nil {
+		return ""
+	}
+	return tm.Status().ActiveSite
+}
 
 // healAll clears the actor faults at HealAt; a long outage (K036) runs its
 // course, and the trial's settle window starts after it.

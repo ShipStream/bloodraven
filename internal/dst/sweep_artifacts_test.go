@@ -10,6 +10,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
+	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -245,7 +246,17 @@ func TestPlannedInvariant_RotationOfAPromotedTarget(t *testing.T) {
 // unconfirmed ends run r1 PromotedUnconfirmed with its target beta crashed
 // and its source alpha fenced, reachable and complete.
 func unconfirmed(t *testing.T) *monFixture {
-	f := newMonFixture(t)
+	return unconfirmedIn(newMonFixture(t))
+}
+
+// unconfirmedWithReader is unconfirmed in a group with a read-only reader,
+// gamma.
+func unconfirmedWithReader(t *testing.T) *monFixture {
+	return unconfirmedIn(newMonFixture(t, state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly))
+}
+
+func unconfirmedIn(f *monFixture) *monFixture {
+	f.t.Helper()
 	f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
 	_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
 	f.passGate()
@@ -258,9 +269,10 @@ func unconfirmed(t *testing.T) *monFixture {
 // TestPlannedInvariant_UnconfirmedBlocksEmergency_Window: the rule is that a
 // live operator promotes the reachable, complete source within the grace
 // while the unconfirmed target stays unreachable. It is judged over a
-// window in which that held at every poll: a primary that existed inside
-// the window, a target that answers again, an operator restart and a failed
-// promotion attempt all end or restart it.
+// window in which that held at every poll. The source promoted, or a site
+// the manager adopted, ends it; a target that answers, a site that is
+// writable without being adopted, an operator restart and a failed
+// promotion attempt start it again; a failed rotation does neither.
 func TestPlannedInvariant_UnconfirmedBlocksEmergency_Window(t *testing.T) {
 	polls := func(f *monFixture, from, to int) {
 		for p := from; p <= to; p++ {
@@ -280,8 +292,90 @@ func TestPlannedInvariant_UnconfirmedBlocksEmergency_Window(t *testing.T) {
 		f := unconfirmed(t)
 		polls(f, 1, 4)
 		f.c.Recover("beta", true, false)
-		polls(f, 5, unconfirmedGrace+5)
+		polls(f, 5, 3*unconfirmedGrace)
 		f.want()
+	})
+	// r1 M3: the target answers for one poll (read-only) and is gone again.
+	// That poll is no emergency, but it does not end the judgment: from the
+	// next poll a live operator owes the promotion within a new grace.
+	t.Run("theTargetAnswersForOnePoll", func(t *testing.T) {
+		f := unconfirmed(t)
+		polls(f, 1, 4)
+		f.c.Recover("beta", true, false)
+		polls(f, 5, 5)
+		f.c.Crash("beta")
+		polls(f, 6, 5+unconfirmedGrace)
+		f.want()
+		polls(f, 6+unconfirmedGrace, 6+unconfirmedGrace)
+		f.want("UnconfirmedBlocksEmergency")
+	})
+	// The same when the target still answered at the moment the run ended
+	// and is gone a poll later: the window is open from the run's end.
+	t.Run("theTargetAnsweredWhenTheRunEnded", func(t *testing.T) {
+		f := newMonFixture(t)
+		f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
+		f.passGate()
+		f.c.AddFailMutations("beta", 1)
+		_ = f.pf("beta").SetReadOnly(pfCtx(), false) // sent, not applied: the target stays read-only
+		f.terminal(v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed)
+		polls(f, 1, 1)
+		f.c.Crash("beta")
+		polls(f, 2, 1+unconfirmedGrace)
+		f.want()
+		polls(f, 2+unconfirmedGrace, 2+unconfirmedGrace)
+		f.want("UnconfirmedBlocksEmergency")
+	})
+	t.Run("theTargetAnsweredWhenTheRunEndedAndStillDoes", func(t *testing.T) {
+		f := newMonFixture(t)
+		f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
+		f.passGate()
+		f.c.AddFailMutations("beta", 1)
+		_ = f.pf("beta").SetReadOnly(pfCtx(), false)
+		f.terminal(v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed)
+		polls(f, 1, 3*unconfirmedGrace)
+		f.want()
+	})
+	// A read-only reader an external writer opens for one poll is not a
+	// primary the manager adopts: it starts the window again and no more.
+	t.Run("aReaderWritableForOnePoll", func(t *testing.T) {
+		f := unconfirmedWithReader(t)
+		polls(f, 1, 4)
+		f.c.RogueWritable("gamma")
+		polls(f, 5, 5)
+		f.c.RogueFence("gamma")
+		polls(f, 6, 5+unconfirmedGrace)
+		f.want()
+		polls(f, 6+unconfirmedGrace, 6+unconfirmedGrace)
+		f.want("UnconfirmedBlocksEmergency")
+	})
+	// A promotable site the manager counted as the primary ends the
+	// judgment, whatever becomes of that site afterwards.
+	t.Run("aSiteTheManagerAdopted", func(t *testing.T) {
+		f := unconfirmedWithReader(t)
+		adopted := ""
+		f.mon.activeSite = func() string { return adopted }
+		polls(f, 1, 4)
+		f.c.Recover("beta", false, true) // the target boots writable and the manager adopts it
+		adopted = "beta"
+		polls(f, 5, 5)
+		f.c.Crash("beta")
+		adopted = ""
+		polls(f, 6, 3*unconfirmedGrace)
+		f.want()
+	})
+	// A writable site the manager did not adopt (it never observed it)
+	// does not end the judgment either.
+	t.Run("aWritableSiteTheManagerNeverSaw", func(t *testing.T) {
+		f := unconfirmedWithReader(t)
+		f.mon.activeSite = func() string { return "" }
+		polls(f, 1, 4)
+		f.c.RogueWritable("gamma")
+		polls(f, 5, 5)
+		f.c.RogueFence("gamma")
+		polls(f, 6, 6+unconfirmedGrace)
+		f.want("UnconfirmedBlocksEmergency")
 	})
 	t.Run("anOperatorRestartStartsItAgain", func(t *testing.T) {
 		f := unconfirmed(t)
@@ -304,6 +398,20 @@ func TestPlannedInvariant_UnconfirmedBlocksEmergency_Window(t *testing.T) {
 		polls(f, 11+unconfirmedGrace, 11+unconfirmedGrace)
 		f.want("UnconfirmedBlocksEmergency")
 	})
+	// A rotation is best effort: one that fails or is abandoned on the
+	// source does not stop its promotion, so it does not restart the window.
+	t.Run("aFailedRotationDoesNotStartItAgain", func(t *testing.T) {
+		f := unconfirmed(t)
+		polls(f, 1, 9)
+		f.c.AddFlushFailures("alpha", 1)
+		if err := f.c.NewChecker("alpha").FlushBinaryLogs(context.Background()); err == nil {
+			t.Fatal("the injected fault did not fail the manager's rotation")
+		}
+		polls(f, 10, unconfirmedGrace)
+		f.want()
+		polls(f, unconfirmedGrace+1, unconfirmedGrace+1)
+		f.want("UnconfirmedBlocksEmergency")
+	})
 	t.Run("noOperatorDoesNotCount", func(t *testing.T) {
 		f := unconfirmed(t)
 		for p := 1; p <= unconfirmedGrace+5; p++ {
@@ -318,20 +426,104 @@ func TestPlannedInvariant_UnconfirmedBlocksEmergency_Window(t *testing.T) {
 }
 
 // TestPlannedInvariant_FencedSourceSuperseded: FencedSourceNeverHealed is the
-// run's own fence wedging the group. Once another site was writable after
-// the run ended, the group had a primary and the source is the topology
-// manager's to demote; what became of that primary is not the run's fence.
+// run's own fence wedging the group. It stops being that once the topology
+// manager takes authority away from the source: it counts another site as
+// the primary, or it fences or repoints the source itself. What became of
+// that primary is then not the run's fence. A site that is only writable
+// for a while without being adopted (r1 M2: a read-only reader an external
+// writer opened for one poll, a candidate the manager never observed)
+// leaves the run's fence to be healed, and a source nobody heals is
+// reported.
 func TestPlannedInvariant_FencedSourceSuperseded(t *testing.T) {
-	f := newMonFixture(t)
-	f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
-	_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
-	f.terminal(v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
-	f.c.RogueWritable("beta")
-	f.mon.endPoll(1, true)
-	f.c.RogueFence("beta")
-	f.mon.endPoll(2, true)
-	f.mon.checkEnd(100)
-	f.want()
+	// leftFenced ends run r1 SourceLeftFenced with its own fence on alpha.
+	leftFenced := func(t *testing.T, roles ...state.SiteRole) *monFixture {
+		f := newMonFixture(t, roles...)
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+		return f
+	}
+	settle := func(f *monFixture, from int) {
+		for p := from; p <= 200; p++ {
+			f.mon.endPoll(p, true)
+		}
+		f.mon.checkEnd(201)
+	}
+	withReader := []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly}
+
+	t.Run("theManagerAdoptedAnotherSite", func(t *testing.T) {
+		f := leftFenced(t)
+		adopted := ""
+		f.mon.activeSite = func() string { return adopted }
+		f.c.RogueWritable("beta")
+		adopted = "beta"
+		f.mon.endPoll(1, true)
+		f.c.RogueFence("beta")
+		adopted = ""
+		settle(f, 2)
+		f.want()
+	})
+	t.Run("aCandidateWritableAtAPoll", func(t *testing.T) {
+		// No manager view wired: the monitor derives it from the truth, and
+		// a manager polling now would count the one writable candidate.
+		f := leftFenced(t)
+		f.c.RogueWritable("beta")
+		f.mon.endPoll(1, true)
+		f.c.RogueFence("beta")
+		settle(f, 2)
+		f.want()
+	})
+	t.Run("theManagerRepointedTheSource", func(t *testing.T) {
+		f := leftFenced(t)
+		f.mon.activeSite = func() string { return "" }
+		tm := f.c.NewChecker("alpha")
+		if err := tm.ChangeReplicationSource(context.Background(), mysql.ReplicationSourceOpts{Host: "beta.mysql.sim"}); err != nil {
+			t.Fatalf("the manager's CHANGE REPLICATION SOURCE: %v", err)
+		}
+		settle(f, 1)
+		f.want()
+	})
+	t.Run("theManagerFencedTheSource", func(t *testing.T) {
+		f := leftFenced(t)
+		f.mon.activeSite = func() string { return "" }
+		if err := f.c.NewChecker("alpha").SetSuperReadOnly(context.Background(), true); err != nil {
+			t.Fatalf("the manager's fence: %v", err)
+		}
+		settle(f, 1)
+		f.want()
+	})
+	t.Run("aReaderWritableForOnePoll", func(t *testing.T) {
+		f := leftFenced(t, withReader...)
+		f.c.RogueWritable("gamma")
+		f.mon.endPoll(1, true)
+		f.c.RogueFence("gamma")
+		settle(f, 2)
+		f.want("FencedSourceNeverHealed")
+	})
+	t.Run("aCandidateTheManagerNeverObserved", func(t *testing.T) {
+		f := leftFenced(t)
+		f.mon.activeSite = func() string { return "" }
+		f.c.RogueWritable("beta")
+		f.mon.endPoll(1, true)
+		f.c.RogueFence("beta")
+		settle(f, 2)
+		f.want("FencedSourceNeverHealed")
+	})
+	t.Run("aCandidateWritableWhileNoManagerRan", func(t *testing.T) {
+		f := leftFenced(t)
+		f.c.RogueWritable("beta")
+		f.mon.endPoll(1, false)
+		f.c.RogueFence("beta")
+		settle(f, 2)
+		f.want("FencedSourceNeverHealed")
+	})
+	t.Run("aSidecarFenceOfTheSourceIsNotTheManagers", func(t *testing.T) {
+		f := leftFenced(t)
+		f.mon.activeSite = func() string { return "" }
+		_ = f.c.NewChecker("alpha").SetSuperReadOnly(WithActor(context.Background(), ActorSidecar), true)
+		settle(f, 1)
+		f.want("FencedSourceNeverHealed")
+	})
 }
 
 // TestPlannedInvariant_OutcomeHonesty_WhatTheRunRead: outcomes are judged

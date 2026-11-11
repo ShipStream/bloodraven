@@ -114,6 +114,19 @@ func (u *SimOrderedUpdate) FinishOrderedUpdateForSim() {
 // not started its clone, as the runner does when the annotation is removed.
 func (tm *TopologyManager) CancelPendingRecloneForSim(site string) { tm.cancelPendingReclone(site) }
 
+// SetRecloneTailStepRunnerForSim replaces the goroutine that runs each step
+// of the pre-reclone archive-tail wait (recloneArchiveTailSettled). A
+// simulation passes func(step func()) { step() } to run steps inline, so a
+// step's statements land inside the Poll that started it and the model
+// sees one actor at a time. Call before the first Poll.
+func (tm *TopologyManager) SetRecloneTailStepRunnerForSim(run func(step func())) {
+	tm.recloneTailRun = run
+}
+
+// WaitRecloneTailStepsForSim blocks until every step goroutine of the
+// pre-reclone wait has returned (tests that assert none is left behind).
+func (tm *TopologyManager) WaitRecloneTailStepsForSim() { tm.waitRecloneTailWorkers() }
+
 // SetSimHooksForSim installs the simulation's yield hooks on a facade built
 // by NewPlannedFailoverTopology. Call before first use.
 func SetSimHooksForSim(topo PlannedFailoverTopology, hooks SimHooks) {

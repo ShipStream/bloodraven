@@ -168,10 +168,33 @@ const (
 // cannot change in between, and the file the rotation opens has a
 // Previous_gtids header equal to the recorded promotion GTID. Everything
 // the candidate logged as a replica is then in sealed files its sidecar can
-// archive, and its first own transaction starts a file. That holds only
-// when the rotation was acknowledged: a failed or abandoned one leaves the
-// replica-era file open (or rotates it at some later point), and the
-// promotion is the same either way.
+// archive, and its first own transaction starts a file.
+//
+// That property is an expectation, not something this path proves, and a
+// reader of the returned (recorded) promotion GTID must treat an empty or
+// mismatching one as unknown. It does not hold:
+//
+//   - when the rotation was not acknowledged: a failed one leaves the
+//     replica-era file open, and one abandoned at its bound may still
+//     complete on the server later, even after the clears. The promotion
+//     is the same either way.
+//   - when the GTID read failed: the rotation is still sent and the
+//     returned set is empty, so the recorded promotion GTID says nothing
+//     about the file the rotation opened.
+//   - when the three statements do not meet one unchanged, read-only
+//     server. The GTID read and the clears take pooled connections and
+//     the rotation dials a connection of its own; all reach the candidate
+//     by the same address, and nothing proves they reach the same server
+//     (promoteVerified pins one connection for that reason; the rotation is
+//     off that connection there too). Nothing re-reads read_only between
+//     the GTID read and the rotation either: a candidate that is already
+//     writable, or one with read_only but not super_read_only and a
+//     privileged session writing, can commit in between, and the new file
+//     then starts past the recorded set. An already writable candidate is
+//     a path the operator takes by design: a split brain with no failover
+//     history, resolved by spec.splitBrainPolicy.sitePriorities, fences
+//     the other sites and runs this promotion on the preferred site, which
+//     is one of the writable ones.
 func (f *FailoverController) promote(ctx context.Context, candidate mysql.Checker, candidateSite string) (string, error) {
 	if err := candidate.StopReplica(ctx); err != nil {
 		return "", err
@@ -284,6 +307,13 @@ func (h promoteHooks) send(ctx context.Context, s promoteMemoStage, stmt func(co
 // binary log through flusher (nil skips it), best effort, as promote does:
 // the candidate is read-only, has no channel and holds exactly the proven
 // set, so the file the rotation opens starts at the promotion GTID set.
+// As in promote that holds only for an acknowledged rotation, and it rests
+// on flusher's connection reaching the server sess is pinned to (it dials
+// the same address; only sess is proven). A promotion resumed from
+// WasWritable, and a planned failover whose re-run finds the target
+// already writable (it never gets here), send none: whether the attempt
+// that cleared the fences rotated first is not known to them, and a new
+// operator process does not rotate again.
 // The rotation is not a stage and has no memo entry: it changes nothing
 // classifyPromotionStage reads, so a resumed attempt classifies the same
 // with or without it, and repeating it only adds an empty file. It is sent

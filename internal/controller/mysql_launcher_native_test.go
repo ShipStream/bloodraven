@@ -47,7 +47,10 @@ import (
 // and keyring-init script (every table, the redo and undo logs and the
 // binary log encrypted). The encrypted run goes on to the keyring states
 // (runSealed): a recloned site sealed again, and a clone that a sealed pod
-// finds staged, where the launcher must not rotate.
+// finds staged, where the launcher must not rotate. A fourth rendering is
+// encryption at rest with coverage.binaryLog off: there a new server_uuid
+// needs no new key, so the sealed pod does rotate, unless a persisted
+// binlog_encryption says the binary log is encrypted after all.
 func TestMySQLLauncherNative(t *testing.T) {
 	if os.Getenv("BLOODRAVEN_MYSQL_NATIVE_TEST") != "1" {
 		t.Skip("opt-in native MySQL launcher test (BLOODRAVEN_MYSQL_NATIVE_TEST=1, docker)")
@@ -62,6 +65,10 @@ func TestMySQLLauncherNative(t *testing.T) {
 	}
 	encrypted := newTestFG()
 	encrypted.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	binlogOff := false
+	encryptedNoBinlog := newTestFG()
+	encryptedNoBinlog.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true,
+		Coverage: &v1alpha1.EncryptionCoverageSpec{BinaryLog: &binlogOff}}
 	for _, tc := range []struct {
 		name string
 		user string // docker --user; "" keeps the image default (root)
@@ -70,6 +77,7 @@ func TestMySQLLauncherNative(t *testing.T) {
 		{name: "image default user", fg: newTestFG()},
 		{name: "runAsUser mysql", user: fmt.Sprintf("%d:%d", mysqlDataUID, mysqlDataGID), fg: newTestFG()},
 		{name: "encryption at rest", fg: encrypted},
+		{name: "encryption at rest, binary log not encrypted", fg: encryptedNoBinlog},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -435,8 +443,12 @@ func (e *launcherNativeEnv) run() {
 			if got := s.sql("SELECT STATUS_VALUE FROM performance_schema.keyring_component_status WHERE STATUS_KEY = 'Component_status'"); got != "Active" {
 				t.Fatalf("%s: keyring component status = %q, want Active (the launcher's encryption steps)", s.name, got)
 			}
-			if got := s.sql("SELECT CONCAT(@@global.default_table_encryption, @@global.innodb_redo_log_encrypt, @@global.innodb_undo_log_encrypt, @@global.binlog_encryption)"); got != "1111" {
-				t.Fatalf("%s: encryption settings = %q, want every one ON (the rendered my.cnf)", s.name, got)
+			want := "1110"
+			if e.binlogEncrypted() {
+				want = "1111"
+			}
+			if got := s.sql("SELECT CONCAT(@@global.default_table_encryption, @@global.innodb_redo_log_encrypt, @@global.innodb_undo_log_encrypt, @@global.binlog_encryption)"); got != want {
+				t.Fatalf("%s: encryption settings (tables, redo, undo, binlog) = %q, want %q (the rendered my.cnf)", s.name, got, want)
 			}
 		}
 	}
@@ -678,6 +690,10 @@ func (e *launcherNativeEnv) runSealed(donor, recipient *launcherNativeServer) {
 		t.Fatalf("server_uuid changed across the unsealing roll: %s -> %s", last, got)
 	}
 	recipient.clone(donor)
+	if !e.binlogEncrypted() {
+		e.runSealedWithoutBinlogEncryption(donor, recipient, last)
+		return
+	}
 	if got := recipient.recreate(true); got != last {
 		t.Fatalf("a clone installed by a sealed pod left server_uuid %s, want the previous %s kept\n%s", got, last, tailLines(recipient.logs(), 40))
 	}
@@ -692,6 +708,85 @@ func (e *launcherNativeEnv) runSealed(donor, recipient *launcherNativeServer) {
 	}
 	if st := recipient.sql("SELECT STATE FROM performance_schema.clone_status"); st != "Completed" {
 		t.Fatalf("clone_status = %q after the clone installed under a sealed keyring, want Completed", st)
+	}
+}
+
+// binlogEncrypted reports whether the group renders binlog_encryption=ON.
+func (e *launcherNativeEnv) binlogEncrypted() bool {
+	if !e.fg.Spec.EncryptionEnabled() {
+		return false
+	}
+	cov := e.fg.Spec.EffectiveEncryptionCoverage()
+	return cov.BinaryLog != nil && *cov.BinaryLog
+}
+
+// runSealedWithoutBinlogEncryption is the end of runSealed for a group
+// with coverage.binaryLog off (R4 B3). The recipient has a finished clone
+// staged and its previous server_uuid is last.
+//
+// A server with a new server_uuid stores a new keyring key only for an
+// encrypted binary log. Without one, the sealed pod that finds the clone
+// staged rotates like any other, and mysqld starts on the read-only
+// keyring. The guard stays for one case: binlog_encryption persisted with
+// SET PERSIST, which outranks the rendered my.cnf.
+func (e *launcherNativeEnv) runSealedWithoutBinlogEncryption(donor, recipient *launcherNativeServer, last string) {
+	t := e.t
+	rotated := recipient.recreate(true)
+	if rotated == last {
+		t.Fatalf("a clone installed by a sealed pod kept server_uuid %s although the binary log is not encrypted\n%s", last, tailLines(recipient.logs(), 40))
+	}
+	if n := recipient.launcherLineCount("removed auto.cnf"); n != 1 || recipient.launcherLineCount("previous: "+last) != 1 {
+		t.Fatalf("launcher lines for a clone staged under a sealed keyring without binary log encryption: %q", recipient.launcherLines())
+	}
+	if n := recipient.launcherLineCount("is read-only (the site is sealed)"); n != 0 {
+		t.Fatalf("the sealed-keyring guard fired without binary log encryption: %q", recipient.launcherLines())
+	}
+	if got := recipient.sql("SELECT STATUS_VALUE FROM performance_schema.keyring_component_status WHERE STATUS_KEY = 'Read_only'"); got != "Yes" {
+		t.Fatalf("the sealed recipient's keyring read_only = %q, want Yes", got)
+	}
+	if got, want := recipient.gtidExecuted(), donor.gtidExecuted(); got != want {
+		t.Fatalf("recipient gtid_executed after the clone installed under a sealed keyring = %s, want the donor's %s", got, want)
+	}
+	if st := recipient.sql("SELECT STATE FROM performance_schema.clone_status"); st != "Completed" {
+		t.Fatalf("clone_status = %q after the clone installed under a sealed keyring, want Completed", st)
+	}
+	// The rotated server works on its read-only keyring: it reads the
+	// encrypted tables and writes to them (its first own transaction is
+	// <new uuid>:1), and it survives an ordinary restart with its identity.
+	recipient.sql("SET GLOBAL read_only = 0; INSERT INTO app.t VALUES (300); SET GLOBAL read_only = 1")
+	if got := recipient.sql("SELECT GROUP_CONCAT(id ORDER BY id) FROM app.t"); got != "1,2,3,4,300" {
+		t.Fatalf("app.t on the sealed, rotated recipient = %q, want 1,2,3,4,300", got)
+	}
+	if set := recipient.gtidExecuted(); !gtidSetHas(set, rotated, "1") {
+		t.Fatalf("gtid_executed = %s, want %s:1 for the rotated server's first transaction", set, rotated)
+	}
+	if got := recipient.restart(); got != rotated {
+		t.Fatalf("server_uuid changed across an ordinary sealed restart: %s -> %s", rotated, got)
+	}
+
+	// binlog_encryption persisted ON over the rendered OFF. The server
+	// then stores a binary log key per server_uuid after all, so a sealed
+	// pod that rotated would abort (MY-013288). The launcher sees the
+	// variable in mysqld-auto.cnf and keeps the identity.
+	if got := recipient.recreate(false); got != rotated {
+		t.Fatalf("server_uuid changed across the unsealing roll: %s -> %s", rotated, got)
+	}
+	recipient.sql("SET PERSIST binlog_encryption = ON")
+	if got := recipient.restart(); got != rotated {
+		t.Fatalf("server_uuid changed across a restart: %s -> %s", rotated, got)
+	}
+	if got := recipient.sql("SELECT @@global.binlog_encryption"); got != "1" {
+		t.Fatalf("binlog_encryption = %s after SET PERSIST and a restart, want 1: the persisted value must outrank the rendered my.cnf for this case to exist", got)
+	}
+	recipient.clone(donor)
+	if got := recipient.recreate(true); got != rotated {
+		t.Fatalf("a clone installed by a sealed pod with a persisted binlog_encryption left server_uuid %s, want the previous %s kept\n%s", got, rotated, tailLines(recipient.logs(), 40))
+	}
+	if n := recipient.launcherLineCount("is read-only (the site is sealed)"); n != 1 || recipient.launcherLineCount("NOT rotated (stays "+rotated+")") != 1 {
+		t.Fatalf("launcher lines for a clone staged under a sealed keyring with a persisted binlog_encryption: %q", recipient.launcherLines())
+	}
+	if st := recipient.sql("SELECT STATE FROM performance_schema.clone_status"); st != "Completed" {
+		t.Fatalf("clone_status = %q, want Completed", st)
 	}
 }
 

@@ -70,6 +70,10 @@ type FakeReplicaState struct {
 	// the binary log, the Previous_gtids header of the file it opened: the
 	// executed set at that moment. RESET REPLICA ALL keeps it.
 	BinlogPreviousGtids []string
+	// BinlogStatusErr fails SHOW BINARY LOG STATUS. Without it the
+	// statement reports the active file "binlog.NNNNNN", numbered from
+	// 000001 plus one per rotation in BinlogPreviousGtids.
+	BinlogStatusErr error
 }
 
 // NewFakeReplica returns a fake replica in the given state.
@@ -263,6 +267,14 @@ func (c *fakeReplicaConn) QueryContext(_ context.Context, query string, args []d
 		return &fakeRows{cols: replicaStatusColumns, rows: [][]driver.Value{replicaStatusRow(s)}}, nil
 	case "SELECT @@global.gtid_executed":
 		return &fakeRows{cols: []string{"@@global.gtid_executed"}, rows: [][]driver.Value{{s.ExecutedGtidSet}}}, nil
+	case "SHOW BINARY LOG STATUS":
+		if s.BinlogStatusErr != nil {
+			return nil, s.BinlogStatusErr
+		}
+		return &fakeRows{
+			cols: []string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"},
+			rows: [][]driver.Value{{fmt.Sprintf("binlog.%06d", 1+len(s.BinlogPreviousGtids)), int64(158), "", "", s.ExecutedGtidSet}},
+		}, nil
 	case "SELECT @@server_uuid, @@global.gtid_executed":
 		return &fakeRows{cols: []string{"@@server_uuid", "@@global.gtid_executed"}, rows: [][]driver.Value{{s.ServerUUID, s.ExecutedGtidSet}}}, nil
 	case "SHOW GRANTS":

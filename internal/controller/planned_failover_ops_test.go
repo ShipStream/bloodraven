@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -54,6 +55,10 @@ type opsMySQL struct {
 	// run without mu so it can block until its context ends.
 	flushes []opsFlush
 	flushFn func(ctx context.Context) error
+	// onStmt, when set, runs as each mutating statement arrives, before it
+	// applies, with its name ("reset", "sro=ON", ...). It runs under mu:
+	// it may set the mock's fields but must not call its methods.
+	onStmt func(stmt string)
 }
 
 // opsFlush is one FLUSH BINARY LOGS an opsMySQL received.
@@ -83,6 +88,17 @@ func (m *opsMySQL) FlushBinaryLogs(ctx context.Context) error {
 	return fl.err
 }
 
+// RotateBinaryLog is FlushBinaryLogs plus a file name numbered by the
+// flushes received so far.
+func (m *opsMySQL) RotateBinaryLog(ctx context.Context) (string, error) {
+	if err := m.FlushBinaryLogs(ctx); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return fmt.Sprintf("binlog.%06d", 1+len(m.flushes)), nil
+}
+
 func (m *opsMySQL) flushLog() []opsFlush {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -91,6 +107,9 @@ func (m *opsMySQL) flushLog() []opsFlush {
 
 func (m *opsMySQL) log(stmt string) error {
 	m.stmts = append(m.stmts, stmt)
+	if m.onStmt != nil {
+		m.onStmt(stmt)
+	}
 	if m.down {
 		return errors.New("connection refused")
 	}

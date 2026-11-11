@@ -809,9 +809,19 @@ func (r *MysqlBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 //     ArtifactCleanupSkipped warning.
 //
 // When the referenced group or profile is gone we emit an
-// ArtifactCleanupSkipped warning event and release the finalizer
-// immediately (after an abandoned backup's producer has stopped) —
-// there's nothing we can do without credentials.
+// ArtifactCleanupSkipped warning event and release the finalizer (after an
+// abandoned backup's producer has stopped) — there's nothing we can do
+// without credentials.
+//
+// No path releases a backup while a verification or a restore may still
+// read it (waitForArtifactReaders), including the ones that leave the
+// artifact in storage (Retain, a group or profile that is gone, no
+// recorded destination): the object is what bounds the PITR binlog cutoff
+// for a replay in progress, and a restore that holds a backup being
+// deleted goes on reading it (holdRestoreBackup). The exceptions are the
+// best-effort skips of a backup that never succeeded (abandoned mode):
+// nothing can read one (verifications and restores refuse a backup that is
+// not Succeeded), and they wait for its producer to stop instead.
 func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, time.Duration, error) {
 	// Record a completion the status lost before the mode is chosen: a
 	// backup whose own Job succeeded is cleaned up as a completed artifact.
@@ -867,6 +877,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	} else {
 		condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
 		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || condition != nil && condition.Reason == v1alpha1.ReasonDestinationUnavailable {
+			if wait, err := r.waitForArtifactReaders(ctx, backup, "no artifact destination is recorded"); err != nil || wait > 0 {
+				return false, wait, err
+			}
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, v1alpha1.EventArtifactCleanupSkipped,
 				"no recorded artifact destination (producing Job %q); skipping cleanup%s", backupJobName(backup.Name), dumpKeyKeptNote(backup))
 			return true, 0, nil
@@ -952,6 +965,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	fgKey := types.NamespacedName{Namespace: backup.Namespace, Name: backup.Spec.FailoverGroupRef.Name}
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
+			if wait, err := r.waitForArtifactReaders(ctx, backup, fmt.Sprintf("failover group %q is gone", fgKey.Name)); err != nil || wait > 0 {
+				return false, wait, err
+			}
 			r.Recorder.Eventf(backup, corev1.EventTypeWarning, v1alpha1.EventArtifactCleanupSkipped,
 				"failover group %q gone; cannot clean up artifact at %q%s", fgKey.Name, location, dumpKeyKeptNote(backup))
 			return true, 0, nil
@@ -961,6 +977,10 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 
 	profile := findProfile(&fg, backup.Spec.ProfileName)
 	if profile == nil {
+		if wait, err := r.waitForArtifactReaders(ctx, backup,
+			fmt.Sprintf("profile %q is gone from group %q", backup.Spec.ProfileName, fg.Name)); err != nil || wait > 0 {
+			return false, wait, err
+		}
 		r.Recorder.Eventf(backup, corev1.EventTypeWarning, v1alpha1.EventArtifactCleanupSkipped,
 			"profile %q gone from group %q; cannot clean up artifact at %q%s",
 			backup.Spec.ProfileName, fg.Name, location, dumpKeyKeptNote(backup))
@@ -1009,7 +1029,7 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		// A verification or a restore may still be reading the artifact
 		// (a manual delete during a run, or a hold retention could not
 		// see).
-		if wait, err := r.waitForArtifactReaders(ctx, backup, false); err != nil || wait > 0 {
+		if wait, err := r.waitForArtifactReaders(ctx, backup, ""); err != nil || wait > 0 {
 			return false, wait, err
 		}
 		// Never overlap executions: a retried Job's pods must be gone
@@ -1209,7 +1229,7 @@ func (r *MysqlBackupReconciler) retainArtifact(ctx context.Context, backup *v1al
 	} else if !stripped {
 		return false, 2 * time.Second, nil
 	}
-	if wait, err := r.waitForArtifactReaders(ctx, backup, true); err != nil || wait > 0 {
+	if wait, err := r.waitForArtifactReaders(ctx, backup, "deletionPolicy is Retain"); err != nil || wait > 0 {
 		return false, wait, err
 	}
 	// The cleanup of this deletion never started (artifactCleanupStarted),
@@ -1330,9 +1350,11 @@ func lateRetainNote(backup *v1alpha1.MysqlBackup) string {
 // restore may still be reading backup's artifact, recording why on the
 // ArtifactCleanup condition (HeldByVerification, or HeldByRestore when only
 // restores read it) and emitting ArtifactCleanupDeferred when the readers
-// change. retain says the wait only holds the release of a Retain backup,
-// whose artifact stays in storage, not a cleanup.
-func (r *MysqlBackupReconciler) waitForArtifactReaders(ctx context.Context, backup *v1alpha1.MysqlBackup, retain bool) (time.Duration, error) {
+// change. kept is "" when the wait holds back a cleanup; otherwise it says
+// why the artifact stays in storage whatever happens (deletionPolicy is
+// Retain, or nothing can clean it up), and the wait only holds the release
+// of the backup.
+func (r *MysqlBackupReconciler) waitForArtifactReaders(ctx context.Context, backup *v1alpha1.MysqlBackup, kept string) (time.Duration, error) {
 	readers, err := artifactReaderRefs(ctx, r.apiReader(), backup)
 	if err != nil {
 		return 0, err
@@ -1346,8 +1368,8 @@ func (r *MysqlBackupReconciler) waitForArtifactReaders(ctx context.Context, back
 	}
 	message := fmt.Sprintf("%s may still be reading the artifact", describeReaders(readers))
 	event := "cleanup waits: " + message
-	if retain {
-		message += "; deletionPolicy is Retain, so the artifact stays in storage and only the release of this backup waits"
+	if kept != "" {
+		message += "; " + kept + ", so the artifact stays in storage and only the release of this backup waits"
 		event = "release waits: " + message
 	}
 	previous := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup)

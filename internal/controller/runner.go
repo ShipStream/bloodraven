@@ -1213,7 +1213,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// A reclone waits, bounded, for its recipient's sidecar to archive the
 	// binary log tail CLONE wipes; a reclone that goes ahead without that
 	// is announced with an Event.
-	tm.ArchiveTailProbe = archiver.tailStatus
+	tm.ArchiveTail = archiver
 	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
 		r.emitPITRArchiveTailNotArchived(tmCtx, nn, site, reason)
 	}
@@ -1223,6 +1223,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tm.CloneServerUUIDNotRotatedCallback = func(site, serverUUID string) {
 		r.emitCloneServerUUIDNotRotated(tmCtx, nn, site, serverUUID)
 	}
+	// The recipient's server_uuid before each clone is recorded on the
+	// group, so a clone that finishes after this manager is still checked.
+	tm.SetCloneIdentityStore(r.cloneIdentityStore(nn))
 
 	done := make(chan struct{})
 	archiverDone := make(chan struct{})
@@ -2686,8 +2689,8 @@ func (r *TopologyManagerRunner) emitPITRArchiveTailNotArchived(ctx context.Conte
 		return
 	}
 	r.recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveTailNotArchived,
-		"site %s is being recloned although its binary log tail was not confirmed archived within %s: %s. CLONE wipes the site's binary logs; a point-in-time restore whose window needs transactions only they held refuses PITRArchiveGap.",
-		site, preRecloneArchiveTailTimeout, reason)
+		"site %s is being recloned although its binary log tail was not confirmed archived in time: %s. CLONE wipes the site's binary logs; a point-in-time restore whose window needs transactions only they held refuses PITRArchiveGap.",
+		site, reason)
 }
 
 // emitCloneServerUUIDNotRotated records the Warning Event of a clone whose

@@ -131,11 +131,16 @@ type runObs struct {
 	// not read at the confirm probe.
 	confirmUnreadable []string
 
-	unconfirmedSince int // poll of a PromotedUnconfirmed with an unreachable target; -1 none
+	// unconfirmedSince is the poll the UnconfirmedBlocksEmergency window
+	// started at: the run ended PromotedUnconfirmed, and since that poll
+	// every precondition of the emergency promotion held (the target
+	// unreachable among them). -1: not judged (the outcome is another, or a
+	// primary existed since).
+	unconfirmedSince int
 	// unconfirmedGen is the process generation unconfirmedSince was counted
-	// in; unconfirmedFault marks an injected fault on a topology-manager
-	// statement to the run's source since the last poll boundary. Both
-	// restart the window (UnconfirmedBlocksEmergency).
+	// in; unconfirmedFault marks an injected fault on a promotion statement
+	// the topology manager sent to the run's source since the last poll
+	// boundary (emergencyPromotionStatement). Both restart the window.
 	unconfirmedGen   int
 	unconfirmedFault bool
 	// rollbackSawSourceWritable: the source was truth-writable at a yield
@@ -143,9 +148,14 @@ type runObs struct {
 	// RolledBack that says "the source is writable" was true when the run
 	// read it (another actor may fence it again before the record commits).
 	rollbackSawSourceWritable bool
-	// superseded: after the run ended SourceLeftFenced, a site other than
-	// its source was writable, so authority moved on from the fenced
-	// source (FencedSourceNeverHealed).
+	// superseded: after the run ended SourceLeftFenced, the topology
+	// manager took authority away from the fenced source: it counted
+	// another site as the group's primary (managerActive), or it fenced
+	// the source or repointed it at another site itself. The re-assert no
+	// longer names the source then, and what becomes of the other primary
+	// is not the run's fence (FencedSourceNeverHealed). A site an external
+	// writer made writable that the manager never adopted (a read-only
+	// reader, which it fences; a site it never observed) does not count.
 	superseded bool
 	startSeq   int // the cluster sequence when the monitor first saw the run
 	// promotingGen is the process generation that committed the run's
@@ -228,6 +238,13 @@ type plannedMonitor struct {
 	// noManager reports whether the group has no registered topology
 	// manager now (nil: it always has one).
 	noManager func() bool
+	// activeSite reports the site the registered topology manager counts
+	// as the group's primary after its last poll: its Status().ActiveSite,
+	// the one writable promotable site it observed ("" when it observed
+	// none or several, or no manager runs). nil derives the same from the
+	// model's truth, as a manager that had just polled every site would
+	// (managerActive).
+	activeSite func() string
 }
 
 func newPlannedMonitor(c *Cluster, sites []string, roles []state.SiteRole) *plannedMonitor {
@@ -253,6 +270,45 @@ func (m *plannedMonitor) violate(invariant, key, detail string) {
 	}
 	m.flagged[k] = true
 	m.violations = append(m.violations, Violation{Invariant: invariant, Poll: m.poll, Detail: detail})
+}
+
+// managerActive is the site the topology manager counts as the group's
+// primary now: activeSite when the harness wired the manager's own view,
+// otherwise the one truth-writable site, if it is promotable and the
+// operator can reach it (TopologyManager.activeSiteLocked on the truth).
+func (m *plannedMonitor) managerActive(truth []SiteTruth) string {
+	if m.activeSite != nil {
+		return m.activeSite()
+	}
+	active := ""
+	for _, t := range truth {
+		if !t.Writable() {
+			continue
+		}
+		if active != "" || !t.Reachable() {
+			return ""
+		}
+		active = t.Name
+	}
+	if active != "" && m.roles[active] != state.SiteRolePrimaryCandidate {
+		return ""
+	}
+	return active
+}
+
+// emergencyPromotionStatement reports whether e is a statement the
+// emergency promotion of its site depends on (FailoverController.Execute on
+// the candidate: the relay drain, STOP REPLICA, RESET REPLICA ALL and the
+// two read-only clears). The best-effort FLUSH BINARY LOGS is not one: a
+// rotation that fails or is abandoned never stops a promotion.
+func emergencyPromotionStatement(e Event) bool {
+	switch e.Kind {
+	case EvDrain, EvStopReplica, EvResetReplica, EvPromote:
+		return true
+	case EvSetSuperRO, EvSetRO:
+		return e.Detail == "on=false"
+	}
+	return false
 }
 
 // activeRun is the run the durable block names, while it is not terminal.
@@ -338,13 +394,26 @@ func (m *plannedMonitor) onEvent(e Event) {
 		}
 		return
 	}
-	if effectiveActor(e.Actor) == ActorTM && e.Outcome != "" && !strings.HasPrefix(string(e.Kind), "fault.") {
-		// An injected fault on a topology-manager statement to the source
-		// of an unconfirmed run: its emergency promotion was attempted and
-		// retries after a backoff (UnconfirmedBlocksEmergency).
+	if effectiveActor(e.Actor) == ActorTM && e.Outcome != "" && emergencyPromotionStatement(e) {
+		// An injected fault on a promotion statement the topology manager
+		// sent to the source of an unconfirmed run: its emergency promotion
+		// was attempted and retries after a backoff
+		// (UnconfirmedBlocksEmergency). A failing or abandoned rotation is
+		// not such a fault: the promotion goes on without it.
 		for _, id := range m.order {
 			if r := m.runs[id]; r.unconfirmedSince >= 0 && e.Site == r.source {
 				r.unconfirmedFault = true
+			}
+		}
+	}
+	if effectiveActor(e.Actor) == ActorTM && observedOutcome(e.Outcome) &&
+		(e.Kind == EvChangeSource || (e.Kind == EvSetSuperRO && e.Detail == "on=true")) {
+		// The topology manager fenced the source of a run that ended
+		// SourceLeftFenced, or made it a replica of another site: the
+		// source is the manager's from here on (FencedSourceNeverHealed).
+		for _, id := range m.order {
+			if r := m.runs[id]; r.terminal && r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed && e.Site == r.source {
+				r.superseded = true
 			}
 		}
 	}
@@ -868,9 +937,10 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 		if !r.writeTried && !r.crossProcess(m.procGen) && r.reason != v1alpha1.PlannedFailoverReasonManagerUnavailable {
 			dishonest("it never sent super_read_only=OFF or read_only=OFF")
 		}
-		if !tgt.Reachable() {
-			r.unconfirmedSince, r.unconfirmedGen = m.poll, m.procGen
-		}
+		// The UnconfirmedBlocksEmergency window opens here whether or not
+		// the target answers at this moment: a poll in which it answers
+		// only starts the window again (endPoll).
+		r.unconfirmedSince, r.unconfirmedGen = m.poll, m.procGen
 	case v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
 		if !r.promotionStmt && !r.crossProcess(m.procGen) {
 			dishonest("it sent no promotion statement")
@@ -1183,16 +1253,25 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 		}
 	}
 	truth := m.c.Truth()
+	active := ""
+	if managerReady && !m.c.OperatorDead() {
+		active = m.managerActive(truth)
+	}
 	for _, id := range m.order {
 		r := m.runs[id]
 		if r.terminal && r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed {
 			for _, t := range truth {
-				switch {
-				case t.Name == r.source && t.Writable():
+				if t.Name == r.source && t.Writable() {
 					r.healed = true
-				case t.Name != r.source && t.Writable():
-					r.superseded = true
 				}
+			}
+			// Authority moves on only when the manager adopts another
+			// site. A site that is merely writable for a while (a reader
+			// an external writer opened, which the manager fences and
+			// never adopts) leaves the source the group's only named
+			// primary, and the run's fence still has to be healed.
+			if active != "" && active != r.source {
+				r.superseded = true
 			}
 		}
 		if r.unconfirmedSince < 0 {
@@ -1218,12 +1297,21 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 		// grace. It is judged over a window in which those preconditions
 		// held at every poll.
 		switch {
-		case writable, tgt.Reachable():
-			// A primary exists, or the target answers again: there is no
-			// emergency left for the unconfirmed run to block. What a
-			// reachable read-only target leaves behind is the end-state
-			// invariants' to judge.
+		case src.Writable() || active != "":
+			// The source was promoted, or the manager counts a site as the
+			// group's primary: there is no emergency left for the
+			// unconfirmed run to block. What becomes of that primary is
+			// the other invariants' to judge.
 			r.unconfirmedSince = -1
+		case writable, tgt.Reachable():
+			// A site is writable that the manager has not adopted (a
+			// reader an external writer opened; the manager fences it and
+			// promotes nothing beside it), or the target answers: no
+			// emergency promotion is due at this poll. Neither ends the
+			// judgment: once that site is fenced again, or the target is
+			// gone again, the operator owes the promotion within a new
+			// grace.
+			r.unconfirmedSince, r.unconfirmedGen = p, m.procGen
 		case m.c.OperatorDead() || !managerReady || r.unconfirmedGen != m.procGen || fault ||
 			src.Name == "" || !src.Reachable() || (r.fenceSet != "" && !containsSet(src, r.fenceSet)):
 			// No operator ran this poll, a new process starts its debounce
@@ -1280,11 +1368,13 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 					contained = false
 				}
 			}
-			// Once another site was writable after the run ended, the group
-			// had a primary again and the topology manager's normal paths
-			// own the source (it demotes it to a replica of that site under
-			// a fence of its own): what became of that primary is not this
-			// run's fence wedging the group.
+			// Once the topology manager adopted another site after the run
+			// ended (or fenced or repointed the source itself), its normal
+			// paths own the source (it demotes it to a replica of that site
+			// under a fence of its own): what became of that primary is not
+			// this run's fence wedging the group. A site that was only
+			// writable for a while without being adopted does not supersede
+			// the run (runObs.superseded).
 			if attributable && !r.superseded && contained && allReachable && (lastTarget == "" || lastTarget == r.source) && !anyWritable {
 				m.violate("FencedSourceNeverHealed", id, fmt.Sprintf(
 					"run %s left its own fence on %s and after settle no site is writable", id, r.source))

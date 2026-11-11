@@ -271,15 +271,30 @@ production planned-failover path end to end:
     run's writes beside that writer;
   - `FencedSourceNeverHealed` judges only the run's own fence (landed, in
     the source's current incarnation, still set, never healed) under the
-    re-assert's preconditions, and only while no other site has been
-    writable since the run ended: after that the group had a primary and
-    the topology manager owns the source;
+    re-assert's preconditions, and only until the topology manager takes
+    authority away from the source: it counts another site as the group's
+    primary (its `Status().ActiveSite` after a poll names another site:
+    the one writable promotable site it observed, or one it promoted), or
+    it fences the source or repoints it at another site itself. After that
+    the re-assert no longer names the source and the manager owns it. A
+    site that is only writable for a while without being adopted does not
+    count: a read-only reader an external writer opened (the manager fences
+    it and never adopts it), or a site writable while no manager polled;
   - `UnconfirmedBlocksEmergency` is judged over a window in which, at every
-    poll, the target stayed unreachable, an operator with a manager ran,
-    and the source was reachable and complete. A site writable inside the
-    window or a target that answers again ends it; an operator death or
-    restart, a window without a manager and an injected fault on the
-    manager's statement to the source start it again;
+    poll, no site was writable, the target stayed unreachable, an operator
+    with a manager ran, and the source was reachable and complete; the
+    operator owes the source's promotion within the grace of such a window.
+    The window opens when the run ends `PromotedUnconfirmed`, whether or
+    not its target answers at that moment.
+    The source becoming writable, or the manager counting any site as the
+    primary, ends the judgment. Everything else only starts the window
+    again, at that poll: a target that answers (for one poll or for good),
+    a writable site the manager has not adopted, an operator death or
+    restart, a poll without a manager, and an injected fault on a promotion
+    statement the manager sent to the source (the relay drain, `STOP
+    REPLICA`, `RESET REPLICA ALL`, the two read-only clears). A failing or
+    abandoned `FLUSH BINARY LOGS` does not: a rotation never stops a
+    promotion;
   - a standing automation hold is the documented manual-recovery state: the
     end-state convergence invariants and the dual-writable check do not
     judge it, but every acknowledged transaction must still exist on some
@@ -329,11 +344,21 @@ clock: the harness builds the controller with
   promotion's poll), not on poll numbers.
 - **The pre-reclone wait.** `recloneWait site n k` requests a reclone of a
   site with PITR archiving "on": the manager's `checkReclone` reads the
-  site's simulated sidecar status, rotates the site's binary log and waits
-  for the tail to be archived. The simulated sidecar never reports it
-  archived (k: unreachable, still uploading, blocked, or a scan from before
-  the rotation), and the harness withdraws the request n polls later or at
-  heal-all, before the wait's 2-minute bound, because CLONE is not modelled
+  site's simulated sidecar status, rotates the site's binary log
+  (`RotateBinaryLog`, which also names the file the rotation opened) and
+  waits for a Drained scan of that file. In production each step of the
+  wait (the status request and the rotation) runs on a goroutine of its own
+  and a later poll picks its result up; a trial runs the step inline
+  (`SetRecloneTailStepRunnerForSim`), inside the Poll that started it, so
+  the model still sees one actor at a time and a seed replays exactly. What
+  that leaves out, a step that returns between two polls or never, is
+  covered by controller and component tests
+  (`reclone_archive_tail_test.go`,
+  `TestReclone_HungRecipientDoesNotSlowThePollLoop`). The simulated sidecar
+  never reports the tail archived (k: unreachable, still uploading, blocked,
+  or a scan from before the rotation), and the harness withdraws the request
+  n polls later or at heal-all, before the wait's deadline (2 minutes after
+  the acknowledged rotation), because CLONE is not modelled
   (`HarnessRecloneWaitExpired` guards that). The request is applied again
   to every manager that replaces the one it was given to, as the annotation
   would be, so a restart or a manager replacement mid-wait starts the wait
@@ -341,8 +366,25 @@ clock: the harness builds the controller with
   and restarts. What is not: a wait that ends (archived, or at its bound)
   and the clone after it; component tests cover those
   (`test/component/binlog_rotation_test.go`).
-- **Invariants.** `FlushAfterWriteGrant` (per poll): an actor never rotates
-  a site after it enabled that site's writes without fencing it again. With
+- **Invariants.** `FlushAfterWriteGrant`: an actor never rotates a site
+  after it enabled that site's writes. The grant stands until the site is
+  fenced again by anyone (an operator actor, its sidecar, an external
+  writer) or its server restarts or is replaced. A rotation that failed or
+  was abandoned counts like one that rotated; one the server completes late
+  does not. A planned failover's and an ordered update's grants are carried
+  across polls while the site stays writable (a `super_read_only` clear
+  that left `read_only` on ends with its poll, so a new process that finds
+  the target read-only may rotate it again). The topology manager's are
+  judged inside the poll only: its promotion is one call in one poll, and
+  the two rotations it sends to a site it made writable in an earlier poll
+  are by design. The split-brain priorities path fences the losers and runs
+  the whole promotion on the policy winner, which is already writable, so
+  that rotation lands on a writable site and the file it opens need not
+  start at the recorded promotion GTID (carried across polls, the rule
+  flagged it in 85 of 112,000 planned trials; nothing writes inside a poll
+  in the model, so a trial cannot show the difference). The pre-reclone
+  rotation's recipient can be a former primary an operator partition has
+  kept writable. With
   the actors on: a planned run's rotation of a target it made writable,
   while that target is still writable or holds its own transactions
   outside F, is `RepeatedPromotion` (a promotion resumed from `WasWritable`

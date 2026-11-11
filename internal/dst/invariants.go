@@ -266,34 +266,14 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 	// I: the operator rotates a site's binary log only while the site is
 	// read-only by its own hand: a promotion candidate before its writes
 	// are enabled, a source it has fenced. A rotation an actor sends to a
-	// site after that actor enabled its writes (and did not fence it again)
-	// is out of order.
-	granted := map[string]int{}
-	for _, e := range events {
-		key := string(effectiveActor(e.Actor)) + "|" + e.Site
-		switch {
-		case e.Kind == EvPromote && observedOutcome(e.Outcome),
-			(e.Kind == EvSetRO || e.Kind == EvSetSuperRO) && e.Detail == "on=false" && observedOutcome(e.Outcome):
-			if _, ok := granted[key]; !ok {
-				granted[key] = e.Seq
-			}
-		case (e.Kind == EvSetRO || e.Kind == EvSetSuperRO) && e.Detail == "on=true" && observedOutcome(e.Outcome):
-			delete(granted, key)
-		case e.Kind == EvFlushBinlog && e.Outcome != "late":
-			if seq, ok := granted[key]; ok {
-				r.violations = append(r.violations, Violation{
-					Invariant: "FlushAfterWriteGrant",
-					Poll:      p,
-					Detail: fmt.Sprintf("%s sent FLUSH BINARY LOGS to %s (seq %d) after enabling its writes (seq %d)",
-						effectiveActor(e.Actor), e.Site, e.Seq, seq),
-				})
-			}
-		}
-	}
+	// site after that actor enabled its writes is out of order (flushGrants
+	// says how long a grant stands).
+	r.violations = append(r.violations, r.flushGrants.observe(p, events)...)
 
 	// I: a dual-writable state that is fully observable to the operator must
 	// be resolved within the grace window (when a resolution policy exists).
 	truth := r.cluster.Truth()
+	r.flushGrants.settle(truth)
 	writable := 0
 	allReachable := true
 	for _, t := range truth {
@@ -749,3 +729,105 @@ func (r *trialRunner) plannedHoldStands() bool {
 // (fingerprint DualWritableUnresolved(confirmedClaim): the fixed DST-4, now a
 // regression; README, Known finding classes).
 const confirmedClaimMarker = "(while a planned run that had made its target writable held the claim)"
+
+// flushGrant is one actor's standing grant of writes to a site: the event
+// that enabled them and the poll it landed in.
+type flushGrant struct {
+	seq, poll int
+}
+
+// flushGrants is the state of FlushAfterWriteGrant: for every actor and
+// site, the first statement by which that actor enabled the site's writes
+// (Promote, or a clear of read_only or super_read_only that reached the
+// server) and that still stands. A grant stands until the site is fenced
+// again by anyone (an operator actor, its sidecar, an external writer) or
+// its server restarts or is replaced. The zero value is ready to use.
+//
+// Whether a grant outlives its poll depends on the actor (settle):
+//
+//   - A planned failover's and an ordered update's grants do, while the
+//     site stays writable. Their handoffs span polls and engine passes, and
+//     every rotation they send is to a site they hold under the claim and
+//     have just fenced or are about to make writable. A rotation of a site
+//     they made writable in an earlier poll, not fenced since, is out of
+//     order.
+//   - The topology manager's do not. Its promotion (FailoverController.
+//     Execute) is one call inside one poll, which the per-poll rule judges
+//     in full, and both rotations it sends to a site it made writable in an
+//     earlier poll are by design: the split-brain priorities path fences
+//     the losers and runs the whole promotion on the policy winner, which
+//     is writable already (often by the manager's own re-assert), and the
+//     pre-reclone rotation's recipient can be a former primary an operator
+//     partition has kept writable. Carried across polls, the rule flagged
+//     85 of 112,000 planned trials, every one the priorities path (seeds
+//     527, 942, 2123, ...). On that path the rotation lands on a writable
+//     site, so the file it opens need not start at the recorded promotion
+//     GTID; nothing in a trial writes inside a poll, so the model cannot
+//     show the difference.
+type flushGrants struct {
+	granted map[string]flushGrant // actor|site
+}
+
+// observe applies one poll's events in order and returns a
+// FlushAfterWriteGrant violation for every FLUSH BINARY LOGS an actor sent
+// to a site while its own grant stood. A rotation that failed or was
+// abandoned counts like one that rotated: the statement was sent. A
+// rotation the server completes after the operator abandoned it ("late") is
+// the model's doing, not a statement the operator ordered there.
+func (g *flushGrants) observe(p int, events []Event) []Violation {
+	if g.granted == nil {
+		g.granted = map[string]flushGrant{}
+	}
+	var out []Violation
+	for _, e := range events {
+		actor := effectiveActor(e.Actor)
+		key := string(actor) + "|" + e.Site
+		switch {
+		case e.Kind == EvPromote && observedOutcome(e.Outcome),
+			(e.Kind == EvSetRO || e.Kind == EvSetSuperRO) && e.Detail == "on=false" && observedOutcome(e.Outcome):
+			if _, ok := g.granted[key]; !ok {
+				g.granted[key] = flushGrant{seq: e.Seq, poll: p}
+			}
+		case (e.Kind == EvSetRO || e.Kind == EvSetSuperRO) && e.Detail == "on=true" && observedOutcome(e.Outcome),
+			e.Kind == EvSidecarFence && observedOutcome(e.Outcome),
+			e.Kind == EvWedgeFence, e.Kind == EvCrash, e.Kind == EvRecoverSite, e.Kind == EvReplacePod, e.Kind == EvRestartSite:
+			g.revoke("", e.Site)
+		case e.Kind == EvFlushBinlog && e.Outcome != "late":
+			grant, ok := g.granted[key]
+			if !ok {
+				continue
+			}
+			detail := fmt.Sprintf("%s sent FLUSH BINARY LOGS to %s (seq %d) after enabling its writes (seq %d)", actor, e.Site, e.Seq, grant.seq)
+			if grant.poll != p {
+				detail += fmt.Sprintf(" at poll %d, and the site was not fenced or restarted since", grant.poll)
+			}
+			out = append(out, Violation{Invariant: "FlushAfterWriteGrant", Poll: p, Detail: detail})
+		}
+	}
+	return out
+}
+
+// revoke ends the grants on site ("" for every site) of actor ("" for every
+// actor).
+func (g *flushGrants) revoke(actor Actor, site string) {
+	for key := range g.granted {
+		a, s, _ := strings.Cut(key, "|")
+		if (actor == "" || a == string(actor)) && (site == "" || s == site) {
+			delete(g.granted, key)
+		}
+	}
+}
+
+// settle ends, at a poll's end, the grants that do not outlive it: the
+// topology manager's, and every grant on a site that is not writable (a
+// clear of super_read_only that left read_only on, a fence the model
+// applied without an event). A new process that finds such a target
+// read-only may rotate it again before it clears again.
+func (g *flushGrants) settle(truth []SiteTruth) {
+	g.revoke(ActorTM, "")
+	for _, t := range truth {
+		if !t.Writable() {
+			g.revoke("", t.Name)
+		}
+	}
+}

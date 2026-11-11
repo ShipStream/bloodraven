@@ -303,36 +303,70 @@ func TestFailover_FailingRotationStillPromotes(t *testing.T) {
 // --- the pre-reclone archive-tail wait (#264) ------------------------------
 
 // sidecarTail is the recipient sidecar's /archiver/status as the
-// pre-reclone wait reads it.
+// pre-reclone wait reads it (controller.ArchiveTailSource). The recipient
+// mock writes binlog.000001 until its first rotation, which opens
+// binlog.000002.
 type sidecarTail struct {
 	mu          sync.Mutex
+	pitrOff     bool
 	unreachable bool
-	active      string
-	state       string
-	reason      string
-	// scanOnFlush makes the fake behave like a healthy sidecar: once the
-	// recipient's binary log was rotated it reports a Drained scan of the
-	// new active file.
-	scanOnFlush func() bool
-	probes      int
+	// hang holds every status request until its context ends: a sidecar
+	// that never answers.
+	hang   bool
+	active string
+	state  string
+	reason string
+	// scanOnFlush makes the fake behave like a sidecar that scans on the
+	// rotation: once the recipient's binary log was rotated it reports a
+	// scan with scanned as the active file, ended scannedState (Drained
+	// when empty).
+	scanOnFlush  func() bool
+	scanned      string
+	scannedState string
+	probes       int
 }
 
-func (s *sidecarTail) probe(_ context.Context, _ string) (*mysql.ArchiverStatus, bool, error) {
+func (s *sidecarTail) ArchivingEnabled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return !s.pitrOff
+}
+
+func (s *sidecarTail) TailStatus(ctx context.Context, _ string) (*mysql.ArchiverStatus, error) {
+	s.mu.Lock()
 	s.probes++
+	hang := s.hang
+	s.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.unreachable {
-		return nil, true, errors.New("dial tcp: connection refused")
+		return nil, errors.New("dial tcp: connection refused")
 	}
 	active, state := s.active, s.state
 	if s.scanOnFlush != nil && s.scanOnFlush() {
-		active, state = s.active+".next", mysql.ArchiverTailDrained
+		active, state = s.scanned, mysql.ArchiverTailDrained
+		if s.scannedState != "" {
+			state = s.scannedState
+		}
 	}
-	return &mysql.ArchiverStatus{Enabled: true, Tail: &mysql.ArchiverTailStatus{State: state, ActiveFile: active, Reason: s.reason}}, true, nil
+	return &mysql.ArchiverStatus{Enabled: true, Tail: &mysql.ArchiverTailStatus{State: state, ActiveFile: active, Reason: s.reason}}, nil
+}
+
+func (s *sidecarTail) probeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.probes
 }
 
 // recloneTailHarness is a bootstrap harness whose failover controller runs
-// on the harness clock, with dc2 the reclone recipient.
+// on the harness clock, with dc2 the reclone recipient. The wait's steps
+// run inline, so a poll's outcome does not depend on goroutine timing;
+// TestReclone_HungRecipientDoesNotSlowThePollLoop runs them as production
+// does.
 func recloneTailHarness(t *testing.T, tail *sidecarTail, announced *[]string) *testHarness {
 	t.Helper()
 	gtid := rotationUUID + ":1-42"
@@ -341,7 +375,8 @@ func recloneTailHarness(t *testing.T, tail *sidecarTail, announced *[]string) *t
 		replicaStatus: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
 	h := newRecloneHarness(t, dc1, dc2)
 	h.tm.SetAutoBootstrapSuppressed(true)
-	h.tm.ArchiveTailProbe = tail.probe
+	h.tm.ArchiveTail = tail
+	h.tm.SetRecloneTailStepRunnerForSim(func(step func()) { step() })
 	h.tm.ArchiveTailNotArchivedCallback = func(site, reason string) { *announced = append(*announced, site+": "+reason) }
 	h.pollN(2)
 	return h
@@ -391,7 +426,7 @@ func pollUntilCloned(t *testing.T, h *testHarness, maxPolls int) time.Duration {
 // announced.
 func TestReclone_WaitsForTheSidecarToArchiveTheTail(t *testing.T) {
 	var announced []string
-	tail := &sidecarTail{active: "binlog.000007", state: mysql.ArchiverTailPending}
+	tail := &sidecarTail{active: "binlog.000001", state: mysql.ArchiverTailPending}
 	h := recloneTailHarness(t, tail, &announced)
 	h.tm.SetRecloneSite("dc2")
 	for i := 0; i < 5; i++ {
@@ -404,9 +439,21 @@ func TestReclone_WaitsForTheSidecarToArchiveTheTail(t *testing.T) {
 	if got := h.dc2MySQL.callCount("FlushBinaryLogs"); got != 1 {
 		t.Fatalf("the recipient received %d rotations during the wait, want 1", got)
 	}
+	// A scan that read the binary log index before the rotation ends
+	// Drained: it never saw the file the rotation sealed (r2 F2).
+	tail.mu.Lock()
+	tail.state = mysql.ArchiverTailDrained
+	tail.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		h.pollN(1)
+		h.clock.Advance(2 * time.Second)
+		if h.dc2MySQL.cloned() {
+			t.Fatal("CLONE was issued on a Drained scan from before the rotation")
+		}
+	}
 	// The sidecar finishes: it reports the rotated log, Drained.
 	tail.mu.Lock()
-	tail.active, tail.state = "binlog.000008", mysql.ArchiverTailDrained
+	tail.active = "binlog.000002"
 	tail.mu.Unlock()
 	pollUntilCloned(t, h, 3)
 	if len(announced) != 0 {
@@ -429,16 +476,24 @@ func TestReclone_UnconfirmedTailIsAnnouncedAndCloneProceeds(t *testing.T) {
 	}{
 		{"rotation fails", func(h *testHarness, _ *sidecarTail) { h.dc2MySQL.failNextCalls("FlushBinaryLogs", 1000) },
 			"FLUSH BINARY LOGS on the site was not acknowledged"},
-		{"sidecar never drains", func(_ *testHarness, tail *sidecarTail) {
-			tail.scanOnFlush = nil
-			tail.state, tail.reason = mysql.ArchiverTailBlocked, "archive store unreachable"
+		{"sidecar never drains", func(h *testHarness, tail *sidecarTail) {
+			// It scans the rotated log and cannot upload the tail.
+			tail.scanOnFlush = func() bool { return h.dc2MySQL.callCount("FlushBinaryLogs") > 0 }
+			tail.scanned, tail.scannedState, tail.reason = "binlog.000002", mysql.ArchiverTailBlocked, "archive store unreachable"
 		}, "cannot archive the tail: archive store unreachable"},
 		{"sidecar unreachable", func(_ *testHarness, tail *sidecarTail) { tail.unreachable = true }, "did not answer"},
+		{"the rotated file's name cannot be read", func(h *testHarness, tail *sidecarTail) {
+			h.dc2MySQL.binlogFileErr = errors.New("Error 1227: access denied")
+			tail.state = mysql.ArchiverTailDrained // whatever the sidecar says
+		}, "the name of the file it opened could not be read"},
+		{"a scan from before the rotation", func(_ *testHarness, tail *sidecarTail) {
+			tail.state = mysql.ArchiverTailDrained
+		}, "its last scan saw binlog.000001 as the active file; the rotation opened binlog.000002"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var announced []string
-			tail := &sidecarTail{active: "binlog.000007", state: mysql.ArchiverTailPending}
+			tail := &sidecarTail{active: "binlog.000001", state: mysql.ArchiverTailPending}
 			h := recloneTailHarness(t, tail, &announced)
 			tc.arm(h, tail)
 			h.tm.SetRecloneSite("dc2")
@@ -459,7 +514,7 @@ func TestReclone_UnconfirmedTailIsAnnouncedAndCloneProceeds(t *testing.T) {
 // again, and clones once the sidecar reports the tail archived.
 func TestReclone_OperatorRestartMidWaitStartsOver(t *testing.T) {
 	var announced []string
-	tail := &sidecarTail{active: "binlog.000007", state: mysql.ArchiverTailPending}
+	tail := &sidecarTail{active: "binlog.000001", state: mysql.ArchiverTailPending}
 	h := recloneTailHarness(t, tail, &announced)
 	h.tm.SetRecloneSite("dc2")
 	for i := 0; i < 10; i++ {
@@ -475,10 +530,13 @@ func TestReclone_OperatorRestartMidWaitStartsOver(t *testing.T) {
 	h2.clock.Set(h.clock.Now())
 	h2.tm.SetAutoBootstrapSuppressed(true)
 	var announced2 []string
-	tail2 := &sidecarTail{active: "binlog.000008", state: mysql.ArchiverTailPending}
+	// The first process's rotation opened binlog.000002, which the sidecar
+	// has seen; the new process's rotation opens binlog.000003.
+	tail2 := &sidecarTail{active: "binlog.000002", state: mysql.ArchiverTailPending, scanned: "binlog.000003"}
 	rotations := h.dc2MySQL.callCount("FlushBinaryLogs")
 	tail2.scanOnFlush = func() bool { return h.dc2MySQL.callCount("FlushBinaryLogs") > rotations }
-	h2.tm.ArchiveTailProbe = tail2.probe
+	h2.tm.ArchiveTail = tail2
+	h2.tm.SetRecloneTailStepRunnerForSim(func(step func()) { step() })
 	h2.tm.ArchiveTailNotArchivedCallback = func(site, reason string) { announced2 = append(announced2, site) }
 	h2.pollN(2)
 	h2.tm.SetRecloneSite("dc2")
@@ -503,11 +561,8 @@ func TestReclone_WithoutPITRClonesAtOnce(t *testing.T) {
 		replicaStatus: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
 	h := newRecloneHarness(t, dc1, dc2)
 	h.tm.SetAutoBootstrapSuppressed(true)
-	probes := 0
-	h.tm.ArchiveTailProbe = func(context.Context, string) (*mysql.ArchiverStatus, bool, error) {
-		probes++
-		return nil, false, nil // PITR not enabled for the group
-	}
+	tail := &sidecarTail{pitrOff: true} // PITR not enabled for the group
+	h.tm.ArchiveTail = tail
 	h.pollN(2)
 	h.tm.SetRecloneSite("dc2")
 	if waited := pollUntilCloned(t, h, 2); waited != 0 {
@@ -516,8 +571,128 @@ func TestReclone_WithoutPITRClonesAtOnce(t *testing.T) {
 	if got := dc2.callCount("FlushBinaryLogs"); got != 0 {
 		t.Fatalf("a reclone without PITR rotated the recipient %d times", got)
 	}
-	if probes == 0 {
-		t.Fatal("the PITR status source was never consulted")
+	if got := tail.probeCount(); got != 0 {
+		t.Fatalf("a reclone without PITR read the recipient's sidecar %d times", got)
+	}
+}
+
+// TestReclone_HungRecipientDoesNotSlowThePollLoop (r1 M1): the pre-reclone
+// wait's status request and rotation run off the poll goroutine, as in
+// production (no inline runner here). With a recipient whose sidecar never
+// answers, or whose rotation never answers, every poll still returns at
+// once, for the whole wait, and the loss of the primary is detected after
+// the same number of polls as with no reclone pending. When the request is
+// dropped (the recipient became the primary) the step in flight ends; no
+// goroutine is left behind.
+func TestReclone_HungRecipientDoesNotSlowThePollLoop(t *testing.T) {
+	// A poll with nothing to wait for takes well under a millisecond of
+	// wall time here; one that waits on the recipient would take the
+	// sidecar client's timeout (seconds) or, on this fake clock, never
+	// return.
+	const pollBudget = 2 * time.Second
+	poll := func(t *testing.T, h *testHarness) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() { h.pollN(1); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(pollBudget):
+			t.Fatalf("a poll did not return within %s: it waits on the reclone recipient", pollBudget)
+		}
+	}
+	// pollsToFailover takes the primary away and counts the polls until
+	// dc2 is promoted.
+	pollsToFailover := func(t *testing.T, h *testHarness) int {
+		t.Helper()
+		h.dc1MySQL.setError(errDown)
+		for n := 1; n <= 20; n++ {
+			poll(t, h)
+			h.clock.Advance(2 * time.Second)
+			if !h.dc2MySQL.isReadOnly() {
+				return n
+			}
+		}
+		t.Fatal("dc2 was not promoted within 20 polls of the primary's loss")
+		return 0
+	}
+	newHarness := func(t *testing.T) *testHarness {
+		gtid := rotationUUID + ":1-42"
+		dc1 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+		dc2 := &mockMySQL{readOnly: true, gtidExecuted: gtid,
+			replicaStatus: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
+		h := newRecloneHarness(t, dc1, dc2)
+		h.tm.SetAutoBootstrapSuppressed(true)
+		h.pollN(2)
+		return h
+	}
+	control := pollsToFailover(t, newHarness(t))
+
+	for _, tc := range []struct {
+		name string
+		arm  func(h *testHarness, tail *sidecarTail)
+		// sent is what the wait must have sent to the recipient while it
+		// hung.
+		sent func(t *testing.T, h *testHarness, tail *sidecarTail)
+	}{
+		{
+			name: "the sidecar never answers",
+			arm:  func(_ *testHarness, tail *sidecarTail) { tail.hang = true },
+			sent: func(t *testing.T, h *testHarness, tail *sidecarTail) {
+				if tail.probeCount() == 0 || h.dc2MySQL.callCount("RotateBinaryLog") != 0 {
+					t.Fatalf("status requests = %d, rotations = %d; want the wait stuck on its status request", tail.probeCount(), h.dc2MySQL.callCount("RotateBinaryLog"))
+				}
+			},
+		},
+		{
+			name: "the rotation never answers",
+			arm: func(h *testHarness, _ *sidecarTail) {
+				h.dc2MySQL.rotateBinaryLogFn = func(ctx context.Context) (string, error) {
+					<-ctx.Done()
+					return "", ctx.Err()
+				}
+			},
+			sent: func(t *testing.T, h *testHarness, _ *sidecarTail) {
+				if h.dc2MySQL.callCount("RotateBinaryLog") == 0 {
+					t.Fatal("the wait never sent its rotation")
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var announced []string
+			tail := &sidecarTail{active: "binlog.000001", state: mysql.ArchiverTailPending}
+			h := newHarness(t)
+			h.tm.ArchiveTail = tail
+			h.tm.ArchiveTailNotArchivedCallback = func(site, reason string) { announced = append(announced, site+": "+reason) }
+			tc.arm(h, tail)
+			h.tm.SetRecloneSite("dc2")
+			// A minute of the wait: thirty polls, each returning at once.
+			for i := 0; i < 30; i++ {
+				poll(t, h)
+				h.clock.Advance(2 * time.Second)
+			}
+			if h.dc2MySQL.cloned() || len(announced) != 0 {
+				t.Fatalf("the wait ended early: cloned=%v announced=%v", h.dc2MySQL.cloned(), announced)
+			}
+			tc.sent(t, h, tail)
+			if got := pollsToFailover(t, h); got != control {
+				t.Fatalf("the primary's loss was detected and failed over after %d polls with a hung reclone recipient, %d without a reclone", got, control)
+			}
+			// dc2 is the primary now: the request is dropped and the step
+			// in flight is cancelled.
+			poll(t, h)
+			poll(t, h)
+			idle := make(chan struct{})
+			go func() { h.tm.WaitRecloneTailStepsForSim(); close(idle) }()
+			select {
+			case <-idle:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a step of the pre-reclone wait was left running after its request was dropped")
+			}
+			if h.dc2MySQL.cloned() {
+				t.Fatal("the new primary was cloned")
+			}
+		})
 	}
 }
 

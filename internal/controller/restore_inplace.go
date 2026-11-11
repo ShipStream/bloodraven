@@ -875,9 +875,12 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			return 0, fmt.Errorf("set in-place restore job owner ref: %w", err)
 		}
 		// Last look before the Job exists: the backup it was built from
-		// must be the one this run pinned in Preflight, still held and not
-		// being deleted (holdRestoreBackup). A run that entered Restoring
-		// under an operator that did not pin takes its hold here.
+		// must be the one this run pinned in Preflight and still carry its
+		// hold (holdRestoreBackup). A backup deleted since Preflight stays
+		// Terminating under that hold and is read all the same: the run is
+		// past its fence, and the hold is what keeps the artifact until it
+		// ends. A run that entered Restoring under an operator that did not
+		// pin takes its hold here, and is refused a backup being deleted.
 		if ended, wait, err := r.holdInPlaceRestoreBackup(ctx, fg, built.Annotations[v1alpha1.RestoreBackupUIDAnnotation]); ended || wait > 0 || err != nil {
 			return wait, err
 		}

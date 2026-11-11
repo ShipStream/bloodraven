@@ -7,6 +7,7 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -54,6 +55,12 @@ type FakeMySQL struct {
 	FlushBinaryLogsErr error
 	FlushBinaryLogsFn  func(ctx context.Context) error
 	BinlogFlushes      int
+	// BinlogFirstSeq numbers the binary log the fake "writes" before any
+	// flush (0 is file 000001); RotateBinaryLog reports
+	// "binlog.<BinlogFirstSeq+BinlogFlushes>" as the active file, or fails
+	// with BinlogFileErr after a successful flush.
+	BinlogFirstSeq int
+	BinlogFileErr  error
 
 	// Error injection per method
 	FenceErr        error
@@ -269,6 +276,24 @@ func (m *FakeMySQL) FlushBinaryLogs(ctx context.Context) error {
 	m.BinlogFlushes++
 	m.mu.Unlock()
 	return nil
+}
+
+// RotateBinaryLog is FlushBinaryLogs plus the name of the file the fake
+// "writes" after it (see BinlogFirstSeq).
+func (m *FakeMySQL) RotateBinaryLog(ctx context.Context) (string, error) {
+	if err := m.FlushBinaryLogs(ctx); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.BinlogFileErr != nil {
+		return "", m.BinlogFileErr
+	}
+	first := m.BinlogFirstSeq
+	if first == 0 {
+		first = 1
+	}
+	return fmt.Sprintf("binlog.%06d", first+m.BinlogFlushes), nil
 }
 
 func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {
