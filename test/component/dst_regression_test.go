@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -732,4 +733,245 @@ func TestDSTPF_RetiredManagerHandoffReachesReplacement(t *testing.T) {
 	if got := h.store.Object().Status.LastFailoverTarget(); got != "dc2" {
 		t.Fatalf("status.lastFailoverTarget = %q, want the carried handoff target dc2", got)
 	}
+}
+
+// The three findings below are from a planned sweep of seeds 1-112,000
+// (about one trial in 15,000). Each changed a documented outcome row; the
+// reasoning is in the planned-failover documentation and on the code the
+// test names.
+
+// TestDSTPF_WritableTargetWithChannelLeavesSourceFenced pins
+// HoldWithoutDataAtRisk(writableTargetWithChannel) (actors-on DST seeds
+// 12285 and 77871 at the time; 77871 shrunk with DST_SKIP=2,3,4,5,6
+// DST_ACTOR_SKIP=0,2,3): the operator dies in Promoting right after STOP
+// REPLICA, an external read_only=0 makes the target writable, and the new
+// process, which has no promotion memo, classifies a writable target with
+// its replication channel. It used to end ManualRecoveryRequired with the
+// automation hold. The run clears the target's flags only after RESET
+// REPLICA ALL and the gate's no-channel read, so the channel shows that no
+// process of the run made the target writable: the run ends
+// SourceLeftFenced{ForeignWritable} as the process with the memo does, sends
+// nothing more to either site, and holds nothing.
+func TestDSTPF_WritableTargetWithChannelLeavesSourceFenced(t *testing.T) {
+	for _, stopped := range []bool{true, false} {
+		name := "restart before STOP REPLICA"
+		if stopped {
+			name = "restart after STOP REPLICA"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newPFHarness(t, pfOpts{})
+			h.request("dc2")
+			h.runToPromotingIntent()
+			if stopped {
+				h.tgt.failNextCalls("ResetReplicaAll", 1) // the process gets no further than STOP REPLICA
+				h.pass()
+				if got := h.tgt.statements(); !slices.Equal(got, []string{"StopReplica"}) {
+					t.Fatalf("setup: target statements %v, want only StopReplica", got)
+				}
+			}
+			h.newProcess()
+			h.tgt.setRO(false, false) // an external read_only=0; the channel is still configured
+			sent := len(h.tgt.statements())
+			pf := h.runUntil(20, terminal)
+			h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonForeignWritable)
+			if h.holdCondition() {
+				t.Fatal("the run set the automation hold over a target someone else made writable")
+			}
+			if _, _, ok := h.held(); ok {
+				t.Fatal("the claim is still held")
+			}
+			if got := h.tgt.statements(); len(got) != sent || h.tgt.writableGrants() != 0 {
+				t.Fatalf("the new process sent %v to the target", got[sent:])
+			}
+			if !h.src.isSuperReadOnly() {
+				t.Fatal("the source was unfenced beside the writable target")
+			}
+			// The manager owns the writable target from here; it never makes
+			// the source a second writer.
+			for range 10 {
+				h.tick()
+				if !h.src.isReadOnly() {
+					t.Fatal("the source became writable beside the writable target")
+				}
+			}
+		})
+	}
+}
+
+// TestDSTPF_ReplacedTargetAfterALostClearRollsBack pins
+// HoldWithoutDataAtRisk(replacedTargetSameProcess) (actors-on DST seeds
+// 29144, 59761 and 78553 at the time; 78553 shrunk with DST_SKIP=1,2,3,4
+// DST_ACTOR_SKIP=1,2,4,6,7,8): super_read_only=OFF is applied on the target
+// but answers with an error, and the target pod is then replaced under a new
+// server_uuid, read-only, with a data directory inside the fenced set. The
+// process that sent the clear used to hold (no writable site until a human
+// acted) where another process rolls back by the DST-3 ruling on the same
+// evidence. It now takes the same decision: the run's record is not durable,
+// the source holds the fenced set under the run's fence and no site is
+// writable, so it rolls back. Without that evidence the hold stands.
+func TestDSTPF_ReplacedTargetAfterALostClearRollsBack(t *testing.T) {
+	const replacement = "dddddddd-0000-0000-0000-000000000004"
+	regressed := pfUUIDA + ":1-60"
+	// lostClear runs the promotion up to a super_read_only=OFF that applies
+	// and whose reply is lost because the pod is replaced under it.
+	lostClear := func(t *testing.T, o pfOpts, p podReplacement, during func(h *pfHarness)) *pfHarness {
+		h := newPFHarness(t, o)
+		h.request("dc2")
+		h.runToPromotingIntent()
+		b := h.tgt.blockOn(t, "SetSuperReadOnly", true)
+		h.passBlocked(b, func() {
+			h.tgt.replacePod(p)
+			if during != nil {
+				during(h)
+			}
+		})
+		if got := h.tgt.statements(); !slices.Equal(got, []string{"StopReplica", "ResetReplicaAll", "SetSuperReadOnly:off"}) {
+			t.Fatalf("setup: target statements %v", got)
+		}
+		if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+			t.Fatalf("setup: phase %s after the lost clear", pf.Phase)
+		}
+		return h
+	}
+	t.Run("the ruling's evidence", func(t *testing.T) {
+		h := lostClear(t, pfOpts{}, podReplacement{serverUUID: replacement, gtidExecuted: &regressed}, nil)
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+		if h.src.isReadOnly() || !h.tgt.isReadOnly() || h.holdCondition() {
+			t.Fatalf("source read-only %v, target read-only %v, hold %v; want the source writable again, the replacement read-only, no hold",
+				h.src.isReadOnly(), h.tgt.isReadOnly(), h.holdCondition())
+		}
+		if h.tgt.writableGrants() != 1 {
+			t.Fatalf("writable grants on the target: %d, want only the lost clear", h.tgt.writableGrants())
+		}
+	})
+	t.Run("a promotable peer does not answer", func(t *testing.T) {
+		h := lostClear(t, pfOpts{third: state.SiteRolePrimaryCandidate}, podReplacement{serverUUID: replacement, gtidExecuted: &regressed},
+			func(h *pfHarness) { h.third.setError(errors.New("dial tcp: i/o timeout")) })
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed)
+		if !h.holdCondition() || !h.src.isSuperReadOnly() {
+			t.Fatalf("hold %v, source fenced %v; want the hold and the source left fenced", h.holdCondition(), h.src.isSuperReadOnly())
+		}
+	})
+	t.Run("the same data directory under a new server_uuid", func(t *testing.T) {
+		// Not a replaced data directory: the server kept the transaction it
+		// accepted after the clear, so it is not inside the fenced set.
+		kept := pfF + "," + pfUUIDB + ":1"
+		h := lostClear(t, pfOpts{}, podReplacement{serverUUID: replacement, gtidExecuted: &kept}, nil)
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, "")
+		if !h.holdCondition() || !h.src.isSuperReadOnly() {
+			t.Fatalf("hold %v, source fenced %v; want the hold and the source left fenced", h.holdCondition(), h.src.isSuperReadOnly())
+		}
+	})
+}
+
+// TestDSTPF_NoSuccessBesideAnUnreadWriter pins
+// OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)
+// (actors-on DST seeds 9297 and 104013 at the time; shrunk with
+// DST_SKIP=0,1,2,4,5,6,7 DST_ACTOR_SKIP=2,3,4,5,6,7,8 and DST_SKIP=0,2,4,5
+// DST_ACTOR_SKIP=1,2,3,5,6,7). The confirmation used to take every
+// primary-candidate that did not answer as a warning. That is the
+// documented residual only for a site that answered read-only at the gate:
+//
+//   - seed 9297: the run's confirmation sees a peer writable beside its own
+//     write and decides ManualRecoveryRequired, the status write is refused,
+//     and the peer then stops answering. The next pass confirmed and the run
+//     ended Succeeded beside the second writer. A site last seen writable
+//     now counts as writable until it answers read-only.
+//   - seed 104013: a new process finds the target writable with exactly the
+//     fenced set and no channel (an external writer, after the first process
+//     got as far as RESET REPLICA ALL) and cannot read the source, which an
+//     external writer made writable too. It confirmed. A process that passed
+//     no gate now needs an answer from the source and every promotable peer:
+//     the run stays Promoting, and ends PromotedUnconfirmed at the promotion
+//     deadline if the site never answers.
+func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
+	down := errors.New("dial tcp: i/o timeout")
+	t.Run("a writer the run saw stops answering", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{third: state.SiteRolePrimaryCandidate})
+		h.request("dc2")
+		h.runToPromotingIntent()
+		h.store.DenyStatus(1 << 20) // the hold the run is about to decide cannot land
+		b := h.tgt.blockOn(t, "SetReadOnly", true)
+		h.passBlocked(b, func() { h.third.setRO(false, false) }) // after the gate read dc3 read-only
+		if h.tgt.isReadOnly() || h.holdCondition() || h.pf().Phase != v1alpha1.PlannedFailoverPhasePromoting {
+			t.Fatalf("setup: target read-only %v, hold %v, phase %s", h.tgt.isReadOnly(), h.holdCondition(), h.pf().Phase)
+		}
+		h.third.setError(down)
+		for range 8 {
+			h.tick()
+			h.pass()
+		}
+		if run, hold, ok := h.held(); !ok || hold || run != h.pf().RunID {
+			t.Fatalf("slot %q hold=%v ok=%v; the run released its claim (confirmed) beside a writer it had seen", run, hold, ok)
+		}
+		h.store.ClearFaults()
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonForeignWritable)
+		hold := h.store.Object().Status.PlannedFailoverHold
+		if !h.holdCondition() || hold == nil || !slices.Contains(hold.AmbiguousSites, "dc3") {
+			t.Fatalf("hold condition %v, hold %+v; want the hold naming dc3", h.holdCondition(), hold)
+		}
+	})
+	// newProcessBesideAnUnreadSource is seed 104013's state: the first
+	// process got as far as RESET REPLICA ALL, external writers then made
+	// the target and the source writable, and the source does not answer the
+	// new process.
+	newProcessBesideAnUnreadSource := func(t *testing.T) *pfHarness {
+		h := newPFHarness(t, pfOpts{})
+		h.request("dc2")
+		h.runToPromotingIntent()
+		h.tgt.failNextCalls("SetSuperReadOnly", 1)
+		h.pass()
+		if got := h.tgt.statements(); !slices.Equal(got, []string{"StopReplica", "ResetReplicaAll"}) {
+			t.Fatalf("setup: target statements %v", got)
+		}
+		h.tgt.setRO(false, false)
+		h.src.setRO(false, false)
+		h.src.setError(down)
+		h.newProcess()
+		for range 10 {
+			h.pass()
+			h.tick()
+			if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Promotion.State != v1alpha1.PlannedFailoverPromotionIntended {
+				t.Fatalf("the new process moved on beside a source it cannot read: phase %s, promotion %+v, result %+v",
+					pf.Phase, pf.Promotion, pf.Result)
+			}
+		}
+		if h.tgt.writableGrants() != 0 {
+			t.Fatalf("setup: the operator cleared the target's flags: %v", h.tgt.statements())
+		}
+		return h
+	}
+	t.Run("a new process cannot read the source, which then answers writable", func(t *testing.T) {
+		h := newProcessBesideAnUnreadSource(t)
+		h.src.setError(nil)
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonForeignWritable)
+		if !h.holdCondition() {
+			t.Fatal("no hold over two writable sites")
+		}
+	})
+	t.Run("a new process cannot read the source until the promotion deadline", func(t *testing.T) {
+		h := newProcessBesideAnUnreadSource(t)
+		pf := h.runUntil(200, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverReasonPromotionUnconfirmed)
+		if h.holdCondition() {
+			t.Fatal("PromotedUnconfirmed set the hold")
+		}
+	})
+	t.Run("a peer that answered read-only at the gate stays the residual", func(t *testing.T) {
+		h := newPFHarness(t, pfOpts{third: state.SiteRolePrimaryCandidate})
+		h.request("dc2")
+		h.runToPromotingIntent()
+		b := h.tgt.blockOn(t, "SetReadOnly", true)
+		h.passBlocked(b, func() { h.third.setError(down) }) // after the gate read dc3 read-only
+		pf := h.runUntil(40, terminal)
+		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+		if !slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers) {
+			t.Fatalf("warnings %v, want UnreachablePeers", pf.Result.Warnings)
+		}
+	})
 }

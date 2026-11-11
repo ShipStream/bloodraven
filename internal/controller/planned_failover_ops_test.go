@@ -380,32 +380,42 @@ func TestClassifyPromotionStage_EveryRow(t *testing.T) {
 		name     string
 		live     promotionLive
 		memo     bool // memo proves no SRO clear was sent
+		cleared  bool // memo says this process sent an SRO clear (neither: no memo, another process's run)
 		stage    PromotionStage
 		kind     PromoteOutcomeKind
 		reason   v1alpha1.PlannedFailoverReason
 		terminal v1alpha1.PlannedFailoverOutcome
 	}{
-		{"uuid changed, memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
-		{"uuid changed, no memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"writable with channel, memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"writable with channel, no memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
-		{"writable, own extras", promotionLive{uuid: opsUUIDB, gtidRaw: own}, false, PromotionStageWritable, 0, "", ""},
-		{"writable, foreign extras", promotionLive{uuid: opsUUIDB, gtidRaw: foreign}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
-		{"writable, missing F", promotionLive{uuid: opsUUIDB, gtidRaw: missing}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"writable, memo proves no write", promotionLive{uuid: opsUUIDB, gtidRaw: own}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"read-only, channel running", promotionLive{uuid: opsUUIDB, readOnly: true, repl: running, gtidRaw: opsF}, false, PromotionStageNotStarted, 0, "", ""},
-		{"read-only, channel stopped", promotionLive{uuid: opsUUIDB, readOnly: true, repl: stopped, gtidRaw: opsF}, false, PromotionStageReplicaStopped, 0, "", ""},
-		{"read-only, no channel, = F", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: opsF}, false, PromotionStageReplicaReset, 0, "", ""},
-		{"read-only, own extras, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonAuthorityChanged, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"read-only, own extras, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, false, PromotionStageWasWritable, 0, "", ""},
-		{"read-only, missing F, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
-		{"read-only, missing F, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"read-only, foreign extras", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: foreign}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
+		{"uuid changed, memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
+		{"uuid changed, no memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable with channel, memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		// A channel on a writable target: no process of the run cleared the
+		// flags (the clears follow RESET REPLICA ALL and the gate's
+		// no-channel read), so a process without a memo ends as the one whose
+		// memo proves no clear; only a process that sent a clear holds.
+		{"writable with channel, no memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with stopped channel, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with channel and own extras, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: own}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with channel, memo of a clear", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
+		{"writable with channel, another server, no memo", promotionLive{uuid: opsUUIDC, repl: running, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"uuid changed, memo of a clear", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable, own extras", promotionLive{uuid: opsUUIDB, gtidRaw: own}, false, false, PromotionStageWritable, 0, "", ""},
+		{"writable, foreign extras", promotionLive{uuid: opsUUIDB, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
+		{"writable, missing F", promotionLive{uuid: opsUUIDB, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable, memo proves no write", promotionLive{uuid: opsUUIDB, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"read-only, channel running", promotionLive{uuid: opsUUIDB, readOnly: true, repl: running, gtidRaw: opsF}, false, false, PromotionStageNotStarted, 0, "", ""},
+		{"read-only, channel stopped", promotionLive{uuid: opsUUIDB, readOnly: true, repl: stopped, gtidRaw: opsF}, false, false, PromotionStageReplicaStopped, 0, "", ""},
+		{"read-only, no channel, = F", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: opsF}, false, false, PromotionStageReplicaReset, 0, "", ""},
+		{"read-only, own extras, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonAuthorityChanged, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"read-only, own extras, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, false, false, PromotionStageWasWritable, 0, "", ""},
+		{"read-only, missing F, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
+		{"read-only, missing F, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"read-only, foreign extras", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.live.gtid = opsSet(t, tc.live.gtidRaw)
-			stage, verdict := classifyPromotionStage(tc.live, F, opsUUIDB, tc.memo)
+			stage, verdict := classifyPromotionStage(tc.live, F, opsUUIDB, tc.memo, tc.memo || tc.cleared)
 			if stage != tc.stage {
 				t.Fatalf("stage = %q, want %q", stage, tc.stage)
 			}

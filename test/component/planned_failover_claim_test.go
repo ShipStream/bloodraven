@@ -1394,17 +1394,20 @@ func TestPF_SourceLossInDrainingHandsOffIn10s(t *testing.T) {
 }
 
 // A target that is writable with a replication channel, found by a
-// cross-process re-run, is Inconsistent: ManualRecoveryRequired and a hold.
-func TestPF_WritableWithChannelIsInconsistent(t *testing.T) {
+// cross-process re-run, was not made writable by the run (its clears follow
+// RESET REPLICA ALL): SourceLeftFenced{ForeignWritable} and no hold, as in
+// the process that wrote the intent. See
+// TestDSTPF_WritableTargetWithChannelLeavesSourceFenced.
+func TestPF_WritableWithChannelIsNotTheRunsWrite(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
 	h.runToPromotingIntent()
 	h.tgt.setRO(false, false) // someone else made it writable, channel still configured
 	h.newProcess()
 	pf := h.runUntil(20, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, "")
-	if !h.holdCondition() {
-		t.Fatal("no hold")
+	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonForeignWritable)
+	if h.holdCondition() {
+		t.Fatal("the run set the automation hold")
 	}
 }
 

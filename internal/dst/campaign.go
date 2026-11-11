@@ -103,8 +103,9 @@ func fingerprint(violations []Violation) string {
 		if v.Invariant == "DualWritableUnresolved" && strings.Contains(v.Detail, confirmedClaimMarker) {
 			key = "DualWritableUnresolved(confirmedClaim)"
 		}
-		// The open planned-failover findings (README) are classes of their
-		// own, so a sweep names the finding a trial hit.
+		// The planned-failover findings (README: the fixed ones, now
+		// regressions, and the open ones) are classes of their own, so a
+		// sweep names the finding a trial hit.
 		switch {
 		case v.Invariant == "HoldWithoutDataAtRisk" && strings.Contains(v.Detail, writableTargetWithChannelMarker):
 			key = "HoldWithoutDataAtRisk(writableTargetWithChannel)"
@@ -112,6 +113,12 @@ func fingerprint(violations []Violation) string {
 			key = "HoldWithoutDataAtRisk(replacedTargetSameProcess)"
 		case (v.Invariant == "OutcomeDishonest" || v.Invariant == "SucceededBesideWritable") && strings.Contains(v.Detail, unreadablePeerMarker):
 			key = v.Invariant + "(unreadablePeer)"
+		case v.Invariant == "OutcomeDishonest" && strings.Contains(v.Detail, targetLacksFencedSetMarker):
+			key = "OutcomeDishonest(targetLacksFencedSet)"
+		case v.Invariant == "OutcomeDishonest" && strings.Contains(v.Detail, rolledBackAfterClearMarker):
+			key = "OutcomeDishonest(rolledBackAfterClear)"
+		case v.Invariant == "OutcomeDishonest" && strings.Contains(v.Detail, rolledBackFencedSourceMarker):
+			key = "OutcomeDishonest(rolledBackFencedSource)"
 		}
 		set[key] = struct{}{}
 	}

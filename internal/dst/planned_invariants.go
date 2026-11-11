@@ -40,9 +40,10 @@ var engineReleaseReasons = []controller.ClaimReleaseReason{
 	controller.ReleaseManagerAbsent, controller.ReleaseStatusStalled,
 }
 
-// Markers that tag a violation's detail with the open finding it belongs to
-// (README, Open planned-failover findings); fingerprint turns each into a
-// class of its own, so a sweep reports which finding a trial hit.
+// Markers that tag a violation's detail with the finding it belongs to
+// (README: Fixed findings, now regressions, and Open planned-failover
+// findings); fingerprint turns each into a class of its own, so a sweep
+// reports which finding a trial hit.
 const (
 	// writableTargetWithChannelMarker: the hold was set over a target that
 	// is the only writable site and still has its replication channel.
@@ -53,6 +54,17 @@ const (
 	// unreadablePeerMarker: every other writable site was unreadable by the
 	// operator when the run confirmed.
 	unreadablePeerMarker = "(every other writable site was unreadable by the operator at the confirmation)"
+
+	// The open findings are recognised by the text of their detail.
+	// targetLacksFencedSetMarker: a Succeeded run whose target lacks part of
+	// the fenced set when the terminal record lands.
+	targetLacksFencedSetMarker = "the target lacks fenced transactions"
+	// rolledBackAfterClearMarker: a RolledBack run that sent read_only=OFF
+	// to the server that still stands in for its target.
+	rolledBackAfterClearMarker = "ended RolledBack but it sent read_only=OFF to the target"
+	// rolledBackFencedSourceMarker: a RolledBack run whose source is not
+	// writable.
+	rolledBackFencedSourceMarker = "ended RolledBack but the source "
 )
 
 // unconfirmedGrace is debounce (FailureThreshold 3 + RecoveryThreshold 2)
@@ -130,6 +142,14 @@ type runObs struct {
 	// confirmUnreadable are the sites of confirmWritable the operator could
 	// not read at the confirm probe.
 	confirmUnreadable []string
+	// peerObs is, per site other than the target, what the last pre-write
+	// gate or confirm probe that reached it found, and the process that
+	// probed. confirmResidual are the sites of confirmUnreadable that are
+	// the documented residual of the confirmation (§7.3): the confirming
+	// process last read them read-only at such a probe, and an external
+	// writer made them writable after it.
+	peerObs         map[string]peerProbeObs
+	confirmResidual []string
 
 	// unconfirmedSince is the poll the UnconfirmedBlocksEmergency window
 	// started at: the run ended PromotedUnconfirmed, and since that poll
@@ -174,6 +194,14 @@ type runObs struct {
 	tailReleasedGen int
 }
 
+// peerProbeObs is one pre-write gate or confirm probe's finding about a
+// site: the process generation that probed, the cluster sequence then, and
+// whether the site read read-only.
+type peerProbeObs struct {
+	gen, seq int
+	readOnly bool
+}
+
 // plannedStats are statistics, not violations.
 type plannedStats struct {
 	// RogueRaceResidual counts rogue writability landing inside an open
@@ -203,6 +231,12 @@ type plannedStats struct {
 	// not be read and another site was writable (§4.4: the target may hold
 	// the run's writes).
 	UnreadableTargetHold int
+	// UnreadablePeerResidual counts Succeeded runs confirmed beside a
+	// writable promotable site the operator could not read then, which had
+	// answered read-only at the confirming process's pre-write gate or an
+	// earlier confirm probe and was made writable by an external writer
+	// after it (§7.3: allowed, with the warning UnreachablePeers).
+	UnreadablePeerResidual int
 }
 
 // plannedMonitor checks the planned-failover invariants of §15.1. The
@@ -711,6 +745,18 @@ func (m *plannedMonitor) onYield(point string) {
 	if others == nil {
 		others = []string{}
 	}
+	// What the probe read from every site it reached: the engine falls back
+	// on these answers at a confirmation that cannot read a promotable site.
+	seq := m.c.Seq()
+	truth := m.c.Truth()
+	if r.peerObs == nil {
+		r.peerObs = map[string]peerProbeObs{}
+	}
+	for _, t := range truth {
+		if t.Name != r.target && t.Reachable() {
+			r.peerObs[t.Name] = peerProbeObs{gen: m.procGen, seq: seq, readOnly: !t.Writable()}
+		}
+	}
 	if class == YieldGateProbe {
 		r.gateWritable = others
 		r.gateJudged = false
@@ -718,10 +764,18 @@ func (m *plannedMonitor) onYield(point string) {
 		return
 	}
 	r.confirmWritable = m.readableOrPromotable(m.c.writableSites())
-	r.confirmUnreadable = nil
-	for _, t := range m.c.Truth() {
-		if t.Writable() && !t.Reachable() {
-			r.confirmUnreadable = append(r.confirmUnreadable, t.Name)
+	r.confirmUnreadable, r.confirmResidual = nil, nil
+	for _, t := range truth {
+		if !t.Writable() || t.Reachable() {
+			continue
+		}
+		r.confirmUnreadable = append(r.confirmUnreadable, t.Name)
+		// The residual: this process read the site read-only at its gate or
+		// an earlier confirm probe, and what made it writable since is an
+		// external writer. A site the process never read, or last read
+		// writable, or one a restart forgot, is not.
+		if o, ok := r.peerObs[t.Name]; ok && t.Name != r.target && o.gen == m.procGen && o.readOnly && m.externallyWritable(t.Name, o.seq) {
+			r.confirmResidual = append(r.confirmResidual, t.Name)
 		}
 	}
 	r.confirmSeen = true
@@ -901,7 +955,12 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 			dishonest(fmt.Sprintf("it sent %d mutations", r.pfMutations))
 		}
 	case v1alpha1.PlannedFailoverOutcomeRolledBack:
-		if r.roClearTried {
+		// A read_only=OFF that went to a server since replaced (the target
+		// answers under another server_uuid; the data directory the clear
+		// reached is gone from view) is the DST-3 ruling's rollback: the
+		// server that stands in for the target now was never written to.
+		replaced := r.targetUUID != "" && !strings.EqualFold(tgt.ServerUUID, r.targetUUID)
+		if r.roClearTried && !replaced {
 			dishonest("it sent read_only=OFF to the target")
 		}
 		// Judged with what the run read: a source it found (or made)
@@ -958,16 +1017,30 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 		if at == nil {
 			at = m.readableOrPromotable(writable)
 		}
+		if r.confirmSeen && len(r.confirmResidual) > 0 {
+			// The confirmation takes a promotable site that does not answer
+			// as a warning when the confirming process last read it
+			// read-only, at its gate or since (§7.3): what an external
+			// writer did to it afterwards is the documented residual.
+			var judged []string
+			for _, w := range at {
+				if slices.Contains(r.confirmResidual, w) {
+					m.stats.UnreadablePeerResidual++
+					continue
+				}
+				judged = append(judged, w)
+			}
+			at = judged
+		}
 		var others []string
 		for _, w := range at {
 			if w != r.target {
 				others = append(others, w)
 			}
 		}
-		// A writable peer the operator could not read at the confirmation
-		// is tagged: the confirmation takes an unreadable peer as a warning
-		// (§7.3), which is right for one that answered read-only at the
-		// gate just before and wrong for one the run has reason to doubt.
+		// A writable peer the operator could not read at the confirmation,
+		// and that is not that residual, is tagged: the confirming process
+		// never read it for the run, or last read it writable.
 		unreadable := ""
 		if r.confirmSeen && len(others) > 0 && !slices.ContainsFunc(others, func(w string) bool {
 			return !slices.Contains(r.confirmUnreadable, w)
@@ -1008,13 +1081,17 @@ func (r *runObs) crossProcess(gen int) bool { return r.promotingGen >= 0 && r.pr
 // checkHoldAtRisk is HoldWithoutDataAtRisk: a hold needs two writable
 // sites, or a site holding transactions outside F.
 //
-// One spec-mandated exception (§7.1 row 1): a cross-process re-run that
-// finds the target's server_uuid changed cannot rule out writes to the
-// replaced pod, whose data is gone from view, and holds by design, except
-// where the DST-3 ruling says to roll back: the run's own failover record
-// is not durable (it never reached RecordPlannedPromotion), the source still
-// holds all of F under the run's fence, and no site is writable. A hold in
-// that state is HoldWithoutDataAtRisk.
+// One spec-mandated exception (§7.1 row 1): a process that finds the
+// target's server_uuid changed and cannot prove that no clear reached the
+// replaced server (another process than the one that wrote Promoting, or
+// that process once it sent super_read_only=OFF or read_only=OFF) cannot
+// rule out writes to the replaced pod, whose data is gone from view, and
+// holds by design, except where the DST-3 ruling says to roll back: the
+// run's own failover record is not durable (it never reached
+// RecordPlannedPromotion), the source still holds all of F under the run's
+// fence, and no site is writable. A hold in that state is
+// HoldWithoutDataAtRisk. The process that wrote Promoting and sent no clear
+// knows nothing was written: it gets no exception.
 func (m *plannedMonitor) checkHoldAtRisk(r *runObs) {
 	if r.fenceSet == "" {
 		return // F unknown: the rule cannot be judged
@@ -1023,14 +1100,18 @@ func (m *plannedMonitor) checkHoldAtRisk(r *runObs) {
 	if err != nil {
 		return
 	}
-	if r.crossProcess(m.procGen) && r.targetUUID != "" {
+	if (r.crossProcess(m.procGen) || r.writeTried) && r.targetUUID != "" {
 		truth := m.c.Truth()
 		for _, t := range truth {
 			if t.Name == r.target && !strings.EqualFold(t.ServerUUID, r.targetUUID) {
 				if m.replacedTargetRollbackDue(r, truth, f) {
-					m.violate("HoldWithoutDataAtRisk", r.id, fmt.Sprintf(
+					detail := fmt.Sprintf(
 						"run %s held after finding target %s replaced, but its record is not durable, the source holds F under its fence and no site is writable (DST-3: roll back)",
-						r.id, r.target))
+						r.id, r.target)
+					if !r.crossProcess(m.procGen) {
+						detail += " " + replacedTargetSameProcessMarker
+					}
+					m.violate("HoldWithoutDataAtRisk", r.id, detail)
 					return
 				}
 				m.stats.ReplacedTargetHold++
@@ -1101,10 +1182,16 @@ func (m *plannedMonitor) replacedTargetRollbackDue(r *runObs, truth []SiteTruth,
 		if !t.Reachable() {
 			return false
 		}
+		exec, err := mysql.ParseGTIDSet(t.Executed.String())
+		if t.Name == r.target && (err != nil || !exec.Subtract(f).IsEmpty()) {
+			// The server under the new server_uuid holds transactions outside
+			// F: it kept the data of the one that may have been written to
+			// (the same data directory under a new auto.cnf, say).
+			return false
+		}
 		if t.Name != r.source {
 			continue
 		}
-		exec, err := mysql.ParseGTIDSet(t.Executed.String())
 		if !t.SuperReadOnly || r.intentUUID == "" || !strings.EqualFold(t.ServerUUID, r.intentUUID) || err != nil || !exec.Contains(f) {
 			return false
 		}

@@ -2,6 +2,7 @@ package dst
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -696,10 +697,11 @@ func TestPlannedInvariant_HoldWithAnUnreadableTarget(t *testing.T) {
 	})
 }
 
-// TestOpenFindings_AreClassesOfTheirOwn: the planned-failover findings that
-// are the operator's (README, Open planned-failover findings) keep failing
-// the sweep, each under a fingerprint that names it.
-func TestOpenFindings_AreClassesOfTheirOwn(t *testing.T) {
+// TestFixedFindings_AreClassesOfTheirOwn: the three planned-failover
+// findings of the 112,000-seed sweep that were the operator's (README, Fixed
+// findings, now regressions) still fail the sweep if the engine produces
+// them again, each under a fingerprint that names it.
+func TestFixedFindings_AreClassesOfTheirOwn(t *testing.T) {
 	ctx := pfCtx()
 	three := []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate}
 	const betaUUID = "00000000-0000-0000-0000-000000000002"
@@ -749,6 +751,43 @@ func TestOpenFindings_AreClassesOfTheirOwn(t *testing.T) {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
 	})
+	t.Run("holdOverATargetReplacedInTheSameProcessBeforeAnyClear", func(t *testing.T) {
+		// The process that wrote Promoting sent no clear: it knows nothing
+		// was written to the server the intent names, so the replaced-target
+		// exception is not its to claim, whatever the other sites read.
+		f := newMonFixture(t)
+		for range 3 {
+			f.c.Tick()
+		}
+		promoting(f)
+		_ = f.pf("beta").StopReplica(ctx)
+		f.c.ReplacePod("beta", 1)
+		f.c.SetOperatorLink("alpha", true) // no DST-3 evidence either
+		hold(f)
+		if fp := fingerprint(f.mon.violations); fp != "HoldWithoutDataAtRisk(replacedTargetSameProcess)" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("holdOverAReplacedTargetWithoutTheRulingsEvidence", func(t *testing.T) {
+		// The same process after a clear, the target replaced, and the
+		// source out of the operator's reach: the DST-3 ruling's evidence
+		// is not there, so the hold is the documented one, as for another
+		// process (counted, not a violation).
+		f := newMonFixture(t)
+		for range 3 {
+			f.c.Tick()
+		}
+		promoting(f)
+		f.passGate()
+		_ = f.pf("beta").SetSuperReadOnly(ctx, false)
+		f.c.ReplacePod("beta", 1)
+		f.c.SetOperatorLink("alpha", true)
+		hold(f)
+		f.want()
+		if f.mon.stats.ReplacedTargetHold != 1 {
+			t.Fatalf("ReplacedTargetHold %d, want 1", f.mon.stats.ReplacedTargetHold)
+		}
+	})
 	succeed := func(f *monFixture, partitioned bool) string {
 		promoting(f)
 		b := f.pf("beta")
@@ -766,6 +805,8 @@ func TestOpenFindings_AreClassesOfTheirOwn(t *testing.T) {
 		return fingerprint(f.mon.violations)
 	}
 	t.Run("succeededBesideAnUnreadableCandidate", func(t *testing.T) {
+		// No gate probe of the confirming process read gamma (passGate
+		// records none): it never read the site it confirmed beside.
 		if fp := succeed(newMonFixture(t, three...), true); fp != "OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)" {
 			t.Fatalf("fingerprint %s", fp)
 		}
@@ -773,6 +814,256 @@ func TestOpenFindings_AreClassesOfTheirOwn(t *testing.T) {
 	t.Run("succeededBesideAReadableCandidate", func(t *testing.T) {
 		if fp := succeed(newMonFixture(t, three...), false); fp != "OutcomeDishonest+SucceededBesideWritable" {
 			t.Fatalf("fingerprint %s", fp)
+		}
+	})
+}
+
+// TestPlannedInvariant_UnreadablePeerAtConfirm: a Succeeded run confirmed
+// beside a writable primary-candidate the operator could not read is the
+// documented residual only when the confirming process last read that site
+// read-only, at its pre-write gate or an earlier confirm probe, and an
+// external writer made it writable afterwards (§7.3). A site the process
+// last read writable, never read, or read before a restart is a second
+// writer the run had no right to confirm beside.
+func TestPlannedInvariant_UnreadablePeerAtConfirm(t *testing.T) {
+	ctx := pfCtx()
+	three := []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate}
+	const tagged = "OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)"
+	// promote runs r1 up to its clears, through a gate probe that reads
+	// every site read-only.
+	promote := func(f *monFixture) {
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		fence := f.fenceSet()
+		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		b := f.pf("beta")
+		_ = b.StopReplica(ctx)
+		_ = b.ResetReplicaAll(ctx)
+		f.mon.onYield(YieldGateProbe)
+		_ = b.SetSuperReadOnly(ctx, false)
+		_ = b.SetReadOnly(ctx, false)
+	}
+	hide := func(f *monFixture, site string) {
+		f.c.SetOperatorLink(site, true)
+		f.c.RogueWritable(site)
+	}
+	confirm := func(f *monFixture) string {
+		f.mon.onYield(YieldConfirmProbe)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		return fingerprint(f.mon.violations)
+	}
+	t.Run("readOnlyAtTheGateThenUnreadable", func(t *testing.T) {
+		f := newMonFixture(t, three...)
+		promote(f)
+		hide(f, "gamma")
+		if fp := confirm(f); fp != "" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+		if f.mon.stats.UnreadablePeerResidual != 1 {
+			t.Fatalf("UnreadablePeerResidual %d, want 1", f.mon.stats.UnreadablePeerResidual)
+		}
+	})
+	t.Run("theSourceReadOnlyAtTheGateThenUnreadable", func(t *testing.T) {
+		f := newMonFixture(t)
+		promote(f)
+		hide(f, "alpha")
+		if fp := confirm(f); fp != "" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("readOnlyAtAnEarlierConfirmThenUnreadable", func(t *testing.T) {
+		// Another process confirms: its first confirm probe reads gamma
+		// read-only, its second cannot read it.
+		f := newMonFixture(t, three...)
+		promote(f)
+		f.mon.noteRestart()
+		f.mon.onYield(YieldConfirmProbe)
+		hide(f, "gamma")
+		if fp := confirm(f); fp != "" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("lastReadWritable", func(t *testing.T) {
+		// The run saw gamma writable after its own write (the hold it
+		// decided did not commit), then gamma stopped answering.
+		f := newMonFixture(t, three...)
+		promote(f)
+		f.c.RogueWritable("gamma")
+		f.mon.onYield(YieldConfirmProbe)
+		// The external writer acts again where the operator cannot see it:
+		// a later rogue does not turn the writable answer into a residual.
+		hide(f, "gamma")
+		if fp := confirm(f); fp != tagged {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("neverReadByTheConfirmingProcess", func(t *testing.T) {
+		// A new process finds the target writable (an external writer, not
+		// the run: no clear was sent) and confirms beside a source it
+		// cannot read.
+		f := newMonFixture(t)
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		fence := f.fenceSet()
+		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		b := f.pf("beta")
+		_ = b.StopReplica(ctx)
+		_ = b.ResetReplicaAll(ctx)
+		f.mon.noteRestart()
+		f.c.RogueWritable("beta")
+		hide(f, "alpha")
+		if fp := confirm(f); fp != tagged {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("readBeforeARestart", func(t *testing.T) {
+		// The gate's answers died with the process that read them.
+		f := newMonFixture(t, three...)
+		promote(f)
+		f.mon.noteRestart()
+		hide(f, "gamma")
+		if fp := confirm(f); fp != tagged {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("writableBeforeTheGateWhereTheGateCouldNotRead", func(t *testing.T) {
+		// gamma was already out of reach and writable at the gate: no
+		// probe ever read it.
+		f := newMonFixture(t, three...)
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		fence := f.fenceSet()
+		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		b := f.pf("beta")
+		_ = b.StopReplica(ctx)
+		_ = b.ResetReplicaAll(ctx)
+		hide(f, "gamma")
+		f.mon.onYield(YieldPeerProbe) // the run probed after the rogue: no race residual
+		f.mon.onYield(YieldGateProbe)
+		_ = b.SetSuperReadOnly(ctx, false)
+		_ = b.SetReadOnly(ctx, false)
+		f.mon.onYield(YieldConfirmProbe)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		if got := f.names(); !slices.Contains(got, "OutcomeDishonest") || !slices.Contains(got, "SucceededBesideWritable") {
+			t.Fatalf("violations %v, want OutcomeDishonest and SucceededBesideWritable among them", f.mon.violations)
+		}
+	})
+	t.Run("madeWritableByTheOperator", func(t *testing.T) {
+		// The residual is an external writer's doing. A site the operator
+		// itself made writable after the gate is not excused by the gate's
+		// answer.
+		f := newMonFixture(t, three...)
+		promote(f)
+		_ = f.c.NewChecker("gamma").SetReadOnly(context.Background(), false) // the topology manager
+		f.c.SetOperatorLink("gamma", true)
+		f.mon.onYield(YieldConfirmProbe)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		if got := f.names(); !slices.Contains(got, "OutcomeDishonest") || !slices.Contains(got, "SucceededBesideWritable") {
+			t.Fatalf("violations %v, want OutcomeDishonest and SucceededBesideWritable among them", f.mon.violations)
+		}
+	})
+	t.Run("readableAndWritable", func(t *testing.T) {
+		f := newMonFixture(t, three...)
+		promote(f)
+		f.c.RogueWritable("gamma")
+		if fp := confirm(f); fp != "OutcomeDishonest+SucceededBesideWritable" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+}
+
+// TestPlannedInvariant_RolledBackOverAReplacedTarget: RolledBack after a
+// read_only=OFF is dishonest while the server that took it still stands in
+// for the target; once the target answers under another server_uuid (the
+// DST-3 ruling's rollback) the clear went to a server that is gone.
+func TestPlannedInvariant_RolledBackOverAReplacedTarget(t *testing.T) {
+	ctx := pfCtx()
+	const betaUUID = "00000000-0000-0000-0000-000000000002"
+	run := func(t *testing.T, replace bool) *monFixture {
+		f := newMonFixture(t)
+		for range 3 {
+			f.c.Tick() // history, so the replacement pod can come up regressed
+		}
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		fence := f.fenceSet()
+		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) {
+			pf.Fence.GtidSet = &fence
+			pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
+		}, nil)
+		f.passGate()
+		f.c.AddFailMutations("beta", 1)
+		_ = f.pf("beta").SetReadOnly(ctx, false) // sent, answered with an error
+		if replace {
+			f.c.ReplacePod("beta", 1)
+		}
+		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		_ = f.pf("alpha").SetReadOnly(ctx, false)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		return f
+	}
+	t.Run("theSameServer", func(t *testing.T) {
+		run(t, false).want("OutcomeDishonest")
+	})
+	t.Run("aReplacedServer", func(t *testing.T) {
+		run(t, true).want()
+	})
+}
+
+// TestOpenFindings_AreClassesOfTheirOwn: the planned-failover findings that
+// are still open (README, Open planned-failover findings) fail the sweep
+// under fingerprints that name them, apart from the classes they share an
+// invariant with.
+func TestOpenFindings_AreClassesOfTheirOwn(t *testing.T) {
+	ctx := pfCtx()
+	promoting := func(f *monFixture) {
+		for range 3 {
+			f.c.Tick() // history, so a replacement pod can come up regressed
+		}
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		fence := f.fenceSet()
+		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+	}
+	clears := func(f *monFixture) {
+		b := f.pf("beta")
+		_ = b.StopReplica(ctx)
+		_ = b.ResetReplicaAll(ctx)
+		f.mon.onYield(YieldGateProbe)
+		_ = b.SetSuperReadOnly(ctx, false)
+		_ = b.SetReadOnly(ctx, false)
+	}
+	t.Run("succeededOverATargetReplacedAfterTheConfirmation", func(t *testing.T) {
+		f := newMonFixture(t)
+		promoting(f)
+		clears(f)
+		f.mon.onYield(YieldConfirmProbe)
+		f.c.RogueFence("beta")
+		f.c.ReplacePod("beta", 2)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(targetLacksFencedSet)" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("rolledBackAfterAClearThatReachedTheServer", func(t *testing.T) {
+		f := newMonFixture(t)
+		promoting(f)
+		clears(f)
+		f.c.RogueFence("beta")
+		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		_ = f.pf("alpha").SetReadOnly(ctx, false)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackAfterClear)" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("rolledBackOverAReadOnlySource", func(t *testing.T) {
+		f := newMonFixture(t)
+		promoting(f)
+		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackFencedSource)" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
 	})
 }
