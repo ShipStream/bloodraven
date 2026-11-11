@@ -58,6 +58,8 @@ type pfFakeTopology struct {
 	calls    []string
 	releases []string // "<runId>:<why>"
 	named    []string // "source:<site>" / "target:<site>"
+	// namedServers is the server each "source:<site>" entry was bound to.
+	namedServers []string
 }
 
 func newPFFakeTopology() *pfFakeTopology { return &pfFakeTopology{} }
@@ -328,10 +330,11 @@ func (f *pfFakeTopology) NameUnconfirmedTarget(ref PlannedRunRef) error {
 	return nil
 }
 
-func (f *pfFakeTopology) NameFencedSource(ref PlannedRunRef) error {
+func (f *pfFakeTopology) NameFencedSource(ref PlannedRunRef, serverUUID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.named = append(f.named, "source:"+ref.Source)
+	f.namedServers = append(f.namedServers, serverUUID)
 	return nil
 }
 

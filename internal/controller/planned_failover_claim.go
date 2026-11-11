@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // The planned-failover claim.
@@ -790,8 +791,80 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 	if tm.lastFailover.UTC().Truncate(time.Second).After(started) {
 		return
 	}
-	tm.lastActiveSite, tm.lastActiveSiteNamed = src.SourceSite, true
-	tm.logger.Info("planned failover: named fenced source for re-assert", "runId", src.RunID, "site", src.SourceSite)
+	tm.nameFencedSourceLocked(src.RunID, src.SourceSite, src.Fence.SourceServerUUID)
+}
+
+// plannedFencedSource is the source a planned run left fenced and named for
+// the re-assert (§6.5), with the server its fence was meant for: the
+// @@server_uuid the durable fence intent names. The zero value binds
+// nothing.
+//
+// The run's fence is its own only on that server (§4.3: this process's
+// memo for that server, or the durable intent naming its @@server_uuid).
+// A run can end without reading the source (SourceLost, a status stall),
+// and its fence may be proven only by an intent an earlier operator process
+// wrote, so the binding is checked when the re-assert acts, not when the
+// source is named: a source that answers under another @@server_uuid then
+// is a replaced server, whose read-only state is not the run's fence, and it
+// is treated as a site the operator only observed (lifted from mysqld's boot
+// read_only, never from super_read_only).
+type plannedFencedSource struct {
+	runID, site, serverUUID string
+	// warnedUUID is the @@server_uuid the mismatch was last logged for.
+	warnedUUID string
+}
+
+// nameFencedSourceLocked names source for the re-assert on behalf of run
+// runID and binds the name to the server serverUUID. A run whose fence
+// intent names no server binds nothing and names nothing: there is no
+// server its fence could be attributed to. Must hold tm.mu.
+func (tm *TopologyManager) nameFencedSourceLocked(runID, source, serverUUID string) bool {
+	if serverUUID == "" {
+		return false
+	}
+	tm.lastActiveSite, tm.lastActiveSiteNamed = source, true
+	tm.plannedFencedSource = plannedFencedSource{runID: runID, site: source, serverUUID: serverUUID}
+	tm.logger.Info("planned failover: named fenced source for re-assert", "runId", runID, "site", source)
+	return true
+}
+
+// plannedNamedSourceIsFenceServer reports whether site, the re-assert's
+// lastActiveSite target, may be lifted from a fence as a named site: it was
+// not named by a planned run (no binding for it), or it answers under the
+// @@server_uuid that run's fence intent names. A failed identity read is
+// no proof.
+func (tm *TopologyManager) plannedNamedSourceIsFenceServer(ctx context.Context, site *siteTracker) bool {
+	tm.mu.RLock()
+	bound := tm.plannedFencedSource
+	tm.mu.RUnlock()
+	if bound.site != site.name || bound.serverUUID == "" {
+		return true
+	}
+	var snap mysql.GTIDSnapshot
+	err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		var err error
+		snap, err = pooledIdentity{site.mysql}.ReadGTIDSnapshot(probeCtx)
+		return err
+	})
+	if err == nil && strings.EqualFold(snap.ServerUUID, bound.serverUUID) {
+		return true
+	}
+	seen := snap.ServerUUID
+	if err != nil {
+		seen = "unreadable"
+	}
+	tm.mu.Lock()
+	logged := tm.plannedFencedSource.site == bound.site && tm.plannedFencedSource.runID == bound.runID &&
+		tm.plannedFencedSource.warnedUUID == seen
+	if !logged && tm.plannedFencedSource.runID == bound.runID {
+		tm.plannedFencedSource.warnedUUID = seen
+	}
+	tm.mu.Unlock()
+	if !logged {
+		tm.logger.Warn("planned failover: the fenced source is not the server the run's fence names; its fence is not lifted",
+			"runId", bound.runID, "site", site.name, "fenceServerUUID", bound.serverUUID, "serverUUID", seen)
+	}
+	return false
 }
 
 // carryNamedActiveSite brings old's named lastActiveSite into tm when
@@ -804,7 +877,7 @@ func (tm *TopologyManager) carryNamedActiveSite(old *TopologyManager) bool {
 		return false
 	}
 	old.mu.RLock()
-	site, named := old.lastActiveSite, old.lastActiveSiteNamed
+	site, named, bound := old.lastActiveSite, old.lastActiveSiteNamed, old.plannedFencedSource
 	old.mu.RUnlock()
 	if !named || site == "" {
 		return false
@@ -815,6 +888,11 @@ func (tm *TopologyManager) carryNamedActiveSite(old *TopologyManager) bool {
 		return false
 	}
 	tm.lastActiveSite, tm.lastActiveSiteNamed = site, true
+	if bound.site == site {
+		// A source a planned run named stays bound to the run's server.
+		bound.warnedUUID = ""
+		tm.plannedFencedSource = bound
+	}
 	tm.logger.Info("carried the replaced topology manager's named active site", "site", site)
 	return true
 }
