@@ -89,23 +89,34 @@ const (
 // anchor and not provably after the witness means the witness may belong
 // to a later episode or server incarnation.
 //
-// A promotion record anchors a witness w in two ways (pitrplan/witness.go):
-// by time, with GTIDExecuted, when w is not in it and it was observed more
-// than δ before w committed; and by containment (issue #269), with
-// PromotionGTIDExecuted, when w is outside that set and inside GTIDExecuted
-// or the confirmation. The second needs no clock to order the record and
-// w, so it covers the transactions an episode commits before and shortly
-// after its record is observed. A record with a promotion set also dates
-// its episode for the planner: the transactions its server committed
-// outside that set were committed no earlier than ProbeInterval before
-// ObservedAt, on the clock of ObservedAt (the sidecar probes the mysqld of
-// its own pod), so an archived copy of one of them with an earlier commit
-// time is another transaction under the same GTID.
+// A promotion record anchors a witness w by time (pitrplan/witness.go),
+// with GTIDExecuted, when w is not in it and it was observed more than δ
+// before w committed. That leaves the transactions an episode commits
+// before and shortly after its record is observed without an anchor: the
+// record's lag window.
 //
-// The fields added for issue #269 are optional. A record without them (an
-// older sidecar's, or one whose evidence could not be established) loads
-// and behaves as before; a writer that does not know them drops them when
-// it rewrites the manifest, which only removes that evidence.
+// The fields added for issue #269 (PromotionGTIDExecuted, the promotion
+// set, and the confirmation) are evidence for anchoring such a w by
+// containment, without a clock: w outside the promotion set and inside
+// GTIDExecuted or the confirmation. The sidecar records them. The planner
+// does not anchor with them in this release (pitrplan.containmentAnchors
+// says why and what must hold first), so the lag window still refuses. It
+// reads them only to refuse:
+//
+//   - a record with a promotion set dates its episode: the transactions
+//     its server committed outside that set were committed no earlier than
+//     ProbeInterval before ObservedAt, on the clock of ObservedAt (the
+//     sidecar probes the mysqld of its own pod), so an archived copy of
+//     one of them with an earlier commit time is another transaction under
+//     the same GTID, and a replica copy that follows it is refused;
+//   - a record that would anchor w by time, and whose confirmation holds a
+//     w that was committed after ConfirmedAt, refuses w: the archived
+//     transaction is not the one its server had.
+//
+// The fields are optional. A record without them (an older sidecar's, or
+// one whose evidence could not be established) loads and anchors as
+// before, and dates nothing; a writer that does not know them drops them
+// when it rewrites the manifest, which only removes that evidence.
 type PromotionRecord struct {
 	// Kind is RecordPromotion (omitted) or RecordReset. A reader treats
 	// any other kind as a fence only.
@@ -133,7 +144,7 @@ type PromotionRecord struct {
 	// the sidecar saw one ("" otherwise: a sidecar start while writable, a
 	// failed probe in between, or a new server incarnation while writable).
 	// The planner does not read it: it is the first of the two sources of
-	// PromotionGTIDExecuted, which is the field that carries the proof,
+	// PromotionGTIDExecuted, which is the field that carries the evidence,
 	// and is kept beside it for diagnosis. It is such a source only when
 	// the observation that opened the episode still contained it; a record
 	// whose server lost transactions in between carries it without a
@@ -162,7 +173,8 @@ type PromotionRecord struct {
 	// not establish it: no ReadOnlyGTIDExecuted, an unreadable binlog
 	// header, a read that exceeded its bound, or a server that changed
 	// while it was derived. Always a subset of GTIDExecuted; a reader
-	// ignores one that is not.
+	// ignores one that is not. The planner uses it to date the episode's
+	// transactions, not as an anchor (see PromotionRecord).
 	PromotionGTIDExecuted string `json:"promotionGtidExecuted,omitempty"`
 	// ConfirmedAt and ConfirmedGTIDAdded are the record's confirmation
 	// (issue #269), added once by the sidecar that wrote the record, and
@@ -178,7 +190,8 @@ type PromotionRecord struct {
 	// construction, and a full copy would add one more whole GTID set per
 	// record to every manifest save. A zero ConfirmedAt means no
 	// confirmation: the sidecar or the server stopped, or the episode
-	// ended, before that probe.
+	// ended, before that probe. The planner uses a confirmation only to
+	// refuse (see PromotionRecord).
 	ConfirmedAt        time.Time `json:"confirmedAt,omitzero"`
 	ConfirmedGTIDAdded string    `json:"confirmedGtidAdded,omitempty"`
 }

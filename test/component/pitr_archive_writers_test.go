@@ -1497,19 +1497,29 @@ func TestArchiveWritersLossyRecloneWithSameServerUUIDFailsClosed(t *testing.T) {
 	}
 }
 
-// #269, the promotion-record lag window. b is promoted while its relay log
+// The promotion-record lag window (#269). b is promoted while its relay log
 // still holds A:7-8, commits B:1-2 before its sidecar's next role probe (so
 // its promotion record already holds them, with A:7-8) and dies before it
 // seals a file of its era: the era is archived only as replica copies in
 // a's mixed file. A target whose witness is B:1 or B:2 has no record
-// provably before it. With the operator's promotion-time rotation the
-// record's promotion set is the promotion GTID set A:1-8, read from the
-// file the rotation opened, and it anchors both witnesses by containment;
-// before #269 they refused PITRStopAmbiguous. Without the rotation the
-// promotion set is only what the sidecar last saw read-only, which lacks
-// A:7-8, and the targets still refuse, with the safe target.
+// provably before it.
+//
+// The sidecar records the evidence of #269: with the operator's
+// promotion-time rotation the record's promotion set is the promotion GTID
+// set A:1-8, read from the file the rotation opened; without the rotation
+// it is only what the sidecar last saw read-only, which lacks A:7-8.
+//
+// The planner as it ships does not anchor with that evidence: both targets
+// refuse PITRStopAmbiguous with the window and the safe targets, word for
+// word as for a record without the evidence. With the containment anchor
+// on (tests only; pitrplan.EnableContainmentAnchorsForTest has why) the
+// promotion set of the rotated layout anchors both witnesses, and the
+// unrotated layout still refuses.
 func TestArchiveWritersPromotionLagWindow(t *testing.T) {
 	A, B := writerUUIDA, writerUUIDB
+	// The layouts are built in parallel and planned one at a time: the
+	// containment anchor is one switch for the whole planner.
+	var planning sync.Mutex
 	for _, rotate := range []bool{true, false} {
 		t.Run(fmt.Sprintf("rotation=%v", rotate), func(t *testing.T) {
 			t.Parallel()
@@ -1566,9 +1576,10 @@ func TestArchiveWritersPromotionLagWindow(t *testing.T) {
 					t.Fatalf("b archived a file of its own era: %+v", row)
 				}
 			}
+			w.assertOneDescriptor()
 
-			// Without the #269 evidence (a record of an older sidecar) both
-			// targets refuse, whatever the rotation did.
+			// The archive without the #269 evidence: the record of an older
+			// sidecar.
 			strip := func(arch *pitrplan.Archive) {
 				for i := range arch.Sites {
 					for j := range arch.Sites[i].Promotions {
@@ -1577,36 +1588,74 @@ func TestArchiveWritersPromotionLagWindow(t *testing.T) {
 					}
 				}
 			}
-			for i, want := range []string{A + ":1-8", A + ":1-8," + B + ":1"} {
+			const micro = "2006-01-02T15:04:05.000000Z"
+			planning.Lock()
+			defer planning.Unlock()
+
+			// As shipped: both targets refuse, whatever the rotation did and
+			// whatever the record carries, and name the window and the safe
+			// targets on both sides of it.
+			for i := range 2 {
 				witness := fmt.Sprintf("%s:%d", B, i+1)
-				_, err := w.planEdited(dump, before(lag[i]), "", strip)
-				ref := assertRefusal(t, witness+" without a promotion set", err, pitrarchive.TokenStopAmbiguous)
-				if !strings.Contains(ref.Message, "in the window") || !strings.Contains(ref.Message, "it carries no promotion set (promotionGtidExecuted)") {
-					t.Fatalf("%s without a promotion set: %s", witness, ref.Message)
-				}
-				plan, err := w.plan(dump, before(lag[i]), "")
-				if !rotate {
-					ref := assertRefusal(t, witness+" without the rotation", err, pitrarchive.TokenStopAmbiguous)
-					for _, sub := range []string{"or choose a target after", "the promotion record b#0 proves by containment only its promotion set (promotionGtidExecuted), which does not hold " + A + ":7",
-						"the promotion-time binlog rotation was not acknowledged"} {
-						if !strings.Contains(ref.Message, sub) {
-							t.Fatalf("%s without the rotation: %q lacks %q", witness, ref.Message, sub)
-						}
+				_, err := w.plan(dump, before(lag[i]), "")
+				ref := assertRefusal(t, witness+" in the lag window, as shipped", err, pitrarchive.TokenStopAmbiguous)
+				for _, sub := range []string{witness + ", is archived only as a replica copy on a. Its predecessors include " + A + ":1 ",
+					"or choose a target after " + rec.ObservedAt.Add(writerDelta).UTC().Format(micro) + " (b's promotion record at " + rec.ObservedAt.UTC().Format(micro) + " plus the 1ms clock-skew margin)",
+					"in the window", "which records it as already executed",
+					"safe targets are at or before " + tail[2].Commit.UTC().Format(micro) + ", or after " + rec.ObservedAt.Add(writerDelta).UTC().Format(micro)} {
+					if !strings.Contains(ref.Message, sub) {
+						t.Fatalf("%s in the lag window, as shipped: %q lacks %q", witness, ref.Message, sub)
 					}
-					continue
 				}
-				assertPlan(t, witness+" in the lag window", plan, err, want, witness, pitrplan.GroundTruthAnchored)
-				if got := plan.Witness.AnchorRecords; len(got) != 1 || got[0] != "b#0" || plan.Witness.AnchorOriginRow != "" {
-					t.Fatalf("%s anchored by %v / %q, want b's record b#0 alone", witness, got, plan.Witness.AnchorOriginRow)
+				for _, word := range []string{"containment", "promotion set", "promotionGtidExecuted", "confirm"} {
+					if strings.Contains(ref.Message, word) {
+						t.Fatalf("%s in the lag window, as shipped: the refusal speaks of %q, which the shipped planner does not anchor with: %s", witness, word, ref.Message)
+					}
+				}
+				_, bare := w.planEdited(dump, before(lag[i]), "", strip)
+				if bare == nil || bare.Error() != err.Error() {
+					t.Fatalf("%s in the lag window, as shipped: the #269 evidence changes the answer:\n  with it:    %v\n  without it: %v", witness, err, bare)
 				}
 			}
 			// After the record and its margin the time rule anchors, with or
-			// without the rotation, as before.
+			// without the rotation.
 			plan, err := w.plan(dump, before(era2[1]), "")
 			assertPlan(t, "after the lag window", plan, err, A+":1-8,"+B+":1-3", B+":4", pitrplan.GroundTruthAnchored)
 			plan, err = w.plan(dump, time.Time{}, "")
 			assertPlan(t, "latest", plan, err, A+":1-10,"+B+":1-5", "", "")
-			w.assertOneDescriptor()
+
+			t.Run("containment anchors", func(t *testing.T) {
+				pitrplan.EnableContainmentAnchorsForTest(t)
+				for i, want := range []string{A + ":1-8", A + ":1-8," + B + ":1"} {
+					witness := fmt.Sprintf("%s:%d", B, i+1)
+					// Without the evidence both targets refuse, whatever the
+					// rotation did.
+					_, err := w.planEdited(dump, before(lag[i]), "", strip)
+					ref := assertRefusal(t, witness+" without a promotion set", err, pitrarchive.TokenStopAmbiguous)
+					if !strings.Contains(ref.Message, "in the window") || !strings.Contains(ref.Message, "it carries no promotion set (promotionGtidExecuted)") {
+						t.Fatalf("%s without a promotion set: %s", witness, ref.Message)
+					}
+					plan, err := w.plan(dump, before(lag[i]), "")
+					if !rotate {
+						ref := assertRefusal(t, witness+" without the rotation", err, pitrarchive.TokenStopAmbiguous)
+						for _, sub := range []string{"or choose a target after", "the promotion record b#0 proves by containment only its promotion set (promotionGtidExecuted), which does not hold " + A + ":7",
+							"the promotion-time binlog rotation was not acknowledged"} {
+							if !strings.Contains(ref.Message, sub) {
+								t.Fatalf("%s without the rotation: %q lacks %q", witness, ref.Message, sub)
+							}
+						}
+						continue
+					}
+					assertPlan(t, witness+" in the lag window", plan, err, want, witness, pitrplan.GroundTruthAnchored)
+					if got := plan.Witness.AnchorRecords; len(got) != 1 || got[0] != "b#0" || plan.Witness.AnchorOriginRow != "" {
+						t.Fatalf("%s anchored by %v / %q, want b's record b#0 alone", witness, got, plan.Witness.AnchorOriginRow)
+					}
+				}
+				plan, err := w.plan(dump, before(era2[1]), "")
+				assertPlan(t, "after the lag window", plan, err, A+":1-8,"+B+":1-3", B+":4", pitrplan.GroundTruthAnchored)
+				plan, err = w.plan(dump, time.Time{}, "")
+				assertPlan(t, "latest", plan, err, A+":1-10,"+B+":1-5", "", "")
+			})
 		})
 	}
 }
@@ -1618,8 +1667,12 @@ func TestArchiveWritersPromotionLagWindow(t *testing.T) {
 // precedes B:1. b never seals its era, so B:1 is archived only as a's copy,
 // whose predecessors are A:1-8, while b committed B:1 on A:1-7. The record's
 // promotion set is A:1-7 (the file the rotation opened), not what the record
-// holds: it does not explain A:8, and the target refuses PITRStopAmbiguous
-// instead of certifying a history b never had. A planner that anchored with
+// holds.
+//
+// The planner as it ships anchors nothing in the record's lag window and
+// refuses PITRStopAmbiguous. With the containment anchor on (tests only)
+// the promotion set does not explain A:8, and the target refuses too,
+// instead of certifying a history b never had: a planner that anchored with
 // the whole record would certify A:1-8.
 func TestArchiveWritersPromotionLagWindowLateApplier(t *testing.T) {
 	A, B := writerUUIDA, writerUUIDB
@@ -1663,12 +1716,25 @@ func TestArchiveWritersPromotionLagWindowLateApplier(t *testing.T) {
 	w.eventually("a's mixed file archived", func() bool { return len(w.manifest("a").Files) == 1 })
 
 	_, err := w.plan(dump, before(early[0]), "")
-	ref := assertRefusal(t, "B:1, committed before b applied A:8", err, pitrarchive.TokenStopAmbiguous)
-	for _, sub := range []string{"predecessors include " + A + ":8", "the promotion record b#0 proves by containment only its promotion set (promotionGtidExecuted), which does not hold " + A + ":8"} {
+	ref := assertRefusal(t, "B:1, committed before b applied A:8, as shipped", err, pitrarchive.TokenStopAmbiguous)
+	for _, sub := range []string{"predecessors include " + A + ":1 ", "in the window", "which records it as already executed"} {
 		if !strings.Contains(ref.Message, sub) {
-			t.Fatalf("refusal %q lacks %q", ref.Message, sub)
+			t.Fatalf("as shipped: refusal %q lacks %q", ref.Message, sub)
 		}
 	}
+	if strings.Contains(ref.Message, "containment") || strings.Contains(ref.Message, "promotion set") {
+		t.Fatalf("as shipped: the refusal speaks of evidence the shipped planner does not anchor with: %s", ref.Message)
+	}
+	t.Run("containment anchors", func(t *testing.T) {
+		pitrplan.EnableContainmentAnchorsForTest(t)
+		_, err := w.plan(dump, before(early[0]), "")
+		ref := assertRefusal(t, "B:1, committed before b applied A:8", err, pitrarchive.TokenStopAmbiguous)
+		for _, sub := range []string{"predecessors include " + A + ":8", "the promotion record b#0 proves by containment only its promotion set (promotionGtidExecuted), which does not hold " + A + ":8"} {
+			if !strings.Contains(ref.Message, sub) {
+				t.Fatalf("refusal %q lacks %q", ref.Message, sub)
+			}
+		}
+	})
 	// After the record and its margin b had A:8, and the record says so.
 	plan, err := w.plan(dump, before(era2[1]), "")
 	assertPlan(t, "after the lag window", plan, err, A+":1-8,"+B+":1-2", B+":3", pitrplan.GroundTruthAnchored)

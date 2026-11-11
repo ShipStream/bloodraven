@@ -1,6 +1,10 @@
 package pitrplan
 
 import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,130 @@ import (
 // it from another source before the promotion. Its era A:51-100 (A:n
 // commits at n s) is archived only as replica copies on b, so only a record
 // of a can prove that a had D:1 when it committed a witness.
+//
+// The planner ships with the containment anchor off (containmentAnchors).
+// The tests of the rule turn it on (withContainmentAnchors), so that it
+// stays guarded for the day it is enabled, and their helpers hold the
+// shipped planner to every archive they plan: a target that only a
+// containment anchor certifies refuses as it did before issue #269.
+
+// withContainmentAnchors turns the containment anchor on until t ends.
+func withContainmentAnchors(t testing.TB) {
+	t.Helper()
+	EnableContainmentAnchorsForTest(t)
+}
+
+// shipped runs f with the containment anchor off, as the planner ships,
+// whatever the test around it has set.
+func shipped(f func()) {
+	old := containmentAnchors
+	containmentAnchors = false
+	defer func() { containmentAnchors = old }()
+	f()
+}
+
+// shippedRun plans s as the planner ships.
+func shippedRun(s *synth, stop float64, exclude string) (p *Plan, err error) {
+	shipped(func() { p, err = s.run(ModeTimestamp, stop, exclude, false) })
+	return p, err
+}
+
+// bareRun is shippedRun on s without the issue #269 evidence of its
+// records: what a sidecar from before that issue recorded.
+func bareRun(s *synth, stop float64, exclude string) (*Plan, error) {
+	type evidence struct {
+		p, added string
+		at       time.Time
+	}
+	var saved []evidence
+	each := func(f func(r *pitrarchive.PromotionRecord)) {
+		for _, name := range s.order {
+			for i := range s.sites[name].Promotions {
+				f(&s.sites[name].Promotions[i])
+			}
+		}
+	}
+	each(func(r *pitrarchive.PromotionRecord) {
+		saved = append(saved, evidence{r.PromotionGTIDExecuted, r.ConfirmedGTIDAdded, r.ConfirmedAt})
+		r.PromotionGTIDExecuted, r.ConfirmedGTIDAdded, r.ConfirmedAt = "", "", time.Time{}
+	})
+	defer func() {
+		i := 0
+		each(func(r *pitrarchive.PromotionRecord) {
+			r.PromotionGTIDExecuted, r.ConfirmedGTIDAdded, r.ConfirmedAt = saved[i].p, saved[i].added, saved[i].at
+			i++
+		})
+	}()
+	return shippedRun(s, stop, exclude)
+}
+
+// answer is what a test compares of a planner's answer: the refusal's text,
+// or the plan's witness, anchors, Λ and segments.
+func answer(p *Plan, err error) string {
+	if err != nil {
+		return "refused: " + err.Error()
+	}
+	return fmt.Sprintf("witness %+v Λ=%s %s", *p.Witness, p.Lineage, segString(p))
+}
+
+// wantShippedRefusal asserts that the shipped planner refuses the target as
+// it did before issue #269: PITRStopAmbiguous for the unanchored replica
+// copy, word for word what it answers when the records carry none of that
+// issue's evidence, so with no word about containment, promotion sets or
+// confirmations. It returns the refusal's text.
+func wantShippedRefusal(t *testing.T, what string, s *synth, stop float64, exclude string, subs ...string) string {
+	t.Helper()
+	_, err := shippedRun(s, stop, exclude)
+	r, ok := RefusalOf(err)
+	if !ok || r.Token != pitrarchive.TokenStopAmbiguous {
+		t.Fatalf("%s, as shipped: got %v, want PITRStopAmbiguous", what, err)
+	}
+	for _, sub := range append([]string{"is archived only as a replica copy on ", "Its predecessors include "}, subs...) {
+		if !strings.Contains(r.Error(), sub) {
+			t.Errorf("%s, as shipped: refusal %q lacks %q", what, r.Error(), sub)
+		}
+	}
+	for _, word := range []string{"containment", "promotionGtidExecuted", "promotion set", "confirm"} {
+		if strings.Contains(r.Error(), word) {
+			t.Errorf("%s, as shipped: the refusal speaks of %q, which the shipped planner does not use to anchor: %s", what, word, r.Error())
+		}
+	}
+	if bare := answer(bareRun(s, stop, exclude)); bare != answer(nil, err) {
+		t.Errorf("%s, as shipped: the evidence of issue #269 changes the answer:\n  with it:    %v\n  without it: %s", what, err, bare)
+	}
+	return r.Error()
+}
+
+// wantShippedSame asserts that the shipped planner answers the target as
+// the planner with containment anchors did (want), and as it answers
+// without the evidence of issue #269: the target needs no containment
+// anchor.
+func wantShippedSame(t *testing.T, what string, s *synth, stop float64, exclude, want string) {
+	t.Helper()
+	if got := answer(shippedRun(s, stop, exclude)); got != want {
+		t.Errorf("%s, as shipped:\n  got:  %s\n  want: %s", what, got, want)
+	}
+	if bare := answer(bareRun(s, stop, exclude)); bare != want {
+		t.Errorf("%s, as shipped, without the evidence of issue #269:\n  got:  %s\n  want: %s", what, bare, want)
+	}
+}
+
+// byTime reports whether the record named name (site#index) anchors p's
+// witness by time: it lacks the witness and was observed more than δ before
+// the witness committed.
+func byTime(t *testing.T, s *synth, name string, p *Plan) bool {
+	t.Helper()
+	for _, site := range s.order {
+		for i, rec := range s.sites[site].Promotions {
+			if name == fmt.Sprintf("%s#%d", site, i) {
+				return !MustParseSet(rec.GTIDExecuted).Has(p.Witness.GTID) &&
+					rec.ObservedAt.UnixMicro()+DefaultClockSkewMargin.Microseconds() < p.Witness.CommitTime
+			}
+		}
+	}
+	t.Fatalf("no record %s", name)
+	return false
+}
 
 // cRec is a promotion record of a's server observed at second at, with
 // gtid_executed set and promotion set p ("" for none).
@@ -45,7 +173,9 @@ func containmentArchive(t *testing.T, records ...pitrarchive.PromotionRecord) *s
 }
 
 // wantContained asserts that the target just before A:n plans with the
-// record named anchor as its only record anchor.
+// record named anchor as its only record anchor. The shipped planner must
+// plan the same when that record anchors by time, and must refuse as before
+// issue #269 when only its promotion set can anchor.
 func wantContained(t *testing.T, what string, s *synth, stop float64, witness, lineage, anchor string) {
 	t.Helper()
 	p, err := s.run(ModeTimestamp, stop, "", false)
@@ -56,10 +186,16 @@ func wantContained(t *testing.T, what string, s *synth, stop float64, witness, l
 		len(p.Witness.AnchorRecords) != 1 || p.Witness.AnchorRecords[0] != anchor || p.Witness.AnchorOriginRow != "" {
 		t.Fatalf("%s: witness %+v Λ=%s, want %s anchored by %s with Λ=%s", what, p.Witness, p.Lineage, witness, anchor, lineage)
 	}
+	if byTime(t, s, anchor, p) {
+		wantShippedSame(t, what, s, stop, "", answer(p, nil))
+		return
+	}
+	wantShippedRefusal(t, what, s, stop, "", "or choose a target after ")
 }
 
 // wantUncontained asserts PITRStopAmbiguous for the unexplained D:1, with
-// subs in the message.
+// subs in the message. What the anchors with containment do not explain,
+// the shipped planner's anchors, which are fewer, do not explain either.
 func wantUncontained(t *testing.T, what string, s *synth, stop float64, subs ...string) string {
 	t.Helper()
 	_, err := s.run(ModeTimestamp, stop, "", false)
@@ -72,12 +208,14 @@ func wantUncontained(t *testing.T, what string, s *synth, stop float64, subs ...
 			t.Errorf("%s: refusal %q lacks %q", what, r.Error(), sub)
 		}
 	}
+	wantShippedRefusal(t, what, s, stop, "", "predecessors include D:1")
 	return r.Error()
 }
 
 // The lag case: the record already holds w, so no clock orders them; its
 // promotion set does not hold w, so the server executed that set first.
 func TestWitnessContainmentLag(t *testing.T) {
+	withContainmentAnchors(t)
 	wantContained(t, "lag", containmentArchive(t, lagRecord()), 52.5, "A:53", "A:1-52,D:1", "a#0")
 	wantContained(t, "last lagged commit", containmentArchive(t, lagRecord()), 53.5, "A:54", "A:1-53,D:1", "a#0")
 
@@ -112,11 +250,17 @@ func TestWitnessContainmentLag(t *testing.T) {
 	if err != nil || !p.Lineage.Subtract(MustParseSet("D:1")).Equal(MustParseSet("A:1-52")) {
 		t.Fatalf("D:1 excluded: %+v %v", p, err)
 	}
+	// So it does as shipped, with no record to name.
+	p, err = shippedRun(s, 52.5, "D:1")
+	if err != nil || !p.Lineage.Subtract(MustParseSet("D:1")).Equal(MustParseSet("A:1-52")) || len(p.Witness.AnchorRecords) != 0 {
+		t.Fatalf("D:1 excluded, as shipped: %+v %v", p, err)
+	}
 }
 
 // The pending case: the record lacks w and was observed within δ of it;
 // the confirmation of the same episode holds w.
 func TestWitnessContainmentPending(t *testing.T) {
+	withContainmentAnchors(t)
 	confirmed := cConfirm(pendingRecord(), 60.6, "A:51-60")
 	wantContained(t, "pending, confirmed", containmentArchive(t, confirmed), 52.5, "A:53", "A:1-52,D:1", "a#0")
 	wantContained(t, "first commit of the era", containmentArchive(t, confirmed), 51.9, "A:52", "A:1-51,D:1", "a#0")
@@ -146,6 +290,7 @@ func TestWitnessContainmentPending(t *testing.T) {
 // Evidence that does not hold together is ignored: the record plans as a
 // record without it does.
 func TestWitnessContainmentInvalidEvidence(t *testing.T) {
+	withContainmentAnchors(t)
 	tests := []struct {
 		name string
 		edit func(r *pitrarchive.PromotionRecord)
@@ -178,6 +323,7 @@ func TestWitnessContainmentInvalidEvidence(t *testing.T) {
 // the promotion set and the w the sidecar sampled, and only records and
 // clocks say that the archived w is that transaction.
 func TestWitnessContainmentFences(t *testing.T) {
+	withContainmentAnchors(t)
 	reset := func(at float64, pi time.Duration) pitrarchive.PromotionRecord {
 		r := cRec(at, "A:1-50,D:1", "")
 		r.Kind, r.ProbeInterval = pitrarchive.RecordReset, pitrarchive.Duration(pi)
@@ -240,6 +386,7 @@ func TestWitnessContainmentFences(t *testing.T) {
 // dropped record could be an earlier fence, so the oldest record of a full
 // manifest anchors nothing by containment (the cap fails closed).
 func TestWitnessContainmentAtRecordCap(t *testing.T) {
+	withContainmentAnchors(t)
 	build := func(later int) *synth {
 		records := []pitrarchive.PromotionRecord{lagRecord()}
 		for i := 0; i < later; i++ {
@@ -269,6 +416,7 @@ func TestWitnessContainmentAtRecordCap(t *testing.T) {
 // sidecar probes the mysqld of its own pod), so the bounds carry no
 // clock-skew margin.
 func TestWitnessContainmentEpisodeWindow(t *testing.T) {
+	withContainmentAnchors(t)
 	// held is a record observed at second at that holds A:53 (53 s) as its
 	// episode's first transaction.
 	held := func(at float64) pitrarchive.PromotionRecord { return cRec(at, "A:1-53,D:1", "A:1-52,D:1") }
@@ -308,6 +456,7 @@ func TestWitnessContainmentEpisodeWindow(t *testing.T) {
 // episode's first transactions, and the first record's transactions are in
 // the second's promotion set.
 func TestWitnessContainmentSecondPromotion(t *testing.T) {
+	withContainmentAnchors(t)
 	second := cConfirm(cRec(80.3, "A:1-80,D:1", "A:1-80,D:1"), 90.4, "A:81-90")
 	s := containmentArchive(t, lagRecord(), second)
 	wantContained(t, "first episode", s, 52.5, "A:53", "A:1-52,D:1", "a#0")
@@ -319,6 +468,7 @@ func TestWitnessContainmentSecondPromotion(t *testing.T) {
 
 // N1: an exclusion neither sets a record aside nor makes one an anchor.
 func TestWitnessContainmentIgnoresExclusions(t *testing.T) {
+	withContainmentAnchors(t)
 	fenced := func() *synth {
 		s := containmentArchive(t, lagRecord())
 		r := cRec(55, "A:1-50,B:1-3", "")
@@ -331,6 +481,7 @@ func TestWitnessContainmentIgnoresExclusions(t *testing.T) {
 	// does not lift the fence.
 	_, err := fenced().run(ModeTimestamp, 52.5, "B:1-3", false)
 	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "predecessors include D:1", "b#0, another server's promotion record")
+	wantShippedRefusal(t, "fenced, B:1-3 excluded", fenced(), 52.5, "B:1-3", "predecessors include D:1")
 	// Nor does an exclusion disturb an anchor: A:60 is excluded, A:53
 	// plans as without it.
 	p, err := containmentArchive(t, lagRecord()).run(ModeTimestamp, 52.5, "A:60", false)
@@ -343,11 +494,16 @@ func TestWitnessContainmentIgnoresExclusions(t *testing.T) {
 	if err != nil || p.Witness.GTID.String() != "A:54" || len(p.Witness.AnchorRecords) != 1 || p.Witness.AnchorRecords[0] != "a#0" {
 		t.Fatalf("w excluded: %+v %v", p, err)
 	}
+	// The shipped planner anchors neither, with or without an exclusion.
+	for _, exclude := range []string{"A:60", "A:53"} {
+		wantShippedRefusal(t, exclude+" excluded", containmentArchive(t, lagRecord()), 52.5, exclude, "predecessors include D:1", "in the window")
+	}
 }
 
 // Records written before issue #269 carry none of the new fields and plan
 // exactly as they did: a lag refusal with the window and the safe targets.
 func TestWitnessContainmentOldRecordsUnchanged(t *testing.T) {
+	withContainmentAnchors(t)
 	old := lagRecord()
 	old.PromotionGTIDExecuted = ""
 	old.ReadOnlyGTIDExecuted = "A:1-50,D:1" // N5: recorded by older sidecars, never read
@@ -393,6 +549,7 @@ func TestRecordEvidence(t *testing.T) {
 // are matched by server_uuid and origin server_id, so a's record anchors
 // nothing for it, whatever it holds.
 func TestWitnessContainmentOtherOriginServer(t *testing.T) {
+	withContainmentAnchors(t)
 	s := newSynth(t)
 	s.site("a").Promotions = append(s.site("a").Promotions, lagRecord())
 	// A:53 carries server_id 103 in b's binlog: c committed it.
@@ -411,6 +568,7 @@ func TestWitnessContainmentOtherOriginServer(t *testing.T) {
 // episode's own like any other, and the sets compare whole source
 // identifiers.
 func TestWitnessContainmentTaggedGTID(t *testing.T) {
+	withContainmentAnchors(t)
 	build := func(rec pitrarchive.PromotionRecord) *synth {
 		s := newSynth(t)
 		s.site("a").Promotions = append(s.site("a").Promotions, rec)
@@ -428,6 +586,9 @@ func TestWitnessContainmentTaggedGTID(t *testing.T) {
 	if err != nil || p.Witness.GTID.String() != "A:blue:2" || !p.Lineage.Equal(MustParseSet("A:1-51,A:blue:1,D:1,D:blue:1-2")) {
 		t.Fatalf("second tagged witness: %+v %v", p, err)
 	}
+	for _, stop := range []float64{51.9, 53.5} {
+		wantShippedRefusal(t, "tagged witness", build(rec), stop, "", "in the window")
+	}
 	// A promotion set that lacks the tagged predecessors of another source
 	// does not explain them.
 	small := cRec(54.2, "A:1-51,A:blue:1-2,D:1,D:blue:1-2", "A:1-50,D:1")
@@ -438,4 +599,138 @@ func TestWitnessContainmentTaggedGTID(t *testing.T) {
 	held := cRec(54.2, "A:1-51,A:blue:1-2,D:1,D:blue:1-2", "A:1-50,A:blue:1,D:1,D:blue:1-2")
 	_, err = build(held).run(ModeTimestamp, 51.9, "", false)
 	wantToken(t, err, pitrarchive.TokenStopAmbiguous, "predecessors include D:1")
+}
+
+// The planner ships with the containment anchor off, and nothing but a
+// test can turn it on: the switch is written only where it is declared and
+// in the test hook, and no Go file of the module that is not a test names
+// the hook.
+func TestContainmentAnchorsAreOff(t *testing.T) {
+	if containmentAnchors {
+		t.Fatal("containmentAnchors is on. It ships off: read its comment before turning it on")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			t.Fatal("no go.mod above the working directory")
+		}
+		root = parent
+	}
+	const hook, home = "EnableContainmentAnchorsForTest", "internal/pitrplan/witness.go"
+	files, writes := 0, 0
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "site", "bin":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files++
+		rel := filepath.ToSlash(strings.TrimPrefix(path, root+string(filepath.Separator)))
+		if rel != home && strings.Contains(string(src), hook) {
+			t.Errorf("%s names %s: only tests may turn the containment anchor on", rel, hook)
+		}
+		if filepath.ToSlash(filepath.Dir(rel)) != "internal/pitrplan" {
+			return nil
+		}
+		for _, line := range strings.Split(string(src), "\n") {
+			code, _, _ := strings.Cut(line, "//")
+			if i := strings.Index(code, "containmentAnchors"); i >= 0 {
+				rest := strings.TrimSpace(code[i+len("containmentAnchors"):])
+				if strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, "==") {
+					writes++
+					if rel != home {
+						t.Errorf("%s writes containmentAnchors: %s", rel, strings.TrimSpace(line))
+					}
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The declaration (false), and the hook's set and restore.
+	if files < 100 || writes != 3 {
+		t.Fatalf("read %d Go files and found %d writes of containmentAnchors, want its declaration and the test hook's two", files, writes)
+	}
+}
+
+// The promotion-record lag window as the planner ships (D-53; issue #269
+// is not enabled): a witness that its era's promotion record already
+// holds, or that committed within δ of that record, refuses
+// PITRStopAmbiguous with the window and the safe targets, whatever
+// evidence of issue #269 the record carries and whatever is excluded. The
+// refusal is word for word the one for a record without that evidence, and
+// says nothing of promotion sets or confirmations: the planner does not
+// use them to anchor. More than δ after the record the time rule anchors.
+func TestWitnessLagWindowShipped(t *testing.T) {
+	const head = "PITRStopAmbiguous: the first transaction at or after 2026-11-01T12:00:%s00000Z, %s, is archived only as a replica copy on b. Its predecessors include %s:1 (sid %[3]s), which %[2]s's origin (a) is not proven to have executed. Exclude %[3]s:1, or choose a target after "
+	// A foreign transaction E:1 before a's era in b's file: the last safe
+	// target before the window.
+	foreign := func() *synth {
+		s := newSynth(t)
+		s.site("a").Promotions = append(s.site("a").Promotions, cConfirm(recP("A", 101, 54.2, "A:1-54,E:1", "A:1-50,E:1"), 64.3, "A:55-64"))
+		s.file("b", "b1", 102, "A:1-50", "", []stx{{g: "E:1", oct: sec(52.4), srv: 102}}, run("A", 53, 100, 53, 101))
+		s.backup("A:1-50", "b", 102, 50.5)
+		return s
+	}
+	lag := "2026-11-01T12:00:59.200000Z (a's promotion record at 2026-11-01T12:00:54.200000Z plus the 5s clock-skew margin). %s was committed at 2026-11-01T12:00:%s.000000Z, in the window (2026-11-01T12:00:%s.000000Z, 2026-11-01T12:00:54.200000Z] between its era's first commit and that record, which records it as already executed"
+	pending := "2026-11-01T12:00:55.500000Z (a's promotion record at 2026-11-01T12:00:50.500000Z, which is not provably before %s, plus the 5s clock-skew margin)"
+	confirmed := cConfirm(pendingRecord(), 60.6, "A:51-60")
+	for _, tt := range []struct {
+		name string
+		s    *synth
+		stop float64
+		want string
+	}{
+		{"the record holds the witness", containmentArchive(t, lagRecord()), 52.5,
+			fmt.Sprintf(head, "52.5", "A:53", "D") + fmt.Sprintf(lag, "A:53", "53", "51")},
+		{"the record holds the witness, the era's second commit", containmentArchive(t, lagRecord()), 51.9,
+			fmt.Sprintf(head, "51.9", "A:52", "D") + fmt.Sprintf(lag, "A:52", "52", "51")},
+		{"the record holds the witness and is confirmed", containmentArchive(t, cConfirm(lagRecord(), 64.3, "A:55-64")), 53.5,
+			fmt.Sprintf(head, "53.5", "A:54", "D") + fmt.Sprintf(lag, "A:54", "54", "51")},
+		{"the record holds the witness, another server's transaction before the era", foreign(), 52.5,
+			fmt.Sprintf(head, "52.5", "A:53", "E") + fmt.Sprintf(lag, "A:53", "53", "53") +
+				"; safe targets are at or before 2026-11-01T12:00:52.400000Z, or after 2026-11-01T12:00:59.200000Z"},
+		{"the witness committed within the margin after the record, which is confirmed", containmentArchive(t, confirmed), 52.5,
+			fmt.Sprintf(head, "52.5", "A:53", "D") + fmt.Sprintf(pending, "A:53")},
+		{"the witness committed within the margin after the record, unconfirmed", containmentArchive(t, pendingRecord()), 52.5,
+			fmt.Sprintf(head, "52.5", "A:53", "D") + fmt.Sprintf(pending, "A:53")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, exclude := range []string{"", "A:90"} {
+				if got := wantShippedRefusal(t, tt.name, tt.s, tt.stop, exclude); got != tt.want {
+					t.Errorf("excluding %q:\n  got:  %s\n  want: %s", exclude, got, tt.want)
+				}
+			}
+		})
+	}
+	// After the record and its margin the record anchors by time, as it
+	// always did, with or without the evidence.
+	for _, s := range []*synth{containmentArchive(t, lagRecord()), containmentArchive(t, confirmed), containmentArchive(t, pendingRecord())} {
+		p, err := shippedRun(s, 59.5, "")
+		if err != nil || p.Witness.GTID.String() != "A:60" || !p.Lineage.Equal(MustParseSet("A:1-59,D:1")) || len(p.Witness.AnchorRecords) != 1 || p.Witness.AnchorRecords[0] != "a#0" {
+			t.Fatalf("after the margin: %+v %v", p, err)
+		}
+		wantShippedSame(t, "after the margin", s, 59.5, "", answer(p, nil))
+	}
 }

@@ -786,6 +786,9 @@ var oracleSuites = map[string]func(*testing.T){
 	"TestWitnessContainmentRecordOrder":                    TestWitnessContainmentRecordOrder,
 	"TestWitnessContainmentEarlierHolderByConfirmation":    TestWitnessContainmentEarlierHolderByConfirmation,
 	"TestWitnessContainmentResidualIssuedTwice":            TestWitnessContainmentResidualIssuedTwice,
+	"TestWitnessLagWindowShipped":                          TestWitnessLagWindowShipped,
+	"TestKnownLimitationTimeAnchorCertifiesReissuedGTID":   TestKnownLimitationTimeAnchorCertifiesReissuedGTID,
+	"TestEpisodeDatesReadsHintsFirst":                      TestEpisodeDatesReadsHintsFirst,
 	"TestBudgetBoundsLiveHeapManyTags (segments, spilled)": TestBudgetBoundsLiveHeapManyTags,
 }
 
@@ -803,6 +806,31 @@ func TestOraclesSpilled(t *testing.T) {
 	slices.Sort(names)
 	for _, name := range names {
 		t.Run(name, oracleSuites[name])
+	}
+}
+
+// TestOraclesWithContainmentAnchors runs the oracle suites with the
+// containment anchor on, in memory and spilled. The planner ships with it
+// off (containmentAnchors), which is how every other test runs them; a
+// suite that asserts the shipped planner's answer to a lag-window target
+// says so itself (shipped), and the tests of the anchor turn it on
+// themselves. Nothing else may depend on the switch.
+func TestOraclesWithContainmentAnchors(t *testing.T) {
+	withContainmentAnchors(t)
+	names := make([]string, 0, len(oracleSuites))
+	for name := range oracleSuites {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, spilled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("spilled=%v", spilled), func(t *testing.T) {
+			if spilled {
+				forceSpill(t)
+			}
+			for _, name := range names {
+				t.Run(name, oracleSuites[name])
+			}
+		})
 	}
 }
 

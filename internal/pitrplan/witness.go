@@ -155,7 +155,9 @@ func (p *planner) groundTruth(c GTID) (*groundTruth, error) {
 // anchorRecords says which promotion records provably precede w and are
 // not fenced off by a later record of their site (round-1 G1, N3
 // revised), and containmentAnchor which record's promotion set P does
-// (issue #269); q is fenced the same way (originAnchor).
+// (issue #269); q is fenced the same way (originAnchor). The planner ships
+// without the P(R*) term: containmentAnchors is off, and containmentAnchor
+// then selects no record.
 //
 // The anchor proves Anchor(w) ⊆ pred_s(w). The plan certifies the whole of
 // pred(o_r), so a copy that passes is then held to what the anchor says of
@@ -166,6 +168,19 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 	first := occs[0].f.txn(occs[0].i)
 	srv := first.Srv
 	choice := p.anchorRecords(c, srv, first.OCT)
+	if r := choice.contradicted; r != nil {
+		// Refused outright, not only set aside: without the record another
+		// copy or another anchor could certify a target that refuses with
+		// it (two copies that the record shows to disagree, for one), and a
+		// record must never be evidence whose loss admits a plan.
+		msg := fmt.Sprintf("the first transaction at or after %s, %s, is archived only as a replica copy. The confirmation of the promotion record %s, observed at %s, holds %s, yet the archived %s was committed at %s, after it: the archived transaction is not the one %s's origin had executed then (the GTID was issued twice, or the server's clock was set back in between), so no record of the origin dates the history it belongs to",
+			fmtMicros(p.T), c, r.name(), r.rec.ConfirmedAt.UTC().Format(microLayout), c, c, fmtMicros(first.OCT), c)
+		if before := occs[0].lastOtherBefore(uuid); before > 0 {
+			msg += fmt.Sprintf(". Choose a target at or before %s, the last transaction of another server before %s in %s", fmtMicros(before), c, occs[0].f.row.Label())
+		}
+		msg += ". If the GTID was issued twice, start a new archive prefix and take a full backup"
+		return nil, refuse(pitrarchive.TokenStopAmbiguous, "%s", msg)
+	}
 	records, recordNames, lagRecord, originSites := choice.set, choice.names, choice.lag, choice.sites
 	var accepted *groundTruth
 	var acceptedKey Set
@@ -294,8 +309,9 @@ func (p *planner) anchoredTruth(c GTID, occs []occurrence) (*groundTruth, error)
 //
 //   - Anchor(w) ∖ X ⊆ pred(o): s had executed all of the anchor before w,
 //     so a faithful copy follows all of it;
-//   - with a containment anchor R, S being the sample of R that holds w
-//     (its gtidExecuted, or its confirmation): pred(o) ∖ X ⊆ S, because
+//   - with a containment anchor R (none unless containmentAnchors is on),
+//     S being the sample of R that holds w (its gtidExecuted, or its
+//     confirmation): pred(o) ∖ X ⊆ S, because
 //     pred_s(w) ⊆ S (S was read after w committed, and gtid_executed only
 //     grows within one incarnation); and every g ∈ S ∖ Anchor(w) ∖ X has
 //     the server_uuid of w: s executed any other after its promotion set
@@ -382,16 +398,23 @@ func (p *planner) copyRefusal(c GTID, o occurrence, exclude Set, format string, 
 	msg := fmt.Sprintf("the first transaction at or after %s, %s, is archived only as a replica copy. ", fmtMicros(p.T), c) +
 		fmt.Sprintf(format, args...) +
 		fmt.Sprintf(". Exclude %s (the restore then holds none of them)", exclude.bounded(512))
-	before := int64(0)
-	for j := 0; j < o.i; j++ {
-		if o.f.gtid(j).UUID() != c.UUID() {
-			before = max(before, o.f.txn(j).OCT)
-		}
-	}
-	if before > 0 {
+	if before := o.lastOtherBefore(c.UUID()); before > 0 {
 		msg += fmt.Sprintf(", or choose a target at or before %s, the last transaction of another server before %s in %s", fmtMicros(before), c, o.f.row.Label())
 	}
 	return refuse(pitrarchive.TokenStopAmbiguous, "%s", msg)
+}
+
+// lastOtherBefore is the commit time (µs) of the newest transaction before
+// o in its file that is not under uuid, or 0: a target at or before it has
+// another witness than o's transaction.
+func (o occurrence) lastOtherBefore(uuid string) int64 {
+	before := int64(0)
+	for j := 0; j < o.i; j++ {
+		if o.f.gtid(j).UUID() != uuid {
+			before = max(before, o.f.txn(j).OCT)
+		}
+	}
+	return before
 }
 
 // episodeDates refuses when an archived copy of a member of own was
@@ -557,11 +580,16 @@ type anchorChoice struct {
 	pending *promoRef
 	// shrunk says which anchors a fence refused, and why.
 	shrunk []string
+	// contradicted is a record that the time rule would take as an anchor
+	// and whose confirmation holds w although the archived w was committed
+	// after that confirmation: the witness refuses (anchoredTruth).
+	contradicted *promoRef
 	// sites are the sites whose records name s.
 	sites map[string]bool
 	// contained is the record whose promotion set anchors w by
 	// containment (issue #269). uncontained says, when no record does and
-	// w lies in a record's lag window, why that record could not.
+	// w lies in a record's lag window, why that record could not. Both are
+	// unset while containmentAnchors is off.
 	contained   *promoRef
 	uncontained string
 }
@@ -581,11 +609,16 @@ type anchorChoice struct {
 //
 // A record whose confirmation holds w, although the archived w was
 // committed after that confirmation was read, is no anchor either: the
-// archived transaction is not the one its episode committed.
+// archived transaction is not the one its episode committed. Such a w
+// refuses (anchorChoice.contradicted): a record that is only set aside
+// leaves the plan to the other copies and anchors, which may certify what
+// they could not with the record.
 //
 // A record that this rule cannot order against w (it holds w, or it was
-// observed within δ of w or after it) may still anchor w with its
-// promotion set: containmentAnchor.
+// observed within δ of w or after it) is no anchor by time: w is in its
+// lag window (D-53). containmentAnchor may anchor w with that record's
+// promotion set, when containmentAnchors is on; the planner ships with it
+// off, and w then refuses.
 func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 	uuid := c.UUID()
 	out := anchorChoice{set: Set{}, sites: map[string]bool{}}
@@ -635,8 +668,9 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 		// committed it: on one clock. An archived w committed after it is
 		// another transaction than the one the confirmation saw.
 		if best.confirmed != nil && best.confirmed.Has(c) && oct > best.rec.ConfirmedAt.UnixMicro() {
-			out.shrunk = append(out.shrunk, fmt.Sprintf("the promotion record %s is not an anchor, because its confirmation, observed at %s, holds %s, which was committed after it: the archived %s is not the transaction that confirmation saw (the GTID was issued twice, or the server's clock was set back in between)",
-				name, best.rec.ConfirmedAt.UTC().Format(microLayout), c, c))
+			if out.contradicted == nil {
+				out.contradicted = best
+			}
 			continue
 		}
 		// R and the site's later records share the sidecar's clock.
@@ -656,10 +690,75 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 	return out
 }
 
+// containmentAnchors says whether the promotion set of a promotion record
+// may anchor a replica-copy witness by containment (containmentAnchor,
+// issue #269). It is off, and only tests turn it on: the planner anchors
+// with promotion records by time alone, as it did before that issue, and a
+// witness in a record's lag window refuses.
+//
+// Why it is off. The containment proof orders a promotion set and the
+// transaction w that the sidecar sampled. A plan needs more: the archived
+// transaction named w, and the archived transactions its copy follows under
+// w's server_uuid, must be the ones that episode's server had. They are not
+// when a server_uuid issues a GTID twice. A server that loses transactions
+// its replica already holds (a crash with an unsynced binlog, a volume that
+// comes back older) and rejoins by replication never gets them back (a
+// server does not apply a transaction that carries its own server_id), and
+// once it is promoted again it issues their numbers to other transactions:
+// the first commits of its next episode, which is the lag window. The
+// checks of containmentAnchor and copyAgainstAnchor date both issues
+// against the record, and two classes of wrong certification through a
+// containment anchor are still known, each pinned by a test: both issues
+// committed inside one episode window
+// (TestWitnessContainmentResidualIssuedTwice), and a GTID issued again one
+// episode back whose record carries no promotion set
+// (TestWitnessLostTailReissuedInAnEarlierEpisode). The time rule has the
+// same root cause from δ after a record on (a record without a promotion
+// set dates nothing); this anchor would extend it into the window where a
+// reissue always falls.
+//
+// Before it is turned on, both must hold:
+//
+//   - the operator no longer rejoins by replication an old primary that
+//     lacks transactions of its own server_uuid that the new primary holds
+//     (it is recloned instead, and a clone gives it a new server_uuid,
+//     issue #265), so that a server_uuid cannot issue a GTID twice without
+//     a clone;
+//   - the rule, with that guarantee, has passed a fresh adversarial review.
+//
+// While it is off, containmentAnchor selects nothing and says nothing, so
+// no plan is certified through a promotion set or a confirmation. What
+// else reads that evidence only refuses, and stays active: the dating of a
+// copy's predecessors against every promotion set observed more than δ
+// before the witness (copyAgainstAnchor), and the witness that the
+// confirmation of its time anchor contradicts (anchorRecords). The other
+// checks of containmentAnchor (the episode window, the earliest holder,
+// the record order, the same server on two sites, the record cap, the
+// wider fences) only ever withdraw a containment anchor, so they have
+// nothing to withdraw.
+var containmentAnchors = false
+
+// EnableContainmentAnchorsForTest turns the containment anchor on until
+// the test t ends (see containmentAnchors for why nothing else may). It is
+// here, and not in a _test.go file, only so that the property sweep in
+// test/component can cover the rule; TestContainmentAnchorsAreOff fails
+// when a file that is not a test names it. The switch is one variable:
+// call it from a test that plans on no other goroutine while t runs.
+func EnableContainmentAnchorsForTest(t interface {
+	Helper()
+	Cleanup(func())
+}) {
+	t.Helper()
+	old := containmentAnchors
+	containmentAnchors = true
+	t.Cleanup(func() { containmentAnchors = old })
+}
+
 // containmentAnchor finds the promotion record of s = (uuid(w), srv) whose
 // promotion set P anchors w by containment (issue #269), or says why the
 // record in whose lag window w lies does not. pending is anchorRecords'
-// pending record.
+// pending record. With containmentAnchors off, which is how the planner
+// ships, it finds none and gives no reason.
 //
 // A promotion record R carries P ⊆ R.gtidExecuted (recordEvidence): every
 // member of P was executed by R's server incarnation before any
@@ -746,6 +845,9 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 // X plays no part (N1): excluding a transaction neither sets a record
 // aside nor makes one an anchor.
 func (p *planner) containmentAnchor(w GTID, srv uint32, oct int64, pending *promoRef) (*promoRef, string) {
+	if !containmentAnchors {
+		return nil, ""
+	}
 	uuid := w.UUID()
 	var holder *promoRef
 	for i := range p.fences {

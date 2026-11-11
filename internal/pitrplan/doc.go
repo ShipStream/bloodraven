@@ -27,17 +27,24 @@
 // (witness.go): a set its origin server provably executed before it. A
 // promotion record of the origin anchors by time, with its gtidExecuted,
 // when it lacks the witness and was observed more than δ before the
-// witness committed. The promotion record of the witness's own episode
-// anchors by containment (issue #269), with its promotion set
-// (promotionGtidExecuted, which the sidecar derives from its last
+// witness committed. An archived origin file of the same server anchors
+// too. Every anchor is fenced by the records around it (fenceOf), and
+// exclusions never set a record aside (N1). A record's
+// readOnlyGtidExecuted is not read.
+//
+// A witness that its era's promotion record already holds, or that
+// committed within δ of that record, has no anchor and refuses
+// PITRStopAmbiguous: the promotion-record lag window (D-53). Issue #269
+// added evidence to close it, which the sidecar records: the record's
+// promotion set (promotionGtidExecuted, derived from the sidecar's last
 // read-only observation and the binlog file opened before the episode's
-// first transaction), when that set lacks the witness and the record's
-// observation or its confirmation holds it: no clock has to order the
-// record and the witness, which covers the transactions a new primary
-// commits before and shortly after its record is observed. An archived
-// origin file of the same server anchors too. Every anchor is fenced by
-// the records around it (fenceOf), and exclusions never set a record
-// aside (N1). A record's readOnlyGtidExecuted is not read.
+// first transaction) and a confirmation. The record of the witness's own
+// episode would anchor by containment, with its promotion set, when that
+// set lacks the witness and the record's observation or its confirmation
+// holds it, so that no clock has to order the record and the witness. That
+// rule is implemented, tested, and switched off (containmentAnchors, which
+// states why and what must hold before it is turned on): the planner as
+// it ships certifies nothing through a promotion set or a confirmation.
 //
 // An anchor proves that the origin had executed a set before the witness;
 // the plan certifies everything the copy follows. So an accepted copy is
@@ -46,7 +53,9 @@
 // a promotion set of the origin were committed in that record's episode
 // or later, by their archived copies' commit times. A copy on a server
 // that lost transactions and never got them back, or on a replica that
-// kept transactions its source lost and issued again, refuses.
+// kept transactions its source lost and issued again, refuses. These
+// checks only refuse and are part of the shipped planner; a promotion set
+// is read for the second, and a record without one dates nothing.
 //
 // Every downloaded copy of a GTID is compared with the others as it arrives
 // (ingest and compare, plan.go): commit time, origin server, emptiness, and

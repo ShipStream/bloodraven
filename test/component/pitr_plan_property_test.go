@@ -45,7 +45,18 @@ package component
 // and confirmation are held to the model as well: the set must precede the
 // episode's first own transaction in the server's own log.
 //
-// PITR_PLAN_SEED=<n> replays one trial; PITR_PLAN_SEEDS=<n> runs seeds 1..n.
+// The planner ships with the containment anchor of #269 off
+// (pitrplan.EnableContainmentAnchorsForTest has why), and TestPITRPlanProperty
+// holds the shipped planner to the model: a witness in a promotion record's
+// lag window that is archived only as a replica copy refuses, and no
+// certified plan is anchored by a record that holds its witness or was
+// observed within δ of it. TestPITRPlanPropertyContainmentAnchors runs the
+// same trials with the anchor on, so that the rule keeps its property
+// coverage until it is enabled.
+//
+// PITR_PLAN_SEED=<n> replays one trial; PITR_PLAN_SEEDS=<n> runs seeds 1..n
+// of TestPITRPlanProperty, PITR_PLAN_CONTAINMENT_SEEDS=<n> those of
+// TestPITRPlanPropertyContainmentAnchors.
 
 import (
 	"bytes"
@@ -515,7 +526,10 @@ type propStats struct {
 	crashedPlanned    int
 }
 
-func runPropTrial(t *testing.T, seed int64) (st propStats) {
+// runPropTrial runs one trial. containment says whether the planner's
+// containment anchor is on (the caller turned it on): the oracle then
+// expects the lag window to plan, and otherwise to refuse.
+func runPropTrial(t *testing.T, seed int64, containment bool) (st propStats) {
 	r := rand.New(rand.NewSource(seed))
 	p := newPropTrial(t, propConfirmDelay)
 	primary, replica := "a", "b"
@@ -600,6 +614,7 @@ func runPropTrial(t *testing.T, seed int64) (st propStats) {
 	}
 	p.targets = append(p.targets, time.Now().UTC().Add(time.Hour))
 	o := newPropOracle(t, p, time.Microsecond)
+	o.containment = containment
 	t.Logf("seed %d: %d eras, backup on %s, lossy=%v (lost %s), inverted=%v, crashed=%v (lost tail %s, issued again: %v), archived %s",
 		seed, eras, backupSite, p.lossy, p.dead, p.inverted, p.crashed, p.lostTail, p.reissued, o.archived)
 	if os.Getenv("PITR_PLAN_SEED") != "" {
@@ -615,6 +630,10 @@ func runPropTrial(t *testing.T, seed int64) (st propStats) {
 		}
 		st.planned++
 		if o.byContainment(r.plan) {
+			if !containment {
+				t.Fatalf("seed %d: the shipped planner certified T=%s X=%s through a promotion record that holds the witness or was observed within δ of it: %+v",
+					seed, r.T.Format(time.RFC3339Nano), r.X, r.plan.Witness)
+			}
 			st.contained++
 		}
 		if p.crashed {
@@ -629,14 +648,17 @@ func runPropTrial(t *testing.T, seed int64) (st propStats) {
 
 // propOracle holds the reference model's view of one finished trial.
 type propOracle struct {
-	t        *testing.T
-	p        *propTrial
-	delta    time.Duration
-	arch     pitrplan.Archive
-	rows     map[pitrplan.RowRef]pitrplan.Row
-	archived pitrplan.Set
-	B        pitrplan.Set
-	maxOctB  int64
+	t     *testing.T
+	p     *propTrial
+	delta time.Duration
+	// containment: the planner's containment anchor (#269) is on. It
+	// ships off, and then no record anchors a witness in its lag window.
+	containment bool
+	arch        pitrplan.Archive
+	rows        map[pitrplan.RowRef]pitrplan.Row
+	archived    pitrplan.Set
+	B           pitrplan.Set
+	maxOctB     int64
 
 	// copies are the archived transactions, read from every row's bytes: a
 	// GTID that was issued twice has copies with two commit times.
@@ -855,8 +877,12 @@ func (o *propOracle) anchorable(w pitrplan.GTID) bool {
 // The model is generous to refusals: any other record of the site observed
 // around w, and any record of the other site around w that lacks w, sets
 // the record aside. The set must also explain every predecessor of w that
-// is not under w's own server_uuid.
+// is not under w's own server_uuid. With the planner's containment anchor
+// off, as it ships, nothing anchors by containment.
 func (o *propOracle) contained(w pitrplan.GTID, X, lambda pitrplan.Set) bool {
+	if !o.containment {
+		return false
+	}
 	site := o.p.model.origin[w]
 	octW := o.p.model.oct[w]
 	d := o.delta.Microseconds()
@@ -1397,7 +1423,38 @@ func (o *propOracle) checkSegments(what string, X pitrplan.Set, plan *pitrplan.P
 	return replayed
 }
 
+// TestPITRPlanProperty holds the planner as it ships, with the containment
+// anchor off, to the model.
 func TestPITRPlanProperty(t *testing.T) {
+	// 32 seeds, so that the default run holds the shipped planner to both
+	// checks on a replica copy that a time anchor accepts. A planner without
+	// the inclusion check (the copy follows all of its anchor) certifies a
+	// history without transactions the origin had at seed 27, and one
+	// without the date check (the copy's predecessors were committed in the
+	// episode that must have committed them) replays a transaction its
+	// origin had lost at seed 32: 27 and 3 of the first 300 seeds. The
+	// trials run real archivers on the wall clock, so which seeds fail such
+	// a planner can shift by one.
+	propSweep(t, false, 32, "PITR_PLAN_SEEDS")
+}
+
+// TestPITRPlanPropertyContainmentAnchors runs the trials of
+// TestPITRPlanProperty with the planner's containment anchor on. The anchor
+// does not ship (pitrplan.EnableContainmentAnchorsForTest has why and what
+// must hold before it does); this keeps the rule held to the model until
+// then. The default is 12 seeds: enough to certify plans through a
+// containment anchor, which the sweep requires, and too few to fail every
+// wrong variant of the rule (a planner that anchors with a whole promotion
+// record instead of its promotion set first fails at seed 27). Run
+// PITR_PLAN_CONTAINMENT_SEEDS=300 or more when changing the rule.
+func TestPITRPlanPropertyContainmentAnchors(t *testing.T) {
+	pitrplan.EnableContainmentAnchorsForTest(t)
+	propSweep(t, true, 12, "PITR_PLAN_CONTAINMENT_SEEDS")
+}
+
+// propSweep runs seeds 1..n (n from the environment variable seedsEnv, else
+// defaultSeeds), or the one seed of PITR_PLAN_SEED.
+func propSweep(t *testing.T, containment bool, defaultSeeds int64, seedsEnv string) {
 	seeds := []int64{}
 	if v := os.Getenv("PITR_PLAN_SEED"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -1406,17 +1463,8 @@ func TestPITRPlanProperty(t *testing.T) {
 		}
 		seeds = append(seeds, n)
 	} else {
-		// 32 seeds, so that the default run holds the planner to each rule
-		// of an anchored witness. A planner that does not hold a replica
-		// copy to its anchor certifies a history without transactions the
-		// origin had from seed 27 on (a copy that lacks members of the
-		// anchor, or of the record's sample outside its promotion set), and
-		// replays a transaction its origin had lost from seed 32 on (the
-		// predecessors' commit times); the planner of 4c2052dc does both.
-		// A planner that anchors with a whole promotion record instead of
-		// its promotion set fails earlier.
-		last := int64(32)
-		if v := os.Getenv("PITR_PLAN_SEEDS"); v != "" {
+		last := defaultSeeds
+		if v := os.Getenv(seedsEnv); v != "" {
 			n, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {
 				t.Fatal(err)
@@ -1431,7 +1479,7 @@ func TestPITRPlanProperty(t *testing.T) {
 	crashed, reissued, crashedPlanned := 0, 0, 0
 	for _, seed := range seeds {
 		t.Run(strconv.FormatInt(seed, 10), func(t *testing.T) {
-			st := runPropTrial(t, seed)
+			st := runPropTrial(t, seed, containment)
 			planned += st.planned
 			refused += st.refused
 			contained += st.contained
@@ -1444,12 +1492,12 @@ func TestPITRPlanProperty(t *testing.T) {
 			}
 		})
 	}
-	t.Logf("%d certified plans (%d through a containment anchor), %d refusals over %d trials; an old primary lost its tail and rejoined in %d trials (%d certified plans), and issued a lost GTID again in %d",
-		planned, contained, refused, len(seeds), crashed, crashedPlanned, reissued)
+	t.Logf("containment anchors on: %v. %d certified plans (%d through a containment anchor), %d refusals over %d trials; an old primary lost its tail and rejoined in %d trials (%d certified plans), and issued a lost GTID again in %d",
+		containment, planned, contained, refused, len(seeds), crashed, crashedPlanned, reissued)
 	if len(seeds) > 1 && planned < len(seeds) {
 		t.Errorf("the sweep certified only %d plans; the generator is not exercising the planner", planned)
 	}
-	if len(seeds) >= 10 && contained == 0 {
+	if containment && len(seeds) >= 10 && contained == 0 {
 		t.Errorf("no plan of the sweep needed a containment anchor; the generator is not exercising the lag window")
 	}
 	if len(seeds) >= 30 && (reissued == 0 || crashedPlanned == 0) {
@@ -1468,13 +1516,19 @@ func TestPITRPlanProperty(t *testing.T) {
 //   - unspaced: b commits within δ of its record and is demoted before the
 //     record is confirmed, so the targets refuse PITRStopAmbiguous;
 //   - confirmed (#269): b commits within δ of its record and stays primary
-//     until its sidecar confirms the record (2δ later). The confirmation
-//     holds b's commits and the record's promotion set does not, so the
-//     record anchors them by containment.
+//     until its sidecar confirms the record (2δ later). The planner as it
+//     ships does not anchor with that evidence, and the targets refuse
+//     PITRStopAmbiguous with the safe target, as in the unspaced case. With
+//     the containment anchor on, the confirmation holds b's commits and the
+//     record's promotion set does not, so the record anchors them.
 //
-// The model oracle checks every other answer.
+// Every case is planned as shipped and again with the containment anchor
+// on. The model oracle checks every other answer.
 func TestPITRPlanPropertyProductionMargin(t *testing.T) {
 	delta := pitrplan.DefaultClockSkewMargin
+	// The cases build their histories in parallel and plan one at a time:
+	// the containment anchor is one switch for the whole planner.
+	var planning sync.Mutex
 	for _, tc := range []struct {
 		name            string
 		spaced, confirm bool
@@ -1526,39 +1580,63 @@ func TestPITRPlanPropertyProductionMargin(t *testing.T) {
 			if tc.confirm && rec.ConfirmedAt.Before(rec.ObservedAt.Add(pitrarchive.PromotionConfirmDelay)) {
 				t.Fatalf("b's record was confirmed %s after it was observed", rec.ConfirmedAt.Sub(rec.ObservedAt))
 			}
-			o := newPropOracle(t, p, delta)
-			for _, T := range eraB {
-				w, _ := o.witness(T, pitrplan.Set{})
-				if o.originCopy(w) {
-					t.Fatalf("the fixture archived b's commit %s on b", w)
-				}
-			}
-			res := o.run(tc.name)
-			for _, r := range res {
-				inB := false
+			safe := "or choose a target after " + recB.Add(delta).UTC().Format("2006-01-02T15:04:05.000000Z") + " (b's promotion record at "
+
+			plan := func(t *testing.T, containment bool) {
+				o := newPropOracle(t, p, delta)
+				o.containment = containment
 				for _, T := range eraB {
-					inB = inB || r.T.Equal(T)
+					w, _ := o.witness(T, pitrplan.Set{})
+					if o.originCopy(w) {
+						t.Fatalf("the fixture archived b's commit %s on b", w)
+					}
 				}
-				switch {
-				case r.mode == pitrplan.ModeLatest && r.err != nil:
-					t.Errorf("latest mode refused: %v", r.err)
-				case inB && tc.spaced:
-					if r.err != nil || o.byContainment(r.plan) {
-						t.Errorf("T=%s inside b's era, more than δ after b's record: want a plan anchored by time, got %+v %v", r.T.Format(time.RFC3339Nano), r.plan, r.err)
+				res := o.run(tc.name)
+				for _, r := range res {
+					inB := false
+					for _, T := range eraB {
+						inB = inB || r.T.Equal(T)
 					}
-				case inB && tc.confirm:
-					if r.err != nil || !o.byContainment(r.plan) || len(r.plan.Witness.AnchorRecords) != 1 || r.plan.Witness.AnchorRecords[0] != "b#0" {
-						t.Errorf("T=%s inside b's era, within δ of b's confirmed record: want a plan anchored by b#0, got %+v %v", r.T.Format(time.RFC3339Nano), r.plan, r.err)
-					}
-				case inB:
-					ref, ok := pitrplan.RefusalOf(r.err)
-					if !ok || ref.Token != pitrarchive.TokenStopAmbiguous {
-						t.Errorf("T=%s inside b's era, within δ of b's record: want PITRStopAmbiguous, got %v", r.T.Format(time.RFC3339Nano), r.err)
-					} else if !strings.Contains(ref.Message, "it has no confirmation (confirmedAt)") {
-						t.Errorf("T=%s: the refusal does not say what b's record lacks: %s", r.T.Format(time.RFC3339Nano), ref.Message)
+					at := r.T.Format(time.RFC3339Nano)
+					switch {
+					case r.mode == pitrplan.ModeLatest && r.err != nil:
+						t.Errorf("latest mode refused: %v", r.err)
+					case inB && tc.spaced:
+						if r.err != nil || o.byContainment(r.plan) {
+							t.Errorf("T=%s inside b's era, more than δ after b's record: want a plan anchored by time, got %+v %v", at, r.plan, r.err)
+						}
+					case inB && tc.confirm && containment:
+						if r.err != nil || !o.byContainment(r.plan) || len(r.plan.Witness.AnchorRecords) != 1 || r.plan.Witness.AnchorRecords[0] != "b#0" {
+							t.Errorf("T=%s inside b's era, within δ of b's confirmed record: want a plan anchored by b#0, got %+v %v", at, r.plan, r.err)
+						}
+					case inB:
+						ref, ok := pitrplan.RefusalOf(r.err)
+						if !ok || ref.Token != pitrarchive.TokenStopAmbiguous {
+							t.Errorf("T=%s inside b's era, within δ of b's record: want PITRStopAmbiguous, got %v", at, r.err)
+							continue
+						}
+						if !strings.Contains(ref.Message, safe) || !strings.Contains(ref.Message, "which is not provably before") {
+							t.Errorf("T=%s: the refusal does not name the safe target (%q): %s", at, safe, ref.Message)
+						}
+						switch {
+						case containment && !strings.Contains(ref.Message, "it has no confirmation (confirmedAt)"):
+							t.Errorf("T=%s: the refusal does not say what b's record lacks: %s", at, ref.Message)
+						case !containment && (strings.Contains(ref.Message, "containment") || strings.Contains(ref.Message, "confirm") || strings.Contains(ref.Message, "promotion set")):
+							// The shipped planner does not anchor with a
+							// promotion set, confirmed or not: the refusal
+							// must not send the operator after one.
+							t.Errorf("T=%s: the shipped planner's refusal speaks of evidence it does not use: %s", at, ref.Message)
+						}
 					}
 				}
 			}
+			planning.Lock()
+			defer planning.Unlock()
+			plan(t, false)
+			t.Run("containment anchors", func(t *testing.T) {
+				pitrplan.EnableContainmentAnchorsForTest(t)
+				plan(t, true)
+			})
 		})
 	}
 }

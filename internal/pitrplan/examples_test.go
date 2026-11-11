@@ -1,6 +1,7 @@
 package pitrplan_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -146,25 +147,46 @@ func TestExample3FailbackWithoutReclone(t *testing.T) {
 
 	// Issue #269: the same history with a record that carries its
 	// promotion set A:1-100 (the operator's rotation at b's promotion) and
-	// a confirmation taken 10.2 s after it. R_b holds Bu:2 and its
-	// promotion set does not, so b executed A:1-100 before Bu:2; Bu:5 is
-	// not in R_b but in its confirmation. Both plan, and so does every
-	// later target, by time as before.
+	// a confirmation taken 10.2 s after it. The planner ships with the
+	// containment anchor off, so the evidence changes nothing: both lag
+	// targets refuse with the same safe targets, and the later one plans
+	// by time.
 	w = example3(t, true)
 	rb := &w.manifest("b").Promotions[0]
 	rb.PromotionGTIDExecuted = w.set("A:1-100").String()
 	rb.ConfirmedAt, rb.ConfirmedGTIDAdded = tauB.Add(10200*time.Millisecond), w.set("Bu:4-13").String()
-	p = w.check("3ii lag, promotion set", query{stop: w.in("Bu:2")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:2",
-		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1", ""}}})
-	if a := p.Witness; len(a.AnchorRecords) != 1 || a.AnchorRecords[0] != "b#0" || a.AnchorOriginRow != "" {
-		t.Errorf("3ii lag anchor = %+v, want R_b only", a)
-	}
-	w.check("3ii lag, the era's first commit", query{stop: w.in("Bu:1")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:1",
-		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100", ""}}})
-	w.check("3ii lag, inside the margin, confirmed", query{stop: w.in("Bu:5")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:5",
-		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-4", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-4", ""}}})
-	w.check("3ii lag, after the record, promotion set", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
-		truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
+	pitrplan.Shipped(func() {
+		w.check("3ii lag, promotion set, as shipped", query{stop: w.in("Bu:2")}, want{token: pitrarchive.TokenStopAmbiguous,
+			msg: []string{"archived only as a replica copy on a", "after " + anchorFrom + " (b's promotion record at " + tauB.Format(microLayout),
+				"safe targets are at or before " + w.at("A:100").Format(microLayout) + ", or after " + anchorFrom}})
+		w.check("3ii lag, inside the margin, confirmed, as shipped", query{stop: w.in("Bu:5")}, want{token: pitrarchive.TokenStopAmbiguous,
+			msg: []string{"after " + anchorFrom + " (b's promotion record at " + tauB.Format(microLayout) + ", which is not provably before"}})
+		for _, stop := range []string{"Bu:2", "Bu:5"} {
+			if _, err := w.plan(query{stop: w.in(stop)}); strings.Contains(err.Error(), "containment") || strings.Contains(err.Error(), "confirm") {
+				t.Errorf("3ii lag, %s, as shipped: the refusal speaks of evidence the planner does not anchor with: %v", stop, err)
+			}
+		}
+		w.check("3ii lag, after the record, promotion set, as shipped", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
+			truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
+	})
+	// With the containment anchor on (tests only): R_b holds Bu:2 and its
+	// promotion set does not, so b executed A:1-100 before Bu:2; Bu:5 is
+	// not in R_b but in its confirmation. Both plan, and so does every
+	// later target, by time as before.
+	t.Run("containment anchors", func(t *testing.T) {
+		pitrplan.EnableContainmentAnchorsForTest(t)
+		p := w.check("3ii lag, promotion set", query{stop: w.in("Bu:2")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:2",
+			truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1", ""}}})
+		if a := p.Witness; len(a.AnchorRecords) != 1 || a.AnchorRecords[0] != "b#0" || a.AnchorOriginRow != "" {
+			t.Errorf("3ii lag anchor = %+v, want R_b only", a)
+		}
+		w.check("3ii lag, the era's first commit", query{stop: w.in("Bu:1")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:1",
+			truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100", ""}}})
+		w.check("3ii lag, inside the margin, confirmed", query{stop: w.in("Bu:5")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:5",
+			truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-4", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-4", ""}}})
+		w.check("3ii lag, after the record, promotion set", query{stop: w.in("Bu:10")}, want{outcome: pitrplan.OutcomeTargetCovered, witness: "Bu:10",
+			truth: pitrplan.GroundTruthAnchored, lambda: "A:1-100,Bu:1-9", segs: []seg{{"a/a1", "A:41-70", ""}, {"a/a2", "A:71-100,Bu:1-9", ""}}})
+	})
 
 	// N3 revised: a reset record of b (b recloned, a sidecar restart that
 	// found b's history replaced) observed after R_b and not provably
