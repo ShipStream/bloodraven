@@ -60,6 +60,8 @@ check mysql-client-other 'internal/mysql/sidecar_client.go' true false false tru
 check controller-restore-go 'internal/controller/restore.go' true false false false
 check mysql-launcher 'internal/controller/mysql_launcher.go' true false false true
 check mysql-launcher-native-test 'internal/controller/mysql_launcher_native_test.go' true false false true
+check dragonfly-client 'internal/dragonfly/position.go' true false false true
+check dragonfly-native-test 'internal/dragonfly/position_native_test.go' true false false true
 check encryption-launcher-steps 'internal/controller/encryption.go' true false false true
 check controller-reconciler 'internal/controller/reconciler.go' true false false false
 check e2e-workflow '.github/workflows/e2e.yml' false false false false

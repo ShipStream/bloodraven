@@ -784,6 +784,8 @@ Live k3d status from May 3, 2026: scenarios 22, 23, 24, 25, 26, 27, and 29 pass 
 
 **Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins with `status.dragonfly.sites[].role=Replica` and `linkStatus=up`, and the Dragonfly promotion metric increments.
 
+The kill closes the replication connection, so the replica holds the seeded key and reports its link down: the manager promotes it on the first missed poll, before the StatefulSet's replacement pod (an empty master) is up. A master that is only partitioned (scenario 39) is promoted after `spec.failureThreshold` missed polls, about 9 to 11 s with the defaults.
+
 ---
 
 ### 26. Emergency MySQL Failover With Dragonfly Down

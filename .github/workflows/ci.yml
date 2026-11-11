@@ -185,6 +185,9 @@ jobs:
   # mysql container launcher against real servers through first boot,
   # restarts, clones and a killed clone. It reads MySQL-internal file names
   # in the data directory, so this is where an upstream change shows.
+  # And the native Dragonfly test: the client against a real master and
+  # replica, for the two Dragonfly-internal commands the sync check reads
+  # replication positions with.
   test-pitr-native:
     needs: changes
     if: needs.changes.outputs.pitr == 'true'
@@ -212,6 +215,10 @@ jobs:
         env:
           BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
         run: go test ./internal/controller -run 'TestMySQLLauncherNative' -v -timeout 20m
+      - name: Run native Dragonfly test
+        env:
+          BLOODRAVEN_DRAGONFLY_NATIVE_TEST: "1"
+        run: go test ./internal/dragonfly -run 'TestDragonflyNativeSyncProof' -v -timeout 10m
 
   test-envtest:
     needs: changes
