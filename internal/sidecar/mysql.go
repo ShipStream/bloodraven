@@ -509,8 +509,9 @@ func mysqlBool(value sql.NullString) bool {
 const sqlLogBinRestoreTimeout = 5 * time.Second
 
 // RotateInnoDBMasterKey issues the master-key rotation. It only
-// succeeds against a writable keyring: with the sealed (read_only)
-// rendering MySQL rejects it with ER_CANNOT_FIND_KEY_IN_KEYRING, which
+// succeeds against a writable keyring: with the sealed rendering (the
+// keyring on a read-only mount) MySQL cannot store the new key and
+// rejects it with ER_CANNOT_FIND_KEY_IN_KEYRING, which
 // is precisely the guardrail that stops an ad-hoc rotation from
 // stranding data behind a key nobody escrowed.
 // The rotation is deliberately kept out of the binary log.

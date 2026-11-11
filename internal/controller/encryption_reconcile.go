@@ -568,9 +568,12 @@ func (r *MysqlFailoverGroupReconciler) advanceEscrowedSite(
 	}
 
 	// Final confirmation from MySQL itself: the keyring component must
-	// report Read_only. Without this a rendering bug (wrong plugin dir,
-	// stale ConfigMap) could leave a writable keyring behind a Secret
-	// mount and the operator would call it sealed.
+	// report Read_only, which shows that mysqld loaded the sealed
+	// component config (a wrong plugin dir or a stale ConfigMap would
+	// not). It is not what keeps the keyring from changing: MySQL stores
+	// keys in a writable file whatever that setting says. The Secret
+	// projection checked above (deploymentRendersSealedKeyring), mounted
+	// read-only, is.
 	live, err := fetch(ctx, fg, site.Name)
 	if err != nil {
 		site.Message = fmt.Sprintf("waiting for sidecar to confirm the seal: %v", err)
