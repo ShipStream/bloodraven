@@ -29,7 +29,7 @@ func TestBuildDragonflyStatus_OptionalSyncObservations(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			master := DragonflySiteSnapshot{Name: "dc1", Reachable: true, Info: dragonfly.ReplicationInfo{Role: "master"}}
-			st := buildDragonflyStatus(fg, []DragonflySiteSnapshot{master, replica(tc.info)})
+			st := buildDragonflyStatus(fg, []DragonflySiteSnapshot{master, replica(tc.info)}, false)
 			var site *v1alpha1.DragonflySiteStatus
 			for i := range st.Sites {
 				if st.Sites[i].Name == "dc2" {
