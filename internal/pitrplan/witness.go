@@ -701,30 +701,78 @@ func (p *planner) anchorRecords(c GTID, srv uint32, oct int64) anchorChoice {
 // transaction named w, and the archived transactions its copy follows under
 // w's server_uuid, must be the ones that episode's server had. They are not
 // when a server_uuid issues a GTID twice. A server that loses transactions
-// its replica already holds (a crash with an unsynced binlog, a volume that
-// comes back older) and rejoins by replication never gets them back (a
-// server does not apply a transaction that carries its own server_id), and
-// once it is promoted again it issues their numbers to other transactions:
-// the first commits of its next episode, which is the lag window. The
-// checks of containmentAnchor and copyAgainstAnchor date both issues
-// against the record, and two classes of wrong certification through a
-// containment anchor are still known, each pinned by a test: both issues
-// committed inside one episode window
-// (TestWitnessContainmentResidualIssuedTwice), and a GTID issued again one
-// episode back whose record carries no promotion set
-// (TestWitnessLostTailReissuedInAnEarlierEpisode). The time rule has the
-// same root cause from δ after a record on (a record without a promotion
-// set dates nothing); this anchor would extend it into the window where a
-// reissue always falls.
+// its replica already holds (a volume that comes back older, a crash that
+// loses the end of the redo log and the binlog together) never gets them
+// back by replication (a server does not apply a transaction that carries
+// its own server_id), and once it is writable again it issues their numbers
+// to other transactions: the first commits of its next episode, which is
+// the lag window.
 //
-// Before it is turned on, both must hold:
+// The operator no longer rejoins such a server by replication and no longer
+// promotes it while a site it can read holds the lost transactions: it
+// reclones it, and a clone gives it a new server_uuid
+// (internal/controller/own_transactions_lost.go). That was the first of the
+// two conditions this comment used to name. The second, a fresh adversarial
+// review with that guarantee, was done and found the anchor still unsafe,
+// because the guarantee has exceptions the operator cannot close (site
+// docs, failover, "What this cannot see"): a server made writable while no
+// site that holds its lost transactions answers (the primary itself,
+// restarted in place, is the plain case), one made writable by hand, one
+// promoted before the replica audit compared it, and every GTID issued
+// twice before the upgrade to that operator. In those histories these
+// wrong certifications through a containment anchor are known, each pinned
+// by a test:
 //
-//   - the operator no longer rejoins by replication an old primary that
-//     lacks transactions of its own server_uuid that the new primary holds
-//     (it is recloned instead, and a clone gives it a new server_uuid,
-//     issue #265), so that a server_uuid cannot issue a GTID twice without
-//     a clone;
-//   - the rule, with that guarantee, has passed a fresh adversarial review.
+//   - a GTID issued again in an episode whose record carries no promotion
+//     set (a sidecar that started while its server was already writable, a
+//     release before promotion sets, an unreadable binlog header) or has no
+//     record, certified in the lag window of a later episode's record,
+//     whose promotion set holds the GTID as one of the transactions the
+//     server had before: nothing dates the archived copy
+//     (TestWitnessLostTailReissuedInAnEarlierEpisode,
+//     TestKnownLimitationContainmentAnchorAfterReissue; with real
+//     archivers, test/component
+//     TestKnownLimitationPITRPlanAfterInPlaceReissue);
+//   - every record carries a promotion set, and the only copy of the lost
+//     transactions is in the backup, taken on the replica that kept them
+//     (retention retired the rows that backup holds). copyAgainstAnchor
+//     dates archived copies; nothing dates the backup against an episode,
+//     and no time tells a backup taken on that replica after the reissue
+//     from one that holds the new transactions (same tests);
+//   - both issues committed inside one episode window
+//     (TestWitnessContainmentResidualIssuedTwice). On one clock that needs
+//     the loss and the reissue between two role probes; with a server that
+//     came back on another node, or a clock set back at a reboot, it needs
+//     a clock error as long as the outage.
+//
+// The time rule has the same root cause from δ after a record on
+// (TestKnownLimitationTimeAnchorCertifiesReissuedGTID,
+// TestKnownLimitationBackupCarriesReissuedGTID), and so has a copy that
+// needs no anchor (TestKnownLimitationOwnHistoryCopyNeedsNoAnchor); this
+// anchor would extend the first two into the window where a reissue always
+// falls. In the review's run of test/component TestPITRPlanResidualSweep
+// (40 random histories of a primary reasserted in place, real archivers) it
+// certified 34 wrong plans in lag windows that the planner as it ships
+// refused, and refused 6 wrong plans that the shipped planner certifies.
+//
+// Before it is turned on, a reader must be able to tell from the archive
+// that none of those histories happened between the oldest transaction the
+// plan relies on under the witness's server_uuid and the witness. At least:
+//
+//   - the anchor is not used while a promotion record of the witness's
+//     server_uuid carries no promotion set, and the sidecar records every
+//     writable episode it did not observe from a read-only observation on
+//     (an episode that ended unrecorded, a sidecar that was not running),
+//     so that "every record carries a promotion set" means every episode;
+//   - the backup is dated like the copies: a backup that holds a
+//     transaction under the witness's server_uuid outside a dating record's
+//     promotion set, and finished before that record's episode can have
+//     begun, holds another transaction under that GTID;
+//   - a backup taken on another server than the witness's origin after the
+//     reissue is told apart, or accepted as a documented limitation (it is
+//     wrong with any witness, anchored or not);
+//   - the result has passed another adversarial review, and
+//     TestPITRPlanResidualSweep certifies no wrong plan.
 //
 // While it is off, containmentAnchor selects nothing and says nothing, so
 // no plan is certified through a promotion set or a confirmation. What
