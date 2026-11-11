@@ -877,6 +877,12 @@ func TestArchiveWritersReplicaViolationSetsItsMarker(t *testing.T) {
 // startStoppable runs an archiver like start and returns a function that
 // stops it (a sidecar container restart) and waits for it to return.
 func (w *writerArchive) startStoppable(site string, srv *simServer, identity sidecar.ArchiveIdentity) func() {
+	_, stop := w.startRestartable(site, srv, identity)
+	return stop
+}
+
+// startRestartable is startStoppable that also returns the archiver.
+func (w *writerArchive) startRestartable(site string, srv *simServer, identity sidecar.ArchiveIdentity) (*sidecar.BinlogArchiver, func()) {
 	ctx, cancel := context.WithCancel(w.ctx)
 	cfg := &sidecar.PITRConfig{
 		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
@@ -886,7 +892,7 @@ func (w *writerArchive) startStoppable(site string, srv *simServer, identity sid
 	done := make(chan struct{})
 	w.wg.Add(1)
 	go func() { defer w.wg.Done(); defer close(done); a.Run(ctx) }()
-	return func() { cancel(); <-done }
+	return a, func() { cancel(); <-done }
 }
 
 func resetRecordsOf(m *sidecar.Manifest) []sidecar.PromotionRecord {
@@ -1622,4 +1628,360 @@ func TestArchiveWritersPromotionLagWindowLateApplier(t *testing.T) {
 	// After the record and its margin b had A:8, and the record says so.
 	plan, err := w.plan(dump, before(era2[1]), "")
 	assertPlan(t, "after the lag window", plan, err, A+":1-8,"+B+":1-2", B+":3", pitrplan.GroundTruthAnchored)
+}
+
+// episodeLayout is up to four writable episodes, a, b, a, b, the third of
+// them short. With recorded, a's sidecar runs throughout and records the third
+// episode like the first. Without, a's sidecar is down for the whole of the
+// third episode (a container restart that outlasts it): no probe ever sees a
+// writable there, the episode has no promotion record, and the new sidecar
+// process, which finds a read-only, drains the episode's files under the
+// record of a's first episode (the same server incarnation).
+//
+// Every promotion rotates the candidate's binary log (#229) and every
+// planned handoff flushes the outgoing primary (#264).
+type episodeLayout struct {
+	w                      *writerArchive
+	dump                   backupmeta.DumpMeta
+	era1, era2, era3, era4 []binlogtest.Txn
+}
+
+// episodeOptions selects the layout.
+type episodeOptions struct {
+	// recorded: a's sidecar runs during the third episode.
+	recorded bool
+	// lostIn: b fails before its last transaction B:3 reached a, so the
+	// third episode starts without it. lostOut: a fails before its last
+	// transaction A:11 reached b.
+	lostIn, lostOut bool
+	// lagIn: B:3 reaches a only after a is writable (a still-running
+	// applier). bGone: b fails for good at the end of its episode; its
+	// last file is never sealed or archived.
+	lagIn, bGone bool
+	// finish is how the layout ends after the third episode:
+	//   "b": b is promoted again as it is (after lostIn it still holds B:3,
+	//        which a never had: an errant transaction that returns);
+	//   "reclone": b is recloned from a with a new server_uuid first (what
+	//        the operator does with a returning primary that holds
+	//        transactions the group lost), then promoted;
+	//   "fenced": a is fenced and nothing is promoted yet.
+	finish string
+}
+
+func newEpisodeLayout(t *testing.T, o episodeOptions) *episodeLayout {
+	t.Helper()
+	A, B, C := writerUUIDA, writerUUIDB, writerUUIDC
+	l := &episodeLayout{w: newWriterArchive(t)}
+	w := l.w
+	srvA := newSimServer(t, A, 101, false)
+	srvB := newSimServer(t, B, 102, true)
+	id := w.identity(writerGroup, w.dest)
+	a, stopA := w.startRestartable("a", srvA, id)
+	b := w.start("b", srvB, w.store, id)
+
+	// Episode 1: a.
+	w.waitRecords("a", 1)
+	l.era1 = liveTxns(A, 101, 1, 5)
+	srvA.apply(l.era1...)
+	srvB.apply(l.era1...)
+	l.dump = writerDump(t, "a", 101, A+":1-5")
+	srvA.rotate()
+	w.eventually("a1 archived", func() bool { return len(w.manifest("a").Files) == 1 })
+	more := liveTxns(A, 101, 6, 8)
+	l.era1 = append(l.era1, more...)
+	srvA.apply(more...)
+	srvB.apply(more...)
+
+	// Episode 2: a planned handoff to b.
+	srvA.setReadOnly(true)
+	w.waitDemoted(a)
+	srvA.rotate()
+	w.waitTailDrained(a, "mysql-bin.000003")
+	srvB.promote(true, nil, nil)
+	w.waitRecords("b", 1)
+	l.era2 = liveTxns(B, 102, 1, 3)
+	srvB.apply(l.era2...)
+	reached := l.era2
+	if o.lostIn || o.lagIn {
+		reached = l.era2[:2]
+	}
+	srvA.apply(reached...)
+
+	// Episode 3: back to a, short. Unrecorded: a's sidecar is gone before
+	// a becomes writable and returns after it is read-only again.
+	if !o.recorded {
+		stopA()
+	}
+	srvB.setReadOnly(true)
+	w.waitDemoted(b)
+	if !o.lostIn && !o.bGone {
+		srvB.rotate() // the handoff's flush; a failed b keeps its file open
+	}
+	var late func() []binlogtest.Txn
+	if o.lagIn {
+		late = func() []binlogtest.Txn { return l.era2[2:] }
+	}
+	srvA.promote(true, nil, late)
+	if o.recorded {
+		w.waitRecords("a", 2)
+	}
+	l.era3 = liveTxns(A, 101, 9, 11)
+	srvA.apply(l.era3...)
+	reached = l.era3
+	if o.lostOut {
+		reached = l.era3[:2]
+	}
+	if (o.finish == "b" || !o.lostIn) && !o.bGone {
+		srvB.apply(reached...)
+	}
+
+	// The end of episode 3: a is fenced (and flushed, unless it failed).
+	srvA.setReadOnly(true)
+	if o.recorded {
+		w.waitDemoted(a)
+	}
+	if !o.lostOut {
+		srvA.rotate()
+	}
+	bRecords := 1
+	switch o.finish {
+	case "reclone":
+		// b returns read-only with B:3; the pre-reclone flush seals its
+		// file, its sidecar archives it, and b is cloned from a.
+		srvB.rotate()
+		w.waitTailDrained(b, "mysql-bin.000003")
+		srvB.recloneAs(srvA, C)
+		w.eventually("b's reset record", func() bool { return len(resetRecordsOf(w.manifest("b"))) == 1 })
+		bRecords++
+		fallthrough
+	case "b":
+		// Episode 4: b again.
+		srvB.promote(true, nil, nil)
+		bRecords++
+		w.waitRecords("b", bRecords)
+		if o.finish == "reclone" {
+			l.era4 = liveTxns(C, 102, 1, 3)
+		} else {
+			l.era4 = liveTxns(B, 102, 4, 6)
+		}
+		srvB.apply(l.era4...)
+		if !o.lostOut {
+			// A failed a that kept A:11 cannot replicate from b; it waits
+			// for its reclone.
+			if o.lostIn && o.finish == "b" {
+				srvA.apply(l.era2[2])
+			}
+			srvA.apply(l.era4...)
+		}
+	case "fenced":
+		if o.lostIn && !o.bGone {
+			srvB.rotate() // the failed b restarts: its file is sealed
+		}
+	}
+	if !o.recorded {
+		w.startRestartable("a", srvA, id)
+	}
+	if o.lostOut {
+		srvA.rotate() // the flush before a's reclone
+	}
+	if o.finish != "fenced" {
+		srvB.rotate()
+	}
+
+	// Both layouts end with the same rows: a's files through the one that
+	// holds its third episode, and b's through its last.
+	wantA := A + ":1-11," + B + ":1-3"
+	if o.lostIn {
+		wantA = A + ":1-11," + B + ":1-2"
+	}
+	var wantB string
+	switch {
+	case o.bGone:
+		wantB = A + ":1-8"
+	case o.finish == "fenced":
+		wantB = A + ":1-8," + B + ":1-3"
+	case o.finish == "reclone":
+		wantB = A + ":1-8," + B + ":1-3," + C + ":1-3"
+	case o.lostOut:
+		wantB = A + ":1-10," + B + ":1-6"
+	default:
+		wantB = A + ":1-11," + B + ":1-6"
+	}
+	archived := func(site string) string {
+		set := internalmysql.GTIDSet{}
+		for _, row := range w.manifest(site).Files {
+			gtids, err := internalmysql.ParseGTIDSet(row.GTIDCoverage.GTIDs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			set = sidecar.UnionBinlogGTIDs(set, gtids)
+		}
+		return set.String()
+	}
+	w.eventually("a's and b's files archived", func() bool {
+		return archived("a") == gtidSet(t, wantA) && archived("b") == gtidSet(t, wantB)
+	})
+	records := 1
+	if o.recorded {
+		records = 2
+	}
+	ma := w.manifest("a")
+	if len(ma.Promotions) != records || len(resetRecordsOf(ma)) != 0 || len(w.manifest("b").Promotions) != bRecords {
+		t.Fatalf("records: a %+v, b %+v", ma.Promotions, w.manifest("b").Promotions)
+	}
+	return l
+}
+
+// verdict is what the planner decides for one target: the refusal and the
+// set it names, or the lineage, the witness and how it was established.
+// The server_uuids are written A, B and C (the recloned b).
+func (l *episodeLayout) verdict(T time.Time, exclude string) string {
+	plan, err := l.w.plan(l.dump, T, exclude)
+	short := strings.NewReplacer(writerUUIDA, "A", writerUUIDB, "B", writerUUIDC, "C")
+	if err != nil {
+		ref, ok := pitrplan.RefusalOf(err)
+		if !ok {
+			l.w.t.Fatalf("plan: %v", err)
+		}
+		out := "refused " + string(ref.Token)
+		if plan != nil && !plan.Divergent.IsEmpty() {
+			out += " divergent=" + plan.Divergent.String()
+		}
+		if plan != nil && !plan.Lost.IsEmpty() {
+			out += " lost=" + plan.Lost.String()
+		}
+		return short.Replace(out)
+	}
+	out := fmt.Sprintf("%s lineage=%s", plan.Outcome, plan.Lineage)
+	if plan.Witness != nil {
+		out += fmt.Sprintf(" witness=%s (%s) in %s/%s", plan.Witness.GTID, plan.Witness.GroundTruth, plan.Witness.Row.Site, plan.Witness.Row.Name)
+	}
+	if !plan.Lost.IsEmpty() {
+		out += " lost=" + plan.Lost.String()
+	}
+	return short.Replace(out)
+}
+
+// targets are the layout's restore targets by name: 1 µs before a
+// transaction of each episode, and latest mode.
+func (l *episodeLayout) targets() (names []string, at map[string]time.Time) {
+	at = map[string]time.Time{}
+	add := func(name string, T time.Time) {
+		names = append(names, name)
+		at[name] = T
+	}
+	add("episode 1, before A:7", before(l.era1[6]))
+	add("episode 2, before B:2", before(l.era2[1]))
+	add("episode 2, before B:3", before(l.era2[2]))
+	add("episode 3, before A:9", before(l.era3[0]))
+	add("episode 3, before A:10", before(l.era3[1]))
+	add("episode 3, before A:11", before(l.era3[2]))
+	for i := range l.era4 {
+		add(fmt.Sprintf("episode 4, before its transaction %d", i+1), before(l.era4[i]))
+	}
+	add("latest", time.Time{})
+	return names, at
+}
+
+// Review F7, a decision that is accepted and pinned here: after a sidecar
+// restart, the files of a writable episode that no sidecar observed are
+// archived by the read-only drain under the site's previous promotion
+// record (the same server incarnation); the episode itself has no record.
+// The planner judges rows by their content, not by the record they were
+// uploaded under, so its verdicts must be those of the same history with
+// the episode recorded. Each layout is built twice, with a's sidecar
+// running through its third episode and without, and every target (a
+// timestamp inside each episode, and latest mode; without exclusions, and
+// with each transaction a layout can lose excluded) must get the same
+// verdict from both. The verdicts that matter are stated as well, so two
+// equal wrong answers do not pass.
+//
+// One layout is left out, because its verdicts do differ: b is promoted
+// again while it still holds B:3, which a never had (lostIn with finish
+// "b": a transaction the group lost returns with its site, which the
+// operator prevents by recloning such a site first). There the recorded
+// history refuses latest mode on the third episode's record, the evidence
+// that B:3 was lost at that promotion; without the record the planner has
+// no such evidence and restores the head, which holds B:3. Timestamp
+// targets agree in that layout too. The difference comes from the
+// promotion nobody observed, not from which record the drain uploads
+// under: the same rows uploaded later, at a's next promotion, would carry
+// no record of the third episode either.
+func TestArchiveWritersUnrecordedEpisodePlansAsRecorded(t *testing.T) {
+	A, B := writerUUIDA, writerUUIDB
+	for _, tc := range []struct {
+		name string
+		o    episodeOptions
+		// want are verdicts by "target" or "target excluding <set>", with
+		// the server_uuids written A, B and C.
+		want map[string]string
+	}{
+		{"clean handoffs", episodeOptions{finish: "b"}, map[string]string{
+			"episode 3, before A:10":              "TargetCovered lineage=A:1-9,B:1-3 witness=A:10 (Origin) in a/mysql-bin.000004",
+			"episode 4, before its transaction 2": "TargetCovered lineage=A:1-11,B:1-4 witness=B:5 (Origin) in b/mysql-bin.000004",
+			"latest":                              "ArchiveHead lineage=A:1-11,B:1-6",
+		}},
+		{"the episode's last transaction is lost", episodeOptions{lostOut: true, finish: "b"}, map[string]string{
+			"episode 3, before A:11":                             "TargetCovered lineage=A:1-10,B:1-3 witness=A:11 (Origin) in a/mysql-bin.000004",
+			"episode 4, before its transaction 2":                "refused PITRArchiveDivergentHistory divergent=A:11",
+			"episode 4, before its transaction 2 excluding A:11": "TargetCovered lineage=A:1-10,B:1-4 witness=B:5 (Origin) in b/mysql-bin.000004",
+			"latest":                "refused PITRArchiveSplitBrain",
+			"latest excluding A:11": "ArchiveHead lineage=A:1-10,B:1-6",
+		}},
+		{"the episode starts without b's last transaction, b is recloned", episodeOptions{lostIn: true, finish: "reclone"}, map[string]string{
+			"episode 3, before A:10":               "refused PITRArchiveDivergentHistory divergent=B:3",
+			"episode 3, before A:10 excluding B:3": "TargetCovered lineage=A:1-9,B:1-2 witness=A:10 (Origin) in a/mysql-bin.000004",
+			"latest":                               "refused PITRArchiveSplitBrain",
+			"latest excluding B:3":                 "ArchiveHead lineage=A:1-11,B:1-2,C:1-3",
+		}},
+		{"the episode starts without b's last transaction, a is fenced", episodeOptions{lostIn: true, finish: "fenced"}, map[string]string{
+			"episode 3, before A:10":               "refused PITRArchiveDivergentHistory divergent=B:3",
+			"episode 3, before A:10 excluding B:3": "TargetCovered lineage=A:1-9,B:1-2 witness=A:10 (Origin) in a/mysql-bin.000004",
+			"latest":                               "refused PITRArchiveSplitBrain",
+			"latest excluding B:3":                 "ArchiveHead lineage=A:1-11,B:1-2",
+		}},
+		{"b's last transaction arrives after the promotion, b never returns", episodeOptions{lagIn: true, bGone: true, finish: "fenced"}, map[string]string{
+			"episode 2, before B:3":  "TargetCovered lineage=A:1-8,B:1-2 witness=B:3 (Anchored) in a/mysql-bin.000004",
+			"episode 3, before A:10": "TargetCovered lineage=A:1-9,B:1-3 witness=A:10 (Origin) in a/mysql-bin.000004",
+			"latest":                 "ArchiveHead lineage=A:1-11,B:1-3",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var layouts [2]*episodeLayout
+			for i, recorded := range []bool{true, false} {
+				o := tc.o
+				o.recorded = recorded
+				layouts[i] = newEpisodeLayout(t, o)
+			}
+			recorded, unrecorded := layouts[0], layouts[1]
+			names, at := recorded.targets()
+			_, unrecordedAt := unrecorded.targets()
+			seen := map[string]bool{}
+			for _, exclude := range []string{"", B + ":3", A + ":11"} {
+				for _, name := range names {
+					want := recorded.verdict(at[name], exclude)
+					got := unrecorded.verdict(unrecordedAt[name], exclude)
+					key := name
+					if exclude != "" {
+						key += " excluding " + strings.NewReplacer(A, "A", B, "B").Replace(exclude)
+					}
+					if got != want {
+						t.Errorf("%s:\n  with the episode recorded: %s\n  unrecorded:                %s", key, want, got)
+					}
+					if stated, ok := tc.want[key]; ok {
+						seen[key] = true
+						if want != stated {
+							t.Errorf("%s: %s, want %s", key, want, stated)
+						}
+					}
+				}
+			}
+			for key := range tc.want {
+				if !seen[key] {
+					t.Errorf("no target %q in this layout", key)
+				}
+			}
+		})
+	}
 }

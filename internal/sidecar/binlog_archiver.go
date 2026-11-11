@@ -66,7 +66,11 @@ type BinlogArchiver struct {
 	tailUpload   *tailUpload
 	scanUploaded []string
 	scanSettled  map[string]bool
-	cfg          *PITRConfig
+	// uploadFailure is the last pass of uploads that failed, a writable
+	// scan's or a tail drain's, while no later scan has settled it
+	// (binlog_tail.go, tailOutcome).
+	uploadFailure *uploadFailure
+	cfg           *PITRConfig
 	// retentionCfg holds the fields the archiver needs to call the
 	// operator's /pitr-cutoff endpoint for retention decisions. Nil
 	// when those fields weren't passed via env (tests, or a
@@ -138,7 +142,7 @@ type BinlogArchiver struct {
 	oldestArchivedTime time.Time
 	newestArchivedTime time.Time
 	// divergentRows/quarantinedRows count this site's manifest rows;
-	// reissuableGTIDs is the last history audit's verdict on what this
+	// reissuableGTIDs is the last maintenance pass's verdict on what this
 	// server could reissue (nil: not evaluated); promotionRecordedAt is the
 	// confirmed record of the current writable episode; historyIntegrity is
 	// the site's marker (persisted or pending).
@@ -515,7 +519,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 			tail = a.tailBlockedEarly(resetErr.Error())
 			return
 		}
-		tail = a.drainTail(ctx, resetErr)
+		tail = a.drainTail(ctx)
 		return
 	}
 	switch {
@@ -544,6 +548,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	if len(entries) < 2 {
 		// < 2 means either no binlogs yet (len 0) or only the active
 		// one exists (len 1). Nothing sealed to archive.
+		a.uploadFailure = nil
 		a.clearScanError()
 		a.setBacklog(0)
 		tail = tailDrained(entries)
@@ -558,7 +563,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.incUploadFailures()
 		a.setError(wrapKeepToken("load manifest", err).Error())
 		a.logger.Warn("load manifest", "error", err)
-		tail = tailBlocked(entries, 0, wrapKeepToken("load manifest", err).Error())
+		tail = tailBlocked(entries, 0, a.noteUploadFailure())
 		return
 	}
 	retired := a.retiredBinlogIdentities(manifest)
@@ -578,14 +583,13 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// after a partial failure and the operator's status.pitr Message
 	// would flap clear on every scan.
 	if !hadFileError {
+		a.uploadFailure = nil
 		a.clearScanError()
 	}
 	// A writable site has to archive every sealed file.
 	switch {
 	case hadFileError:
-		a.mu.Lock()
-		tail = tailBlocked(entries, backlog, a.lastError)
-		a.mu.Unlock()
+		tail = tailBlocked(entries, backlog, a.noteUploadFailure())
 	case backlog > 0:
 		tail = tailPending(entries, backlog)
 	default:
@@ -917,10 +921,13 @@ type Status struct {
 	// under its own current server_uuid. Non-empty is an archiver error
 	// (LastError), and the runner warns PITRArchiveReissueRiskDetected when
 	// such a site is promoted. The empty string means the last history
-	// audit found none. nil means it has not been evaluated: no audit has
-	// completed in this process, or the server has no history yet (empty
-	// gtid_executed, a clone in progress, a read-only server with no
-	// replication channel).
+	// audit found none. nil means the last maintenance pass did not
+	// evaluate it: no audit has run in this process, the audit could not
+	// read the manifest or the server's state, the manifest carries a
+	// recorded GTID reuse (the audit stops there), or the server has no
+	// history yet (empty gtid_executed, a clone in progress, a read-only
+	// server with no replication channel). A verdict never outlives the
+	// pass that made it.
 	ReissuableGTIDs *string `json:"reissuableGtids,omitempty"`
 	// PromotionRecordedAt is the ObservedAt of the promotion record that
 	// gates the current writable episode's uploads; zero while no record
@@ -933,8 +940,10 @@ type Status struct {
 	// Tail is what the last scan decided about the sealed binlogs this
 	// site still has to archive: every sealed file while writable, the
 	// writable-era tail while read-only (binlog_tail.go). State and the
-	// file names come from one scan. nil until a scan has read the binlog
-	// index.
+	// file names come from one read of the binlog index, so the state is
+	// about the index in which ActiveFile was the active file, not about
+	// rotations after it (publishTail). nil until a scan has read the
+	// binlog index.
 	Tail *internalmysql.ArchiverTailStatus `json:"tail,omitempty"`
 }
 

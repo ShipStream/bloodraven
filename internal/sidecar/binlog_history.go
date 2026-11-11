@@ -96,7 +96,19 @@ func (a *BinlogArchiver) noteArchiveEpoch(ctx context.Context, m *Manifest, entr
 // the evidence in Divergent[], which the planner reads (pitrplan
 // Row.Divergent): a restore whose window crosses those transactions
 // refuses PITRArchiveDivergentHistory until excludeGtids lists them.
+//
+// The verdict on what this server could reissue (/archiver/status
+// reissuableGtids) is this pass's or none. Every return that did not
+// evaluate the server leaves no verdict: an earlier pass's "none" says
+// nothing about a server that has changed since, and the runner reads it as
+// no risk when the site is promoted.
 func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
+	evaluated := false
+	defer func() {
+		if !evaluated {
+			a.setReissuable(nil)
+		}
+	}()
 	auditError := a.archiveReuseError()
 	// Proof inspection shares one bounded history lane with the scan.
 	if !a.historyScanBusy {
@@ -120,7 +132,6 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 	// Empty execution is a fresh/bootstrap observation, not divergence
 	// evidence, and says nothing about what this server could reissue.
 	if current.IsEmpty() {
-		a.setReissuable(nil)
 		return auditError
 	}
 	if source, ok := a.mysql.(binlogBootstrapReader); ok {
@@ -129,7 +140,6 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 			return err
 		}
 		if !ready {
-			a.setReissuable(nil)
 			return auditError
 		}
 	}
@@ -197,6 +207,10 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 			quarantineChanged = true
 		}
 	}
+	// The server was evaluated: the verdict stands whether or not the
+	// evidence below can be saved.
+	a.setReissuable(reissuable)
+	evaluated = true
 	before, _ := json.Marshal(m.Divergent)
 	after, _ := json.Marshal(divergent)
 	if string(before) != string(after) || quarantineChanged {
@@ -207,7 +221,6 @@ func (a *BinlogArchiver) auditArchive(ctx context.Context, m *Manifest) error {
 		a.logger.Info("archive divergence evidence recorded", "rows", len(divergent),
 			"missingGtids", missingAll.String(), "reissuableGtids", reissuable.String())
 	}
-	a.setReissuable(reissuable)
 	if auditError != nil {
 		return auditError
 	}
@@ -239,7 +252,7 @@ func issuedBy(set internalmysql.GTIDSet, uuid string) internalmysql.GTIDSet {
 }
 
 // setReissuable publishes the audit's verdict on what this server could
-// reissue for /archiver/status; nil when this pass could not evaluate it.
+// reissue for /archiver/status; nil when this pass did not evaluate it.
 func (a *BinlogArchiver) setReissuable(set internalmysql.GTIDSet) {
 	var text *string
 	if set != nil {

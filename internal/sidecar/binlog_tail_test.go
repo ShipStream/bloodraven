@@ -905,7 +905,8 @@ func TestArchiverTailStatus(t *testing.T) {
 		t.Fatalf("tail = %+v, rows %q", st.Tail, tailRows(t, store))
 	}
 
-	// A scan that cannot read the index keeps the last names, blocked.
+	// A scan that cannot read the index is blocked and names no file: the
+	// names of an earlier index read do not belong to this scan's state.
 	if err := os.Rename(index, index+".away"); err != nil {
 		t.Fatal(err)
 	}
@@ -913,9 +914,9 @@ func TestArchiverTailStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.scanAndArchive(ctx)
-	st = assertTail(t, a, internalmysql.ArchiverTailBlocked, "mysql-bin.000004", 0)
+	st = assertTail(t, a, internalmysql.ArchiverTailBlocked, "", 0)
 	assertQuiet(t, Status{BacklogFiles: st.BacklogFiles, LastError: st.LastError})
-	if !strings.Contains(st.Tail.Reason, "read index") {
+	if !strings.Contains(st.Tail.Reason, "read index") || st.Tail.NewestSealedFile != "" {
 		t.Fatalf("tail = %+v", st.Tail)
 	}
 }

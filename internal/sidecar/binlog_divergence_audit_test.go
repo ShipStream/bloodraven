@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // The history audit (auditArchive): what it reports as an archiver error
@@ -345,4 +346,170 @@ func TestStandingAuditErrorSurvivesTheScan(t *testing.T) {
 			}
 		})
 	}
+}
+
+// manifestFaultStore fails this site's manifest reads or writes on demand.
+type manifestFaultStore struct {
+	*memStore
+	failGet, failPut bool
+}
+
+func (s *manifestFaultStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if s.failGet && key == manifestKey("binlogs", "iad") {
+		return nil, false, errors.New("store unreachable")
+	}
+	return s.memStore.Get(ctx, key)
+}
+
+func (s *manifestFaultStore) Put(ctx context.Context, key string, r io.Reader, size int64) error {
+	if s.failPut && key == manifestKey("binlogs", "iad") {
+		return errors.New("store unreachable")
+	}
+	return s.memStore.Put(ctx, key, r, size)
+}
+
+// A verdict never outlives the maintenance pass that made it (review F5).
+// The runner reads "" as "this server can reissue nothing" when the site is
+// promoted, so a pass that did not evaluate the server reports no verdict
+// instead of the last one: the server may have lost history since.
+func TestReissuableVerdictIsOfThisPassOrAbsent(t *testing.T) {
+	ctx := context.Background()
+	sid := coverageTestSID
+	row := auditRow("mysql-bin.000002", "a", sid+":1-10", sid+":11")
+	// clean is a replica whose audit found nothing to reissue.
+	clean := func(t *testing.T) (*BinlogArchiver, *bootstrapAuditState, *manifestFaultStore) {
+		t.Helper()
+		state := &bootstrapAuditState{historyStateStub: historyStateStub{stubRoleChecker: stubRoleChecker{readOnly: true}, uuid: sid, executed: sid + ":1-11"}, ready: true}
+		store := &manifestFaultStore{memStore: newMemStore()}
+		if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
+			t.Fatal(err)
+		}
+		a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		a.maintainArchive(ctx)
+		if st := a.Snapshot(ctx); st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != "" || st.LastError != "" {
+			t.Fatalf("the clean audit: reissuableGtids %v, lastError %q", st.ReissuableGTIDs, st.LastError)
+		}
+		return a, state, store
+	}
+
+	// The server lost A:11, which it issued (a restored data directory),
+	// and the evidence cannot be saved. The audit did evaluate the server:
+	// its verdict is published although the pass ends in an error.
+	t.Run("the evidence save fails", func(t *testing.T) {
+		a, state, store := clean(t)
+		state.executed = sid + ":1-10"
+		store.failPut = true
+		a.maintainArchive(ctx)
+		st := a.Snapshot(ctx)
+		if st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != sid+":11" || !strings.Contains(st.LastError, "save divergence evidence") {
+			t.Fatalf("reissuableGtids %v, lastError %q; want the verdict of this pass and the save error", st.ReissuableGTIDs, st.LastError)
+		}
+		if st.DivergentRows != 0 {
+			t.Fatalf("divergentRows %d: the count is of the manifest, which was not saved", st.DivergentRows)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		lose func(t *testing.T, a *BinlogArchiver, state *bootstrapAuditState, store *manifestFaultStore)
+	}{
+		{"the manifest carries a recorded GTID reuse", func(t *testing.T, a *BinlogArchiver, state *bootstrapAuditState, store *manifestFaultStore) {
+			m, err := loadManifest(ctx, store, "binlogs", "iad")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Epoch = &ArchiveEpoch{ResetReason: "verified GTID namespace reuse within " + sid + ":11; use a new manifest prefix and full backup"}
+			if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"the manifest cannot be read", func(t *testing.T, a *BinlogArchiver, state *bootstrapAuditState, store *manifestFaultStore) {
+			store.failGet = true
+		}},
+		{"the archive session cannot be opened", func(t *testing.T, a *BinlogArchiver, state *bootstrapAuditState, store *manifestFaultStore) {
+			a.session, a.identityErr = nil, errors.New("archive identity: unusable")
+		}},
+		{"an archived row cannot be parsed", func(t *testing.T, a *BinlogArchiver, state *bootstrapAuditState, store *manifestFaultStore) {
+			m, err := loadManifest(ctx, store, "binlogs", "iad")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Files[0].PreviousGTIDs = "not a GTID set"
+			if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, state, store := clean(t)
+			state.executed = sid + ":1-10"
+			tc.lose(t, a, state, store)
+			a.maintainArchive(ctx)
+			if st := a.Snapshot(ctx); st.ReissuableGTIDs != nil {
+				t.Fatalf("reissuableGtids %q after a pass that did not evaluate the server (lastError %q); want none", *st.ReissuableGTIDs, st.LastError)
+			}
+		})
+	}
+
+	// The descriptor is gone: the scan cannot verify the archive session
+	// again, and its maintenance pass does not run the audit at all.
+	t.Run("the archive session is no longer verified", func(t *testing.T) {
+		state := &bootstrapAuditState{historyStateStub: historyStateStub{stubRoleChecker: stubRoleChecker{readOnly: true}, uuid: sid, executed: sid + ":1-11"}, ready: true}
+		store := newMemStore()
+		if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Files: []ManifestEntry{row}}); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), BinlogIndex: "mysql-bin.index"}
+		a := newTestArchiver(cfg, "iad", state, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		a.scanAndArchive(ctx)
+		if st := a.Snapshot(ctx); st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != "" {
+			t.Fatalf("the clean audit: reissuableGtids %v (lastError %q)", st.ReissuableGTIDs, st.LastError)
+		}
+		state.executed = sid + ":1-10"
+		if err := store.Delete(ctx, pitrarchive.DescriptorKey("binlogs")); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.session.Reverify(ctx); err == nil || a.session.Verified() {
+			t.Fatalf("the session is still verified without a descriptor: %v", err)
+		}
+		a.scanAndArchive(ctx)
+		if st := a.Snapshot(ctx); st.ReissuableGTIDs != nil {
+			t.Fatalf("reissuableGtids %q from a scan without a verified session; want none", *st.ReissuableGTIDs)
+		}
+	})
+
+	// The server's state cannot be read.
+	t.Run("the server state cannot be read", func(t *testing.T) {
+		state := &switchableAuditState{bootstrapAuditState: bootstrapAuditState{historyStateStub: historyStateStub{stubRoleChecker: stubRoleChecker{readOnly: true}, uuid: sid, executed: sid + ":1-11"}, ready: true}}
+		a, _ := auditArchiver(t, state, &Manifest{Site: "iad", Files: []ManifestEntry{row}})
+		a.maintainArchive(ctx)
+		if st := a.Snapshot(ctx); st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != "" {
+			t.Fatalf("the clean audit: reissuableGtids %v", st.ReissuableGTIDs)
+		}
+		state.err = errors.New("connection refused")
+		a.maintainArchive(ctx)
+		if st := a.Snapshot(ctx); st.ReissuableGTIDs != nil || !strings.Contains(st.LastError, "connection refused") {
+			t.Fatalf("reissuableGtids %v, lastError %q", st.ReissuableGTIDs, st.LastError)
+		}
+		// Readable again, the next pass has a verdict again.
+		state.err, state.executed = nil, sid+":1-10"
+		a.maintainArchive(ctx)
+		if st := a.Snapshot(ctx); st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != sid+":11" {
+			t.Fatalf("after the server answered again: reissuableGtids %v", st.ReissuableGTIDs)
+		}
+	})
+}
+
+// switchableAuditState is a bootstrapAuditState whose server-state query
+// can be made to fail.
+type switchableAuditState struct {
+	bootstrapAuditState
+	err error
+}
+
+func (s *switchableAuditState) BinlogState(ctx context.Context) (string, string, error) {
+	if s.err != nil {
+		return "", "", s.err
+	}
+	return s.bootstrapAuditState.BinlogState(ctx)
 }

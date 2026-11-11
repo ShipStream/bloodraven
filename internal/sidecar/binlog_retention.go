@@ -86,15 +86,20 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 	// read, the full prefix listing and every manifest read the scan just
 	// did (F203). A scan that ended before the session (a failed role
 	// probe) still opens it, so retention runs without a role.
+	//
+	// A pass that does not reach the history audit leaves no verdict on
+	// what this server could reissue (auditArchive).
 	if a.session != nil && !a.session.Verified() {
 		a.mu.Lock()
 		scanStart := a.lastScanAt
 		a.mu.Unlock()
 		if a.session.attemptedSince(scanStart) {
+			a.setReissuable(nil)
 			return
 		}
 	}
 	if a.openSession(ctx) != nil {
+		a.setReissuable(nil)
 		return
 	}
 	if manifest, err := a.loadManifest(ctx); err == nil {
@@ -111,9 +116,12 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 			a.mu.Unlock()
 			a.historyAuditError = ""
 		}
-	} else if a.historyAuditError != "" {
-		// An unreadable manifest cannot establish that the prior failure resolved.
-		a.setMaintenanceError(a.historyAuditError)
+	} else {
+		a.setReissuable(nil)
+		if a.historyAuditError != "" {
+			// An unreadable manifest cannot establish that the prior failure resolved.
+			a.setMaintenanceError(a.historyAuditError)
+		}
 	}
 	a.maybeRunRetention(ctx)
 	m, err := a.loadManifest(ctx)

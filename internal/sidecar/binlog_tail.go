@@ -51,6 +51,8 @@ type tailFile struct {
 	// archived: the file needs no upload. A row of this site's manifest
 	// (live, retired or quarantined) matched it, or a drain settled it.
 	archived bool
+	// id is the file's content identity, once a drain needed it.
+	id string
 }
 
 // tailDrain is the drain's memory, owned by the scan goroutine.
@@ -66,19 +68,58 @@ type tailDrain struct {
 	// blockedReason is the last refusal logged, so a standing one is
 	// logged once.
 	blockedReason string
-	// headerReads and walks count the file headers read and the origin
-	// walks started, for the tests that pin a file is examined once.
-	// budget replaces newOriginBudget in tests.
+	// scanned are the files this scan has stat'ed (tailStat): within one
+	// scan a file has one identity, from its first stat through its
+	// examination to the upload list.
+	scanned map[string]struct{}
+	// headerReads, walks and hashes count the file headers read, the origin
+	// walks started and the files hashed for their content identity, for
+	// the tests that pin a file is examined once. budget replaces
+	// newOriginBudget in tests.
 	headerReads int
 	walks       int
+	hashes      int
 	budget      func() *originBudget
 }
+
+// uploadFailure is a pass of uploads that failed, as /archiver/status
+// reports it: the archiver error and the backlog. It stands until a scan
+// settles what it was about (see tailOutcome).
+type uploadFailure struct {
+	msg     string
+	backlog int64
+}
+
+// tailOutcome is what a read-only scan's drain means for the archiver's
+// error and backlog. A failing upload is reported exactly as on a writable
+// site: from the scan that failed until a scan that settles it, with no gap
+// while a later scan is still working (the operator's polls would take a gap
+// for a recovery, and the backlog alert could never fire).
+type tailOutcome int
+
+const (
+	// tailQuiet: the scan decided that this site has nothing to upload (no
+	// tail, or all of it archived) or may not upload (a gate refused, by
+	// design not an error). A standby with nothing to report: no error, no
+	// backlog, and an earlier upload failure is over.
+	tailQuiet tailOutcome = iota
+	// tailUndecided: the scan could not decide (the index or a file could
+	// not be read, the examination is unfinished, the role moved on). It
+	// reports nothing of its own; an upload failure that stands is still
+	// the truth about its files and stays reported.
+	tailUndecided
+	// tailUploads: an upload pass ran, or its manifest could not be loaded.
+	// The drain set the error and the backlog itself.
+	tailUploads
+)
 
 // tailUpload is set while a read-only site's drain runs scanFiles. It binds
 // that pass to what the drain decided on: the role observation the gates
 // were checked against (episodeCurrent refuses manifest saves once the
-// timeline moved on) and the files as they were when the index was read
-// (archivePinned uploads no other bytes under their names).
+// timeline moved on) and the files as the drain examined them: each file's
+// identity is the one its first stat of this scan found (tailStat), which
+// the examination ran on (archivePinned uploads no other bytes under their
+// names).
 type tailUpload struct {
 	obs   RoleObservation
 	files map[string]os.FileInfo
@@ -118,9 +159,13 @@ func (a *BinlogArchiver) tailBlockedEarly(reason string) tailScan {
 
 // publishTail sets the tail block from one scan: the state and the file
 // names come from the same index read and change together under the status
-// mutex. A scan that could not read the index keeps the names of the last
-// one that did (never as Drained), and publishes nothing before any scan
-// read it.
+// mutex. The names say which index the state is about: Drained means that
+// every sealed file of the index in which ActiveFile was the active one is
+// archived, or is not this site's to archive. A rotation after that read is
+// not in it (the scan does not read the index again), so a reader that waits
+// for a rotation compares ActiveFile with the file that rotation opened. A
+// scan that could not read the index reports no file names (and is never
+// Drained), and publishes nothing before any scan read it.
 func (a *BinlogArchiver) publishTail(t tailScan) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -129,7 +174,6 @@ func (a *BinlogArchiver) publishTail(t tailScan) {
 		if a.tailStatus == nil {
 			return
 		}
-		st.ActiveFile, st.NewestSealedFile = a.tailStatus.ActiveFile, a.tailStatus.NewestSealedFile
 	} else if n := len(t.entries); n > 0 {
 		st.ActiveFile = filepath.Base(t.entries[n-1])
 		if n > 1 {
@@ -156,19 +200,22 @@ func (t *roleTimeline) tailCurrent(obs RoleObservation) error {
 }
 
 // readOnlyIdentity returns the latest role observation when it is read-only
-// and reported the server identity.
-func (t *roleTimeline) readOnlyIdentity() (RoleObservation, bool) {
+// (readOnly) and reported the server identity (identified).
+func (t *roleTimeline) readOnlyIdentity() (obs RoleObservation, readOnly, identified bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.state != roleReadOnly || t.readOnly == nil || t.readOnly.ServerUUID == "" {
-		return RoleObservation{}, false
+	if t.state != roleReadOnly || t.readOnly == nil {
+		return RoleObservation{}, false, false
 	}
-	return *t.readOnly, true
+	if t.readOnly.ServerUUID == "" {
+		return RoleObservation{}, true, false
+	}
+	return *t.readOnly, true, true
 }
 
-// check refuses the upload of a sealed binlog that was replaced between the
-// drain's index read and the open (a reclone or a reset restarts the
-// numbering, so the name may now be a file of another incarnation).
+// check refuses the upload of a sealed binlog that is not the file the
+// drain examined (a reclone or a reset restarts the numbering, so the name
+// may now be a file of another incarnation).
 func (u *tailUpload) check(name string, opened os.FileInfo) error {
 	if want := u.files[name]; want == nil || !stableBinlogFile(want, opened) {
 		return fmt.Errorf("binlog %s was replaced after its index was read; it is not this server's sealed tail", name)
@@ -178,17 +225,39 @@ func (u *tailUpload) check(name string, opened os.FileInfo) error {
 
 // drainTail is a scan's work on a read-only site: it archives the
 // writable-era tail (see the top of this file) and returns the tail block.
-// resetErr is recordResets' result.
 //
 // A read-only site with nothing to drain reports what it always did:
 // backlog 0 and no error. Nothing that only decides whether there is a tail
 // (the index, the file headers, the origin walk, the gates) is reported as
 // an archiver error: it blocks the tail with a reason and is logged once.
 // Errors of the uploads themselves (the manifest, the store, a file) are
-// archiver errors, as on a writable site.
-func (a *BinlogArchiver) drainTail(ctx context.Context, resetErr error) tailScan {
-	result, reported := a.drainTailFiles(ctx, resetErr)
-	if result.state != internalmysql.ArchiverTailBlocked || reported {
+// archiver errors, as on a writable site, and as sticky (tailOutcome).
+//
+// The scan's incarnation-reset result (recordResets) is not a gate here. A
+// write error is reported by the scan before it gets here. What is left is
+// errStartCheckPending: the session is not verified, or this process has no
+// observation that reported the server identity. The drain refuses both
+// before it reads the manifest (the session gate, readOnlyIdentity), and
+// what the start-up check compares, the site's latest record with the
+// server, tailRecordGate compares for the very observation the drain
+// uploads under.
+func (a *BinlogArchiver) drainTail(ctx context.Context) tailScan {
+	result, outcome := a.drainTailFiles(ctx)
+	switch outcome {
+	case tailQuiet:
+		a.uploadFailure = nil
+		a.setBacklog(0)
+		a.clearScanError()
+	case tailUndecided:
+		if f := a.uploadFailure; f != nil {
+			a.setBacklog(f.backlog)
+			a.setError(f.msg)
+		} else {
+			a.setBacklog(0)
+			a.clearScanError()
+		}
+	}
+	if result.state != internalmysql.ArchiverTailBlocked || outcome == tailUploads {
 		a.tail.blockedReason = ""
 	} else if result.reason != a.tail.blockedReason {
 		a.tail.blockedReason = result.reason
@@ -197,91 +266,107 @@ func (a *BinlogArchiver) drainTail(ctx context.Context, resetErr error) tailScan
 	return result
 }
 
-// drainTailFiles does drainTail's work. reported: the result's error is
-// already the archiver's LastError (and logged).
-func (a *BinlogArchiver) drainTailFiles(ctx context.Context, resetErr error) (result tailScan, reported bool) {
-	// Until uploads start this is a standby with nothing to report.
-	a.setBacklog(0)
-	a.clearScanError()
+// noteUploadFailure remembers a failed pass of uploads as it is reported
+// now (LastError and the backlog), for the read-only scans that cannot
+// decide (tailUndecided).
+func (a *BinlogArchiver) noteUploadFailure() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.uploadFailure = &uploadFailure{msg: a.lastError, backlog: a.backlogFiles}
+	return a.lastError
+}
+
+// drainTailFiles does drainTail's work. Nothing here clears the archiver's
+// error or backlog before the scan knows its outcome.
+func (a *BinlogArchiver) drainTailFiles(ctx context.Context) (tailScan, tailOutcome) {
+	a.tail.scanned = make(map[string]struct{})
 	entries, err := readBinlogIndex(filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex))
 	if err != nil {
-		return tailScan{state: internalmysql.ArchiverTailBlocked, reason: fmt.Sprintf("read index: %v", err)}, false
+		return tailScan{state: internalmysql.ArchiverTailBlocked, reason: fmt.Sprintf("read index: %v", err)}, tailUndecided
 	}
 	if len(entries) < 2 {
-		return tailDrained(entries), false
+		return tailDrained(entries), tailQuiet
 	}
 	sealed := entries[:len(entries)-1]
 	a.pruneTailFiles(sealed)
-	obs, ok := a.roles.readOnlyIdentity()
-	if !ok {
-		return tailBlocked(entries, 0, "the tail cannot be told from replica copies: "+errRoleProbeUnsupported.Error()), false
+	obs, readOnly, identified := a.roles.readOnlyIdentity()
+	if !readOnly {
+		// The role sampler saw the server change since this scan's probe.
+		return tailBlocked(entries, 0, "the server stopped being read-only during this scan; the next scan decides what it archives"), tailUndecided
+	}
+	if !identified {
+		return tailBlocked(entries, 0, "the tail cannot be told from replica copies: "+errRoleProbeUnsupported.Error()), tailQuiet
 	}
 	j, stop, done, err := a.findTail(entries, obs, a.tailBudget())
 	if err != nil {
-		return tailBlocked(entries, 0, err.Error()), false
+		return tailBlocked(entries, 0, err.Error()), tailUndecided
 	}
 	if !done {
-		return tailPending(entries, 0), false
+		return tailPending(entries, 0), tailUndecided
 	}
 	if j < 0 {
-		return tailDrained(entries), false
+		return tailDrained(entries), tailQuiet
 	}
 	if a.session == nil || !a.session.Verified() {
-		return tailBlocked(entries, 0, "the archive session is not verified yet (the archive descriptor is awaited); the tail through "+filepath.Base(sealed[j])+" waits for it"), false
+		return tailBlocked(entries, 0, "the archive session is not verified yet (the archive descriptor is awaited); the tail through "+filepath.Base(sealed[j])+" waits for it"), tailQuiet
 	}
 	manifest, err := a.loadManifest(ctx)
 	if err != nil {
 		a.incUploadFailures()
-		msg := wrapKeepToken("load manifest", err).Error()
-		a.setError(msg)
+		a.setError(wrapKeepToken("load manifest", err).Error())
 		a.logger.Warn("load manifest", "error", err)
-		return tailBlocked(entries, 0, msg), true
+		return tailBlocked(entries, 0, a.noteUploadFailure()), tailUploads
 	}
 	retired := a.retiredBinlogIdentities(manifest)
 	// A budget of its own: a slow manifest read must not starve it.
-	unarchived, done, err := a.unarchivedTail(manifest, retired, sealed, stop, j, a.tailBudget())
+	unarchived, unconfirmed, done, err := a.unarchivedTail(manifest, retired, sealed, stop, j, a.tailBudget())
 	if err != nil {
-		return tailBlocked(entries, 0, err.Error()), false
+		return tailBlocked(entries, 0, err.Error()), tailUndecided
 	}
 	if !done {
-		return tailPending(entries, 0), false
+		return tailPending(entries, 0), tailUndecided
 	}
 	last := filepath.Base(sealed[j])
 	if len(unarchived) == 0 {
 		a.tail.through, a.tail.throughInfo = last, a.tail.files[last].info
-		return tailDrained(entries), false
+		return tailDrained(entries), tailQuiet
 	}
 	pending := int64(len(unarchived))
 	// The gates of a read-only upload. The session is verified and the
 	// scan returned before this on a history-integrity error.
-	if resetErr != nil {
-		return tailBlocked(entries, pending, resetErr.Error()), false
-	}
 	if err := tailRecordGate(manifest, obs); err != nil {
-		return tailBlocked(entries, pending, err.Error()), false
+		return tailBlocked(entries, pending, err.Error()), tailQuiet
 	}
+	// The upload is bound to the files as this scan examined them: tailStat
+	// returns each file's identity from its first stat of the scan, and
+	// refuses a file that changed since.
 	upload := &tailUpload{obs: obs, files: make(map[string]os.FileInfo, j+1)}
 	for _, entry := range sealed[:j+1] {
 		name := filepath.Base(entry)
 		f, err := a.tailStat(name)
 		if err != nil {
-			return tailBlocked(entries, pending, fmt.Sprintf("stat %s: %v", name, err)), false
+			return tailBlocked(entries, pending, fmt.Sprintf("stat %s: %v", name, err)), tailUndecided
 		}
 		upload.files[name] = f.info
 	}
+	// Nothing is uploaded for a server the role sampler has since seen
+	// writable, failed or of another incarnation: the save would be refused
+	// (episodeCurrent), after the object was written.
 	if err := a.roles.tailCurrent(obs); err != nil {
-		return tailBlocked(entries, pending, err.Error()), false
+		return tailBlocked(entries, pending, err.Error()), tailUndecided
 	}
 	a.tailUpload = upload
 	archived, _, hadError := a.scanFiles(ctx, manifest, sealed[:j+1], retired)
 	a.tailUpload = nil
 
 	pending = 0
-	for _, name := range unarchived {
-		if a.scanSettled[name] {
-			a.tail.files[name].archived = true
-		} else {
-			pending++
+	for _, names := range [][]string{unarchived, unconfirmed} {
+		for _, name := range names {
+			if a.scanSettled[name] {
+				a.tail.files[name].archived = true
+			} else {
+				pending++
+			}
 		}
 	}
 	a.setBacklog(pending)
@@ -296,17 +381,15 @@ func (a *BinlogArchiver) drainTailFiles(ctx context.Context, resetErr error) (re
 	}
 	if hadError {
 		// scanFiles reported the file's error and kept it as LastError.
-		a.mu.Lock()
-		msg := a.lastError
-		a.mu.Unlock()
-		return tailBlocked(entries, pending, msg), true
+		return tailBlocked(entries, pending, a.noteUploadFailure()), tailUploads
 	}
+	a.uploadFailure = nil
 	a.clearScanError()
 	if pending > 0 {
-		return tailPending(entries, pending), false
+		return tailPending(entries, pending), tailUploads
 	}
 	a.tail.through, a.tail.throughInfo = last, a.tail.files[last].info
-	return tailDrained(entries), false
+	return tailDrained(entries), tailUploads
 }
 
 // tailBudget bounds one phase of a scan's examination of local files.
@@ -333,14 +416,31 @@ func (a *BinlogArchiver) pruneTailFiles(sealed []string) {
 	}
 }
 
+// errTailFileChanged: a sealed binlog is no longer the file an earlier step
+// of the same scan saw under its name.
+var errTailFileChanged = errors.New("the binlog was replaced during this scan (a reclone or a reset restarts the numbering); the next scan examines it again")
+
 // tailStat stats a sealed binlog and returns what is remembered about it,
-// starting over when the file changed.
+// starting over when the file changed since an earlier scan. Within one
+// scan a file has one identity, the one its first stat of the scan found:
+// the examination and the upload list are bound to it, and a file that
+// changed since is an error, never examined as one file and uploaded as
+// another.
 func (a *BinlogArchiver) tailStat(name string) (*tailFile, error) {
 	info, err := os.Stat(filepath.Join(a.cfg.BinlogDir, name))
 	if err != nil {
 		return nil, err
 	}
 	f := a.tail.files[name]
+	if _, seen := a.tail.scanned[name]; seen && f != nil {
+		if !stableBinlogFile(f.info, info) {
+			return nil, errTailFileChanged
+		}
+		return f, nil
+	}
+	if a.tail.scanned != nil {
+		a.tail.scanned[name] = struct{}{}
+	}
 	if f == nil || !stableBinlogFile(f.info, info) {
 		f = &tailFile{info: info}
 		if a.tail.files == nil {
@@ -508,12 +608,24 @@ func hasSourceUUID(set internalmysql.GTIDSet, uuid string) bool {
 
 // unarchivedTail returns the sealed files in (stop, j] that this site's
 // manifest does not hold. A file is held when a live or quarantined row has
-// its name, size and Previous_gtids (the check the scan uses for old files),
-// or a retirement record its name and Previous_gtids. For j, the file that
-// holds the tail's last transactions, a matching live row is confirmed by
-// content identity, so a reused name never passes for it. done is false
-// when the budget ran out.
-func (a *BinlogArchiver) unarchivedTail(m *Manifest, retired map[binlogIdentity]struct{}, sealed []string, stop, j int, budget *originBudget) (unarchived []string, done bool, err error) {
+// its name, size and Previous_gtids (the check the scan uses for old files).
+// Two matches are confirmed by content identity, the only thing that tells
+// a reused name from the file a row was made of:
+//
+//   - j, the file that holds the tail's last transactions;
+//   - a file that only a retirement record matches. A record keeps the
+//     name and Previous_gtids, and compaction keeps it for as long as a
+//     local file of that name exists. After a reclone the numbering starts
+//     again and the first Previous_gtids are empty again, so the record of
+//     an earlier incarnation's file matches the new file of that name.
+//
+// A file a retirement record matches is hashed once per process, within the
+// budget (the scan's identity cache serves when the scan identified the
+// file already). While another file is known unarchived the hash is left to
+// the upload pass, which identifies every file without a live row itself:
+// those files are returned as unconfirmed, and the upload does not wait for
+// them. done is false when the budget ran out.
+func (a *BinlogArchiver) unarchivedTail(m *Manifest, retired map[binlogIdentity]struct{}, sealed []string, stop, j int, budget *originBudget) (unarchived, unconfirmed []string, done bool, err error) {
 	rows := make(map[string][]ManifestEntry)
 	for _, row := range m.Files {
 		rows[row.Name] = append(rows[row.Name], row)
@@ -521,56 +633,125 @@ func (a *BinlogArchiver) unarchivedTail(m *Manifest, retired map[binlogIdentity]
 	for _, q := range m.Quarantined {
 		rows[q.Entry.Name] = append(rows[q.Entry.Name], q.Entry)
 	}
-	pruned := make(map[string][]string)
+	records := make(map[string][]string)
 	for _, p := range m.Pruned {
-		pruned[p.Name] = append(pruned[p.Name], p.PreviousGTIDs)
+		records[p.Name] = append(records[p.Name], p.PreviousGTIDs)
 	}
+	// sameContent: a row or a retirement record of the name has the file's
+	// content identity.
+	sameContent := func(name string, f *tailFile) (bool, error) {
+		id, err := a.tailContentID(name, f)
+		if err != nil {
+			return false, err
+		}
+		return a.candidateSeen(rows[name], id) || a.retiredIdentity(retired, name, id), nil
+	}
+	var byRecord []string
 	for i := stop + 1; i <= j; i++ {
 		name := filepath.Base(sealed[i])
 		f, err := a.tailStat(name)
 		if err != nil {
-			return nil, false, fmt.Errorf("stat %s: %w", name, err)
+			return nil, nil, false, fmt.Errorf("stat %s: %w", name, err)
 		}
 		if f.archived {
 			continue
 		}
-		if len(rows[name]) == 0 && len(pruned[name]) == 0 {
+		if len(rows[name]) == 0 && len(records[name]) == 0 {
 			unarchived = append(unarchived, name)
 			continue
 		}
 		if !f.havePrevious && budget.spent() {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
 		previous, err := a.tailPrevious(name, f)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
-		held := false
+		byRow, record := false, false
 		for _, row := range rows[name] {
-			held = held || (row.Size == f.info.Size() && row.PreviousGTIDs == previous)
+			byRow = byRow || (row.Size == f.info.Size() && row.PreviousGTIDs == previous)
 		}
-		for _, p := range pruned[name] {
-			held = held || p == previous
+		for _, p := range records[name] {
+			record = record || p == previous
 		}
-		if held && i == j {
-			id, err := a.stableContentID(name, f)
-			if err != nil {
-				return nil, false, err
-			}
-			held = a.candidateSeen(rows[name], id) || a.retiredIdentity(retired, name, id)
-		}
-		if !held {
+		switch {
+		case !byRow && !record:
 			unarchived = append(unarchived, name)
-			continue
+		case i == j:
+			held, err := sameContent(name, f)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			if held {
+				f.archived = true
+			} else {
+				unarchived = append(unarchived, name)
+			}
+		case byRow:
+			f.archived = true
+		default:
+			byRecord = append(byRecord, name)
 		}
-		f.archived = true
 	}
-	return unarchived, true, nil
+	for _, name := range byRecord {
+		f := a.tail.files[name]
+		if !a.tailContentKnown(name, f) {
+			if len(unarchived) > 0 {
+				unconfirmed = append(unconfirmed, name)
+				continue
+			}
+			if budget.spent() {
+				return nil, nil, false, nil
+			}
+			budget.bytes -= f.info.Size()
+		}
+		held, err := sameContent(name, f)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if held {
+			f.archived = true
+		} else {
+			unarchived = append(unarchived, name)
+		}
+	}
+	return unarchived, unconfirmed, true, nil
 }
 
-// stableContentID is the content identity of a sealed binlog that did not
-// change while it was hashed. It does not touch the scan's identity cache,
-// whose entries stand for files already reconciled with the manifest.
+// tailContentKnown reports whether a sealed binlog's content identity is at
+// hand without reading the file: the drain or the scan identified this very
+// file before.
+func (a *BinlogArchiver) tailContentKnown(name string, f *tailFile) bool {
+	if f.id != "" {
+		return true
+	}
+	cached, ok := a.localIDs[name]
+	return ok && stableBinlogFile(cached.info, f.info)
+}
+
+// tailContentID is the content identity of a sealed binlog as the drain saw
+// it. It is kept with the file, so a file is hashed once; the scan's
+// identity cache is read when it holds this very file, and never written:
+// its entries stand for files already reconciled with the manifest.
+func (a *BinlogArchiver) tailContentID(name string, f *tailFile) (string, error) {
+	if f.id != "" {
+		return f.id, nil
+	}
+	if cached, ok := a.localIDs[name]; ok && stableBinlogFile(cached.info, f.info) {
+		f.id = cached.id
+		return f.id, nil
+	}
+	a.tail.hashes++
+	id, err := a.stableContentID(name, f)
+	if err != nil {
+		return "", err
+	}
+	f.id = id
+	return id, nil
+}
+
+// stableContentID hashes a sealed binlog for its content identity and
+// refuses a file that changed while it was hashed.
 func (a *BinlogArchiver) stableContentID(name string, f *tailFile) (string, error) {
 	path := filepath.Join(a.cfg.BinlogDir, name)
 	id, err := a.fileContentID(path)
