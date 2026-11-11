@@ -558,7 +558,14 @@ Fixed findings, now regressions (`TestDST_PlannedQuick` fails on them):
   hold, where another process rolls back by the DST-3 ruling on the same
   evidence. Both now take the facade's one decision
   (`replacedTargetRollbackSafe`); without the ruling's evidence the hold
-  stands and is counted (`ReplacedTargetHold`).
+  stands and is counted (`ReplacedTargetHold`). Of the eleven trials of
+  this class in seeds 1–336,000, ten now roll back and one still holds
+  (237169: the source is down when the target is found replaced). That
+  trial is the only one in those seeds that the monitor rules changed with
+  these fixes judge differently: with the three of them switched off (the
+  replaced-target hold of the process that sent a clear, the confirmation's
+  residual, `RolledBack` over a replaced target) the fixed engine fails
+  237169 and nothing else new.
 - **`OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)`**
   (fixed; seeds 9297 and 104013). The confirmation used to take every
   unreadable primary-candidate as a warning. It now does so only for a site
