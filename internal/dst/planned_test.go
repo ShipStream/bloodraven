@@ -17,7 +17,7 @@ import (
 // fault generator updates it knowingly: it last changed when the binary log
 // rotation faults (failFlush, slowFlush) and the pre-reclone wait
 // (recloneWait) were added.
-const scheduleGolden = "b184a6370e18cf9382b844893e97f7d31d3b86ec9eafea28250131e7411f7c92"
+const scheduleGolden = "4d76e67d4b87f6a5a7354eadf67c973a480c13f5d638f1b5c5175cba4e921f6d"
 
 // scheduleGoldenBeforeFlushFaults is the same hash at the commit before the
 // planned-failover actors and the rotation faults existed. The rotation
@@ -41,6 +41,11 @@ func TestGenerateTrial_FlushFaultsOnlyAdd(t *testing.T) {
 				if op.At < tr.WarmupPolls || op.At >= tr.HealAt || op.N < 5 || op.N > 34 || op.K < 0 || op.K > 3 {
 					t.Fatalf("seed %d: reclone wait outside its shape: %s", seed, op)
 				}
+				continue
+			}
+			if op.Kind == OpRegressSite || op.Kind == OpRegressBoot {
+				// Drawn from a stream of their own, after the rotation
+				// faults existed (TestGenerateTrial_OwnLossFaultsOnlyAdd).
 				continue
 			}
 			if op.Kind == OpFailFlush || op.Kind == OpSlowFlush {
