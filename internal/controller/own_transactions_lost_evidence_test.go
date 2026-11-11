@@ -846,3 +846,104 @@ func TestOwnLoss_UpdaterRejoinCheck(t *testing.T) {
 		t.Fatal("the updater has no rejoin check or no replication start gate")
 	}
 }
+
+// A manager that starts into an outage chooses a promotion target without
+// waiting on the API server, so it must have the sites' recorded
+// server_uuids by then: they are loaded when the manager starts, not by
+// the first comparison that happens to store one (DST seed 9458: a
+// replaced manager promoted a site whose earlier identity it had not
+// loaded).
+func TestOwnLoss_ManagerStartedIntoAnOutageKnowsTheEarlierUUIDs(t *testing.T) {
+	build := func() (*TopologyManager, *memSiteIdentityStore) {
+		// dc2's data directory was replaced under a new server_uuid, on
+		// older data; dc3 holds what dc2 issued under the earlier one.
+		dc2 := fencedLossServer(lossUUIDRe, lossUUIDOld+":1-50,"+lossUUIDNew+":1-15")
+		dc3 := fencedLossServer(lossUUIDThird, lossUUIDOld+":1-80,"+lossUUIDNew+":1-15")
+		tm := evidenceGroup(t, dc2, dc3, state.SiteRoleDROnly)
+		store := &memSiteIdentityStore{uuids: map[string][]string{"dc2": {lossUUIDOld}}}
+		tm.SetSiteIdentityStore(store)
+		return tm, store
+	}
+
+	tm, _ := build()
+	if err := tm.LoadSiteIdentities(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := tm.pickFreshestCandidate(context.Background(), []string{"dc2"}); got != "" {
+		t.Fatalf("picked %q: dc2 lacks %s:51-80, issued under a server_uuid the group has on record for it", got, lossUUIDOld)
+	}
+
+	// The control shows what the load is for: without it the picker,
+	// which does not read the store, knows only the uuid dc2 runs under.
+	tm, _ = build()
+	if got := tm.pickFreshestCandidate(context.Background(), []string{"dc2"}); got != "dc2" {
+		t.Fatalf("picked %q without the history loaded; the control no longer shows the difference", got)
+	}
+
+	// A load that fails is retried off the poll loop.
+	tm, store := build()
+	store.loadErr = errors.New("the API server is away")
+	if err := tm.LoadSiteIdentities(context.Background()); err == nil {
+		t.Fatal("LoadSiteIdentities = nil with a store that cannot be read")
+	}
+	store.mu.Lock()
+	store.loadErr = nil
+	store.mu.Unlock()
+	tm.siteIdentity.mu.Lock()
+	tm.siteIdentity.nextTry = time.Time{}
+	tm.siteIdentity.mu.Unlock()
+	tm.loadSiteIdentitiesInBackground(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tm.siteIdentity.mu.Lock()
+		loaded := tm.siteIdentity.loaded
+		tm.siteIdentity.mu.Unlock()
+		if loaded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the background load did not load the history")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Source convergence looks at a recorded report before anything else. The
+// replication start gate would refuse the site too, but only convergence's
+// own look gives the site the right status while a hold stands: without it
+// a site that lacks its own transactions reads Pending/SourceMismatch, as
+// if its channel were about to be repointed when the hold ends.
+func TestOwnLoss_ConvergenceReportsARecordedSiteDuringAHold(t *testing.T) {
+	f := newLossFixture(t, lossPrimaryGTID, lossUUIDNew+":1-5,"+lossUUIDOld+":1-90", false)
+	f.site.mockMySQL.replicaStatusVal = &mysql.ReplicaStatus{SourceHost: "mysql-dc1"}
+	pollN(f.tm, 2)
+	f.tm.SetOwnTransactionsLost("dc2", lossLostGTID, 10)
+	f.setHold(true)
+	pollN(f.tm, 3)
+	st := f.tm.Status()
+	if st.Sites[1].SourceConvergenceState != sourceConvergenceBlocked || st.Sites[1].SourceConvergenceReason != v1alpha1.SourceReasonOwnTransactionsLost {
+		t.Fatalf("source convergence during the hold = %s/%s, want Blocked/OwnTransactionsLost", st.Sites[1].SourceConvergenceState, st.Sites[1].SourceConvergenceReason)
+	}
+	if changes, starts, _, _ := f.site.counts(); starts != 0 || changes != 0 {
+		t.Fatalf("the channel was touched during the hold (START=%d CHANGE=%d)", starts, changes)
+	}
+
+	// A site whose report rests on a witness is not held back: against
+	// the primary it lacks nothing, and its stopped channel is restarted,
+	// also once the report stands.
+	g := newWitnessFixture(t, witnessPrimarySet, witnessPrimarySet, witnessHolderSet)
+	g.dc2.mockMySQL.replicaStatusVal = &mysql.ReplicaStatus{SourceHost: "mysql-dc1"}
+	g.poll(t, 6)
+	if rec := ownLossOf(g.tm, "dc2"); rec == nil || !rec.witness {
+		t.Fatalf("dc2 own-loss record = %+v, want a witness report", rec)
+	}
+	// Its channel stops again (a restart with --skip-replica-start).
+	g.dc2.mockMySQL.mu.Lock()
+	g.dc2.mockMySQL.replicaStatusVal = &mysql.ReplicaStatus{SourceHost: "mysql-dc1"}
+	g.dc2.mockMySQL.mu.Unlock()
+	_, before, _, _ := g.dc2.counts()
+	g.poll(t, 3)
+	if _, after, _, _ := g.dc2.counts(); after <= before {
+		t.Fatalf("START REPLICA calls %d -> %d: the stopped channel of a site whose report rests on a witness is no longer restarted", before, after)
+	}
+}

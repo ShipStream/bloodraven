@@ -583,11 +583,20 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 		tm.forgetOwnLossRefusalLocked(site)
 		metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
 		msg := "own transactions lost cleared: the site holds every transaction it issued"
-		if witness {
+		why := fmt.Sprintf("it holds every transaction it issued that %s holds", comparedTo)
+		switch {
+		case witness:
 			msg = "own transactions lost cleared: the witness no longer holds transactions the site lacks"
+			why = fmt.Sprintf("%s no longer holds transactions it issued and lacks", comparedTo)
+		case rec.comparedTo != "" && rec.comparedTo != comparedTo:
+			// The report named another holder: nothing was repaired, the
+			// primary it is compared with now never had the transactions.
+			why = fmt.Sprintf("the report was made against %s; the primary is %s now, which does not hold those transactions, so the site lacks nothing it holds",
+				rec.comparedTo, comparedTo)
 		}
+		tm.noteOwnLossClearedLocked(site, why)
 		return true, func() {
-			tm.logger.Info(msg, "site", site, "comparedTo", comparedTo)
+			tm.logger.Info(msg, "site", site, "comparedTo", comparedTo, "reason", why)
 		}
 	}
 	if rec != nil && !rec.witness && rec.detectedBy != "" && witness {
@@ -607,6 +616,7 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 		rec = &ownLossRecord{}
 		tm.ownLoss[site] = rec
 	}
+	delete(tm.ownLossCleared, site)
 	sameSet := rec.lostGtid == set
 	rec.lostGtid, rec.lostCount = set, count
 	rec.comparedTo, rec.detectedBy = comparedTo, detectedBy
@@ -681,6 +691,16 @@ func (tm *TopologyManager) clearOwnLossAfterClone(site string) {
 	rec := tm.ownLoss[site]
 	delete(tm.ownLoss, site)
 	tm.forgetOwnLossRefusalLocked(site)
+	if rec != nil {
+		tm.noteOwnLossClearedLocked(site, "it was recloned")
+	}
+	// A report that rests on this site as its witness is reviewed now: the
+	// clone replaced what it held.
+	for _, other := range tm.ownLoss {
+		if other.witness && other.comparedTo == site {
+			other.reviewAfter = time.Time{}
+		}
+	}
 	tm.mu.Unlock()
 	if rec == nil {
 		return
@@ -875,6 +895,15 @@ func (tm *TopologyManager) reviewWitnessOwnLoss(ctx context.Context) bool {
 		}
 	}
 	return changed
+}
+
+// noteOwnLossClearedLocked records why site's report ended, for the
+// OwnTransactionsLostResolved Event. Caller holds tm.mu.
+func (tm *TopologyManager) noteOwnLossClearedLocked(site, why string) {
+	if tm.ownLossCleared == nil {
+		tm.ownLossCleared = map[string]string{}
+	}
+	tm.ownLossCleared[site] = why
 }
 
 // ownLossCandidates returns the read-only primary-candidates automatic
@@ -1196,9 +1225,6 @@ func (tm *TopologyManager) verifyOwnLossReclone(ctx context.Context, donor, reci
 	if rec == nil {
 		return refuse("the report was cleared")
 	}
-	if rec.witness {
-		return refuse("the report rests on a witness, not on the primary")
-	}
 	if blocked {
 		return refuse("the site also holds transactions the primary lacks; an administrator decides about them and reclones it")
 	}
@@ -1267,9 +1293,11 @@ func (tm *TopologyManager) verifyOwnLossReclone(ctx context.Context, donor, reci
 		tm.RequestStatusRefresh()
 	}
 	if lost.IsEmpty() {
-		// settleOwnLossLocked dropped the report: the site holds every
-		// transaction it issued, so there is nothing to clone it for.
-		return refuse("the site holds every transaction it issued")
+		// The primary holds nothing the site issued and lacks, so there is
+		// nothing to clone it for. settleOwnLossLocked dropped a report
+		// that was made against the primary; one that rests on a witness
+		// stays, and is not a reason to clone.
+		return refuse("the primary holds no transaction the site issued and lacks")
 	}
 	return true
 }

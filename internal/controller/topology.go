@@ -182,6 +182,9 @@ type SiteSnapshot struct {
 	// RecloneFailures is the number of automatic reclones of the site
 	// that failed in a row (0 when none did, or the site has no report).
 	RecloneFailures int
+	// LostCleared says why the site's last own-loss report ended ("" while
+	// one stands, or none ever did).
+	LostCleared string
 }
 
 // SourceConvergenceState is the persisted per-follower source state.
@@ -885,6 +888,9 @@ type TopologyManager struct {
 	// refused for it. Protected by mu.
 	ownLoss                 map[string]*ownLossRecord
 	ownLossPromotionRefused []string
+	// ownLossCleared says, by site, why its last report ended (until the
+	// site is reported again). Protected by mu.
+	ownLossCleared map[string]string
 	// siteIdentity holds the server_uuids each site has run under. It has
 	// its own lock.
 	siteIdentity siteIdentityTracker
@@ -2366,6 +2372,8 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			sites[i].RecloneWaiting = loss.recloneWaiting
 			sites[i].LostToWitness = loss.witness
 			sites[i].RecloneFailures = loss.recloneFailures
+		} else {
+			sites[i].LostCleared = tm.ownLossCleared[tm.sites[i].name]
 		}
 	}
 

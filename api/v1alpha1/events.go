@@ -49,13 +49,30 @@ const (
 	// compared with. The operator does not start the site's replication,
 	// does not promote it and reclones it (`recoveryState:
 	// RecloneRequired`); a site that also holds transactions the primary
-	// lacks stays `RecoveryBlocked` for an administrator. Emitted on
-	// detection and when the set changes. See [A returning site that lost
-	// its own transactions](/docs/operations/failover#a-returning-site-that-lost-its-own-transactions).
+	// lacks stays `RecoveryBlocked` for an administrator. When the holder
+	// is not the primary but another site that holds transactions the
+	// primary lacks, the message says so: the site keeps replicating and
+	// is not recloned, and it is not promoted until that other site is
+	// repaired. Emitted on detection and when the set changes; once more
+	// after an operator restart when the installed CRD does not store
+	// `lostGtid`. See [A returning site that lost its own
+	// transactions](/docs/operations/failover#a-returning-site-that-lost-its-own-transactions).
 	EventOwnTransactionsLost = ReasonOwnTransactionsLost
-	// A site's `OwnTransactionsLost` report was cleared: it was recloned,
-	// or a new comparison found it holds everything it issued.
+	// A site's `OwnTransactionsLost` report ended. The message gives the
+	// cause: the site was recloned; a new comparison found it holds every
+	// transaction it issued that the primary holds; the report had been
+	// made against another site and the current primary never held those
+	// transactions (nothing was repaired); or the witness that held them
+	// no longer does.
 	EventOwnTransactionsLostResolved = "OwnTransactionsLostResolved"
+	// The automatic reclone of a site that lacks transactions it issued
+	// itself has failed three or more times in a row. The operator keeps
+	// asking, with a wait that doubles from 5 minutes to at most 2 hours;
+	// every failed clone made the primary send its whole data set. The
+	// message gives the count and the next attempt; the clone's error is
+	// in the `BootstrapFailed` Degraded condition. Emitted for the third
+	// and every later failure.
+	EventOwnTransactionsLostRecloneFailing = "OwnTransactionsLostRecloneFailing"
 	// Automatic promotion refused: the remaining candidates lack
 	// transactions they issued themselves (`recoveryState:
 	// RecloneRequired`) and would issue those GTIDs again. The group stays

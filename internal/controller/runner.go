@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -84,6 +85,20 @@ type managedTopology struct {
 	// lastOwnLossPromotionRefused is the same for promotions refused
 	// because the candidates lack transactions they issued themselves.
 	lastOwnLossPromotionRefused []string
+	// ownLossAnnounced is, by site, the own-loss report the last status
+	// write announced (emitOwnLossEvents). It takes the place of the
+	// stored status for the comparison once a write has happened: an
+	// installed CRD from before status.sites[].lostGtid existed prunes the
+	// field, and a comparison with the stored status would then announce
+	// the same report on every write and never resolve it. In memory, so
+	// with such a CRD a report is announced once more after a restart.
+	ownLossAnnounced map[string]ownLossAnnouncement
+	// crdDegraded is until when status writes are made with the values
+	// the installed CRD accepted (degradeStatusForOlderCRD), without
+	// trying the current ones first; crdDegradedLogged says the condition
+	// was logged.
+	crdDegraded       atomic.Int64 // unix nanoseconds
+	crdDegradedLogged atomic.Bool
 	// lastBootstrapRefusedRestoreHold is the last site a
 	// BootstrapRefusedRestoreHold Event was emitted for.
 	lastBootstrapRefusedRestoreHold string
@@ -2162,6 +2177,17 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// poller's current state rather than from a snapshot copy.
 	r.applyPITRArchiveStatus(ctx, nn, &freshFG)
 
+	// An installed CRD older than this operator refused the current enum
+	// values a while ago: write the ones it accepts, so the comparison
+	// below sees what is stored and the write is not refused again
+	// (status_crd_compat.go).
+	r.mu.RLock()
+	statusMT := r.managers[nn]
+	r.mu.RUnlock()
+	if statusMT != nil && time.Now().UnixNano() < statusMT.crdDegraded.Load() {
+		degradeStatusForOlderCRD(&freshFG.Status)
+	}
+
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	// Keyring promotion Events compare in-memory last-seen, so they must
 	// still run here: after an operator restart the CR already carries
@@ -2293,7 +2319,17 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		}
 		r.applyPITRArchiveStatus(ctx, nn, &fresh)
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
-			return err
+			// A CRD from before this operator's enum values refuses the
+			// whole write (active site, failover record and conditions
+			// included). Write the values it accepts instead.
+			degraded := statusRefusedForUnsupportedValue(err) && degradeStatusForOlderCRD(&fresh.Status)
+			if !degraded {
+				return err
+			}
+			if retryErr := r.client.Status().Update(ctx, &fresh); retryErr != nil {
+				return retryErr
+			}
+			r.noteStatusDegradedForOlderCRD(nn, statusMT, err)
 		}
 		freshFG = fresh
 		return nil
@@ -2616,9 +2652,7 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	oldDetectedBy := make(map[string]v1alpha1.DivergenceDetector, len(existingStatus.Sites))
 	oldSet := make(map[string]string, len(existingStatus.Sites))
 	oldComparedTo := make(map[string]string, len(existingStatus.Sites))
-	oldLost := make(map[string]string, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
-		oldLost[s.Name] = s.LostGtid
 		oldState[s.Name] = s.RecoveryState
 		oldDetectedBy[s.Name] = s.DivergenceDetectedBy
 		oldSet[s.Name], oldComparedTo[s.Name] = s.DivergentGtid, s.DivergenceComparedTo
@@ -2629,28 +2663,8 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	recoveryActive := func(st v1alpha1.SiteRecoveryState) bool {
 		return st == v1alpha1.RecoveryStateInProgress || st == v1alpha1.RecoveryStateBlocked
 	}
+	r.emitOwnLossEvents(fg, existingStatus, snap)
 	for _, s := range snap.Sites {
-		// A site lacks transactions it issued itself: announced when the
-		// report appears and when its set changes, and closed when it is
-		// gone. A report that ends with the site writable was not
-		// repaired: the site was made the primary as it is.
-		switch prev := oldLost[s.Name]; {
-		case s.LostGtid != "" && s.LostGtid != prev:
-			what := fmt.Sprintf("The operator does not replicate or promote it and reclones it (by hand: kubectl bloodraven reclone %s %s --cold)", fg.Name, s.Name)
-			if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
-				what = fmt.Sprintf("It also holds transactions the primary lacks, so it is not recloned automatically: decide about those, then reclone it (kubectl bloodraven reclone %s %s)", fg.Name, s.Name)
-			}
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLost,
-				"%s lacks %d transactions it issued itself that %s holds (%s); replication cannot bring them back and a promotion would issue their GTIDs again. %s",
-				s.Name, s.LostTxnCount, lostHeldBy(s.LostComparedTo), truncateGtidHint(s.LostGtid), what)
-		case s.LostGtid == "" && prev != "" && s.State == state.StateWritable:
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLostSitePromoted,
-				"%s is the primary although it lacks transactions it issued itself (%s) and was not recloned; unless its server_uuid was changed first it issues their GTIDs again",
-				s.Name, truncateGtidHint(prev))
-		case s.LostGtid == "" && prev != "":
-			r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventOwnTransactionsLostResolved,
-				"%s holds every transaction it issued again", s.Name)
-		}
 		// Data loss detected: RecoveryBlocked appeared where it wasn't before,
 		// or the periodic re-verification found the divergent set has CHANGED
 		// while the site stayed blocked (it respawned writable, took writes,
@@ -2700,6 +2714,86 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventOldPrimaryRecovered,
 					"Old primary %s recovered and is now replicating", s.Name)
 			}
+		}
+	}
+}
+
+// ownLossAnnouncement is what the last status write said about a site's
+// own-loss report.
+type ownLossAnnouncement struct {
+	lostGtid string
+	// failures is the count of failed automatic reclones the last
+	// OwnTransactionsLostRecloneFailing Event carried (0 when none was
+	// emitted for this report).
+	failures int
+}
+
+// emitOwnLossEvents announces a site that lacks transactions it issued
+// itself when the report appears and when its set changes, and closes it
+// when it is gone, with the cause. A report that ends with the site
+// writable was not repaired: the site was made the primary as it is.
+//
+// What was announced last is remembered per manager (ownLossAnnounced);
+// the stored status is consulted only for the first write after a start,
+// because an installed CRD that predates status.sites[].lostGtid prunes
+// the field.
+func (r *TopologyManagerRunner) emitOwnLossEvents(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
+	nn := FailoverGroupNamespacedName(fg)
+	r.mu.RLock()
+	mt := r.managers[nn]
+	r.mu.RUnlock()
+	stored := make(map[string]string, len(existingStatus.Sites))
+	for _, s := range existingStatus.Sites {
+		stored[s.Name] = s.LostGtid
+	}
+	for _, s := range snap.Sites {
+		prev := ownLossAnnouncement{lostGtid: stored[s.Name]}
+		if mt != nil {
+			if a, ok := mt.ownLossAnnounced[s.Name]; ok {
+				prev = a
+			}
+		}
+		next := ownLossAnnouncement{lostGtid: s.LostGtid}
+		switch {
+		case s.LostGtid != "" && s.LostGtid != prev.lostGtid:
+			what := fmt.Sprintf("replication cannot bring them back and a promotion would issue their GTIDs again. The operator does not replicate or promote it and reclones it (by hand: kubectl bloodraven reclone %s %s --cold)", fg.Name, s.Name)
+			switch {
+			case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
+				what = fmt.Sprintf("replication cannot bring them back and a promotion would issue their GTIDs again. It also holds transactions the primary lacks, so it is not recloned automatically: decide about those, then reclone it (kubectl bloodraven reclone %s %s)", fg.Name, s.Name)
+			case s.LostToWitness:
+				holder := lostHeldBy(s.LostComparedTo)
+				what = fmt.Sprintf("the primary does not hold them either, so the site keeps replicating and is not recloned automatically; it is not promoted while %s holds them. Reclone %s to discard them or make the primary contain them, or reclone %s (kubectl bloodraven reclone %s %s --cold)",
+					holder, holder, s.Name, fg.Name, s.Name)
+			}
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLost,
+				"%s lacks %d transactions it issued itself that %s holds (%s); %s",
+				s.Name, s.LostTxnCount, lostHeldBy(s.LostComparedTo), truncateGtidHint(s.LostGtid), what)
+		case s.LostGtid == "" && prev.lostGtid != "" && s.State == state.StateWritable:
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLostSitePromoted,
+				"%s is the primary although it lacks transactions it issued itself (%s) and was not recloned; unless its server_uuid was changed first it issues their GTIDs again",
+				s.Name, truncateGtidHint(prev.lostGtid))
+		case s.LostGtid == "" && prev.lostGtid != "":
+			why := s.LostCleared
+			if why == "" {
+				why = "a new comparison no longer finds transactions it issued and lacks"
+			}
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventOwnTransactionsLostResolved,
+				"%s is no longer reported as lacking transactions it issued itself: %s", s.Name, why)
+		}
+		if s.LostGtid != "" && s.LostGtid == prev.lostGtid {
+			next.failures = prev.failures
+		}
+		if s.LostGtid != "" && s.RecloneFailures >= ownLossRecloneFailureEvent && s.RecloneFailures != next.failures {
+			next.failures = s.RecloneFailures
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLostRecloneFailing,
+				"the automatic reclone of %s, which lacks transactions it issued itself, has failed %d times in a row (%s); every attempt makes the primary send its whole data set. See the BootstrapFailed condition for the clone's error, or reclone it by hand once the cause is fixed: kubectl bloodraven reclone %s %s --cold",
+				s.Name, s.RecloneFailures, s.RecloneWaiting, fg.Name, s.Name)
+		}
+		if mt != nil {
+			if mt.ownLossAnnounced == nil {
+				mt.ownLossAnnounced = map[string]ownLossAnnouncement{}
+			}
+			mt.ownLossAnnounced[s.Name] = next
 		}
 	}
 }
@@ -3092,7 +3186,7 @@ func divergenceDegradedMessage(snap TopologySnapshot) string {
 // itself, or returns "" when none does. It is the RecoveryPending and
 // Degraded message for OwnTransactionsLost.
 func ownLossMessage(snap TopologySnapshot, group string) string {
-	var parts []string
+	var parts, witnessOnly []string
 	for _, s := range snap.Sites {
 		if s.LostGtid == "" {
 			continue
@@ -3104,6 +3198,10 @@ func ownLossMessage(snap TopologySnapshot, group string) string {
 		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
 			part += "; it also holds transactions the primary lacks, so it is not recloned automatically"
 			byHand = fmt.Sprintf(" (decide about those, then: kubectl bloodraven reclone %s %s)", group, s.Name)
+		case s.LostToWitness:
+			witnessOnly = append(witnessOnly, s.Name)
+			part += "; " + s.RecloneWaiting
+			byHand = fmt.Sprintf(" (or reclone this site: kubectl bloodraven reclone %s %s --cold)", group, s.Name)
 		case s.RecloneWaiting != "":
 			part += "; automatic reclone waiting: " + s.RecloneWaiting
 		default:
@@ -3114,6 +3212,10 @@ func ownLossMessage(snap TopologySnapshot, group string) string {
 	}
 	if len(parts) == 0 {
 		return ""
+	}
+	if len(witnessOnly) == len(parts) {
+		return strings.Join(parts, "; ") +
+			". The site holds everything the primary does and keeps replicating; promoted, it would issue the GTIDs of those transactions again."
 	}
 	return strings.Join(parts, "; ") +
 		". Replication cannot bring these transactions back (the site's receiver drops events with its own server_id), so the site is not replicated and not promoted until it is recloned."
