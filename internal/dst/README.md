@@ -267,30 +267,48 @@ production planned-failover path end to end:
     releases the claim; an ordered update and another run are bound by a
     standing hold like the topology manager;
   - outcomes are judged with what the run could know: `Succeeded` at its
-    confirm probe (the claim is released at Publishing), `SourceLeftFenced`
+    confirm probe (the claim is released at Publishing), both for the
+    other writable sites and for whether the target held the fenced set
+    (a target that loses part of it afterwards, on an older data
+    directory, is not a promotion the run got wrong); `SourceLeftFenced`
     with an unreachable source by its reason (§6.2) or ended while no
-    manager was registered, and a cross-process re-run's
+    manager was registered; and a cross-process re-run's
     `PromotedUnconfirmed` / `ManualRecoveryRequired` without the promotion
     memo (§7.1). `RolledBack` over a source that is not writable is honest
     when the source was writable at a yield of the rollback (the run read
-    it so; its sidecar may fence it again before the record commits), and
-    a `read_only=OFF` the process died before sending does not make a
-    `RolledBack` dishonest, nor does one sent to a server that was then
-    replaced (the target answers under another `server_uuid`: the DST-3
-    ruling's rollback);
+    it so; its sidecar may fence it again before the record commits), or,
+    for a run that ends `RolledBack` straight from `Fencing`, at the peer
+    probe of the pass that ended it, with no fence of the run's own after
+    that probe. `RolledBack` after a `read_only=OFF` that reached the
+    target (one the process died before sending did not) is judged by what
+    the target held when the rollback was decided, not by the statement:
+    the server that stood in for the target when the `RollingBack` record
+    committed must have read read-only with nothing outside F. That is the
+    re-proof's evidence for the server the intent names and the DST-3
+    ruling's for one that replaced it. A target still writable by the run's
+    clear, or holding a transaction outside F, is `OutcomeDishonest`, also
+    when its pod is replaced between the decision and the terminal record;
   - a hold is justified (`HoldWithoutDataAtRisk` is quiet) when a promotion
     intent exists, the deciding pass cannot read the target and another
     site is writable (`UnreadableTargetHold`): the target may hold the
     run's writes beside that writer. A hold over a target found replaced
-    (another `server_uuid`) is justified when the deciding process cannot
-    prove that no clear reached the replaced server (another process than
-    the one that wrote `Promoting`, or that process after it sent one) and
-    the DST-3 ruling's evidence is missing: the run's own record is
-    durable, a site is writable or unreachable, the source is not fenced
-    by the run or lacks part of F, or the replacement holds transactions
-    outside F (`ReplacedTargetHold`). With that evidence the hold is
+    (another `server_uuid`, or the intent's server without part of F: its
+    volume came back older) is justified when the deciding process cannot
+    prove that no clear reached the replaced data directory (another
+    process than the one that wrote `Promoting`, or that process after it
+    sent one) and the DST-3 ruling's evidence is missing: the run's own
+    record is durable, a site is writable, the source or a promotable
+    peer is unreachable (a read-only reader that does not answer is not
+    missing evidence), the source is not fenced by the run or lacks part
+    of F, or the replacement holds transactions outside F
+    (`ReplacedTargetHold`). With that evidence the hold is
     `HoldWithoutDataAtRisk`, and so is one set by the process that wrote
-    `Promoting` and sent no clear;
+    `Promoting` and sent no clear. A hold set by a rollback that read the
+    source writable without part of F, or without transactions of its own
+    stream that the target holds, is justified whatever the run sent
+    (`SourceLostHold`): two histories exist from then on, although the
+    GTID sets show it only until the source has issued as many
+    transactions as it lost;
   - `FencedSourceNeverHealed` judges only the run's own fence (landed, in
     the source's current incarnation, still set, never healed) under the
     re-assert's preconditions, and only until the topology manager takes
@@ -622,8 +640,16 @@ Fixed findings, now regressions (`TestDST_PlannedQuick` fails on them):
   once the run's own record is durable. Pinned in
   `test/component/dst_regression_test.go`.
 
-- **`HoldWithoutDataAtRisk(writableTargetWithChannel)`** (fixed; seeds
-  12285 and 77871 of 1–112,000). The operator restarts in `Promoting`
+The planned-failover findings of the wider sweeps follow. Each is described
+by what happens, not by a seed: a seed's schedule changes whenever a fault
+or actor generator does (the data-directory regress added one op to a
+quarter of all schedules), so a seed quoted here stops reproducing its
+finding, while the pinned component test keeps doing so.
+
+Classes that were the operator's, fixed:
+
+- **`HoldWithoutDataAtRisk(writableTargetWithChannel)`** (fixed). The
+  operator restarts in `Promoting`
   before `RESET REPLICA ALL`, and before the new process classifies the
   target an external `read_only=0` makes it writable. Writable with a
   channel and no memo used to be `Inconsistent(ForeignWritable)`: a hold.
@@ -631,61 +657,142 @@ Fixed findings, now regressions (`TestDST_PlannedQuick` fails on them):
   gate's no-channel read, so no process of the run made that target
   writable; the new process now ends `SourceLeftFenced{ForeignWritable}`
   without a hold, as the process with the memo does. Only the process
-  whose memo says it sent a clear still holds.
-- **`HoldWithoutDataAtRisk(replacedTargetSameProcess)`** (fixed; seeds
-  29144, 59761 and 78553). `super_read_only=OFF` is applied but answers
-  with an error, then the target pod is replaced under a new `server_uuid`
-  and reads read-only inside F. The process that sent the clear used to
-  hold, where another process rolls back by the DST-3 ruling on the same
-  evidence. Both now take the facade's one decision
-  (`replacedTargetRollbackSafe`); without the ruling's evidence the hold
-  stands and is counted (`ReplacedTargetHold`). Of the eleven trials of
-  this class in seeds 1–336,000, ten now roll back and one still holds
-  (237169: the source is down when the target is found replaced). That
-  trial is the only one in those seeds that the monitor rules changed with
-  these fixes judge differently: with the three of them switched off (the
-  replaced-target hold of the process that sent a clear, the confirmation's
-  residual, `RolledBack` over a replaced target) the fixed engine fails
-  237169 and nothing else new.
+  whose memo says it sent a clear still holds. The new process cannot
+  rule out that an earlier one cleared the flags and the channel came
+  afterwards; the outcome is the same and safe in both readings, and its
+  record says which of the two it knows.
+  `TestDSTPF_WritableTargetWithChannelLeavesSourceFenced`.
+- **`HoldWithoutDataAtRisk(replacedTargetSameProcess)`** (fixed).
+  `super_read_only=OFF` is applied but answers with an error, then the
+  target pod is replaced under a new `server_uuid` and reads read-only
+  inside F. The process that sent the clear used to hold, where another
+  process rolls back by the DST-3 ruling on the same evidence. Both now
+  take the facade's one decision (`replacedTargetRollbackSafe`); without
+  the ruling's evidence the hold stands and is counted
+  (`ReplacedTargetHold`). `TestDSTPF_ReplacedTargetAfterALostClearRollsBack`.
+- **`HoldWithoutDataAtRisk(regressedTarget)`** (fixed). The operator dies
+  in `Promoting` after `RESET REPLICA ALL`; the target restarts on an older
+  data directory under the same `server_uuid` and reads read-only, without
+  a channel, short of F, with nothing outside it. A process without the
+  memo used to hold: no writable site, with the source intact under the
+  run's fence. An older copy of the intent's server is the same finding as
+  a replaced pod (what a clear let onto the promoted copy is gone either
+  way), so the same ruling decides it now, in the promotion attempt and in
+  the re-proof (`replacedTargetWithinFence`). The re-proof used to roll
+  back over any read-only target inside F, also over a replaced one with
+  the ruling's evidence missing (a promotable peer that does not answer,
+  the run's record durable); it now holds there, as the promotion attempt
+  does. `TestDSTPF_RegressedTargetAfterAPossibleClearRollsBack`,
+  `TestDSTPF_CrossProcessReplacedTargetRuling`.
 - **`OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)`**
-  (fixed; seeds 9297 and 104013). The confirmation used to take every
-  unreadable primary-candidate as a warning. It now does so only for a site
-  the confirming process last read read-only at its gate or an earlier
-  confirm probe; a site it last read writable (seed 9297: the run's
-  `ManualRecoveryRequired` write did not commit, then the peer stopped
-  answering) is still a writer, and a site it never read (seed 104013: a new
-  process finds the target writable and cannot read the source) leaves the
-  run `Promoting` until the site answers or the promotion deadline ends it
-  `PromotedUnconfirmed`.
+  (fixed). The confirmation used to take every unreadable
+  primary-candidate as a warning. It now does so only for a site the
+  confirming process last read read-only at its gate or an earlier confirm
+  probe; a site it last read writable (the run's `ManualRecoveryRequired`
+  write did not commit, then the peer stopped answering) is still a
+  writer, and a site it never read (a new process finds the target
+  writable and cannot read the source) leaves the run `Promoting` until
+  the site answers or the promotion deadline ends it `PromotedUnconfirmed`.
+  `TestDSTPF_NoSuccessBesideAnUnreadWriter`.
+- **`RepointDivergent` by the planned path** (fixed). The source restarts
+  during a run on an older data directory under the same `server_uuid` and
+  comes up writable; the run rolls back; the rollback's "source already
+  writable" branch checked only the `server_uuid` and gave the target,
+  which holds the transactions the source lost, a channel from that
+  source. The rollback now compares the source with F and with what the
+  target holds (`plannedSourceLost`, `plannedSourceTrustFor`): no path
+  creates or starts the target's channel toward a source that answers
+  short of either, and a writable source in that state ends the run
+  `ManualRecoveryRequired{SourceUnfenced}` with the hold (a second history
+  has begun; the monitor counts it, `SourceLostHold`). A read-only one is
+  left fenced. `TestDSTPF_RollbackHoldsOverASourceThatLostTransactions`.
+- **`FencedSourceNeverHealed`** (fixed). The fence lands, its `Draining`
+  record never commits, the source is cut off, the operator restarts and
+  the run ends `SourceLeftFenced{SourceLost}` with only the fence intent
+  durable. The process that ended the run had neither the fence memo nor
+  an `Applied` record, so it did not name the source for the re-assert,
+  and with no other candidate up nothing ever lifted the fence: no
+  writable site, no hold, no warning. A restarted manager already named
+  the source from that record; the live engine now does too, by §4.3's
+  rule (the durable intent names the server), and the name is bound to
+  that server: the re-assert lifts a fence only while the source answers
+  under the intent's `server_uuid`.
+  `TestDSTPF_FenceKnownOnlyByItsIntentIsHealed`.
 
-The three are pinned in `test/component/dst_regression_test.go`
-(`TestDSTPF_WritableTargetWithChannelLeavesSourceFenced`,
-`TestDSTPF_ReplacedTargetAfterALostClearRollsBack`,
-`TestDSTPF_NoSuccessBesideAnUnreadWriter`), and
-`TestFixedFindings_AreClassesOfTheirOwn` keeps each fingerprint firing on
-the history it names.
+Classes that were the monitor's. Each judged an honest record against
+something the run could not have read. The rules were narrowed, not
+removed: `TestOutcomeFindings_AreClassesOfTheirOwn` and the tests it names
+keep each firing, under its fingerprint, on the history it was written for.
+
+- **`OutcomeDishonest(targetLacksFencedSet)`**. The run confirms over a
+  target that holds F; before the terminal record lands the target loses
+  part of F (its pod is replaced, or since the data-directory regress it
+  simply restarts, on an older directory: the fault may hit the new
+  primary one poll after the confirmation). The monitor compared F with
+  the target at the terminal record. `Succeeded` is now judged against the
+  target at the confirm probe, like the rest of that outcome. A run that
+  confirms over a target short of F still fires. The fault itself is
+  legitimate and stays: `regressSite`, like `replacePod`'s regress, never
+  rolls back a transaction no other site holds, so no acknowledged write
+  is lost for good, and a primary that comes back on an older volume while
+  its old source still holds the tail is a state the operator must cope
+  with after the run.
+- **`OutcomeDishonest(rolledBackAfterClear)`**. Both clears reach the
+  target; before a transaction commits it is fenced again; a new process
+  finds the same server read-only with exactly F and rolls back by the
+  re-proof's rule. The monitor counted every `read_only=OFF` that reached
+  the target's current server against `RolledBack`. It now judges by GTIDs
+  and state, at the moment the rollback was decided (the `RollingBack`
+  record): a target still writable by the run's clear, or holding a
+  transaction outside F, fires; so does one whose pod is replaced after
+  the decision, which the earlier rule (judged at the terminal record)
+  let through.
+- **`OutcomeDishonest(rolledBackFencedSource)`**. The fence is never sent;
+  the pass that ends the run from `Fencing` reads the source writable
+  beside another writer (`RolledBack`: authority moved before the fence
+  was sent), and the source's sidecar fences it before the record commits.
+  The monitor now accepts a source the deciding pass read writable at its
+  peer probe, as it already did for a rollback; a `RolledBack` over a
+  source no pass read writable, or that the run fenced after the probe,
+  still fires. The related misleading record, a run that ends
+  `SourceLeftFenced` over a source it never fenced or never proved fenced,
+  was the operator's to make exact: the outcome stays (it is the
+  conservative one), and the terminal message now says what the run knows
+  of its fence (`sourceLeftClause`).
+
+`TestFixedFindings_AreClassesOfTheirOwn` keeps the earlier fingerprints
+firing on the histories they name.
 
 `TestDST_PlannedQuick` allows only `CooldownViolated(restart+stateLost)`
 (`plannedAllowedClasses` in `planned_test.go`); anything else fails it. When
 a finding is fixed, pin its shrunk trial in
-`test/component/dst_regression_test.go`.
+`test/component/dst_regression_test.go`, by its shape and not by its seed.
 
-### Open planned-failover findings
+### Sweeps
 
-`TestDST_PlannedQuick`'s 300 seeds are clean, and after the three fixes
-above so are seeds 1–112,000, apart from the inherent class. Seeds
-112,001–336,000 are not: besides more trials of the three fixed classes
-(14 on the base, none after the fixes) they hold five trials in four
-classes that the first 112,000 seeds never reached. They fail the same way
-before and after the fixes, none is allowed by the gate, and none has been
-analysed further than the table says. Each has a fingerprint of its own:
+`TestDST_PlannedQuick`'s 300 seeds run in `make test`. Wider ranges are run
+by hand, one range per process (`DST_PLANNED_START`, `DST_PLANNED_TRIALS`).
+The numbers below are of the last sweep of the merged tree:
 
-| Fingerprint | Seeds | What happens | First reading |
-|---|---|---|---|
-| `OutcomeDishonest(targetLacksFencedSet)` | 166664, 207074 | The run confirms its promotion; in the next poll an external writer fences the target and its pod is replaced on a regressed data directory, before the confirmed tail records the promotion. The monitor compares the fenced set with the target as it is when the terminal record lands, not as it was at the confirm probe. | Probably the harness: `replacePod` never replaces a writable site, but here the site was fenced a moment earlier. The engine recording a promotion its confirmation is one poll old for is by design. |
-| `OutcomeDishonest(rolledBackAfterClear)` | 265453 | Both clears reach the target; before any transaction commits on it an external writer fences it again and makes the source writable, and the target crashes. A new process finds the target read-only with exactly F and rolls back by the re-proof's rule ("no transaction of the run committed"). The monitor counts every `read_only=OFF` that reached the target's current server against `RolledBack`. | The monitor and the re-proof disagree about what "nothing was written" means for a target that was writable for a moment and holds no transaction of its own. Needs a decision. |
-| `OutcomeDishonest(rolledBackFencedSource)` | 310992 | The fence is never sent (the source is cut off from the operator from `Fencing` on); the source's sidecar fences it on lease expiry. After a restart and the heal the run ends `RolledBack`, which says the source is writable, while the source is read-only by its sidecar's fence. | The misleading-outcome family ("ends `SourceLeftFenced` over a source that was never fenced", seen in the earlier sweep): the terminal outcome is decided from what the run sent, not from what the source reads when the record lands. |
-| `FencedSourceNeverHealed` | 199484 | The fence lands, but its `Draining` record does not commit (a late commit refused after settlement). The source is then cut off, the operator restarts twice and the run rolls back `SourceLost`. The new process has neither the fence memo nor an `Applied` fence record, so the source is not named for the re-assert; with the other primary-candidate crashed and the third site dr-only, no site is writable after the settle window. | The operator's: a fence proven only in a dead process's memory is not attributable after a restart, and nothing heals it. Needs a design decision (attribute by the durable intent and the `server_uuid` when naming the source). |
+<!-- SWEEP-RESULTS -->
+
+No planned-failover finding is open. What the planned path leaves to
+others, by design:
+
+| State | Who owns it |
+|---|---|
+| A source that has issued as many transactions as it lost before the rollback reads it | Nobody can see it: the GTID sets are equal again (the residual of the own-loss check, above). |
+| A primary that restarts on an older data directory after a run confirmed | The topology manager (the own-loss check and its reclone). |
+| A target whose channel ran all along while the source regressed | Not stopped by the rollback; the hold's record says to look. |
+
+Earlier open classes, for the record of what each turned out to be:
+
+| Fingerprint | Was | Now |
+|---|---|---|
+| `OutcomeDishonest(targetLacksFencedSet)` | open | the monitor's; judged at the confirm probe |
+| `OutcomeDishonest(rolledBackAfterClear)` | open | the monitor's; judged by GTIDs when the rollback is decided |
+| `OutcomeDishonest(rolledBackFencedSource)` | open | the monitor's; the record's wording was the operator's |
+| `FencedSourceNeverHealed` | open | the operator's; fixed |
 
 `CooldownViolated` splits three ways so the inherent class cannot absorb a
 regression, and only the third is expected:

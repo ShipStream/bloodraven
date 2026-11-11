@@ -55,15 +55,20 @@ const (
 	// operator when the run confirmed.
 	unreadablePeerMarker = "(every other writable site was unreadable by the operator at the confirmation)"
 
-	// The open findings are recognised by the text of their detail.
-	// targetLacksFencedSetMarker: a Succeeded run whose target lacks part of
-	// the fenced set when the terminal record lands.
+	// regressedTargetMarker: the hold was set over the intent's server on
+	// an older copy of its data, with the evidence for a rollback complete.
+	regressedTargetMarker = "(the target answers on an older copy of its data)"
+
+	// The outcome findings are recognised by the text of their detail.
+	// targetLacksFencedSetMarker: a Succeeded run whose target lacked part
+	// of the fenced set when the run confirmed.
 	targetLacksFencedSetMarker = "the target lacks fenced transactions"
 	// rolledBackAfterClearMarker: a RolledBack run that sent read_only=OFF
-	// to the server that still stands in for its target.
+	// to its target, which was still writable by that clear, or held
+	// transactions outside the fenced set, when the rollback was decided.
 	rolledBackAfterClearMarker = "ended RolledBack but it sent read_only=OFF to the target"
 	// rolledBackFencedSourceMarker: a RolledBack run whose source is not
-	// writable.
+	// writable and that never read it writable.
 	rolledBackFencedSourceMarker = "ended RolledBack but the source "
 )
 
@@ -168,6 +173,29 @@ type runObs struct {
 	// RolledBack that says "the source is writable" was true when the run
 	// read it (another actor may fence it again before the record commits).
 	rollbackSawSourceWritable bool
+	// fencingSawSourceWritable: the source was truth-writable at a peer
+	// probe of the current engine pass while the run's block read Fencing,
+	// and the run has not fenced it since. A RolledBack decided in that
+	// pass without a rollback ("authority moved before the fence was sent")
+	// read the source writable; its sidecar may fence it before the record
+	// commits. It closes with the pass (closeGate).
+	fencingSawSourceWritable bool
+	// sourceLost: at a peer probe of the rollback the source was
+	// truth-writable without part of the fenced set, or without
+	// transactions of its own stream that the target holds. Two histories
+	// exist from then on, which is what a hold is for (sourceLacksHistory).
+	sourceLost bool
+	// rollbackTarget is the server that stood in for the target when the
+	// run's RollingBack record committed: a RolledBack is judged against
+	// the target the rollback was decided over, not the one that answers
+	// when the terminal record lands.
+	rollbackTarget *rollbackTargetObs
+	// roClearSeq is the cluster sequence of the last read_only=OFF the run
+	// sent that reached, or may have reached, its target (-1: none).
+	roClearSeq int
+	// confirmTarget and publishTarget are whether the target held the
+	// fenced set at the confirm probe and at the Publishing record.
+	confirmTarget, publishTarget *bool
 	// superseded: after the run ended SourceLeftFenced, the topology
 	// manager took authority away from the fenced source: it counted
 	// another site as the group's primary (managerActive), or it fenced
@@ -192,6 +220,18 @@ type runObs struct {
 	// again (tailReleasedGen is that process's generation).
 	tailReleased    bool
 	tailReleasedGen int
+}
+
+// rollbackTargetObs is the target as it was when a run's RollingBack
+// record committed.
+type rollbackTargetObs struct {
+	serverUUID string
+	writable   bool
+	// outsideFence: it held transactions outside the fenced set (always
+	// false while the fenced set is unknown).
+	outsideFence bool
+	// seq is the cluster sequence then.
+	seq int
 }
 
 // peerProbeObs is one pre-write gate or confirm probe's finding about a
@@ -237,6 +277,9 @@ type plannedStats struct {
 	// earlier confirm probe and was made writable by an external writer
 	// after it (§7.3: allowed, with the warning UnreachablePeers).
 	UnreadablePeerResidual int
+	// SourceLostHold counts holds set by a rollback that found the source
+	// writable without transactions it held (two histories; §9).
+	SourceLostHold int
 }
 
 // plannedMonitor checks the planned-failover invariants of §15.1. The
@@ -470,6 +513,7 @@ func (m *plannedMonitor) onEvent(e Event) {
 		// other outcome reached the server or may have.
 		if e.Outcome != "operatorDied" {
 			r.roClearTried = true
+			r.roClearSeq = e.Seq
 		}
 		r.writeTried = true
 		r.promotionStmt = true
@@ -629,6 +673,9 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 		r.fenceGen = m.procGen
 		r.fenceInc = after.Incarnation
 		r.fenceUUID = after.ServerUUID
+		// What the pass read before its own fence no longer describes the
+		// source.
+		r.fencingSawSourceWritable = false
 	}
 
 	if isUnfence(e) && e.Site == r.source {
@@ -714,11 +761,27 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 // onYield observes yield points: the gate and confirm probes record truth.
 func (m *plannedMonitor) onYield(point string) {
 	class := yieldClass(point)
-	if r := m.activeRun(); r != nil && !r.rollbackSawSourceWritable &&
-		m.cur.Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhaseRollingBack {
+	if r := m.activeRun(); r != nil {
+		var src, tgt SiteTruth
 		for _, t := range m.c.Truth() {
-			if t.Name == r.source && t.Writable() {
+			switch t.Name {
+			case r.source:
+				src = t
+			case r.target:
+				tgt = t
+			}
+		}
+		switch m.cur.Status.PlannedFailover.Phase {
+		case v1alpha1.PlannedFailoverPhaseRollingBack:
+			if src.Name != "" && src.Writable() {
 				r.rollbackSawSourceWritable = true
+				if class == YieldPeerProbe && sourceLacksHistory(src, tgt, r.fenceSet) {
+					r.sourceLost = true
+				}
+			}
+		case v1alpha1.PlannedFailoverPhaseFencing:
+			if class == YieldPeerProbe && src.Name != "" && src.Writable() {
+				r.fencingSawSourceWritable = true
 			}
 		}
 	}
@@ -766,6 +829,10 @@ func (m *plannedMonitor) onYield(point string) {
 	r.confirmWritable = m.readableOrPromotable(m.c.writableSites())
 	r.confirmUnreadable, r.confirmResidual = nil, nil
 	for _, t := range truth {
+		if t.Name == r.target && r.fenceSet != "" {
+			has := containsSet(t, r.fenceSet)
+			r.confirmTarget = &has
+		}
 		if !t.Writable() || t.Reachable() {
 			continue
 		}
@@ -801,7 +868,7 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 	}
 	r := m.runs[pf.RunID]
 	if r == nil {
-		r = &runObs{id: pf.RunID, fenceGen: -1, unconfirmedSince: -1, startSeq: m.c.Seq(), promotingGen: -1, probeSeq: -1}
+		r = &runObs{id: pf.RunID, fenceGen: -1, unconfirmedSince: -1, startSeq: m.c.Seq(), promotingGen: -1, probeSeq: -1, roClearSeq: -1}
 		m.runs[pf.RunID] = r
 		m.order = append(m.order, pf.RunID)
 	}
@@ -824,10 +891,31 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 	if pf.Promotion != nil {
 		r.targetUUID = pf.Promotion.TargetServerUUID
 	}
+	if pf.Phase == v1alpha1.PlannedFailoverPhaseRollingBack && r.rollbackTarget == nil {
+		// The rollback was decided over the server that answers for the
+		// target now.
+		for _, t := range m.c.Truth() {
+			if t.Name != r.target {
+				continue
+			}
+			obs := &rollbackTargetObs{serverUUID: t.ServerUUID, writable: t.Writable(), seq: m.c.Seq()}
+			if f, err := mysql.ParseGTIDSet(r.fenceSet); err == nil && r.fenceSet != "" {
+				exec, err := mysql.ParseGTIDSet(t.Executed.String())
+				obs.outsideFence = err != nil || !exec.Subtract(f).IsEmpty()
+			}
+			r.rollbackTarget = obs
+		}
+	}
 	if (pf.Phase == v1alpha1.PlannedFailoverPhasePublishing || pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded) &&
 		!r.published && r.fenceSet != "" {
 		r.published = true
 		r.publishWritable = m.readableOrPromotable(m.c.writableSites())
+		for _, t := range m.c.Truth() {
+			if t.Name == r.target {
+				has := containsSet(t, r.fenceSet)
+				r.publishTarget = &has
+			}
+		}
 		if pf.Promotion != nil && pf.Promotion.ConfirmationTime != nil {
 			r.confirmedAt = pf.Promotion.ConfirmationTime.UTC().Truncate(time.Second)
 		}
@@ -936,6 +1024,9 @@ func containsSet(t SiteTruth, s string) bool {
 // checkTerminal is OutcomeDishonest and SucceededBesideWritable, judged
 // against truth at the terminal write.
 func (m *plannedMonitor) checkTerminal(r *runObs) {
+	// What the deciding pass read at its peer probe, before the pass's
+	// observations close with the run.
+	fencingSawSourceWritable := r.fencingSawSourceWritable
 	r.closeGate()
 	truth := map[string]SiteTruth{}
 	var writable []string
@@ -955,18 +1046,40 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 			dishonest(fmt.Sprintf("it sent %d mutations", r.pfMutations))
 		}
 	case v1alpha1.PlannedFailoverOutcomeRolledBack:
-		// A read_only=OFF that went to a server since replaced (the target
-		// answers under another server_uuid; the data directory the clear
-		// reached is gone from view) is the DST-3 ruling's rollback: the
-		// server that stands in for the target now was never written to.
-		replaced := r.targetUUID != "" && !strings.EqualFold(tgt.ServerUUID, r.targetUUID)
-		if r.roClearTried && !replaced {
-			dishonest("it sent read_only=OFF to the target")
+		// RolledBack says nothing was written to the target. After a
+		// read_only=OFF reached it (or may have), that is judged by what
+		// the server held when the rollback was decided, not by the
+		// statement: the server that stood in for the target when the
+		// RollingBack record committed must have read read-only with
+		// nothing outside the fenced set. That is the re-proof's evidence
+		// for the server the intent names (the same data directory holds
+		// exactly what it held before the clears, so no transaction
+		// committed while it was writable), and the DST-3 ruling's for a
+		// server that replaced it. A run that ended RolledBack without a
+		// RollingBack record is judged against the target as it is now.
+		if r.roClearTried {
+			at := r.rollbackTarget
+			if at == nil {
+				at = &rollbackTargetObs{serverUUID: tgt.ServerUUID, writable: tgt.Writable(), seq: m.c.Seq()}
+				if f, err := mysql.ParseGTIDSet(r.fenceSet); err == nil && r.fenceSet != "" {
+					exec, err := mysql.ParseGTIDSet(tgt.Executed.String())
+					at.outsideFence = err != nil || !exec.Subtract(f).IsEmpty()
+				}
+			}
+			// A target an external writer made writable after the run's
+			// last clear is not writable by the run's doing.
+			stillWritable := at.writable && !m.externallyWritable(r.target, r.roClearSeq)
+			if stillWritable || (at.outsideFence && !m.externallyWritable(r.target, r.startSeq)) {
+				dishonest(fmt.Sprintf("it sent read_only=OFF to the target, which was writable=%v and held transactions outside the fenced set=%v when the rollback was decided",
+					at.writable, at.outsideFence))
+			}
 		}
 		// Judged with what the run read: a source it found (or made)
 		// writable while rolling back may be fenced again by another actor
-		// (its sidecar's lease rule, a rogue) before the record commits.
-		if r.source != "" && !src.Writable() && !r.rollbackSawSourceWritable {
+		// (its sidecar's lease rule, a rogue) before the record commits. So
+		// may a source the pass that ended the run from Fencing read
+		// writable at its peer probe and did not fence.
+		if r.source != "" && !src.Writable() && !r.rollbackSawSourceWritable && !fencingSawSourceWritable {
 			dishonest("the source " + r.source + " is not writable")
 		}
 		if r.fenceSet != "" {
@@ -1001,7 +1114,10 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 		// only starts the window again (endPoll).
 		r.unconfirmedSince, r.unconfirmedGen = m.poll, m.procGen
 	case v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
-		if !r.promotionStmt && !r.crossProcess(m.procGen) {
+		// A hold needs a possible write to the target, or a source the
+		// rollback found writable without transactions it held (two
+		// histories whatever the run sent).
+		if !r.promotionStmt && !r.crossProcess(m.procGen) && !r.sourceLost {
 			dishonest("it sent no promotion statement")
 		}
 	case v1alpha1.PlannedFailoverOutcomeSucceeded:
@@ -1053,7 +1169,19 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 		if len(writable) == 0 && r.targetWritable && tgt.Incarnation != r.targetInc {
 			m.stats.SucceededTargetRestarted++
 		}
-		if r.fenceSet != "" && !containsSet(tgt, r.fenceSet) {
+		// The same moment judges what the target held: a target that holds
+		// the fenced set when the run confirms and loses part of it
+		// afterwards (it restarts on an older data directory) is not a
+		// promotion the run got wrong.
+		hasFence := r.confirmTarget
+		if !r.confirmSeen || hasFence == nil {
+			hasFence = r.publishTarget
+		}
+		if hasFence == nil && r.fenceSet != "" {
+			has := containsSet(tgt, r.fenceSet)
+			hasFence = &has
+		}
+		if hasFence != nil && !*hasFence {
 			dishonest("the target lacks fenced transactions " + r.fenceSet)
 		}
 		if len(others) > 0 {
@@ -1065,6 +1193,24 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 // closeGate ends the run's gate observation (pass end, run end).
 func (r *runObs) closeGate() {
 	r.gateWritable, r.gateJudged, r.gateOpen = nil, false, false
+	r.fencingSawSourceWritable = false
+}
+
+// sourceLacksHistory reports whether src lacks part of the fenced set, or
+// transactions of its own stream that tgt holds: the model's form of the
+// rollback's plannedSourceLost. An unknown fenced set proves nothing about
+// the first.
+func sourceLacksHistory(src, tgt SiteTruth, fence string) bool {
+	if fence != "" && !containsSet(src, fence) {
+		return true
+	}
+	for u, n := range tgt.Executed {
+		own := u == src.ServerUUID || (len(u) > 8 && len(src.ServerUUID) > 8 && u[8:] == src.ServerUUID[8:])
+		if own && n > src.Executed[u] {
+			return true
+		}
+	}
+	return false
 }
 
 // runRecorded reports whether run id recorded its promotion: its
@@ -1093,6 +1239,13 @@ func (r *runObs) crossProcess(gen int) bool { return r.promotingGen >= 0 && r.pr
 // HoldWithoutDataAtRisk. The process that wrote Promoting and sent no clear
 // knows nothing was written: it gets no exception.
 func (m *plannedMonitor) checkHoldAtRisk(r *runObs) {
+	if r.sourceLost {
+		// The rollback read the source writable without transactions it
+		// held: it issues their GTIDs again for other transactions, so two
+		// histories exist although no GTID set shows it for long.
+		m.stats.SourceLostHold++
+		return
+	}
 	if r.fenceSet == "" {
 		return // F unknown: the rule cannot be judged
 	}
@@ -1103,12 +1256,20 @@ func (m *plannedMonitor) checkHoldAtRisk(r *runObs) {
 	if (r.crossProcess(m.procGen) || r.writeTried) && r.targetUUID != "" {
 		truth := m.c.Truth()
 		for _, t := range truth {
-			if t.Name == r.target && !strings.EqualFold(t.ServerUUID, r.targetUUID) {
+			// Replaced: another server answers for the target, or the
+			// intent's server on an older copy of its data (it lacks part of
+			// F, which it held when the run entered Promoting). Either way
+			// the directory a clear may have reached is gone from view.
+			newServer := !strings.EqualFold(t.ServerUUID, r.targetUUID)
+			if t.Name == r.target && (newServer || !containsSet(t, r.fenceSet)) {
 				if m.replacedTargetRollbackDue(r, truth, f) {
 					detail := fmt.Sprintf(
 						"run %s held after finding target %s replaced, but its record is not durable, the source holds F under its fence and no site is writable (DST-3: roll back)",
 						r.id, r.target)
-					if !r.crossProcess(m.procGen) {
+					switch {
+					case !newServer:
+						detail += " " + regressedTargetMarker
+					case !r.crossProcess(m.procGen):
 						detail += " " + replacedTargetSameProcessMarker
 					}
 					m.violate("HoldWithoutDataAtRisk", r.id, detail)
@@ -1173,13 +1334,19 @@ func (m *plannedMonitor) replacedTargetRollbackDue(r *runObs, truth []SiteTruth,
 		return false
 	}
 	for _, t := range truth {
-		if t.Writable() {
+		// Production rolls back only on positive evidence from every
+		// promotable peer (K178): an unreachable primary-candidate or
+		// dr-only site's writability is unknown, and the source must be
+		// reachable to be unfenced. A read-only-role reader that does not
+		// answer is allowed there as everywhere (§4.1), so it does not
+		// excuse a hold; neither does what it is doing out of sight.
+		if !t.Reachable() {
+			if m.roles[t.Name] == state.SiteRoleReadOnly && t.Name != r.source && t.Name != r.target {
+				continue
+			}
 			return false
 		}
-		// Production rolls back only on positive evidence from every peer
-		// (K178): an unreachable site's writability is unknown, and the
-		// source must be reachable to be unfenced.
-		if !t.Reachable() {
+		if t.Writable() {
 			return false
 		}
 		exec, err := mysql.ParseGTIDSet(t.Executed.String())
@@ -1296,7 +1463,7 @@ func (m *plannedMonitor) noteEnginePass() {
 		return
 	}
 	if r == nil {
-		r = &runObs{id: id, fenceGen: -1, unconfirmedSince: -1, probeSeq: -1}
+		r = &runObs{id: id, fenceGen: -1, unconfirmedSince: -1, probeSeq: -1, roClearSeq: -1}
 		m.runs[id] = r
 		m.order = append(m.order, id)
 	}
