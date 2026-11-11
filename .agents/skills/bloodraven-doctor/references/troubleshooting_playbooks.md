@@ -1556,7 +1556,7 @@ Do not:
 - `/archiver/status` of the writable site: `filesArchived: 0`, `backlogFiles` equal to the number of sealed binlogs and rising with every rotation, `consecutiveFailedScans` rising, `tail.state: Blocked`. Sidecar WARN `archive binlog` with `error="invalid binlog magic"` once per sealed file per scan.
 - `/archiver/status` of a read-only site: `tail.state: Blocked` with `reason` `read the header of mysql-bin.NNNNNN: get event err EOF, need 1768714341 but got <n>` and WARN `binlog tail not archived while read-only`. A site that was never writable shows no `lastError`; a demoted primary keeps the `invalid binlog magic` error and its backlog.
 - Sidecar INFO `promotion set not recorded` with `reason="read the header of mysql-bin.NNNNNN: …"` at every promotion; the promotion record has no `promotionGtidExecuted`.
-- The archive prefix holds `archive.json` and the per-site manifests, and no binlog object. A reclone of the old primary waits 2 minutes and raises Warning `PITRArchiveTailNotArchived`.
+- The archive prefix holds `archive.json` and the per-site manifests, and no binlog object. A reclone waits 2 minutes for the recipient's tail and then raises Warning `PITRArchiveTailNotArchived`.
 - A group that turned binary log encryption on after PITR had been archiving: the binlogs sealed before the change are in the archive, every one after it fails.
 
 ### Cause

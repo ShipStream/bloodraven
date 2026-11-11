@@ -27,7 +27,7 @@ Three options are described: decrypt in the sidecar (1), refuse the combination 
 | Promotion set | `promotionSet` ends on a header it cannot read (`internal/sidecar/promotion_record.go:558-560`, `:661-664`) | The record is written without `promotionGtidExecuted`; INFO `promotion set not recorded` |
 | Tail drain | `findTail` → `examineOrigin` → `tailPrevious` → `localBinlogHeader` (`internal/sidecar/binlog_tail.go:458-466`, `:532-538`); the outcome is `tailUndecided` (`:300-303`) | `tail.state: Blocked`, reason `read the header of mysql-bin.NNNNNN: …`, WARN `binlog tail not archived while read-only`; no `lastError` of its own |
 | Origin walk | `errEncryptedBinlog` (`internal/sidecar/binlog_origin.go:71`, `:106-107`) | Never reached on a real file: the header read before it fails first. The message quoted in PR #280 ("the binlog file is encrypted") therefore does not appear in any status or log |
-| Reclone | The operator waits up to 2 minutes for the recipient's tail (`internal/controller/reclone_archive_tail.go`) | Every reclone of a former primary waits its 2 minutes and raises Warning `PITRArchiveTailNotArchived` |
+| Reclone | The operator waits up to 2 minutes for the recipient's tail (`internal/controller/reclone_archive_tail.go`) | The tail of a read-only site never reports `Drained`, so every reclone waits its 2 minutes and raises Warning `PITRArchiveTailNotArchived` (from the code; not run) |
 | Restore | The archive holds `archive.json`, manifests with promotion records, and no binlog | A point-in-time target after the backup has nothing to replay. No restore ever sees an encrypted file. (`mysqlbinlog` on one says `ERROR: Reading encrypted log files directly is not supported.`, measured) |
 
 ### What a real server shows (docker)
