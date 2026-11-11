@@ -57,8 +57,8 @@ func TestRetentionRequiresGTIDCoverageInEveryBackup(t *testing.T) {
 				}
 				meta.GTIDCoverage.ContentID = id
 				meta.GTIDCoverage.Complete = i != 3
-				rows = append(rows, map[string]any{"name": name, "contentId": id, "lastEventTime": base.Add(time.Hour), "gtidCoverage": meta.GTIDCoverage})
-				if err := store.Put(ctx, "binlogs/iad/"+name, bytes.NewReader(payload), int64(len(payload))); err != nil {
+				rows = append(rows, map[string]any{"name": name, "id": id, "lastEventTime": base.Add(time.Hour), "gtidCoverage": meta.GTIDCoverage})
+				if err := store.Put(ctx, "binlogs/iad/"+name+"."+id, bytes.NewReader(payload), int64(len(payload))); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -73,7 +73,7 @@ func TestRetentionRequiresGTIDCoverageInEveryBackup(t *testing.T) {
 			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
 			a.maybeRunRetention(ctx)
 			for i, row := range rows {
-				_, exists, err := store.Get(ctx, "binlogs/iad/"+row["name"].(string))
+				_, exists, err := store.Get(ctx, "binlogs/iad/"+row["name"].(string)+"."+row["id"].(string))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -163,11 +163,9 @@ func TestRetentionBackfillsCoverageWithoutAliasingIncarnations(t *testing.T) {
 			t.Fatal(err)
 		}
 		entry := ManifestEntry{Name: "mysql-bin.000001", FirstEventTime: meta.FirstEventTime, LastEventTime: meta.LastEventTime, PreviousGTIDs: meta.PreviousGTIDs}
-		if len(rows) > 0 {
-			entry.ID, err = fileContentID(file)
-			if err != nil {
-				t.Fatal(err)
-			}
+		entry.ID, err = fileContentID(file)
+		if err != nil {
+			t.Fatal(err)
 		}
 		key, err := ArchiveEntryKey("binlogs", "iad", entry)
 		if err != nil {
@@ -199,7 +197,7 @@ func TestRetentionBackfillsCoverageWithoutAliasingIncarnations(t *testing.T) {
 		t.Fatalf("retention confused reused names: %+v", m.Files)
 	}
 	if m.Files[0].GTIDCoverage == nil || !m.Files[0].GTIDCoverage.Complete || m.Files[0].GTIDCoverage.GTIDs != coverageTestSID+":21" {
-		t.Fatalf("legacy coverage was not persisted: %+v", m.Files[0])
+		t.Fatalf("backfilled coverage was not persisted: %+v", m.Files[0])
 	}
 	for i, row := range rows {
 		key, err := ArchiveEntryKey("binlogs", "iad", row)

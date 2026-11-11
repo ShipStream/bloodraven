@@ -109,6 +109,22 @@ const (
 	// (its reclone queue is `Armed` or `Held`, or the topology is frozen).
 	// The site keeps its data and its stopped replication.
 	EventBootstrapRefusedRestoreHold = "BootstrapRefusedRestoreHold"
+	// A site was cloned (a reclone, the fresh-deploy bootstrap, the
+	// auto-clone of an empty site, the post-restore reclone queue) and came
+	// back with the `server_uuid` it had before. The mysql container's
+	// launcher gives every clone recipient a new one by removing
+	// `auto.cnf` on the restart that installs the clone; here it did not
+	// run (a pod rendered before the launcher, which rolls with the
+	// group's pending update, or a `spec.image` that starts mysqld
+	// another way) or could not remove the file (its line in the mysql
+	// container's log starts with `bloodraven-launcher:`). The message
+	// names the site and the `server_uuid`. The site replicates and stays
+	// a failover candidate; if it is promoted after losing transactions
+	// as a primary it can reissue their GTIDs
+	// (`PITRArchiveReissueRiskDetected`). Reclone the site once its pod
+	// runs the launcher ([Server identity after a
+	// clone](/docs/operations/operations#server-identity-after-a-clone)).
+	EventCloneServerUUIDNotRotated = "CloneServerUUIDNotRotated"
 	// The group's sidecar image (a `spec.sidecar.image` pin, or the
 	// operator's default `BLOODRAVEN_SIDECAR_IMAGE` when it pins none) is
 	// tagged with a different release than the running operator. The two share a rendering contract and are
@@ -669,6 +685,16 @@ const (
 // clear by themselves. They are listed in [Archive
 // identity](/docs/backup-and-restore/backup-restore#archive-identity).
 //
+// Divergent rows in a site's manifest (archived transactions its server no
+// longer has, for example the tail an old primary archived before it was
+// recloned) are evidence for restores, not an archiver error. They fire no
+// Event and leave the condition `True`; its message lists them, for example
+// `Every site reports a running archiver with a ready store and no error;
+// iad: 1 divergent row (...)`. Only a server that could issue those GTIDs
+// again is an error: its sidecar reports `reissuableGtids`, and the condition
+// turns `False` with reason `ArchiverError` ([Reissue
+// risk](/docs/backup-and-restore/pitr-history-repair#reissue-risk)).
+//
 // A `PITRArchiveNotReady` → `PITRArchiveRecovered` pair is expected, not an
 // incident, when:
 //
@@ -719,11 +745,16 @@ const (
 	// history
 	// marker](/docs/backup-and-restore/pitr-history-repair#unsafe-history-marker)).
 	EventPITRArchiveUnsafeHistoryDetected = "PITRArchiveUnsafeHistoryDetected"
-	// The active site changed to a site whose manifest holds divergent or
-	// quarantined rows. If it was recloned after a lossy failover it
-	// reissues the lost GTIDs; start a new archive prefix and take a full
-	// backup ([Reissue risk after a
-	// reclone](/docs/backup-and-restore/pitr-history-repair#reissue-risk-after-a-reclone)).
+	// The active site changed to a site whose server could reissue GTIDs
+	// its archive already holds: its manifest has divergent or quarantined
+	// rows with transactions the server no longer has, issued under the
+	// `server_uuid` it still has (a data directory restored or reset
+	// without a clone, or a clone by a release that kept the recipient's
+	// `server_uuid`). The message lists them; a sidecar that has not
+	// reported that verdict warns on the row counts instead. Its new
+	// writes reuse those GTIDs: start a new archive prefix and take a full
+	// backup ([Reissue
+	// risk](/docs/backup-and-restore/pitr-history-repair#reissue-risk)).
 	EventPITRArchiveReissueRiskDetected = "PITRArchiveReissueRiskDetected"
 	// A reclone started although the recipient's binary log tail was not
 	// confirmed archived: before CLONE wipes a site's binary logs the

@@ -1507,6 +1507,10 @@ func pitrRecloneEventSnapshot(ctx context.Context, env *runner.Env) (map[string]
 // completes without the operator's "pre-reclone archive tail archived"
 // line: CLONE wipes site's binary logs, and a tail it wiped unarchived is
 // a PITRArchiveGap for every restore that needs it.
+//
+// Every reclone must also give site a new server_uuid (#265, cloneIdentity):
+// a recloned former primary that kept the one its lost transactions were
+// issued under would reissue their GTIDs once promoted again.
 func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDivergent bool) error {
 	readyCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
@@ -1516,6 +1520,10 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 		value = v
 		return ready, msg, nil
 	})
+	if err != nil {
+		return err
+	}
+	identity, err := startCloneIdentity(ctx, env, site)
 	if err != nil {
 		return err
 	}
@@ -1579,6 +1587,9 @@ func pitrRecloneSite(ctx context.Context, env *runner.Env, site string, expectDi
 		return err
 	}
 	env.Capture.Note("reclone of " + site + " completed")
+	if _, err := identity.assertRotated(ctx, env); err != nil {
+		return err
+	}
 	if archivesTail {
 		return pitrAssertRecloneTailArchived(ctx, env, operatorLog, eventsBefore, site, pitrPreRecloneLogWait)
 	}
@@ -1923,9 +1934,10 @@ func pitrCheckTargetAfterBackup(env *runner.Env, e pitrExpectation) error {
 }
 
 // pitrDivergenceAuditError matches the sidecar's history-audit LastError for
-// archived rows the server no longer has (internal/sidecar
-// binlog_history.go auditArchive), possibly behind an unsafe-history prefix.
-var pitrDivergenceAuditError = regexp.MustCompile(`site \S+ name \S+ id \S* P=\S* divergent transactions=\S+; preserve objects and use pitr-quarantine`)
+// archived transactions the server issued, no longer has and could reissue
+// (internal/sidecar binlog_history.go auditArchive), possibly behind an
+// unsafe-history prefix. A loss under another server_uuid is no error.
+var pitrDivergenceAuditError = regexp.MustCompile(`site \S+: server_uuid \S+ no longer has archived transactions \S+ that it issued \(row \S+ id \S*\) and reuses their GTIDs`)
 
 // pitrPromotionReady reports whether an archiver status shows site's
 // promotion confirmed: primary on the active prefix and the expected
@@ -1934,9 +1946,9 @@ var pitrDivergenceAuditError = regexp.MustCompile(`site \S+ name \S+ id \S* P=\S
 // (pitrSiteNow), which the sidecar shares, so no cross-host slack is
 // needed (F182). With tolerateDivergence the divergence audit's LastError
 // is accepted while the site's manifest holds divergent or quarantined
-// rows: the audit keeps reporting rows a lossy failover deliberately left
-// behind (s70), and that error never clears. Any other error, or the audit
-// error with no such rows, is not ready (F181).
+// rows: the audit keeps reporting a loss the server could reissue (a site
+// that kept its server_uuid), and that error never clears. Any other
+// error, or the audit error with no such rows, is not ready (F181).
 func pitrPromotionReady(st *pgsidecar.ArchiverStatusResponse, prefix, archiveID string, notBefore time.Time, tolerateDivergence bool) (bool, string) {
 	if st == nil {
 		return false, "no status"

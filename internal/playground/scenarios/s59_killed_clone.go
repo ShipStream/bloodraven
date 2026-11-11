@@ -38,6 +38,8 @@ type s59State struct {
 	recloneAt          time.Time
 	primaryDownAt      time.Time
 	failoversBefore    float64
+	// identity is the candidate's server_uuid before the killed reclone.
+	identity cloneIdentity
 }
 
 // scenario59KilledClone covers the total-data-loss chain from the chaos
@@ -54,6 +56,11 @@ type s59State struct {
 //     and the recipient stays super_read_only;
 //   - with the primary down, the empty candidate is never promoted, and
 //     the group recovers with no data loss when the primary returns.
+//
+// It also pins what a clone does to the recipient's server_uuid (#265). The
+// killed clone is rolled back inside the running mysqld and installs
+// nothing, so the candidate keeps its server_uuid; the repair clone that
+// completes gives it a new one.
 func scenario59KilledClone() runner.Scenario {
 	st := &s59State{}
 	return runner.Scenario{
@@ -63,7 +70,8 @@ func scenario59KilledClone() runner.Scenario {
 			"makes the operator log 'bootstrap failed' (not 'bootstrap completed successfully') and leaves the " +
 			"recipient super_read_only. With the primary then scaled to 0, the operator logs 'failover picker: " +
 			"refusing candidate whose data regressed' and promotes nothing; when the primary returns it is active " +
-			"again with the marker row intact, and the candidate is re-cloned.",
+			"again with the marker row intact, and the candidate is re-cloned. The killed clone leaves the candidate's " +
+			"server_uuid unchanged; the repair clone gives it a new one.",
 		Risk:     "high",
 		DocLink:  "playground/chaos-scenarios.md#59-killed-clone",
 		Timeout:  20 * time.Minute,
@@ -170,6 +178,9 @@ func s59KillReclone(st *s59State) runner.Step {
 			if _, err := env.Logs("operator"); err != nil {
 				return fmt.Errorf("open operator tailer: %w", err)
 			}
+			if st.identity, err = startCloneIdentity(ctx, env, st.candidate); err != nil {
+				return err
+			}
 			st.recloneAt = time.Now()
 			value, err := recloneValueFor(ctx, env, st.candidate)
 			if err != nil {
@@ -255,7 +266,11 @@ func s59VerifyBootstrapFailed(st *s59State) runner.Step {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("recipient %s after the killed clone: super_read_only=ON gtid_executed=%q", st.candidate, gtid))
-			return nil
+			// The clone was killed and rolled back in the running mysqld:
+			// nothing was installed and nothing restarted, so the
+			// recipient is the server it was. (The throttle keeps any
+			// automatic re-clone from completing before this read.)
+			return st.identity.assertKept(ctx, env)
 		},
 	}
 }
@@ -405,6 +420,10 @@ func s59RepairCandidate(st *s59State) runner.Step {
 					return !bootstrapFailed(boot), "boot=" + bootState, nil
 				})
 			if err != nil {
+				return err
+			}
+			// The repair clone completed: the candidate is a new server.
+			if _, err := st.identity.assertRotated(ctx, env); err != nil {
 				return err
 			}
 			// A fresh connection: the primary's pod restarted, so the

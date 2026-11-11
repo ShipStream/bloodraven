@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -18,43 +17,22 @@ import (
 type binlogHeader struct {
 	previous string
 }
+
+// binlogHistoryTask re-identifies one sealed local binlog in the history
+// lane of scanFiles: its bytes are hashed within the scan's budget, across
+// scans when the file is large.
 type binlogHistoryTask struct {
-	name           string
-	info           os.FileInfo
-	reader         io.ReadCloser
-	hash           hash.Hash
-	id             string
-	remote         bool
-	row            int
-	remoteIdentity binlogIdentity
-	remoteResult   chan remoteHistoryResult
+	name   string
+	info   os.FileInfo
+	reader io.ReadCloser
+	hash   hash.Hash
+	id     string
 }
 
-type remoteHistoryResult struct {
-	digest string
-	err    error
-}
-
-// A large remote read keeps consuming in one bounded worker instead of parking
-// an HTTP response until the next scan. Only the scan goroutine publishes it.
-func (t *binlogHistoryTask) drainRemote() {
-	reader, h := t.reader, t.hash
-	t.remoteResult = make(chan remoteHistoryResult, 1)
-	result := t.remoteResult
-	go func() {
-		_, err := io.Copy(h, reader)
-		_ = reader.Close()
-		result <- remoteHistoryResult{digest: hex.EncodeToString(h.Sum(nil)), err: err}
-	}()
-}
 func (t *binlogHistoryTask) close() {
 	if t != nil && t.reader != nil {
 		_ = t.reader.Close()
 		t.reader = nil
-	}
-	if t != nil && t.remoteResult != nil {
-		<-t.remoteResult
-		t.remoteResult = nil
 	}
 }
 func localBinlogHeader(path string) (binlogHeader, error) {
@@ -111,45 +89,11 @@ func (a *BinlogArchiver) retiredIdentity(retired map[binlogIdentity]struct{}, na
 }
 func (a *BinlogArchiver) candidateSeen(rows []ManifestEntry, id string) bool {
 	for _, row := range rows {
-		if row.ID != "" && sameStoredIdentity(a.store, row.ID, id) {
+		if sameStoredIdentity(a.store, row.ID, id) {
 			return true
 		}
 	}
 	return false
-}
-func (a *BinlogArchiver) legacyExists(ctx context.Context, row ManifestEntry) error {
-	key, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, row)
-	if err != nil {
-		return err
-	}
-	if until := a.legacyChecked[key]; time.Now().Before(until) {
-		return nil
-	}
-	r, err := a.store.Open(ctx, key)
-	if err != nil {
-		return err
-	}
-	_ = r.Close()
-	if a.legacyChecked == nil {
-		a.legacyChecked = make(map[string]time.Time)
-	}
-	a.legacyChecked[key] = time.Now().Add(time.Hour)
-	return nil
-}
-func (a *BinlogArchiver) missingLegacy(ctx context.Context, name, id string, rows []ManifestEntry) (bool, error) {
-	for _, row := range rows {
-		if row.ID == "" && sameStoredIdentity(a.store, row.ContentID, id) {
-			err := a.legacyExists(ctx, row)
-			if errors.Is(err, os.ErrNotExist) || isS3NotFound(err) {
-				return true, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			return false, nil
-		}
-	}
-	return false, nil
 }
 func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []string, retired map[binlogIdentity]struct{}) (int, int64, bool) {
 	rows := make(map[string][]ManifestEntry)
@@ -245,23 +189,7 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 			settled[name] = true
 			continue
 		}
-		replace, err := a.missingLegacy(ctx, name, id, rows[name])
-		if err != nil {
-			fail(name, err)
-			continue
-		}
-		legacySame := false
-		for _, row := range rows[name] {
-			if row.ID == "" && sameStoredIdentity(a.store, row.ContentID, id) {
-				legacySame = true
-			}
-		}
-		if legacySame && !replace {
-			delete(pending, name)
-			settled[name] = true
-			continue
-		}
-		if err := a.archivePinned(ctx, path, name, id, replace); err != nil {
+		if err := a.archivePinned(ctx, path, name, id); err != nil {
 			pending[name] = true
 			fail(name, err)
 			continue
@@ -270,15 +198,10 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 		uploadedNames = append(uploadedNames, name)
 		delete(pending, name)
 		settled[name] = true
-		if replace {
-			rows[name] = nil
-		}
 		rows[name] = append(rows[name], ManifestEntry{Name: name, ID: id})
 	}
 	budget := int64(64 << 20)
 	started := time.Now()
-	updates := make(map[binlogIdentity]string)
-history:
 	for completed := 0; completed < 8 && len(sealed) > 0 && budget > 0 && time.Since(started) < 2*time.Second; {
 		if a.historyTask == nil {
 			index := len(sealed) - 1 - (a.historyNext % len(sealed))
@@ -313,30 +236,6 @@ history:
 			a.historyTask = nil
 			continue
 		}
-		if task.remoteResult != nil {
-			select {
-			case result := <-task.remoteResult:
-				task.reader = nil
-				task.remoteResult = nil
-				if result.err != nil {
-					fail(task.name, result.err)
-					a.historyTask = nil
-					completed++
-					continue
-				}
-				identity := a.store.BinlogContentID(result.digest)
-				updates[task.remoteIdentity] = identity
-				for index, row := range rows[task.name] {
-					if row.identity() == task.remoteIdentity {
-						rows[task.name][index].ContentID = identity
-						task.row = index + 1
-						break
-					}
-				}
-			default:
-				break history
-			}
-		}
 		if task.reader != nil {
 			a.historyScanBusy = true
 			buffer := make([]byte, 64<<10)
@@ -351,26 +250,16 @@ history:
 						a.historyTask = nil
 						break
 					}
-					digest := hex.EncodeToString(task.hash.Sum(nil))
-					identity := a.store.BinlogContentID(digest)
-					if task.remote {
-						updates[task.remoteIdentity] = identity
-						if task.row < len(rows[task.name]) && rows[task.name][task.row].identity() == task.remoteIdentity {
-							rows[task.name][task.row].ContentID = identity
-							task.row++
-						}
-					} else {
-						after, err := os.Stat(filepath.Join(a.cfg.BinlogDir, task.name))
-						if err != nil || !stableBinlogFile(task.info, after) {
-							a.historyTask = nil
-							break
-						}
-						task.id = identity
-						if a.localIDs == nil {
-							a.localIDs = make(map[string]cachedBinlogIdentity)
-						}
-						a.localIDs[task.name] = cachedBinlogIdentity{info: after, id: identity}
+					after, err := os.Stat(filepath.Join(a.cfg.BinlogDir, task.name))
+					if err != nil || !stableBinlogFile(task.info, after) {
+						a.historyTask = nil
+						break
 					}
+					task.id = a.store.BinlogContentID(hex.EncodeToString(task.hash.Sum(nil)))
+					if a.localIDs == nil {
+						a.localIDs = make(map[string]cachedBinlogIdentity)
+					}
+					a.localIDs[task.name] = cachedBinlogIdentity{info: after, id: task.id}
 					break
 				}
 				if n == 0 {
@@ -382,81 +271,14 @@ history:
 				continue
 			}
 			if task.reader != nil {
-				if task.remote {
-					task.drainRemote()
-				}
+				// The budget ran out mid-file: the next scan continues.
 				break
 			}
 		}
-		wait := false
 		problem := false
-		for task.row < len(rows[task.name]) {
-			row := rows[task.name][task.row]
-			if row.ID != "" {
-				task.row++
-				continue
-			}
-			if row.ContentID == "" {
-				if a.reuseWork != nil {
-					wait = true
-					break
-				}
-				key, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, row)
-				if err == nil {
-					task.reader, err = a.store.Open(ctx, key)
-				}
-				if err != nil {
-					fail(task.name, fmt.Errorf("object missing or unreadable, digest unknown; preserve surviving data and use pitr-quarantine: %w", err))
-					problem = true
-					if !errors.Is(err, os.ErrNotExist) && !isS3NotFound(err) {
-						task.close()
-						a.historyTask = nil
-						completed++
-						break
-					}
-					task.row++
-					continue
-				}
-				task.remote = true
-				task.remoteIdentity = row.identity()
-				task.hash = sha256.New()
-				wait = true
-				break
-			}
-			if err := a.legacyExists(ctx, row); err != nil {
-				if errors.Is(err, os.ErrNotExist) || isS3NotFound(err) {
-					if sameStoredIdentity(a.store, row.ContentID, task.id) {
-						if err := a.archivePinned(ctx, filepath.Join(a.cfg.BinlogDir, task.name), task.name, task.id, true); err != nil {
-							fail(task.name, err)
-							problem = true
-						} else {
-							uploaded++
-							uploadedNames = append(uploadedNames, task.name)
-							rows[task.name][task.row] = ManifestEntry{Name: task.name, ID: task.id}
-						}
-					} else {
-						fail(task.name, fmt.Errorf("object missing; surviving bytes have a different identity; use pitr-quarantine"))
-						problem = true
-					}
-				} else {
-					fail(task.name, err)
-					problem = true
-				}
-			}
-			task.row++
-		}
-		if wait && a.reuseWork != nil {
-			break history
-		}
-		if wait || a.historyTask == nil {
-			continue
-		}
 		seen := a.candidateSeen(rows[task.name], task.id) || a.retiredIdentity(retired, task.name, task.id)
-		for _, row := range rows[task.name] {
-			seen = seen || sameStoredIdentity(a.store, row.ContentID, task.id)
-		}
 		if !seen {
-			if err := a.archivePinned(ctx, filepath.Join(a.cfg.BinlogDir, task.name), task.name, task.id, false); err != nil {
+			if err := a.archivePinned(ctx, filepath.Join(a.cfg.BinlogDir, task.name), task.name, task.id); err != nil {
 				fail(task.name, err)
 				problem = true
 			} else {
@@ -472,20 +294,6 @@ history:
 		task.close()
 		a.historyTask = nil
 		completed++
-	}
-	if len(updates) > 0 {
-		latest, err := a.loadManifest(ctx)
-		if err == nil {
-			for i := range latest.Files {
-				if id, ok := updates[latest.Files[i].identity()]; ok {
-					latest.Files[i].ContentID = id
-				}
-			}
-			err = a.saveManifest(ctx, latest)
-		}
-		if err != nil {
-			fail("manifest", err)
-		}
 	}
 	for name := range a.localIDs {
 		if names[name] == nil && a.tailUpload == nil {

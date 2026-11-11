@@ -41,7 +41,10 @@ func retentionCutoffProof() map[string]any {
 }
 func TestRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
 	for _, encrypted := range []bool{false, true} {
-		for _, layout := range []string{"ID", "legacy", "verified legacy"} {
+		// "mismatched": the row's ID is not its object's, so its proof is
+		// never trusted. "unbound": the ID is right and the coverage was
+		// copied from other bytes, so it is rebuilt from the object.
+		for _, layout := range []string{"mismatched", "unbound"} {
 			t.Run(fmt.Sprintf("encrypted=%v/%s", encrypted, layout), func(t *testing.T) {
 				ctx := context.Background()
 				pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
@@ -62,12 +65,9 @@ func TestRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				row := ManifestEntry{Name: "mysql-bin.000001", LastEventTime: time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11"}}
-				if layout == "ID" {
-					row.ID = original
-				}
-				if layout == "verified legacy" {
-					row.ContentID = original
+				row := ManifestEntry{Name: "mysql-bin.000001", ID: original, LastEventTime: time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11"}}
+				if layout == "unbound" {
+					row.ID = store.BinlogContentID(unboundRow(row.Name, data).ID)
 				}
 				key, err := ArchiveEntryKey("binlogs", "iad", row)
 				if err != nil {
@@ -91,8 +91,8 @@ func TestRetentionBindsExistingProofToArchivedBytes(t *testing.T) {
 				if store.reads != 1 {
 					t.Fatalf("proof must be rebound using one inspection, got %d", store.reads)
 				}
-				if layout == "legacy" {
-					if m.Files[0].GTIDCoverage == nil || m.Files[0].GTIDCoverage.GTIDs != coverageTestSID+":21" || m.Files[0].ContentID == "" || m.Files[0].PreviousGTIDs != coverageTestSID+":1-20" {
+				if layout == "unbound" {
+					if !coverageBoundToEntry(m.Files[0]) || m.Files[0].GTIDCoverage.GTIDs != coverageTestSID+":21" || m.Files[0].PreviousGTIDs != coverageTestSID+":1-20" {
 						t.Fatalf("proof was not rebuilt from the archived bytes: %+v", m.Files[0])
 					}
 				}
@@ -113,7 +113,8 @@ func TestRetentionBackfillIsBoundedAndPersistent(t *testing.T) {
 	}
 	m := &Manifest{Site: "iad"}
 	for i := 0; i < 16; i++ {
-		entry := ManifestEntry{Name: fmt.Sprintf("mysql-bin.%06d", i), Size: int64(len(payload)), LastEventTime: time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)}
+		entry := unboundRow(fmt.Sprintf("mysql-bin.%06d", i), payload)
+		entry.Size, entry.LastEventTime = int64(len(payload)), time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
 		key, err := ArchiveEntryKey("binlogs", "iad", entry)
 		if err != nil {
 			t.Fatal(err)
@@ -139,7 +140,7 @@ func TestRetentionBackfillIsBoundedAndPersistent(t *testing.T) {
 	}
 	verified := 0
 	for _, entry := range persisted.Files {
-		if entry.ContentID != "" {
+		if coverageBoundToEntry(entry) {
 			verified++
 		}
 	}

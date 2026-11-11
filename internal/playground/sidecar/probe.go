@@ -167,9 +167,15 @@ type ArchiverStatusResponse struct {
 	// key revision. nil from a sidecar without PITR.
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count those rows in the site's own
-	// manifest.
+	// manifest. A divergent row is evidence, not an archiver error.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
+	// ReissuableGTIDs is the part of those rows' transactions the site's
+	// server no longer holds and could issue again (the ones under its own
+	// current server_uuid): "" when the last history audit found none, nil
+	// when there is no verdict (no audit yet, a server with no history, or
+	// a sidecar that predates the field).
+	ReissuableGTIDs *string `json:"reissuableGtids,omitempty"`
 	// PromotionRecordedAt is the confirmed promotion record of the current
 	// writable episode; zero while none is confirmed (or read-only).
 	PromotionRecordedAt time.Time `json:"promotionRecordedAt"`

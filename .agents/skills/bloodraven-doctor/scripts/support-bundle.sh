@@ -146,8 +146,10 @@ kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "bloodraven.shipstream.i
     > "$OUTPUT_DIR/verification-pitr.json" 2> "$OUTPUT_DIR/verification-pitr-errors.txt" || true
 
 # Per-site /archiver/status: archive block, promotionRecordedAt, historyIntegrity,
-# divergentRows, quarantinedRows and the tail block (what the site still has
-# to archive; absent from older sidecars). The endpoint returns no credentials.
+# divergentRows, quarantinedRows, reissuableGtids (the archived transactions
+# the site's server could issue again; absent while its audit has no verdict)
+# and the tail block (what the site still has to archive; absent from older
+# sidecars). The endpoint returns no credentials.
 # When nothing could fetch it, the file holds an explicit error object
 # instead of being empty.
 for pod in $(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME,app.kubernetes.io/name=mysql" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do

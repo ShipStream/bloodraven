@@ -847,6 +847,11 @@ type TopologyManager struct {
 	// without its recipient's binary log tail confirmed archived; the
 	// runner records the PITRArchiveTailNotArchived Event.
 	ArchiveTailNotArchivedCallback func(site, reason string)
+	// CloneServerUUIDNotRotatedCallback reports a clone recipient that
+	// came back with the server_uuid it had before the clone
+	// (verifyCloneServerUUIDRotated); the runner records the
+	// CloneServerUUIDNotRotated Event.
+	CloneServerUUIDNotRotatedCallback func(site, serverUUID string)
 	// recloneTail is the pre-reclone wait in progress and
 	// recloneTailSettled the site whose wait ended while its clone has not
 	// started yet. Only Poll's goroutine (checkReclone) uses them.
@@ -4705,6 +4710,11 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		tm.logger.Warn("could not read clone status before clone", "error", prevErr)
 	}
 
+	// The recipient's identity before the clone: the launcher gives it a
+	// new server_uuid on the restart, and the check after the clone
+	// compares against this one.
+	uuidBefore := tm.cloneServerUUIDBefore(ctx, replica, replicaSite)
+
 	// Phase 1: Clone from primary.
 	err := tm.bootstrap.BootstrapReplica(ctx, BootstrapOpts{
 		Primary:      primary,
@@ -4748,6 +4758,7 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		}
 		return fmt.Errorf("clone: %w", verifyErr)
 	}
+	tm.verifyCloneServerUUIDRotated(ctx, replica, replicaSite, uuidBefore)
 
 	// Phase 3: Configure and start replication.
 	tm.mu.Lock()

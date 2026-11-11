@@ -140,8 +140,10 @@ if [[ -n "$PITR_ARCHIVE_ID" && "$PITR_ARCHIVE_ID" != " archiveID= encryption= de
     echo "PITR archive:        $PITR_ARCHIVE_ID"
     # Per-site archive evidence from each sidecar's /archiver/status: the
     # archive block, the last promotion record, the permanent history marker,
-    # the divergent/quarantined rows in the site's own manifest, and the tail
-    # block: what the last scan decided about the sealed binlogs the site
+    # the divergent/quarantined rows in the site's own manifest (evidence, not
+    # an error), reissuableGtids (the archived transactions the site's server
+    # could issue again: an error, playbook 41; absent is "not evaluated"),
+    # and the tail block: what the last scan decided about the sealed binlogs the site
     # still has to archive (a read-only site archives the tail of its last
     # writable era). Sidecars that predate the block do not report it.
     if command -v jq >/dev/null 2>&1; then
@@ -152,11 +154,11 @@ if [[ -n "$PITR_ARCHIVE_ID" && "$PITR_ARCHIVE_ID" != " archiveID= encryption= de
             fi
             ARCHIVER_JSON="$SIDECAR_HTTP_BODY"
             printf '%s' "$ARCHIVER_JSON" | jq -r --arg pod "$pod" \
-                '"  \($pod) site=\(.site // "?") archive=\(.archive.state // "none")/\(.archive.reason // "") id=\(.archive.archiveID // "") promotionRecordedAt=\(.promotionRecordedAt // "none") historyIntegrity=\(if .historyIntegrity then "\(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at)" else "none" end) divergentRows=\(.divergentRows // 0) quarantinedRows=\(.quarantinedRows // 0) tail=\(if (.tail | type) == "object" then "\(.tail.state // "?") active=\(.tail.activeFile // "none") newestSealed=\(.tail.newestSealedFile // "none") pending=\(.tail.pendingFiles // 0)\(if (.tail.reason // "") != "" then " reason=\(.tail.reason)" else "" end)\(if .tail.state == "Blocked" and .primary == false then " (read-only site not archiving its tail: playbook 46)" else "" end)" else "not-reported" end)"' \
+                '"  \($pod) site=\(.site // "?") archive=\(.archive.state // "none")/\(.archive.reason // "") id=\(.archive.archiveID // "") promotionRecordedAt=\(.promotionRecordedAt // "none") historyIntegrity=\(if .historyIntegrity then "\(.historyIntegrity.violation) (\(.historyIntegrity.detail)) at \(.historyIntegrity.at)" else "none" end) divergentRows=\(.divergentRows // 0) quarantinedRows=\(.quarantinedRows // 0) reissuableGtids=\(if (.reissuableGtids | type) != "string" then "not-evaluated" elif .reissuableGtids == "" then "none" else "\(.reissuableGtids) (this server could reissue archived GTIDs: playbook 41)" end) tail=\(if (.tail | type) == "object" then "\(.tail.state // "?") active=\(.tail.activeFile // "none") newestSealed=\(.tail.newestSealedFile // "none") pending=\(.tail.pendingFiles // 0)\(if (.tail.reason // "") != "" then " reason=\(.tail.reason)" else "" end)\(if .tail.state == "Blocked" and .primary == false then " (read-only site not archiving its tail: playbook 46)" else "" end)" else "not-reported" end)"' \
                 2>/dev/null || echo "  $pod: /archiver/status is not JSON"
         done
     else
-        echo "  Per-site archive, promotionRecordedAt, historyIntegrity, divergentRows, quarantinedRows and tail: sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver"
+        echo "  Per-site archive, promotionRecordedAt, historyIntegrity, divergentRows, quarantinedRows, reissuableGtids and tail: sidecar-probe.sh -n $NAMESPACE $MFG_NAME archiver"
     fi
 fi
 # PITR archive encryption bindings (#203): the identity (mode, key snapshot)

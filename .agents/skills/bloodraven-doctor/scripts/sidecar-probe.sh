@@ -167,6 +167,37 @@ summarize_archiver_tail() {
         end' 2>/dev/null || true
 }
 
+# The /archiver/status divergence fields. divergentRows counts the rows of
+# the site's manifest whose transactions its server no longer has: evidence
+# for restores, not an archiver error. reissuableGtids is the part of those
+# transactions (of divergent and quarantined rows) the server could issue
+# again, the ones under its own current server_uuid: "" is "none", a set is
+# an archiver error (playbook 41), absent is "no verdict yet", never "none".
+summarize_archiver_divergence() {
+    command -v jq >/dev/null 2>&1 || return 0
+    local body
+    body=$(printf '%s\n' "$1" | sed '/^(HTTP [0-9]*)$/d')
+    printf '%s\n' "$body" | jq -r '
+        if type != "object" or .enabled != true then empty
+        else (.divergentRows // 0) as $d | (.quarantinedRows // 0) as $q |
+            if (.reissuableGtids | type) == "string" and .reissuableGtids != "" then
+                "   divergence: this server could reissue archived GTIDs " + .reissuableGtids
+                + " (divergentRows=" + ($d | tostring) + " quarantinedRows=" + ($q | tostring)
+                + "): reclone the site before it is promoted, playbook 41"
+            elif (.reissuableGtids | type) != "string" then
+                if ($d + $q) > 0 then
+                    "   divergence: divergentRows=" + ($d | tostring) + " quarantinedRows=" + ($q | tostring)
+                    + ", reissue risk not evaluated (no audit verdict yet, or the sidecar predates reissuableGtids): playbook 41"
+                else "   divergence: none recorded, reissue risk not evaluated (no audit verdict yet, or the sidecar predates reissuableGtids)"
+                end
+            elif $d > 0 then
+                "   divergence: divergentRows=" + ($d | tostring)
+                + " recorded as evidence, nothing reissuable: no archiver action, restores across them need excludeGtids (playbooks 27 and 42)"
+            else "   divergence: none"
+            end
+        end' 2>/dev/null || true
+}
+
 for pod in $PODS; do
     echo ""
     echo "📍 Pod: $pod"
@@ -200,6 +231,7 @@ for pod in $PODS; do
         fi
         if [[ "$ENDPOINT" == "archiver" ]]; then
             summarize_archiver_tail "$RESULT"
+            summarize_archiver_divergence "$RESULT"
         fi
     else
         echo "⚠️ Unable to fetch $TARGET_PATH from sidecar on pod $pod (tried containers: $CANDIDATES)."

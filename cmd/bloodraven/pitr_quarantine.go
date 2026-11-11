@@ -17,14 +17,14 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 	flags.SetOutput(errOut)
 	site := flags.String("site", "", "Archive site")
 	name := flags.String("name", "", "Exact binlog basename")
-	id := flags.String("id", "", "Exact archive ID, or 'legacy' for a basename-only row")
+	id := flags.String("id", "", "The row's id in the site manifest (its content identity)")
 	reason := flags.String("reason", "", "Audit reason; objects are preserved")
 	resume := flags.String("resume-gtids", "", "GTID set of a trusted canonical full backup; recorded with the change and checked against earlier quarantine and acknowledgement bounds. Restores do not use it: excludeGtids still decides which transactions a restore drops")
 	ack := flags.Bool("acknowledge-history", false, "Verify active history and overlapping issuance against a canonical backup, then supersede an obsolete guard")
 	undo := flags.Bool("undo", false, "Restore a quarantined row after repairing its object")
 	confirm := flags.Bool("confirm", false, "Apply the metadata change; stop the site's writer first")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(errOut, "Preserve a problematic object and quarantine only its manifest row.\nUsage: bloodraven pitr-quarantine --site SITE --name NAME --id ID|legacy --reason TEXT --resume-gtids SET --confirm\nOr: bloodraven pitr-quarantine --site SITE --acknowledge-history --reason TEXT --resume-gtids SET --confirm\nUses the same BLOODRAVEN_PITR_* storage configuration and mounted Secrets as pitr-download, plus the writer identity the sidecar gets (BLOODRAVEN_FAILOVER_GROUP_UID, BLOODRAVEN_PITR_DESTINATION, BLOODRAVEN_PITR_ENCRYPTION_MODE); it refuses an archive whose descriptor this group does not own.\nStop the site's sidecar writer first; take a manifest copy and a canonical full backup. Use --undo to restore a repaired row.")
+		_, _ = fmt.Fprintln(errOut, "Preserve a problematic object and quarantine only its manifest row.\nUsage: bloodraven pitr-quarantine --site SITE --name NAME --id ID --reason TEXT --resume-gtids SET --confirm\nOr: bloodraven pitr-quarantine --site SITE --acknowledge-history --reason TEXT --resume-gtids SET --confirm\nUses the same BLOODRAVEN_PITR_* storage configuration and mounted Secrets as pitr-download, plus the writer identity the sidecar gets (BLOODRAVEN_FAILOVER_GROUP_UID, BLOODRAVEN_PITR_DESTINATION, BLOODRAVEN_PITR_ENCRYPTION_MODE); it refuses an archive whose descriptor this group does not own.\nStop the site's sidecar writer first; take a manifest copy and a canonical full backup. Use --undo to restore a repaired row.")
 		flags.PrintDefaults()
 	}
 	for _, arg := range args {
@@ -43,8 +43,11 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 		flags.Usage()
 		return fmt.Errorf("site and explicit --confirm are required; choose name/id or --acknowledge-history")
 	}
+	// Basename-only rows belong to archives written before archive
+	// identity. This release refuses those archives and any manifest
+	// holding such a row, so there is none to select.
 	if *id == "legacy" {
-		*id = ""
+		return fmt.Errorf("--id legacy is not supported: a row without an id belongs to an archive written before archive identity, which this release refuses (%s); give the row's id from its manifest", pitrarchive.TokenArchiveLegacy)
 	}
 	cfg, err := pitrQuarantineStoreConfig()
 	if err != nil {

@@ -36,8 +36,9 @@ func TestManifestRoundTripPVC(t *testing.T) {
 
 	// Append two entries; the second overwrites the first if same name.
 	now := time.Now().UTC().Truncate(time.Second)
-	e1 := ManifestEntry{Name: "mysql-bin.000001", RemotePath: "binlogs/us-east-1a/mysql-bin.000001", Size: 100, FirstEventTime: now, LastEventTime: now, ArchivedAt: now}
-	e2 := ManifestEntry{Name: "mysql-bin.000002", RemotePath: "binlogs/us-east-1a/mysql-bin.000002", Size: 200, FirstEventTime: now.Add(time.Minute), LastEventTime: now.Add(2 * time.Minute), ArchivedAt: now}
+	id1, id2 := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	e1 := ManifestEntry{Name: "mysql-bin.000001", ID: id1, RemotePath: "binlogs/us-east-1a/mysql-bin.000001." + id1, Size: 100, FirstEventTime: now, LastEventTime: now, ArchivedAt: now}
+	e2 := ManifestEntry{Name: "mysql-bin.000002", ID: id2, RemotePath: "binlogs/us-east-1a/mysql-bin.000002." + id2, Size: 200, FirstEventTime: now.Add(time.Minute), LastEventTime: now.Add(2 * time.Minute), ArchivedAt: now}
 
 	if err := appendManifestEntry(ctx, store, prefix, site, e1); err != nil {
 		t.Fatalf("append e1: %v", err)
@@ -71,7 +72,7 @@ func TestManifestRoundTripPVC(t *testing.T) {
 	// Prune drops e1, returns its remote path for delete, and leaves
 	// the on-disk manifest with just e2.
 	removed, err := testPrune(ctx, store, prefix, site,
-		map[binlogIdentity]string{{Name: "mysql-bin.000001"}: strings.Repeat("a", 64)})
+		map[binlogIdentity]string{e1.identity(): id1})
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestManifestRoundTripPVC(t *testing.T) {
 }
 
 // TestPruneManifestIgnoresRemotePath pins that retention deletes keys
-// derived from prefix/site/Name, never a manifest-supplied RemotePath
+// derived from prefix/site/Name/ID, never a manifest-supplied RemotePath
 // that could point at unrelated objects in the bucket.
 func TestPruneManifestIgnoresRemotePath(t *testing.T) {
 	store, err := newPVCStore(testPVCConfig(t.TempDir()), "")
@@ -103,23 +104,24 @@ func TestPruneManifestIgnoresRemotePath(t *testing.T) {
 	ctx := context.Background()
 	prefix, site := "binlogs", "us-east-1a"
 	now := time.Now().UTC()
+	id := strings.Repeat("a", 64)
 	for _, e := range []ManifestEntry{
-		{Name: "mysql-bin.000001", RemotePath: "backups/full-2026.tar", LastEventTime: now, ArchivedAt: now},
-		{Name: "../../backups/full-2026.tar", RemotePath: "backups/full-2026.tar", LastEventTime: now, ArchivedAt: now},
+		{Name: "mysql-bin.000001", ID: id, RemotePath: "backups/full-2026.tar", LastEventTime: now, ArchivedAt: now},
+		{Name: "../../backups/full-2026.tar", ID: id, RemotePath: "backups/full-2026.tar", LastEventTime: now, ArchivedAt: now},
 	} {
 		if err := appendManifestEntry(ctx, store, prefix, site, e); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
 	removed, err := testPrune(ctx, store, prefix, site, map[binlogIdentity]string{
-		{Name: "mysql-bin.000001"}:            strings.Repeat("a", 64),
-		{Name: "../../backups/full-2026.tar"}: strings.Repeat("a", 64),
+		{Name: "mysql-bin.000001", ID: id}:            id,
+		{Name: "../../backups/full-2026.tar", ID: id}: id,
 	})
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	if len(removed) != 1 || removed[0] != "binlogs/us-east-1a/mysql-bin.000001" {
-		t.Errorf("want removed=[binlogs/us-east-1a/mysql-bin.000001], got %v", removed)
+	if want := "binlogs/us-east-1a/mysql-bin.000001." + id; len(removed) != 1 || removed[0] != want {
+		t.Errorf("want removed=[%s], got %v", want, removed)
 	}
 	m, err := loadManifest(ctx, store, prefix, site)
 	if err != nil {
@@ -153,7 +155,7 @@ func TestLoadManifestForcesSite(t *testing.T) {
 	if m.Site != "iad" {
 		t.Fatalf("want site iad, got %q", m.Site)
 	}
-	if err := appendManifestEntry(ctx, store, "binlogs", "iad", ManifestEntry{Name: "mysql-bin.000001"}); err != nil {
+	if err := appendManifestEntry(ctx, store, "binlogs", "iad", ManifestEntry{Name: "mysql-bin.000001", ID: strings.Repeat("a", 64)}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if _, err := os.Stat(tmp + "/victim.json"); !os.IsNotExist(err) {

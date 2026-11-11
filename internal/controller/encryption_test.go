@@ -507,8 +507,8 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	if src.Name != "config" {
 		t.Errorf("component sources should come from the per-site ConfigMap volume, got %q", src.Name)
 	}
-	cmd, args := encryptionMysqlLauncher(fg, []string{"--server-id=1"})
-	if len(cmd) < 3 || cmd[0] != "/bin/bash" {
+	cmd, args := mysqlLauncher(fg, []string{"--server-id=1"})
+	if len(cmd) != 3 || cmd[0] != "/bin/bash" || cmd[1] != "-ec" {
 		t.Fatalf("launcher command = %v, want bash -ec <script>", cmd)
 	}
 	script := cmd[2]
@@ -523,7 +523,8 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 		"/opt/mysql/lib/plugin/component_keyring_file.cnf",
 		"/opt/bloodraven/mysql/lib/plugin",
 		"/opt/bloodraven/mysql/share",
-		mysqlDockerEntrypoint,
+		mysqlImageEntrypoints[0],
+		`exec "$entrypoint" "$0" "$@"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("launcher script missing %q:\n%s", want, script)

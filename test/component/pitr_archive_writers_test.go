@@ -1119,3 +1119,268 @@ func TestArchiveWritersRecloneArchivesLostTail(t *testing.T) {
 	plan, err = w.plan(early, time.Time{}, lost)
 	assertPlan(t, "latest excluding the lost tail", plan, err, A+":1-8,"+B+":1-3", "", "")
 }
+
+// writerUUIDC is the server_uuid a clone gives its recipient (#265).
+const writerUUIDC = "cccccccc-0000-4000-8000-00000000000c"
+
+// auditedServer is a simServer whose sidecar also runs the history audit,
+// as every real server's does: it answers the audit's server-state query.
+type auditedServer struct{ *simServer }
+
+func (s auditedServer) BinlogState(context.Context) (string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.uuid, s.executed.String(), nil
+}
+
+// startAudited is start for a server whose sidecar audits its manifest
+// against the server's state.
+func (w *writerArchive) startAudited(site string, srv *simServer, identity sidecar.ArchiveIdentity) *sidecar.BinlogArchiver {
+	cfg := &sidecar.PITRConfig{
+		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
+		PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond, Archive: identity,
+	}
+	a := sidecar.NewBinlogArchiver(cfg, site, auditedServer{srv}, w.store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w.wg.Add(1)
+	go func() { defer w.wg.Done(); a.Run(w.ctx) }()
+	return a
+}
+
+// recloneAs is reclone by an operator that rotates the recipient's
+// server_uuid: the clone starts as a new server.
+func (s *simServer) recloneAs(donor *simServer, uuid string) {
+	s.reclone(donor)
+	s.mu.Lock()
+	s.uuid = uuid
+	s.mu.Unlock()
+}
+
+// lossyRecloneLayout runs the layout of #271's audit: a archives A:1-5, then
+// commits A:6-10 of which only A:6-8 reach b. a fails, b is promoted and
+// commits B:1-3 (archived). a comes back read-only; the operator's flush
+// seals its tail, which its sidecar archives with the lost A:9-10 in it.
+// The caller then reclones a from b and fails back.
+type lossyRecloneLayout struct {
+	w          *writerArchive
+	srvA, srvB *simServer
+	a, b       *sidecar.BinlogArchiver
+	early      backupmeta.DumpMeta
+	tail, era2 []binlogtest.Txn
+}
+
+func newLossyRecloneLayout(t *testing.T) *lossyRecloneLayout {
+	l := &lossyRecloneLayout{w: newWriterArchive(t)}
+	w := l.w
+	l.srvA = newSimServer(t, writerUUIDA, 101, false)
+	l.srvB = newSimServer(t, writerUUIDB, 102, true)
+	id := w.identity(writerGroup, w.dest)
+	l.a = w.startAudited("a", l.srvA, id)
+	l.b = w.startAudited("b", l.srvB, id)
+
+	w.waitRecords("a", 1)
+	era1 := liveTxns(writerUUIDA, 101, 1, 5)
+	l.srvA.apply(era1...)
+	l.srvB.apply(era1...)
+	l.early = writerDump(t, "a", 101, writerUUIDA+":1-5")
+	l.srvA.rotate()
+	w.eventually("a1 archived", func() bool { return len(w.manifest("a").Files) == 1 })
+	l.tail = liveTxns(writerUUIDA, 101, 6, 10)
+	l.srvA.apply(l.tail...)
+	l.srvB.apply(l.tail[:3]...)
+
+	// a fails; b is promoted without A:9-10 and archives its era.
+	l.srvA.setReadOnly(true)
+	w.waitDemoted(l.a)
+	l.srvB.setReadOnly(false)
+	w.waitRecords("b", 1)
+	l.era2 = liveTxns(writerUUIDB, 102, 1, 3)
+	l.srvB.apply(l.era2...)
+	l.srvB.rotate()
+	w.eventually("b's file archived", func() bool { return len(w.manifest("b").Files) == 1 })
+
+	// a comes back fenced. It still holds everything it archived, so its
+	// audit has nothing to record yet.
+	l.srvA.rotate()
+	st := w.waitTailDrained(l.a, "mysql-bin.000003")
+	if st.DivergentRows != 0 || st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != "" {
+		t.Fatalf("a before its reclone: divergentRows %d, reissuableGtids %v", st.DivergentRows, st.ReissuableGTIDs)
+	}
+	if ma := w.manifest("a"); len(ma.Files) != 2 || ma.Files[1].GTIDCoverage.GTIDs != gtidSet(t, writerUUIDA+":6-10") {
+		t.Fatalf("a's tail before the wipe: %+v", ma.Files)
+	}
+	return l
+}
+
+// failback demotes b and promotes the recloned a, whose manifest then holds
+// its first promotion record, the reclone's reset record and this one.
+func (l *lossyRecloneLayout) failback() {
+	l.srvB.setReadOnly(true)
+	l.w.waitDemoted(l.b)
+	l.srvA.setReadOnly(false)
+	l.w.waitRecords("a", 3)
+}
+
+// #271, #265: after a lossy failover the old primary's tail is archived and
+// the site is recloned as a server with a new server_uuid. Its audit
+// records the lost transactions as divergence evidence and reports no
+// error; it cannot reissue them, so after the failback it archives again
+// and the archive stays usable: a restore across the lost tail refuses
+// PITRArchiveDivergentHistory naming exactly the lost set, and plans once
+// that set is excluded.
+func TestArchiveWritersLossyRecloneWithNewServerUUIDStaysUsable(t *testing.T) {
+	l := newLossyRecloneLayout(t)
+	w, A, B, C := l.w, writerUUIDA, writerUUIDB, writerUUIDC
+	lost := A + ":9-10"
+
+	l.srvA.recloneAs(l.srvB, C)
+	w.eventually("a's reset record", func() bool { return len(resetRecordsOf(w.manifest("a"))) == 1 })
+	var st sidecar.Status
+	w.eventually("a's divergence evidence", func() bool {
+		st = l.a.Snapshot(context.Background())
+		return st.DivergentRows == 1
+	})
+	ma := w.manifest("a")
+	if len(ma.Divergent) != 1 || ma.Divergent[0].Name != "mysql-bin.000002" || ma.Divergent[0].ID != ma.Files[1].ID || ma.Divergent[0].MissingGTIDs != gtidSet(t, lost) {
+		t.Fatalf("a's divergence evidence: %+v (rows %+v)", ma.Divergent, ma.Files)
+	}
+	// Evidence, not a failure: the status a site's health is judged by is
+	// clean on every scan from here on.
+	clean := func(what string) {
+		t.Helper()
+		for i := 0; i < 5; i++ {
+			st := l.a.Snapshot(context.Background())
+			if st.LastError != "" || st.UploadFailures != 0 || st.ConsecutiveFailedScans != 0 || st.DivergentRows != 1 ||
+				st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != "" {
+				t.Fatalf("%s: lastError %q, uploadFailures %d, failedScans %d, divergentRows %d, reissuableGtids %v",
+					what, st.LastError, st.UploadFailures, st.ConsecutiveFailedScans, st.DivergentRows, st.ReissuableGTIDs)
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+	clean("recloned a, read-only")
+
+	l.failback()
+	assertRecord(t, w.manifest("a").Promotions[2], C, 101, A+":1-8,"+B+":1-3")
+	era3 := liveTxns(C, 101, 1, 3)
+	l.srvA.apply(era3...)
+	l.srvB.apply(era3...)
+	l.srvA.rotate()
+	w.eventually("a's new era archived", func() bool { return len(w.manifest("a").Files) == 3 })
+	clean("a after the failback")
+	for _, site := range []string{"a", "b"} {
+		if m := w.manifest(site); m.Epoch != nil {
+			t.Fatalf("site %s set a reuse guard: %+v", site, m.Epoch)
+		}
+	}
+	if st := l.b.Snapshot(context.Background()); st.LastError != "" || st.DivergentRows != 0 || *st.ReissuableGTIDs != "" {
+		t.Fatalf("b: %+v", st)
+	}
+	w.assertOneDescriptor()
+
+	// The old backup reaches a's new era across the lost tail only with
+	// the lost set excluded, and the refusal names exactly that set.
+	plan, err := w.plan(l.early, before(era3[1]), "")
+	assertRefusal(t, "a's new era across the lost tail", err, pitrarchive.TokenArchiveDivergentHistory)
+	if plan == nil || !plan.Divergent.Equal(planSet(t, lost)) {
+		t.Fatalf("divergent set %+v, want %s", plan, lost)
+	}
+	plan, err = w.plan(l.early, before(era3[1]), lost)
+	assertPlan(t, "a's new era, excluding the lost tail", plan, err, A+":1-8,"+B+":1-3,"+C+":1", C+":2", pitrplan.GroundTruthOrigin)
+	plan, err = w.plan(l.early, before(l.era2[1]), "")
+	assertRefusal(t, "b's era across the lost tail", err, pitrarchive.TokenArchiveDivergentHistory)
+	if plan == nil || !plan.Divergent.Equal(planSet(t, lost)) {
+		t.Fatalf("divergent set %+v, want %s", plan, lost)
+	}
+	plan, err = w.plan(l.early, before(l.era2[1]), lost)
+	assertPlan(t, "b's era, excluding the lost tail", plan, err, A+":1-8,"+B+":1", B+":2", pitrplan.GroundTruthOrigin)
+	// A target inside the lost tail restores what a had then.
+	plan, err = w.plan(l.early, before(l.tail[4]), "")
+	assertPlan(t, "inside the lost tail", plan, err, A+":1-9", A+":10", pitrplan.GroundTruthOrigin)
+	// Latest mode: two heads until the lost transactions are excluded; the
+	// refusal names them as one of the branches.
+	_, err = w.plan(l.early, time.Time{}, "")
+	if ref := assertRefusal(t, "latest with a's lost tail archived", err, pitrarchive.TokenArchiveSplitBrain); !strings.Contains(ref.Message, "a/mysql-bin.000002 holds "+gtidSet(t, lost)) {
+		t.Fatalf("split-brain refusal does not name the lost tail: %s", ref.Message)
+	}
+	plan, err = w.plan(l.early, time.Time{}, lost)
+	assertPlan(t, "latest excluding the lost tail", plan, err, A+":1-8,"+B+":1-3,"+C+":1-3", "", "")
+	// A backup taken after the reclone needs no exclusion.
+	late := writerDump(t, "a", 101, A+":1-8,"+B+":1-3,"+C+":1-3")
+	era4 := liveTxns(C, 101, 4, 6)
+	l.srvA.apply(era4...)
+	l.srvA.rotate()
+	w.eventually("a's second new file archived", func() bool { return len(w.manifest("a").Files) == 4 })
+	plan, err = w.plan(late, before(era4[1]), "")
+	assertPlan(t, "backup after the reclone", plan, err, A+":1-8,"+B+":1-3,"+C+":1-4", C+":5", pitrplan.GroundTruthOrigin)
+	if !plan.Divergent.IsEmpty() {
+		t.Fatalf("backup after the reclone: divergent %s", plan.Divergent)
+	}
+	clean("a at the end")
+}
+
+// The same layout with a reclone that keeps the recipient's server_uuid (a
+// clone by a release before #265, or a data directory restored without a
+// clone). The server lost transactions it issued under the server_uuid it
+// still has: its sidecar reports that as an archiver error before the
+// failback, and after it the server reissues A:9-10 for other transactions.
+// Once they are archived, a's manifest carries the reuse guard that every
+// reader refuses (PITRArchiveHistoryReset): the archive fails closed.
+func TestArchiveWritersLossyRecloneWithSameServerUUIDFailsClosed(t *testing.T) {
+	l := newLossyRecloneLayout(t)
+	w, A, B := l.w, writerUUIDA, writerUUIDB
+	lost := gtidSet(t, A+":9-10")
+
+	l.srvA.reclone(l.srvB)
+	w.eventually("a's reset record", func() bool { return len(resetRecordsOf(w.manifest("a"))) == 1 })
+	var st sidecar.Status
+	w.eventually("a's reissuable divergence", func() bool {
+		st = l.a.Snapshot(context.Background())
+		return st.ReissuableGTIDs != nil && *st.ReissuableGTIDs == lost && st.LastError != ""
+	})
+	if st.DivergentRows != 1 || !strings.Contains(st.LastError, "server_uuid "+A) || !strings.Contains(st.LastError, "archived transactions "+lost) ||
+		!strings.Contains(st.LastError, "reuses their GTIDs") || !strings.Contains(st.LastError, "Reclone this site before it is promoted") {
+		t.Fatalf("recloned a, read-only: divergentRows %d, lastError %q", st.DivergentRows, st.LastError)
+	}
+	// The planner is unaffected so far: the lost set is excluded as before.
+	plan, err := w.plan(l.early, before(l.era2[1]), "")
+	assertRefusal(t, "b's era across the lost tail", err, pitrarchive.TokenArchiveDivergentHistory)
+	if plan == nil || !plan.Divergent.Equal(planSet(t, lost)) {
+		t.Fatalf("divergent set %+v, want %s", plan, lost)
+	}
+	plan, err = w.plan(l.early, before(l.era2[1]), lost)
+	assertPlan(t, "b's era, excluding the lost tail", plan, err, A+":1-8,"+B+":1", B+":2", pitrplan.GroundTruthOrigin)
+
+	// Fail back: a issues A:9-12, reusing the lost A:9-10.
+	l.failback()
+	assertRecord(t, w.manifest("a").Promotions[2], A, 101, A+":1-8,"+B+":1-3")
+	reissued := liveTxns(A, 101, 9, 12)
+	l.srvA.apply(reissued...)
+	l.srvB.apply(reissued...)
+	// In the active binlog only: the server holds those numbers again, and
+	// the audit keeps the loss on record rather than taking the archive
+	// for whole.
+	w.eventually("the evidence survives the numeric return", func() bool {
+		st = l.a.Snapshot(context.Background())
+		return st.Primary && st.ReissuableGTIDs != nil && *st.ReissuableGTIDs == lost
+	})
+	if ma := w.manifest("a"); len(ma.Divergent) != 1 || ma.Divergent[0].MissingGTIDs != lost || ma.Epoch != nil || st.LastError == "" {
+		t.Fatalf("a with the reissue in its active binlog: divergent %+v, epoch %+v, lastError %q", ma.Divergent, ma.Epoch, st.LastError)
+	}
+
+	// Sealed and archived, the reissue is proven from the archived bytes.
+	l.srvA.rotate()
+	w.eventually("a's reuse guard", func() bool {
+		m := w.manifest("a")
+		return m.Epoch != nil && m.Epoch.ResetReason != ""
+	})
+	ma := w.manifest("a")
+	if !strings.Contains(ma.Epoch.ResetReason, "verified GTID namespace reuse within "+lost) || len(ma.Epoch.Reuse) != 1 || len(ma.Files) != 3 {
+		t.Fatalf("a's reuse guard: %+v, %d rows", ma.Epoch, len(ma.Files))
+	}
+	w.eventually("a reports the reuse guard", func() bool {
+		return strings.Contains(l.a.Snapshot(context.Background()).LastError, "verified GTID namespace reuse")
+	})
+	if mb := w.manifest("b"); mb.Epoch != nil {
+		t.Fatalf("b set a reuse guard: %+v", mb.Epoch)
+	}
+}

@@ -48,10 +48,9 @@ import (
 type BinlogArchiver struct {
 	// Identity work and cursors belong to the scan goroutine, not the status mutex.
 	retentionNextInspection     int
-	retentionInspectionFailures map[retentionInspectionIdentity]time.Time
+	retentionInspectionFailures map[binlogIdentity]time.Time
 	historyTask                 *binlogHistoryTask
 	historyNext                 int
-	historyNextAudit            int
 	historyAuditError           string
 	historyScanBusy             bool
 	reuseWork                   *archiveReuseWork
@@ -60,7 +59,6 @@ type BinlogArchiver struct {
 	reuseErrors                 map[archiveReuseKey]error
 	reuseCompared               map[archiveReuseKey]bool
 	sealedSnapshot              map[string]os.FileInfo
-	legacyChecked               map[string]time.Time
 	localIDs                    map[string]cachedBinlogIdentity
 	// The read-only tail drain (binlog_tail.go): its memory, its running
 	// upload pass, and what the last scanFiles pass uploaded and reconciled.
@@ -102,8 +100,9 @@ type BinlogArchiver struct {
 	unsafeLogged       bool
 
 	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun,
-	// uploadFailures, lastUploadAt, backlogFiles, tailStatus, and the
-	// manifest aggregates (manifestFileCount/Bytes/oldest/newest).
+	// uploadFailures, lastUploadAt, backlogFiles, tailStatus,
+	// reissuableGTIDs, and the manifest aggregates
+	// (manifestFileCount/Bytes/oldest/newest).
 	mu               sync.Mutex
 	lastError        string
 	lastScanAt       time.Time
@@ -136,10 +135,13 @@ type BinlogArchiver struct {
 	oldestArchivedTime time.Time
 	newestArchivedTime time.Time
 	// divergentRows/quarantinedRows count this site's manifest rows;
-	// promotionRecordedAt is the confirmed record of the current writable
-	// episode; historyIntegrity is the site's marker (persisted or pending).
+	// reissuableGTIDs is the last history audit's verdict on what this
+	// server could reissue (nil: not evaluated); promotionRecordedAt is the
+	// confirmed record of the current writable episode; historyIntegrity is
+	// the site's marker (persisted or pending).
 	divergentRows       int64
 	quarantinedRows     int64
+	reissuableGTIDs     *string
 	promotionRecordedAt time.Time
 	historyIntegrity    *HistoryIntegrity
 }
@@ -535,7 +537,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	if len(entries) < 2 {
 		// < 2 means either no binlogs yet (len 0) or only the active
 		// one exists (len 1). Nothing sealed to archive.
-		a.setError("")
+		a.clearScanError()
 		a.setBacklog(0)
 		tail = tailDrained(entries)
 		return
@@ -569,7 +571,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// after a partial failure and the operator's status.pitr Message
 	// would flap clear on every scan.
 	if !hadFileError {
-		a.setError("")
+		a.clearScanError()
 	}
 	// A writable site has to archive every sealed file.
 	switch {
@@ -897,10 +899,22 @@ type Status struct {
 	// names the identity error).
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count the Divergent and
-	// Quarantined entries in this site's own manifest. The runner warns
-	// PITRArchiveReissueRiskDetected when a site with a non-zero sum is promoted.
+	// Quarantined entries in this site's own manifest. A divergent row is
+	// evidence, not a failure: the row holds (or builds on) transactions
+	// this site's server no longer has, and a restore across them refuses
+	// PITRArchiveDivergentHistory until excludeGtids lists them.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
+	// ReissuableGTIDs is the part of those transactions (of the active and
+	// the quarantined rows) that this server could issue again: the ones
+	// under its own current server_uuid. Non-empty is an archiver error
+	// (LastError), and the runner warns PITRArchiveReissueRiskDetected when
+	// such a site is promoted. The empty string means the last history
+	// audit found none. nil means it has not been evaluated: no audit has
+	// completed in this process, or the server has no history yet (empty
+	// gtid_executed, a clone in progress, a read-only server with no
+	// replication channel).
+	ReissuableGTIDs *string `json:"reissuableGtids,omitempty"`
 	// PromotionRecordedAt is the ObservedAt of the promotion record that
 	// gates the current writable episode's uploads; zero while no record
 	// is confirmed (D-43).
@@ -952,12 +966,18 @@ func (a *BinlogArchiver) Snapshot(ctx context.Context) Status {
 		copied := *a.tailStatus
 		tail = &copied
 	}
+	var reissuable *string
+	if a.reissuableGTIDs != nil {
+		copied := *a.reissuableGTIDs
+		reissuable = &copied
+	}
 	return Status{
 		Tail:                   tail,
 		StoreReady:             storeReady,
 		Archive:                archive,
 		DivergentRows:          a.divergentRows,
 		QuarantinedRows:        a.quarantinedRows,
+		ReissuableGTIDs:        reissuable,
 		PromotionRecordedAt:    a.promotionRecordedAt,
 		HistoryIntegrity:       marker,
 		Enabled:                true,
@@ -1000,6 +1020,19 @@ func (a *BinlogArchiver) setError(s string) {
 	a.mu.Lock()
 	a.lastError = s
 	a.mu.Unlock()
+}
+
+// clearScanError ends the errors of the scan itself. A standing
+// history-audit error stays: the maintenance pass that follows this scan
+// confirms or clears it, and a status read in between must not show a
+// clean archiver for one that is not (the operator would count that poll
+// as a recovery).
+func (a *BinlogArchiver) clearScanError() {
+	if a.historyAuditError != "" {
+		a.setMaintenanceError(a.historyAuditError)
+		return
+	}
+	a.setError("")
 }
 
 func (a *BinlogArchiver) incUploadFailures() {

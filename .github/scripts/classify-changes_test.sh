@@ -58,6 +58,10 @@ check pitr-dump-meta-render 'internal/controller/pitr_dump_meta.go' true false f
 check verify-script 'internal/controller/verify_script.sh' true false false true
 check mysql-client-other 'internal/mysql/sidecar_client.go' true false false true
 check controller-restore-go 'internal/controller/restore.go' true false false false
+check mysql-launcher 'internal/controller/mysql_launcher.go' true false false true
+check mysql-launcher-native-test 'internal/controller/mysql_launcher_native_test.go' true false false true
+check encryption-launcher-steps 'internal/controller/encryption.go' true false false true
+check controller-reconciler 'internal/controller/reconciler.go' true false false false
 check e2e-workflow '.github/workflows/e2e.yml' false false false false
 
 printf 'Passed %s classifier cases.\n' "$cases"

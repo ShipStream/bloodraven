@@ -45,10 +45,6 @@ const (
 	// component files into place.
 	keyringComponentSrcMount = "/run/bloodraven/keyring-component-src"
 
-	// Official MySQL Community image entrypoint. Used by the encryption
-	// launcher so we still get the image's init/user-switch logic.
-	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
-
 	// mysqlRuntimeBinDir holds a private copy of mysqld plus its global
 	// component manifest. Ubuntu hosts can carry a path-attached
 	// /usr/sbin/mysqld AppArmor profile. That host profile attaches after
@@ -384,20 +380,20 @@ func buildEncryptionFragments(
 	return out
 }
 
-// encryptionMysqlLauncher returns the container Command and Args that
-// materialize keyring component files onto image-owned paths and hand
-// off to the official MySQL entrypoint.
+// encryptionMysqlLauncher returns the encryption-at-rest part of the mysql
+// container's launcher (mysqlLauncher): the script steps that materialize
+// the keyring component files onto image-owned paths and put a private
+// copy of mysqld first on PATH, and the mysqld flags that go with it.
 //
-// mysqlArgs are the mysqld flags (starting with --server-id=..., not
-// including the "mysqld" binary name). They become $1..$n after a $0 of
-// "mysqld" so the entrypoint sees the same argv shape as a normal
+// argPrefix goes between "mysqld" and the mysqld flags of every group
+// (--server-id=…), so the entrypoint sees the same argv shape as a normal
 // `docker run mysql:… --flag` invocation.
 //
 // The backup verification Job has its own, simpler launcher for a
 // throwaway keyring in verify_script.sh. It works around the same
 // MySQL/AppArmor quirks (private mysqld copy, component manifest, private
 // plugin directory); apply a change to one in the other.
-func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
+func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup) (steps string, argPrefix []string) {
 	kr := fg.Spec.EffectiveKeyring()
 	mysqlImageBasedir := path.Dir(kr.MysqldDir)
 	mysqlImageBinary := path.Join(kr.MysqldDir, "mysqld")
@@ -407,14 +403,12 @@ func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string
 	mysqlRuntimePluginDir := path.Join(mysqlRuntimeBasedir, pluginRelative)
 	manifestDst := mysqlRuntimeBinary + ".my"
 	componentDst := path.Join(kr.PluginDir, "component_keyring_file.cnf")
-	// bash -ec '<script>' mysqld --flag…  →  $0=mysqld, $1=--flag…
 	// Copy mysqld away from the host-profiled /usr/sbin path, materialize
 	// its adjacent manifest and the component config as real overlay files,
 	// then put the private binary first on PATH. The entrypoint still sees
 	// argv[0] == "mysqld", so its config validation, uid switch, fresh-db
 	// initialization, and final exec behavior remain unchanged.
-	script := fmt.Sprintf(`set -euo pipefail
-src=%q
+	steps = fmt.Sprintf(`src=%q
 mkdir -p %q
 mkdir -p %q
 ln -sfn %q %q
@@ -429,7 +423,6 @@ test -r %q
 test -r %q
 test -x %q
 export PATH=%q:"$PATH"
-exec %s "$0" "$@"
 `,
 		keyringComponentSrcMount,
 		mysqlRuntimeBinDir,
@@ -445,19 +438,15 @@ exec %s "$0" "$@"
 		manifestDst, componentDst,
 		path.Join(kr.PluginDir, "component_keyring_file.so"),
 		mysqlRuntimeBinDir,
-		mysqlDockerEntrypoint,
 	)
-	command = []string{"/bin/bash", "-ec", script}
 	// Relocating mysqld makes it derive basedir/plugin_dir from the private
 	// path. Restore the source image's layout so the relative component URN,
 	// errmsg.sys, and the rest of the official entrypoint keep resolving
 	// exactly as they did for the image binary.
-	args = append([]string{
-		"mysqld",
+	return steps, []string{
 		"--basedir=" + mysqlImageBasedir,
 		"--plugin-dir=" + kr.PluginDir,
-	}, mysqlArgs...)
-	return command, args
+	}
 }
 
 // keyringTokenMode picks the projection mode for the escrow bearer

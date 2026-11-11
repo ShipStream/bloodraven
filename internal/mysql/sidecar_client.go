@@ -47,10 +47,18 @@ type ArchiverStatus struct {
 	// reason and key revision. nil when PITR is not configured.
 	Archive *pitrarchive.ArchiveStatus `json:"archive,omitempty"`
 	// DivergentRows and QuarantinedRows count the Divergent and
-	// Quarantined entries in this site's own manifest. The runner warns
-	// PITRArchiveReissueRiskDetected when a site with a non-zero sum is promoted.
+	// Quarantined entries in this site's own manifest. A divergent row is
+	// evidence the planner reads, not an archiver failure.
 	DivergentRows   int64 `json:"divergentRows"`
 	QuarantinedRows int64 `json:"quarantinedRows"`
+	// ReissuableGTIDs is the part of those rows' transactions the site's
+	// server no longer holds and could issue again: the ones under its own
+	// current server_uuid. The runner warns PITRArchiveReissueRiskDetected
+	// when a site that reports a non-empty set is promoted. The empty
+	// string means the sidecar's last history audit found none. nil means
+	// no verdict: the sidecar predates the field, no audit has completed
+	// in its process, or its server has no history yet.
+	ReissuableGTIDs *string `json:"reissuableGtids,omitempty"`
 	// PromotionRecordedAt is the ObservedAt of the promotion record that
 	// gates the current writable episode's uploads; zero while no record
 	// is confirmed (D-43).

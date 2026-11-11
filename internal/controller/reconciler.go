@@ -58,7 +58,11 @@ const (
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
 	// forward to the new safe defaults.
-	deploymentPodRenderVersion = "deployment-pod-render-v7-prestop-mysql-pwd"
+	//
+	// v8: the mysql container starts through mysqlLauncher in every group
+	// (issue #265). A pod rendered before it has no launcher, so a clone
+	// there keeps the recipient's server_uuid.
+	deploymentPodRenderVersion = "deployment-pod-render-v8-mysql-launcher"
 
 	// sidecarLivenessPath is the sidecar's liveness probe target. It must
 	// not depend on MySQL: the sidecar fences MySQL when MySQL misbehaves,
@@ -1511,47 +1515,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		sidecarVolumeMounts = append(sidecarVolumeMounts, encFrags.SidecarVolumeMounts...)
 
-		mysqlArgs := []string{
-			fmt.Sprintf("--server-id=%d", serverID),
-			"--gtid-mode=ON",
-			"--enforce-gtid-consistency=ON",
-			"--log-bin=/var/lib/mysql/mysql-bin",
-			"--relay-log=/var/lib/mysql/mysql-relay-bin",
-			"--relay-log-index=/var/lib/mysql/mysql-relay-bin.index",
-			"--log-replica-updates=ON",
-			"--skip-replica-start=ON",
-			"--plugin-load-add=mysql_clone.so",
-			// Fail-closed boot: mysqld never accepts application writes
-			// before the operator (or the sidecar, when the operator names
-			// this site active) lifts the fence. Without it, a restarted
-			// MySQL is writable until the sidecar's next tick: an old
-			// primary next to the active one, or a reader whose datadir was
-			// replaced, reads as a second writable site. read_only, not
-			// super_read_only: the image's first-boot init runs its SQL as
-			// root through a server started with these same flags, and
-			// super_read_only fails it with ERROR 1290. A command-line flag
-			// also outranks a spec.mysqlConf override.
-			"--read-only=ON",
-		}
-
-		if fg.Spec.TLS != nil {
-			// Keep the server-side TLS contract on the mysqld command line as
-			// well as in bloodraven.cnf. The sidecar verifies the per-site
-			// Service SAN from its first connection; allowing mysqld to fall
-			// back to its auto-generated server-cert.pem fails every sidecar
-			// query, leaving the pod unready and the sidecar unable to fence.
-			mysqlArgs = append(mysqlArgs,
-				"--ssl-ca=/etc/mysql/tls/ca.crt",
-				"--ssl-cert=/etc/mysql/tls/tls.crt",
-				"--ssl-key=/etc/mysql/tls/tls.key",
-				"--require-secure-transport=ON",
-			)
-		}
+		mysqlArgs := mysqlServerArgs(serverID, fg.Spec.TLS != nil)
 
 		mysqlContainer := corev1.Container{
 			Name:  "mysql",
 			Image: image,
-			Args:  mysqlArgs,
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "mysql",
@@ -1589,14 +1557,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// containers in the rendered PodSpec).
 			SecurityContext: mysqlSecurityContext(fg),
 		}
-		// Encryption: copy component files onto image-owned paths, then
-		// exec the official entrypoint. Replaces plain Args so the
-		// launcher owns argv0. See encryptionMysqlLauncher.
-		if fg.Spec.EncryptionEnabled() {
-			cmd, args := encryptionMysqlLauncher(fg, mysqlArgs)
-			mysqlContainer.Command = cmd
-			mysqlContainer.Args = args
-		}
+		// mysqld always starts through the operator's launcher, which
+		// execs the image entrypoint: it rotates server_uuid on the start
+		// that installs a CLONE and, with encryption, copies the keyring
+		// component files onto image-owned paths. See mysqlLauncher.
+		mysqlContainer.Command, mysqlContainer.Args = mysqlLauncher(fg, mysqlArgs)
 
 		operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 
@@ -2473,6 +2438,12 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 	// name with another serverID finds its retained Deployment, which must
 	// then roll.
 	fmt.Fprintf(h, "serverID=%d\n", site.ServerID)
+	// The mysql container's launcher script and mysqld flags, by content
+	// (with 0 for the server ID, which is hashed above): an existing
+	// Deployment is only updated when this hash moves, so a launcher
+	// change that did not move it would never reach a running pod.
+	launcherCommand, launcherArgs := mysqlLauncher(fg, mysqlServerArgs(0, fg.Spec.TLS != nil))
+	fmt.Fprintf(h, "mysqlCommand=%q\nmysqlArgs=%q\n", launcherCommand, launcherArgs)
 	// The effective sidecar image: a pin, or the operator's default, so a
 	// new default rolls the groups that do not pin one. An unset default
 	// hashes as empty; the render refuses it (effectiveSidecarImage), and

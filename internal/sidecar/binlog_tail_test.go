@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1256,18 +1258,39 @@ func (r auditedRole) BinlogState(context.Context) (string, string, error) {
 	return r.serverUUID, r.gtidExecuted, nil
 }
 
-// A tail with transactions that never reached the new primary is archived
-// before the reclone (they are evidence the planner needs). After the
-// reclone the server no longer holds them, and the site's divergence audit
-// reports its own archived row, as it does for any archived row the server
-// lost: the site reports an archiver error until the row is quarantined or
-// acknowledged, and counts a divergent row.
-func TestTailDrainLostTailIsAuditedAfterReclone(t *testing.T) {
+// tailC is the server_uuid a clone recipient starts with (#265).
+const tailC = "cccccccc-0000-0000-0000-00000000000c"
+
+// setServerUUID gives the simulated server a new server_uuid, as a clone
+// does.
+func (s *tailSim) setServerUUID(uuid string) {
+	s.role.mu.Lock()
+	s.role.serverUUID = uuid
+	s.role.mu.Unlock()
+}
+
+// lostTailSite is a former primary whose tail A:4-5 never reached the new
+// primary: the tail is archived read-only before the reclone (the planner
+// needs it as evidence), and the site is then recloned from a donor that
+// holds A:1-3 and B:1-2. With rotate the clone gives the server a new
+// server_uuid (#265); without, it keeps the one that issued the lost
+// transactions (a clone by an earlier release). retained is what the
+// operator's retention cutoff answers.
+func lostTailSite(t *testing.T, rotate bool, retained string) (*tailSim, *BinlogArchiver, *tailStore) {
+	t.Helper()
 	ctx := context.Background()
 	store := newTailStore()
 	sim := newTailSim(t, tailA, 101, false)
-	role := auditedRole{sim.role}
-	a := newTestArchiver(sim.config(), "iad", role, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a := newTestArchiver(sim.config(), "iad", auditedRole{sim.role}, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if retained != "" {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(pitrCutoffResponse{Coverage: PITRGTIDCoverageProtocol, CutoffTime: "2026-04-17T00:00:00Z", RetainedGTIDs: []string{retained}})
+		}))
+		t.Cleanup(server.Close)
+		a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", testRetentionArchiveID, time.Hour)
+		// The first sweep waits for the reclone.
+		a.lastRetentionRun = time.Now()
+	}
 	sim.apply(originTxns(tailA, 101, 1, 3)...)
 	sim.rotate()
 	a.scanAndArchive(ctx)
@@ -1276,17 +1299,130 @@ func TestTailDrainLostTailIsAuditedAfterReclone(t *testing.T) {
 	sim.rotate() // the flush before the reclone
 	a.scanAndArchive(ctx)
 	st := assertTail(t, a, internalmysql.ArchiverTailDrained, "mysql-bin.000003", 0)
-	if st.LastError != "" || st.DivergentRows != 0 || tailRows(t, store) != "mysql-bin.000001,mysql-bin.000002" {
+	if st.LastError != "" || st.DivergentRows != 0 || st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != "" || tailRows(t, store) != "mysql-bin.000001,mysql-bin.000002" {
 		t.Fatalf("before the reclone: %+v, rows %q", st, tailRows(t, store))
 	}
-
+	assertQuiet(t, st)
 	sim.reclone(tailA + ":1-3," + tailB + ":1-2")
+	if rotate {
+		sim.setServerUUID(tailC)
+	}
+	return sim, a, store
+}
+
+// A tail with transactions that never reached the new primary is archived
+// before the reclone. After the reclone the server no longer holds them,
+// and it has a new server_uuid, so it cannot issue them again. The site's
+// audit records its own archived row as divergent, which the planner reads,
+// and that is all: no archiver error, no failure counted, and the site
+// keeps uploading and retiring.
+func TestTailDrainLostTailIsRecordedAfterReclone(t *testing.T) {
+	ctx := context.Background()
+	var logs bytes.Buffer
+	sim, a, store := lostTailSite(t, true, tailA+":1-3,"+tailB+":1-2")
+	a.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	a.scanAndArchive(ctx)
+	st := a.Snapshot(ctx)
+	if st.DivergentRows != 1 || st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != "" {
+		t.Fatalf("after the reclone: divergentRows %d, reissuableGtids %v", st.DivergentRows, st.ReissuableGTIDs)
+	}
+	assertQuiet(t, st)
+	m, _ := loadManifest(ctx, store, "binlogs", "iad")
+	if len(resetRecords(m.Promotions)) != 1 || len(m.Divergent) != 1 || m.Divergent[0].Name != "mysql-bin.000002" || m.Divergent[0].MissingGTIDs != tailA+":4-5" {
+		t.Fatalf("manifest = %+v", m)
+	}
+	if got := strings.Count(logs.String(), `"msg":"archive divergence evidence recorded"`); got != 1 ||
+		!strings.Contains(logs.String(), `"rows":1,"missingGtids":"`+tailA+`:4-5","reissuableGtids":""`) {
+		t.Fatalf("divergence log records: %d in\n%s", got, logs.String())
+	}
+
+	// Later scans change nothing and log nothing more.
+	a.scanAndArchive(ctx)
+	if got := strings.Count(logs.String(), `"msg":"archive divergence evidence recorded"`); got != 1 {
+		t.Fatalf("the unchanged evidence was logged %d times", got)
+	}
+	assertQuiet(t, a.Snapshot(ctx))
+
+	// The site is promoted again and archives its new era.
+	sim.setReadOnly(false)
+	sim.apply(originTxns(tailC, 101, 1, 2)...)
+	sim.rotate()
 	a.scanAndArchive(ctx)
 	st = a.Snapshot(ctx)
-	if st.DivergentRows != 1 || !strings.Contains(st.LastError, "divergent transactions="+tailA+":4-5") {
-		t.Fatalf("after the reclone: divergentRows %d, lastError %q", st.DivergentRows, st.LastError)
+	if st.LastError != "" || st.BacklogFiles != 0 || st.DivergentRows != 1 || *st.ReissuableGTIDs != "" || tailRows(t, store) != "mysql-bin.000001,mysql-bin.000001,mysql-bin.000002" {
+		t.Fatalf("after the failback: %+v, rows %q", st, tailRows(t, store))
 	}
-	if m, _ := loadManifest(ctx, store, "binlogs", "iad"); len(resetRecords(m.Promotions)) != 1 || len(m.Divergent) != 1 || m.Divergent[0].Name != "mysql-bin.000002" {
-		t.Fatalf("manifest = %+v", m)
+	if m, _ := loadManifest(ctx, store, "binlogs", "iad"); m.Epoch != nil {
+		t.Fatalf("a server with a new server_uuid set a reuse guard: %+v", m.Epoch)
+	}
+
+	// Retention retires the row every retained backup covers, with the
+	// divergent row beside it. No backup holds the lost transactions, so
+	// that row stays.
+	a.lastRetentionRun = time.Time{}
+	a.scanAndArchive(ctx)
+	m, _ = loadManifest(ctx, store, "binlogs", "iad")
+	if len(m.Pruned) != 1 || m.Pruned[0].Name != "mysql-bin.000001" || !m.Pruned[0].Deleted || len(m.Divergent) != 1 ||
+		tailRows(t, store) != "mysql-bin.000001,mysql-bin.000002" {
+		t.Fatalf("retention with a divergent row: pruned %+v, divergent %+v, rows %q", m.Pruned, m.Divergent, tailRows(t, store))
+	}
+	if st := a.Snapshot(ctx); st.LastError != "" || st.UploadFailures != 0 {
+		t.Fatalf("after retention: %+v", st)
+	}
+}
+
+// The same reclone by a release that kept the recipient's server_uuid: the
+// server lost transactions it issued under the server_uuid it still has, so
+// it issues those GTIDs again as soon as it writes. That is an archiver
+// error before the promotion, the reissue is evidence the audit never
+// drops, and once the reissued transactions are archived the manifest
+// carries the reuse guard.
+func TestTailDrainLostTailIsReissuableWhenTheServerKeepsItsUUID(t *testing.T) {
+	ctx := context.Background()
+	sim, a, store := lostTailSite(t, false, "")
+	a.scanAndArchive(ctx)
+	st := a.Snapshot(ctx)
+	lost := tailA + ":4-5"
+	if st.DivergentRows != 1 || st.ReissuableGTIDs == nil || *st.ReissuableGTIDs != lost || st.UploadFailures != 1 {
+		t.Fatalf("after the reclone: divergentRows %d, reissuableGtids %v, uploadFailures %d", st.DivergentRows, st.ReissuableGTIDs, st.UploadFailures)
+	}
+	for _, want := range []string{"server_uuid " + tailA, "archived transactions " + lost, "row mysql-bin.000002", "reuses their GTIDs", "PITRArchiveHistoryReset", "Reclone this site before it is promoted", "new archive prefix"} {
+		if !strings.Contains(st.LastError, want) {
+			t.Fatalf("lastError %q lacks %q", st.LastError, want)
+		}
+	}
+	if _, ok := pitrarchive.ParseToken(st.LastError); ok {
+		t.Fatalf("lastError %q starts with a refusal token: the archive is not refused yet", st.LastError)
+	}
+	if strings.Contains(st.LastError, "pitr-quarantine") {
+		t.Fatalf("lastError %q asks for a quarantine, which does not remove the risk", st.LastError)
+	}
+
+	// Promoted, it reissues A:4-5. While they are only in the active
+	// binlog the server holds those numbers again; the evidence stays.
+	sim.setReadOnly(false)
+	reissued := originTxns(tailA, 101, 4, 6)
+	for i := range reissued {
+		reissued[i].Commit = reissued[i].Commit.Add(time.Hour)
+	}
+	sim.apply(reissued...)
+	a.scanAndArchive(ctx)
+	st = a.Snapshot(ctx)
+	if st.DivergentRows != 1 || *st.ReissuableGTIDs != lost || !strings.Contains(st.LastError, "reuses their GTIDs") {
+		t.Fatalf("with the reissue in the active binlog: %+v", st)
+	}
+	if m, _ := loadManifest(ctx, store, "binlogs", "iad"); m.Epoch != nil {
+		t.Fatalf("reuse guard before the reissue is archived: %+v", m.Epoch)
+	}
+
+	// Sealed and uploaded, the reissue is proven from the archived bytes.
+	sim.rotate()
+	a.scanAndArchive(ctx)
+	m, _ := loadManifest(ctx, store, "binlogs", "iad")
+	if m.Epoch == nil || !strings.Contains(m.Epoch.ResetReason, "verified GTID namespace reuse within "+lost) || len(m.Files) != 3 {
+		t.Fatalf("after the reissue was archived: epoch %+v, %d rows", m.Epoch, len(m.Files))
+	}
+	if st := a.Snapshot(ctx); !strings.Contains(st.LastError, "verified GTID namespace reuse") {
+		t.Fatalf("lastError %q, want the reuse guard", st.LastError)
 	}
 }

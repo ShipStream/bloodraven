@@ -521,12 +521,21 @@ func TestPITRArchiveWriteNeededArchiveIdentity(t *testing.T) {
 	}
 }
 
-// D-46: PITRArchiveReissueRiskDetected fires when the active site changes to a site
-// whose own manifest holds divergent or quarantined rows, whatever moved it
-// (failover, planned failover, re-promotion), and not otherwise.
+// D-46, #271: PITRArchiveReissueRiskDetected fires when the active site
+// changes to a site whose server could reissue GTIDs its archive holds
+// (reissuableGtids), whatever moved it (failover, planned failover,
+// re-promotion), and not for divergent or quarantined rows the server
+// cannot reissue. A status without the verdict falls back to the row counts.
 func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 	nn := types.NamespacedName{Namespace: "ns", Name: "lion"}
-	rows := func(divergent, quarantined int64) *internalmysql.ArchiverStatus {
+	const lost = "aaaaaaaa-0000-4000-8000-00000000000a:9-10"
+	// rows is a status with a verdict: reissuable is the set the server
+	// could reissue ("" for none).
+	rows := func(divergent, quarantined int64, reissuable string) *internalmysql.ArchiverStatus {
+		return &internalmysql.ArchiverStatus{Enabled: true, DivergentRows: divergent, QuarantinedRows: quarantined, ReissuableGTIDs: &reissuable}
+	}
+	// unevaluated is a status without a verdict.
+	unevaluated := func(divergent, quarantined int64) *internalmysql.ArchiverStatus {
 		return &internalmysql.ArchiverStatus{Enabled: true, DivergentRows: divergent, QuarantinedRows: quarantined}
 	}
 	tests := []struct {
@@ -538,15 +547,24 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 		// failedOver records an earlier failover on the group.
 		failedOver bool
 		wantEvent  bool
+		// wantText is in the Event: the reissuable set, or the fallback's
+		// row count.
+		wantText string
 	}{
-		{name: "failover to a site with divergent rows", from: "iad", to: "pdx", pitr: true, snap: rows(2, 0), wantEvent: true},
-		{name: "planned failover to a site with quarantined rows", from: "iad", to: "pdx", pitr: true, snap: rows(0, 1), wantEvent: true},
-		{name: "re-promotion read from the last good status", from: "iad", to: "pdx", pitr: true, snap: rows(1, 1), lastGood: true, wantEvent: true},
-		{name: "clean site", from: "iad", to: "pdx", pitr: true, snap: rows(0, 0)},
-		{name: "no promotion", from: "pdx", to: "pdx", pitr: true, snap: rows(3, 0)},
-		{name: "bootstrap", from: "", to: "pdx", pitr: true, snap: rows(3, 0)},
-		{name: "promotion after a persisted NoPrimary", from: "", to: "pdx", pitr: true, snap: rows(3, 0), failedOver: true, wantEvent: true},
-		{name: "PITR disabled", from: "iad", to: "pdx", snap: rows(3, 0)},
+		{name: "failover to a server that kept its server_uuid", from: "iad", to: "pdx", pitr: true, snap: rows(2, 0, lost), wantEvent: true, wantText: "server_uuid it still has: " + lost},
+		{name: "planned failover, the lost rows quarantined", from: "iad", to: "pdx", pitr: true, snap: rows(0, 1, lost), wantEvent: true, wantText: lost},
+		{name: "re-promotion read from the last good status", from: "iad", to: "pdx", pitr: true, snap: rows(1, 1, lost), lastGood: true, wantEvent: true, wantText: lost},
+		{name: "divergent rows of a server with a new server_uuid", from: "iad", to: "pdx", pitr: true, snap: rows(2, 0, "")},
+		{name: "quarantined rows of a server with a new server_uuid", from: "iad", to: "pdx", pitr: true, snap: rows(0, 3, "")},
+		{name: "no verdict, divergent rows", from: "iad", to: "pdx", pitr: true, snap: unevaluated(2, 0), wantEvent: true, wantText: "holds 2 divergent/quarantined rows, and its sidecar has not reported"},
+		{name: "no verdict, quarantined rows from the last good status", from: "iad", to: "pdx", pitr: true, snap: unevaluated(0, 1), lastGood: true, wantEvent: true, wantText: "holds 1 divergent/quarantined rows"},
+		{name: "no verdict, clean site", from: "iad", to: "pdx", pitr: true, snap: unevaluated(0, 0)},
+		{name: "clean site", from: "iad", to: "pdx", pitr: true, snap: rows(0, 0, "")},
+		{name: "no promotion", from: "pdx", to: "pdx", pitr: true, snap: rows(3, 0, lost)},
+		{name: "bootstrap", from: "", to: "pdx", pitr: true, snap: rows(3, 0, lost)},
+		{name: "promotion after a persisted NoPrimary", from: "", to: "pdx", pitr: true, snap: rows(3, 0, lost), failedOver: true, wantEvent: true, wantText: lost},
+		{name: "promotion after a persisted NoPrimary, new server_uuid", from: "", to: "pdx", pitr: true, snap: rows(3, 0, ""), failedOver: true},
+		{name: "PITR disabled", from: "iad", to: "pdx", snap: rows(3, 0, lost)},
 		{name: "no archiver status", from: "iad", to: "pdx", pitr: true},
 	}
 	for _, tt := range tests {
@@ -580,10 +598,30 @@ func TestEmitPITRArchiveReissueRisk(t *testing.T) {
 			if tt.wantEvent != (len(got) == 1) {
 				t.Fatalf("events %v, want reissue warning=%t", got, tt.wantEvent)
 			}
-			if tt.wantEvent && (!strings.HasPrefix(got[0], "Warning") || !strings.Contains(got[0], "site pdx was promoted") || !strings.Contains(got[0], "PITRArchiveHistoryReset")) {
+			if tt.wantEvent && (!strings.HasPrefix(got[0], "Warning") || !strings.Contains(got[0], "site pdx was promoted") ||
+				!strings.Contains(got[0], "PITRArchiveHistoryReset") || !strings.Contains(got[0], "new archive prefix") || !strings.Contains(got[0], tt.wantText)) {
 				t.Fatalf("event text: %s", got[0])
 			}
 		})
+	}
+}
+
+// The latest status outranks the last good one: a site recloned with a new
+// server_uuid since its last error-free poll does not warn.
+func TestEmitPITRArchiveReissueRiskUsesLatestStatus(t *testing.T) {
+	nn := types.NamespacedName{Namespace: "ns", Name: "lion"}
+	lost, none := "aaaaaaaa-0000-4000-8000-00000000000a:9-10", ""
+	r := newRunnerWithArchiverSnapshots(t, nn, map[string]*internalmysql.ArchiverStatus{
+		"pdx": {Enabled: true, DivergentRows: 1, ReissuableGTIDs: &none},
+	})
+	r.managers[nn].archiver.lastGood = map[string]*internalmysql.ArchiverStatus{"pdx": {Enabled: true, DivergentRows: 1, ReissuableGTIDs: &lost}}
+	rec := record.NewFakeRecorder(10)
+	r.recorder = rec
+	fg := identityFG()
+	fg.Status.ActiveSite = "pdx"
+	r.emitPITRArchiveReissueRisk(fg, "iad")
+	if events := drainRunnerEvents(rec); len(events) != 0 {
+		t.Fatalf("events = %v, want none", events)
 	}
 }
 

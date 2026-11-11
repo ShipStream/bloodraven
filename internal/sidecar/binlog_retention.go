@@ -24,16 +24,6 @@ func (a *BinlogArchiver) retryPrunedDeletes(ctx context.Context, m *Manifest) (i
 			continue
 		}
 		key, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: p.ID})
-		contentID := p.ID
-		if contentID == "" {
-			contentID = p.ContentID
-		}
-		if err == nil {
-			_, err = ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: contentID})
-			if contentID == "" {
-				err = fmt.Errorf("missing retired content identity for %s", p.Name)
-			}
-		}
 		if err != nil {
 			a.logger.Warn("retention: delete object", "key", p.Key, "error", err)
 			continue
@@ -71,25 +61,14 @@ func (a *BinlogArchiver) deleteRetired(ctx context.Context, key string) error {
 func (a *BinlogArchiver) retiredBinlogIdentities(m *Manifest) map[binlogIdentity]struct{} {
 	retired := make(map[binlogIdentity]struct{}, len(m.Pruned))
 	for _, p := range m.Pruned {
-		id := p.ID
-		if id == "" {
-			id = p.ContentID
-		}
-		if id == "" {
+		if _, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: p.ID}); err != nil {
 			continue
 		}
-		if _, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: id}); err != nil {
-			continue
-		}
-		retired[binlogIdentity{Name: p.Name, ID: id}] = struct{}{}
+		retired[binlogIdentity{Name: p.Name, ID: p.ID}] = struct{}{}
 	}
 	for _, q := range m.Quarantined {
-		id := q.Entry.ID
-		if id == "" {
-			id = q.Entry.ContentID
-		}
-		if id != "" {
-			retired[binlogIdentity{Name: q.Entry.Name, ID: id}] = struct{}{}
+		if q.Entry.ID != "" {
+			retired[q.Entry.identity()] = struct{}{}
 		}
 	}
 	return retired

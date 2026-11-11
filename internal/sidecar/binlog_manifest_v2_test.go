@@ -143,8 +143,10 @@ func TestManifestAppendPromotionRecordCap(t *testing.T) {
 // /archiver/status additions decode into the operator's client type.
 func TestArchiverStatusWireCompatibleWithClient(t *testing.T) {
 	at := time.Date(2026, 11, 4, 20, 1, 2, 123456000, time.UTC)
+	reissuable := "aaaaaaaa-0000-0000-0000-00000000000a:9-10"
 	s := Status{
-		Enabled: true,
+		Enabled:         true,
+		ReissuableGTIDs: &reissuable,
 		Archive: &pitrarchive.ArchiveStatus{
 			Destination: "s3://b/binlogs?endpoint=aws", ArchiveID: v2TestArchiveID,
 			EncryptionMode: pitrarchive.EncryptionPassphrase, State: pitrarchive.StateRefused,
@@ -167,8 +169,16 @@ func TestArchiverStatusWireCompatibleWithClient(t *testing.T) {
 	}
 	if c.Archive == nil || *c.Archive != *s.Archive || c.DivergentRows != 2 || c.QuarantinedRows != 3 ||
 		!c.PromotionRecordedAt.Equal(at) || c.HistoryIntegrity == nil || *c.HistoryIntegrity != *s.HistoryIntegrity ||
-		c.Tail == nil || *c.Tail != *s.Tail {
+		c.Tail == nil || *c.Tail != *s.Tail || c.ReissuableGTIDs == nil || *c.ReissuableGTIDs != reissuable {
 		t.Fatalf("client decoded %+v from %s", c, b)
+	}
+	// "No reissuable transactions" is a verdict and stays on the wire; no
+	// verdict is absent, which the operator reads as unknown.
+	none := ""
+	empty, _ := json.Marshal(Status{Enabled: true, ReissuableGTIDs: &none})
+	var verdict internalmysql.ArchiverStatus
+	if err := json.Unmarshal(empty, &verdict); err != nil || verdict.ReissuableGTIDs == nil || *verdict.ReissuableGTIDs != "" || !bytes.Contains(empty, []byte(`"reissuableGtids":""`)) {
+		t.Fatalf("an empty verdict decoded as %v from %s (%v)", verdict.ReissuableGTIDs, empty, err)
 	}
 	// The tail block's wire names are the operator's wait condition.
 	for _, key := range []string{`"tail":{"state":"Blocked"`, `"activeFile":"mysql-bin.000007"`, `"newestSealedFile":"mysql-bin.000006"`, `"pendingFiles":2`, `"reason":"archive `} {
@@ -178,7 +188,7 @@ func TestArchiverStatusWireCompatibleWithClient(t *testing.T) {
 	}
 	// Absent optional blocks stay absent on the wire.
 	b, _ = json.Marshal(Status{Enabled: true})
-	for _, key := range []string{`"archive"`, `"promotionRecordedAt"`, `"historyIntegrity"`, `"tail"`} {
+	for _, key := range []string{`"archive"`, `"promotionRecordedAt"`, `"historyIntegrity"`, `"tail"`, `"reissuableGtids"`} {
 		if bytes.Contains(b, []byte(key)) {
 			t.Errorf("empty status carries %s: %s", key, b)
 		}

@@ -227,7 +227,9 @@ func bundleFile(t *testing.T, tarball, base string) string {
 // Warnings recorded on the group's verifications, not only on the group.
 // It prints each site's tail block (#264): a read-only site that does not
 // archive its tail points at playbook 46, and a sidecar that predates the
-// block is "not-reported", never taken for drained.
+// block is "not-reported", never taken for drained. It prints each site's
+// reissuableGtids (#271): a set points at playbook 41, an empty verdict is
+// "none", and a status without the field is "not-evaluated", never "none".
 func TestTriageArchiverStatusAndVerificationEvents(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not on PATH")
@@ -237,12 +239,14 @@ func TestTriageArchiverStatusAndVerificationEvents(t *testing.T) {
 	e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.status.pitr.archive.state}*", "Verified ok archiveID=a1", false)
 	e.rule(t, "get pods -n orders -l app.kubernetes.io/instance=lion,app.kubernetes.io/name=mysql -o jsonpath=*", "mysql-lion-dc1-0 mysql-lion-dc2-0 mysql-lion-dc3-0", false)
 	e.rule(t, "get pod mysql-lion-dc?-0 -n orders -o jsonpath=*", "sidecar mysql", false)
-	// dc1: a read-only former primary whose tail is refused. dc2: the
-	// primary, drained. dc3: a sidecar that predates the tail block.
+	// dc1: a read-only former primary whose tail is refused, with divergent
+	// rows its server cannot reissue. dc2: the primary, drained, whose
+	// server could reissue archived GTIDs. dc3: a sidecar that predates the
+	// tail block and the reissue verdict.
 	e.rule(t, "exec -n orders mysql-lion-dc1-0 -c mysql -- curl *",
-		`{"site":"dc1","primary":false,"archive":{"state":"Verified"},"divergentRows":2,"tail":{"state":"Blocked","activeFile":"mysql-bin.000012","newestSealedFile":"mysql-bin.000011","pendingFiles":1,"reason":"this site's latest record is not a promotion record"}}`, false)
+		`{"site":"dc1","primary":false,"archive":{"state":"Verified"},"divergentRows":2,"reissuableGtids":"","tail":{"state":"Blocked","activeFile":"mysql-bin.000012","newestSealedFile":"mysql-bin.000011","pendingFiles":1,"reason":"this site's latest record is not a promotion record"}}`, false)
 	e.rule(t, "exec -n orders mysql-lion-dc2-0 -c mysql -- curl *",
-		`{"site":"dc2","primary":true,"archive":{"state":"Verified"},"tail":{"state":"Drained","activeFile":"mysql-bin.000004","newestSealedFile":"mysql-bin.000003","pendingFiles":0}}`, false)
+		`{"site":"dc2","primary":true,"archive":{"state":"Verified"},"divergentRows":1,"reissuableGtids":"aaaaaaaa-0000-4000-8000-00000000000a:9-10","tail":{"state":"Drained","activeFile":"mysql-bin.000004","newestSealedFile":"mysql-bin.000003","pendingFiles":0}}`, false)
 	e.rule(t, "exec -n orders mysql-lion-dc3-0 -c mysql -- curl *", `{"site":"dc3","primary":false,"archive":{"state":"Verified"}}`, false)
 	e.rule(t, "exec *", "", true)
 	e.rule(t, "get events -n orders --field-selector involvedObject.name=lion *",
@@ -256,11 +260,11 @@ func TestTriageArchiverStatusAndVerificationEvents(t *testing.T) {
 	}
 	for _, want := range []string{
 		"mysql-lion-dc1-0 site=dc1 archive=Verified/",
-		"divergentRows=2 quarantinedRows=0 tail=Blocked active=mysql-bin.000012 newestSealed=mysql-bin.000011 pending=1 reason=this site's latest record is not a promotion record (read-only site not archiving its tail: playbook 46)",
+		"divergentRows=2 quarantinedRows=0 reissuableGtids=none tail=Blocked active=mysql-bin.000012 newestSealed=mysql-bin.000011 pending=1 reason=this site's latest record is not a promotion record (read-only site not archiving its tail: playbook 46)",
 		"mysql-lion-dc2-0 site=dc2 archive=Verified/",
-		"quarantinedRows=0 tail=Drained active=mysql-bin.000004 newestSealed=mysql-bin.000003 pending=0\n",
+		"divergentRows=1 quarantinedRows=0 reissuableGtids=aaaaaaaa-0000-4000-8000-00000000000a:9-10 (this server could reissue archived GTIDs: playbook 41) tail=Drained active=mysql-bin.000004 newestSealed=mysql-bin.000003 pending=0\n",
 		"mysql-lion-dc3-0 site=dc3 archive=Verified/",
-		"quarantinedRows=0 tail=not-reported\n",
+		"divergentRows=0 quarantinedRows=0 reissuableGtids=not-evaluated tail=not-reported\n",
 		"PITRArchiveTailNotArchived: playbook 46",
 		"2026-11-05T11:00:00Z   Warning   PITRArchiveTailNotArchived   1   site dc1 is being recloned",
 		"[verification/verify-1] 2026-11-05T10:00:00Z   Warning   PITROnHistoryTransactionsExcluded",

@@ -15,42 +15,31 @@ type binlogIdentity struct{ Name, ID string }
 
 func (e ManifestEntry) identity() binlogIdentity { return binlogIdentity{Name: e.Name, ID: e.ID} }
 
-// normalizeArchiveEntry recovers IDs stripped by an older manifest writer, but
-// only when RemotePath exactly matches a key derived under the trusted site.
-func normalizeArchiveEntry(prefix, site string, entry ManifestEntry) ManifestEntry {
-	if entry.ID != "" {
-		return entry
+// validBinlogID reports whether id is a content identity: the lowercase hex
+// SHA-256 of the sealed bytes (keyed for encrypted stores).
+func validBinlogID(id string) bool {
+	if len(id) != sha256.Size*2 {
+		return false
 	}
-	if len(entry.RemotePath) < 64 {
-		return entry
+	for _, c := range id {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
 	}
-	candidate := entry
-	candidate.ID = entry.RemotePath[len(entry.RemotePath)-64:]
-	if key, err := ArchiveEntryKey(prefix, site, candidate); err == nil && key == entry.RemotePath {
-		return candidate
-	}
-	return entry
+	return true
 }
 
-// ArchiveEntryKey derives object keys from validated identity fields, never RemotePath.
-// Empty IDs refer to the original basename-only archive layout.
+// ArchiveEntryKey derives object keys from validated identity fields, never
+// RemotePath. Every archived binlog is content-addressed: an entry without a
+// valid ID has no key.
 func ArchiveEntryKey(prefix, site string, entry ManifestEntry) (string, error) {
 	if !isPlainFileName(site) || !isPlainFileName(entry.Name) {
 		return "", fmt.Errorf("invalid archive site/name: %q/%q", site, entry.Name)
 	}
-	name := entry.Name
-	if entry.ID != "" {
-		if len(entry.ID) != sha256.Size*2 {
-			return "", fmt.Errorf("invalid binlog identity %q", entry.ID)
-		}
-		for _, c := range entry.ID {
-			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-				return "", fmt.Errorf("invalid binlog identity %q", entry.ID)
-			}
-		}
-		name += "." + entry.ID
+	if !validBinlogID(entry.ID) {
+		return "", fmt.Errorf("invalid binlog identity %q", entry.ID)
 	}
-	return binlogObjectKey(prefix, site, name), nil
+	return binlogObjectKey(prefix, site, entry.Name+"."+entry.ID), nil
 }
 
 func fileContentID(filePath string) (string, error) {
@@ -103,7 +92,6 @@ func (a *BinlogArchiver) localBinlogID(filePath string) (string, error) {
 
 // inspectArchivedBinlog authenticates and parses a stream without scratch files.
 func (a *BinlogArchiver) inspectArchivedBinlog(ctx context.Context, entry ManifestEntry, inspect func(BinlogEvidence) error) error {
-	entry = normalizeArchiveEntry(a.cfg.ManifestPrefix, a.site, entry)
 	key, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, entry)
 	if err != nil {
 		return err
@@ -114,11 +102,7 @@ func (a *BinlogArchiver) inspectArchivedBinlog(ctx context.Context, entry Manife
 	}
 	defer reader.Close()
 	evidence, parseErr := InspectBinlog(reader, time.Time{})
-	expected := entry.ID
-	if expected == "" {
-		expected = entry.ContentID
-	}
-	if expected != "" && !MatchesBinlogDigest(a.store, expected, evidence.Digest) {
+	if !MatchesBinlogDigest(a.store, entry.ID, evidence.Digest) {
 		return fmt.Errorf("archived binlog identity mismatch for %s", entry.Name)
 	}
 	if parseErr != nil {

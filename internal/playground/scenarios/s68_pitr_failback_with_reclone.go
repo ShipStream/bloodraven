@@ -41,7 +41,8 @@ func scenario68PITRFailbackWithReclone() runner.Scenario {
 			"exactly the fenced history. Cycle 2 (A→B without a flush, reclone a, failback, flush a): the failback archives " +
 			"b's unflushed era as the outgoing primary's tail, so verifications inside that era and after it certify exactly " +
 			"the fenced history; a backup taken after the failback is covered. Each reclone starts only after the operator " +
-			"confirmed the recipient's binlog tail archived, with no PITRArchiveTailNotArchived Event.",
+			"confirmed the recipient's binlog tail archived, with no PITRArchiveTailNotArchived Event, and leaves the " +
+			"recipient with a new server_uuid, under which it numbers the era after its failback.",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#68-pitr-failback-with-reclone",
 		Timeout:           75 * time.Minute,

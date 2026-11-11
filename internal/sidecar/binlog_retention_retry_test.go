@@ -46,7 +46,6 @@ func (s *retentionFaultStore) Put(ctx context.Context, key string, r io.Reader, 
 type retentionPendingRow struct {
 	Name           string    `json:"name"`
 	ID             string    `json:"id"`
-	ContentID      string    `json:"contentId"`
 	Key            string    `json:"key"`
 	Deleted        bool      `json:"deleted"`
 	PreviousGTIDs  string    `json:"previousGtids"`
@@ -68,7 +67,7 @@ func readRetentionPendingRows(t *testing.T, store ArchiveStore) []retentionPendi
 	return body.Pruned
 }
 
-func newRetentionRetryFixture(t *testing.T, legacy bool) (*retentionFaultStore, func() *BinlogArchiver, *atomic.Int32, []ManifestEntry, []string) {
+func newRetentionRetryFixture(t *testing.T) (*retentionFaultStore, func() *BinlogArchiver, *atomic.Int32, []ManifestEntry, []string) {
 	t.Helper()
 	ctx := context.Background()
 	pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
@@ -93,13 +92,7 @@ func newRetentionRetryFixture(t *testing.T, legacy bool) (*retentionFaultStore, 
 			t.Fatal(err)
 		}
 		meta.GTIDCoverage.ContentID = id
-		if legacy && i == 0 {
-			id = ""
-		}
 		entry := ManifestEntry{Name: []string{"mysql-bin.000001", "mysql-bin.000002"}[i], ID: id, Size: meta.Size, FirstEventTime: meta.FirstEventTime, LastEventTime: meta.LastEventTime, PreviousGTIDs: meta.PreviousGTIDs, GTIDCoverage: meta.GTIDCoverage}
-		if entry.ID == "" {
-			entry.ContentID = meta.GTIDCoverage.ContentID
-		}
 		key, err := ArchiveEntryKey("binlogs", "iad", entry)
 		if err != nil {
 			t.Fatal(err)
@@ -131,57 +124,45 @@ func newRetentionRetryFixture(t *testing.T, legacy bool) (*retentionFaultStore, 
 }
 
 func TestRetentionRetriesFailedDeleteAfterRestart(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		label := "ID-aware"
-		if legacy {
-			label = "legacy"
+	store, factory, status, entries, keys := newRetentionRetryFixture(t)
+	store.failDelete[keys[0]] = 1
+	factory().maybeRunRetention(context.Background())
+	rows := readRetentionPendingRows(t, store)
+	if len(rows) != 1 || rows[0].Deleted {
+		t.Errorf("failed delete lost its durable pending record: %+v", rows)
+	} else {
+		wantID, err := fileContentID("testdata/incarnation-a.bin")
+		if err != nil {
+			t.Fatal(err)
 		}
-		t.Run(label, func(t *testing.T) {
-			store, factory, status, entries, keys := newRetentionRetryFixture(t, legacy)
-			store.failDelete[keys[0]] = 1
-			factory().maybeRunRetention(context.Background())
-			rows := readRetentionPendingRows(t, store)
-			if len(rows) != 1 || rows[0].Deleted {
-				t.Errorf("failed delete lost its durable pending record: %+v", rows)
-			} else {
-				wantID, err := fileContentID("testdata/incarnation-a.bin")
-				if err != nil {
-					t.Fatal(err)
-				}
-				actualID := rows[0].ID
-				if actualID == "" {
-					actualID = rows[0].ContentID
-				}
-				if actualID != wantID || rows[0].Key != keys[0] || rows[0].PreviousGTIDs != entries[0].PreviousGTIDs || !rows[0].FirstEventTime.Equal(entries[0].FirstEventTime) {
-					t.Errorf("retired identity/header metadata missing: %+v", rows[0])
-				}
-			}
-			status.Store(http.StatusServiceUnavailable)
-			factory().maybeRunRetention(context.Background())
-			_, exists, err := store.Get(context.Background(), keys[0])
-			if err != nil || exists {
-				t.Errorf("failed delete was never retried after restart: exists=%t, %v", exists, err)
-			}
-			if store.deletes[keys[0]] != 2 {
-				t.Errorf("delete attempts=%d, want 2", store.deletes[keys[0]])
-			}
-			if store.deletes[keys[1]] != 0 {
-				t.Fatal("protected object was deleted")
-			}
-			rows = readRetentionPendingRows(t, store)
-			if len(rows) != 1 || !rows[0].Deleted {
-				t.Errorf("successful deletion was not acknowledged: %+v", rows)
-			}
-			m, err := loadManifest(context.Background(), store, "binlogs", "iad")
-			if err != nil || len(m.Files) != 1 || m.Files[0].Name != "mysql-bin.000002" {
-				t.Fatalf("live manifest did not preserve the protected row: %+v, %v", m, err)
-			}
-		})
+		if rows[0].ID != wantID || rows[0].Key != keys[0] || rows[0].PreviousGTIDs != entries[0].PreviousGTIDs || !rows[0].FirstEventTime.Equal(entries[0].FirstEventTime) {
+			t.Errorf("retired identity/header metadata missing: %+v", rows[0])
+		}
+	}
+	status.Store(http.StatusServiceUnavailable)
+	factory().maybeRunRetention(context.Background())
+	_, exists, err := store.Get(context.Background(), keys[0])
+	if err != nil || exists {
+		t.Errorf("failed delete was never retried after restart: exists=%t, %v", exists, err)
+	}
+	if store.deletes[keys[0]] != 2 {
+		t.Errorf("delete attempts=%d, want 2", store.deletes[keys[0]])
+	}
+	if store.deletes[keys[1]] != 0 {
+		t.Fatal("protected object was deleted")
+	}
+	rows = readRetentionPendingRows(t, store)
+	if len(rows) != 1 || !rows[0].Deleted {
+		t.Errorf("successful deletion was not acknowledged: %+v", rows)
+	}
+	m, err := loadManifest(context.Background(), store, "binlogs", "iad")
+	if err != nil || len(m.Files) != 1 || m.Files[0].Name != "mysql-bin.000002" {
+		t.Fatalf("live manifest did not preserve the protected row: %+v, %v", m, err)
 	}
 }
 
 func TestRetentionRetriesAfterDeleteAcknowledgementFails(t *testing.T) {
-	store, factory, status, _, keys := newRetentionRetryFixture(t, false)
+	store, factory, status, _, keys := newRetentionRetryFixture(t)
 	store.failSaveAt = 2 // Retire save succeeds; deletion acknowledgement fails.
 	factory().maybeRunRetention(context.Background())
 	_, exists, err := store.Get(context.Background(), keys[0])
@@ -204,7 +185,7 @@ func TestRetentionRetriesAfterDeleteAcknowledgementFails(t *testing.T) {
 }
 
 func TestRetentionResumesPersistedDeleteBeforeContactingOperator(t *testing.T) {
-	store, factory, status, entries, keys := newRetentionRetryFixture(t, false)
+	store, factory, status, entries, keys := newRetentionRetryFixture(t)
 	body := map[string]any{"version": ManifestVersion, "archiveId": testArchiveID, "site": "iad", "files": entries[1:], "pruned": []map[string]any{{"name": entries[0].Name, "id": entries[0].ID, "key": "unrelated/victim", "deleted": false, "previousGtids": entries[0].PreviousGTIDs, "firstEventTime": entries[0].FirstEventTime}}}
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -232,7 +213,7 @@ func TestRetentionResumesPersistedDeleteBeforeContactingOperator(t *testing.T) {
 }
 
 func TestRetentionDoesNotDeleteBeforeRetirementSave(t *testing.T) {
-	store, factory, _, _, keys := newRetentionRetryFixture(t, false)
+	store, factory, _, _, keys := newRetentionRetryFixture(t)
 	store.failSaveAt = 1
 	factory().maybeRunRetention(context.Background())
 	if store.deletes[keys[0]] != 0 {
@@ -254,7 +235,7 @@ func TestRetentionDoesNotDeleteBeforeRetirementSave(t *testing.T) {
 }
 
 func TestRetentionDoesNotRetryDeleteOfLiveReference(t *testing.T) {
-	store, factory, status, entries, keys := newRetentionRetryFixture(t, false)
+	store, factory, status, entries, keys := newRetentionRetryFixture(t)
 	body := map[string]any{"version": ManifestVersion, "archiveId": testArchiveID, "site": "iad", "files": entries, "pruned": []map[string]any{{"name": entries[0].Name, "id": entries[0].ID, "key": keys[0], "deleted": false}}}
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -281,7 +262,7 @@ func TestRetentionDoesNotRetryDeleteOfLiveReference(t *testing.T) {
 }
 
 func TestRetentionAcknowledgesOnlySuccessfulDeletes(t *testing.T) {
-	store, factory, status, entries, keys := newRetentionRetryFixture(t, false)
+	store, factory, status, entries, keys := newRetentionRetryFixture(t)
 	extra := entries[0]
 	extra.Name = "mysql-bin.000003"
 	extraKey, err := ArchiveEntryKey("binlogs", "iad", extra)

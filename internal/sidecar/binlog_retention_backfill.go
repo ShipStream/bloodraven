@@ -11,25 +11,18 @@ const (
 	maxRetentionBackfillTime        = 2 * time.Second
 )
 
+// coverageBoundToEntry reports whether entry's coverage was computed from
+// the bytes its ID names. Unbound coverage (copied from other bytes, or
+// absent) proves nothing about the row.
 func coverageBoundToEntry(entry ManifestEntry) bool {
-	id := entry.ID
-	if id == "" {
-		id = entry.ContentID
-	}
-	return id != "" && entry.GTIDCoverage != nil && entry.GTIDCoverage.ContentID == id
+	return entry.ID != "" && entry.GTIDCoverage != nil && entry.GTIDCoverage.ContentID == entry.ID
 }
 
-type retentionInspectionIdentity struct {
-	Name, ID, ContentID string
-}
 type retentionBackfillResult struct {
 	pending  bool // Eligible work remains after this bounded batch.
 	progress bool // New evidence was inspected, even if its save needs retrying.
 }
 
-func inspectionIdentity(entry ManifestEntry) retentionInspectionIdentity {
-	return retentionInspectionIdentity{entry.Name, entry.ID, entry.ContentID}
-}
 func needsRetentionInspection(entry ManifestEntry, cutoff time.Time) bool {
 	return !entry.LastEventTime.IsZero() && entry.LastEventTime.Before(cutoff) && !coverageBoundToEntry(entry)
 }
@@ -38,10 +31,10 @@ func needsRetentionInspection(entry ManifestEntry, cutoff time.Time) bool {
 // the normal retention interval while unrelated rows can keep making progress.
 func (a *BinlogArchiver) backfillRetentionCoverage(ctx context.Context, m *Manifest, cutoff time.Time) (retentionBackfillResult, error) {
 	result := retentionBackfillResult{}
-	live := make(map[retentionInspectionIdentity]bool, len(m.Files))
+	live := make(map[binlogIdentity]bool, len(m.Files))
 	for _, f := range m.Files {
 		if needsRetentionInspection(f, cutoff) {
-			live[inspectionIdentity(f)] = true
+			live[f.identity()] = true
 		}
 	}
 	for key := range a.retentionInspectionFailures {
@@ -59,7 +52,7 @@ func (a *BinlogArchiver) backfillRetentionCoverage(ctx context.Context, m *Manif
 	for offset := 0; offset < len(m.Files); offset++ {
 		index := (start + offset) % len(m.Files)
 		f := &m.Files[index]
-		key := inspectionIdentity(*f)
+		key := f.identity()
 		if !needsRetentionInspection(*f, cutoff) || time.Now().Before(a.retentionInspectionFailures[key]) {
 			continue
 		}
@@ -71,28 +64,21 @@ func (a *BinlogArchiver) backfillRetentionCoverage(ctx context.Context, m *Manif
 		a.retentionNextInspection = (index + 1) % len(m.Files)
 		inspectedSize := f.Size
 		err := a.inspectArchivedBinlog(ctx, *f, func(evidence BinlogEvidence) error {
-			id := f.ID
-			if id == "" {
-				id = a.store.BinlogContentID(evidence.Digest)
-			}
 			meta := evidence.Metadata
 			inspectedSize = meta.Size
-			meta.GTIDCoverage.ContentID = id
+			meta.GTIDCoverage.ContentID = f.ID
 			f.GTIDCoverage = meta.GTIDCoverage
 			f.Size = meta.Size
 			f.FirstEventTime = meta.FirstEventTime
 			f.LastEventTime = meta.LastEventTime
 			f.PreviousGTIDs = meta.PreviousGTIDs
-			if f.ID == "" {
-				f.ContentID = id
-			}
 			result.progress = true
 			return nil
 		})
 		readBytes += max(inspectedSize, 0)
 		if err != nil {
 			if a.retentionInspectionFailures == nil {
-				a.retentionInspectionFailures = make(map[retentionInspectionIdentity]time.Time)
+				a.retentionInspectionFailures = make(map[binlogIdentity]time.Time)
 			}
 			delay := time.Hour
 			if a.retentionCfg != nil && a.retentionCfg.Interval > 0 {
@@ -105,7 +91,7 @@ func (a *BinlogArchiver) backfillRetentionCoverage(ctx context.Context, m *Manif
 		}
 	}
 	for _, f := range m.Files {
-		if needsRetentionInspection(f, cutoff) && !time.Now().Before(a.retentionInspectionFailures[inspectionIdentity(f)]) {
+		if needsRetentionInspection(f, cutoff) && !time.Now().Before(a.retentionInspectionFailures[f.identity()]) {
 			result.pending = true
 			break
 		}

@@ -54,9 +54,10 @@ const MaxPromotionRecords = pitrarchive.MaxPromotionRecords
 // binlog file.
 type ManifestEntry struct {
 	GTIDCoverage *BinlogGTIDCoverage `json:"gtidCoverage,omitempty"`
-	// ID identifies sealed bytes (keyed for encrypted stores); empty for legacy keys.
-	ID        string `json:"id,omitempty"`
-	ContentID string `json:"contentId,omitempty"`
+	// ID identifies the sealed bytes (keyed for encrypted stores) and, with
+	// Name, the row and its object key. Required: a manifest holding a row
+	// without one is refused (checkManifestRows).
+	ID string `json:"id,omitempty"`
 	// BaseGTIDs bridges a physical clone's empty Previous_gtids to its donor history.
 	BaseGTIDs      string    `json:"baseGtids,omitempty"`
 	Name           string    `json:"name"`
@@ -69,11 +70,10 @@ type ManifestEntry struct {
 }
 
 // PrunedEntry records durable retirement and its object-deletion acknowledgement.
-// ID keeps the original archive key layout; legacy rows use ContentID for byte identity.
+// ID is the retired row's content identity.
 type PrunedEntry struct {
 	Name           string    `json:"name"`
 	ID             string    `json:"id,omitempty"`
-	ContentID      string    `json:"contentId,omitempty"`
 	PreviousGTIDs  string    `json:"previousGtids,omitempty"`
 	FirstEventTime time.Time `json:"firstEventTime,omitempty"`
 	Key            string    `json:"key"`
@@ -94,8 +94,11 @@ type ArchiveReuseEvidence struct {
 	GTIDs  string        `json:"gtids"`
 	Proof  string        `json:"proof"`
 }
+
+// ArchiveDivergence is the divergence audit's evidence for one active row
+// (auditArchive): MissingGTIDs are the row's transactions, or transactions
+// it builds on, that the site's server no longer holds.
 type ArchiveDivergence struct {
-	ContentID    string `json:"contentId,omitempty"`
 	Name         string `json:"name"`
 	ID           string `json:"id,omitempty"`
 	MissingGTIDs string `json:"missingGtids"`
@@ -107,12 +110,8 @@ type ArchiveHistoryAcknowledgement struct {
 	At               time.Time `json:"at"`
 }
 type ArchiveEpoch struct {
-	Reuse []ArchiveReuseEvidence `json:"reuse,omitempty"`
-	// Legacy diagnostics are readable for recovery; none authorizes a guard.
-	ServerUUID  string `json:"serverUuid"`
-	LastName    string `json:"lastName"`
-	Executed    string `json:"executed"`
-	ResetReason string `json:"resetReason,omitempty"`
+	Reuse       []ArchiveReuseEvidence `json:"reuse,omitempty"`
+	ResetReason string                 `json:"resetReason,omitempty"`
 }
 
 // Manifest is the JSON document at <prefix>/manifest-<site>.json. Each site's
@@ -168,7 +167,8 @@ func (m *Manifest) appendedPromotionKey() string {
 }
 
 // checkManifestVersion refuses every manifest version except
-// ManifestVersion, and a v2 manifest without an archiveId.
+// ManifestVersion, a v2 manifest without an archiveId, and one holding a
+// row without a content identity.
 func checkManifestVersion(key string, m *Manifest) error {
 	switch {
 	case m.Version < ManifestVersion:
@@ -181,6 +181,37 @@ func checkManifestVersion(key string, m *Manifest) error {
 		return fmt.Errorf("%w: manifest %s is version %d but has no archiveId", ErrManifestInvalid, key, m.Version)
 	case len(m.Promotions) > MaxPromotionRecords:
 		return fmt.Errorf("%w: manifest %s holds %d promotion records, max %d", ErrManifestInvalid, key, len(m.Promotions), MaxPromotionRecords)
+	}
+	return checkManifestRows(key, m)
+}
+
+// checkManifestRows refuses a manifest that holds a row without a content
+// identity: an active or quarantined row, or a retirement record, with no
+// id. Every version-2 writer publishes rows content-addressed
+// (archivePinned), so such a row was written before archive identity, or
+// by hand. It has no object key this release derives and no identity to
+// verify its bytes against, and nothing repairs it, so the manifest is
+// refused where it is loaded and where it would be saved. A malformed
+// (non-empty) id is left to the code that derives the row's key.
+func checkManifestRows(key string, m *Manifest) error {
+	refuse := func(kind, name string) error {
+		return fmt.Errorf("%w: manifest %s %s %q has no id; version-2 rows are content-addressed; start a new archive prefix and take a full backup",
+			ErrManifestInvalid, key, kind, name)
+	}
+	for _, f := range m.Files {
+		if f.ID == "" {
+			return refuse("row", f.Name)
+		}
+	}
+	for _, q := range m.Quarantined {
+		if q.Entry.ID == "" {
+			return refuse("quarantined row", q.Entry.Name)
+		}
+	}
+	for _, p := range m.Pruned {
+		if p.ID == "" {
+			return refuse("retirement record", p.Name)
+		}
 	}
 	return nil
 }
@@ -240,7 +271,8 @@ func binlogObjectKey(prefix, site, filename string) string {
 // propagated — the caller should surface it loudly rather than silently
 // reset the manifest. Any version other than ManifestVersion is refused
 // (ErrManifestLegacy, ErrManifestVersionUnsupported), as is a v2 manifest
-// without an archiveId (ErrManifestInvalid).
+// without an archiveId or with a row that has no content identity
+// (ErrManifestInvalid).
 func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) (*Manifest, error) {
 	data, ok, err := store.Get(ctx, manifestKey(prefix, site))
 	if err != nil {
@@ -260,9 +292,6 @@ func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) 
 	// saveManifest writes back to manifestKey(prefix, m.Site), so a
 	// tampered "site" field could otherwise redirect that write.
 	m.Site = site
-	for i := range m.Files {
-		m.Files[i] = normalizeArchiveEntry(prefix, site, m.Files[i])
-	}
 	return &m, nil
 }
 
@@ -294,10 +323,7 @@ func encodeManifest(prefix string, m *Manifest) ([]byte, error) {
 		if a.Name != b.Name {
 			return a.Name < b.Name
 		}
-		if a.ID != b.ID {
-			return a.ID < b.ID
-		}
-		return a.ContentID < b.ContentID
+		return a.ID < b.ID
 	})
 	m.Version = ManifestVersion
 	if err := checkManifestVersion(manifestKey(prefix, m.Site), m); err != nil {
@@ -317,7 +343,8 @@ func encodeManifest(prefix string, m *Manifest) ([]byte, error) {
 // steer deletes outside this site's archive; entries whose Name is not
 // a plain file name, or whose ID is invalid, are dropped but not deleted. The
 // manifest is only rewritten if at least one entry was removed. Drop values
-// must contain the verified content ID (keyed for encrypted stores) for each selected identity.
+// must contain the verified content ID (keyed for encrypted stores) for each
+// selected identity, which is the row's ID.
 func pruneManifest(ctx context.Context, session *ArchiveSession, site string, drop map[binlogIdentity]string) ([]string, error) {
 	prefix := session.Prefix()
 	m, err := session.LoadManifest(ctx, site)
@@ -334,20 +361,14 @@ func pruneManifest(ctx context.Context, session *ArchiveSession, site string, dr
 		if contentID, d := drop[f.identity()]; d {
 			pruned++
 			if key, err := ArchiveEntryKey(prefix, site, f); err == nil {
-				if f.ID != "" && contentID != f.ID {
+				if contentID != f.ID {
 					return nil, fmt.Errorf("retirement content identity differs from archive ID for %s", f.Name)
 				}
-				if _, err := ArchiveEntryKey(prefix, site, ManifestEntry{Name: f.Name, ID: contentID}); err != nil || contentID == "" {
-					return nil, fmt.Errorf("missing valid retirement content identity for %s", f.Name)
-				}
 				retired := PrunedEntry{Name: f.Name, ID: f.ID, Key: key, PreviousGTIDs: f.PreviousGTIDs, FirstEventTime: f.FirstEventTime}
-				if f.ID == "" {
-					retired.ContentID = contentID
-				}
 				found := false
 				for i := range m.Pruned {
 					p := m.Pruned[i]
-					if p.Name == retired.Name && p.ID == retired.ID && p.ContentID == retired.ContentID {
+					if p.Name == retired.Name && p.ID == retired.ID {
 						m.Pruned[i] = retired
 						found = true
 						break

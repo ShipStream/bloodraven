@@ -130,7 +130,7 @@ func TestPITRCheckTargetAfterBackup(t *testing.T) {
 // audit keeps reporting its retained lost rows, yet must still require the
 // right primary, archive and a fresh promotion record.
 func TestPITRPromotionReadyToleratesOnlyExpectedDivergence(t *testing.T) {
-	const auditErr = "site iad name mysql-bin.000004 id ab12 P=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-40 divergent transactions=3e11fa47-71ca-11e1-9e33-c80aa9429562:41-60; preserve objects and use pitr-quarantine with a canonical full-backup bound"
+	const auditErr = "site iad: server_uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562 no longer has archived transactions 3e11fa47-71ca-11e1-9e33-c80aa9429562:41-60 that it issued (row mysql-bin.000004 id ab12) and reuses their GTIDs when it writes; once the reused GTIDs are archived, every restore from this archive refuses PITRArchiveHistoryReset. Reclone this site before it is promoted (a clone starts with a new server_uuid); if it is already the primary, start a new archive prefix and take a full backup"
 	notBefore := mustMicro(t, "2026-11-05T10:00:10.000000Z")
 	good := func() *pgsidecar.ArchiverStatusResponse {
 		return &pgsidecar.ArchiverStatusResponse{

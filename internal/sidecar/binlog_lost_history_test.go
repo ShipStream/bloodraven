@@ -51,9 +51,11 @@ func TestLostHistoryIsDivergenceWithoutReissuance(t *testing.T) {
 	if err := a.auditArchive(ctx, m); err != nil || len(m.Divergent) != 0 {
 		t.Fatalf("restored execution did not clear contradicted evidence: %v", err)
 	}
+	// The same loss on a server with another server_uuid is recorded and
+	// is not an error: that server cannot issue the lost GTID again.
 	state.executed = coverageTestSID + ":1-20"
-	if err := a.auditArchive(ctx, m); err == nil {
-		t.Fatal("lost tail was not re-evaluated")
+	if err := a.auditArchive(ctx, m); err != nil || len(m.Divergent) != 1 || m.Divergent[0].MissingGTIDs != coverageTestSID+":21" {
+		t.Fatalf("lost tail under another server_uuid: %v, %+v", err, m.Divergent)
 	}
 
 	if err := testQuarantine(ctx, store, "binlogs", "iad", "mysql-bin.000002", id, "canonical branch selected", coverageTestSID+":1-21", false); err != nil {
@@ -68,34 +70,6 @@ func TestLostHistoryIsDivergenceWithoutReissuance(t *testing.T) {
 	}
 	if len(restored.Divergent) != 1 {
 		t.Fatal("quarantine undo lost prior divergence evidence")
-	}
-}
-func TestDivergenceVisibleBeforeRestore(t *testing.T) {
-	store := newMemStore()
-	row := ManifestEntry{Name: "mysql-bin.000002", ID: strings.Repeat("a", 64), PreviousGTIDs: coverageTestSID + ":1-10", GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11"}}
-	if err := appendManifestEntry(context.Background(), store, "binlogs", "iad", row); err != nil {
-		t.Fatal(err)
-	}
-	state := &historyStateStub{stubRoleChecker: stubRoleChecker{readOnly: true}, uuid: "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee", executed: coverageTestSID + ":1-10"}
-	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", state, store, slog.Default())
-	a.scanAndArchive(context.Background())
-	status := a.Snapshot(context.Background())
-	if !strings.Contains(status.LastError, "divergent") || status.UploadFailures == 0 {
-		t.Fatalf("divergence is invisible until restore: %+v", status)
-	}
-}
-
-func TestLostUnindexedLegacyVisibleOnReplica(t *testing.T) {
-	store := newMemStore()
-	row := ManifestEntry{Name: "mysql-bin.000002", PreviousGTIDs: coverageTestSID + ":1-10"}
-	if err := appendManifestEntry(context.Background(), store, "binlogs", "iad", row); err != nil {
-		t.Fatal(err)
-	}
-	a := newTestArchiver(&PITRConfig{ManifestPrefix: "binlogs"}, "iad", &stubRoleChecker{readOnly: true}, store, slog.Default())
-	a.scanAndArchive(context.Background())
-	status := a.Snapshot(context.Background())
-	if !strings.Contains(status.LastError, "digest unknown") || status.UploadFailures == 0 {
-		t.Fatalf("lost legacy object is invisible until restore: %+v", status)
 	}
 }
 func TestQuarantinePreservesObjectsAndCanBeUndone(t *testing.T) {

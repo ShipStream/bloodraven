@@ -202,7 +202,7 @@ func (a *BinlogArchiver) drainTail(ctx context.Context, resetErr error) tailScan
 func (a *BinlogArchiver) drainTailFiles(ctx context.Context, resetErr error) (result tailScan, reported bool) {
 	// Until uploads start this is a standby with nothing to report.
 	a.setBacklog(0)
-	a.setError("")
+	a.clearScanError()
 	entries, err := readBinlogIndex(filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex))
 	if err != nil {
 		return tailScan{state: internalmysql.ArchiverTailBlocked, reason: fmt.Sprintf("read index: %v", err)}, false
@@ -301,7 +301,7 @@ func (a *BinlogArchiver) drainTailFiles(ctx context.Context, resetErr error) (re
 		a.mu.Unlock()
 		return tailBlocked(entries, pending, msg), true
 	}
-	a.setError("")
+	a.clearScanError()
 	if pending > 0 {
 		return tailPending(entries, pending), false
 	}

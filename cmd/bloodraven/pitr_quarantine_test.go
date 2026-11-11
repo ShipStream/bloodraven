@@ -16,6 +16,8 @@ import (
 const (
 	quarantineTestUID = "00000000-0000-4000-8000-000000000a01"
 	quarantineTestSID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	// quarantineTestRowID is a manifest row's content identity.
+	quarantineTestRowID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
 func quarantineTestDestination(t testing.TB) pitrarchive.Destination {
@@ -82,12 +84,12 @@ func TestPITRQuarantineCommandGoesThroughTheWriterSession(t *testing.T) {
 	setQuarantineEnv(t, root)
 	store := quarantineTestStore(t, root)
 	archiveID := seedQuarantineDescriptor(t, store, pitrarchive.Source{Namespace: "ns", Name: "orders", UID: quarantineTestUID})
-	row := sidecar.ManifestEntry{Name: "mysql-bin.legacy"}
+	row := sidecar.ManifestEntry{Name: "mysql-bin.000007", ID: quarantineTestRowID}
 	at := time.Date(2026, 11, 4, 1, 0, 0, 0, time.UTC)
 	putQuarantineManifest(t, store, sidecar.Manifest{ArchiveID: archiveID, Site: "iad", Files: []sidecar.ManifestEntry{row},
 		Promotions:       []sidecar.PromotionRecord{{ServerUUID: "u", ServerID: 101, GTIDExecuted: "u:1-3", ObservedAt: at}},
 		HistoryIntegrity: &sidecar.HistoryIntegrity{Violation: pitrarchive.ViolationBinlogFormat, Detail: "binlog_format=MIXED", At: at}})
-	args := []string{"--site=iad", "--name=" + row.Name, "--id=legacy", "--reason=lost object; canonical backup verified", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"}
+	args := []string{"--site=iad", "--name=" + row.Name, "--id=" + row.ID, "--reason=lost object; canonical backup verified", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"}
 	if err := pitrQuarantine(ctx, args, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +100,7 @@ func TestPITRQuarantineCommandGoesThroughTheWriterSession(t *testing.T) {
 	if len(m.Promotions) != 1 || m.HistoryIntegrity == nil {
 		t.Fatalf("quarantine dropped the site's records or marker: %+v", m)
 	}
-	if err := pitrQuarantine(ctx, []string{"--site=iad", "--name=" + row.Name, "--id=legacy", "--undo", "--confirm"}, io.Discard, io.Discard); err != nil {
+	if err := pitrQuarantine(ctx, []string{"--site=iad", "--name=" + row.Name, "--id=" + row.ID, "--undo", "--confirm"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if m, err := sidecar.LoadManifest(ctx, store, "binlogs", "iad"); err != nil || len(m.Files) != 1 || len(m.Quarantined) != 0 {
@@ -107,7 +109,7 @@ func TestPITRQuarantineCommandGoesThroughTheWriterSession(t *testing.T) {
 }
 
 func TestPITRQuarantineCommandRefusals(t *testing.T) {
-	args := []string{"--site=iad", "--name=mysql-bin.legacy", "--id=legacy", "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"}
+	args := []string{"--site=iad", "--name=mysql-bin.000007", "--id=" + quarantineTestRowID, "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"}
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, store sidecar.ArchiveStore)
@@ -116,13 +118,20 @@ func TestPITRQuarantineCommandRefusals(t *testing.T) {
 	}{
 		{name: "another group's archive", setup: func(t *testing.T, store sidecar.ArchiveStore) {
 			id := seedQuarantineDescriptor(t, store, pitrarchive.Source{Namespace: "ns", Name: "other", UID: "00000000-0000-4000-8000-0000000000ff"})
-			putQuarantineManifest(t, store, sidecar.Manifest{ArchiveID: id, Site: "iad", Files: []sidecar.ManifestEntry{{Name: "mysql-bin.legacy"}}})
+			putQuarantineManifest(t, store, sidecar.Manifest{ArchiveID: id, Site: "iad", Files: []sidecar.ManifestEntry{{Name: "mysql-bin.000007", ID: quarantineTestRowID}}})
 		}, want: string(pitrarchive.TokenArchiveForeign)},
 		{name: "no archive", setup: func(*testing.T, sidecar.ArchiveStore) {}, want: string(pitrarchive.TokenArchiveNotFound)},
 		{name: "legacy prefix", setup: func(t *testing.T, store sidecar.ArchiveStore) {
 			body := []byte(`{"version":1,"site":"iad","files":[{"name":"mysql-bin.legacy"}]}`)
 			_ = store.Put(context.Background(), "binlogs/manifest-iad.json", bytes.NewReader(body), int64(len(body)))
 		}, want: string(pitrarchive.TokenArchiveLegacy)},
+		// A version-2 manifest of this archive holding a row without an
+		// id (#271): refused where it is loaded, nothing repaired.
+		{name: "row without an id", setup: func(t *testing.T, store sidecar.ArchiveStore) {
+			id := seedQuarantineDescriptor(t, store, pitrarchive.Source{Namespace: "ns", Name: "orders", UID: quarantineTestUID})
+			body := []byte(`{"version":2,"archiveId":"` + id + `","site":"iad","files":[{"name":"mysql-bin.000007","id":"` + quarantineTestRowID + `"},{"name":"mysql-bin.000008"}]}`)
+			_ = store.Put(context.Background(), "binlogs/manifest-iad.json", bytes.NewReader(body), int64(len(body)))
+		}, want: string(pitrarchive.TokenArchiveObjectInvalid)},
 		{name: "no writer identity", setup: func(*testing.T, sidecar.ArchiveStore) {}, env: map[string]string{"BLOODRAVEN_FAILOVER_GROUP_UID": ""}, want: "BLOODRAVEN_FAILOVER_GROUP_UID"},
 		{name: "destination of another prefix", setup: func(*testing.T, sidecar.ArchiveStore) {}, env: map[string]string{"BLOODRAVEN_PITR_DESTINATION": "pvc://ns/archive/other/binlogs"}, want: "key prefix"},
 	}
@@ -152,7 +161,7 @@ func TestPITRQuarantineCommandRefusals(t *testing.T) {
 // right for --acknowledge-history as well as for a quarantine.
 func TestPITRQuarantineNoArchiveIsOperationNeutral(t *testing.T) {
 	for _, args := range [][]string{
-		{"--site=iad", "--name=mysql-bin.legacy", "--id=legacy", "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"},
+		{"--site=iad", "--name=mysql-bin.000007", "--id=" + quarantineTestRowID, "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"},
 		{"--site=iad", "--acknowledge-history", "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"},
 	} {
 		root := t.TempDir()
@@ -175,5 +184,40 @@ func TestPITRQuarantineResumeGTIDsHelp(t *testing.T) {
 	text := help.String()
 	if strings.Contains(text, "exclusion") || !strings.Contains(text, "excludeGtids still decides") {
 		t.Fatalf("resume-gtids help:\n%s", text)
+	}
+}
+
+// #271: there is no basename-only row to select any more. --id legacy is
+// refused before the store is opened, and an id that is not a content
+// identity before the manifest is read.
+func TestPITRQuarantineRefusesIdentitylessSelection(t *testing.T) {
+	root := t.TempDir()
+	setQuarantineEnv(t, root)
+	store := quarantineTestStore(t, root)
+	archiveID := seedQuarantineDescriptor(t, store, pitrarchive.Source{Namespace: "ns", Name: "orders", UID: quarantineTestUID})
+	putQuarantineManifest(t, store, sidecar.Manifest{ArchiveID: archiveID, Site: "iad", Files: []sidecar.ManifestEntry{{Name: "mysql-bin.000007", ID: quarantineTestRowID}}})
+	before, _, _ := store.Get(context.Background(), sidecar.ManifestKey("binlogs", "iad"))
+	for id, want := range map[string]string{
+		"legacy":  string(pitrarchive.TokenArchiveLegacy),
+		"abc":     "invalid binlog identity",
+		"../../x": "invalid binlog identity",
+	} {
+		for _, undo := range []bool{false, true} {
+			args := []string{"--site=iad", "--name=mysql-bin.000007", "--id=" + id, "--reason=r", "--resume-gtids=" + quarantineTestSID + ":1-20", "--confirm"}
+			if undo {
+				args = []string{"--site=iad", "--name=mysql-bin.000007", "--id=" + id, "--undo", "--confirm"}
+			}
+			err := pitrQuarantine(context.Background(), args, io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("--id=%s undo=%t: %v, want %q", id, undo, err, want)
+			}
+		}
+	}
+	if after, _, _ := store.Get(context.Background(), sidecar.ManifestKey("binlogs", "iad")); !bytes.Equal(before, after) {
+		t.Fatalf("a refused selection changed the manifest:\n%s", after)
+	}
+	var help bytes.Buffer
+	if err := pitrQuarantine(context.Background(), []string{"--help"}, io.Discard, &help); err != nil || strings.Contains(help.String(), "legacy") {
+		t.Fatalf("help still offers a legacy id (%v):\n%s", err, help.String())
 	}
 }
