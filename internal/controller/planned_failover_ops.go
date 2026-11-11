@@ -1643,6 +1643,22 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable)
 		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, false, &res)
 		return res, nil
+	case (fErr == nil && !gtidSetHolds(pinned.gtid, F)) || (liveErr == nil && tm.lacksOwnTransactions(ref.Source, pinned.uuid, pinned.gtid, live.gtid)):
+		// The same server_uuid on an older data directory: the source
+		// restarted without part of the set it was fenced with, or
+		// (restarted before the fence was read) without transactions it
+		// issued itself that the target already holds. Unfencing it would
+		// have it issue those GTIDs again, and the target, which holds
+		// them, must not be pointed at it. It stays fenced; the topology
+		// manager reports what it lacks (own_transactions_lost.go). A
+		// target that holds transactions of another server is a
+		// divergent target, which does not keep the source fenced.
+		tm.logger.Warn("planned failover: rollback leaves the source fenced, it lacks transactions it held",
+			"runId", ref.RunID, "site", ref.Source, "fenceGtid", truncateGtidSet(F.String()),
+			"sourceGtid", truncateGtidSet(pinned.gtid), "targetGtid", truncateGtidSet(live.gtidRaw))
+		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
+		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, false, &res)
+		return res, nil
 	}
 	tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, true, &res)
 	if !pinned.readOnly {

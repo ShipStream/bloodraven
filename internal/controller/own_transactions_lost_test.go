@@ -256,7 +256,7 @@ func TestOwnLoss_ReturningOldPrimaryIsNotRejoined(t *testing.T) {
 	}
 	warns := f.records(t, "own transactions lost")
 	if len(warns) != 1 || warns[0]["level"] != "WARN" || warns[0]["site"] != "dc2" || warns[0]["lostGtid"] != lossLostGTID ||
-		warns[0]["primary"] != "dc1" || warns[0]["serverUUIDs"] != lossUUIDOld || warns[0]["detectedBy"] != "OldPrimaryRecovery" ||
+		warns[0]["comparedTo"] != "dc1" || warns[0]["serverUUIDs"] != lossUUIDOld || warns[0]["detectedBy"] != "OldPrimaryRecovery" ||
 		!strings.Contains(warns[0]["remedy"].(string), "kubectl bloodraven reclone lion dc2") {
 		t.Fatalf("log records = %v, want one WARN naming the site, the set, the primary and the remedy", warns)
 	}

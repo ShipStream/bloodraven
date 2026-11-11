@@ -964,8 +964,9 @@ type SiteStatus struct {
 	RecoveryState SiteRecoveryState `json:"recoveryState,omitempty"`
 
 	// LostGtid is the GTID set of transactions this site issued under a
-	// server_uuid it has had, that the primary holds and the site no
-	// longer does (its volume came back older, or a crash lost them).
+	// server_uuid it has had, that another site holds (the primary, or a
+	// peer when no site was writable) and the site no longer does (its
+	// volume came back older, or a crash lost them).
 	// Replication cannot bring them back: the site's receiver drops
 	// events that carry its own server_id. Populated while the loss
 	// stands, with RecoveryState RecloneRequired, or RecoveryBlocked when

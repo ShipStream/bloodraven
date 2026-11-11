@@ -274,3 +274,57 @@ func (tm *TopologyManager) FailoverRecordForSim() (FailoverRecord, bool) {
 func PlannedFailoverOwnsSitesForSim(fg *v1alpha1.MysqlFailoverGroup) bool {
 	return plannedFailoverOwnsSites(fg)
 }
+
+// SetRecloneRunnerForSim replaces the clone of a reclone (the bootstrap
+// goroutine: CLONE INSTANCE, the wait for the restart, the replication
+// setup) with run, which applies a clone's effect to the simulation's
+// model and reports whether it could (the donor and the recipient are up
+// and can reach each other). checkReclone's own decisions stay the
+// production ones: the request, the donor confirmation, the claims and
+// the pre-reclone archive-tail wait. After a clone the recipient has no
+// replication channel; old-primary recovery configures it on a later poll,
+// as it would after an operator restart between a clone and its
+// replication setup. Call before the first Poll.
+func (tm *TopologyManager) SetRecloneRunnerForSim(run func(donor, recipient string) bool) {
+	tm.recloneForSim = run
+}
+
+// finishRecloneForSim runs the simulated clone of recipient from donor and
+// settles the request as the bootstrap goroutine does after a clone that
+// completed.
+func (tm *TopologyManager) finishRecloneForSim(donor string, recipient *siteTracker) bool {
+	if !tm.recloneForSim(donor, recipient.name) {
+		return false
+	}
+	tm.mu.Lock()
+	if tm.reclonePendingSite == recipient.name {
+		tm.reclonePendingSite, tm.reclonePendingOwner = "", ""
+	}
+	recipient.sourceHost = ""
+	recipient.sourceConvergenceState = ""
+	recipient.sourceConvergenceReason = ""
+	recipient.servingHealthy = false
+	tm.mu.Unlock()
+	tm.clearRecloneArchiveTail()
+	tm.clearOwnLossAfterClone(recipient.name)
+	return true
+}
+
+// OwnTransactionsLostForSim reports the set a site is recorded to lack of
+// the transactions it issued itself ("" when it has no report).
+func (tm *TopologyManager) OwnTransactionsLostForSim(site string) string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if rec := tm.ownLoss[site]; rec != nil {
+		return rec.lostGtid
+	}
+	return ""
+}
+
+// SetOwnLossWitnessGraceForSim sets how long a promotion decision waits
+// for the non-candidate sites' GTID sets after its candidates answered. A
+// simulation, whose reads return at once, passes a long grace so that a
+// loaded machine cannot make a read miss it and change a trial.
+func (tm *TopologyManager) SetOwnLossWitnessGraceForSim(d time.Duration) {
+	tm.ownLossWitnessGrace = d
+}

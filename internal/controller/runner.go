@@ -2625,13 +2625,13 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// repaired: the site was made the primary as it is.
 		switch prev := oldLost[s.Name]; {
 		case s.LostGtid != "" && s.LostGtid != prev:
-			what := "The operator does not replicate or promote it and reclones it"
+			what := fmt.Sprintf("The operator does not replicate or promote it and reclones it (by hand: kubectl bloodraven reclone %s %s --cold)", fg.Name, s.Name)
 			if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
-				what = "It also holds transactions the primary lacks, so it is not recloned automatically: decide about those, then reclone it"
+				what = fmt.Sprintf("It also holds transactions the primary lacks, so it is not recloned automatically: decide about those, then reclone it (kubectl bloodraven reclone %s %s)", fg.Name, s.Name)
 			}
 			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLost,
-				"%s lacks %d transactions it issued itself that the primary%s holds (%s); replication cannot bring them back and a promotion would issue their GTIDs again. %s (kubectl bloodraven reclone %s %s)",
-				s.Name, s.LostTxnCount, comparedToSuffix(s.LostComparedTo), truncateGtidHint(s.LostGtid), what, fg.Name, s.Name)
+				"%s lacks %d transactions it issued itself that %s holds (%s); replication cannot bring them back and a promotion would issue their GTIDs again. %s",
+				s.Name, s.LostTxnCount, lostHeldBy(s.LostComparedTo), truncateGtidHint(s.LostGtid), what)
 		case s.LostGtid == "" && prev != "" && s.State == state.StateWritable:
 			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLostSitePromoted,
 				"%s is the primary although it lacks transactions it issued itself (%s) and was not recloned; unless its server_uuid was changed first it issues their GTIDs again",
@@ -2678,7 +2678,10 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		// marker cleared because the site became WRITABLE (promotion or
 		// re-assert) is not a recovery completion — the site did not rejoin
 		// as a replica — so no Normal event is emitted for it.
-		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable {
+		// Nor is a rejoin that turned into a reclone: the site lacks
+		// transactions it issued, and OwnTransactionsLost says so above.
+		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable &&
+			s.RecoveryState != v1alpha1.RecoveryStateRecloneRequired {
 			if oldState[s.Name] == v1alpha1.RecoveryStateBlocked && oldDetectedBy[s.Name] == divergenceDetectedByAudit {
 				r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventDivergenceResolved,
 					"Replica %s no longer holds transactions the primary lacks", s.Name)
@@ -3083,17 +3086,19 @@ func ownLossMessage(snap TopologySnapshot, group string) string {
 		if s.LostGtid == "" {
 			continue
 		}
-		part := fmt.Sprintf("%s lacks %d transactions it issued itself that the primary%s holds (%s)",
-			s.Name, s.LostTxnCount, comparedToSuffix(s.LostComparedTo), truncateGtidHint(s.LostGtid))
+		part := fmt.Sprintf("%s lacks %d transactions it issued itself that %s holds (%s)",
+			s.Name, s.LostTxnCount, lostHeldBy(s.LostComparedTo), truncateGtidHint(s.LostGtid))
+		byHand := fmt.Sprintf(" (by hand: kubectl bloodraven reclone %s %s --cold)", group, s.Name)
 		switch {
 		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
 			part += "; it also holds transactions the primary lacks, so it is not recloned automatically"
+			byHand = fmt.Sprintf(" (decide about those, then: kubectl bloodraven reclone %s %s)", group, s.Name)
 		case s.RecloneWaiting != "":
 			part += "; automatic reclone waiting: " + s.RecloneWaiting
 		default:
 			part += "; the operator is recloning it"
 		}
-		part += fmt.Sprintf(" (by hand: kubectl bloodraven reclone %s %s)", group, s.Name)
+		part += byHand
 		parts = append(parts, part)
 	}
 	if len(parts) == 0 {
@@ -3101,6 +3106,15 @@ func ownLossMessage(snap TopologySnapshot, group string) string {
 	}
 	return strings.Join(parts, "; ") +
 		". Replication cannot bring these transactions back (the site's receiver drops events with its own server_id), so the site is not replicated and not promoted until it is recloned."
+}
+
+// lostHeldBy names the site a lost set was computed against: the primary,
+// or, when no site was writable, the peer that holds the transactions.
+func lostHeldBy(comparedTo string) string {
+	if comparedTo == "" {
+		return "another site"
+	}
+	return comparedTo
 }
 
 func divergentPromotionMessage(note DivergentPromotion) string {

@@ -154,9 +154,9 @@ type SiteSnapshot struct {
 	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
 	ClassificationOverdue bool
 
-	// Per-site old-primary recovery state ("", RecoveryInProgress, or
-	// RecoveryBlocked) with the divergence report when blocked. Multiple
-	// sites can carry recovery state at once.
+	// Per-site old-primary recovery state ("", RecoveryInProgress,
+	// RecoveryBlocked, or RecloneRequired) with the divergence report when
+	// blocked. Multiple sites can carry recovery state at once.
 	RecoveryState     v1alpha1.SiteRecoveryState
 	DivergentGtid     string
 	DivergentTxnCount int64
@@ -249,7 +249,7 @@ type TopologySnapshot struct {
 	// Sites[].RecoveryState/DivergentGtid/DivergentTxnCount — consult those
 	// when more than one site can be in recovery at once.
 	RecoverySite         string
-	RecoveryState        v1alpha1.SiteRecoveryState // absent, RecoveryInProgress, or RecoveryBlocked
+	RecoveryState        v1alpha1.SiteRecoveryState // absent, RecoveryInProgress, RecoveryBlocked, or RecloneRequired
 	DivergentGtid        string
 	DivergentTxnCount    int64
 	DivergenceDetectedBy v1alpha1.DivergenceDetector
@@ -881,6 +881,12 @@ type TopologyManager struct {
 	// siteIdentity holds the server_uuids each site has run under. It has
 	// its own lock.
 	siteIdentity siteIdentityTracker
+	// recloneForSim, when set, stands in for the clone of a reclone
+	// (topology_sim.go). Never set in production.
+	recloneForSim func(donor, recipient string) bool
+	// ownLossWitnessGrace overrides the constant of the same name when
+	// positive (tests and simulations, whose reads never hang).
+	ownLossWitnessGrace time.Duration
 	// recloneTail is the pre-reclone wait in progress and
 	// recloneTailSettled the site whose wait ended while its clone has not
 	// started yet. Only Poll's goroutine (checkReclone) uses them. The
@@ -3176,6 +3182,9 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 		name string
 		gtid mysql.GTIDSet
 		ok   bool
+		// uuid is the candidate's server_uuid, "" when its checker cannot
+		// report it.
+		uuid string
 	}
 
 	infos := make([]candidateInfo, len(candidates))
@@ -3194,21 +3203,31 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 			defer wg.Done()
 			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			raw, err := checker.GetGtidExecuted(queryCtx)
+			snap, identityKnown, err := readSiteGTIDSnapshot(queryCtx, checker)
 			if err != nil {
 				tm.logger.Warn("failover picker: failed to query GTID", "site", infos[i].name, "error", err)
 				return
 			}
-			parsed, err := mysql.ParseGTIDSet(raw)
+			parsed, err := mysql.ParseGTIDSet(snap.GtidExecuted)
 			if err != nil {
 				tm.logger.Warn("failover picker: failed to parse GTID", "site", infos[i].name, "error", err)
 				return
 			}
 			infos[i].gtid = parsed
 			infos[i].ok = true
+			if identityKnown {
+				infos[i].uuid = snap.ServerUUID
+			}
 		}()
 	}
+	// The other sites are read too (a disaster-recovery site, a reader,
+	// the failed primary if it answers again): one of them may hold
+	// transactions a candidate issued and no longer has
+	// (refuseOwnLossCandidate). They never hold the decision for longer
+	// than ownLossWitnessGrace.
+	collectWitnesses := tm.readOwnLossWitnesses(ctx, candidates)
 	wg.Wait()
+	witnesses := collectWitnesses()
 
 	tm.mu.RLock()
 	lastPromotionRaw := tm.promotionGtidExecuted
@@ -3224,6 +3243,33 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 				"promotionGtid", lastPromotionRaw, "reason", reason)
 			infos[i].ok = false
 		}
+	}
+	// A candidate that lacks transactions it issued itself, by the
+	// evidence of any site that answers, is no candidate: its next write
+	// would be issued under a GTID that already names another
+	// transaction.
+	sets := make(map[string]mysql.GTIDSet, len(infos)+len(witnesses))
+	for name, set := range witnesses {
+		sets[name] = set
+	}
+	for i := range infos {
+		if infos[i].ok {
+			sets[infos[i].name] = infos[i].gtid
+		}
+	}
+	var lostCandidates []string
+	for i := range infos {
+		if !infos[i].ok || infos[i].uuid == "" {
+			continue
+		}
+		if tm.refuseOwnLossCandidate(infos[i].name, infos[i].uuid, infos[i].gtid, sets) {
+			infos[i].ok = false
+			lostCandidates = append(lostCandidates, infos[i].name)
+		}
+	}
+	if len(lostCandidates) > 0 {
+		tm.refuseOwnLossPromotion(lostCandidates)
+		tm.RequestStatusRefresh()
 	}
 
 	// A candidate with a recorded divergence block holds transactions the
@@ -4784,6 +4830,11 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 			tm.bootstrapFailureResolved = false
 			tm.bootstrapErr = err
 			tm.bootstrapFailedTarget = recipient
+			if rec := tm.ownLoss[recipient]; rec != nil {
+				// The operator asks again for a site that lacks its own
+				// transactions, but not at poll frequency.
+				rec.recloneRetryAfter = tm.clock.Now().Add(ownLossRecloneRetryDelay)
+			}
 			tm.logger.Error("bootstrap failed", "source", source, "error", err)
 		} else {
 			tm.bootstrapPhase = BootstrapPhaseDone
@@ -5370,12 +5421,13 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 
 	gtidCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	targetGtidStr, err := targetSite.mysql.GetGtidExecuted(gtidCtx)
+	targetSnap, targetIdentityKnown, err := readSiteGTIDSnapshot(gtidCtx, targetSite.mysql)
 	cancel()
 	if err != nil {
 		tm.logger.Warn("primary re-assert: failed to read target GTID_EXECUTED", "site", target, "error", err)
 		return false
 	}
+	targetGtidStr := targetSnap.GtidExecuted
 	targetGtid, err := mysql.ParseGTIDSet(targetGtidStr)
 	if err != nil {
 		tm.logger.Warn("primary re-assert: failed to parse target GTID_EXECUTED", "site", target, "error", err)
@@ -5457,6 +5509,25 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 			}
 			tm.logger.Warn("primary re-assert refused: peer has transactions the target lacks — divergence needs human review",
 				"site", s.name, "peerGtid", peerGtidStr, "targetGtid", targetGtidStr)
+			if targetIdentityKnown {
+				// When what the target lacks are transactions it issued
+				// itself, the target came back without part of its own
+				// history (an older volume): say so, and keep it out of
+				// promotion and replication until it is recloned from
+				// whichever site an administrator makes the primary.
+				uuids := tm.noteSiteServerUUID(ctx, target, targetSnap.ServerUUID)
+				if lost := ownLostTransactions(peerGtid, targetGtid, uuids); !lost.IsEmpty() {
+					tm.mu.Lock()
+					changed, lossLog := tm.settleOwnLossLocked(target, lost, s.name, divergenceDetectedByRecovery, uuids)
+					tm.mu.Unlock()
+					if lossLog != nil {
+						lossLog()
+					}
+					if changed {
+						tm.RequestStatusRefresh()
+					}
+				}
+			}
 			return false
 		}
 	}
@@ -5802,7 +5873,10 @@ func (tm *TopologyManager) sharesHistory(ctx context.Context, gtid mysql.GTIDSet
 }
 
 // initiateRecovery fences the old primary, compares GTID sets, and either
-// auto-recovers (no divergence) or blocks with metadata (divergence).
+// auto-recovers (no divergence), blocks with metadata (divergence), or,
+// for a site that lacks transactions it issued itself, records that and
+// leaves the site without replication for its reclone
+// (own_transactions_lost.go).
 //
 // Returns (changed, acted): acted=false means the site was merely SKIPPED
 // (empty datadir, pre-probe failure) without spending the one-recovery-
@@ -6251,6 +6325,12 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 		return false
 	}
 
+	if tm.recloneForSim != nil {
+		// A simulation models the clone's effect itself
+		// (SetRecloneRunnerForSim); everything up to here is the
+		// production path.
+		return tm.finishRecloneForSim(donor.name, recipient)
+	}
 	if !tm.startBootstrapByName(ctx, donor.name, recipient.name, "reclone") {
 		return false
 	}

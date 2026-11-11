@@ -60,8 +60,9 @@ const (
 	recloneOwnerOwnLoss = "operator/own-transactions-lost"
 
 	// ownLossRecloneRetryDelay is how long the operator waits before it
-	// requests another reclone of a site whose last automatic reclone
-	// did not complete (it failed, or its request was dropped).
+	// requests another reclone of a site whose last clone failed, so a
+	// clone that keeps failing does not load the primary at poll
+	// frequency.
 	ownLossRecloneRetryDelay = 5 * time.Minute
 
 	// serverUUIDHistoryLimit bounds the recorded server_uuids per site.
@@ -73,6 +74,11 @@ const (
 
 	// siteIdentityWriteTimeout bounds one load or write of the history.
 	siteIdentityWriteTimeout = 5 * time.Second
+
+	// ownLossWitnessGrace is the most a promotion decision waits, after
+	// its candidates have answered, for the other sites' GTID sets
+	// (readOwnLossWitnesses).
+	ownLossWitnessGrace = 250 * time.Millisecond
 )
 
 // errOwnTransactionsLost is returned for a replication start refused
@@ -90,7 +96,9 @@ type ownLossRecord struct {
 	// a record restored from status and not compared again yet.
 	detectedBy v1alpha1.DivergenceDetector
 	// recloneRetryAfter is when the operator may request the next
-	// automatic reclone; zero before the first request.
+	// automatic reclone: ownLossRecloneRetryDelay after a clone of the
+	// site failed, zero otherwise. A request that was displaced, withdrawn
+	// or never started its clone is made again at once.
 	recloneRetryAfter time.Time
 	// recloneWaiting says why no automatic reclone runs or is requested
 	// ("" while one is).
@@ -301,10 +309,11 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 			return false, nil
 		}
 		delete(tm.ownLoss, site)
+		tm.forgetOwnLossRefusalLocked(site)
 		metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
 		return true, func() {
 			tm.logger.Info("own transactions lost cleared: the site holds every transaction it issued",
-				"site", site, "primary", comparedTo)
+				"site", site, "comparedTo", comparedTo)
 		}
 	}
 	set, count := lost.String(), lost.TransactionCount()
@@ -333,15 +342,23 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 		// not announced again.
 		return true, nil
 	}
+	// A site without a divergent GTID is recloned by hand with --cold; one
+	// that also holds transactions the primary lacks is confirmed with
+	// the prefix of that set, which the plugin reads from status.
+	recloneCmd := fmt.Sprintf("kubectl bloodraven reclone %s %s --cold", tm.cfg.Name, site)
+	remedy := "the site is not rejoined by replication and not promoted; the operator reclones it, or run: " + recloneCmd
+	if r := tm.recovery[site]; r != nil && r.state == v1alpha1.RecoveryStateBlocked {
+		remedy = fmt.Sprintf("the site also holds transactions the primary lacks, so it is not recloned automatically; decide about those, then run: kubectl bloodraven reclone %s %s", tm.cfg.Name, site)
+	}
 	return true, func() {
 		tm.logger.Warn("own transactions lost",
 			"site", site,
 			"lostTransactions", count,
 			"lostGtid", set,
-			"primary", comparedTo,
+			"comparedTo", comparedTo,
 			"serverUUIDs", strings.Join(uuids, ","),
 			"detectedBy", detectedBy,
-			"remedy", fmt.Sprintf("the site is not rejoined by replication and not promoted; the operator reclones it, or run: kubectl bloodraven reclone %s %s", tm.cfg.Name, site))
+			"remedy", remedy)
 	}
 }
 
@@ -368,6 +385,7 @@ func (tm *TopologyManager) clearOwnLossAfterClone(site string) {
 	tm.mu.Lock()
 	rec := tm.ownLoss[site]
 	delete(tm.ownLoss, site)
+	tm.forgetOwnLossRefusalLocked(site)
 	tm.mu.Unlock()
 	if rec == nil {
 		return
@@ -393,6 +411,15 @@ func (tm *TopologyManager) ownLossCandidates() []string {
 	return out
 }
 
+// forgetOwnLossRefusalLocked drops site from the recorded promotion
+// refusals once its report is gone, so a later refusal of the same site
+// is announced again. Caller holds tm.mu.
+func (tm *TopologyManager) forgetOwnLossRefusalLocked(site string) {
+	if i := slices.Index(tm.ownLossPromotionRefused, site); i >= 0 {
+		tm.ownLossPromotionRefused = slices.Delete(slices.Clone(tm.ownLossPromotionRefused), i, i+1)
+	}
+}
+
 // recordOwnLossPromotionRefused records the candidates the last promotion
 // decision refused for lost own transactions (nil when it refused none),
 // for the runner's Warning event.
@@ -404,8 +431,15 @@ func (tm *TopologyManager) recordOwnLossPromotionRefused(sites []string) {
 
 // refuseOwnLossPromotion logs and records the refusal to promote sites.
 func (tm *TopologyManager) refuseOwnLossPromotion(sites []string) {
-	tm.logger.Warn("promotion refused: candidate lacks transactions it issued itself and would issue their GTIDs again",
-		"sites", sites)
+	tm.mu.RLock()
+	same := stringSlicesEqual(tm.ownLossPromotionRefused, sites)
+	tm.mu.RUnlock()
+	if !same {
+		// The refusal stands for as long as the report does and is
+		// re-decided on every poll: log it when it changes.
+		tm.logger.Warn("promotion refused: candidate lacks transactions it issued itself and would issue their GTIDs again",
+			"sites", sites)
+	}
 	tm.recordOwnLossPromotionRefused(sites)
 }
 
@@ -448,6 +482,7 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 			// repair. The runner records the promotion from the status
 			// change.
 			delete(tm.ownLoss, name)
+			tm.forgetOwnLossRefusalLocked(name)
 			metrics.OwnTransactionsLost.WithLabelValues(name).Set(0)
 			lost, count := rec.lostGtid, rec.lostCount
 			logs = append(logs, func() {
@@ -482,7 +517,6 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 			setWaiting(rec, fmt.Sprintf("the last automatic reclone did not complete; the next one is requested at %s", rec.recloneRetryAfter.UTC().Format(time.RFC3339)))
 		default:
 			tm.reclonePendingSite, tm.reclonePendingOwner = name, recloneOwnerOwnLoss
-			rec.recloneRetryAfter = now.Add(ownLossRecloneRetryDelay)
 			setWaiting(rec, "")
 			requested = true
 			lost, count, primary := rec.lostGtid, rec.lostCount, active
@@ -502,4 +536,149 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 	if changed {
 		tm.RequestStatusRefresh()
 	}
+}
+
+// knownSiteServerUUIDs is noteSiteServerUUID without access to the store,
+// for the promotion path, which must not wait on the API server: the uuid
+// is remembered and stored by the next call that may.
+func (tm *TopologyManager) knownSiteServerUUIDs(site, serverUUID string) []string {
+	serverUUID = normalizeServerUUID(serverUUID)
+	t := &tm.siteIdentity
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.uuids == nil {
+		t.uuids = map[string][]string{}
+	}
+	if t.unsaved == nil {
+		t.unsaved = map[string][]string{}
+	}
+	if serverUUID != "" && !slices.Contains(t.uuids[site], serverUUID) {
+		t.uuids[site] = append(t.uuids[site], serverUUID)
+		t.unsaved[site] = append(t.unsaved[site], serverUUID)
+	}
+	return append([]string(nil), t.uuids[site]...)
+}
+
+// readOwnLossWitnesses starts a read of the executed GTID set of every
+// site that is not a promotion candidate, whatever the last poll saw of
+// it, and returns a function that hands over the sets that have arrived.
+//
+// With the primary gone there is no primary to compare a candidate with,
+// but any site that answers is a witness: whatever it holds under a
+// candidate's server_uuid the candidate issued. That includes the failed
+// primary itself when it answers again in the poll that replaces it.
+//
+// A witness never decides how long the promotion takes: the returned
+// function waits for the reads still outstanding for ownLossWitnessGrace
+// at most, after the candidates' own reads have ended. A site that
+// answers does so in milliseconds; a blackholed one costs that grace once
+// and is then not a witness.
+func (tm *TopologyManager) readOwnLossWitnesses(ctx context.Context, candidates []string) func() map[string]mysql.GTIDSet {
+	out := make(map[string]mysql.GTIDSet)
+	var mu sync.Mutex
+	type witness struct {
+		name    string
+		checker mysql.Checker
+	}
+	var todo []witness
+	for i := range tm.sites {
+		if site := &tm.sites[i]; !slices.Contains(candidates, site.name) {
+			todo = append(todo, witness{site.name, site.mysql})
+		}
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, w := range todo {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			raw, err := w.checker.GetGtidExecuted(queryCtx)
+			if err != nil {
+				// No witness: the candidate is judged on the sites that
+				// answer.
+				return
+			}
+			set, err := mysql.ParseGTIDSet(raw)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			out[w.name] = set
+			mu.Unlock()
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	grace := tm.ownLossWitnessGrace
+	if grace <= 0 {
+		grace = ownLossWitnessGrace
+	}
+	return func() map[string]mysql.GTIDSet {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		got := make(map[string]mysql.GTIDSet, len(out))
+		for name, set := range out {
+			got[name] = set
+		}
+		return got
+	}
+}
+
+// refuseOwnLossCandidate compares a promotion candidate with every other
+// site's set read for this decision. It records the candidate's report
+// and returns true when one of them holds transactions the candidate
+// issued and lacks.
+func (tm *TopologyManager) refuseOwnLossCandidate(name, serverUUID string, set mysql.GTIDSet, sets map[string]mysql.GTIDSet) bool {
+	uuids := tm.knownSiteServerUUIDs(name, serverUUID)
+	peers := make([]string, 0, len(sets))
+	for peer := range sets {
+		if peer != name {
+			peers = append(peers, peer)
+		}
+	}
+	slices.Sort(peers)
+	for _, peer := range peers {
+		lost := ownLostTransactions(sets[peer], set, uuids)
+		if lost.IsEmpty() {
+			continue
+		}
+		tm.mu.Lock()
+		_, lossLog := tm.settleOwnLossLocked(name, lost, peer, divergenceDetectedByRecovery, uuids)
+		tm.mu.Unlock()
+		if lossLog != nil {
+			lossLog()
+		}
+		tm.logger.Error("failover picker: refusing candidate that lacks transactions it issued itself",
+			"site", name, "lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()), "comparedTo", peer)
+		return true
+	}
+	return false
+}
+
+// gtidSetHolds reports whether the GTID set raw (as a server reports it)
+// contains want. A set that does not parse proves nothing.
+func gtidSetHolds(raw string, want mysql.GTIDSet) bool {
+	set, err := mysql.ParseGTIDSet(raw)
+	return err == nil && set.Contains(want)
+}
+
+// lacksOwnTransactions reports whether site, running under serverUUID with
+// the executed set raw, lacks transactions it issued itself that holder
+// has. A set that does not parse proves nothing.
+func (tm *TopologyManager) lacksOwnTransactions(site, serverUUID, raw string, holder mysql.GTIDSet) bool {
+	set, err := mysql.ParseGTIDSet(raw)
+	if err != nil || serverUUID == "" {
+		return false
+	}
+	return !ownLostTransactions(holder, set, tm.knownSiteServerUUIDs(site, serverUUID)).IsEmpty()
 }
