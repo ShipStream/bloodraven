@@ -668,11 +668,13 @@ type propOracle struct {
 	fetched map[pitrplan.RowRef]*pitrplan.FileIndex
 }
 
-// propCopy is one archived copy of a transaction.
+// propCopy is one archived copy of a transaction. own says that the file's
+// own server originated it (its origin server_id is the file's writer).
 type propCopy struct {
 	row pitrplan.RowRef
 	g   pitrplan.GTID
 	oct int64
+	own bool
 }
 
 type propResult struct {
@@ -706,7 +708,7 @@ func newPropOracle(t *testing.T, p *propTrial, delta time.Duration) *propOracle 
 			t.Fatalf("read %s/%s: %v", ref.Site, ref.Name, err)
 		}
 		for i := range idx.Txns {
-			o.copies = append(o.copies, propCopy{ref, idx.GTID(i), idx.Txns[i].OCT})
+			o.copies = append(o.copies, propCopy{ref, idx.GTID(i), idx.Txns[i].OCT, idx.Txns[i].Srv == idx.WriterServerID})
 		}
 	}
 	o.fetched = map[pitrplan.RowRef]*pitrplan.FileIndex{}
@@ -1122,6 +1124,59 @@ func (o *propOracle) modelOwnLost(X, lineage pitrplan.Set) pitrplan.Set {
 	return lost
 }
 
+// lossReport is what a certified latest plan must report as lost
+// (coverage.json's lost list), computed from every archived copy, read or
+// not: the excluded transactions of lineage that a writable server provably
+// lacked more than δ after they were committed, with a copy on another site.
+// A writable server's state is known from a promotion record (its
+// gtidExecuted, at observedAt) and from a file with a replayed transaction
+// its own server originated (its Previous_gtids and transactions, at the
+// newest such commit). It compares copies, a GTID with its commit time, so
+// it also holds for a GTID that was issued twice. The plan's report must
+// not depend on which files the replay needed: a file holding only excluded
+// transactions is not downloaded, and its lost transactions are reported
+// all the same.
+func (o *propOracle) lossReport(X, lineage pitrplan.Set) pitrplan.Set {
+	d := o.delta.Microseconds()
+	type point struct {
+		site  string
+		have  pitrplan.Set
+		bound int64
+	}
+	var points []point
+	for _, sm := range o.arch.Sites {
+		for _, rec := range sm.Promotions {
+			if rec.Kind == pitrarchive.RecordPromotion {
+				points = append(points, point{sm.Site, pitrplan.MustParseSet(rec.GTIDExecuted), rec.ObservedAt.UnixMicro() - d})
+			}
+		}
+	}
+	replay := lineage.Subtract(o.B).Subtract(X)
+	newest := map[pitrplan.RowRef]int64{}
+	for _, c := range o.copies {
+		if c.own && c.row.State == pitrplan.RowActive && replay.Has(c.g) && c.oct > newest[c.row] {
+			newest[c.row] = c.oct
+		}
+	}
+	for ref, oct := range newest {
+		row := o.rows[ref]
+		points = append(points, point{ref.Site, row.Hints.Previous.Union(row.Hints.GTIDs), oct - d})
+	}
+	lost := pitrplan.Set{}
+	for _, c := range o.copies {
+		if c.row.State != pitrplan.RowActive || !X.Has(c.g) || !lineage.Has(c.g) {
+			continue
+		}
+		for _, pt := range points {
+			if pt.site != c.row.Site && c.oct < pt.bound && !pt.have.Has(c.g) {
+				lost = lost.Union(pitrplan.SetOf(c.g))
+				break
+			}
+		}
+	}
+	return lost
+}
+
 // run plans every target (and latest mode) with X = ∅ and, when the loss
 // is excludable, X = the lost transactions, checking each answer against
 // the model.
@@ -1242,6 +1297,11 @@ func (o *propOracle) checkCrashed(what string, mode pitrplan.Mode, T time.Time, 
 		histories = p.model.heldHistories(plan.Lineage)
 		if len(histories) == 0 || plan.Lineage.Subtract(X).Overlaps(p.dead) {
 			t.Fatalf("%s: latest Λ %s is not a server state, or holds lost %s", what, plan.Lineage, p.dead)
+		}
+	}
+	if mode == pitrplan.ModeLatest {
+		if want := o.lossReport(X, plan.Lineage); !plan.Lost.Equal(want) {
+			t.Fatalf("%s: reported loss evidence %s; every archived copy gives %s", what, plan.Lost, want)
 		}
 	}
 	applied := o.checkSegments(what, X, plan)
@@ -1388,6 +1448,9 @@ func (o *propOracle) checkLatest(what string, X pitrplan.Set, plan *pitrplan.Pla
 	all := o.modelLost(pitrplan.Set{}).Intersect(plan.Lineage).Union(o.modelOwnLost(X, plan.Lineage))
 	if !plan.Lost.Equal(all) || !p.dead.Contains(plan.Lost) || !X.Contains(plan.Lost) {
 		t.Fatalf("%s: reported loss evidence %s; the model's is %s, the lost transactions %s", what, plan.Lost, all, p.dead)
+	}
+	if want := o.lossReport(X, plan.Lineage); !plan.Lost.Equal(want) {
+		t.Fatalf("%s: reported loss evidence %s; every archived copy gives %s", what, plan.Lost, want)
 	}
 	o.checkSegments(what, X, plan)
 }

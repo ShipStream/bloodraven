@@ -416,11 +416,12 @@ func TestLatestLostReadsAFileItsHintsCannotDate(t *testing.T) {
 	}
 }
 
-// The report is completed from the rows a plan may read: a marked site's
-// row is never one of them. c, marked, alone archived C:1, which b's record
-// lacks; with C:1 excluded the plan stands, and its report does not rest
-// on c's manifest.
-func TestLatestLostIgnoresUnreadRowsOfAMarkedSite(t *testing.T) {
+// A copy on a marked site is loss evidence like any other, read or not (a
+// marked site's file that a plan happens to download counts too). c alone
+// archived C:1, which b's record lacks; with C:1 excluded the plan stands
+// and reports it, with c marked as without, and c's row is dated from its
+// manifest in both.
+func TestLatestLostCountsUnreadRowsOfAMarkedSite(t *testing.T) {
 	s := newSynth(t)
 	s.promote("a", "A", 101, "", -100)
 	s.file("a", "a1", 101, "", "", run("A", 1, 95, 1, 101))
@@ -434,7 +435,7 @@ func TestLatestLostIgnoresUnreadRowsOfAMarkedSite(t *testing.T) {
 	}
 	s.site("c").Marked = &pitrarchive.HistoryIntegrity{Violation: pitrarchive.ViolationBinlogFormat, Detail: "STATEMENT"}
 	p, err = s.run(ModeLatest, 0, "C:1", false)
-	if err != nil || !p.Lost.IsEmpty() || s.fetches["c/c1"] != 0 {
+	if err != nil || !p.Lost.Equal(MustParseSet("C:1")) || s.fetches["c/c1"] != 0 {
 		t.Fatalf("c marked: %+v %v, fetches %v", p, err, s.fetches)
 	}
 }

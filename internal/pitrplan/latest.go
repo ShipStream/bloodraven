@@ -361,7 +361,9 @@ func (p *planner) ownWrites(f *file) (GTID, int64, bool) {
 // lossEvidence's rule flags and whose copies are in rows the plan did not
 // download. Every active row of an unmarked site that may hold a member of
 // P = Λ ∖ (B ∪ X) is downloaded before the evidence pass, so a row left
-// unread holds, of Λ ∖ B, only excluded transactions: without this pass
+// unread holds, of Λ ∖ B, only excluded transactions (a marked site's rows
+// are not downloaded for P at all, and count here like any other copy, as
+// they do in the pass over the downloaded files): without this pass
 // coverage.json's lost list depended on where the files were cut (lost
 // A:2-5 in three files was reported as A:2,A:5).
 //
@@ -396,7 +398,7 @@ func (p *planner) lossEvidenceUnread(points []lossPoint, evidence Set) (Set, err
 		}
 		bound := pt.bound
 		for _, r := range p.rows {
-			if r.Site == pt.site || r.State != RowActive || p.isMarked(r.Site) || p.files[r] != nil || p.failed[r] != nil ||
+			if r.Site == pt.site || r.State != RowActive || p.files[r] != nil || p.failed[r] != nil ||
 				!r.Hints.Known || r.Hints.lo() >= bound || !r.Hints.GTIDs.Overlaps(want) {
 				continue
 			}
