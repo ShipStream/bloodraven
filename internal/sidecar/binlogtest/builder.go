@@ -36,6 +36,11 @@ type Txn struct {
 	// row images are these bytes, and an XID. The index pass digests such
 	// a transaction's row changes (pitrplan.EffectDigest).
 	Rows []byte
+	// Table, when set, is the table a row transaction changes instead of
+	// markers; WideColumn makes its column metadata that of a wider
+	// column, as a site whose table definition differs writes it.
+	Table      string
+	WideColumn bool
 }
 
 // File is one sealed binlog.
@@ -121,7 +126,14 @@ func (f File) Bytes() ([]byte, error) {
 		}
 		if t.Rows != nil {
 			event(2, ts, t.ServerID, queryBody("BEGIN"))
-			event(19, ts, t.ServerID, TableMapBody(rowsTableID, "orders", "markers", 15))
+			table, metadata := "markers", []byte{0, 0}
+			if t.Table != "" {
+				table = t.Table
+			}
+			if t.WideColumn {
+				metadata = []byte{0x90, 0x01}
+			}
+			event(19, ts, t.ServerID, TableMapBodyWithMetadata(rowsTableID, "orders", table, []byte{15}, metadata))
 			event(30, ts, t.ServerID, RowsBody(rowsTableID, true, 1, [][]byte{{0x01}}, t.Rows))
 			event(16, ts, t.ServerID, make([]byte, 8))
 			continue
@@ -150,16 +162,23 @@ const rowsTableID = 108
 
 // TableMapBody is a TABLE_MAP event's post-header and payload: the table
 // id, flags, the database and table names, and one type byte per column
-// (15 is VARCHAR, 245 JSON), with zeroed column metadata and null bitmap.
+// (15 is VARCHAR, 245 JSON), with zeroed column metadata (two bytes per
+// column) and null bitmap.
 func TableMapBody(id uint64, db, table string, types ...byte) []byte {
+	return TableMapBodyWithMetadata(id, db, table, types, make([]byte, 2*len(types)))
+}
+
+// TableMapBodyWithMetadata is TableMapBody with the column metadata block
+// given (at most 250 bytes: its length is written in one byte).
+func TableMapBodyWithMetadata(id uint64, db, table string, types, metadata []byte) []byte {
 	body := appendUint48(nil, id)
 	body = append(body, 1, 0) // flags
 	body = append(append(append(body, byte(len(db))), db...), 0)
 	body = append(append(append(body, byte(len(table))), table...), 0)
 	body = append(body, byte(len(types)))
 	body = append(body, types...)
-	body = append(body, byte(2*len(types)))                // metadata length
-	body = append(body, make([]byte, 2*len(types))...)     // metadata
+	body = append(body, byte(len(metadata)))
+	body = append(body, metadata...)
 	return append(body, make([]byte, (len(types)+7)/8)...) // null bitmap
 }
 

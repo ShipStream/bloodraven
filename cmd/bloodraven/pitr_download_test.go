@@ -602,33 +602,44 @@ func TestPlanAndStageRefusalWritesCoverage(t *testing.T) {
 }
 
 // Issue #268, through the real glue: site b holds replica copies of a's row
-// transactions. When b's copy of one GTID changes other rows (same commit
-// time, origin server and emptiness), pitr-download refuses and records the
-// refusal in coverage.json; faithful copies plan, and every segment names
-// its first transaction's offset (issue #271).
+// transactions. When b's copy of one GTID changes another table, or the same
+// table with other row bytes (same commit time, origin server and
+// emptiness), pitr-download refuses, says which, and records the refusal in
+// coverage.json. Faithful copies plan, with their rows in another order and
+// with another table layout on b too, and every segment names its first
+// transaction's offset (issue #271).
 func TestPlanAndStageComparesRowChanges(t *testing.T) {
-	rowTxns := func(from, to int64, differ int64) []binlogtest.Txn {
+	rowTxns := func(from, to int64, change func(*binlogtest.Txn)) []binlogtest.Txn {
 		txns := dlTxns(sidA, from, to, dlEpoch.Add(time.Duration(from)*time.Second), 101)
 		for i := range txns {
-			txns[i].Rows = []byte(fmt.Sprintf("\x00\x08row %04d", txns[i].GNO))
-			if txns[i].GNO == differ {
-				txns[i].Rows = []byte("\x00\x08repaired")
+			// Two rows.
+			txns[i].Rows = []byte(fmt.Sprintf("\x00\x08row %04d\x00\x03two", txns[i].GNO))
+			if txns[i].GNO == 20 && change != nil {
+				change(&txns[i])
 			}
 		}
 		return txns
 	}
 	for _, tc := range []struct {
 		name   string
-		differ int64
-	}{{name: "faithful copies"}, {name: "another row change under one GTID", differ: 20}} {
+		change func(*binlogtest.Txn)
+		differ string
+	}{
+		{name: "faithful copies"},
+		{name: "the rows in another order (a table without a primary key)", change: func(tx *binlogtest.Txn) { tx.Rows = []byte("\x00\x03two\x00\x08row 0020") }},
+		{name: "another table layout on one site", change: func(tx *binlogtest.Txn) { tx.WideColumn, tx.Rows = true, []byte("\x00\x08\x00row 0020\x00\x03\x00two") }},
+		{name: "another row value under one GTID", change: func(tx *binlogtest.Txn) { tx.Rows = []byte("\x00\x08repaired\x00\x03two") },
+			differ: "the same tables with different row data"},
+		{name: "another table under one GTID", change: func(tx *binlogtest.Txn) { tx.Table = "repairs" }, differ: "they change different tables"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &dlArchive{store: stampTestStore(t), dest: downloadDest(t), manifests: map[string]*sidecar.Manifest{}}
 			a.desc = putDescriptor(t, a.store, a.dest)
 			for _, s := range []string{"a", "b"} {
 				a.manifests[s] = &sidecar.Manifest{Version: 2, ArchiveID: a.desc.ArchiveID, Site: s}
 			}
-			a.put(t, "a", "mysql-bin.000001", 101, "", "", rowTxns(1, 30, 0))
-			a.put(t, "b", "mysql-bin.000001", 102, sidA+":1-10", "", rowTxns(11, 25, tc.differ))
+			a.put(t, "a", "mysql-bin.000001", 101, "", "", rowTxns(1, 30, nil))
+			a.put(t, "b", "mysql-bin.000001", 102, sidA+":1-10", "", rowTxns(11, 25, tc.change))
 			a.save(t)
 			out, metaDir := t.TempDir(), t.TempDir()
 			req := pitrDownloadRequest{
@@ -639,8 +650,8 @@ func TestPlanAndStageComparesRowChanges(t *testing.T) {
 			}
 			res, err := planAndStage(context.Background(), a.store, req, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			c := readCoverage(t, out)
-			if tc.differ != 0 {
-				want := sidA + ":20 differs between a/mysql-bin.000001 and b/mysql-bin.000001 (row changes differ: effect digest "
+			if tc.differ != "" {
+				want := sidA + ":20 differs between a/mysql-bin.000001 and b/mysql-bin.000001 (row changes differ: " + tc.differ + ", effect digest "
 				if tok, _ := pitrarchive.ParseToken(errString(err)); tok != pitrarchive.TokenArchiveNamespaceReuse || !strings.Contains(errString(err), want) {
 					t.Fatalf("planAndStage: %v, want PITRArchiveNamespaceReuse %q", err, want)
 				}
@@ -664,8 +675,8 @@ func TestPlanAndStageComparesRowChanges(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if idx.Txns[10].Effect.IsZero() || idx.Txns[10].Effect == idx.Txns[11].Effect {
-				t.Fatalf("row transactions have no distinct effect digests: %x, %x", idx.Txns[10].Effect, idx.Txns[11].Effect)
+			if idx.Txns[10].Effect.IsZero() || idx.Txns[10].Effect.Compare(idx.Txns[11].Effect) != pitrplan.EffectRowsDiffer {
+				t.Fatalf("row transactions have no distinct effect digests: %s, %s", idx.Txns[10].Effect, idx.Txns[11].Effect)
 			}
 			if pos := c.Segments[0].StartPosition; pos != idx.Txns[10].Pos || pos <= idx.Txns[0].Pos || staged[pos+4] != 33 {
 				t.Fatalf("startPosition %d, want A:11's GTID event at %d", pos, idx.Txns[10].Pos)

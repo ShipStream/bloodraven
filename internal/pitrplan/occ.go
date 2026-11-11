@@ -4,10 +4,12 @@ import (
 	"math"
 	"slices"
 	"sort"
+
+	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // The occurrence registry records, for every GTID among the downloaded
-// transactions, the copy later copies are compared with and how many
+// transactions, the copies later copies are compared with and how many
 // copies there are (ingest, plan.go), and the GTID's node in the order
 // check (identity.go).
 //
@@ -17,18 +19,50 @@ import (
 // would touch a random page for every transaction once it no longer fits
 // in memory. Each source has a sorted list of extents; an extent is an
 // array of records for consecutive GNOs.
+//
+// Kept copies. Commit time, origin server and emptiness are equalities, so
+// one kept copy stands for all that agreed with it. Row changes are not
+// (EffectDigest.Compare): a copy without a digest, or with another layout,
+// says nothing about a copy it is compared with, and two later copies may
+// still differ from each other. So a GTID keeps the first copy, replaced
+// by the first copy that has a digest, and then every copy whose digest no
+// kept copy can vouch for: one per distinct layout. A new copy is compared
+// with each of them. Any two downloaded copies that are comparable are
+// therefore compared, directly or through an equal kept copy, whatever the
+// order of the downloads. Nearly every GTID keeps one copy, in its record;
+// the further ones are a linked list in an array of their own (links, 12
+// bytes a node, two nodes for a GTID's second kept copy and one for each
+// after it), which is charged and spills like the records.
+
+// occCopy names one copy of a GTID.
+type occCopy struct {
+	// file is 1 + the index in planner.order of the file holding the copy.
+	file uint32
+	// i is the copy's transaction index in its file.
+	i uint32
+}
+
+// occLink is a node of a GTID's list of kept copies.
+type occLink struct {
+	copy occCopy
+	// next is 1 + the index in occTable.links of the next node, 0 at the
+	// end of the list.
+	next uint32
+}
 
 // occRec is the registry's record of one GTID.
 type occRec struct {
-	// file is 1 + the index in planner.order of the file holding the copy
-	// that later copies are compared with: the first copy, or the first
-	// with an effect digest. 0 means no downloaded file holds the GTID.
+	// file is 1 + the index in planner.order of the file holding the first
+	// kept copy. 0 means no downloaded file holds the GTID.
 	file uint32
-	// i is that copy's transaction index in its file.
+	// i is that copy's transaction index in its file or, when list is set,
+	// the index in occTable.links of the first node of the GTID's kept
+	// copies (whose first is that copy).
 	i uint32
 	// n counts the copies, saturating.
 	n uint16
-	_ uint16
+	// list is 1 when the GTID keeps more than one copy.
+	list uint16
 	// node is 1 + the GTID's node in the order check, or 0.
 	node int32
 }
@@ -69,6 +103,56 @@ type occSource struct {
 type occTable struct {
 	b   *Budget
 	src []occSource
+	// links holds the kept copies of the GTIDs that keep more than one.
+	links vec[occLink]
+}
+
+func newOccTable(b *Budget) occTable { return occTable{b: b, links: newVec[occLink](b)} }
+
+// kept appends the kept copies of rec to buf, in the order they were kept.
+func (t *occTable) kept(rec occRec, buf []occCopy) []occCopy {
+	if rec.list == 0 {
+		return append(buf, occCopy{file: rec.file, i: rec.i})
+	}
+	links := t.links.items()
+	for at := rec.i; ; {
+		l := links[at]
+		buf = append(buf, l.copy)
+		if l.next == 0 {
+			return buf
+		}
+		at = l.next - 1
+	}
+}
+
+// keep adds c to the end of rec's kept copies. rec is changed only when
+// the copy was stored; the caller puts it.
+func (t *occTable) keep(rec *occRec, c occCopy) error {
+	const what = "occurrence registry"
+	if t.links.n > math.MaxUint32-2 {
+		return refuse(pitrarchive.TokenPlanTooLarge, "more than %d copies of transactions differ in their table layouts between sites, the planner's limit; choose a backup closer to the target", uint32(math.MaxUint32-2))
+	}
+	head := rec.i
+	if rec.list == 0 {
+		// The record's own copy becomes the list's first node.
+		head = uint32(t.links.n) //nolint:gosec // checked above
+		if err := t.links.push(occLink{copy: occCopy{file: rec.file, i: rec.i}}, what); err != nil {
+			return err
+		}
+	}
+	tail := head
+	for next := t.links.items()[tail].next; next != 0; next = t.links.items()[tail].next {
+		tail = next - 1
+	}
+	at := uint32(t.links.n) //nolint:gosec // checked above
+	if err := t.links.push(occLink{copy: c}, what); err != nil {
+		return err
+	}
+	last := t.links.items()[tail]
+	last.next = at + 1
+	t.links.set(int(tail), last)
+	rec.i, rec.list = head, 1
+	return nil
 }
 
 // grow makes room for source sid.

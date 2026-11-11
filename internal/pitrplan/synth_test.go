@@ -27,18 +27,27 @@ type stx struct {
 	srv   uint32
 	empty bool
 	xa    bool
-	// fx, when non-zero, is the transaction's effect digest (every byte
-	// fx); zero is "not comparable".
-	fx byte
+	// fx, when non-zero, is the transaction's effect digest: its tables
+	// part is fx in every byte, and so are its layout and rows parts unless
+	// lay or bag say otherwise. Zero is "not comparable".
+	fx, lay, bag byte
 }
 
-// effect is the synthetic effect digest stx.fx stands for.
-func effect(fx byte) EffectDigest {
-	var d EffectDigest
-	for i := range d {
-		d[i] = fx
+// effect is the synthetic effect digest whose parts all stand for fx.
+func effect(fx byte) EffectDigest { return effectParts(fx, 0, 0) }
+
+// effectParts is the synthetic effect digest of stx{fx, lay, bag}.
+func effectParts(fx, lay, bag byte) EffectDigest {
+	if fx == 0 {
+		return EffectDigest{}
 	}
-	return d
+	if lay == 0 {
+		lay = fx
+	}
+	if bag == 0 {
+		bag = fx
+	}
+	return NewEffectDigest(uint32(fx)*0x01010101, uint64(lay)*0x0101010101010101, uint32(bag)*0x01010101)
 }
 
 // run builds sequential txns sid:from-to with commit times start, start+1s, …
@@ -112,7 +121,7 @@ func (s *synth) file(site, name string, fsrv uint32, prev, base string, groups .
 			if t.xa {
 				b.Mark(TxnXA)
 			}
-			b.SetEffect(effect(t.fx))
+			b.SetEffect(effectParts(t.fx, t.lay, t.bag))
 		}
 	}
 	idx, err := b.Finish(fmt.Sprintf("%s-%s", site, name), synthPos(n))

@@ -91,9 +91,9 @@ const (
 //     emptiness (binlogDataEvent, the rule the emptyGtids hint uses), XA,
 //     the file offset of the GTID event (a segment's --start-position), and
 //     the effect digest of the transaction's row changes
-//     (binlog_txindex_effect.go), for which the table maps' names and
-//     column types and the rows events' post-headers and bitmaps are framed
-//     with bounds checks.
+//     (binlog_txindex_effect.go), for which the table maps' names,
+//     column types and column metadata and the rows events' post-headers
+//     and bitmaps are framed with bounds checks.
 //     Every transaction must end with its terminator (XID, COMMIT,
 //     ROLLBACK, XA PREPARE, or a statement outside BEGIN) before the next
 //     GTID or the end of the file, and no event other than rotation,

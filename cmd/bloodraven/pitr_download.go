@@ -520,14 +520,17 @@ type cachedRow struct {
 // planner. A row is cached in cacheDir only when the planner says it may
 // become a plan file (P2), the node filesystem keeps max(10%, 256 MiB)
 // free after it, and the staging emptyDir's sizeLimit (when set) still
-// has room for it beside the planner's spill; the copy is dropped as soon
-// as the bytes received pass that allowance, whatever the manifest says
-// the row's size is. An uncached plan file is re-downloaded with a digest
-// check when staged. The spill takes precedence over the cache: cached
-// rows are dropped to make room for it (reserveSpill). Before staging,
-// when the spill is gone, cached rows the plan does not stage are
-// deleted, and the staged set must fit under the sizeLimit and above the
-// node's floor.
+// has room for it beside the planner's spill. The copy's allowance is the
+// row's size as its manifest row claims it, taken when the download
+// starts; the copy is dropped as soon as the bytes received pass it (such
+// a row is refused anyway). An uncached plan file is re-downloaded with a
+// digest check when staged. The spill takes precedence over the cache:
+// the copy being written and the cached rows are dropped to make room for
+// it (stagingSpill.reserve), and what the open copy has yet to write
+// counts as taken (review R3 finding 3: a row's index spills while the row
+// downloads, so both grow at once). Before staging, when the spill is
+// gone, cached rows the plan does not stage are deleted, and the staged
+// set must fit under the sizeLimit and above the node's floor.
 type rowFetcher struct {
 	store    sidecar.ArchiveStore
 	prefix   string
@@ -540,6 +543,9 @@ type rowFetcher struct {
 	// the cache's usage as the kubelet measures it (whole blocks).
 	limit       int64
 	cachedBytes int64
+	// tee is the copy of the row being downloaded, or nil: a part file
+	// that is not yet a cached row.
+	tee *cacheTee
 	// spill is the planner's spill arena on the same volume, or nil.
 	spill *stagingSpill
 	// freeAfter reports the free bytes left on dir's filesystem after
@@ -690,11 +696,31 @@ func (rr *recordingReader) Read(p []byte) (int, error) {
 // or the bytes pass its allowance; then it drops the copy (a full disk
 // only costs a re-download).
 type cacheTee struct {
-	r       io.Reader
-	out     *os.File
-	part    string
+	r    io.Reader
+	out  *os.File
+	part string
+	// allow is the staging disk the copy may take, in whole blocks. It is
+	// set aside for the copy while it is open (reserved, unwritten).
 	allow   int64
 	written int64
+}
+
+// reserved is the staging disk set aside for the open copy: its whole
+// allowance, written or not.
+func (t *cacheTee) reserved() int64 {
+	if t == nil || t.out == nil {
+		return 0
+	}
+	return t.allow
+}
+
+// unwritten is the part of the open copy's allowance it has yet to write:
+// what the filesystem's free space does not show yet.
+func (t *cacheTee) unwritten() int64 {
+	if t == nil || t.out == nil {
+		return 0
+	}
+	return max(t.allow-blocks(t.written), 0)
 }
 
 func (t *cacheTee) Read(p []byte) (int, error) {
@@ -740,7 +766,13 @@ func (rf *rowFetcher) fetchOnce(ctx context.Context, ref pitrplan.RowRef, entry 
 			}
 		}
 	}
-	defer tee.drop()
+	// The open copy is known to the spill's disk budget until it is a
+	// cached row or gone.
+	rf.tee = tee
+	defer func() {
+		rf.tee = nil
+		tee.drop()
+	}()
 	label := ref.Site + "/" + ref.Name
 	idx, err := sidecar.InspectTransactions(tee, sidecar.TxIndexOptions{Label: label, Budget: rf.budget})
 	refusal, refused := pitrplan.RefusalOf(err)
@@ -781,21 +813,28 @@ func (rf *rowFetcher) fetchOnce(ctx context.Context, ref pitrplan.RowRef, entry 
 	return idx, false, nil
 }
 
-// cacheAllowance is the tee rule: the bytes a row may cache, or 0 when
-// size (the manifest's claim) does not fit. The node keeps its floor, and
-// the emptyDir's sizeLimit has room for the cache plus this row and the
-// reserve. The allowance, not size, bounds what the tee writes.
-func (rf *rowFetcher) cacheAllowance(size int64) int64 {
-	allow := int64(math.MaxInt64)
+// cacheRoom is the staging disk a new copy may take: what the emptyDir's
+// sizeLimit leaves beside the cache, the spill and the reserve, and what
+// the node's filesystem has above its floor.
+func (rf *rowFetcher) cacheRoom() int64 {
+	room := int64(math.MaxInt64)
 	if rf.limit > 0 {
-		allow = rf.limit - rf.cachedBytes - rf.spill.diskBytes() - stagingReserve
+		room = rf.limit - rf.cachedBytes - rf.spill.diskBytes() - stagingReserve
 	}
 	free, threshold := rf.freeAfter(rf.cacheDir, 0)
-	allow = min(allow, free-threshold)
-	if blocks(size) > allow {
-		return 0
+	return min(room, free-threshold)
+}
+
+// cacheAllowance is the tee rule: the bytes a row may cache, or 0 when
+// size (the manifest's claim) does not fit the room. The allowance is the
+// claimed size in whole blocks and bounds what the tee writes: the copy
+// takes no more of the volume than was set aside for it when its download
+// started, however long the download and whatever spills meanwhile.
+func (rf *rowFetcher) cacheAllowance(size int64) int64 {
+	if need := blocks(size); need <= rf.cacheRoom() {
+		return need
 	}
-	return allow
+	return 0
 }
 
 // prepareStaging deletes cached rows the plan does not stage, then checks

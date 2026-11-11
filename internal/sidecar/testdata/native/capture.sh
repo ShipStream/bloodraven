@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Requires Docker and the mysql:8.4 image (mysql:9.7 for failback and effect). No ports, credentials or data leave the containers.
+# Requires Docker and the mysql:8.4 image (mysql:9.7 for failback and effect, both for effect-mixed). No ports, credentials or data leave the containers.
 mode=${1:-all}
-[[ "$mode" == all || "$mode" == compression || "$mode" == failback || "$mode" == effect ]] || { echo "usage: $0 [all|compression|failback|effect]" >&2; exit 2; }
+[[ "$mode" == all || "$mode" == compression || "$mode" == failback || "$mode" == effect || "$mode" == effect-mixed ]] || { echo "usage: $0 [all|compression|failback|effect|effect-mixed]" >&2; exit 2; }
 output=$(cd "$(dirname "$0")" && pwd)
+if [[ "$mode" == effect-mixed ]]; then
+ # A MySQL 8.4 source and its MySQL 9.7 replica, one container each on an
+ # internal network. See the "Effect-digest pairs" section of README.md.
+ exec bash "$output/effect-mixed/capture.sh"
+fi
 if [[ "$mode" == effect ]]; then
  # A source and its replica (log_replica_updates) in one network-less
  # MySQL 9.7 container: every transaction as an origin copy and as a

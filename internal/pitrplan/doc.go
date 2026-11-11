@@ -40,11 +40,16 @@
 // aside (N1). A record's readOnlyGtidExecuted is not read.
 //
 // Every downloaded copy of a GTID is compared with the others as it arrives
-// (ingest, plan.go): commit time, origin server, emptiness, and the effect
-// digest of its row changes when both copies have one (EffectDigest, issue
-// #268). Each segment records the file offset of its first replayed
-// transaction (Segment.StartPosition, issue #271), which restore.py hands
-// to mysqlbinlog as --start-position.
+// (ingest and compare, plan.go): commit time, origin server, emptiness, and
+// its row changes (EffectDigest, issue #268). Two copies that change other
+// tables refuse; two that change the same tables with the same layout and
+// other row bytes refuse; a copy without a digest, or with another layout
+// (the sites' table definitions or row images differ), says nothing. That
+// relation is not transitive, so the occurrence registry keeps one copy of
+// a GTID per layout (occ.go) and every comparable pair is compared,
+// whatever the order of the downloads. Each segment records the file
+// offset of its first replayed transaction (Segment.StartPosition, issue
+// #271), which restore.py hands to mysqlbinlog as --start-position.
 //
 // Memory (D-42, issue #266). Everything whose size grows with the archive
 // is charged to a Budget before it is allocated, and planning refuses

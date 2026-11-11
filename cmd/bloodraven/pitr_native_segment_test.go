@@ -413,10 +413,17 @@ func TestPITRNativeSegmentReplay(t *testing.T) {
 // replica copy, cut into rows events at different sizes and compressed on
 // one side only (internal/sidecar/testdata/native/effect, README "Effect-
 // digest pairs"). mysql-bin.000001 is the backup's history, 000002 the
-// faithful workload, 000003 a transaction r applied over drifted data, and
-// 000004 a repair transaction injected on r under s's GTID.
+// faithful workload (with tables without a primary key, whose rows r logs
+// in another order, and tables and row images that differ between the
+// sites), 000003 a transaction r applied over drifted data, 000004 a
+// repair transaction injected on r under s's GTID that changes another
+// table, and 000005 one that changes the same table. effect-mixed is the
+// faithful workload from a MySQL 8.4 source to a 9.7 replica.
 
-const nativeEffectDir = "../../internal/sidecar/testdata/native/effect"
+const (
+	nativeEffectDir      = "../../internal/sidecar/testdata/native/effect"
+	nativeEffectMixedDir = "../../internal/sidecar/testdata/native/effect-mixed"
+)
 
 type effectCapture struct {
 	// cases are cases.tsv: label → expectation and GTIDs.
@@ -476,21 +483,36 @@ func loadEffectCapture(t *testing.T, dir string) *effectCapture {
 		}{f[1], at.Time}
 	}
 	for _, site := range []string{"s", "r"} {
-		for n := 1; n <= 4; n++ {
-			name := fmt.Sprintf("mysql-bin.%06d", n)
-			b, err := os.ReadFile(filepath.Join(dir, site+"-"+name+".bin"))
+		paths, err := filepath.Glob(filepath.Join(dir, site+"-mysql-bin.*.bin"))
+		if err != nil || len(paths) == 0 {
+			t.Fatalf("no binlogs of %s in %s: %v", site, dir, err)
+		}
+		for _, path := range paths {
+			b, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
+			name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), site+"-"), ".bin")
 			c.files[site+"/"+name] = b
 		}
 	}
 	return c
 }
 
+// effectVerdict is how cases.tsv names the relation of two copies' digests.
+func effectVerdict(a, b pitrplan.EffectDigest) string {
+	if a.IsZero() || b.IsZero() {
+		return "uncomparable"
+	}
+	return map[pitrplan.EffectRelation]string{pitrplan.EffectEqual: "equal", pitrplan.EffectNotComparable: "layout",
+		pitrplan.EffectTablesDiffer: "tables", pitrplan.EffectRowsDiffer: "rows"}[a.Compare(b)]
+}
+
 // checkDigests compares the two copies of every transaction with what
-// cases.tsv says they must be.
-func (c *effectCapture) checkDigests(t *testing.T) {
+// cases.tsv says they must be. atLeast is the fewest pairs of each verdict
+// the capture holds, exactly the verdicts that refuse (tables, rows); names
+// are cases it must have.
+func (c *effectCapture) checkDigests(t *testing.T, atLeast map[string]int, names ...string) {
 	t.Helper()
 	type copies struct{ s, r *pitrplan.Txn }
 	byGTID := map[pitrplan.GTID]*copies{}
@@ -513,13 +535,7 @@ func (c *effectCapture) checkDigests(t *testing.T) {
 		if cp.s == nil || cp.r == nil {
 			t.Fatalf("%s is not in both servers' binlogs", g)
 		}
-		got := "equal"
-		switch {
-		case cp.s.Effect.IsZero() || cp.r.Effect.IsZero():
-			got = "uncomparable"
-		case cp.s.Effect != cp.r.Effect:
-			got = "differ"
-		}
+		got := effectVerdict(cp.s.Effect, cp.r.Effect)
 		count[got]++
 		label, want := "", ""
 		for name, cs := range c.cases {
@@ -529,26 +545,47 @@ func (c *effectCapture) checkDigests(t *testing.T) {
 		}
 		// Outside the labelled cases (the replication user's DDL) nothing
 		// may differ.
-		if (want == "" && got == "differ") || (want != "" && got != want) {
-			t.Errorf("%s (%s): the source's and the replica's copies are %s (%x, %x), want %s", g, label, got, cp.s.Effect, cp.r.Effect, want)
+		if (want == "" && (got == "tables" || got == "rows")) || (want != "" && got != want) {
+			t.Errorf("%s (%s): the source's and the replica's copies compare as %q (%s, %s), want %q", g, label, got, cp.s.Effect, cp.r.Effect, want)
 		}
 		// The drifted copy agrees with the original on everything the
-		// planner compared before the digest; the injected one does not.
+		// planner compared before the digest; the injected ones do not.
 		same := cp.s.OCT == cp.r.OCT && cp.s.Srv == cp.r.Srv && cp.s.Empty() == cp.r.Empty()
-		if same == (label == "injected") {
+		if same == strings.HasPrefix(label, "injected") {
 			t.Errorf("%s (%s): commit time, origin server and emptiness agree: %v", g, label, same)
 		}
 	}
-	if count["equal"] < 30 || count["differ"] != 2 || count["uncomparable"] < 10 {
-		t.Fatalf("pairs: %v; want at least 30 equal, 2 that differ (drift, injected) and at least 10 not comparable", count)
+	for _, verdict := range []string{"equal", "layout", "uncomparable", "tables", "rows"} {
+		exact := verdict == "tables" || verdict == "rows"
+		if count[verdict] < atLeast[verdict] || (exact && count[verdict] != atLeast[verdict]) {
+			t.Fatalf("pairs: %v; want %v (tables and rows exactly)", count, atLeast)
+		}
 	}
-	for _, name := range []string{"big-insert", "big-update", "big-delete", "multi-table", "types", "generated", "partitioned", "no-primary-key",
-		"cascade", "trigger", "tagged", "source-compressed", "only-source-compressed", "uncompressed-cuts", "drift", "injected", "json", "json-partial", "savepoint"} {
+	for _, name := range names {
 		if _, ok := c.cases[name]; !ok {
 			t.Errorf("the capture has no case %q", name)
 		}
 	}
 }
+
+// effectCases are what the MySQL 9.7 capture must hold: the faithful
+// workload, the cases review R3 found refused by a digest that depended on
+// the order of the rows and on the sites' layouts, and the three copies
+// that must refuse.
+var (
+	effectPairs = map[string]int{"equal": 80, "layout": 10, "uncomparable": 30, "tables": 1, "rows": 2}
+	effectCases = []string{"big-insert", "big-update", "big-delete", "multi-table", "types", "generated", "partitioned", "no-primary-key",
+		"cascade", "trigger", "tagged", "source-compressed", "only-source-compressed", "uncompressed-cuts", "json", "json-partial", "savepoint",
+		"nopk-update-key-order", "nopk-update-desc", "nopk-delete-desc", "nopk-update-index-range", "nopk-delete-asc", "uniqnull-update-desc", "pk-update-desc",
+		"pk-delete-desc", "nopk-duplicates", "load-data", "row-image-minimal-update", "row-image-minimal-insert", "row-image-minimal-delete",
+		"row-image-noblob-update", "replica-column", "replica-wider-column", "replica-invisible-primary-key", "replica-indexes", "replica-functional-index",
+		"replica-default", "source-only-partitioned", "fk-update-cascade", "fk-delete-cascade", "fk-set-null", "fk-multi", "wide-table", "multi-table-update",
+		"multi-table-delete", "insert-select", "big-blob", "rows-query", "mixed-format", "statement-format", "create-select",
+		"drift", "injected", "injected-values"}
+	effectMixedPairs = map[string]int{"equal": 15, "uncomparable": 10}
+	effectMixedCases = []string{"mixed-plain", "mixed-fk-update-cascade", "mixed-fk-delete-cascade", "mixed-fk-set-null", "mixed-trigger", "mixed-partitioned",
+		"mixed-nopk-update-key-order"}
+)
 
 // archive stores the named files of both sites ("s/mysql-bin.000002", …)
 // and returns the archive.
@@ -610,8 +647,42 @@ func (c *effectCapture) plan(t *testing.T, phase string, names ...string) (*plan
 	return planAndStage(context.Background(), a.store, req, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
+// effectRefusal fails unless err is PITRArchiveNamespaceReuse and its text
+// holds every one of has and none of lacks.
+func effectRefusal(t *testing.T, what string, err error, has, lacks []string) {
+	t.Helper()
+	msg := errString(err)
+	if tok, _ := pitrarchive.ParseToken(msg); tok != pitrarchive.TokenArchiveNamespaceReuse {
+		t.Fatalf("%s: %v, want PITRArchiveNamespaceReuse", what, err)
+	}
+	for _, sub := range has {
+		if !strings.Contains(msg, sub) {
+			t.Errorf("%s: the refusal lacks %q: %s", what, sub, msg)
+		}
+	}
+	for _, sub := range lacks {
+		if strings.Contains(msg, sub) {
+			t.Errorf("%s: the refusal holds %q: %s", what, sub, msg)
+		}
+	}
+}
+
+// checkFaithful plans over both sites' copies of the workload after the
+// setup phase: every pair is equal, has another layout or is not
+// comparable, so the plan is certified up to the faithful phase's end.
+func (c *effectCapture) checkFaithful(t *testing.T, names ...string) {
+	t.Helper()
+	res, err := c.plan(t, "setup", names...)
+	if err != nil {
+		t.Fatalf("faithful copies: %v", err)
+	}
+	if want := pitrplan.MustParseSet(c.phases["faithful"].executed); !res.plan.Lineage.Equal(want) || res.plan.Downloaded < len(names)-1 {
+		t.Fatalf("faithful copies: Λ = %s after %d downloads, want %s with both sites' copies read", res.plan.Lineage, res.plan.Downloaded, want)
+	}
+}
+
 // checkPlans runs the planner over the capture: faithful copies plan, and
-// a copy with other row changes refuses.
+// a copy with other row changes refuses, saying what differs.
 func (c *effectCapture) checkPlans(t *testing.T) {
 	t.Helper()
 	one := func(name string) string {
@@ -623,41 +694,43 @@ func (c *effectCapture) checkPlans(t *testing.T) {
 	}
 	// Both sites' copies of the faithful workload are downloaded (one is
 	// replayed, the closure compares the other) and the plan is certified:
-	// no comparable pair differs.
-	res, err := c.plan(t, "setup", "s/mysql-bin.000001", "r/mysql-bin.000001", "s/mysql-bin.000002", "r/mysql-bin.000002")
-	if err != nil {
-		t.Fatalf("faithful copies: %v", err)
-	}
-	if want := pitrplan.MustParseSet(c.phases["faithful"].executed); !res.plan.Lineage.Equal(want) || res.plan.Downloaded < 3 {
-		t.Fatalf("faithful copies: Λ = %s after %d downloads, want %s with both copies of mysql-bin.000002 read", res.plan.Lineage, res.plan.Downloaded, want)
-	}
+	// rows in another order, other event cuts, compression on one side and
+	// sites with other layouts refuse nothing.
+	c.checkFaithful(t, "s/mysql-bin.000001", "r/mysql-bin.000001", "s/mysql-bin.000002", "r/mysql-bin.000002")
+	const advice = "restore from a full backup taken later, once its newest transactions are archived in binlog files after these two"
 	// r applied the drift transaction over other data: the two copies agree
-	// on GTID, commit time, origin server and emptiness, and only their row
-	// changes differ.
-	_, err = c.plan(t, "setup", "s/mysql-bin.000001", "r/mysql-bin.000001", "s/mysql-bin.000002", "r/mysql-bin.000002", "s/mysql-bin.000003", "r/mysql-bin.000003")
-	msg := errString(err)
-	if tok, _ := pitrarchive.ParseToken(msg); tok != pitrarchive.TokenArchiveNamespaceReuse ||
-		!strings.Contains(msg, one("drift")+" differs between ") || !strings.Contains(msg, "/mysql-bin.000003 (row changes differ: effect digest ") ||
-		!strings.Contains(msg, "injected under this GTID") || strings.Contains(msg, "commit time") || strings.Contains(msg, "origin server") {
-		t.Fatalf("drifted copy: %v, want PITRArchiveNamespaceReuse on row changes alone", err)
-	}
-	// The repair injected on r under s's GTID differs in its GTID event
-	// too. The dump was taken after the drift and r's drifted file is gone,
-	// so this is the only pair that disagrees.
+	// on GTID, commit time, origin server, emptiness, tables and layout, and
+	// only their row bytes differ.
+	_, err := c.plan(t, "setup", "s/mysql-bin.000001", "r/mysql-bin.000001", "s/mysql-bin.000002", "r/mysql-bin.000002", "s/mysql-bin.000003", "r/mysql-bin.000003")
+	effectRefusal(t, "drifted copy", err,
+		[]string{one("drift") + " differs between ", "/mysql-bin.000003 (row changes differ: the same tables with different row data, effect digest ",
+			"a transaction with other values was injected under this GTID (a manual repair with SET GTID_NEXT), or the two servers' data had diverged when they applied it", advice},
+		[]string{"commit time", "origin server", "different tables"})
+	// The repair injected on r under s's GTID changes another table, and
+	// differs in its GTID event too. The dump was taken after the drift and
+	// r's drifted file is gone, so this is the only pair that disagrees.
 	_, err = c.plan(t, "drift", "s/mysql-bin.000001", "r/mysql-bin.000001", "s/mysql-bin.000002", "r/mysql-bin.000002", "s/mysql-bin.000003",
 		"s/mysql-bin.000004", "r/mysql-bin.000004")
-	msg = errString(err)
-	if tok, _ := pitrarchive.ParseToken(msg); tok != pitrarchive.TokenArchiveNamespaceReuse ||
-		!strings.Contains(msg, one("injected")+" differs between ") || !strings.Contains(msg, "commit time") || !(strings.Contains(msg, "origin server 101 vs 102") || strings.Contains(msg, "origin server 102 vs 101")) ||
-		!strings.Contains(msg, "row changes differ: effect digest ") {
-		t.Fatalf("injected repair: %v, want PITRArchiveNamespaceReuse naming commit time, origin server and row changes", err)
-	}
+	effectRefusal(t, "injected repair of another table", err,
+		[]string{one("injected") + " differs between ", "commit time", "origin server 10", "row changes differ: they change different tables, effect digest ",
+			"the GTID was reissued, or one site's history was rewritten"},
+		[]string{"the same tables"})
+	// The same with a repair that changes the same table.
+	_, err = c.plan(t, "injected", "s/mysql-bin.000001", "r/mysql-bin.000001", "s/mysql-bin.000002", "r/mysql-bin.000002", "s/mysql-bin.000003",
+		"s/mysql-bin.000004", "s/mysql-bin.000005", "r/mysql-bin.000005")
+	effectRefusal(t, "injected repair of the same table", err,
+		[]string{one("injected-values") + " differs between ", "commit time", "origin server 10", "row changes differ: the same tables with different row data, effect digest "},
+		[]string{"different tables"})
 }
 
 func TestPITRNativeEffectPlans(t *testing.T) {
 	c := loadEffectCapture(t, nativeEffectDir)
-	c.checkDigests(t)
+	c.checkDigests(t, effectPairs, effectCases...)
 	c.checkPlans(t)
+	// A MySQL 8.4 source and its 9.7 replica.
+	m := loadEffectCapture(t, nativeEffectMixedDir)
+	m.checkDigests(t, effectMixedPairs, effectMixedCases...)
+	m.checkFaithful(t, "s/mysql-bin.000001", "r/mysql-bin.000001")
 }
 
 // TestPITRNativeEffectCapture captures a source and replica pair afresh
@@ -687,6 +760,35 @@ func TestPITRNativeEffectCapture(t *testing.T) {
 		t.Fatalf("capture: %v\n%s", err, b)
 	}
 	c := loadEffectCapture(t, out)
-	c.checkDigests(t)
+	c.checkDigests(t, effectPairs, effectCases...)
 	c.checkPlans(t)
+}
+
+// TestPITRNativeEffectMixedCapture captures a MySQL 8.4 source and its 9.7
+// replica afresh (two containers on an internal network) and checks the
+// capture like the committed one. It needs the mysql:8.4 image, which it
+// does not pull: without it the test is skipped.
+func TestPITRNativeEffectMixedCapture(t *testing.T) {
+	if os.Getenv("BLOODRAVEN_PITR_NATIVE_TEST") != "1" {
+		t.Skip("set BLOODRAVEN_PITR_NATIVE_TEST=1 (needs docker and the mysql:8.4 and mysql:9.7 images)")
+	}
+	for _, image := range []string{"mysql:8.4", "mysql:9.7"} {
+		if err := exec.Command("docker", "image", "inspect", image).Run(); err != nil {
+			t.Skipf("the %s image is not present (docker pull %s)", image, image)
+		}
+	}
+	out := t.TempDir()
+	if err := os.Chmod(out, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", filepath.Join(nativeEffectMixedDir, "capture.sh"))
+	cmd.Env = append(os.Environ(), "EFFECT_MIXED_OUT="+out)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("capture: %v\n%s", err, b)
+	}
+	m := loadEffectCapture(t, out)
+	m.checkDigests(t, effectMixedPairs, effectMixedCases...)
+	m.checkFaithful(t, "s/mysql-bin.000001", "r/mysql-bin.000001")
 }

@@ -218,6 +218,10 @@ func (g *orderGraph) adjacency() error {
 // so only prev(f') ∖ exec(f) needs its own edges and the graph stays
 // linear in the occurrences. A cycle is an inversion.
 func (p *planner) orderCheck() error {
+	// The registry of a failed ingest is not read (fetch).
+	if p.broken != nil {
+		return p.broken
+	}
 	// The shared set.
 	txnsBySite := map[string]Set{}
 	for _, f := range p.order {

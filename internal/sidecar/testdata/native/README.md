@@ -113,7 +113,7 @@ the rows and `gtid_executed` with the captured source. Recapturing changes
 UUIDs and times; the tests read them from the TSV files.
 
 
-## Effect-digest pairs (MySQL 9.7)
+## Effect-digest pairs (MySQL 9.7, and 8.4 to 9.7)
 
 `effect/` is a genuine MySQL 9.7 capture of a source `s` (server_id 101) and
 its replica `r` (102, `log_replica_updates`) in one network-less container
@@ -122,38 +122,94 @@ everything from `s`'s first transaction, so every GTID is archived twice: as
 an origin copy in `s-mysql-bin.*` and as a replica copy in `r-mysql-bin.*`.
 The two servers cut rows events at different sizes
 (`binlog_row_event_max_size` 2048 and 512) and only `r` compresses
-transactions, except for one transaction where only `s` does and one where
-neither does. Both rotate at the same transactions:
+transactions, except for a few transactions where only `s` does or neither
+does. Some tables are defined differently on `r` (changed with
+`sql_log_bin=0`, as an administrator does in a rolling schema change). Both
+servers rotate at the same transactions:
 
 | File | Holds |
 |---|---|
 | `mysql-bin.000001` | The schema: the backup's history. |
-| `mysql-bin.000002` | Faithful copies: multi-row statements larger than an event, several tables in one transaction, updates and deletes, every common column type (and BLOB, GEOMETRY, VECTOR), generated columns and a functional index, a partitioned table, a table without a primary key, upserts, a foreign-key cascade, a trigger, MyISAM, a tagged GTID; then what is not comparable: a `SAVEPOINT`, a `JSON` table and a partial JSON update. |
+| `mysql-bin.000002` | The faithful workload (below); then what is not comparable: statement and mixed format, `CREATE TABLE … SELECT`, a `SAVEPOINT`, a `JSON` table and a partial JSON update. |
 | `mysql-bin.000003` | `drift`: `r`'s row was changed with `sql_log_bin=0`, so its copy of `s`'s next update of that row has another before image. GTID, commit time, origin server and emptiness agree. |
-| `mysql-bin.000004` | `injected`: a repair transaction run on `r` under `s`'s GTID (`SET gtid_next`), with other rows; `r` then skips `s`'s original. |
+| `mysql-bin.000004` | `injected`: a repair transaction run on `r` under `s`'s GTID (`SET gtid_next`) that changes another table; `r` then skips `s`'s original. |
+| `mysql-bin.000005` | `injected-values`: the same with a repair that changes the same table, with other values. |
 
-`cases.tsv` lists each labelled statement's GTIDs and what the two copies'
-effect digests (`pitrplan.EffectDigest`, issue #268) must be: `equal`,
-`differ` or `uncomparable`. `phases.tsv` records `s`'s `gtid_executed` and
-`UTC_TIMESTAMP(6)` at each rotation.
+The faithful workload, by what the two copies must be:
+
+- **Equal.** Multi-row statements larger than an event, several tables in
+  one transaction, updates and deletes, every common column type (and BLOB,
+  GEOMETRY, VECTOR), generated columns, a partitioned table, upserts,
+  foreign-key cascades (update, delete, set null), a trigger, MyISAM, a
+  tagged GTID, a 301-column table, multi-table `UPDATE` and `DELETE`,
+  `INSERT … SELECT`, `LOAD DATA` (row format), a 300 KB value, `ROWS_QUERY`
+  events. Tables **without a primary key**, or with only a nullable unique
+  key (`nopk-*`, `uniqnull-*`): `r` applies an `UPDATE` or `DELETE` of such a
+  table by a scan and logs the rows in the order its scan finds them, so
+  the two copies hold the same row images in another order (the same
+  statements on a table with a primary key, `pk-*`, keep the order). Tables
+  that differ on `r` without changing the row images: more indexes, a
+  functional index, another default, a table partitioned on `s` only.
+- **Layout** (the same tables, encoded differently; not comparable):
+  `SET SESSION binlog_row_image = MINIMAL` or `NOBLOB` on `s` (`r` logs
+  `FULL` images), a column added on `r` only, a column widened on `r` only
+  (`INT` to `BIGINT`, `replica_type_conversions=ALL_NON_LOSSY`), and a
+  generated invisible primary key on `r` only
+  (`REQUIRE_TABLE_PRIMARY_KEY_CHECK=GENERATE`). The data is identical on
+  both servers in every one of these.
+
+`effect-mixed/` is the same kind of pair with a MySQL 8.4 source and a 9.7
+replica, each in its own container on an internal network
+(`bash capture.sh effect-mixed`, script `effect-mixed/capture.sh`): plain
+changes, foreign-key cascades (an 8.4 source does not log the rows a cascade
+changes, and the 9.7 replica does not add them), a trigger, a partitioned
+table, and a table without a primary key whose rows `r` logs in another
+order.
+
+`cases.tsv` lists each labelled statement's GTIDs and how the two copies'
+effect digests (`pitrplan.EffectDigest`, issue #268) must compare:
+
+| Expectation | Meaning | The planner |
+|---|---|---|
+| `equal` | The same tables, layout and row bytes. | accepts |
+| `layout` | The same tables, encoded differently. | does not compare the rows |
+| `tables` | Other tables, or the same in another way or order. | refuses |
+| `rows` | The same tables and layout, other row bytes. | refuses |
+| `uncomparable` | A copy has no digest. | does not compare |
+
+`phases.tsv` records `s`'s `gtid_executed` and `UTC_TIMESTAMP(6)` at each
+rotation (in `effect-mixed`, after the schema and at the end).
 
 `go test ./internal/sidecar -run TestEffectDigestNativeFixtures` checks every
 GTID that occurs in more than one fixture file against `cases.tsv`, and that
-the capture is what it claims (different cuts, one-sided compression).
+the capture is what it claims (different cuts, one-sided compression, rows
+in another order on the tables without a primary key, shorter row images
+under `MINIMAL` and `NOBLOB`).
 `go test ./cmd/bloodraven -run TestPITRNativeEffectPlans` plans over both
-sites: the faithful files plan, the drifted copy refuses
-`PITRArchiveNamespaceReuse` on its row changes alone, and the injected one
-on commit time, origin server and row changes. With Docker,
-`BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run TestPITRNativeEffectCapture`
-runs the capture script again and checks the fresh capture the same way.
+sites: the faithful files plan (9.7, and 8.4 to 9.7), the drifted copy
+refuses `PITRArchiveNamespaceReuse` on its row data alone, the repair of
+another table on commit time, origin server and "they change different
+tables", and the repair of the same table on "the same tables with
+different row data". With Docker,
+`BLOODRAVEN_PITR_NATIVE_TEST=1 go test ./cmd/bloodraven -run 'TestPITRNativeEffect(Mixed)?Capture'`
+runs the capture scripts again and checks the fresh captures the same way
+(the mixed one is skipped when the `mysql:8.4` image is not present).
 
 What the capture and one-off runs of the same workload established (MySQL
 9.7.4; the one-off captures are not committed):
 
 - An origin copy and a replica copy have equal digests for every comparable
   case above, with the events cut differently and with compression on
-  either side only. So do a MySQL 8.4.11 source and a 9.7.4 replica, and a
-  server that applied the source's binlog through `mysqlbinlog | mysql`.
+  either side only. So does a server that applied the source's binlog
+  through `mysqlbinlog | mysql`.
+- A replica does not keep the order of the rows of an `UPDATE` or `DELETE`
+  on a table without a primary key or NOT NULL unique key (9.7.4, and 9.7.4
+  replicating from 8.4.11): the first version of the digest hashed the row
+  images in order and refused these healthy archives (review R3). The rows
+  part of the digest is therefore a multiset of bytes.
+- A session's `binlog_row_image` needs `SESSION_VARIABLES_ADMIN`; an
+  unprivileged user gets error 1227 (measured in review R3). The sidecar
+  audits only `@@global.binlog_row_image`.
 - `JSON` row images are the stored binary document. They stayed equal
   between a source and a replica that replicated from the start, including
   after in-place `JSON_SET`/`JSON_REMOVE`/`JSON_REPLACE` and after partial

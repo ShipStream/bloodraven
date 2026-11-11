@@ -17,36 +17,64 @@ import (
 // data had drifted, can agree with the original on commit time, origin
 // server and emptiness and still change different rows.
 //
-// What is digested. A replica re-logs the row changes it applies
-// (log_replica_updates) in its own events, so the digest covers only what an
-// origin copy and a faithful replica copy share byte for byte. Per
-// transaction, in file order, for every WRITE_ROWS, UPDATE_ROWS and
-// DELETE_ROWS event (version 2):
+// What a faithful replica shares with the origin. A replica re-logs the row
+// changes it applies (log_replica_updates) in its own events. Measured on
+// MySQL 9.7.4 and 8.4 (testdata/native/README.md), its copy has:
 //
-//   - a group header: the event class, the database and table names (from
-//     the statement's TABLE_MAP event for the event's table id), the column
-//     count and the columns-present bitmap or bitmaps, with the unused high
-//     bits of their last byte cleared;
-//   - the row images: every byte after the bitmaps.
+//   - the same tables, changed the same way, in the same order;
+//   - the same row images, but not in the same order: a table without a
+//     primary key (or with only a nullable unique key) is applied by a
+//     scan, and the replica logs the rows of an UPDATE or DELETE in the
+//     order its scan finds them;
+//   - another encoding of the row images when the two sites' table
+//     definitions or row images differ: a session's binlog_row_image, a
+//     column added or widened on one site first (a rolling schema change),
+//     a generated invisible primary key on the replica only. The data is
+//     the same and the bytes are not.
 //
-// A group is a run of consecutive rows events with the same header. A server
-// cuts one statement's rows into events at binlog_row_event_max_size and at
-// partition changes, each on a row boundary, so a group's concatenated row
-// images do not depend on where the events were cut. The transaction's
-// digest is SHA-256(domain ‖ SHA-256(header digest ‖ row images) of every
-// group), cut to 128 bits. The stream is unambiguous: a header's fields
-// have fixed sizes (the bitmaps' follows from the column count, the names
-// are digested with their lengths), and each group enters the
-// transaction's hash as one fixed-size digest.
+// So the digest has three parts (pitrplan.EffectDigest), each a truncated
+// SHA-256 over the transaction's WRITE_ROWS, UPDATE_ROWS and DELETE_ROWS
+// events (version 2) in file order. A group is a run of consecutive rows
+// events of one table and one class (write, update, delete); a server cuts
+// a statement's rows into events at binlog_row_event_max_size and at
+// partition changes, so where a group is cut into events means nothing.
+//
+//   - tables: per group, the class and the database and table names (from
+//     the statement's TABLE_MAP for the event's table id; the names are
+//     digested with their lengths).
+//   - layout: the same, plus, per group, each distinct consecutive encoding
+//     of its events: the column count, the columns-present bitmap (two for
+//     an update) with the unused high bits of the last byte cleared, and
+//     the TABLE_MAP's column type array and column metadata block (the
+//     part of a TABLE_MAP that says how a row image's bytes are laid out).
+//   - rows: per group, the class and names, the total length of the row
+//     images (every byte after the bitmaps) and how often each byte value
+//     occurs in them. It is a multiset of bytes: the same for the same rows
+//     in any order and cut into events anywhere.
+//
+// Every record that enters a hash has a fixed size or carries its length,
+// so no bytes can move between a name, a layout and row data.
+//
+// What the planner concludes (pitrplan.EffectDigest.Compare): other tables
+// refuse; the same tables with another layout say nothing; the same tables
+// and layout with other row bytes refuse.
+//
+// What the rows part cannot see: a change that only permutes the bytes of a
+// group's row images (two rows' values exchanged, the digits of a value
+// reordered) has the same multiset. Telling those apart needs the row
+// boundaries, which means decoding every column type's length; review F078
+// found go-mysql's row decoder indexes its input without bounds checks, and
+// a decoder of our own for every type is a larger risk than the gap.
 //
 // What is left out, because it legitimately differs between copies: table
 // ids, event boundaries, transaction compression (the events inside a
 // TRANSACTION_PAYLOAD are digested like outer ones), every event header
 // (timestamp, server_id, log_pos, flags, checksum), the rows events' flags
-// and extra-data block, the TABLE_MAP column metadata and optional metadata,
-// the GTID event, BEGIN, COMMIT and XID, and ROWS_QUERY.
+// and extra-data block, the TABLE_MAP flags, null bitmap and optional
+// metadata (binlog_row_metadata), the GTID event, BEGIN, COMMIT and XID,
+// and ROWS_QUERY.
 //
-// What is not comparable (a zero digest, which the planner never compares):
+// What is not comparable at all (a zero digest):
 //
 //   - a transaction without rows events (DDL and other statements): a
 //     replica or a newer server may re-log different statement text;
@@ -65,24 +93,27 @@ import (
 //     a file whose FORMAT_DESCRIPTION declares other post-header lengths
 //     than the ones framed here, and anything that does not frame exactly:
 //     a rows event without its TABLE_MAP, a column count that disagrees
-//     with it, a truncated post-header or bitmap, more than
+//     with it, a truncated post-header, bitmap or table map, more than
 //     effectMaxTables table maps in one statement.
 //
 // The digester never refuses a file: what it cannot frame is not comparable,
 // so it cannot turn a restore that plans today into a refusal on its own.
 // Only two comparable copies that disagree refuse, in the planner
 // (PITRArchiveNamespaceReuse). A missed difference is preferred to a false
-// one, which would refuse a healthy archive. The native captures under
-// testdata/native/effect hold origin and replica copies of the same
-// transactions and pin both directions (TestEffectDigestNativeFixtures).
+// one, which would refuse a healthy archive during an incident. The native
+// captures under testdata/native/effect hold origin and replica copies of
+// the same transactions and pin every direction
+// (TestEffectDigestNativeFixtures).
 //
 // The table maps and rows events are framed here, with every length checked
-// against the event, and not by go-mysql's decoders (review F078 found they
-// index their input without bounds checks). No row image is decoded.
+// against the event, and not by go-mysql's decoders. No row image is
+// decoded.
 
 const (
-	// effectDomain versions the canonical form.
-	effectDomain = "bloodraven pitr effect digest v1\x00"
+	// The domains version the canonical form of each part.
+	effectTablesDomain = "bloodraven pitr effect digest v2 tables\x00"
+	effectLayoutDomain = "bloodraven pitr effect digest v2 layout\x00"
+	effectRowsDomain   = "bloodraven pitr effect digest v2 rows\x00"
 	// effectMaxTables bounds the table maps of one statement.
 	effectMaxTables = 64
 	// effectMaxColumns is MySQL's column limit per table.
@@ -92,13 +123,27 @@ const (
 	rowsV2PostHeader   = 10 // table id 6, flags 2, extra-data length 2
 	rowsStmtEndFlag    = 0x0001
 	mysqlTypeJSON      = 245
+
+	// effectGroupKey is a group's class byte and table name digest.
+	effectGroupKey = 1 + sha256.Size
+	// effectLanesMin is the row-image length from which count uses its
+	// lanes: below it, adding them up costs more than they save.
+	effectLanesMin = 2048
+
+	// effectRowsRecord is the largest record of a group's row bytes: the
+	// group key, the total length, the number of byte values that occur,
+	// and each one with its count.
+	effectRowsRecord = effectGroupKey + 8 + 2 + 256*(1+8)
 )
 
 // effectTable is one TABLE_MAP of the open statement.
 type effectTable struct {
 	id uint64
 	// name is SHA-256 over the length-prefixed database and table names.
-	name    [sha256.Size]byte
+	name [sha256.Size]byte
+	// layout is SHA-256 over the column count, the column type array and
+	// the column metadata block with its length.
+	layout  [sha256.Size]byte
 	columns uint64
 	// stable is false for a table whose row images are not byte-stable
 	// across copies (a JSON column).
@@ -106,27 +151,36 @@ type effectTable struct {
 }
 
 // effectStateBytes is charged once per index pass for the digester: its
-// table list and three SHA-256 states.
-const effectStateBytes = int64(unsafe.Sizeof(effectDigester{})) + 3*256
+// table list, byte counts and four SHA-256 states.
+const effectStateBytes = int64(unsafe.Sizeof(effectDigester{})) + 4*256
 
 // effectDigester computes one transaction's pitrplan.EffectDigest
-// incrementally: nothing of a transaction is kept but hash states and the
-// open statement's table maps.
+// incrementally: nothing of a transaction is kept but hash states, the open
+// group's byte counts and the open statement's table maps.
 type effectDigester struct {
 	// enabled: the file's FORMAT_DESCRIPTION declares the post-header
 	// lengths this parser frames.
 	enabled bool
-	tx      hash.Hash // the transaction: domain, then one digest per group
-	group   hash.Hash // the open group: header digest, then row images
-	scratch hash.Hash // a group header
-	// header is the open group's header digest; sum and next are scratch
-	// space for digests, so that hashing allocates nothing per event.
-	header [sha256.Size]byte
+	// One hash per part of the digest, over the transaction.
+	tableSum, layoutSum, rowSum hash.Hash
+	scratch                     hash.Hash // a table map's names and layout, an event's layout
+	// key is the open group's class and table name digest; layout the
+	// encoding of its latest event.
+	key    [effectGroupKey]byte
+	layout [sha256.Size]byte
+	// length and counts are the open group's row bytes: how many, and how
+	// often each value occurs.
+	length uint64
+	counts [256]uint64
+	// lanes are count's scratch tables; they are zero between events.
+	lanes [4][256]uint32
+	// sum and next are scratch space for digests, fixed for a record's
+	// fixed fields and record for a group's row-bytes record, so that
+	// hashing allocates nothing per event.
 	sum    [sha256.Size]byte
 	next   [sha256.Size]byte
-	// fixed holds a header's fixed fields, and single bytes, on their way
-	// into a hash.
 	fixed  [1 + 8]byte
+	record [effectRowsRecord]byte
 	open   bool // a group is open
 	rows   bool // the transaction has a digested rows event
 	off    bool // the transaction is not comparable
@@ -147,34 +201,65 @@ func (d *effectDigester) init(lengths []byte) {
 		at(replication.WRITE_ROWS_EVENTv2) == rowsV2PostHeader &&
 		at(replication.UPDATE_ROWS_EVENTv2) == rowsV2PostHeader &&
 		at(replication.DELETE_ROWS_EVENTv2) == rowsV2PostHeader
-	d.tx, d.group, d.scratch = sha256.New(), sha256.New(), sha256.New()
+	d.tableSum, d.layoutSum, d.rowSum, d.scratch = sha256.New(), sha256.New(), sha256.New(), sha256.New()
 }
 
 // begin starts a transaction.
 func (d *effectDigester) begin() {
+	if d.open {
+		// A transaction that was set aside left its group open.
+		d.length, d.counts = 0, [256]uint64{}
+	}
 	d.open, d.rows, d.off, d.ntable = false, false, !d.enabled, 0
 	if d.enabled {
-		d.tx.Reset()
-		d.tx.Write([]byte(effectDomain))
+		d.tableSum.Reset()
+		d.tableSum.Write([]byte(effectTablesDomain))
+		d.layoutSum.Reset()
+		d.layoutSum.Write([]byte(effectLayoutDomain))
+		d.rowSum.Reset()
+		d.rowSum.Write([]byte(effectRowsDomain))
 	}
 }
 
 // finish returns the transaction's digest: zero when it is not comparable.
 func (d *effectDigester) finish() pitrplan.EffectDigest {
-	var out pitrplan.EffectDigest
 	if d.off || !d.rows {
-		return out
+		return pitrplan.EffectDigest{}
 	}
 	d.closeGroup()
-	copy(out[:], d.tx.Sum(d.sum[:0]))
-	return out
+	tables := binary.BigEndian.Uint32(d.tableSum.Sum(d.sum[:0]))
+	layout := binary.BigEndian.Uint64(d.layoutSum.Sum(d.sum[:0]))
+	rows := binary.BigEndian.Uint32(d.rowSum.Sum(d.sum[:0]))
+	if tables == 0 && layout == 0 && rows == 0 {
+		// Zero means "not comparable".
+		rows = 1
+	}
+	return pitrplan.NewEffectDigest(tables, layout, rows)
 }
 
+// closeGroup adds the open group's row bytes to the rows part: its key, the
+// total length, and the byte values that occur with their counts, in
+// ascending order.
 func (d *effectDigester) closeGroup() {
-	if d.open {
-		d.tx.Write(d.group.Sum(d.sum[:0]))
-		d.open = false
+	if !d.open {
+		return
 	}
+	rec := append(d.record[:0], d.key[:]...)
+	rec = binary.LittleEndian.AppendUint64(rec, d.length)
+	at := len(rec)
+	rec = append(rec, 0, 0)
+	values := uint16(0)
+	for v := range d.counts {
+		if n := d.counts[v]; n != 0 {
+			rec = append(rec, byte(v))
+			rec = binary.LittleEndian.AppendUint64(rec, n)
+			values++
+			d.counts[v] = 0
+		}
+	}
+	binary.LittleEndian.PutUint16(rec[at:], values)
+	d.rowSum.Write(rec)
+	d.length, d.open = 0, false
 }
 
 // event digests one in-transaction event (outer, or inside a payload); body
@@ -204,8 +289,9 @@ func (d *effectDigester) event(kind replication.EventType, body []byte, query st
 
 // tableMap records a TABLE_MAP event: table id, flags, the database name
 // (one length byte, the name, NUL), the table name (the same), the column
-// count (a length-encoded integer) and one type byte per column. The column
-// metadata, null bitmap and optional metadata after them are not read.
+// count (a length-encoded integer), one type byte per column, the length of
+// the column metadata (a length-encoded integer) and the metadata, and the
+// null bitmap. The optional metadata after it is not read.
 func (d *effectDigester) tableMap(body []byte) bool {
 	if len(body) < tableMapPostHeader {
 		return false
@@ -239,11 +325,31 @@ func (d *effectDigester) tableMap(body []byte) bool {
 		return false
 	}
 	t.columns = columns
-	for _, typ := range body[pos : pos+int(columns)] {
+	types := body[pos : pos+int(columns)]
+	for _, typ := range types {
 		if typ == mysqlTypeJSON {
 			t.stable = false
 		}
 	}
+	pos += int(columns)
+	metadata, n, err := payloadLengthEncodedInt(body[pos:])
+	if err != nil {
+		return false
+	}
+	pos += n
+	// The metadata, then one null bit per column.
+	if rest := uint64(len(body) - pos); rest < metadata || rest-metadata < (columns+7)/8 {
+		return false
+	}
+	d.scratch.Reset()
+	binary.LittleEndian.PutUint64(d.fixed[:8], columns)
+	d.scratch.Write(d.fixed[:8])
+	d.scratch.Write(types)
+	binary.LittleEndian.PutUint64(d.fixed[:8], metadata)
+	d.scratch.Write(d.fixed[:8])
+	d.scratch.Write(body[pos : pos+int(metadata)])
+	d.scratch.Sum(d.next[:0])
+	t.layout = d.next
 	// A statement maps each table once; a repeated id replaces its entry.
 	for i := range d.tables[:d.ntable] {
 		if d.tables[i].id == t.id {
@@ -300,11 +406,9 @@ func (d *effectDigester) rowsEvent(kind replication.EventType, body []byte) bool
 	if table == nil || !table.stable || table.columns != columns {
 		return false
 	}
-	d.fixed[0] = class
-	binary.LittleEndian.PutUint64(d.fixed[1:], columns)
+	// The event's encoding: the table's, and which columns are logged.
 	d.scratch.Reset()
-	d.scratch.Write(d.fixed[:])
-	d.scratch.Write(table.name[:])
+	d.scratch.Write(table.layout[:])
 	// The bits past the last column are not part of the bitmap.
 	mask := byte(0xff)
 	if r := columns % 8; r != 0 {
@@ -317,19 +421,66 @@ func (d *effectDigester) rowsEvent(kind replication.EventType, body []byte) bool
 		pos += width
 	}
 	d.scratch.Sum(d.next[:0])
-	if !d.open || d.next != d.header {
+	if !d.open || d.key[0] != class || [sha256.Size]byte(d.key[1:]) != table.name {
 		d.closeGroup()
-		d.header, d.open = d.next, true
-		d.group.Reset()
-		d.group.Write(d.header[:])
+		d.key[0] = class
+		copy(d.key[1:], table.name[:])
+		d.open = true
+		d.tableSum.Write(d.key[:])
+		d.fixed[0] = 'G'
+		d.layoutSum.Write(d.fixed[:1])
+		d.layoutSum.Write(d.key[:])
+		d.layout = [sha256.Size]byte{}
+		d.startLayout()
+	} else if d.next != d.layout {
+		d.startLayout()
 	}
-	d.group.Write(body[pos:])
+	d.count(body[pos:])
 	d.rows = true
 	if flags&rowsStmtEndFlag != 0 {
 		// The statement's table maps end with it.
 		d.ntable = 0
 	}
 	return true
+}
+
+// count adds an event's row images to the open group's byte counts.
+func (d *effectDigester) count(rows []byte) {
+	d.length += uint64(len(rows))
+	if len(rows) < effectLanesMin {
+		for _, b := range rows {
+			d.counts[b]++
+		}
+		return
+	}
+	// Four tables, one per position modulo 4: a run of one byte value
+	// (zeros are common in row images) would otherwise make every
+	// increment wait for the one before it. An event is shorter than
+	// 4 GiB, so a lane's 32-bit counts cannot overflow before they are
+	// added up.
+	lanes := &d.lanes
+	for len(rows) >= 4 {
+		lanes[0][rows[0]]++
+		lanes[1][rows[1]]++
+		lanes[2][rows[2]]++
+		lanes[3][rows[3]]++
+		rows = rows[4:]
+	}
+	for _, b := range rows {
+		d.counts[b]++
+	}
+	for v := range d.counts {
+		d.counts[v] += uint64(lanes[0][v]) + uint64(lanes[1][v]) + uint64(lanes[2][v]) + uint64(lanes[3][v])
+	}
+	*lanes = [4][256]uint32{}
+}
+
+// startLayout records the encoding in d.next as the open group's next one.
+func (d *effectDigester) startLayout() {
+	d.layout = d.next
+	d.fixed[0] = 'L'
+	d.layoutSum.Write(d.fixed[:1])
+	d.layoutSum.Write(d.layout[:])
 }
 
 // tableID reads the 6-byte table id that starts a TABLE_MAP or rows event.

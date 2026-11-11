@@ -540,7 +540,8 @@ func coverageOf(t testing.TB, p *Plan, err error) string {
 
 // diffHistory is randomHistory with what the search alone does not need:
 // promotion records at the writer changes, effect digests (some copies
-// not comparable, a few different), and sometimes two adjacent
+// not comparable or with another layout, a few with other tables or other
+// rows), and sometimes two adjacent
 // transactions swapped on one site (an order inversion). It returns the
 // archive, B, X and the number of transactions in B.
 func diffHistory(t *testing.T, r *rand.Rand) (*synth, string, string, int) {
@@ -604,9 +605,13 @@ func diffHistory(t *testing.T, r *rand.Rand) (*synth, string, string, int) {
 				tx := stx{g: e.g, oct: sec(e.at), srv: e.srv, fx: e.fx}
 				switch r.Intn(40) {
 				case 0:
-					tx.fx = 6 // other row changes under the same GTID
+					tx.fx = 6 // other tables under the same GTID
 				case 1, 2, 3, 4, 5, 6:
 					tx.fx = 0 // this copy is not comparable
+				case 7:
+					tx.bag = 9 // the same tables with other row bytes
+				case 8, 9, 10:
+					tx.lay, tx.bag = 7, 9 // another layout: not comparable
 				}
 				txns = append(txns, tx)
 			}

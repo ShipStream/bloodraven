@@ -117,17 +117,21 @@ func (s *stagingSpill) close() {
 // reserve is the staging-disk budget of the spill: the arena calls it
 // before it takes n more bytes. The spill, the tee cache and the reserve
 // must fit the emptyDir's sizeLimit, and the node filesystem must keep its
-// floor. Cached rows are only a saved download, so they make room first.
+// floor. The copy of the row being downloaded counts with its whole
+// allowance: its index spills while it downloads, and what it has yet to
+// write is not in the filesystem's free space. Cached rows, and that copy,
+// are only a saved download, so they make room first.
 func (s *stagingSpill) reserve(n int64) error {
 	rf := s.rf
 	for {
 		var refusal error
 		held := s.arena.Stats().DiskBytes
-		if rf.limit > 0 && held+rf.cachedBytes+n+stagingReserve > rf.limit {
+		cached := rf.cachedBytes + rf.tee.reserved()
+		if rf.limit > 0 && held+cached+n+stagingReserve > rf.limit {
 			refusal = &pitrplan.Refusal{Token: pitrarchive.TokenPlanTooLarge, Message: fmt.Sprintf(
 				"planning must spill %s more to the staging volume, which already holds %s of spilled planning data and %s of cached binlog files; that is more than the volume's sizeLimit of %s; raise spec.backup.stagingVolumeSizeLimit, raise the Job's memory limit so that less is spilled, or choose a backup closer to the target",
-				util.HumanBytes(n), util.HumanBytes(held), util.HumanBytes(rf.cachedBytes), util.HumanBytes(rf.limit))}
-		} else if free, threshold := rf.freeAfter(rf.stagingDir(), n); free < threshold {
+				util.HumanBytes(n), util.HumanBytes(held), util.HumanBytes(cached), util.HumanBytes(rf.limit))}
+		} else if free, threshold := rf.freeAfter(rf.stagingDir(), n+rf.tee.unwritten()); free < threshold {
 			refusal = &pitrplan.Refusal{Token: pitrarchive.TokenPlanTooLarge, Message: fmt.Sprintf(
 				"planning must spill %s more to the staging volume (it holds %s of spilled planning data), which would leave less than the node filesystem's floor of %s free (max(10%%, 256 MiB), kept clear of the kubelet's eviction threshold); give the Job's node more ephemeral storage, raise the Job's memory limit so that less is spilled, or choose a backup closer to the target",
 				util.HumanBytes(n), util.HumanBytes(held), util.HumanBytes(threshold))}
@@ -141,10 +145,15 @@ func (s *stagingSpill) reserve(n int64) error {
 	}
 }
 
-// dropCachedRow deletes the largest cached row (the first in row order
-// among equals) and reports whether there was one. The row is downloaded
-// again if the plan stages it.
+// dropCachedRow gives up one saved download and reports whether there was
+// one: the copy of the row being downloaded, which is not a cached row
+// yet, and then the largest cached row (the first in row order among
+// equals). A dropped row is downloaded again if the plan stages it.
 func (rf *rowFetcher) dropCachedRow() bool {
+	if rf.tee.reserved() > 0 {
+		rf.tee.drop()
+		return true
+	}
 	var victim pitrplan.RowRef
 	found := false
 	for ref, c := range rf.cached {

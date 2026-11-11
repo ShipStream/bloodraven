@@ -1,6 +1,9 @@
 package pitrplan
 
 import (
+	"encoding/binary"
+	"fmt"
+
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -20,18 +23,86 @@ const (
 	TxnUnsupported
 )
 
-// EffectDigest identifies a transaction's row changes independently of the
-// server that logged them (issue #268): 128 bits of a SHA-256 over the
-// transaction's rows events in a canonical form that an origin copy and a
-// faithful replica copy share (internal/sidecar's effect digester defines
-// the form and what it leaves out). The zero value means "not comparable":
-// the transaction has no rows events, or holds something whose re-logging
-// by a replica is not byte-stable. Two copies of a GTID are compared only
-// when both digests are non-zero.
+// EffectDigest describes a transaction's row changes independently of the
+// server that logged them (issue #268), so that two archived copies of one
+// GTID can be compared. internal/sidecar's effect digester computes it and
+// defines the canonical form; it has three parts:
+//
+//   - tables (32 bits): which tables the transaction changes, how (write,
+//     update, delete) and in which order;
+//   - layout (64 bits): the tables part plus how each table's row images
+//     are encoded (the columns, their types and which of them are logged);
+//   - rows (32 bits): the row bytes of each table's changes as a multiset,
+//     so that it does not depend on the order of the rows.
+//
+// The zero value means "not comparable": the transaction has no rows
+// events, or holds something a replica does not re-log in a stable form.
+// Compare defines what two digests say about two copies.
+//
+// The split follows from what a hash collision costs. Colliding tables or
+// rows parts make two copies that differ look equal: a missed detection,
+// with probability 2⁻³² for each copy that really differs, and such copies
+// are rare. Colliding layout parts make two copies with different layouts
+// look comparable, and their row bytes then differ: a refusal of a healthy
+// archive. Copies with different layouts are not rare (every transaction of
+// a table during a rolling schema change), so the layout part has 64 bits.
 type EffectDigest [16]byte
+
+// NewEffectDigest assembles a digest from its parts. A digest whose parts
+// are all zero would read as "not comparable"; the digester never passes
+// one (it sets a bit).
+func NewEffectDigest(tables uint32, layout uint64, rows uint32) EffectDigest {
+	var d EffectDigest
+	binary.BigEndian.PutUint32(d[0:4], tables)
+	binary.BigEndian.PutUint64(d[4:12], layout)
+	binary.BigEndian.PutUint32(d[12:16], rows)
+	return d
+}
 
 // IsZero reports whether the transaction's row changes are not comparable.
 func (d EffectDigest) IsZero() bool { return d == EffectDigest{} }
+
+// String prints the parts: tables-layout-rows.
+func (d EffectDigest) String() string {
+	return fmt.Sprintf("%x-%x-%x", d[0:4], d[4:12], d[12:16])
+}
+
+// EffectRelation is what two copies' effect digests say about them.
+type EffectRelation uint8
+
+const (
+	// EffectNotComparable: one copy has no digest, or both change the same
+	// tables with different layouts (the sites' table definitions or row
+	// images differ: binlog_row_image, a column added or widened on one
+	// site, a generated invisible primary key on one site). Nothing is
+	// concluded.
+	EffectNotComparable EffectRelation = iota
+	// EffectEqual: the same tables, layouts and row bytes.
+	EffectEqual
+	// EffectTablesDiffer: the copies change different tables, or the same
+	// tables in other ways or another order.
+	EffectTablesDiffer
+	// EffectRowsDiffer: the same tables and layouts, other row bytes.
+	EffectRowsDiffer
+)
+
+// Compare relates two copies of one GTID. The relation is symmetric but
+// not transitive: a may be not comparable with b and with c while b and c
+// differ, so a set of copies is consistent only when every pair is (the
+// planner's occurrence registry keeps what that takes, occ.go).
+func (d EffectDigest) Compare(o EffectDigest) EffectRelation {
+	switch {
+	case d.IsZero() || o.IsZero():
+		return EffectNotComparable
+	case [4]byte(d[0:4]) != [4]byte(o[0:4]):
+		return EffectTablesDiffer
+	case [8]byte(d[4:12]) != [8]byte(o[4:12]):
+		return EffectNotComparable
+	case [4]byte(d[12:16]) != [4]byte(o[12:16]):
+		return EffectRowsDiffer
+	}
+	return EffectEqual
+}
 
 // Txn is one indexed transaction of a file. Its GTID is
 // (FileIndex.SIDs[SID], GNO). It is a fixed-size record without pointers,
@@ -45,7 +116,7 @@ type Txn struct {
 	// `mysqlbinlog --start-position` starts a segment whose first replayed
 	// transaction this is.
 	Pos int64
-	// Effect is the digest of the transaction's row changes, or zero.
+	// Effect describes the transaction's row changes, or is zero.
 	Effect EffectDigest
 	// Srv is the originating server_id (the GTID event header's).
 	Srv   uint32

@@ -44,9 +44,9 @@ const (
 	// TxnBytes is the size of one indexed transaction, the Txn record
 	// (56 bytes: GNO, commit time, file offset, the 16-byte effect digest,
 	// origin server, source index and flags). The effect digest adds no
-	// other per-transaction memory: the index pass hashes a transaction's
-	// rows events as it reads them and keeps only fixed state, charged
-	// once per file.
+	// other per-transaction memory: the index pass hashes and counts a
+	// transaction's rows events as it reads them and keeps only fixed
+	// state, charged once per file.
 	TxnBytes = int64(unsafe.Sizeof(Txn{}))
 	// intervalBytes is charged per interval of a materialized set: the
 	// interval and the slack of its slice's doubling growth.

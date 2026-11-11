@@ -229,8 +229,15 @@ func TestStagingSpillReserve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := rf.cacheAllowance(4096), int64(12<<20-7<<20-4<<20); got != want {
-		t.Fatalf("cache allowance %d beside a 4 MiB spill, want %d", got, want)
+	if got, want := rf.cacheRoom(), int64(12<<20-7<<20-4<<20); got != want {
+		t.Fatalf("room for a new copy %d beside a 4 MiB spill, want %d", got, want)
+	}
+	// A row that fits is allowed its own size, in whole blocks, and no more.
+	if got := rf.cacheAllowance(1<<20 - 100); got != 1<<20 {
+		t.Fatalf("cache allowance %d for a row of just under 1 MiB, want 1 MiB", got)
+	}
+	if got := rf.cacheAllowance(1<<20 + 1); got != 0 {
+		t.Fatalf("cache allowance %d for a row larger than the room", got)
 	}
 	// 3 MiB more: the largest cached row goes, the others stay.
 	if err := rf.spill.reserve(3 << 20); err != nil {
@@ -291,6 +298,194 @@ func TestStagingSpillReserve(t *testing.T) {
 		}
 	}
 }
+
+// Review R3 finding 3: a row's index spills while the row itself is being
+// downloaded and copied into the tee cache, so the two grow at once. The
+// copy's allowance is the row's size, set aside when its download starts,
+// and the spill's reservations count it, written or not; when both do not
+// fit, the copy gives way like a cached row does. Before the fix the copy
+// was allowed everything free at its start and the spill did not see it,
+// so together they could pass the sizeLimit or the node's floor.
+func TestStagingSpillCountsTheOpenCopy(t *testing.T) {
+	spillOnDisk(t, true)
+	out := t.TempDir()
+	budget := pitrplan.NewBudget(64 << 20)
+	rf := &rowFetcher{budget: budget, cacheDir: filepath.Join(out, ".pitr-cache"), cached: map[pitrplan.RowRef]cachedRow{},
+		freeAfter: func(string, int64) (int64, int64) { return 1 << 40, 0 }}
+	if err := os.MkdirAll(rf.cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rf.spill = openStagingSpill(pitrDownloadRequest{outDir: out, memory: 64 << 20}, rf, budget)
+	if rf.spill == nil {
+		t.Skip("no file-backed spill on this platform")
+	}
+	defer rf.spill.close()
+	// open starts the copy of a row: allow bytes set aside, written of them
+	// on disk.
+	part := filepath.Join(rf.cacheDir, "1.part")
+	open := func(allow, written int64) {
+		t.Helper()
+		f, err := os.Create(part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write(make([]byte, written)); err != nil {
+			t.Fatal(err)
+		}
+		rf.tee = &cacheTee{out: f, part: part, allow: allow, written: written}
+	}
+	dropped := func() bool {
+		_, err := os.Stat(part)
+		return rf.tee.out == nil && os.IsNotExist(err)
+	}
+
+	// The sizeLimit: 12 MiB beside the reserve, 8 MiB of it set aside for
+	// the open copy, of which 1 MiB is written.
+	rf.limit = stagingReserve + 12<<20
+	open(8<<20, 1<<20)
+	if err := rf.spill.reserve(3 << 20); err != nil || dropped() {
+		t.Fatalf("3 MiB beside the open copy's 8: %v, copy dropped %v", err, dropped())
+	}
+	mem, err := rf.spill.Alloc(3 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A new copy sees the spill; the spill sees the open copy.
+	if got := rf.spill.reserve(1 << 20); got != nil || dropped() {
+		t.Fatalf("1 MiB more (3 + 8 + 1 = 12): %v, copy dropped %v", got, dropped())
+	}
+	if err := rf.spill.reserve(2 << 20); err != nil {
+		t.Fatalf("2 MiB more, which fits once the open copy is gone: %v", err)
+	}
+	if !dropped() {
+		t.Fatal("the spill took 2 MiB more beside 3 MiB spilled and a copy that may grow to 8 MiB: 13 MiB of a 12 MiB limit")
+	}
+	// The open copy goes before a cached row does.
+	cachedPath := filepath.Join(rf.cacheDir, "row")
+	if err := os.WriteFile(cachedPath, make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref := pitrplan.RowRef{Site: "a", Name: "row", ID: "row"}
+	rf.cached[ref] = cachedRow{path: cachedPath, size: 1 << 20}
+	rf.cachedBytes = 1 << 20
+	open(6<<20, 0)
+	if err := rf.spill.reserve(4 << 20); err != nil || !dropped() || len(rf.cached) != 1 {
+		t.Fatalf("4 MiB beside 3 spilled, 1 cached and an open copy of 6: %v, copy dropped %v, %d rows cached", err, dropped(), len(rf.cached))
+	}
+	// Past everything: both are given up, and the refusal counts neither.
+	open(2<<20, 0)
+	err = rf.spill.reserve(10 << 20)
+	if r, ok := pitrplan.RefusalOf(err); !ok || r.Token != pitrarchive.TokenPlanTooLarge || !strings.Contains(r.Message, "0 B of cached binlog files") || !dropped() || len(rf.cached) != 0 {
+		t.Fatalf("10 MiB beside 3 spilled: %v, copy dropped %v, %d rows cached", err, dropped(), len(rf.cached))
+	}
+
+	// The node's floor: the filesystem's free space shows what the copy
+	// has written, not what it may still write.
+	rf.limit, rf.cachedBytes = 0, 0
+	floor := int64(256 << 20)
+	rf.freeAfter = func(_ string, n int64) (int64, int64) {
+		free := floor + 4<<20 - n
+		if _, err := os.Stat(part); err != nil {
+			free += 6 << 20 // the dropped copy's bytes are free again
+		}
+		return free, floor
+	}
+	open(8<<20, 6<<20)
+	if err := rf.spill.reserve(2 << 20); err != nil || dropped() {
+		t.Fatalf("2 MiB and the copy's last 2 MiB reach the floor exactly: %v, copy dropped %v", err, dropped())
+	}
+	if err := rf.spill.reserve(3 << 20); err != nil || !dropped() {
+		t.Fatalf("3 MiB and the copy's last 2 MiB pass the floor: %v, copy dropped %v", err, dropped())
+	}
+	rf.spill.Free(mem)
+	rf.tee = nil
+}
+
+// The same through a real download: the index of a large row spills while
+// the row is copied into the cache. At every read of the object, the copy
+// on disk, what is still set aside for it, the cache and the spill fit the
+// sizeLimit; the copy is given up for the spill, and the row is indexed
+// all the same.
+func TestRowFetcherSpillBesideItsOwnCopy(t *testing.T) {
+	spillOnDisk(t, true)
+	const n = 12000
+	a := windowArchive(t, n)
+	fetch := func(limit int64) (peakSpill, size int64, cached bool) {
+		t.Helper()
+		store := &watchedStore{ArchiveStore: a.store}
+		rf, refs, _ := fetcherFor(t, a, store)
+		rf.budget = pitrplan.NewBudget(3 << 20)
+		rf.limit = limit
+		rf.spill = openStagingSpill(pitrDownloadRequest{outDir: rf.stagingDir(), memory: 3 << 20}, rf, rf.budget)
+		if rf.spill == nil {
+			t.Skip("no file-backed spill on this platform")
+		}
+		defer rf.spill.close()
+		ref := refs["a/mysql-bin.000001"]
+		size = rf.entries[ref].Size
+		store.onRead = func() {
+			spill := rf.spill.diskBytes()
+			peakSpill = max(peakSpill, spill)
+			var onDisk int64
+			if st, err := os.Stat(filepath.Join(rf.cacheDir, "1.part")); err == nil {
+				onDisk = blocks(st.Size())
+			}
+			if onDisk > rf.tee.reserved() {
+				t.Fatalf("the open copy holds %d bytes, more than the %d set aside for it", onDisk, rf.tee.reserved())
+			}
+			if limit > 0 && spill+rf.tee.reserved()+rf.cachedBytes+stagingReserve > limit {
+				t.Fatalf("%d spilled and %d set aside for the open copy (%d written), with the reserve, pass the sizeLimit of %d", spill, rf.tee.reserved(), onDisk, limit)
+			}
+		}
+		idx, err := rf.FetchForPlan(context.Background(), ref, true)
+		if err != nil || len(idx.Txns) != n {
+			t.Fatalf("fetch with sizeLimit %d: %v", limit, err)
+		}
+		_, cached = rf.cached[ref]
+		return peakSpill, size, cached
+	}
+	// With room for both, the row is cached and its index spilled.
+	peak, size, cached := fetch(0)
+	if peak == 0 || !cached {
+		t.Fatalf("without a sizeLimit: %d bytes spilled, row cached %v; the test needs a spill beside a cached row", peak, cached)
+	}
+	// Room for the copy when the download starts, not for the copy and the
+	// spill: the copy gives way.
+	limit := stagingReserve + blocks(size) + peak/2
+	if _, _, cached = fetch(limit); cached {
+		t.Fatalf("a sizeLimit of %d holds a row of %d bytes and %d bytes of spill", limit, size, peak)
+	}
+	// Room for both again.
+	if _, _, cached = fetch(stagingReserve + blocks(size) + 2*peak); !cached {
+		t.Fatal("with room for the copy and the spill the row was not cached")
+	}
+}
+
+// watchedStore calls onRead before every read of an object.
+type watchedStore struct {
+	sidecar.ArchiveStore
+	onRead func()
+}
+
+func (w *watchedStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	r, err := w.ArchiveStore.Open(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{readerFunc(func(p []byte) (int, error) {
+		if w.onRead != nil {
+			w.onRead()
+		}
+		return r.Read(p)
+	}), r}, nil
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 // TestStagingInMemory: a memory-backed staging volume (an emptyDir with
 // medium Memory) gets no spill, and neither does one that cannot be
