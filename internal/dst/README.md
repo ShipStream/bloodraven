@@ -775,9 +775,10 @@ by hand, one range per process (`DST_PLANNED_START`, `DST_PLANNED_TRIALS`).
 The numbers below are of the last sweep of the merged tree:
 
 <!-- SWEEP-RESULTS -->
+<!-- Fill in above: the seed ranges swept, the trial count, the count per
+     fingerprint, and any planned-failover class that is still open. -->
 
-No planned-failover finding is open. What the planned path leaves to
-others, by design:
+What the planned path leaves to others, by design:
 
 | State | Who owns it |
 |---|---|
