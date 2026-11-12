@@ -124,9 +124,12 @@ func (c *fakeDragonflyConn) Save(_ context.Context) error {
 	return c.saveErr
 }
 
-func (c *fakeDragonflyConn) ClientKillType(_ context.Context, kind string) error {
-	c.clientKillTypes = append(c.clientKillTypes, kind)
-	return c.clientKillErr
+// KillClients records one pass over the instance's client connections as
+// a "NORMAL" entry in clientKillTypes: normal clients, not replication
+// links.
+func (c *fakeDragonflyConn) KillClients(_ context.Context) (int, error) {
+	c.clientKillTypes = append(c.clientKillTypes, "NORMAL")
+	return 0, c.clientKillErr
 }
 
 func (c *fakeDragonflyConn) HasCommand(_ context.Context, _ string) (bool, error) {
@@ -426,6 +429,9 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 			MasterPort:             6379,
 			MasterLinkStatus:       "up",
 			MasterLastIOSecondsAgo: 0,
+			// At the master's position: the take-back is made only for
+			// a replica proven in sync.
+			SlaveReplOffset: 100,
 		},
 	})
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
@@ -1083,8 +1089,8 @@ func (panicOnInfoConn) ReplicaOfNoOne(_ context.Context) error               { r
 func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 	return nil
 }
-func (panicOnInfoConn) Save(_ context.Context) error                     { return nil }
-func (panicOnInfoConn) ClientKillType(_ context.Context, _ string) error { return nil }
+func (panicOnInfoConn) Save(_ context.Context) error               { return nil }
+func (panicOnInfoConn) KillClients(_ context.Context) (int, error) { return 0, nil }
 func (panicOnInfoConn) HasCommand(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }

@@ -3,10 +3,12 @@ package dragonfly
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -226,17 +228,75 @@ func replTakeoverIOTimeout(secs int64) time.Duration {
 	return time.Duration(secs)*time.Second + replTakeoverServerSlack + replTakeoverClientGrace
 }
 
-// ClientKillType issues `CLIENT KILL TYPE <kind>` against the connected
-// instance, which terminates all client connections of the given kind.
-// Used after a planned-failover Dragonfly promotion to force application
-// clients off the (now-demoted) old master so they reconnect through the
-// active Service and land on the new master.
+// KillClients closes the client connections of the connected instance,
+// except the caller's own and the replication links, and returns how many
+// it closed. It is used after a promotion to take application clients off
+// the old master, so that they reconnect through the active Service and
+// land on the new one.
 //
-// Best-effort: callers ignore errors from this call. Dragonfly returns
-// the count of killed connections; the count is discarded — the operator
-// only cares that the kick was attempted.
-func (c *Client) ClientKillType(ctx context.Context, kind string) error {
-	return c.exec(ctx, "CLIENT", "KILL", "TYPE", kind)
+// Dragonfly (v1.38, v2.1) has no `CLIENT KILL TYPE`: it answers `ERR
+// syntax error`, as it does for SKIPME, USER and MAXAGE. It takes `CLIENT
+// KILL ID <id>`, `ADDR`, `LADDR` and the old `<ip:port>` form. So the
+// connections are listed (`CLIENT LIST`) and closed one by one by id. A
+// replica's links to this instance are the connections named `repl_ctrl_N`
+// and `repl_flow_N`; they are left alone, because cutting them makes a
+// replica that is in sync start over.
+//
+// A connection that is gone by the time its turn comes answers 0 and is
+// not an error. A server error on one connection does not stop the rest;
+// the first one is returned with the count. A transport error ends the
+// call: the connection must not be used afterwards.
+func (c *Client) KillClients(ctx context.Context) (int, error) {
+	own, err := c.execReply(ctx, "CLIENT", "ID")
+	if err != nil {
+		return 0, fmt.Errorf("dragonfly: CLIENT ID: %w", err)
+	}
+	list, err := c.execReply(ctx, "CLIENT", "LIST")
+	if err != nil {
+		return 0, fmt.Errorf("dragonfly: CLIENT LIST: %w", err)
+	}
+	killed := 0
+	var firstErr error
+	for _, id := range clientIDsToKill(list, strings.TrimSpace(own)) {
+		reply, err := c.execReply(ctx, "CLIENT", "KILL", "ID", id)
+		if err != nil {
+			var se *ServerError
+			if !errors.As(err, &se) {
+				return killed, fmt.Errorf("dragonfly: CLIENT KILL ID %s: %w", id, err)
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("dragonfly: CLIENT KILL ID %s: %w", id, err)
+			}
+			continue
+		}
+		if n, convErr := strconv.Atoi(strings.TrimSpace(reply)); convErr == nil {
+			killed += n
+		}
+	}
+	return killed, firstErr
+}
+
+// clientIDsToKill returns, from a `CLIENT LIST` body, the ids of the
+// connections KillClients closes: every one but own and the replication
+// links. A line without an id is skipped.
+func clientIDsToKill(list, own string) []string {
+	var ids []string
+	for _, line := range strings.Split(list, "\n") {
+		id, name := "", ""
+		for _, field := range strings.Fields(line) {
+			switch {
+			case strings.HasPrefix(field, "id="):
+				id = strings.TrimPrefix(field, "id=")
+			case strings.HasPrefix(field, "name="):
+				name = strings.TrimPrefix(field, "name=")
+			}
+		}
+		if id == "" || id == own || strings.HasPrefix(name, "repl_ctrl_") || strings.HasPrefix(name, "repl_flow_") {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // Save asks Dragonfly to synchronously persist a snapshot to its configured

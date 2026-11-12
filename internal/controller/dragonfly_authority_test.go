@@ -328,10 +328,14 @@ func (c *lagTargetConn) InfoReplication(context.Context) (dragonfly.ReplicationI
 	return dragonfly.ReplicationInfo{Role: "slave", MasterHost: "lion-dragonfly-dc1.shared-lion.svc.cluster.local", MasterPort: 6379, MasterLinkStatus: "up"}, nil
 }
 
+// ReplTakeover takes longer than the poll interval and then succeeds. (A
+// takeover that fails while dc1 still answers as a master is not followed
+// by REPLICAOF NO ONE, so nothing would be promoted.)
 func (c *lagTargetConn) ReplTakeover(context.Context, time.Duration) error {
 	c.s.takeoverSent.Store(true)
-	time.Sleep(150 * time.Millisecond) // the replica could not catch up in time
-	return errors.New("takeover timed out")
+	time.Sleep(150 * time.Millisecond)
+	c.s.promoted.Store(true)
+	return nil
 }
 
 func (c *lagTargetConn) ReplicaOfNoOne(context.Context) error {

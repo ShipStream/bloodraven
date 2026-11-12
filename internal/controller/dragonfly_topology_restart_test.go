@@ -253,8 +253,8 @@ func TestDragonflyManager_ReconcileReplication_KeepsCacheOverRestartedMaster(t *
 	replica := dragonflyReplicaOf(restartTestDC1Host)
 	replica.MasterLinkStatus, replica.MasterReplID = "down", restartTestOldReplID
 	snaps := []DragonflySiteSnapshot{
-		{Name: "dc1", Reachable: true, Keys: &zero, Info: dragonfly.ReplicationInfo{Role: "master", MasterReplID: restartTestNewReplID}},
-		{Name: "dc2", Reachable: true, Keys: &many, Info: replica},
+		{Name: "dc1", Reachable: true, PersistRead: true, Keys: &zero, Info: dragonfly.ReplicationInfo{Role: "master", MasterReplID: restartTestNewReplID}},
+		{Name: "dc2", Reachable: true, PersistRead: true, Keys: &many, Info: replica},
 	}
 	h.mgr.reconcileReplication(context.Background(), fg, snaps, false)
 	if len(h.dc2.replicaOfArgs) != 0 {
@@ -536,8 +536,9 @@ func TestDragonflyManager_Tick_MissCountStartsAgainWithTheActiveSite(t *testing.
 
 // The emergency and rollout promotion does not read a REPLTAKEOVER error
 // as "no role changed": after "Operation canceled", as after any other
-// failure, it sends REPLICAOF NO ONE on a fresh connection, so the target
-// is a master whether or not the old master completes the takeover later.
+// failure, it sends REPLICAOF NO ONE on a fresh connection when the old
+// master no longer answers as a master, so the target is a master whether
+// or not the old master completes the takeover later.
 func TestDragonflyManager_Promote_CanceledTakeoverStillPromotes(t *testing.T) {
 	h := newRestartHarness(t, nil)
 	first := &fakeDragonflyConn{info: h.dc2.info, keys: 300,
@@ -545,6 +546,12 @@ func TestDragonflyManager_Promote_CanceledTakeoverStillPromotes(t *testing.T) {
 	fallback := &fakeDragonflyConn{info: h.dc2.info, keys: 300}
 	h.conn.programQueue(holdTestDC2, first)
 	h.conn.program(holdTestDC2, fallback)
+	// The old master answers the probe before the takeover and is gone
+	// after it (it completed the takeover and exited).
+	h.conn.programQueue(holdTestDC1, h.dc1)
+	h.conn.mu.Lock()
+	delete(h.conn.byAdd, holdTestDC1)
+	h.conn.mu.Unlock()
 	if !h.mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1") {
 		t.Fatalf("TryEmergencyPromote = false\n%s", h.logs.String())
 	}

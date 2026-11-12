@@ -189,11 +189,21 @@ func TestDragonflyNativeManagerKeepsCacheOverRestartedMaster(t *testing.T) {
 			left.info, left.keys, oldID, keys)
 	}
 
+	// An application client that is connected to the restarted instance.
+	app := dial("dc1")
+	defer func() { _ = app.Close() }()
+
 	mgr.Tick(ctx)
 	promoted := observe("dc2")
 	if promoted.info.Role != "master" || promoted.keys != keys {
 		t.Fatalf("after the cycle that saw the restarted master, dc2 reports role %q with %d keys; want a master with %d (not re-attached and emptied)",
 			promoted.info.Role, promoted.keys, keys)
+	}
+	// The promotion closed the old master's client connections (CLIENT LIST
+	// and CLIENT KILL ID on the real server), so the client reconnects
+	// through the active Service.
+	if err := app.Ping(ctx); err == nil {
+		t.Fatal("a client of the replaced master still answers after the promotion; its connection was not closed")
 	}
 	st := dragonflyStatusOf(t, c, key)
 	if st.ActiveSite != "dc2" || st.LastPromotionTarget != "dc2" {
@@ -210,8 +220,18 @@ func TestDragonflyNativeManagerKeepsCacheOverRestartedMaster(t *testing.T) {
 	}
 
 	// Dragonfly follows MySQL (active on dc1) back once the promotion is no
-	// longer recent: a REPLTAKEOVER, which loses nothing. The stamp is
-	// aged here; in a cluster this is pendingPromotionActiveSiteTTL later.
+	// longer recent and dc1 is proven in sync with dc2 by the positions the
+	// real servers report: a REPLTAKEOVER, which loses nothing. Not before:
+	// the record is recent and dc1 was just replaced.
+	for i := 0; i < 2; i++ {
+		mgr.Tick(ctx)
+	}
+	if got := dragonflyStatusOf(t, c, key).ActiveSite; got != "dc2" {
+		t.Fatalf("status.dragonfly.activeSite = %q right after the promotion, want dc2 until the take-back's delay has passed", got)
+	}
+	// The stamp is aged and the manager's clock moved here; in a cluster
+	// this is pendingPromotionActiveSiteTTL later.
+	mgr.now = func() time.Time { return time.Now().Add(2 * dragonflyTakeBackBaseDelay) }
 	var live v1alpha1.MysqlFailoverGroup
 	if err := c.Get(ctx, key, &live); err != nil {
 		t.Fatal(err)

@@ -191,6 +191,13 @@ func (c *siteStateConn) InfoReplication(context.Context) (dragonfly.ReplicationI
 		MasterPort: 6379, MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0}, nil
 }
 
+// ReplicationPosition follows the role the site reports now, so the
+// take-back's sync check sees a master and a replica at the same position.
+func (c *siteStateConn) ReplicationPosition(ctx context.Context) (dragonfly.Position, error) {
+	info, _ := c.InfoReplication(ctx)
+	return fakeDragonflyPosition(info)
+}
+
 func (c *siteStateConn) ReplTakeover(context.Context, time.Duration) error {
 	c.s.mu.Lock()
 	c.s.master = c.site

@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -36,10 +37,14 @@ func pfSyncFixture(t *testing.T, policy string, source, target DragonflyConnecti
 
 // A target that refuses the position command, or reports its position in
 // another form than the source, cannot be compared however long the run
-// waits. onSyncTimeout is applied at once; MySQL is not held fenced for
-// maxSyncWait (an hour here, 30s by default).
-func TestPlannedFailoverDragonflySync_UnprovableTargetDoesNotWait(t *testing.T) {
-	linked := dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"}
+// waits. With the link checks holding (the target reports stable sync with
+// the instance that is the source now), the run goes on to REPLTAKEOVER at
+// once, under either policy, without recording sessions lost, and says so:
+// MySQL is not held fenced for maxSyncWait (an hour here, 30s by default),
+// and onSyncTimeout=Fail does not roll every planned failover of such a
+// group back.
+func TestPlannedFailoverDragonflySync_UnprovableTargetReliesOnTheTakeover(t *testing.T) {
+	linked := dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterReplID: "a"}
 	refusals := []struct {
 		name   string
 		target func() *fakeDragonflyConn
@@ -62,28 +67,83 @@ func TestPlannedFailoverDragonflySync_UnprovableTargetDoesNotWait(t *testing.T) 
 		}},
 	}
 	for _, tc := range refusals {
-		t.Run(tc.name+"/Proceed", func(t *testing.T) {
-			r, nn := pfSyncFixture(t, "Proceed", syncProofMaster("a", 24, 28), tc.target())
-			pfDFPass(t, r, nn)
-			pf := fetchFG(t, r, nn).Status.PlannedFailover
-			if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsLost ||
-				pf.Dragonfly.Reason != v1alpha1.DragonflyPlannedReasonSyncTimeout || !strings.Contains(pf.Dragonfly.Message, "cannot be proven") {
-				t.Fatalf("phase = %s dragonfly = %+v, want the takeover at once with sessions Lost and the reason", pf.Phase, pf.Dragonfly)
-			}
-			if pf.Dragonfly.SyncWaitSeconds == nil || *pf.Dragonfly.SyncWaitSeconds > 1 {
-				t.Fatalf("syncWaitSeconds = %v, want no wait", pf.Dragonfly.SyncWaitSeconds)
-			}
-		})
-		t.Run(tc.name+"/Fail", func(t *testing.T) {
+		for _, policy := range []string{"Proceed", "Fail"} {
+			t.Run(tc.name+"/"+policy, func(t *testing.T) {
+				r, nn := pfSyncFixture(t, policy, syncProofMaster("a", 24, 28), tc.target())
+				pfDFPass(t, r, nn)
+				pf := fetchFG(t, r, nn).Status.PlannedFailover
+				if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions == v1alpha1.DragonflySessionsLost ||
+					pf.Dragonfly.Reason != "" || !strings.Contains(pf.Dragonfly.Message, "relying on REPLTAKEOVER") {
+					t.Fatalf("phase = %s dragonfly = %+v, want the takeover at once, no sessions-lost mark, and the reason", pf.Phase, pf.Dragonfly)
+				}
+				if pf.Dragonfly.Takeover == nil || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverIntended {
+					t.Fatalf("takeover = %+v, want Intended", pf.Dragonfly.Takeover)
+				}
+				if pf.Dragonfly.SyncWaitSeconds == nil || *pf.Dragonfly.SyncWaitSeconds > 1 {
+					t.Fatalf("syncWaitSeconds = %v, want no wait", pf.Dragonfly.SyncWaitSeconds)
+				}
+				events := drainEventsCh(r.Recorder.(*record.FakeRecorder).Events, 8, 50*time.Millisecond)
+				if !eventsContain(events, v1alpha1.EventDragonflySyncUnproven) || eventsContain(events, v1alpha1.EventDragonflySyncTimedOut) {
+					t.Fatalf("events = %v, want DragonflySyncUnproven and no DragonflySyncTimedOut", events)
+				}
+			})
+		}
+	}
+	// A source that refuses the position command is the same case: the
+	// record says Unavailable, and the link checks decide.
+	t.Run("source refuses the position command", func(t *testing.T) {
+		fg := plannedFailoverFGWithDragonfly("Fail")
+		fg.Status.PlannedFailover.Settings.Dragonfly.MaxSyncWait = metav1.Duration{Duration: time.Hour}
+		r, _, _ := pfDFReconciler(t, fg)
+		source := syncProofMaster("a", 24, 28)
+		source.positionErr = &dragonfly.ServerError{Message: "ERR unknown command `DFLY`"}
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFIad: source, pfDFPdx: syncProofReplica("a", 1, 1)})
+		nn := fgNN(fg)
+		pfDFPass(t, r, nn)
+		if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetUnavailable {
+			t.Fatalf("dragonfly = %+v, want sourceOffsetState Unavailable", pf.Dragonfly)
+		}
+		pfDFPass(t, r, nn)
+		pf := fetchFG(t, r, nn).Status.PlannedFailover
+		if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions == v1alpha1.DragonflySessionsLost {
+			t.Fatalf("phase = %s dragonfly = %+v, want the takeover, not a rollback", pf.Phase, pf.Dragonfly)
+		}
+	})
+	// The link checks are what is left, so they have to hold. A target that
+	// refuses the position command and is not in stable sync with the source
+	// is waited for like any other, and onSyncTimeout applies at maxSyncWait.
+	notLinked := []struct {
+		name   string
+		target func() *fakeDragonflyConn
+	}{
+		{"follows another replication id", func() *fakeDragonflyConn {
+			return &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterReplID: "z"},
+				positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}
+		}},
+		{"reports no replication id", func() *fakeDragonflyConn {
+			return &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
+				positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}
+		}},
+	}
+	for _, tc := range notLinked {
+		t.Run(tc.name+" waits, then onSyncTimeout", func(t *testing.T) {
 			r, nn := pfSyncFixture(t, "Fail", syncProofMaster("a", 24, 28), tc.target())
+			for i := 0; i < 3; i++ {
+				pfDFPass(t, r, nn)
+			}
+			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {
+				t.Fatalf("phase = %s, want the wait to continue: the link checks do not hold", pf.Phase)
+			}
+			r.plannedClock.(*clock.FakeClock).Advance(2 * time.Hour)
 			pfDFPass(t, r, nn)
 			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack ||
 				pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonDragonflySyncTimeout {
-				t.Fatalf("phase = %s rollback = %+v, want RollingBack at once", pf.Phase, pf.Rollback)
+				t.Fatalf("phase = %s rollback = %+v, want RollingBack at maxSyncWait", pf.Phase, pf.Rollback)
 			}
 		})
 	}
 	// What may pass is waited for, as before.
+	linked.MasterReplID = ""
 	waits := []struct {
 		name   string
 		target func() *fakeDragonflyConn

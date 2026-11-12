@@ -236,6 +236,10 @@ type dragonflyRolloutState struct {
 	notReady      string
 	notReadySince time.Time
 	stallReported bool
+	// unprovenReported is set once the rollout has said that the target's
+	// sync could not be proven by position and that it relies on
+	// REPLTAKEOVER (DragonflySyncUnproven).
+	unprovenReported bool
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch;create;update;patch;delete
