@@ -196,6 +196,10 @@ type MysqlFailoverGroupReconciler struct {
 
 	dragonflyRolloutMu      sync.Mutex
 	dragonflyRolloutBackoff map[dragonflyRolloutKey]dragonflyRolloutState
+	// dragonflyRolloutWaits is what each group's Dragonfly template rollout
+	// is waiting for, when that is not its promotion target's sync
+	// (noteDragonflyRolloutWait). Guarded by dragonflyRolloutMu.
+	dragonflyRolloutWaits map[types.NamespacedName]dragonflyRolloutWaitState
 
 	restorePrivMu       sync.Mutex
 	restorePrivRejected map[types.NamespacedName]restorePrivilegeCheck

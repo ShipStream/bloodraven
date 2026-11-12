@@ -583,7 +583,7 @@ func TestFixR1_RolloutPromotionRespectsClaimAndHold(t *testing.T) {
 			dials++
 			return &fakeDragonflyConn{}, nil
 		}
-		if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), fresh, "dc2", "dc1"); promoted || !deferred || dials != 0 {
+		if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), fresh, "dc2", "dc1", v1alpha1.SiteSpec{Name: "dc1"}); promoted || !deferred || dials != 0 {
 			t.Errorf("hold (condition=%v): promoted=%v deferred=%v dials=%d, want deferred with nothing dialled", viaCondition, promoted, deferred, dials)
 		}
 	}
