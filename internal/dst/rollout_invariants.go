@@ -361,7 +361,7 @@ func (s *rolloutSim) needsHuman(g *rolloutGroupSim, fg *v1alpha1.MysqlFailoverGr
 // are the groups that wait behind it while it holds the slot.
 func (s *rolloutSim) checkEnd() []Violation {
 	var out []Violation
-	last := s.trial.Polls - 1
+	last := s.step
 	add := func(invariant, detail string) {
 		out = append(out, Violation{Invariant: invariant, Poll: last, Detail: detail})
 	}

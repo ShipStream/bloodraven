@@ -187,18 +187,17 @@ type rolloutSim struct {
 
 	// mu guards everything below: the interceptor and the pod probe run
 	// on the ordered update's goroutine.
-	mu          sync.Mutex
-	proc        *rolloutProc
-	dead        bool
-	deadUntil   int
-	countdown   int
-	preApply    bool
-	crashDown   int
-	step        int
-	violations  []Violation
-	res         RolloutResult
-	seen        map[string]struct{}
-	deathInStep bool
+	mu         sync.Mutex
+	proc       *rolloutProc
+	dead       bool
+	deadUntil  int
+	countdown  int
+	preApply   bool
+	crashDown  int
+	step       int
+	violations []Violation
+	res        RolloutResult
+	seen       map[string]struct{}
 	// lastState is the last fleet line of the step log (capture mode).
 	lastState string
 }
@@ -431,7 +430,6 @@ func (s *rolloutSim) killProcessLocked(during string) {
 		return
 	}
 	s.dead = true
-	s.deathInStep = true
 	for _, g := range s.groups {
 		g.cluster.KillOperator(during)
 	}
@@ -480,7 +478,6 @@ func (s *rolloutSim) run() {
 	for p := 0; p < s.trial.Polls; p++ {
 		s.mu.Lock()
 		s.step = p
-		s.deathInStep = false
 		s.mu.Unlock()
 		for _, g := range s.groups {
 			g.cluster.BeginPoll(p)
@@ -656,9 +653,16 @@ func (s *rolloutSim) applyOp(op Op, p int) {
 		s.fixPod(g, op.Site)
 	case OpSiteDown:
 		for _, t := range g.cluster.Truth() {
-			if t.Name == op.Site && t.ReadOnly {
-				g.cluster.Crash(op.Site)
+			if t.Name != op.Site {
+				continue
 			}
+			if !t.ReadOnly {
+				// A handoff made it the primary since the schedule was
+				// drawn; stopping it would be a failover trial.
+				s.logf("op skipped: %s/%s is writable", op.Group, op.Site)
+				continue
+			}
+			g.cluster.Crash(op.Site)
 		}
 	case OpSiteUp:
 		g.cluster.Recover(op.Site, false, false)

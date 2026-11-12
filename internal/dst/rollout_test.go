@@ -99,10 +99,12 @@ func (c rolloutCoverage) String() string {
 // DST_ROLLOUT_TRIALS and DST_ROLLOUT_START run another range instead (one
 // range per process), for a wider sweep.
 func TestDST_RolloutQuick(t *testing.T) {
-	results := rolloutSweep()
+	var results []TrialResult
 	if os.Getenv("DST_ROLLOUT_TRIALS") != "" || os.Getenv("DST_ROLLOUT_START") != "" {
 		results = runBatch(uint64(envInt("DST_ROLLOUT_START", 1)), envInt("DST_ROLLOUT_TRIALS", rolloutSweepSeeds),
 			runtime.GOMAXPROCS(0), GenerateRolloutTrial)
+	} else {
+		results = rolloutSweep()
 	}
 	failures := map[string]uint64{}
 	counts := map[string]int{}
@@ -121,7 +123,14 @@ func TestDST_RolloutQuick(t *testing.T) {
 	for fp, seed := range failures {
 		t.Logf("finding: %s (%d/%d trials, first seed %d)", fp, counts[fp], len(results), seed)
 	}
+	var needsHuman []uint64
+	for _, r := range results {
+		if len(r.Rollout.NeedsHuman) > 0 {
+			needsHuman = append(needsHuman, r.Trial.Seed)
+		}
+	}
 	t.Logf("coverage: %s", coverRollout(results))
+	t.Logf("seeds that left a group for a human (README, Inherent): %v", needsHuman)
 }
 
 // TestRolloutSweep_ReachesTheMidRollStates: the quick range must keep
@@ -281,5 +290,53 @@ func TestDST_RolloutRepro(t *testing.T) {
 	t.Logf("signature: %s", r.Signature)
 	for _, v := range r.Violations {
 		t.Logf("VIOLATION: %s", v)
+	}
+}
+
+// rolloutHandBuilt is a rollout trial written out by hand: the fleet and the
+// ops, with the warm-up and a settle window around them.
+func rolloutHandBuilt(groups []RolloutGroup, healAt int, ops ...Op) Trial {
+	return Trial{
+		WarmupPolls: rolloutWarmup,
+		HealAt:      healAt,
+		Polls:       healAt + 60,
+		Rollout: RolloutPlan{
+			Enabled: true, Groups: groups, StartGraceSteps: 8, StallAfterSteps: 6, Ops: ops,
+		},
+	}
+}
+
+// TestRollout_OperatorRestartDuringRecreateRollNeedsAHuman is the inherent
+// class of the rollout trials (README "Paced rollouts"), written out so
+// that it does not move with the generator: a Recreate roll restarts the
+// primary, the operator restarts before the group's status names an active
+// site again, and the next process finds two read-only sites and no
+// authority on record. The model's pods are away for no time at all, so it
+// takes a second release one step after the first to restart the primary
+// under the new process; in a cluster the restart alone does it.
+//
+// The group is left for a human and the fleet waits behind it; neither is
+// a violation. Without the second restart the same schedule converges.
+func TestRollout_OperatorRestartDuringRecreateRollNeedsAHuman(t *testing.T) {
+	groups := []RolloutGroup{
+		{Name: "ant", Sites: rolloutSiteNames[:2], Recreate: true},
+		{Name: "bee", Sites: rolloutSiteNames[:2]},
+	}
+	wedged := RunTrial(rolloutHandBuilt(groups, 20,
+		Op{At: 4, Kind: OpRelease},
+		Op{At: 5, Kind: OpRelease, N: 1},
+	), true, nil)
+	if wedged.Failed() {
+		t.Fatalf("violations: %v\n%s", wedged.Violations, strings.Join(wedged.Rollout.Log, "\n"))
+	}
+	if !reflect.DeepEqual(wedged.Rollout.NeedsHuman, []string{"ant"}) || wedged.Rollout.Completed != 0 {
+		t.Fatalf("NeedsHuman = %v, completed = %d; want ant left for a human and bee waiting behind it\n%s",
+			wedged.Rollout.NeedsHuman, wedged.Rollout.Completed, strings.Join(wedged.Rollout.Log, "\n"))
+	}
+
+	healed := RunTrial(rolloutHandBuilt(groups, 20, Op{At: 4, Kind: OpRelease}), true, nil)
+	if healed.Failed() || len(healed.Rollout.NeedsHuman) > 0 || healed.Rollout.Completed != 2 {
+		t.Fatalf("without the second restart: violations %v, NeedsHuman %v, completed %d\n%s",
+			healed.Violations, healed.Rollout.NeedsHuman, healed.Rollout.Completed, strings.Join(healed.Rollout.Log, "\n"))
 	}
 }
