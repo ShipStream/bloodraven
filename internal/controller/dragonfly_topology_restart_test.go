@@ -109,12 +109,12 @@ func TestDragonflyManager_Tick_RestartedEmptyMaster(t *testing.T) {
 		if promoted, _ := h.outcome(); promoted {
 			t.Fatalf("promoted after %d missed observations, want none before %d", defaultDragonflyMasterLossThreshold-1, defaultDragonflyMasterLossThreshold)
 		}
-		// While the master is gone the replica is told to follow it again,
-		// as before: Dragonfly refuses that and the replica keeps its keys.
-		if len(h.dc2.replicaOfArgs) == 0 {
-			t.Fatal("no REPLICAOF sent to the link-down replica while the master was unobserved")
+		// While the master is gone a replica that holds keys is not told
+		// to follow it again: the command would attach it to the master's
+		// empty replacement if that came up while the replica held it.
+		if len(h.dc2.replicaOfArgs) != 0 {
+			t.Fatalf("REPLICAOF %v sent to a replica that holds keys while the master was unobserved", h.dc2.replicaOfArgs)
 		}
-		h.dc2.replicaOfArgs = nil
 		h.masterRestarted(0)
 		h.tick(1)
 		h.wantPromotedNotReattached("the cycle that saw the master back")
@@ -472,10 +472,12 @@ func (c *replicaOfDeadline) ReplicaOf(ctx context.Context, host string, port int
 }
 
 // A REPLICAOF that points a replica at a master the cycle did not reach is
-// bounded at a second: a replica holds it for about 20s when the master's
-// address swallows packets, and the cycle is one of those the failure
-// threshold counts. Toward a master that answered it has no bound of its
-// own.
+// sent only to a replica that holds nothing, and is bounded at a second: a
+// replica holds it for about 20s when the master's address swallows
+// packets, and the cycle is one of those the failure threshold counts. A
+// replica that holds keys gets none: the master may be returning as a new,
+// empty instance, and the command would discard the keys for it. Toward a
+// master that answered it has no bound of its own.
 func TestDragonflyManager_Tick_ReplicaOfTowardAMissedMasterIsBounded(t *testing.T) {
 	h := newRestartHarness(t, nil)
 	replica := &replicaOfDeadline{fakeDragonflyConn: h.dc2}
@@ -494,6 +496,11 @@ func TestDragonflyManager_Tick_ReplicaOfTowardAMissedMasterIsBounded(t *testing.
 	}
 	h.missMaster()
 	h.dc2.replicaOfArgs = nil
+	h.tick(1)
+	if len(h.dc2.replicaOfArgs) != 0 {
+		t.Fatalf("REPLICAOF %v sent toward a missed master to a replica that holds keys", h.dc2.replicaOfArgs)
+	}
+	h.dc2.keys = 0
 	h.tick(1)
 	if len(h.dc2.replicaOfArgs) == 0 || !replica.bounded || replica.remaining > dragonflyReplicaOfMissedMasterBudget || replica.remaining <= 0 {
 		t.Fatalf("REPLICAOF toward a missed master: sent=%v bounded=%v remaining=%s, want sent within %s",

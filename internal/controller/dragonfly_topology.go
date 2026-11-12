@@ -1481,10 +1481,11 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			// topology change).
 			//
 			// While the master is the instance the replica synced from,
-			// or does not answer, REPLICAOF to the same target costs the
-			// replica nothing: it is refused in under 200ms against a
-			// dead master (`ERR replication cancelled`) and the replica
-			// keeps its keys and the replication id it followed.
+			// REPLICAOF to the same target costs the replica nothing.
+			// Against a master that stays dead it is refused in under
+			// 200ms (`ERR replication cancelled`) and the replica keeps
+			// its keys and the replication id it followed; a master that
+			// was not observed may not stay dead, though (see below).
 			//
 			// It is not safe against a master that came back as a new
 			// instance. With --break_replication_on_master_restart the
@@ -1512,6 +1513,21 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 				continue
 			case dragonflyRestartStale:
 				m.reportStaleReplica(fg, active, activeSnap, &snap, why)
+			}
+			// A master this cycle did not reach may be returning as a
+			// new, empty instance: its pod is recreated within seconds
+			// of a kill. A replica holds REPLICAOF while it connects and
+			// does not drop it when the operator's budget ends, so a
+			// command sent now attaches to whatever answers at that
+			// address a moment later and discards the replica's keys
+			// for it (seen on a cluster: the cache was gone 30ms before
+			// the returned master was observed and the replica
+			// promoted). Only a replica known to hold nothing is
+			// pointed at a master that was not observed; the others
+			// wait for an observation, which decides between
+			// re-attaching and promoting them.
+			if (activeSnap == nil || !activeSnap.Reachable) && !snap.holdsNoKeys() {
+				continue
 			}
 			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort, replicaOfBudget(activeSnap))
 		case dragonfly.RoleUnconfigured:
