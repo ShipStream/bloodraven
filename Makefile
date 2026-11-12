@@ -112,9 +112,12 @@ test-envtest: ## Run envtest controller tests (real API server, no cluster)
 E2E_PROFILE ?= release
 E2E_JUNIT_OUT ?= playground/chaos-results/e2e-$(E2E_PROFILE)-junit.xml
 E2E_ARGS ?=
+# E2E_SHARD=<i>/<n> runs one of n disjoint parts of the profile (CI runs the
+# full profile as 4 jobs, each on its own cluster). Empty runs all of it.
+E2E_SHARD ?=
 
-test-e2e: build-playground-chaos ## Run real-cluster E2E tests (E2E_PROFILE=release|smoke|full; requires kind/k3d)
-	./bin/playground-chaos run-all --profile="$${E2E_PROFILE}" --auto-reset --continue-on-failure --junit-out="$${E2E_JUNIT_OUT}" $(E2E_ARGS)
+test-e2e: build-playground-chaos ## Run real-cluster E2E tests (E2E_PROFILE=release|smoke|full, E2E_SHARD=<i>/<n>; requires kind/k3d)
+	./bin/playground-chaos run-all --profile="$(E2E_PROFILE)" --shard="$(E2E_SHARD)" --auto-reset --continue-on-failure --junit-out="$(E2E_JUNIT_OUT)" $(E2E_ARGS)
 
 test-e2e-smoke: build-playground-chaos ## Run real-cluster E2E smoke (smoke profile — requires kind/k3d)
 	$(MAKE) test-e2e E2E_PROFILE=smoke E2E_JUNIT_OUT=playground/chaos-results/e2e-smoke-junit.xml

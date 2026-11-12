@@ -66,7 +66,10 @@ check mysql-launcher 'internal/controller/mysql_launcher.go' true false false tr
 check mysql-launcher-native-test 'internal/controller/mysql_launcher_native_test.go' true false false true false
 check encryption-launcher-steps 'internal/controller/encryption.go' true false false true false
 check controller-reconciler 'internal/controller/reconciler.go' true false false false false
-check e2e-workflow '.github/workflows/e2e.yml'        false false false false false
+# Go tests read the E2E workflows (shard matrix, job timeouts, scenario
+# lists), so editing one runs the Go jobs; other workflows do not.
+check e2e-workflow '.github/workflows/e2e.yml'        true  false false false false
+check e2e-reusable-workflow '.github/workflows/_e2e.yml' true false false false false
 # The Dragonfly rule: the client, the controller's Dragonfly files, the
 # image pins. None of them starts the PITR job.
 check dragonfly-client 'internal/dragonfly/position.go' true false false false true

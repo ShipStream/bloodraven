@@ -148,7 +148,7 @@ The chart repo is served directly off the `gh-pages` branch via `raw.githubuserc
 **Triggers:**
 
 - Nightly schedule (release profile plus dedicated encryption scenario)
-- Manual dispatch with profile selection (smoke / release / full) plus encryption
+- Manual dispatch with profile selection (smoke / release / full) plus encryption. `full` runs as four shard jobs (see below)
 - Pull requests while the `e2e` label is present (smoke profile plus encryption; re-runs on push, adding other labels does not re-trigger)
 
 The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI and deploys the playground. Normal jobs run `playground-chaos run-all` with the selected profile. The dedicated encryption job creates the group with MySQL and escrow TLS from its first generation, adopts encryption with `playground/enable-encryption.sh`, and runs `48-keyring-seal-and-rotation` explicitly. This covers adoption, sealing, key placement, replica rotation, pod replacement, and post-rotation reads against real MySQL without overlapping a separate live TLS rollout. Jobs upload JUnit results where available, chaos forensics, setup logs, and kind logs as artifacts.
@@ -158,9 +158,13 @@ The reusable image producer (`_e2e-images.yml`) builds the five playground image
 Profiles:
 | Profile | Scenarios | Use case |
 |---|---|---|
-| `smoke` | 3 (~3-5 min) | PR label gate, fast feedback |
-| `release` | 10 (~20-30 min) | Release and nightly gate |
-| `full` | All registered | Full regression (manual only) |
+| `smoke` | 4 (~5 min) | PR label gate, release gate, fast feedback |
+| `release` | 28, one job | Nightly and post-release |
+| `full` | All registered except quarantined (63), four shard jobs | Full regression (manual dispatch only) |
+
+**Full profile shards.** One job cannot finish the full profile inside its timeout (#236), so `e2e.yml` runs it as a matrix of four jobs named `e2e (shard N) / Real-cluster E2E (full N/4)`. Each creates its own kind cluster and runs `playground-chaos run-all --profile=full --shard=N/4`. The runner assigns the scenarios (`runner.SelectShard`): the parts are disjoint, their union is the profile, and they are balanced by each scenario's `Timeout` plus a reset allowance (the runner keeps no measured durations). `./bin/playground-chaos list --profile=full --shard=N/4` prints a part. Go tests pin the layout: `TestProfileShardsCoverProfile` (no scenario can fall out of every shard) and `TestFullProfileShardsFitCIJob` (each shard's budget fits the 300-minute job timeout; when it fails, add a shard to the matrix list and raise `shards` in `e2e.yml`). A failed shard fails the run; the other shards still finish (`fail-fast: false`). Artifacts are per shard: `e2e-full-shard-N-of-4-junit`, `-forensics`, `-kind-logs`, `-setup-logs`.
+
+Every E2E job writes a per-scenario table (pass, fail, not run) to its job summary. `run-all` rewrites the JUnit report after each scenario, so a job that is cancelled at its timeout still uploads the results so far and its forensics, and the summary lists the scenarios that never ran.
 
 The release workflow (`.github/workflows/release.yml`) blocks publishing on both the smoke failover gate and the dedicated encryption adoption/rotation gate. The broader release profile still runs after publishing for extended validation.
 

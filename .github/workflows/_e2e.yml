@@ -36,6 +36,19 @@ on:
         required: false
         type: string
         default: ""
+      shard:
+        description: >-
+          Run only this part (1..shards) of the profile, on this job's own
+          cluster; 0 runs the whole profile. The caller starts one job per
+          part (a matrix). Ignored with `scenario`.
+        required: false
+        default: 0
+        type: number
+      shards:
+        description: "Number of parts the profile is split into when `shard` is set"
+        required: false
+        default: 1
+        type: number
       enable-encryption:
         description: "Convert the default playground to TLS + encryption before running"
         required: false
@@ -55,14 +68,23 @@ env:
   SKIP_IMAGE_BUILD: "1"
 
 concurrency:
-  group: e2e-${{ github.workflow }}-${{ github.ref }}-${{ inputs.scenario != '' && inputs.scenario || inputs.profile }}
+  # The shard is part of the group: the shards of one profile run side by
+  # side and must not cancel each other.
+  group: e2e-${{ github.workflow }}-${{ github.ref }}-${{ inputs.scenario != '' && inputs.scenario || inputs.profile }}-${{ inputs.shard }}
   cancel-in-progress: true
 
 jobs:
   e2e:
-    name: Real-cluster E2E (${{ inputs.scenario != '' && inputs.scenario || inputs.profile }})
+    name: Real-cluster E2E (${{ inputs.scenario != '' && inputs.scenario || inputs.profile }}${{ inputs.scenario == '' && inputs.shard != 0 && format(' {0}/{1}', inputs.shard, inputs.shards) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      # What this job runs, for artifact and report names: the caller's
+      # label, else the scenario list, else the profile, with the shard
+      # appended so the shards of one profile upload distinct artifacts.
+      E2E_LABEL: ${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || (inputs.shard != 0 && format('{0}-shard-{1}-of-{2}', inputs.profile, inputs.shard, inputs.shards) || inputs.profile)) }}
+      E2E_JUNIT_OUT: playground/chaos-results/e2e-${{ inputs.scenario != '' && 'scenarios' || (inputs.shard != 0 && format('{0}-shard-{1}-of-{2}', inputs.profile, inputs.shard, inputs.shards) || inputs.profile) }}-junit.xml
+      E2E_SHARD: ${{ inputs.scenario == '' && inputs.shard != 0 && format('{0}/{1}', inputs.shard, inputs.shards) || '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -151,17 +173,21 @@ jobs:
         if: inputs.scenario == ''
         env:
           E2E_PROFILE: ${{ inputs.profile }}
-          E2E_JUNIT_OUT: playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
-        run: make test-e2e E2E_PROFILE="$E2E_PROFILE" E2E_JUNIT_OUT="$E2E_JUNIT_OUT"
+        run: |
+          # A shard runs its part of the profile (run-all --shard=<i>/<n>);
+          # the other parts run in sibling jobs, each on its own cluster.
+          # The planned IDs feed the summary step (which scenarios never ran).
+          ./bin/playground-chaos list --profile="$E2E_PROFILE" --shard="$E2E_SHARD" | grep -E '^[0-9]' | cut -d' ' -f1 > "$RUNNER_TEMP/e2e-planned.txt"
+          make test-e2e E2E_PROFILE="$E2E_PROFILE" E2E_JUNIT_OUT="$E2E_JUNIT_OUT" E2E_SHARD="$E2E_SHARD"
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
       - name: Run E2E scenarios ${{ inputs.scenario }}
         if: inputs.scenario != ''
         env:
           E2E_SCENARIOS: ${{ inputs.scenario }}
-          E2E_JUNIT_OUT: playground/chaos-results/e2e-scenarios-junit.xml
         run: |
           set -euo pipefail
+          printf '%s\n' "$E2E_SCENARIOS" > "$RUNNER_TEMP/e2e-planned.txt"
           # Sequential on purpose: these share one cluster and the list is
           # ordered least- to most-destructive. A failure stops the run so
           # forensics are captured against the state that produced it.
@@ -176,20 +202,30 @@ jobs:
           ./bin/playground-chaos run-all --scenarios="$E2E_SCENARIOS" --junit-out="$E2E_JUNIT_OUT"
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
+      - name: Summarize results
+        # Per-scenario pass / fail / not run, from the JUnit report that
+        # run-all rewrites after every scenario: a job that is killed at its
+        # timeout still shows what finished and what never ran.
+        if: always()
+        run: python3 .github/scripts/e2e-summary.py "E2E $E2E_LABEL" "$E2E_JUNIT_OUT" "$RUNNER_TEMP/e2e-planned.txt" >> "$GITHUB_STEP_SUMMARY"
+        continue-on-error: true
+
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-junit
-          path: playground/chaos-results/e2e-${{ inputs.scenario != '' && 'scenarios' || inputs.profile }}-junit.xml
+          name: e2e-${{ env.E2E_LABEL }}-junit
+          path: ${{ env.E2E_JUNIT_OUT }}
           retention-days: 30
           overwrite: true
 
       - name: Upload chaos forensics
-        if: failure()
+        # Also when the job is cancelled at its timeout: the captures of the
+        # scenarios that failed before it are what #236 could not triage.
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-forensics
+          name: e2e-${{ env.E2E_LABEL }}-forensics
           path: playground/chaos-results/
           retention-days: 30
 
@@ -204,7 +240,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-kind-logs
+          name: e2e-${{ env.E2E_LABEL }}-kind-logs
           path: /tmp/kind-logs/
           retention-days: 14
         continue-on-error: true
@@ -213,7 +249,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ inputs.label != '' && inputs.label || (inputs.scenario != '' && inputs.scenario || inputs.profile) }}-setup-logs
+          name: e2e-${{ env.E2E_LABEL }}-setup-logs
           path: |
             playground/setup.log
             playground/enable-encryption.log
