@@ -416,6 +416,22 @@ func TestDragonflyManager_TakeBackHold(t *testing.T) {
 	}
 }
 
+// A master that stays away past the threshold is replaced by the threshold
+// promotion; that counts toward the delay like a restarted master does.
+func TestDragonflyManager_Tick_ThresholdPromotionDelaysTheTakeBack(t *testing.T) {
+	h := newRestartHarness(t, nil)
+	h.tick(1)
+	h.missMaster()
+	h.dc2.info.MasterLinkStatus = "down"
+	h.tick(defaultDragonflyMasterLossThreshold)
+	if got := h.promoted(); got != "dc2" {
+		t.Fatalf("promoted %q, want dc2", got)
+	}
+	if wait, n := h.mgr.takeBackHold("dc1"); wait != dragonflyTakeBackBaseDelay || n != 1 {
+		t.Fatalf("hold = %s after %d replacements, want %s after 1", wait, n, dragonflyTakeBackBaseDelay)
+	}
+}
+
 // The cycle of a crash-looping active master, on the manager: each restart
 // is answered by a promotion of the replica, and the take-back that follows
 // waits out its delay, which doubles.

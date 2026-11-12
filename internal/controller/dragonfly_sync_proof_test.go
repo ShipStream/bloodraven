@@ -338,6 +338,9 @@ func TestDragonflyRolloutCandidateSyncReady(t *testing.T) {
 		{"target refuses the position command and reports no replication id", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
 			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
 			positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}, dragonflyRolloutNotLinked},
+		{"target refuses the position command and neither site reports a replication id", syncProofMaster("", 24, 28), &fakeDragonflyConn{
+			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
+			positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}, dragonflyRolloutNotLinked},
 		{"source refuses the position command and the target's link is down", func() *fakeDragonflyConn {
 			c := syncProofMaster("a", 24, 28)
 			c.positionErr = &dragonfly.ServerError{Message: "ERR unknown command `DFLY`"}
