@@ -131,8 +131,16 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 		t.Fatalf("dc2 = recoveryState %q, sourceConvergenceReason %q; want the values the previous CRD knows (RecoveryBlocked, GTIDDiverged)",
 			dc2.RecoveryState, dc2.SourceConvergenceReason)
 	}
-	if dc2.LostGtid != "" {
-		t.Fatalf("lostGtid = %q: the previous CRD was expected to prune it; the fixture is not the previous CRD", dc2.LostGtid)
+	if dc2.LostGtid != "" || dc2.LostComparedTo != "" {
+		t.Fatalf("lostGtid = %q, lostComparedTo = %q: the previous CRD was expected to prune them; the fixture is not the previous CRD",
+			dc2.LostGtid, dc2.LostComparedTo)
+	}
+	// What is stored is RecoveryBlocked without any set: the shape an
+	// operator that restarts on this status takes for an own-loss report
+	// whose set the CRD pruned, and restores as one (controller test
+	// TestStartManager_RestoresAnOwnLossReportDegradedForAnOlderCRD).
+	if dc2.DivergentGtid != "" || dc2.DivergentTransactionCount != nil {
+		t.Fatalf("dc2 = %+v: the degraded report carries a divergent set, so a restart would take it for a divergence", dc2)
 	}
 	// The conditions carry the real reason: the group does not read
 	// healthy, and says what is wrong.
@@ -243,8 +251,8 @@ func TestEnvtest_StatusWrite_OlderCRDPrunesLostGtid(t *testing.T) {
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
-		if s := got.Status.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.DivergentGtid != divergent || s.LostGtid != "" {
-			t.Fatalf("write %d: dc2 = %+v, want RecoveryBlocked with its divergent set and lostGtid pruned", i, s)
+		if s := got.Status.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.DivergentGtid != divergent || s.LostGtid != "" || s.LostComparedTo != "" {
+			t.Fatalf("write %d: dc2 = %+v, want RecoveryBlocked with its divergent set, and lostGtid and lostComparedTo pruned", i, s)
 		}
 		// The first write finds out; from the second on nothing changes.
 		if i == 1 {
@@ -295,6 +303,11 @@ func TestEnvtest_StatusWrite_CurrentCRDKeepsRecloneRequired(t *testing.T) {
 	}
 	if s := got.Status.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || s.SourceConvergenceReason != v1alpha1.SourceReasonOwnTransactionsLost || s.LostGtid == "" {
 		t.Fatalf("dc2 = %+v, want RecloneRequired, OwnTransactionsLost and the lost set stored", s)
+	}
+	// The site the report was compared with is stored with it: a restarted
+	// operator restores the report with its holder.
+	if s := got.Status.Sites[1]; s.LostComparedTo != "dc1" {
+		t.Fatalf("dc2 lostComparedTo = %q, want dc1 stored by the current CRD", s.LostComparedTo)
 	}
 	if strings.Contains(logs.String(), "older CRD") {
 		t.Fatalf("the current CRD was reported as older:\n%s", logs.String())

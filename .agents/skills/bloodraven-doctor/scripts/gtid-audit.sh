@@ -143,6 +143,28 @@ run_sql() {
         sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-}" exec mysql -uroot -N -B -e "$1"' sh "$sql" 2>/dev/null
 }
 
+# replica_status_field <pod> <field>: one field of SHOW REPLICA STATUS, read
+# in the vertical format so it is found by name. Empty when the pod has no
+# channel or cannot be read.
+replica_status_field() {
+    local pod="$1" field="$2" container
+    container=$(find_mysql_container "$pod")
+    kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- \
+        sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-}" exec mysql -uroot -E -e "SHOW REPLICA STATUS"' sh 2>/dev/null \
+        | awk -v k="$field:" '$1 == k { print $2; exit }'
+}
+
+# binlog_at_or_past <file> <pos> <want-file> <want-pos>: true when the
+# binary log coordinates file:pos are at or beyond want-file:want-pos of
+# the same log (the numeric suffix orders the files).
+binlog_at_or_past() {
+    local file="$1" pos="$2" want_file="$3" want_pos="$4"
+    [[ -n "$file" && -n "$want_file" && "${file%.*}" == "${want_file%.*}" ]] || return 1
+    [[ "${file##*.}" =~ ^[0-9]+$ && "${want_file##*.}" =~ ^[0-9]+$ && "$pos" =~ ^[0-9]+$ && "$want_pos" =~ ^[0-9]+$ ]] || return 1
+    local seq=$((10#${file##*.})) want_seq=$((10#${want_file##*.}))
+    (( seq > want_seq || (seq == want_seq && pos >= want_pos) ))
+}
+
 # GTID sets contain only UUIDs, tags, interval numbers and separators.
 valid_gtid_set() {
     [[ "$1" =~ ^[A-Za-z0-9_:,\ -]*$ ]]
@@ -176,7 +198,8 @@ for site in $SITES; do
     RECORDED_GTID=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].divergentGtid}" 2>/dev/null || true)
     RECORDED_BY=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].divergenceDetectedBy}" 2>/dev/null || true)
     RECORDED_LOST=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].lostGtid}" 2>/dev/null || true)
-    echo "   Operator record: recoveryState=${RECORDED_STATE:-none} divergenceDetectedBy=${RECORDED_BY:-none} divergentGtid=${RECORDED_GTID:-none} lostGtid=${RECORDED_LOST:-none}"
+    RECORDED_LOST_TO=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$site')].lostComparedTo}" 2>/dev/null || true)
+    echo "   Operator record: recoveryState=${RECORDED_STATE:-none} divergenceDetectedBy=${RECORDED_BY:-none} divergentGtid=${RECORDED_GTID:-none} lostGtid=${RECORDED_LOST:-none} lostComparedTo=${RECORDED_LOST_TO:-none}"
 
     if [[ -n "$PRIMARY_PROBLEM" ]]; then
         echo "   ❔ UNKNOWN: $PRIMARY_PROBLEM"
@@ -231,29 +254,84 @@ for site in $SITES; do
 
     echo "   follower server_uuid: $FOLLOWER_UUID"
     echo "   follower gtid_executed: $FOLLOWER_GTID"
-    # What the follower lacks of the transactions it issued itself. Lag
-    # cannot explain these: whatever the primary holds under the
-    # follower's server_uuid was committed on the follower first, and its
-    # replication receiver drops events with its own server_id, so they
-    # never come back by replication. Only the current server_uuid is
+    # What the follower lacks of the transactions it issued itself.
+    # Whatever the primary holds under the follower's server_uuid was
+    # committed on the follower first. The follower's receiver drops
+    # events with its own server_id, so transactions the primary received
+    # from it by replication never come back that way. Transactions that
+    # were replayed onto the primary from a decoded binary log
+    # (mysqlbinlog | mysql) carry the primary's server_id and do replicate,
+    # so for a follower whose channel runs a deficit may be lag: it is a
+    # loss only if it is still there once the follower's applier has
+    # executed the primary's binary log past the point at which the
+    # primary held the transactions. Only the current server_uuid is
     # checked here, against the primary; the operator also compares under
     # the earlier ones it recorded (annotation
-    # bloodraven.shipstream.io/server-uuid-history), and with a site that
-    # holds transactions the primary lacks.
+    # bloodraven.shipstream.io/server-uuid-history), and with every other
+    # site.
     MISSING=$(run_sql "$PRIMARY_POD" "SELECT REPLACE(GTID_SUBTRACT(@@GLOBAL.gtid_executed, '$FOLLOWER_GTID'), '\n', '')" || true)
     OWN_LOST=$(printf '%s' "$MISSING" | tr ',' '\n' | grep -i "^${FOLLOWER_UUID}:" | paste -sd, - || true)
+    OWN_VERDICT=""
     if [[ -n "$OWN_LOST" ]]; then
+        OWN_VERDICT="lost"
+        IO_RUNNING=$(replica_status_field "$FOLLOWER_POD" Replica_IO_Running || true)
+        SQL_RUNNING=$(replica_status_field "$FOLLOWER_POD" Replica_SQL_Running || true)
+        if [[ "$IO_RUNNING" == "Yes" && "$SQL_RUNNING" == "Yes" ]]; then
+            # The primary's coordinates with its set, then the follower's
+            # applier position, then what the follower still lacks of that
+            # set.
+            PRIMARY_LOG=$(run_sql "$PRIMARY_POD" "SHOW BINARY LOG STATUS" || true)
+            PRIMARY_FILE=$(printf '%s' "$PRIMARY_LOG" | cut -f1)
+            PRIMARY_POS=$(printf '%s' "$PRIMARY_LOG" | cut -f2)
+            PRIMARY_SET=$(printf '%s' "$PRIMARY_LOG" | cut -f5- | sed 's/\\n//g' | tr -d '\n ')
+            EXEC_FILE=$(replica_status_field "$FOLLOWER_POD" Relay_Source_Log_File || true)
+            EXEC_POS=$(replica_status_field "$FOLLOWER_POD" Exec_Source_Log_Pos || true)
+            if [[ -z "$PRIMARY_FILE" ]] || ! valid_gtid_set "$PRIMARY_SET"; then
+                OWN_VERDICT="lost-unchecked"
+            elif binlog_at_or_past "$EXEC_FILE" "$EXEC_POS" "$PRIMARY_FILE" "$PRIMARY_POS"; then
+                STILL=$(run_sql "$FOLLOWER_POD" "SELECT REPLACE(GTID_SUBTRACT('$PRIMARY_SET', @@GLOBAL.gtid_executed), '\n', '')" || true)
+                OWN_LOST=$(printf '%s' "$STILL" | tr ',' '\n' | grep -i "^${FOLLOWER_UUID}:" | paste -sd, - || true)
+                [[ -n "$OWN_LOST" ]] || OWN_VERDICT="applied"
+            else
+                OWN_VERDICT="lag"
+            fi
+        fi
+    fi
+    case "$OWN_VERDICT" in
+    lost|lost-unchecked)
         echo "   🟠 OWN TRANSACTIONS LOST: $site lacks transactions it issued itself that the primary ($ACTIVE_SITE) holds:"
         echo "      $OWN_LOST"
-        echo "      Replication cannot return them, and promoted it would issue these GTIDs again. The operator reclones the site"
+        if [[ "$IO_RUNNING" == "Yes" && "$SQL_RUNNING" == "Yes" && "$OWN_VERDICT" == "lost" ]]; then
+            echo "      Its applier has executed the primary's binary log past $PRIMARY_FILE:$PRIMARY_POS, where the primary held them:"
+            echo "      its receiver dropped them (they carry its own server_id), and replication cannot return them."
+        elif [[ "$OWN_VERDICT" == "lost-unchecked" ]]; then
+            echo "      The primary's binary log position could not be read, so this was not checked against replication lag."
+        else
+            echo "      Its replication from the primary is not running, so nothing is delivering them. (Had they been replayed onto"
+            echo "      the primary from a decoded binary log, replication would deliver them; the GTID sets cannot tell.)"
+        fi
+        echo "      Promoted it would issue these GTIDs again. The operator reclones the site"
         echo "      (recoveryState=RecloneRequired); by hand: kubectl bloodraven reclone $MFG_NAME $site -n $NAMESPACE --cold"
         if [[ -z "$RECORDED_LOST" ]]; then
             echo "      The operator has not recorded this yet (an operator release without this check, or its first comparison is pending)."
         fi
-    elif [[ -n "$RECORDED_LOST" ]]; then
-        echo "   The operator records lostGtid for $site, but the primary holds nothing $site issued under its current server_uuid and lacks."
+        ;;
+    lag)
+        echo "   🟡 BEHIND, NOT LOST (so far): $site lacks transactions under its own server_uuid that the primary ($ACTIVE_SITE) holds:"
+        echo "      $OWN_LOST"
+        echo "      Its replication runs and its applier ($EXEC_FILE:$EXEC_POS) has not reached the primary's position ($PRIMARY_FILE:$PRIMARY_POS)."
+        echo "      This is what a replay of its transactions onto the primary looks like (mysqlbinlog | mysql): it receives them"
+        echo "      like any other transaction. Run the audit again once it has caught up; the operator reports nothing until then."
+        ;;
+    applied)
+        echo "   $site was behind on transactions under its own server_uuid and has applied them since the first read: not a loss."
+        ;;
+    esac
+    if [[ -z "$OWN_VERDICT" || "$OWN_VERDICT" == "applied" || "$OWN_VERDICT" == "lag" ]] && [[ -n "$RECORDED_LOST" ]]; then
+        echo "   The operator records lostGtid for $site (lostComparedTo: ${RECORDED_LOST_TO:-not stored}), but the primary holds nothing $site issued under its current server_uuid and provably lacks."
         echo "      Either the loss is under an earlier server_uuid of the site, or another site holds them and the primary does not"
-        echo "      (the OwnTransactionsLost condition names it: $site keeps replicating, is not promoted, and is not recloned automatically),"
+        echo "      (the OwnTransactionsLost condition names it: $site keeps replicating, is not promoted, and is not recloned automatically;"
+        echo "      the report ends once every other site answers and none holds them),"
         echo "      or the site was just recloned and the record clears within ~30s."
     fi
     if [[ -z "$EXTRA" ]]; then
@@ -370,7 +448,9 @@ echo "   not a containment proof. Ordered updates and planned failovers will not
 echo "   promote it. Preserve the events first:"
 echo "     mysqlbinlog --include-gtids='<set>' <binlog files on the follower>"
 echo "   then either discard them:  kubectl bloodraven reclone $MFG_NAME <site> -n $NAMESPACE"
-echo "   or keep them: replay the decoded events on the primary."
+echo "   or keep them: replay the decoded events on the primary. The primary logs them with its own"
+echo "   server_id, so every replica receives them, also the site that issued them. While the replay"
+echo "   runs that site reads BEHIND, NOT LOST here, and the operator reports nothing about it."
 echo "   Committing empty transactions on the primary (per GTID: SET GTID_NEXT='<uuid>:<n>';"
 echo "   BEGIN; COMMIT; then SET GTID_NEXT='AUTOMATIC') only ACCEPTS the divergence: the"
 echo "   replica keeps rows the primary lacks and becomes promotable again, and a later"

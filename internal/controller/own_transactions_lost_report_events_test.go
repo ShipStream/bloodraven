@@ -91,13 +91,13 @@ func TestDegradeStatusForOlderCRD(t *testing.T) {
 	lostCount := int64(10)
 	st := &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "dc1", Sites: []v1alpha1.SiteStatus{
 		{Name: "dc1", State: v1alpha1.SiteStateWritable},
-		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, SourceConvergenceReason: v1alpha1.SourceReasonOwnTransactionsLost, LostGtid: lossLostGTID, LostTransactionCount: &lostCount},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, SourceConvergenceReason: v1alpha1.SourceReasonOwnTransactionsLost, LostGtid: lossLostGTID, LostTransactionCount: &lostCount, LostComparedTo: "dc1"},
 		{Name: "dc3", RecoveryState: v1alpha1.RecoveryStateInProgress, SourceConvergenceReason: v1alpha1.SourceReasonGTIDDiverged},
 	}}
 	if !degradeStatusForOlderCRD(st) {
 		t.Fatal("nothing was degraded")
 	}
-	if s := st.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.SourceConvergenceReason != v1alpha1.SourceReasonGTIDDiverged || s.LostGtid != "" || s.LostTransactionCount != nil {
+	if s := st.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.SourceConvergenceReason != v1alpha1.SourceReasonGTIDDiverged || s.LostGtid != "" || s.LostTransactionCount != nil || s.LostComparedTo != "" {
 		t.Fatalf("dc2 = %+v, want RecoveryBlocked, GTIDDiverged and the fields the older CRD prunes left out", s)
 	}
 

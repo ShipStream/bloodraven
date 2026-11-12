@@ -23,15 +23,21 @@ import (
 // error is raised; the filter is by server_id, a new server_uuid does not
 // lift it). So a site that comes back without transactions it originated
 // (its volume came back older, or a crash lost them from both the redo log
-// and the binary log) while the primary holds them can never get them by
-// replication. It would replicate everything else, look healthy, and at
-// its next promotion issue the same GTID numbers for other transactions.
+// and the binary log) while the primary holds them with the site's
+// server_id can never get them by replication. It would replicate
+// everything else, look healthy, and at its next promotion issue the same
+// GTID numbers for other transactions.
 //
-// The evidence is exact and needs no assumption about lag: every
-// transaction under a site's server_uuid was committed on that site first,
-// so whatever the primary holds under that server_uuid the site held once.
-// lost = primary.gtid_executed − site.gtid_executed, restricted to the
-// server_uuids the site has had. A site's server_id is spec.sites[].serverID
+// Every transaction under a site's server_uuid was committed on that site
+// first, so whatever the primary holds under that server_uuid the site held
+// once. lost = primary.gtid_executed − site.gtid_executed, restricted to
+// the server_uuids the site has had. The GTID sets do not say which
+// server_id a transaction is logged with: one that was applied on the
+// primary from a decoded binary log carries the primary's, and replication
+// does deliver it. For a site that has no channel that is a doubt the
+// operator resolves toward the clone; for a site whose channel runs, the
+// deficit counts only once it cannot be lag (see "A hole, or only lag?"
+// below). A site's server_id is spec.sites[].serverID
 // and stays, while its server_uuid changes at every clone (#265), so the
 // uuids a site has had are recorded on the group (SiteIdentityStore): a
 // volume that comes back from before a reclone carries the earlier
@@ -78,8 +84,9 @@ import (
 //     recloned a divergent site or an in-place restore recloned its
 //     peers. Such a witness is divergent, which the divergence checks
 //     report once a primary exists. The clone is recorded on the site's
-//     server_uuid timeline by the write the clone waits for
-//     (groupCloneIdentityStore.Record). A site queued for the reclone of
+//     server_uuid timeline when it is known to have installed
+//     (markSiteCloned), and the server_uuid a site runs under is live
+//     whatever the timeline says. A site queued for the reclone of
 //     an in-place restore (ownLossWitnessExcludedLocked) is no witness at
 //     all: its data is void by a durable record, the operator never
 //     promotes it or replicates from it, and it is cloned over.
@@ -88,7 +95,8 @@ import (
 // on a report: verifyOwnLossReclone reads the fenced site and its donor
 // again when the clone is about to start and lets it run only if the
 // donor is the confirmed primary, holds everything the site holds, and
-// still holds transactions the site issued and lacks.
+// still holds transactions the site issued and lacks, which for a site
+// whose channel runs must be a proven hole.
 
 const (
 	// recloneOwnerOwnLoss is the owner of a reclone the operator requests
@@ -132,24 +140,46 @@ var errOwnTransactionsLost = errors.New("the site lacks transactions it issued i
 
 // ownLossRecord is what the manager knows about a site that lacks
 // transactions it issued. Protected by tm.mu.
+//
+// A report is one of three kinds:
+//
+//   - a hole (witness false, detectedBy set): a check of this manager found
+//     that the confirmed primary comparedTo holds transactions the site
+//     issued and lacks. Replication cannot fill it, so the site's
+//     replication is not started and the site is recloned. It ends by a
+//     clean comparison with that same primary, or by the reclone.
+//   - a witness report (witness true): the site lacks transactions it
+//     issued that a site which is not the confirmed primary holds
+//     (comparedTo, "" when status did not say). The site can replicate from
+//     the primary, so its replication is not refused and it is not recloned
+//     automatically; it is not promoted (it would issue those GTIDs again).
+//   - restored (witness false, detectedBy ""): read from status after an
+//     operator restart and not compared by this manager yet. It holds like
+//     a hole (no replication start, no promotion) and asks for no reclone.
+//     The first comparison with the confirmed primary makes it a hole (the
+//     primary holds transactions the site lacks) or a witness report (it
+//     does not).
+//
+// One rule ends a report that is not a hole against the current primary
+// (reviewOwnLossReports, and the primary re-assert for its target): every
+// other site of the group has answered in one pass and none holds
+// transactions the site issued, under a server_uuid no clone has
+// superseded, and lacks. A clean comparison with the primary alone never
+// ends it, and neither does a holder that stops answering. A hole against
+// a primary that is no longer the primary becomes a witness report naming
+// that site when the new primary does not hold the transactions.
 type ownLossRecord struct {
-	lostGtid   string
-	lostCount  int64
+	lostGtid  string
+	lostCount int64
+	// comparedTo is the site that holds lostGtid: the primary for a hole,
+	// the witness for a witness report. It is stored in
+	// status.sites[].lostComparedTo and restored from it; "" for a report
+	// restored from a status written without the field.
 	comparedTo string
-	// witness is true when comparedTo was not the confirmed primary: the
-	// site lacks transactions it issued that another site (a witness)
-	// holds, and nothing the primary holds. Such a site can replicate
-	// from the primary, so its replication is not refused and it is not
-	// recloned automatically; it is not promoted while the witness holds
-	// those transactions (it would issue their GTIDs again, or become a
-	// primary without part of its own history). The report ends when the
-	// witness no longer holds them (reviewWitnessOwnLoss) or the site is
-	// recloned. False for a report restored from status, whose kind is
-	// not stored: it holds like a report against the primary until the
-	// next comparison.
+	// witness is true for a witness report (see above).
 	witness bool
-	// reviewAfter is when a witness report is compared with its witness
-	// again (reviewWitnessOwnLoss).
+	// reviewAfter is when a witness report is compared with the other
+	// sites again (reviewOwnLossReports).
 	reviewAfter time.Time
 	// detectedBy is the check that made the comparison
 	// (divergenceDetectedByRecovery or divergenceDetectedByAudit), "" for
@@ -162,8 +192,8 @@ type ownLossRecord struct {
 	recloneRetryAfter time.Time
 	// recloneFailures counts the automatic reclones of the site that
 	// failed in a row. In memory: it is carried to a manager that
-	// replaces this one in the same process (carryOwnLossRecloneBackoff)
-	// and starts at zero after an operator restart.
+	// replaces this one in the same process (carryOwnLossReports) and
+	// starts at zero after an operator restart.
 	recloneFailures int
 	// recloneWaiting says why no automatic reclone runs or is requested
 	// ("" while one is).
@@ -208,25 +238,32 @@ func ownLostOnWitness(witness, site mysql.GTIDSet, live []string) mysql.GTIDSet 
 // not exercise it: the manager then knows only the uuids it has seen.
 //
 // A site's record is a timeline, oldest first: its server_uuids, and
-// serverUUIDCloneMarker where a clone into the site was issued. Every
-// server_uuid before the last marker was given up at a clone
-// (liveServerUUIDs).
+// serverUUIDCloneMarker where a clone was installed into the site. A
+// server_uuid recorded only before the last marker was given up at that
+// clone (liveServerUUIDs); one the site is seen under after it is recorded
+// again, after the marker.
 type SiteIdentityStore interface {
 	// Load returns the recorded timelines by site.
 	Load(ctx context.Context) (map[string][]string, error)
 	// Add appends entry (a server_uuid, or serverUUIDCloneMarker) to
-	// site's record: a server_uuid unless it is there, the marker unless
-	// it is the last entry.
+	// site's record by the rule of appendServerUUIDEntry.
 	Add(ctx context.Context, site, entry string) error
 }
 
 // serverUUIDCloneMarker is the entry of a site's recorded timeline that
-// stands for a clone issued into the site.
+// stands for a clone installed into the site.
 const serverUUIDCloneMarker = "clone"
 
 // appendServerUUIDEntry appends entry to a site's timeline and reports
-// whether it changed: a server_uuid unless it is there, the clone marker
-// unless it is the last entry.
+// whether it changed: the clone marker unless it is the last entry, a
+// server_uuid unless it is recorded after the last marker already.
+//
+// A server_uuid that stands only before the last marker is appended again:
+// the site runs under it after that clone (the clone installed without a
+// new server_uuid, or the site's volume came back from before it), so it
+// can issue that identity's GTIDs again and the clone no longer supersedes
+// it. This is the durable form of the rule that the server_uuid a site
+// runs under is always live (liveServerUUIDs).
 func appendServerUUIDEntry(timeline []string, entry string) ([]string, bool) {
 	switch {
 	case entry == "":
@@ -236,17 +273,28 @@ func appendServerUUIDEntry(timeline []string, entry string) ([]string, bool) {
 			// Nothing was recorded before it, or it is recorded already.
 			return timeline, false
 		}
-	case slices.Contains(timeline, entry):
+	case slices.Contains(timeline[lastCloneMarker(timeline)+1:], entry):
 		return timeline, false
 	}
 	return append(timeline, entry), true
 }
 
-// recordedServerUUIDs returns the server_uuids of a timeline.
+// lastCloneMarker returns the index of the last clone marker of a
+// timeline, -1 when it has none.
+func lastCloneMarker(timeline []string) int {
+	for i := len(timeline) - 1; i >= 0; i-- {
+		if timeline[i] == serverUUIDCloneMarker {
+			return i
+		}
+	}
+	return -1
+}
+
+// recordedServerUUIDs returns the server_uuids of a timeline, each once.
 func recordedServerUUIDs(timeline []string) []string {
 	out := make([]string, 0, len(timeline))
 	for _, e := range timeline {
-		if e != serverUUIDCloneMarker {
+		if e != serverUUIDCloneMarker && !slices.Contains(out, e) {
 			out = append(out, e)
 		}
 	}
@@ -264,18 +312,21 @@ func recordedServerUUIDs(timeline []string) []string {
 // exactly what its donor held then: one that another site still holds and
 // the site lacks was given up at the clone (the donor did not have it),
 // not lost. A server_uuid that changed without a clone (a data directory
-// replaced by hand) carries no such proof and stays live. current always
-// counts: a site that runs under a server_uuid from before a clone (its
-// volume came back from before it, or the clone never installed) can
-// issue that identity's GTIDs again.
+// replaced by hand) carries no such proof and stays live.
+//
+// The server_uuid a site runs under is always live, whatever the timeline
+// says: a site that runs under a server_uuid from before a clone (its
+// volume came back from before it, or the clone installed without a new
+// server_uuid) can issue that identity's GTIDs again. Every caller that
+// has read the site passes it as current, and noting it
+// (appendServerUUIDEntry) records it again after the marker, so it stays
+// live when the site is not read. A caller that has not read the site
+// (current == "") must not conclude from this list that the site has
+// nothing to lose: the site may run under an identity that is recorded
+// only before the marker and was not seen since. crossCheckOwnLoss
+// filters on every recorded server_uuid for that reason.
 func liveServerUUIDs(timeline []string, current string) []string {
-	start := 0
-	for i, e := range timeline {
-		if e == serverUUIDCloneMarker {
-			start = i + 1
-		}
-	}
-	live := recordedServerUUIDs(timeline[start:])
+	live := recordedServerUUIDs(timeline[lastCloneMarker(timeline)+1:])
 	if current != "" && !slices.Contains(live, current) {
 		live = append(live, current)
 	}
@@ -406,14 +457,21 @@ func (tm *TopologyManager) noteSiteServerUUID(ctx context.Context, site, serverU
 	return recordedServerUUIDs(t.timeline[site])
 }
 
-// markSiteCloned records that a clone into site was issued: the
-// server_uuids recorded so far are superseded once it installs
-// (liveServerUUIDs). The bootstrap writes the marker with the clone
-// identity record, in the write the clone waits for
-// (groupCloneIdentityStore.Record); this is for a manager without that
-// record (a test, a simulation) and stores it best effort.
-func (tm *TopologyManager) markSiteCloned(ctx context.Context, site string) {
+// markSiteCloned records that a clone was installed into site: the
+// server_uuids recorded so far are superseded (liveServerUUIDs). It is
+// called when the clone is known to have installed, never when it is
+// issued: a clone that fails or is killed leaves the site with the data
+// and the identity it had, and a marker for it would void, at the site's
+// next change of server_uuid, an identity no clone replaced. It reports
+// whether the marker is stored (or the manager has no store): the clone
+// identity record, which makes a later manager look at the clone again,
+// is removed only then (finishCloneIdentity).
+func (tm *TopologyManager) markSiteCloned(ctx context.Context, site string) bool {
 	tm.noteSiteEntry(ctx, site, serverUUIDCloneMarker)
+	t := &tm.siteIdentity
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.store == nil || !slices.Contains(t.unsaved[site], serverUUIDCloneMarker)
 }
 
 // syncSiteIdentities loads the stored timelines (once) and stores the
@@ -503,16 +561,15 @@ func (t *siteIdentityTracker) siteEntryStored(site, entry string) {
 }
 
 // siteCloneRecorded notes that the clone identity record's write stored
-// serverUUID (when known) and the clone marker in site's timeline, so the
-// tracker holds both and does not write them again.
+// serverUUID in site's timeline, so the tracker holds it and does not
+// write it again.
 func (tm *TopologyManager) siteCloneRecorded(site, serverUUID string) {
 	t := &tm.siteIdentity
-	for _, entry := range []string{normalizeServerUUID(serverUUID), serverUUIDCloneMarker} {
-		t.mu.Lock()
-		t.rememberLocked(site, entry)
-		t.mu.Unlock()
-		t.siteEntryStored(site, entry)
-	}
+	entry := normalizeServerUUID(serverUUID)
+	t.mu.Lock()
+	t.rememberLocked(site, entry)
+	t.mu.Unlock()
+	t.siteEntryStored(site, entry)
 }
 
 // readSiteGTIDSnapshot reads a site's server_uuid with its executed GTID
@@ -548,7 +605,14 @@ func (tm *TopologyManager) ownLossSite(site string) bool {
 // primary does. Caller holds tm.mu.
 func (tm *TopologyManager) ownLossHoleLocked(site string) bool {
 	rec := tm.ownLoss[site]
-	return rec != nil && !rec.witness
+	if rec == nil {
+		return false
+	}
+	// A witness report that names the site which is the primary now (it
+	// was made while no site was writable, by the picker or the
+	// re-assert) says that the primary holds the transactions: it holds
+	// like a hole until a comparison with the primary settles it.
+	return !rec.witness || (rec.comparedTo != "" && rec.comparedTo == tm.activeSiteLocked())
 }
 
 // ownLossHoleSite is ownLossHoleLocked for callers that do not hold tm.mu.
@@ -563,12 +627,18 @@ func (tm *TopologyManager) ownLossHoleSite(site string) bool {
 // holds. witness is false when comparedTo is the confirmed primary, true
 // when it is another site (see ownLossRecord.witness).
 //
-// A non-empty set records (or refreshes) the report; an empty one is the
-// proof that clears it, for the kind of report the comparison is about:
-// a clean comparison with the primary says nothing about what a witness
-// holds, and a witness that holds nothing more does not fill a hole
-// against the primary. A report against the primary is the stronger one
-// and is kept over a witness's.
+// A non-empty set records (or refreshes) the report. A hole against the
+// primary is the stronger one and is kept over a witness's.
+//
+// An empty set from a comparison with the confirmed primary ends a hole
+// that was made against that same primary: the site holds again what the
+// primary holds of its own transactions. It ends nothing else. A report
+// that names another site, or whose holder status did not say, rests on
+// what that site holds, and the primary not holding it is no proof that
+// nobody does: such a report becomes (or stays) a witness report, the site
+// may replicate from the primary again, and reviewOwnLossReports ends it
+// when every other site has answered and none holds the set. An empty set
+// from a comparison with one witness changes nothing, for the same reason.
 //
 // It reports whether the report changed, and returns the log call to make
 // once tm.mu is released (nil when there is nothing to say). Caller holds
@@ -576,27 +646,33 @@ func (tm *TopologyManager) ownLossHoleSite(site string) bool {
 func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, comparedTo string, detectedBy v1alpha1.DivergenceDetector, uuids []string, witness bool) (changed bool, log func()) {
 	rec := tm.ownLoss[site]
 	if lost.IsEmpty() {
-		if rec == nil || rec.witness != witness || (witness && rec.comparedTo != comparedTo) {
+		if rec == nil || witness {
 			return false, nil
 		}
-		delete(tm.ownLoss, site)
-		tm.forgetOwnLossRefusalLocked(site)
-		metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
-		msg := "own transactions lost cleared: the site holds every transaction it issued"
-		why := fmt.Sprintf("it holds every transaction it issued that %s holds", comparedTo)
-		switch {
-		case witness:
-			msg = "own transactions lost cleared: the witness no longer holds transactions the site lacks"
-			why = fmt.Sprintf("%s no longer holds transactions it issued and lacks", comparedTo)
-		case rec.comparedTo != "" && rec.comparedTo != comparedTo:
-			// The report named another holder: nothing was repaired, the
-			// primary it is compared with now never had the transactions.
-			why = fmt.Sprintf("the report was made against %s; the primary is %s now, which does not hold those transactions, so the site lacks nothing it holds",
-				rec.comparedTo, comparedTo)
+		if rec.detectedBy != "" && !rec.witness && rec.comparedTo == comparedTo {
+			why := fmt.Sprintf("it holds every transaction it issued that %s holds", comparedTo)
+			tm.dropOwnLossLocked(site, why)
+			return true, func() {
+				tm.logger.Info("own transactions lost cleared: the site holds every transaction it issued",
+					"site", site, "comparedTo", comparedTo, "reason", why)
+			}
 		}
-		tm.noteOwnLossClearedLocked(site, why)
+		if rec.witness && rec.detectedBy != "" {
+			// A witness report: the primary was never its holder.
+			return false, nil
+		}
+		// A hole against another primary, or a restored report: the
+		// primary of now does not hold the transactions.
+		holder := rec.comparedTo
+		rec.witness = true
+		if rec.detectedBy == "" {
+			rec.detectedBy = detectedBy
+		}
+		rec.reviewAfter = time.Time{}
+		rec.recloneRefusal, rec.recloneWaiting, rec.recloneAnnounced = "", "", false
 		return true, func() {
-			tm.logger.Info(msg, "site", site, "comparedTo", comparedTo, "reason", why)
+			tm.logger.Info("own transactions lost kept: the primary does not hold the transactions, the report stands until every other site has been compared",
+				"site", site, "comparedTo", comparedTo, "heldBy", lostHeldBy(holder))
 		}
 	}
 	if rec != nil && !rec.witness && rec.detectedBy != "" && witness {
@@ -634,7 +710,7 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 		return true, nil
 	}
 	if witness {
-		remedy := fmt.Sprintf("the site is not promoted while %s holds these transactions, which the primary does not have: reclone %s to discard them or make the primary contain them, or reclone this site (kubectl bloodraven reclone %s %s --cold)",
+		remedy := fmt.Sprintf("the site is not promoted while %s holds these transactions, which the primary does not have: reclone %s to discard them, or replay them onto the primary (this site then receives them by replication), or reclone this site (kubectl bloodraven reclone %s %s --cold)",
 			comparedTo, comparedTo, tm.cfg.Name, site)
 		return true, func() {
 			tm.logger.Warn("own transactions lost",
@@ -667,11 +743,30 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 	}
 }
 
-// SetOwnTransactionsLost restores a persisted report from CR status after
-// an operator restart. The restored report keeps the site out of
-// replication and promotion at once; the next comparison with a confirmed
-// primary confirms or clears it.
+// dropOwnLossLocked ends site's report for the reason why. Caller holds
+// tm.mu.
+func (tm *TopologyManager) dropOwnLossLocked(site, why string) {
+	delete(tm.ownLoss, site)
+	delete(tm.ownLossProof, site)
+	tm.forgetOwnLossRefusalLocked(site)
+	tm.noteOwnLossClearedLocked(site, why)
+	metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
+}
+
+// SetOwnTransactionsLost is SetOwnTransactionsLostFrom for a status that
+// does not say which site the report was compared with (written against a
+// CRD without status.sites[].lostComparedTo).
 func (tm *TopologyManager) SetOwnTransactionsLost(site, lostGtid string, lostCount int64) {
+	tm.SetOwnTransactionsLostFrom(site, lostGtid, lostCount, "")
+}
+
+// SetOwnTransactionsLostFrom restores a persisted report from CR status
+// after an operator restart: the lost set and comparedTo, the site that
+// held it. The restored report keeps the site out of replication and
+// promotion at once. Its kind is settled by the first comparison with the
+// confirmed primary (settleOwnLossLocked), and it ends by the rule of
+// every report (ownLossRecord).
+func (tm *TopologyManager) SetOwnTransactionsLostFrom(site, lostGtid string, lostCount int64, comparedTo string) {
 	if lostGtid == "" {
 		return
 	}
@@ -680,8 +775,72 @@ func (tm *TopologyManager) SetOwnTransactionsLost(site, lostGtid string, lostCou
 	if tm.ownLoss == nil {
 		tm.ownLoss = map[string]*ownLossRecord{}
 	}
-	tm.ownLoss[site] = &ownLossRecord{lostGtid: lostGtid, lostCount: lostCount}
+	tm.ownLoss[site] = &ownLossRecord{lostGtid: lostGtid, lostCount: lostCount, comparedTo: comparedTo}
 	metrics.OwnTransactionsLost.WithLabelValues(site).Set(float64(lostCount))
+}
+
+// SetOwnTransactionsLostUnknown restores a report whose lost set and holder
+// the stored status does not carry: the installed CRD is older than the
+// operator, so the report was stored as recoveryState RecoveryBlocked with
+// no set at all (degradeStatusForOlderCRD). Nothing is known but
+// that the site was reported, so the report takes the conservative rule
+// whole: it keeps the site out of replication and promotion, a comparison
+// with the primary makes it a hole or a witness report, and it ends only
+// when every other site has answered and none holds transactions the site
+// issued and lacks (reviewOwnLossReports), or by the site's reclone.
+func (tm *TopologyManager) SetOwnTransactionsLostUnknown(site string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.ownLoss == nil {
+		tm.ownLoss = map[string]*ownLossRecord{}
+	}
+	if tm.ownLoss[site] == nil {
+		tm.ownLoss[site] = &ownLossRecord{}
+	}
+}
+
+// carryOwnLossReports takes over the reports of the manager this one
+// replaces in the same process (a spec or credential change), for the
+// sites both have: prev's reports are newer than the status this manager
+// was started from, which may not hold a report prev made in its last
+// polls, and they carry their kind. A report restored from status for a
+// site prev has no report for is dropped: prev cleared it, or never had
+// it. The failed-reclone count and its retry time come with the record,
+// so a spec change does not restart a failing clone at once; an operator
+// restart does (the count is not stored).
+func (tm *TopologyManager) carryOwnLossReports(prev *TopologyManager) {
+	if prev == nil || prev == tm {
+		return
+	}
+	prev.mu.RLock()
+	carried := make(map[string]ownLossRecord, len(prev.ownLoss))
+	for site, rec := range prev.ownLoss {
+		carried[site] = *rec
+	}
+	prev.mu.RUnlock()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for site := range tm.ownLoss {
+		if _, ok := carried[site]; !ok {
+			delete(tm.ownLoss, site)
+			metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
+		}
+	}
+	for site, rec := range carried {
+		if tm.getSite(site) == nil {
+			continue
+		}
+		if tm.ownLoss == nil {
+			tm.ownLoss = map[string]*ownLossRecord{}
+		}
+		rec := rec
+		// The request, its refusal and the review time are this manager's
+		// to make again.
+		rec.recloneAnnounced, rec.recloneRefusal, rec.recloneWaiting = false, "", ""
+		rec.reviewAfter = time.Time{}
+		tm.ownLoss[site] = &rec
+		metrics.OwnTransactionsLost.WithLabelValues(site).Set(float64(rec.lostCount))
+	}
 }
 
 // clearOwnLossAfterClone drops site's report: a completed clone made the
@@ -689,51 +848,43 @@ func (tm *TopologyManager) SetOwnTransactionsLost(site, lostGtid string, lostCou
 func (tm *TopologyManager) clearOwnLossAfterClone(site string) {
 	tm.mu.Lock()
 	rec := tm.ownLoss[site]
-	delete(tm.ownLoss, site)
-	tm.forgetOwnLossRefusalLocked(site)
+	delete(tm.ownLossProof, site)
 	if rec != nil {
-		tm.noteOwnLossClearedLocked(site, "it was recloned")
+		tm.dropOwnLossLocked(site, "it was recloned")
 	}
-	// A report that rests on this site as its witness is reviewed now: the
-	// clone replaced what it held.
+	// A report that may rest on what this site held is reviewed now: the
+	// clone replaced it.
 	for _, other := range tm.ownLoss {
-		if other.witness && other.comparedTo == site {
-			other.reviewAfter = time.Time{}
-		}
+		other.reviewAfter = time.Time{}
 	}
 	tm.mu.Unlock()
 	if rec == nil {
 		return
 	}
-	metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
 	tm.logger.Info("own transactions lost cleared: the site was recloned", "site", site)
 	tm.RequestStatusRefresh()
 }
 
-// clearRestoredOwnLoss drops site's report when it is still the one
-// restored from status (no comparison of this manager has confirmed it):
-// the primary re-assert read every other site, all of them read-only, and
-// none holds transactions the site issued, under a server_uuid no clone
-// has superseded, and lacks. It reports whether a report was dropped.
+// clearOwnLossNoHolder drops site's report, of whatever kind: one pass
+// read every other site of the group and none holds transactions the site
+// issued, under a server_uuid no clone has superseded, and lacks. The
+// callers are the two passes that read them all: reviewOwnLossReports, and
+// the primary re-assert for its target (which refuses unless every peer
+// answers read-only). It reports whether a report was dropped.
 //
-// What the restored report rested on is not known. If it was a hole
-// against a primary under a server_uuid the site has since given up at a
-// clone, that site is divergent, not this one short, and the first
-// comparison with a confirmed primary reports whichever of the two it
-// finds again.
-func (tm *TopologyManager) clearRestoredOwnLoss(site string) bool {
+// A hole made against a primary under a server_uuid the site has since
+// given up at a clone is dropped too: that site is divergent, not this
+// one short, and the first comparison with a confirmed primary reports
+// whichever of the two it finds again.
+func (tm *TopologyManager) clearOwnLossNoHolder(site string) bool {
 	const why = "no other site holds transactions it issued and lacks"
 	tm.mu.Lock()
-	rec := tm.ownLoss[site]
-	if rec == nil || rec.witness || rec.detectedBy != "" {
+	if tm.ownLoss[site] == nil {
 		tm.mu.Unlock()
 		return false
 	}
-	delete(tm.ownLoss, site)
-	tm.forgetOwnLossRefusalLocked(site)
-	tm.noteOwnLossClearedLocked(site, why)
+	tm.dropOwnLossLocked(site, why)
 	tm.mu.Unlock()
-	metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
 	tm.logger.Info("own transactions lost cleared: no site holds transactions the site lacks", "site", site, "reason", why)
 	return true
 }
@@ -815,11 +966,16 @@ func (tm *TopologyManager) wakeOwnLossChecks() {
 // planned failover read the report; they compare with no witness of their
 // own).
 //
-// The primary itself is not a subject: it is writable already. Sites are
-// read only when extra names a server_uuid of theirs that no clone has
-// superseded, so the usual divergence (a site's own unreplicated tail)
-// costs no read. It reports whether a report changed.
-func (tm *TopologyManager) crossCheckOwnLoss(ctx context.Context, witness *siteTracker, witnessSet, extra mysql.GTIDSet, active string) bool {
+// The primary itself is not a subject: it is writable already. Only extra
+// counts, the part of the witness's set the primary lacks: what the
+// primary holds too is the primary's to be compared with, where lag can be
+// told from a hole (auditFollower). Sites are read only when extra names a
+// server_uuid they have ever had, so the usual divergence (a site's own
+// unreplicated tail) costs no read. The filter is on every recorded
+// server_uuid, not on the live ones: which of them are live depends on the
+// server_uuid the site runs under now, which only the read tells
+// (liveServerUUIDs). It reports whether a report changed.
+func (tm *TopologyManager) crossCheckOwnLoss(ctx context.Context, witness *siteTracker, extra mysql.GTIDSet, active string) bool {
 	if extra.IsEmpty() {
 		return false
 	}
@@ -829,50 +985,226 @@ func (tm *TopologyManager) crossCheckOwnLoss(ctx context.Context, witness *siteT
 	if excluded {
 		return false
 	}
+	tm.notePrimaryLacksOwnTransactions(active, witness.name, extra)
 	changed := false
 	for i := range tm.sites {
 		site := &tm.sites[i]
 		if site.name == witness.name || site.name == active || site.state != state.StateReadOnly {
 			continue
 		}
-		if extra.OriginatedBy(tm.liveSiteServerUUIDs(site.name, "")...).IsEmpty() {
+		if extra.OriginatedBy(tm.recordedSiteServerUUIDs(site.name)...).IsEmpty() {
 			continue
 		}
-		if tm.compareWithWitness(ctx, site, witness.name, witnessSet) {
+		snap, siteSet, ok := tm.readOwnLossSubject(ctx, site)
+		if !ok {
+			continue
+		}
+		live := tm.liveSiteServerUUIDs(site.name, snap.ServerUUID)
+		uuids := tm.noteSiteServerUUID(ctx, site.name, snap.ServerUUID)
+		lost := ownLostOnWitness(extra, siteSet, live)
+		if lost.IsEmpty() {
+			continue
+		}
+		tm.mu.Lock()
+		siteChanged, lossLog := tm.settleOwnLossLocked(site.name, lost, witness.name, divergenceDetectedByAudit, uuids, true)
+		if rec := tm.ownLoss[site.name]; rec != nil && rec.witness {
+			rec.reviewAfter = tm.clock.Now().Add(gtidAuditInterval)
+		}
+		tm.mu.Unlock()
+		if lossLog != nil {
+			lossLog()
+		}
+		if siteChanged {
+			tm.RequestStatusRefresh()
 			changed = true
 		}
 	}
 	return changed
 }
 
-// compareWithWitness reads site and settles its witness report against
-// witness, whose set is witnessSet. A site that cannot be read keeps what
-// is recorded. It reports whether the report changed.
-func (tm *TopologyManager) compareWithWitness(ctx context.Context, site *siteTracker, witness string, witnessSet mysql.GTIDSet) bool {
-	var snap mysql.GTIDSnapshot
+// notePrimaryLacksOwnTransactions logs, once per set, that the writable
+// primary lacks transactions it issued itself under a server_uuid no clone
+// has superseded, which the site holder has (extra is what holder holds
+// and the primary lacks). The primary is no subject of an own-loss report:
+// it is writable already, the operator did not make it so on this evidence
+// (every promotion path compares first), and fencing the only primary
+// would turn a loss that has happened into an outage. It came to be this
+// way outside the operator: it restarted on older data and booted
+// writable or was made writable by hand, for example the source of an
+// ordered update's handoff that the abort found writable and regressed.
+// What it commits now reuses the GTIDs of the transactions it lost. The
+// holder is reported RecoveryBlocked with those transactions as its
+// divergent set (the caller has just recorded that); this line says which
+// of the two sites is the one that lost data.
+func (tm *TopologyManager) notePrimaryLacksOwnTransactions(primary, holder string, extra mysql.GTIDSet) {
+	if primary == "" {
+		return
+	}
+	own := extra.OriginatedBy(tm.liveSiteServerUUIDs(primary, "")...)
+	key := ""
+	if !own.IsEmpty() {
+		key = primary + "/" + holder + "/" + own.String()
+	}
+	tm.mu.Lock()
+	same := tm.primaryOwnLossLogged == key
+	tm.primaryOwnLossLogged = key
+	tm.mu.Unlock()
+	if key == "" || same {
+		return
+	}
+	tm.logger.Error("the primary lacks transactions it issued itself, which another site holds; it restarted on older data and was made writable outside the operator, and reuses their GTIDs for what it commits now",
+		"site", primary, "heldBy", holder, "lostTransactions", own.TransactionCount(), "lostGtid", truncateGtidSet(own.String()),
+		"remedy", fmt.Sprintf("the transactions exist on %s only (its divergentGtid). Decide which history to keep: replay them onto the primary and reclone %s, or stop writes, make %s the primary by hand and reclone %s",
+			holder, holder, holder, primary))
+}
+
+// recordedSiteServerUUIDs returns every server_uuid recorded for site,
+// without access to the store.
+func (tm *TopologyManager) recordedSiteServerUUIDs(site string) []string {
+	t := &tm.siteIdentity
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return recordedServerUUIDs(t.timeline[site])
+}
+
+// readOwnLossSubject reads the server_uuid and executed set of a site that
+// is compared with other sites. ok is false when the site does not answer,
+// its identity cannot be read (a test double) or its set does not parse:
+// nothing is concluded about it then.
+func (tm *TopologyManager) readOwnLossSubject(ctx context.Context, site *siteTracker) (snap mysql.GTIDSnapshot, set mysql.GTIDSet, ok bool) {
 	var identityKnown bool
 	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
 		var err error
 		snap, identityKnown, err = readSiteGTIDSnapshot(probeCtx, site.mysql)
 		return err
 	}); err != nil || !identityKnown {
-		return false
+		return snap, set, false
 	}
-	siteSet, err := mysql.ParseGTIDSet(snap.GtidExecuted)
-	if err != nil {
-		return false
-	}
-	live := tm.liveSiteServerUUIDs(site.name, snap.ServerUUID)
-	uuids := tm.noteSiteServerUUID(ctx, site.name, snap.ServerUUID)
-	lost := ownLostOnWitness(witnessSet, siteSet, live)
+	set, err := mysql.ParseGTIDSet(snap.GtidExecuted)
+	return snap, set, err == nil
+}
+
+// reviewOwnLossReports looks, once per gtidAuditInterval, at every report
+// that is not a hole against the primary (a witness report, or one
+// restored from status that nothing has compared yet), by the one rule
+// that ends such a report: every other site of the group answered in this
+// pass and none holds transactions the site issued, under a server_uuid no
+// clone has superseded, and lacks.
+//
+// The site and every other site are read, whatever site the report names:
+// two sites can hold the same lost transactions, and a report restored
+// from an older status names none. A site that awaits the reclone of an
+// in-place restore holds nothing that counts and need not answer, and a
+// site that left the group is not asked. Any other site that does not
+// answer proves nothing, and the report stays: a site is not made
+// promotable again on silence. A site that holds the transactions becomes
+// the report's holder. The primary is asked under every server_uuid the
+// site has had: what it holds of them is a hole, which the audit and
+// recovery report with their own proof, and until they have, this pass
+// leaves the report alone. It runs with or without a primary, and only
+// reads.
+func (tm *TopologyManager) reviewOwnLossReports(ctx context.Context) bool {
+	now := tm.clock.Now()
 	tm.mu.Lock()
-	changed, lossLog := tm.settleOwnLossLocked(site.name, lost, witness, divergenceDetectedByAudit, uuids, true)
-	if rec := tm.ownLoss[site.name]; rec != nil && rec.witness {
-		rec.reviewAfter = tm.clock.Now().Add(gtidAuditInterval)
+	var due []string
+	for name, rec := range tm.ownLoss {
+		if (rec.witness || rec.detectedBy == "") && !now.Before(rec.reviewAfter) {
+			rec.reviewAfter = now.Add(gtidAuditInterval)
+			due = append(due, name)
+		}
 	}
+	active := tm.activeSiteLocked()
 	tm.mu.Unlock()
-	if lossLog != nil {
-		lossLog()
+	slices.Sort(due)
+	changed := false
+	for _, name := range due {
+		site := tm.getSite(name)
+		if site == nil || site.state != state.StateReadOnly {
+			continue
+		}
+		// Only a read-only site is reviewed, by its live flag (the tracked
+		// state is debounced). A site that is writable issues transactions:
+		// once it has issued as many as it lost its set looks complete,
+		// and its report is what makes the split-brain fence choose it
+		// (fenceWritableOwnLossSites). Its report ends when it is fenced
+		// and reviewed, or by the promotion record (requestOwnLossReclone).
+		var readOnly bool
+		if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			var err error
+			readOnly, err = site.mysql.CheckReadOnly(probeCtx)
+			return err
+		}); err != nil || !readOnly {
+			continue
+		}
+		// The other sites first, then the site: what the site applied
+		// between the reads is then in its set, so a holder's set never
+		// shows a transaction the site is about to hold.
+		sets := tm.readOwnLossWitnesses(ctx, []string{name})()
+		snap, siteSet, ok := tm.readOwnLossSubject(ctx, site)
+		if !ok {
+			continue
+		}
+		live := tm.liveSiteServerUUIDs(name, snap.ServerUUID)
+		uuids := tm.noteSiteServerUUID(ctx, name, snap.ServerUUID)
+		tm.mu.RLock()
+		named := ""
+		if rec := tm.ownLoss[name]; rec != nil {
+			named = rec.comparedTo
+		}
+		silent, primaryHolds := false, false
+		var peers []string
+		for i := range tm.sites {
+			peer := tm.sites[i].name
+			if peer == name || tm.ownLossWitnessExcludedLocked(peer) {
+				continue
+			}
+			set, answered := sets[peer]
+			switch {
+			case peer == active && answered:
+				primaryHolds = !ownLostTransactions(set, siteSet, uuids).IsEmpty()
+			case !answered || tm.sites[i].state != state.StateReadOnly:
+				// No answer, or a site that is not seen read-only (not
+				// classified yet, or writable beside another): nothing
+				// is concluded from it, in either direction.
+				silent = true
+			default:
+				peers = append(peers, peer)
+			}
+		}
+		tm.mu.RUnlock()
+		// The site the report names is asked first, so a report keeps its
+		// holder while that site still holds the transactions.
+		slices.SortStableFunc(peers, func(a, b string) int {
+			switch {
+			case a == named && b != named:
+				return -1
+			case b == named && a != named:
+				return 1
+			}
+			return strings.Compare(a, b)
+		})
+		held := false
+		for _, peer := range peers {
+			lost := ownLostOnWitness(sets[peer], siteSet, live)
+			if lost.IsEmpty() {
+				continue
+			}
+			held = true
+			tm.mu.Lock()
+			siteChanged, lossLog := tm.settleOwnLossLocked(name, lost, peer, divergenceDetectedByAudit, uuids, true)
+			tm.mu.Unlock()
+			if lossLog != nil {
+				lossLog()
+			}
+			changed = changed || siteChanged
+			break
+		}
+		if held || silent || primaryHolds {
+			continue
+		}
+		if tm.clearOwnLossNoHolder(name) {
+			changed = true
+		}
 	}
 	if changed {
 		tm.RequestStatusRefresh()
@@ -880,49 +1212,186 @@ func (tm *TopologyManager) compareWithWitness(ctx context.Context, site *siteTra
 	return changed
 }
 
-// reviewWitnessOwnLoss compares every site that carries a witness report
-// with its witness again, once per gtidAuditInterval: the report ends when
-// the witness no longer holds transactions the site lacks (it was
-// recloned, or its volume was replaced), when the witness left the group,
-// or when an in-place restore queued the witness for its reclone. A
-// witness that does not answer proves nothing, and the report stays: a
-// site is not made promotable again on silence. It runs with or without a
-// primary, and only reads.
-func (tm *TopologyManager) reviewWitnessOwnLoss(ctx context.Context) bool {
-	type review struct{ site, witness string }
-	now := tm.clock.Now()
-	tm.mu.Lock()
-	var due []review
-	for name, rec := range tm.ownLoss {
-		if rec.witness && !now.Before(rec.reviewAfter) {
-			rec.reviewAfter = now.Add(gtidAuditInterval)
-			due = append(due, review{name, rec.comparedTo})
-		}
+// A hole, or only lag?
+//
+// "Whatever the primary holds under a server_uuid of the site, the site
+// held once" is true, but it does not follow that the site can never get
+// it by replication. The receiver drops events by server_id, and a
+// transaction keeps its server_uuid but takes the server_id of the server
+// that logs it when it is applied there from a decoded binary log
+// (mysqlbinlog | mysql, one of the documented remedies for a divergent
+// site) or under a hand-set gtid_next. Measured on MySQL 9.7: transactions
+// of B replayed onto A are logged on A with A's server_id, and B,
+// replicating from A, receives and applies every one of them. While such a
+// replay runs, a follower that is merely behind lacks, at every
+// comparison, transactions under its own server_uuid that the primary
+// holds.
+//
+// So for a site whose channel from the primary runs, a deficit is a hole
+// only once it cannot be lag. The proof is by position, not by time: the
+// primary's binary log coordinates are read together with its executed set
+// (SHOW BINARY LOG STATUS), and the deficit counts once the site's applier
+// has executed the primary's log past those coordinates
+// (ReplicaStatus.ExecutedPast) and the site still lacks part of that set.
+// Everything the primary had logged by then the site has applied, or its
+// receiver dropped. Measured: with a real hole the site's executed position
+// reaches the primary's while the transactions stay missing, also on an
+// idle primary; with a delayed or stopped applier it stays behind the
+// snapshot until the transactions are applied.
+//
+// A site with no channel, or a channel that does not run from the primary,
+// is compared once, exactly, as before: nothing is delivering anything to
+// it. If the primary holds the site's transactions by a replay, replication
+// would have delivered them and the reclone is not needed; the two cases
+// look the same in the GTID sets, and a needless clone (the primary holds
+// everything the site does) is the safe side of that doubt, a rejoin the
+// unsafe one.
+
+// binlogPositionReader is implemented by checkers that read a server's
+// binary log coordinates with its executed set. The production checker
+// does. For one that does not (a test double, a simulation without a
+// replay) a deficit is taken as a hole at once, as for a site without a
+// channel.
+type binlogPositionReader interface {
+	ReadBinlogPosition(ctx context.Context) (mysql.BinlogPosition, error)
+}
+
+// ownLossProof is a snapshot of the primary that a site with a running
+// channel must have executed past before what it lacks of the snapshot
+// counts as a hole. Protected by tm.mu.
+type ownLossProof struct {
+	// primary and primaryUUID name the server the snapshot was read from.
+	primary, primaryUUID string
+	pos                  mysql.BinlogPosition
+	set                  mysql.GTIDSet
+}
+
+// ownLossProofRetry is how soon a follower whose deficit could still be
+// lag is audited again.
+const ownLossProofRetry = 5 * time.Second
+
+// proveOwnLossHole decides whether lost, what site lacks of its own
+// transactions that the primary holds (from a comparison just made, under
+// uuids), is a hole. It returns the hole and proven=true, or proven=false
+// when the deficit can still be replication lag: nothing is concluded
+// then, and the caller looks again.
+//
+// It is a hole at once when the primary cannot report its binary log
+// coordinates, or the site has no channel that runs from the primary
+// (both threads running, the receiver connected to this primary).
+// Otherwise the primary's coordinates and set are recorded on the first
+// sight of a deficit, and the hole is what the site still lacks of that
+// set once its applier has executed past those coordinates; that can be
+// in the same call, when the site is caught up. An empty hole with
+// proven=true means the site holds everything the snapshot held: the
+// deficit was lag.
+func (tm *TopologyManager) proveOwnLossHole(ctx context.Context, primary, site *siteTracker, primaryUUID, siteUUID string, uuids []string, lost mysql.GTIDSet) (hole mysql.GTIDSet, proven bool) {
+	positions, ok := primary.mysql.(binlogPositionReader)
+	if !ok || lost.IsEmpty() {
+		return lost, true
 	}
-	tm.mu.Unlock()
-	slices.SortFunc(due, func(a, b review) int { return strings.Compare(a.site, b.site) })
-	changed := false
-	for _, r := range due {
-		site, witness := tm.getSite(r.site), tm.getSite(r.witness)
-		if site == nil {
-			continue
-		}
-		tm.mu.RLock()
-		void := witness == nil || tm.ownLossWitnessExcludedLocked(r.witness)
-		tm.mu.RUnlock()
-		var witnessSet mysql.GTIDSet
-		if !void {
+	readStatus := func() (*mysql.ReplicaStatus, error) {
+		var rs *mysql.ReplicaStatus
+		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
 			var err error
-			if _, witnessSet, err = readGTIDSetRaw(ctx, witness.mysql); err != nil {
-				continue
+			rs, err = site.mysql.ShowReplicaStatus(probeCtx)
+			return err
+		})
+		return rs, err
+	}
+	rs, err := readStatus()
+	if err != nil {
+		// Whether a channel runs is not known: nothing is concluded.
+		return mysql.GTIDSet{}, false
+	}
+	if !channelRunsFrom(rs, primary.host) {
+		tm.mu.Lock()
+		delete(tm.ownLossProof, site.name)
+		tm.mu.Unlock()
+		return lost, true
+	}
+	// Two rounds at most: a snapshot the site has passed without a hole is
+	// replaced by one taken now, which the site may have passed too.
+	for round := 0; round < 2; round++ {
+		tm.mu.RLock()
+		proof := tm.ownLossProof[site.name]
+		tm.mu.RUnlock()
+		if proof == nil || proof.primary != primary.name || proof.primaryUUID != primaryUUID {
+			var pos mysql.BinlogPosition
+			if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+				var err error
+				pos, err = positions.ReadBinlogPosition(probeCtx)
+				return err
+			}); err != nil {
+				// The coordinates cannot be read (binary logging off, a
+				// missing privilege): the single comparison stands.
+				tm.logger.Warn("own transactions lost: the primary's binary log position could not be read; a deficit is not checked against replication lag",
+					"site", site.name, "primary", primary.name, "error", err)
+				return lost, true
+			}
+			set, err := mysql.ParseGTIDSet(pos.GtidExecuted)
+			if err != nil {
+				return mysql.GTIDSet{}, false
+			}
+			proof = &ownLossProof{primary: primary.name, primaryUUID: primaryUUID, pos: pos, set: set}
+			tm.mu.Lock()
+			if tm.ownLossProof == nil {
+				tm.ownLossProof = map[string]*ownLossProof{}
+			}
+			tm.ownLossProof[site.name] = proof
+			tm.mu.Unlock()
+		}
+		// The applier's position first, then the set: what was applied up
+		// to that position is in the set read after it. A receiver that
+		// last connected to another server under the primary's name (the
+		// primary was replaced) reports that server's positions, not this
+		// primary's: wait for it to reconnect.
+		if rs, err = readStatus(); err != nil || !channelRunsFrom(rs, primary.host) ||
+			(rs.SourceUUID != "" && primaryUUID != "" && !strings.EqualFold(rs.SourceUUID, primaryUUID)) {
+			return mysql.GTIDSet{}, false
+		}
+		snap, siteSet, ok := tm.readOwnLossSubject(ctx, site)
+		if !ok || !strings.EqualFold(snap.ServerUUID, siteUUID) {
+			return mysql.GTIDSet{}, false
+		}
+		if !rs.ExecutedPast(proof.pos) {
+			// Behind the snapshot. A snapshot that lies beyond the
+			// primary's log as it is now (the log was reset) can never be
+			// passed: it is dropped, and the next look takes another.
+			var now mysql.BinlogPosition
+			if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+				var err error
+				now, err = positions.ReadBinlogPosition(probeCtx)
+				return err
+			}); err == nil && !(&mysql.ReplicaStatus{ExecSourceLogFile: now.File, ExecSourceLogPos: now.Pos}).ExecutedPast(proof.pos) {
+				tm.mu.Lock()
+				delete(tm.ownLossProof, site.name)
+				tm.mu.Unlock()
+			}
+			return mysql.GTIDSet{}, false
+		}
+		if hole = ownLostTransactions(proof.set, siteSet, uuids); !hole.IsEmpty() {
+			return hole, true
+		}
+		// The site holds everything of that snapshot. What it lacked in
+		// the caller's comparison came later: prove against a new one.
+		tm.mu.Lock()
+		delete(tm.ownLossProof, site.name)
+		tm.mu.Unlock()
+		if round == 0 {
+			_, primarySet, err := readGTIDSetRaw(ctx, primary.mysql)
+			if err != nil || ownLostTransactions(primarySet, siteSet, uuids).IsEmpty() {
+				return mysql.GTIDSet{}, err == nil
 			}
 		}
-		// A void witness holds nothing that counts: an empty set clears.
-		if tm.compareWithWitness(ctx, site, r.witness, witnessSet) {
-			changed = true
-		}
 	}
-	return changed
+	return mysql.GTIDSet{}, false
+}
+
+// channelRunsFrom reports whether rs is a channel from host with both
+// threads running.
+func channelRunsFrom(rs *mysql.ReplicaStatus, host string) bool {
+	return rs != nil && rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(host)
 }
 
 // noteOwnLossClearedLocked records why site's report ended, for the
@@ -1040,11 +1509,21 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 			continue
 		}
 		if tm.sites[i].state == state.StateWritable && active == name {
+			if !tm.everyOtherSiteReadOnlyLocked(name) {
+				// The only writable site the operator sees, but not every
+				// other site answers read-only: one of them may be the
+				// primary an administrator promoted in its place. The
+				// report stays, so that this site, not that one, is fenced
+				// if both turn out writable (fenceWritableOwnLossSites).
+				setWaiting(rec, "the site was made writable without a reclone; the report stays until every other site is seen read-only")
+				continue
+			}
 			// Made writable without a reclone (the operator does not
-			// promote it): the report no longer describes a replica to
-			// repair. The runner records the promotion from the status
-			// change.
+			// promote it), and no other site can be writing: the report
+			// no longer describes a replica to repair. The runner records
+			// the promotion from the status change.
 			delete(tm.ownLoss, name)
+			delete(tm.ownLossProof, name)
 			tm.forgetOwnLossRefusalLocked(name)
 			metrics.OwnTransactionsLost.WithLabelValues(name).Set(0)
 			lost, count := rec.lostGtid, rec.lostCount
@@ -1064,12 +1543,13 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 			setWaiting(rec, "another site is recloned first")
 		case tm.recovery[name] != nil && tm.recovery[name].state == v1alpha1.RecoveryStateBlocked:
 			setWaiting(rec, "the site also holds transactions the primary lacks; an administrator decides about them and reclones it")
-		case rec.witness:
+		case rec.witness && rec.comparedTo != active:
 			// Nothing to repair against the primary: a clone would only
 			// change the site's server_uuid. The report ends with the
-			// witness's own repair.
-			setWaiting(rec, fmt.Sprintf("the transactions are held by %s only, not by the primary, so the site is not recloned automatically; it is not promoted until %s is recloned or the primary contains them",
-				lostHeldBy(rec.comparedTo), lostHeldBy(rec.comparedTo)))
+			// witness's own repair. (A witness report that names the
+			// primary of now is compared with it like any other; the
+			// check before the clone decides.)
+			setWaiting(rec, ownLossWitnessWaiting(rec.comparedTo))
 		case tm.bootstrap == nil || tm.bootstrapCfg.ReplUser == "":
 			setWaiting(rec, "replication credentials are not configured, so the operator cannot clone")
 		case tm.topologyFrozen || slices.Contains(tm.restoreRecloneBlocked, name) || tm.restoreReclonePendingLocked(name):
@@ -1091,7 +1571,13 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 			setWaiting(rec, "the site is not reachable")
 		case rec.detectedBy == "":
 			setWaiting(rec, "the report was restored from status and has not been compared with the primary again yet")
-		case rec.comparedTo != active:
+		case rec.comparedTo != active || rec.witness:
+			// Made against another site, or against this one before it
+			// was the primary: recovery or the audit compares first.
+			if rec.witness {
+				setWaiting(rec, fmt.Sprintf("the report was made against %s before it was the primary; the site has not been compared with it as the primary yet", active))
+				break
+			}
 			setWaiting(rec, fmt.Sprintf("the report was made against %s; the site has not been compared with the primary %s yet", lostHeldBy(rec.comparedTo), active))
 		case now.Before(rec.recloneRetryAfter):
 			setWaiting(rec, fmt.Sprintf("%s; the next one is requested at %s",
@@ -1134,6 +1620,47 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 	}
 }
 
+// everyOtherSiteReadOnlyLocked reports whether every site but name is
+// observed read-only: reachable, and not writable. Caller holds tm.mu.
+func (tm *TopologyManager) everyOtherSiteReadOnlyLocked(name string) bool {
+	for i := range tm.sites {
+		if tm.sites[i].name != name && tm.sites[i].state != state.StateReadOnly {
+			return false
+		}
+	}
+	return true
+}
+
+// ownLossWitnessWaiting says why a site with a witness report is not
+// recloned automatically, and what ends the report. holder is the site
+// the report names ("" when status did not say).
+func ownLossWitnessWaiting(holder string) string {
+	if holder == "" {
+		return "the primary does not hold the transactions, so the site is not recloned automatically; it is not promoted until every other site has been compared and none holds them (the report does not say which site did)"
+	}
+	return fmt.Sprintf("the transactions are held by %s, not by the primary, so the site is not recloned automatically; it is not promoted until every other site has been compared and none holds them: reclone %s, or replay the transactions onto the primary",
+		holder, holder)
+}
+
+// ownLossPromotionRemedyLocked says, for a refusal to promote site, what
+// ends its report ("" when it has none). Caller holds tm.mu.
+func (tm *TopologyManager) ownLossPromotionRemedyLocked(site string) string {
+	rec := tm.ownLoss[site]
+	switch {
+	case rec == nil:
+		return ""
+	case rec.witness && rec.comparedTo != "":
+		return fmt.Sprintf("%s holds them and the primary does not; no reclone of %s is coming: reclone %s (or replay the transactions onto the primary), or reclone %s with kubectl bloodraven reclone %s %s --cold",
+			rec.comparedTo, site, rec.comparedTo, site, tm.cfg.Name, site)
+	case rec.witness:
+		return fmt.Sprintf("the primary does not hold them, so no reclone of %s is coming: the report ends once every other site answers and none holds them, or reclone %s with kubectl bloodraven reclone %s %s --cold",
+			site, site, tm.cfg.Name, site)
+	case rec.detectedBy == "":
+		return "the report was restored from status and is being compared again"
+	}
+	return "wait for its reclone"
+}
+
 // ownLossRecloneFailuresText says how many automatic reclones failed in a
 // row.
 func ownLossRecloneFailuresText(failures int) string {
@@ -1155,35 +1682,6 @@ func (tm *TopologyManager) noteOwnLossCloneFailedLocked(site string) {
 	rec.recloneAnnounced = false
 }
 
-// carryOwnLossRecloneBackoff takes over the failed-reclone count and the
-// retry time of the manager this one replaces, for the sites both hold a
-// report for, so a spec change does not restart a failing clone at once.
-// An operator restart does: the count is not stored.
-func (tm *TopologyManager) carryOwnLossRecloneBackoff(prev *TopologyManager) {
-	if prev == nil || prev == tm {
-		return
-	}
-	type backoff struct {
-		failures int
-		after    time.Time
-	}
-	prev.mu.RLock()
-	carried := make(map[string]backoff, len(prev.ownLoss))
-	for site, rec := range prev.ownLoss {
-		if rec.recloneFailures > 0 {
-			carried[site] = backoff{rec.recloneFailures, rec.recloneRetryAfter}
-		}
-	}
-	prev.mu.RUnlock()
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	for site, b := range carried {
-		if rec := tm.ownLoss[site]; rec != nil && rec.recloneFailures == 0 {
-			rec.recloneFailures, rec.recloneRetryAfter = b.failures, b.after
-		}
-	}
-}
-
 // verifyOwnLossReclone decides, when the automatic reclone of recipient is
 // about to start, whether the evidence for it holds now. It is the only
 // thing the destructive step rests on; the report that led to the request
@@ -1201,7 +1699,11 @@ func (tm *TopologyManager) carryOwnLossRecloneBackoff(prev *TopologyManager) {
 //     the primary lacks, so a site that is divergent as well as lossy can
 //     never be cloned over automatically, whatever was or was not recorded
 //     about it, and
-//   - the donor still holds transactions the recipient issued and lacks.
+//   - the donor still holds transactions the recipient issued and lacks,
+//     and, when the recipient's channel from the donor runs, its applier
+//     has executed the donor's log past the point at which the donor held
+//     them (proveOwnLossHole): a recipient that is only behind is not
+//     cloned.
 //
 // Otherwise the request is dropped. A site found to hold transactions the
 // primary lacks is handed to recovery and the audit, which record the
@@ -1303,6 +1805,20 @@ func (tm *TopologyManager) verifyOwnLossReclone(ctx context.Context, donor, reci
 			"extraTransactions", extra.TransactionCount(), "extraGtid", truncateGtidSet(extra.String()))
 	}
 	lost := ownLostTransactions(donorSet, siteSet, uuids)
+	// A site whose channel from the primary runs may only be behind: the
+	// clone waits until what it lacks cannot be lag (proveOwnLossHole).
+	// The request is made again on every poll, so this is asked again
+	// until the site's applier has passed the primary's snapshot.
+	donorUUID := ""
+	if !lost.IsEmpty() {
+		// Best effort: it only tells a receiver that still names the
+		// primary's predecessor from one that names this server.
+		donorUUID, _ = readServerUUID(ctx, donor.mysql)
+	}
+	lost, proven := tm.proveOwnLossHole(ctx, donor, recipient, donorUUID, snap.ServerUUID, uuids, lost)
+	if !proven {
+		return refuse("the site replicates from the primary and has not applied everything the primary held when the loss was seen; what it lacks may be replication lag, which is no reason to clone")
+	}
 	tm.mu.Lock()
 	if tm.authorityEpoch != epoch || tm.activeSiteLocked() != donor.name {
 		tm.mu.Unlock()

@@ -1155,9 +1155,18 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			if site.LostTransactionCount != nil {
 				lost = *site.LostTransactionCount
 			}
-			tm.SetOwnTransactionsLost(site.Name, site.LostGtid, lost)
+			tm.SetOwnTransactionsLostFrom(site.Name, site.LostGtid, lost, site.LostComparedTo)
 			r.logger.Info("restored own transactions lost state from CR status",
-				"fg", nn, "site", site.Name, "lostGtid", site.LostGtid, "lostTransactions", lost)
+				"fg", nn, "site", site.Name, "lostGtid", site.LostGtid, "lostTransactions", lost, "comparedTo", site.LostComparedTo)
+		}
+		if ownLossReportDegradedForOlderCRD(site) {
+			// A CRD from before lostGtid stored the site's own-loss report
+			// as a RecoveryBlocked without a set. The report is restored
+			// without its set and holder, and held by the conservative
+			// rule: it ends only once every other site has been compared.
+			tm.SetOwnTransactionsLostUnknown(site.Name)
+			r.logger.Info("restored own transactions lost state from CR status without its set: the installed CRD is older than the operator",
+				"fg", nn, "site", site.Name, "remedy", "apply the CRDs of this release (helm does not upgrade the crds/ of a chart)")
 		}
 		if site.RecoveryState != v1alpha1.RecoveryStateBlocked && site.RecoveryState != v1alpha1.RecoveryStateInProgress && site.DivergentGtid == "" {
 			continue
@@ -1178,9 +1187,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 	if prev != nil {
 		// A manager replaced in this process (a spec or credential change)
-		// hands over how often the automatic reclone of a reported site
-		// has failed, so the replacement does not clone again at once.
-		tm.carryOwnLossRecloneBackoff(prev.tm)
+		// hands over its own-loss reports: they are newer than the status
+		// read above and carry their kind, and with them how often the
+		// automatic reclone of a reported site has failed, so the
+		// replacement does not clone again at once.
+		tm.carryOwnLossReports(prev.tm)
 	}
 
 	tmCtx, cancel := context.WithCancel(ctx)
@@ -1261,6 +1272,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// operator's reach.
 	tm.CloneServerUUIDNotRotatedCallback = func(site, serverUUID string) {
 		r.emitCloneServerUUIDNotRotated(tmCtx, nn, site, serverUUID)
+	}
+	tm.ReassertDataLossCallback = func(site, runID, lostGtid string, lostCount int64) {
+		r.emitPlannedSourceTransactionsLost(tmCtx, nn, site, runID, lostGtid, lostCount)
 	}
 	// The recipient's server_uuid before each clone is recorded on the
 	// group, so a clone that finishes after this manager is still checked.
@@ -2440,9 +2454,13 @@ func MergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap Top
 		}
 		st.Sites[i].LostGtid = s.LostGtid
 		st.Sites[i].LostTransactionCount = nil
-		if s.LostGtid != "" && s.LostTxnCount > 0 {
-			c := s.LostTxnCount
-			st.Sites[i].LostTransactionCount = &c
+		st.Sites[i].LostComparedTo = ""
+		if s.LostGtid != "" {
+			st.Sites[i].LostComparedTo = s.LostComparedTo
+			if s.LostTxnCount > 0 {
+				c := s.LostTxnCount
+				st.Sites[i].LostTransactionCount = &c
+			}
 		}
 	}
 
@@ -2779,7 +2797,7 @@ func (r *TopologyManagerRunner) emitOwnLossEvents(fg *v1alpha1.MysqlFailoverGrou
 				what = fmt.Sprintf("replication cannot bring them back and a promotion would issue their GTIDs again. It also holds transactions the primary lacks, so it is not recloned automatically: decide about those, then reclone it (kubectl bloodraven reclone %s %s)", fg.Name, s.Name)
 			case s.LostToWitness:
 				holder := lostHeldBy(s.LostComparedTo)
-				what = fmt.Sprintf("the primary does not hold them either, so the site keeps replicating and is not recloned automatically; it is not promoted while %s holds them. Reclone %s to discard them or make the primary contain them, or reclone %s (kubectl bloodraven reclone %s %s --cold)",
+				what = fmt.Sprintf("the primary does not hold them either, so the site keeps replicating and is not recloned automatically; it is not promoted while %s holds them. Reclone %s to discard them, or replay them onto the primary (this site then receives them by replication), or reclone %s (kubectl bloodraven reclone %s %s --cold)",
 					holder, holder, s.Name, fg.Name, s.Name)
 			}
 			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventOwnTransactionsLost,
@@ -2902,6 +2920,24 @@ func (r *TopologyManagerRunner) emitCloneServerUUIDNotRotated(ctx context.Contex
 			"The pod may predate the launcher (it rolls with the group's pending update), spec.image may start mysqld without it, or the launcher could not remove the file (its line in the mysql container's log starts with %q). "+
 			"The site replicates normally. Promoted after it lost transactions as a primary, it can reissue their GTIDs (PITRArchiveReissueRiskDetected). Reclone the site once its pod runs the launcher.",
 		site, serverUUID, mysqlLauncherLogPrefix)
+}
+
+// emitPlannedSourceTransactionsLost records the Warning Event of a source a
+// planned failover left fenced that was made writable again without part of
+// the set it was fenced with (TopologyManager.reassertNamedSourceCheck).
+func (r *TopologyManagerRunner) emitPlannedSourceTransactionsLost(ctx context.Context, nn types.NamespacedName, site, runID, lostGtid string, lostCount int64) {
+	if r == nil || r.recorder == nil {
+		return
+	}
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := r.client.Get(ctx, nn, &fg); err != nil {
+		r.logger.Warn("could not record the PlannedSourceTransactionsLost event", "fg", nn, "site", site, "error", err)
+		return
+	}
+	r.recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventPlannedSourceTransactionsLost,
+		"site %s, the source planned failover %s left fenced, is the primary again without %d transactions it held under that fence (%s), and no site holds them: they are lost. "+
+			"The source restarted on older data while it was fenced. If the group archives binary logs, the archive may still hold them (see PITRArchiveReissueRiskDetected).",
+		site, runID, lostCount, truncateGtidHint(lostGtid))
 }
 
 // pitrArchiverStatus is site's latest (or last good) archiver status, or
@@ -3206,6 +3242,13 @@ func ownLossMessage(snap TopologySnapshot, group string) string {
 	var parts, witnessOnly []string
 	for _, s := range snap.Sites {
 		if s.LostGtid == "" {
+			if s.RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
+				// Restored from a status that did not carry the set (an
+				// older CRD), and not compared again yet.
+				witnessOnly = append(witnessOnly, s.Name)
+				parts = append(parts, fmt.Sprintf("%s was reported as lacking transactions it issued itself before the operator restarted, and the installed CRD did not store which (apply the CRDs of this release); it is not promoted until it has been compared with every other site (or reclone it: kubectl bloodraven reclone %s %s --cold)",
+					s.Name, group, s.Name))
+			}
 			continue
 		}
 		part := fmt.Sprintf("%s lacks %d transactions it issued itself that %s holds (%s)",

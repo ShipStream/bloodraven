@@ -443,9 +443,9 @@ func (r *trialRunner) restoreSites(tm *controller.TopologyManager) {
 			}
 			if site.LostGtid != "" {
 				// As the runner: a report of lost own transactions holds
-				// across the restart, without its kind (against the primary
-				// or against a witness), which status does not carry.
-				tm.SetOwnTransactionsLost(site.Name, site.LostGtid, site.LostTxnCount)
+				// across the restart, with the site it was compared with
+				// (status.sites[].lostComparedTo).
+				tm.SetOwnTransactionsLostFrom(site.Name, site.LostGtid, site.LostTxnCount, site.LostComparedTo)
 			}
 		}
 	}
@@ -781,6 +781,23 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 		r.cluster.RegressSite(op.Site, op.K)
 	case OpRegressBoot:
 		r.cluster.Recover(op.Site, op.Fenced, false)
+	case OpFailedClone:
+		// Whatever the operator records for a clone it issued, and no
+		// clone: the site keeps its data and its server_uuid.
+		recorded := r.tm != nil && !r.cluster.OperatorDead() && r.tm.CloneIssuedAndFailedForSim(op.Site)
+		r.cluster.NoteFailedClone(op.Site, recorded)
+	case OpSilentWitness:
+		// The site stops answering the operator, and the operator process
+		// restarts (K=0) or replaces the group's manager (K=1) in the same
+		// poll: the new manager starts from status, without the site.
+		r.cluster.SetOperatorLink(op.Site, true)
+		if op.K == 1 && r.pl != nil {
+			r.pl.applyOp(Op{At: op.At, Kind: OpReplaceManager, N: op.N % 4}, poll)
+		} else {
+			r.restartOperator(poll)
+		}
+	case OpSilentWitnessHeal:
+		r.cluster.SetOperatorLink(op.Site, false)
 	case OpFailFlush:
 		r.cluster.AddFlushFailures(op.Site, op.N)
 	case OpSlowFlush:

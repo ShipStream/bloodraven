@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -206,16 +207,20 @@ func TestServerUUIDTimeline(t *testing.T) {
 		changed bool
 		want    []string
 	}{
-		{m, false, nil},                      // a marker with nothing before it
-		{a, true, []string{a}},               //
-		{a, false, []string{a}},              // a uuid is recorded once
-		{m, true, []string{a, m}},            //
-		{m, false, []string{a, m}},           // a second clone under the same uuid adds nothing
-		{b, true, []string{a, m, b}},         //
-		{a, false, []string{a, m, b}},        // back under an earlier uuid: nothing new
-		{m, true, []string{a, m, b, m}},      //
-		{c, true, []string{a, m, b, m, c}},   //
-		{"", false, []string{a, m, b, m, c}}, //
+		{m, false, nil},                             // a marker with nothing before it
+		{a, true, []string{a}},                      //
+		{a, false, []string{a}},                     // a uuid is recorded once
+		{m, true, []string{a, m}},                   //
+		{m, false, []string{a, m}},                  // a second clone with nothing seen since adds nothing
+		{b, true, []string{a, m, b}},                //
+		{b, false, []string{a, m, b}},               // recorded after the marker already
+		{a, true, []string{a, m, b, a}},             // back under an earlier uuid: it runs under it after the clone
+		{a, false, []string{a, m, b, a}},            //
+		{m, true, []string{a, m, b, a, m}},          //
+		{c, true, []string{a, m, b, a, m, c}},       //
+		{"", false, []string{a, m, b, a, m, c}},     //
+		{a, true, []string{a, m, b, a, m, c, a}},    // and again after the second clone
+		{m, true, []string{a, m, b, a, m, c, a, m}}, //
 	} {
 		var changed bool
 		timeline, changed = appendServerUUIDEntry(timeline, step.entry)
@@ -235,7 +240,9 @@ func TestServerUUIDTimeline(t *testing.T) {
 		{"never cloned: every uuid", []string{a, b}, b, []string{a, b}},
 		{"cloned: what came after the clone", []string{a, m, b}, b, []string{b}},
 		{"cloned twice", []string{a, m, b, m, c}, c, []string{c}},
-		{"the clone has not installed: the uuid it runs under", []string{a, m}, a, []string{a}},
+		{"the clone kept the uuid: the uuid it runs under", []string{a, m}, a, []string{a}},
+		{"the same, recorded when the site was read after the clone", []string{a, m, a}, "", []string{a}},
+		{"a failed clone leaves no marker, then the data directory is replaced: both stay live", []string{a, b}, b, []string{a, b}},
 		{"a volume from before the clone: the uuid it runs under counts", []string{a, m, b}, a, []string{b, a}},
 		{"a uuid changed without a clone stays live", []string{a, m, b, c}, c, []string{b, c}},
 		{"an unknown current uuid adds nothing", []string{a, m, b}, "", []string{b}},
@@ -714,12 +721,16 @@ func TestOwnLoss_FailedRecloneBacksOff(t *testing.T) {
 		t.Fatalf("recloneWaiting = %q, want the count of failures", rec.recloneWaiting)
 	}
 
-	// A manager that replaces this one keeps the count and the wait.
+	// A manager that replaces this one keeps the report with its kind,
+	// the count and the wait.
 	g := newLossFixture(t, lossPrimaryGTID, lossReturnGTID, true)
 	g.tm.SetOwnTransactionsLost("dc2", lossLostGTID, 10)
-	g.tm.carryOwnLossRecloneBackoff(f.tm)
+	g.tm.carryOwnLossReports(f.tm)
 	if rec, prev := g.loss(), f.loss(); rec.recloneFailures != 3 || !rec.recloneRetryAfter.Equal(prev.recloneRetryAfter) {
 		t.Fatalf("carried backoff = %d failures until %s, want 3 until %s", rec.recloneFailures, rec.recloneRetryAfter, prev.recloneRetryAfter)
+	}
+	if rec, prev := g.loss(), f.loss(); rec.comparedTo != prev.comparedTo || rec.witness != prev.witness || rec.detectedBy != prev.detectedBy {
+		t.Fatalf("carried report = %+v, want the kind and holder of %+v", rec, prev)
 	}
 }
 
@@ -761,8 +772,10 @@ func TestCloneIdentityRecord_StoresTheServerUUIDHistoryInTheSameWrite(t *testing
 		t.Fatal(err)
 	}
 	got, after := history()
-	if !stringSlicesEqual(got[site], []string{lossUUIDOld, serverUUIDCloneMarker}) {
-		t.Fatalf("server_uuid timeline after Record = %v, want [%s clone]", got, lossUUIDOld)
+	// The server_uuid, and no clone marker: the clone is marked when it is
+	// known to have installed, not when it is issued.
+	if !stringSlicesEqual(got[site], []string{lossUUIDOld}) {
+		t.Fatalf("server_uuid timeline after Record = %v, want [%s]", got, lossUUIDOld)
 	}
 	if recs, err := store.Load(ctx); err != nil || recs[site].ServerUUID == "" {
 		t.Fatalf("clone identity record = %v, %v, want it stored", recs, err)
@@ -778,7 +791,7 @@ func TestCloneIdentityRecord_StoresTheServerUUIDHistoryInTheSameWrite(t *testing
 	if err := store.Resolve(ctx, site, CloneIdentity{ServerUUID: strings.ToUpper(lossUUIDOld)}); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := history(); len(got[site]) != 2 {
+	if got, _ := history(); len(got[site]) != 1 {
 		t.Fatalf("server_uuid timeline after Resolve = %v, want it kept", got)
 	}
 
@@ -795,8 +808,8 @@ func TestCloneIdentityRecord_StoresTheServerUUIDHistoryInTheSameWrite(t *testing
 	if err := f.tm.recordCloneIdentity(ctx, site, uuidBefore, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := history(); !stringSlicesEqual(got[site], []string{lossUUIDOld, serverUUIDCloneMarker, lossUUIDThird, serverUUIDCloneMarker}) {
-		t.Fatalf("server_uuid timeline = %v, want %s and the clone added by the clone identity record's write", got, lossUUIDThird)
+	if got, _ := history(); !stringSlicesEqual(got[site], []string{lossUUIDOld, lossUUIDThird}) {
+		t.Fatalf("server_uuid timeline = %v, want %s added by the clone identity record's write and no clone marker", got, lossUUIDThird)
 	}
 	f.tm.siteIdentity.mu.Lock()
 	unsaved := len(f.tm.siteIdentity.unsaved[site])
@@ -804,8 +817,81 @@ func TestCloneIdentityRecord_StoresTheServerUUIDHistoryInTheSameWrite(t *testing
 	if unsaved != 0 {
 		t.Fatalf("%d entries of %s still wait to be stored, want none", unsaved, site)
 	}
+	// Issued, not installed: both identities are live, whatever the site
+	// runs under.
+	if live := f.tm.liveSiteServerUUIDs(site, ""); !stringSlicesEqual(live, []string{lossUUIDThird}) {
+		t.Fatalf("live server_uuids before the clone installed = %v, want the one it runs under", live)
+	}
+
+	// The clone installs and the recipient answers under a new
+	// server_uuid. The marker cannot be stored (the history's store
+	// fails), so the record stays: a later manager finds it and marks the
+	// clone.
+	f.site.lmu.Lock()
+	f.site.uuid = lossUUIDRe
+	f.site.lmu.Unlock()
+	f.tm.cloneCompletedInProcess(ctx, f.site, site, uuidBefore)
+	if recs, err := store.Load(ctx); err != nil || recs[site].ServerUUID == "" {
+		t.Fatalf("clone identity record = %v, %v: it was removed before the clone was marked on the timeline", recs, err)
+	}
+	if got, _ := history(); slices.Contains(got[site], serverUUIDCloneMarker) {
+		t.Fatalf("server_uuid timeline = %v, want no marker stored yet", got)
+	}
+	// The store works again: the poll loop's look stores the marker and
+	// then removes the record.
+	f.tm.SetSiteIdentityStore(&groupSiteIdentityStore{client: c, nn: nn, logger: testLogger()})
+	f.tm.siteIdentity.mu.Lock()
+	f.tm.siteIdentity.nextTry = time.Time{}
+	f.tm.siteIdentity.mu.Unlock()
+	f.tm.settleCloneIdentity(ctx, f.site, site)
+	if got, _ := history(); !stringSlicesEqual(got[site], []string{lossUUIDOld, lossUUIDThird, serverUUIDCloneMarker}) {
+		t.Fatalf("server_uuid timeline = %v, want the installed clone marked", got)
+	}
+	if recs, err := store.Load(ctx); err != nil || recs[site].ServerUUID != "" {
+		t.Fatalf("clone identity record = %v, %v, want it removed once the marker is stored", recs, err)
+	}
 	if live := f.tm.liveSiteServerUUIDs(site, lossUUIDRe); !stringSlicesEqual(live, []string{lossUUIDRe}) {
 		t.Fatalf("live server_uuids after the clone = %v, want only the new one", live)
+	}
+}
+
+// A clone that was issued and failed leaves no marker: the identity the
+// site keeps stays live, also after its server_uuid changes without a
+// clone (a data directory replaced by hand).
+func TestCloneMarker_OnlyForAnInstalledClone(t *testing.T) {
+	ctx := context.Background()
+	fg := newTestFG()
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg).Build()
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	site := fg.Spec.Sites[1].Name
+	f := newLossFixture(t, lossPrimaryGTID, lossReturnGTID, true)
+	f.tm.SetCloneIdentityStore(&groupCloneIdentityStore{client: c, nn: nn, logger: testLogger()})
+	f.tm.SetSiteIdentityStore(&groupSiteIdentityStore{client: c, nn: nn, logger: testLogger()})
+	prev := &mysql.CloneStatus{State: mysql.CloneStateCompleted, BeginTime: "2026-11-10 08:00:00"}
+	if err := f.tm.recordCloneIdentity(ctx, site, lossUUIDOld, prev, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The clone failed: a newer Failed row.
+	f.site.mockMySQL.mu.Lock()
+	f.site.mockMySQL.cloneStatusVal = &mysql.CloneStatus{State: mysql.CloneStateFailed, BeginTime: "2026-11-11 08:00:00"}
+	f.site.mockMySQL.mu.Unlock()
+	f.tm.settleCloneIdentity(ctx, f.site, site)
+	var cur v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &cur); err != nil {
+		t.Fatal(err)
+	}
+	timeline := parseServerUUIDHistory(cur.Annotations[v1alpha1.ServerUUIDHistoryAnnotation], nil, nn)[site]
+	if !stringSlicesEqual(timeline, []string{lossUUIDOld}) {
+		t.Fatalf("server_uuid timeline after a failed clone = %v, want no clone marker", timeline)
+	}
+	if cur.Annotations[v1alpha1.CloneServerUUIDAnnotation] != "" {
+		t.Fatalf("clone identity record = %q, want it removed: the clone failed", cur.Annotations[v1alpha1.CloneServerUUIDAnnotation])
+	}
+	// The data directory is replaced by hand: the site answers under
+	// another server_uuid. The first identity is still one it can have
+	// lost transactions of.
+	if live := f.tm.liveSiteServerUUIDs(site, lossUUIDThird); !stringSlicesEqual(live, []string{lossUUIDOld, lossUUIDThird}) {
+		t.Fatalf("live server_uuids = %v, want the identity no clone replaced to stay live", live)
 	}
 }
 

@@ -590,6 +590,9 @@ func (pl *plannedHarness) applyOp(op Op, poll int) {
 		var inFlight func() bool
 		if old != nil {
 			inFlight = old.OrderedUpdateClaimedForSim
+			// As the runner's startManager: the replacement takes over
+			// its predecessor's own-loss reports, with their kind.
+			tm.CarryOwnLossReportsForSim(old)
 		}
 		if !pl.reg.replace(tm, pl.wiringFrom(view), op.N, inFlight) {
 			pl.unsupported[op.Kind]++

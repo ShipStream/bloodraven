@@ -66,40 +66,49 @@ func TestOwnLoss_ReassertComparesAStandingReportAgain(t *testing.T) {
 			t.Fatalf("own-loss record = %+v, want %s against the witness dc1", rec, lossLostGTID)
 		}
 	})
-	t.Run("a report against the primary is not settled by the re-assert", func(t *testing.T) {
-		// A comparison of this manager with the confirmed primary found the
-		// hole. It ends by a clean comparison with a primary or a reclone,
-		// not here: it was made under every server_uuid the site has had,
-		// which no peer's set is evidence for once there is no primary.
+	t.Run("a report against the primary is settled the same way", func(t *testing.T) {
+		// One rule ends a report: every other site answered and none holds
+		// transactions the site issued and lacks. The re-assert reads every
+		// peer, so it applies the rule to a hole a comparison of this
+		// manager made against the then-primary too. dc2 is complete
+		// again, and dc1, read-only now, holds nothing dc2 lacks.
 		f := reassertGroup(t, lossUUIDOld+":1-100", lossUUIDOld+":1-100")
 		f.tm.mu.Lock()
 		f.tm.ownLoss = map[string]*ownLossRecord{"dc2": {lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1",
 			detectedBy: divergenceDetectedByRecovery}}
 		f.tm.mu.Unlock()
 		f.pollFor(2 * time.Minute)
-		if siteWritable(f.site) {
-			t.Fatal("dc2 was made writable over a report made against the confirmed primary")
+		if !siteWritable(f.site) || f.loss() != nil {
+			t.Fatalf("dc2 writable=%v report=%+v, want it re-asserted and the report ended", siteWritable(f.site), f.loss())
 		}
-		if f.loss() == nil {
-			t.Fatal("the report against the primary was cleared without a comparison with a primary")
+	})
+	t.Run("a report against the primary on a target that still lacks them", func(t *testing.T) {
+		f := reassertGroup(t, lossUUIDOld+":1-100", lossReturnGTID)
+		f.tm.mu.Lock()
+		f.tm.ownLoss = map[string]*ownLossRecord{"dc2": {lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1",
+			detectedBy: divergenceDetectedByRecovery}}
+		f.tm.mu.Unlock()
+		f.pollFor(2 * time.Minute)
+		if siteWritable(f.site) {
+			t.Fatal("dc2 was made writable although dc1 holds transactions it issued and lacks")
+		}
+		if rec := f.loss(); rec == nil || rec.lostGtid != lossLostGTID {
+			t.Fatalf("own-loss record = %+v, want the report kept", rec)
 		}
 	})
 }
 
-// TestClearRestoredOwnLoss_OnlyTheRestoredReport: the re-assert decides to
-// settle a restored report before it reads the sites. A report that a
-// comparison confirmed in the meantime (recovery or the audit against a
-// primary, the picker or the review against a witness) is not the one it
-// decided about and stays.
-func TestClearRestoredOwnLoss_OnlyTheRestoredReport(t *testing.T) {
+// TestClearOwnLossNoHolder_EveryKind: the pass that read every other site
+// and found no holder ends a report of any kind.
+func TestClearOwnLossNoHolder_EveryKind(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		rec     *ownLossRecord
 		cleared bool
 	}{
 		{"restored from status", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10}, true},
-		{"confirmed against the primary", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1", detectedBy: divergenceDetectedByAudit}, false},
-		{"a witness's", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1", detectedBy: divergenceDetectedByRecovery, witness: true}, false},
+		{"confirmed against the primary", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1", detectedBy: divergenceDetectedByAudit}, true},
+		{"a witness's", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1", detectedBy: divergenceDetectedByRecovery, witness: true}, true},
 		{"none", nil, false},
 	} {
 		f := newLossFixture(t, lossUUIDOld+":1-100", lossUUIDOld+":1-100", false)
@@ -108,7 +117,7 @@ func TestClearRestoredOwnLoss_OnlyTheRestoredReport(t *testing.T) {
 			f.tm.ownLoss = map[string]*ownLossRecord{"dc2": tc.rec}
 			f.tm.mu.Unlock()
 		}
-		if got := f.tm.clearRestoredOwnLoss("dc2"); got != tc.cleared {
+		if got := f.tm.clearOwnLossNoHolder("dc2"); got != tc.cleared {
 			t.Errorf("%s: cleared = %v, want %v", tc.name, got, tc.cleared)
 		}
 		if gone := f.loss() == nil; gone != (tc.cleared || tc.rec == nil) {

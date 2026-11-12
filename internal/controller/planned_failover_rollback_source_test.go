@@ -267,3 +267,58 @@ func TestPF_SourceLostTransactionsEndsWithTheHold(t *testing.T) {
 		t.Fatalf("a long lost set is not cut: %d bytes", len(long))
 	}
 }
+
+// TestRollback_NeverGivesAChannelToATargetThatLacksItsOwnTransactions: the
+// target restarted on older data during the run, under the server_uuid it
+// had, and no longer holds transactions it issued when it was the primary;
+// the source holds them (they are part of the fenced set). Its receiver
+// would drop them, so the rollback neither starts nor creates its channel:
+// it compares the target before it asks the replication start gate, which
+// knows only reports that exist already. The target is reported against
+// the source.
+func TestRollback_NeverGivesAChannelToATargetThatLacksItsOwnTransactions(t *testing.T) {
+	fence := opsUUIDA + ":1-10," + opsUUIDB + ":1-5"
+	short := opsUUIDA + ":1-10," + opsUUIDB + ":1-3"
+	notRestored := []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored}
+	for _, tc := range []rollbackSourceCase{
+		{name: "no channel: none is created", fence: fence,
+			mutate:  func(f *opsFixture) { f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, short, nil },
+			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, warnings: notRestored},
+		{name: "a stopped channel is not started", fence: fence,
+			mutate: func(f *opsFixture) {
+				f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, short, &mysql.ReplicaStatus{SourceHost: "mysql-dc1"}
+			},
+			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, warnings: notRestored},
+		// The control: the same target holding everything it issued.
+		{name: "control: complete, the channel is created", fence: fence,
+			mutate:  func(f *opsFixture) { f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, fence, nil },
+			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, target: []string{"change:mysql-dc1", "start"}},
+		// Short of the fenced set by the source's transactions only: that
+		// is lag, which the channel repairs.
+		{name: "control: behind by the source's transactions, the channel is created", fence: fence,
+			mutate: func(f *opsFixture) {
+				f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, opsUUIDA+":1-8,"+opsUUIDB+":1-5", nil
+			},
+			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, target: []string{"change:mysql-dc1", "start"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runRollbackSourceCase(t, tc) })
+	}
+
+	// The report.
+	f := newOpsFixture(t, "")
+	f.hold(false)
+	f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, short, nil
+	pf := opsRun(v1alpha1.PlannedFailoverPhaseRollingBack)
+	pf.Fence.GtidSet = &fence
+	pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonSourceUnfenced, IntentTime: metav1.NewTime(f.clk.Now())}
+	if _, err := f.topo.Rollback(context.Background(), f.ref, pf); err != nil {
+		t.Fatal(err)
+	}
+	rec := ownLossOf(f.tm, "dc2")
+	if rec == nil || rec.witness || rec.comparedTo != "dc1" || rec.lostGtid != opsUUIDB+":4-5" {
+		t.Fatalf("dc2 own-loss record = %+v, want a report of %s against the source dc1", rec, opsUUIDB+":4-5")
+	}
+	if err := f.tm.withReplicaStartGate("dc2", func() error { return nil }); err == nil || !strings.Contains(err.Error(), "lacks transactions it issued itself") {
+		t.Fatalf("replication start gate = %v, want it to refuse dc2 from now on", err)
+	}
+}

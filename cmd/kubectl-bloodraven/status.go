@@ -228,7 +228,9 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 // printSiteReports says, below the site table, what each site with a
 // recovery report holds or lacks: the transactions it holds and the
 // primary lacks (divergentGtid), and the transactions it issued itself
-// and lacks (lostGtid). For the latter it also prints the operator's own
+// and lacks (lostGtid), with the site that holds them (lostComparedTo):
+// the primary, from which the site cannot replicate them, or another
+// site. For the latter it also prints the operator's own
 // account of the report, which says whether the site is being recloned
 // and, if not, what the automatic reclone waits for: that is the message
 // of the condition whose reason is OwnTransactionsLost, printed whole
@@ -247,8 +249,16 @@ func printSiteReports(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
 		}
 		if s.LostGtid != "" {
 			lost = true
-			lines = append(lines, fmt.Sprintf("  %s lacks %s it issued itself: %s",
-				s.Name, transactionCount(s.LostTransactionCount), truncate(s.LostGtid, 200)))
+			held := ""
+			switch {
+			case s.LostComparedTo == "":
+			case s.LostComparedTo == fg.Status.ActiveSite:
+				held = fmt.Sprintf(", which the primary %s holds", s.LostComparedTo)
+			default:
+				held = fmt.Sprintf(", which %s holds and the primary does not", s.LostComparedTo)
+			}
+			lines = append(lines, fmt.Sprintf("  %s lacks %s it issued itself%s: %s",
+				s.Name, transactionCount(s.LostTransactionCount), held, truncate(s.LostGtid, 200)))
 		}
 	}
 	if len(lines) == 0 {

@@ -73,8 +73,11 @@ dimension rather than one per statement.
    (`TestGenerateTrial_FlushFaultsOnlyAdd`). The data-directory regress
    (`regressSite`, with the `regressBoot` that boots the site again) is
    drawn from a third stream (`ownLossFaults`,
-   `TestGenerateTrial_OwnLossFaultsOnlyAdd`). Execution consumes no
-   randomness after generation.
+   `TestGenerateTrial_OwnLossFaultsOnlyAdd`), and the evidence faults
+   (`failedClone`, and `silentWitness` with its `silentWitnessHeal`) from
+   a fourth (`ownLossEvidenceFaults`,
+   `TestGenerateTrial_OwnLossEvidenceFaultsOnlyAdd`). Execution consumes
+   no randomness after generation.
 2. The harness builds a production `TopologyManager` via
    `NewTopologyManagerWithClock` with a `FakeClock`, the simulated
    `mysql.Checker`s, DNS updater/reader, tainter, and out-of-band anti-flap
@@ -496,14 +499,28 @@ clone of the site has superseded, whether the site may be made writable
   `clone_server_uuid_record_test.go`,
   `test/component/own_transactions_lost_test.go`).
 - **Durable state.** Each site's timeline, its `server_uuid`s and where a
-  clone into it was issued, outlives every manager of a trial
+  clone was installed into it, outlives every manager of a trial
   (`simSiteIdentityStore`, the group annotation in production). A manager
   loads it when it starts, as the runner does, so a manager that starts
   into an outage knows it before its first promotion decision. A site's
   own-loss report is restored from the simulated status at every manager
-  start (`restoreSites`), as the runner restores it: with the lost set
-  and without what it was compared with, so the new manager does not know
-  whether it rests on the primary or on a witness.
+  start (`restoreSites`), as the runner restores it: with the lost set and
+  the site it was compared with (`lostComparedTo`), and without its kind,
+  which the first comparison with the primary settles. A manager that
+  replaces another in the same process takes over its predecessor's
+  reports as they are (`CarryOwnLossReportsForSim`), as the runner's
+  `startManager` does.
+- **The evidence faults** test what that evidence survives.
+  `failedClone site` is a clone the operator issued into a site that
+  failed before it installed: the harness calls the production
+  `recordCloneIdentity` for the site (`CloneIssuedAndFailedForSim`) and
+  clones nothing, so the site keeps its data and its `server_uuid`. One
+  trial in five has one. `silentWitness site n k` cuts a site off from
+  the operator for `n` polls (3 to 42) and, in the same poll, restarts
+  the operator (`k=0`) or replaces the group's manager (`k=1`; a restart
+  in a trial without the actors): the new manager starts from status
+  while one site does not answer. One trial in four has one. Neither
+  changes the model's truth; both change only what the operator knows.
 - **The witness wait** runs on the manager's clock (250 ms in production).
   The trial clock stands still during a poll, so a promotion decision
   waits for the witness reads themselves, which return at once in the
@@ -577,7 +594,41 @@ clone of the site has superseded, whether the site may be made writable
     restored from status after an operator restart, whose kind is not
     known, is settled by the re-assert's own comparison with every peer
     (`TestTrial_RestoredOwnLossReportDoesNotWedgeACompletePrimary`,
-    `TestOwnLoss_ReassertComparesAStandingReportAgain`).
+    `TestOwnLoss_ReassertComparesAStandingReportAgain`);
+  - a witness report did not survive a manager replacement, or an
+    operator restart, while its witness did not answer: the restored
+    report carried neither its holder nor its kind, a clean comparison
+    with the primary cleared it, and a planned failover promoted the site
+    in the poll after the witness came back. A report now names its
+    holder, a replaced manager takes its predecessor's reports over, and
+    one rule ends a report that is not a hole against the current
+    primary: every other site answered and none holds the set
+    (`TestTrial_WitnessReportSurvivesASilentWitness`, which fails with
+    `PromotedWithoutOwnTransactions` on the earlier code for the restart
+    and for the replacement);
+  - a clone that was issued and failed left its marker on the site's
+    timeline, and the cross-check that finds a site which lost what a
+    divergent site holds filtered on the identities no clone had
+    superseded without reading the site: it never read a site whose
+    only recorded `server_uuid` stood before the marker, made no report,
+    and a planned failover promoted the site. The model could not see
+    this before `failedClone` existed (it marked only installed clones).
+    The marker is now written when a clone is known to have installed,
+    a `server_uuid` a site is seen under after a marker is recorded
+    again, and the cross-check filters on every recorded `server_uuid`
+    (`TestTrial_FailedCloneDoesNotHideAWitnessReport`, which fails with
+    `PromotedWithoutOwnTransactions` on the earlier code);
+  - a rollback unfenced its source, the record of that end did not
+    commit, and the operator restarted while the source did not answer:
+    past the rollback deadline the new process ended the run
+    `SourceLeftFenced` with "source left fenced" over a source that was
+    writable (`OutcomeDishonest`; found by `silentWitness`, which makes a
+    cut-off site and a restart in one poll common). A rollback whose
+    deadline passes on a pass that could not read the source now ends
+    `SourceLeftFenced{SourceLost}`, the outcome of a run that ended
+    without reaching its source, and says that an earlier attempt may
+    have unfenced it
+    (`TestDSTPF_RollbackThatCannotReachTheSourceDoesNotCallItFenced`).
 - **Residual, by design.** A site promoted while every holder of its lost
   transactions is down or unreachable: the operator cannot know. A trial
   then ends with one GTID naming two transactions, which the model's
@@ -588,14 +639,28 @@ clone of the site has superseded, whether the site may be made writable
   operator elects nobody among read-only sites (`WedgedNoPrimary` exempts a
   target that is not GTID-complete, as before). The same end for a source
   a planned failover's rollback left fenced for that reason. A report
-  restored after an operator restart on a site that is not the recorded
-  primary is compared again only once a primary exists.
+  that is not a hole against the current primary stands for as long as
+  any other site does not answer: it is evidence the operator had, and
+  silence does not end it.
 - **Not modelled.** An in-place restore and its reclone queue (the model
   has none), so the rule that a queued site is no witness, at the picker,
   the re-assert and the rollback, is covered by unit tests only
   (`own_transactions_lost_evidence_test.go`,
   `planned_failover_rollback_witness_test.go`). CLONE INSTANCE as a
   statement: a reclone is its effect, applied in one step (above).
+  Binary log coordinates, and a replay onto the primary of transactions
+  another site issued: in production a follower whose channel runs is
+  reported only once its applier has executed the primary's binary log
+  past the point where the primary held the transactions, because a
+  replay is logged with the primary's `server_id` and does replicate
+  (measured on MySQL 9.7). The model's checkers read no coordinates, so
+  the audit there takes a deficit for a hole at once, which is exact in
+  the model: `Cluster.Tick` never delivers a site its own streams. The
+  proof by position is covered by controller tests
+  (`own_transactions_lost_lag_test.go`). An installed CRD older than the
+  operator, which stores a report without its set
+  (`TestStartManager_RestoresAnOwnLossReportDegradedForAnOlderCRD`,
+  `test/envtest/status_older_crd_test.go`).
 
 ## Invariants
 
@@ -858,6 +923,19 @@ and promoted anyway.
   primary that is complete again was refused for a report nothing compared
   again. `TestTrial_RestoredOwnLossReportDoesNotWedgeACompletePrimary`,
   `TestOwnLoss_ReassertComparesAStandingReportAgain`.
+- **`PromotedWithoutOwnTransactions` after lost evidence**, two
+  histories, both in the same section: a witness report that did not
+  survive a manager replacement or an operator restart while its witness
+  was silent, and a failed clone whose marker hid a site from the
+  cross-check. `TestTrial_WitnessReportSurvivesASilentWitness`,
+  `TestTrial_FailedCloneDoesNotHideAWitnessReport` (constructed trials in
+  this package: the histories need the simulation's faults), and the
+  controller tests they name.
+- **`OutcomeDishonest` at a rollback deadline**: `SourceLeftFenced` with
+  "source left fenced" over a source an earlier operator process had
+  unfenced and the ending process could not read. It ends
+  `SourceLeftFenced{SourceLost}` now.
+  `TestDSTPF_RollbackThatCannotReachTheSourceDoesNotCallItFenced`.
 
 The findings of the plain (actors-off) sweeps are pinned in the same file
 (`TestSplitBrainFence_*`, `TestRecovery_*`, `TestFreshDeploy_*`,
@@ -959,6 +1037,23 @@ rollback finding above) and one `OutcomeDishonest(rolledBackFencedSource)`
 between the two trees also because a manager start now restores own-loss
 reports in the model.
 
+Measured again on 2026-11-11 on the tree that added the evidence faults
+(`failedClone`, `silentWitness`), which add an op to about four seeds in
+ten, so these are other trials than the ones above:
+
+| Sweep | Seeds | Trials | Failing | By fingerprint |
+|---|---|---|---|---|
+| `TestDST_PlannedQuick` | 1–120,000 | 120,000 | 27 | `CooldownViolated(restart+stateLost)` 27 |
+| `TestDST_PlannedQuick` | 440,001–520,000 | 80,000 | 19 | `CooldownViolated(restart+stateLost)` 19 |
+| `TestDST_Quick` | 1–10,000 | 10,000 | 0 | |
+
+Every failing trial is the inherent class. The first sweep of these
+ranges with the evidence faults, before the rollback-deadline fix, had
+one more: seed 22948, `OutcomeDishonest` (the rollback finding above).
+The earlier code, replayed on these faults, fails the two constructed
+trials named above; a sweep of it over planned seeds 1–40,000 did not
+reach either history by chance, which is why they are written out.
+
 What the planned path leaves to others, by design:
 
 | State | Who owns it |
@@ -979,8 +1074,12 @@ What the planned path leaves to others, by design:
   it.** In trials: the data-directory regress, the receiver's `server_id`
   filter, reports against the primary and against a witness, the witness
   review, the automatic reclone's request, its check before the clone and
-  its effect, the `server_uuid` timeline with its clone markers, and
-  reports restored at a manager start without their kind. Not in trials:
+  its effect, the `server_uuid` timeline with its clone markers, a clone
+  that was issued and failed, reports restored at a manager start with
+  their holder and carried across a manager replacement, and a site that
+  falls silent as the operator restarts or its manager is replaced. Not
+  in trials: a replay onto the primary and the proof by binary log
+  position that tells a hole from lag,
   a witness read that answers late (a simulated site answers at once or
   fails at once, so the 250 ms grace is covered by
   `TestOwnLoss_PickerDoesNotWaitForASilentWitness`), a site queued for a

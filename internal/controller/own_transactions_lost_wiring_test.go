@@ -19,7 +19,7 @@ func TestStartManager_RestoresOwnTransactionsLostAndWiresTheHistory(t *testing.T
 	lost := int64(10)
 	fg.Status.Sites = []v1alpha1.SiteStatus{
 		{Name: "dc1"},
-		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, LostGtid: lossLostGTID, LostTransactionCount: &lost},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, LostGtid: lossLostGTID, LostTransactionCount: &lost, LostComparedTo: "dc1"},
 	}
 	t.Cleanup(func() { metrics.OwnTransactionsLost.WithLabelValues("dc2").Set(0) })
 	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
@@ -36,6 +36,9 @@ func TestStartManager_RestoresOwnTransactionsLostAndWiresTheHistory(t *testing.T
 	mt.tm.mu.RUnlock()
 	if rec == nil || rec.lostGtid != lossLostGTID || rec.lostCount != 10 {
 		t.Fatalf("restored report = %+v, want %s (10)", rec, lossLostGTID)
+	}
+	if rec.comparedTo != "dc1" || rec.witness || rec.detectedBy != "" {
+		t.Fatalf("restored report = %+v, want the site it was compared with (dc1) and no kind until it is compared again", rec)
 	}
 	if other != nil {
 		t.Fatalf("dc1 got a report: %+v", other)
@@ -86,5 +89,50 @@ func TestPlannedClaim_RefusesATargetThatLacksItsOwnTransactions(t *testing.T) {
 	if !decided || d.Kind == ClaimGranted || d.RejectReason != v1alpha1.PlannedFailoverReasonTargetUnhealthy ||
 		!strings.Contains(d.Message, "lacks 3 transactions it issued itself") {
 		t.Fatalf("decision = %+v (decided %v), want a TargetUnhealthy rejection naming the lost transactions", d, decided)
+	}
+}
+
+// A status written against a CRD from before lostGtid stores a site's
+// own-loss report as RecoveryBlocked without any set. A manager that starts
+// on it restores the report all the same, without its set: the site stays
+// out of promotion, and the report ends only by the rule of every report.
+func TestStartManager_RestoresAnOwnLossReportDegradedForAnOlderCRD(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	fg.Status.Sites = []v1alpha1.SiteStatus{
+		{Name: "dc1"},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateBlocked},
+	}
+	if !ownLossReportDegradedForOlderCRD(fg.Status.Sites[1]) {
+		t.Fatal("the degraded shape is not recognised")
+	}
+	// What a real divergence block looks like, and a site without a report.
+	div := int64(3)
+	for _, s := range []v1alpha1.SiteStatus{
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: lossUUIDOld + ":101-103", DivergentTransactionCount: &div},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateInProgress},
+		{Name: "dc2"},
+	} {
+		if ownLossReportDegradedForOlderCRD(s) {
+			t.Fatalf("%+v was taken for a degraded own-loss report", s)
+		}
+	}
+	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	mt := registeredManager(r, FailoverGroupNamespacedName(fg))
+	if mt == nil {
+		t.Fatal("no manager registered")
+	}
+	mt.tm.mu.RLock()
+	rec := mt.tm.ownLoss["dc2"]
+	mt.tm.mu.RUnlock()
+	if rec == nil || rec.lostGtid != "" || rec.witness || rec.detectedBy != "" {
+		t.Fatalf("restored report = %+v, want one without a set and without a kind", rec)
+	}
+	if err := mt.tm.liveHandoffRefusal("dc2")(); err == nil {
+		t.Fatal("handoff to dc2 is not refused after a restart on a status an older CRD stored")
+	}
+	if err := mt.tm.withReplicaStartGate("dc2", func() error { return nil }); err == nil {
+		t.Fatal("the restored report does not keep the site's replication from being started")
 	}
 }

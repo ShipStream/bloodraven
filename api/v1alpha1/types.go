@@ -983,6 +983,19 @@ type SiteStatus struct {
 	// +optional
 	LostTransactionCount *int64 `json:"lostTransactionCount,omitempty"`
 
+	// LostComparedTo names the site that holds LostGtid: the site this
+	// one was compared with when the loss was found. When it is the
+	// active primary (status.activeSite) the site cannot replicate the
+	// transactions and is recloned. When it is another site, the primary
+	// does not hold them: this site keeps replicating, is not promoted,
+	// and the report ends once every other site has been compared and
+	// none holds them (the named site was recloned, or the transactions
+	// were replayed onto the primary and replicated back). Empty when
+	// LostGtid is, and for a report restored from a status that did not
+	// carry the field.
+	// +optional
+	LostComparedTo string `json:"lostComparedTo,omitempty"`
+
 	// DivergentGtid is the GTID set of transactions on this site that
 	// the primary named by DivergenceComparedTo lacks. Populated when
 	// RecoveryState is RecoveryBlocked.

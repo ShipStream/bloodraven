@@ -316,24 +316,48 @@ func (f *FailoverController) abortHandoff(ctx context.Context, candidateSite str
 func (f *FailoverController) abortHandoffWithin(ctx context.Context, budget time.Duration, candidateSite string, source mysql.Checker, held mysql.GTIDSet, cause error) error {
 	rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
-	if c, ok := source.(superReadOnlyChecker); ok {
-		var readOnly, superReadOnly bool
-		probeErr := withMySQLSafetyTimeout(rbCtx, func(probeCtx context.Context) error {
-			var err error
+	// The source's flags as they are now. readOnlyKnown is false when the
+	// probe failed: nothing is said about the source's state then.
+	var readOnly, superReadOnly, superKnown bool
+	probeErr := withMySQLSafetyTimeout(rbCtx, func(probeCtx context.Context) error {
+		var err error
+		if c, ok := source.(superReadOnlyChecker); ok {
 			if superReadOnly, err = c.CheckSuperReadOnly(probeCtx); err != nil {
 				return err
 			}
-			readOnly, err = source.CheckReadOnly(probeCtx)
-			return err
-		})
-		if probeErr == nil && readOnly && !superReadOnly {
-			f.logger.Error("maintenance handoff: source left read-only: it restarted during the handoff",
-				"candidate", candidateSite, "cause", cause)
-			return fmt.Errorf("%w; source left read-only: it restarted during the handoff and is read-only by its own start, not by the handoff's fence", cause)
+			superKnown = true
 		}
+		readOnly, err = source.CheckReadOnly(probeCtx)
+		return err
+	})
+	readOnlyKnown := probeErr == nil
+	if readOnlyKnown && superKnown && readOnly && !superReadOnly {
+		f.logger.Error("maintenance handoff: source left read-only: it restarted during the handoff",
+			"candidate", candidateSite, "cause", cause)
+		return fmt.Errorf("%w; source left read-only: it restarted during the handoff and is read-only by its own start, not by the handoff's fence", cause)
 	}
 	_, now, readErr := readGTIDSetRaw(rbCtx, source)
 	if missing := held.Subtract(now); readErr == nil && !missing.IsEmpty() {
+		switch {
+		case readOnlyKnown && !readOnly:
+			// Not behind any fence: it restarted on older data and came up
+			// writable, or something else made it writable. The handoff
+			// sends it nothing. It is the group's primary now, without
+			// transactions it issued; the replica GTID audit reports them
+			// on the site that still holds them, and that it is the
+			// primary which lacks them (crossCheckOwnLoss).
+			f.logger.Error("maintenance handoff: source is writable and no longer holds transactions it held before the handoff",
+				"candidate", candidateSite, "cause", cause,
+				"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
+			return fmt.Errorf("%w; source is writable without %d transactions it held before the handoff (restarted on older data, and not fenced by the handoff any more); it was left as found",
+				cause, missing.TransactionCount())
+		case !readOnlyKnown:
+			f.logger.Error("maintenance handoff: source not unfenced: it no longer holds transactions it held before the handoff",
+				"candidate", candidateSite, "cause", cause, "error", probeErr,
+				"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
+			return fmt.Errorf("%w; source not unfenced: it lacks %d transactions it held before the handoff (restarted on older data?); whether it is read-only could not be read",
+				cause, missing.TransactionCount())
+		}
 		f.logger.Error("maintenance handoff: source left read-only: it no longer holds transactions it held before the handoff",
 			"candidate", candidateSite, "cause", cause,
 			"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))

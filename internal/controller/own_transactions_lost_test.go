@@ -504,8 +504,11 @@ func TestOwnLoss_ReplicationStartGateRefuses(t *testing.T) {
 	}
 }
 
-// A report restored from status keeps the site out of promotion at once,
-// and the first comparison that finds the site whole clears it.
+// A report restored from status keeps the site out of promotion at once.
+// It does not say which site held the transactions, so the comparison
+// with the primary alone does not end it: it ends when every other site
+// has answered and none holds them (here the primary is the only other
+// site).
 func TestOwnLoss_RestoredReportHoldsUntilACleanComparison(t *testing.T) {
 	f := newLossFixture(t, lossPrimaryGTID, lossUUIDOld+":1-100", false)
 	f.tm.SetOwnTransactionsLost("dc2", lossLostGTID, 10)
@@ -525,7 +528,7 @@ func TestOwnLoss_RestoredReportHoldsUntilACleanComparison(t *testing.T) {
 	if rec := f.loss(); rec != nil {
 		t.Fatalf("own-loss record = %+v after a clean comparison, want none", rec)
 	}
-	if got := len(f.records(t, "own transactions lost cleared: the site holds every transaction it issued")); got != 1 {
+	if got := len(f.records(t, "own transactions lost cleared: no site holds transactions the site lacks")); got != 1 {
 		t.Fatalf("cleared log lines = %d, want 1", got)
 	}
 	changes, starts, _, _ := f.site.counts()

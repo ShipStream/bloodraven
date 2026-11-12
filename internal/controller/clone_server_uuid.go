@@ -204,6 +204,11 @@ type pendingCloneIdentity struct {
 	// with a Completed clone_status row), although its server_uuid could
 	// not be read yet.
 	restarted bool
+	// installed: the clone is known to have installed (the recipient
+	// answered with the clone's Completed clone_status row, or under
+	// another server_uuid). The site's server_uuid timeline gets its clone
+	// marker before the record is removed (finishCloneIdentity).
+	installed bool
 	// releaseHold: the recipient's Clone keyring hold was kept at the end
 	// of a bootstrap because of this record, or may have been by an
 	// earlier manager; it is released when the record is settled.
@@ -286,16 +291,13 @@ func (tm *TopologyManager) recordCloneIdentity(ctx context.Context, site, server
 			// No record to write the server_uuid timeline with (a test or
 			// a simulation): it is stored on its own, best effort.
 			tm.noteSiteServerUUID(ctx, site, serverUUID)
-			tm.markSiteCloned(ctx, site)
 		}
 		return err
 	}
 	if serverUUID == "" {
 		// Nothing to compare this clone against. An older record, if any,
 		// stays: a clone completed since it was written with the same
-		// server_uuid is still a clone that did not rotate. The clone is
-		// still marked on the site's timeline, best effort.
-		tm.markSiteCloned(ctx, site)
+		// server_uuid is still a clone that did not rotate.
 		return nil
 	}
 	rec := CloneIdentity{ServerUUID: serverUUID}
@@ -307,18 +309,18 @@ func (tm *TopologyManager) recordCloneIdentity(ctx context.Context, site, server
 		rec.PreviousCloneBegin = &begin
 	}
 	if p, ok := tm.pendingCloneIdentity(site); ok && !p.decided && p.rec.ServerUUID == serverUUID {
-		// The write that stored that record stored the uuid and the
-		// clone marker in the site's timeline too, unless an operator
-		// from before that did it wrote it: make sure, best effort.
+		// The write that stored that record stored the uuid in the
+		// site's timeline too, unless an operator from before that did
+		// it wrote it: make sure, best effort.
 		tm.noteSiteServerUUID(ctx, site, serverUUID)
-		tm.markSiteCloned(ctx, site)
 		return nil
 	}
 	if err := store.Record(ctx, site, rec); err != nil {
 		return fmt.Errorf("record the server_uuid of clone recipient %s: %w", site, err)
 	}
-	// The same write stored the uuid and the clone marker in the site's
-	// timeline.
+	// The same write stored the uuid in the site's timeline. The clone
+	// itself is marked there when it is known to have installed
+	// (finishCloneIdentity).
 	tm.siteCloneRecorded(site, serverUUID)
 	t := &tm.cloneIdentity
 	t.mu.Lock()
@@ -357,8 +359,17 @@ func (tm *TopologyManager) finishCloneIdentity(ctx context.Context, site string)
 	// The outcome is known; do not lose the removal to a manager that is
 	// shutting down.
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	// An installed clone supersedes the server_uuids the site had. The
+	// marker is stored before the record goes: while the record stands, a
+	// manager that replaces this one looks at the clone again and marks
+	// it. Until the marker is stored the earlier server_uuids stay live,
+	// which errs toward reporting the site.
+	if p.installed && !tm.markSiteCloned(writeCtx, site) {
+		tm.logger.Warn("could not record the installed clone in the site's server_uuid history; will retry", "site", site)
+		return
+	}
 	err := store.Resolve(writeCtx, site, p.rec)
-	cancel()
 	if err != nil {
 		tm.logger.Warn("could not remove the recorded server_uuid of a clone recipient; will retry", "site", site, "error", err)
 		return
@@ -412,15 +423,19 @@ func (tm *TopologyManager) cloneCompletedInProcess(ctx context.Context, recipien
 	}
 	verdict := tm.verifyCloneServerUUIDRotated(ctx, recipient, site, before)
 	if !recorded {
+		// No record whose removal waits for the marker: the installed
+		// clone is marked on the site's timeline now, best effort.
+		tm.markSiteCloned(ctx, site)
 		return
 	}
 	if verdict == cloneIdentityUnreadAfter {
 		// The clone is installed; only the read is missing. The poll loop
 		// compares once the recipient answers.
-		tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.restarted = true })
+		tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.restarted, p.installed = true, true })
+		tm.markSiteCloned(ctx, site)
 		return
 	}
-	tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.decided = true })
+	tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.decided, p.installed = true, true })
 	tm.finishCloneIdentity(ctx, site)
 }
 
@@ -475,13 +490,15 @@ func (tm *TopologyManager) settleCloneIdentity(ctx context.Context, recipient my
 		case err != nil:
 		case after != p.rec.ServerUUID:
 			tm.logger.Info("clone recipient server_uuid rotated", "site", site, "previousServerUuid", p.rec.ServerUUID, "serverUuid", after)
-			tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.decided = true })
+			tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.decided, p.installed = true, true })
 			tm.finishCloneIdentity(ctx, site)
 		default:
 			notVerified("the recipient's clone status before the clone is unknown, so its completed clone cannot be told from an earlier one")
 		}
 	default:
-		tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.restarted = true })
+		// The recorded clone's Completed row: it installed.
+		tm.markCloneIdentity(site, p.rec, func(p *pendingCloneIdentity) { p.restarted, p.installed = true, true })
+		tm.markSiteCloned(ctx, site)
 		if tm.verifyCloneServerUUIDRotated(ctx, recipient, site, p.rec.ServerUUID) == cloneIdentityUnreadAfter {
 			return
 		}

@@ -59,13 +59,15 @@ const crdDegradedRetryInterval = 10 * time.Minute
 //     resumes that rejoin.
 //   - sites[].sourceConvergenceReason OwnTransactionsLost becomes
 //     GTIDDiverged: the reason that goes with the same Blocked state.
-//   - sites[].lostGtid and lostTransactionCount are left out: a CRD
-//     without those values has no such fields and prunes them.
+//   - sites[].lostGtid, lostTransactionCount and lostComparedTo are left
+//     out: a CRD without those values has no such fields and prunes them.
+//     An operator that restarts on such a status has no report to restore
+//     and finds the loss again by its own comparison.
 func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 	changed := false
 	for i := range st.Sites {
-		if st.Sites[i].LostGtid != "" || st.Sites[i].LostTransactionCount != nil {
-			st.Sites[i].LostGtid, st.Sites[i].LostTransactionCount = "", nil
+		if st.Sites[i].LostGtid != "" || st.Sites[i].LostTransactionCount != nil || st.Sites[i].LostComparedTo != "" {
+			st.Sites[i].LostGtid, st.Sites[i].LostTransactionCount, st.Sites[i].LostComparedTo = "", nil, ""
 			changed = true
 		}
 		if st.Sites[i].RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
@@ -78,6 +80,17 @@ func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 		}
 	}
 	return changed
+}
+
+// ownLossReportDegradedForOlderCRD reports whether s is what a status
+// write for an older CRD stores for a site with an own-loss report and no
+// divergence: recoveryState RecoveryBlocked without a divergent set (a
+// divergence block always carries its set) and without lostGtid. An
+// operator that restarts on it restores the report without its set
+// (TopologyManager.SetOwnTransactionsLostUnknown): the report must not be
+// lost with the field the CRD pruned.
+func ownLossReportDegradedForOlderCRD(s v1alpha1.SiteStatus) bool {
+	return s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergentGtid == "" && s.LostGtid == ""
 }
 
 // errStatusLostGtidPruned is what noteStatusDegradedForOlderCRD logs when

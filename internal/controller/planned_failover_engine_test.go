@@ -372,6 +372,31 @@ func TestPlannedFailoverEngine_Table(t *testing.T) {
 			},
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: v1alpha1.PlannedFailoverReasonLagTimeout,
 				releases: []string{"run-1:terminal"}, named: []string{"source:iad"}}},
+		// The deadline passes on a pass that could not read the source at
+		// all (an earlier attempt, or an operator process that died before
+		// it recorded its end, may have unfenced it): the run ends without
+		// reaching the source, and says so instead of "left fenced".
+		{name: "rollingBack/deadline with an unreachable source ends SourceLost", phase: v1alpha1.PlannedFailoverPhaseRollingBack, steps: 1,
+			setup: func(h *pfEngineHarness) {
+				h.topo.rollback = func(PlannedRunRef) (RollbackResult, error) { return RollbackResult{SourceUnreachable: true}, nil }
+				h.clk.Advance(plannedFailoverRollbackDeadline)
+			},
+			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: v1alpha1.PlannedFailoverReasonSourceLost,
+				releases: []string{"run-1:terminal"}, named: []string{"source:iad"},
+				check: func(t *testing.T, h *pfEngineHarness) {
+					pf := h.pf()
+					if pf.Rollback == nil || pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonLagTimeout {
+						t.Errorf("rollback record = %+v, want the rollback's own reason kept", pf.Rollback)
+					}
+					if !strings.Contains(pf.Message, "could not reach the source") || strings.Contains(pf.Message, "left fenced") {
+						t.Errorf("message = %q, want it to say the source was not reached, not that it was left fenced", pf.Message)
+					}
+				}}},
+		{name: "rollingBack/an unreachable source before the deadline is retried", phase: v1alpha1.PlannedFailoverPhaseRollingBack, steps: 1,
+			setup: func(h *pfEngineHarness) {
+				h.topo.rollback = func(PlannedRunRef) (RollbackResult, error) { return RollbackResult{SourceUnreachable: true}, nil }
+			},
+			want: pfExpect{phase: v1alpha1.PlannedFailoverPhaseRollingBack, held: "run-1"}},
 		{name: "publishing/succeeded writes the failover record", phase: v1alpha1.PlannedFailoverPhasePublishing, steps: 1,
 			want: pfExpect{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, events: []string{"PlannedFailoverSucceeded"},
 				check: func(t *testing.T, h *pfEngineHarness) {

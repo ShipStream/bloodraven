@@ -508,6 +508,7 @@ func GenerateTrial(seed uint64) Trial {
 
 	ops = append(ops, flushFaults(seed, names, warmup, faultWindow)...)
 	ops = append(ops, ownLossFaults(seed, names, warmup, faultWindow, healAt)...)
+	ops = append(ops, ownLossEvidenceFaults(seed, names, warmup, faultWindow, healAt)...)
 	sort.SliceStable(ops, func(i, j int) bool { return ops[i].At < ops[j].At })
 
 	return Trial{
