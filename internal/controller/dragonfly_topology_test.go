@@ -47,7 +47,9 @@ type fakeDragonflyConn struct {
 	replicaOfErr  error
 	replicaOfArgs []string
 
-	replicaOfNoOneErr error
+	replicaOfNoOneErr   error
+	replicaOfNoOneCalls int
+	replTakeoverCalls   int
 
 	replTakeoverErr error
 	saveCalls       int
@@ -107,9 +109,13 @@ func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32
 	return c.replicaOfErr
 }
 
-func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error { return c.replicaOfNoOneErr }
+func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error {
+	c.replicaOfNoOneCalls++
+	return c.replicaOfNoOneErr
+}
 
 func (c *fakeDragonflyConn) ReplTakeover(_ context.Context, _ time.Duration) error {
+	c.replTakeoverCalls++
 	return c.replTakeoverErr
 }
 
@@ -294,8 +300,9 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
 
 	// What a killed master leaves: the replica holds the cache and reports
-	// its link to the master down. That is promoted on the first missed
-	// observation (dragonflyMasterLossCorroborated).
+	// its link to the master down. That does not shorten the wait: the
+	// replica is promoted once the threshold's worth of observations
+	// missed the master.
 	target := &fakeDragonflyConn{
 		info: dragonfly.ReplicationInfo{
 			Role:                   "slave",
@@ -312,7 +319,9 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
 	mgr.SetConnector(conn.connect)
 
-	mgr.Tick(context.Background())
+	for i := 0; i < defaultDragonflyMasterLossThreshold; i++ {
+		mgr.Tick(context.Background())
+	}
 
 	var got v1alpha1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {

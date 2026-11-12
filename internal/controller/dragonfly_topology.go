@@ -68,18 +68,25 @@ type DragonflyManager struct {
 	activeUnobservedSince time.Time
 	activeHoldLogged      bool
 	// The Dragonfly-only promotion waits for the active master to be
-	// missed in masterLossThreshold consecutive observations; see
+	// missed in dragonflyMasterLossThreshold consecutive observations; see
 	// noteActiveMaster and dragonflyOnlyPromotionCandidate.
 	// masterMissSite is the active site being missed, masterMisses the
-	// consecutive observations that missed it, and masterWaitLogged is set
-	// once the wait has been logged for this outage. Guarded by mu.
-	// corroboratedMasterLossThreshold is the threshold when the replica
-	// itself reports the master gone. Both are fields so tests can set
-	// them; zero means the default.
-	masterMissSite                  string
-	masterMisses                    int
-	masterWaitLogged                bool
-	corroboratedMasterLossThreshold int
+	// consecutive observations that missed it, masterMissAt when the last
+	// of them was made, and masterWaitLogged is set once the wait has been
+	// logged for this outage. Guarded by mu.
+	masterMissSite   string
+	masterMisses     int
+	masterMissAt     time.Time
+	masterWaitLogged bool
+	// replicaLinked is, per site, the last observation of it as a replica
+	// in stable sync: whom it followed and when. It is what says that a
+	// replica found holding the cache of an earlier instance of its master
+	// had that cache up to the instance's end; see
+	// dragonflyKeepsCacheOverRestartedMaster. Guarded by mu.
+	replicaLinked map[string]dragonflyLinkSighting
+	// now is the clock the miss count and the sightings are timed with; a
+	// field so tests can set it.
+	now func() time.Time
 	// unobservedSites holds the sites whose failed observation has been
 	// logged, so a site that stays down is logged once; keyCountFailed
 	// is the same for a site whose key count cannot be read. Guarded by
@@ -178,9 +185,10 @@ func NewDragonflyManager(c client.Client, recorder record.EventRecorder, logger 
 		staleMasterEventTTL: 5 * time.Minute,
 		activeHoldGrace:     defaultDragonflyActiveHoldGrace,
 
-		corroboratedMasterLossThreshold: defaultDragonflyCorroboratedMasterLossThreshold,
-		unobservedSites:                 make(map[string]bool),
-		keyCountFailed:                  make(map[string]bool),
+		replicaLinked:   make(map[string]dragonflyLinkSighting),
+		now:             time.Now,
+		unobservedSites: make(map[string]bool),
+		keyCountFailed:  make(map[string]bool),
 
 		emergencyTakeoverTimeout:    defaultEmergencyTakeoverTimeout,
 		emergencyWaits:              defaultEmergencyWaits,
@@ -400,12 +408,17 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 		return
 	}
 
+	observedAt := m.now()
 	snap := m.observe(ctx, &fg)
+	// What was observed is noted before the cycle can yield: an
+	// observation that reached the master ends the miss count whether or
+	// not this cycle goes on to act.
+	hold := m.holdUnobservedActive(&fg, snap)
+	m.noteActiveMaster(&fg, snap, hold, observedAt)
+	m.noteLinkedReplicas(snap)
 	if m.shouldYield() {
 		return
 	}
-	hold := m.holdUnobservedActive(&fg, snap)
-	m.noteActiveMaster(&fg, snap, hold)
 	if master := dragonflyMasterOverEmptyRecord(&fg, snap); master != "" && plannedTakeoverMasterSite(&fg) == "" {
 		m.logger.Info("dragonfly: recorded active site holds no keys; following the master on the MySQL active site",
 			"site", recordedDragonflyActiveSite(&fg), "master", master)
@@ -427,6 +440,17 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 				fg.Status.ActiveSite, oldSource, target)
 		}
 		m.promoteLocked(workCtx, &fg, target, oldSource, m.emergencyTakeoverTimeout)
+		return
+	}
+	if target, oldSource, ok := m.restartedMasterPromotionCandidate(&fg, snap, hold); ok {
+		m.logger.Info("dragonfly: active master restarted without the cache; promoting the replica that holds it",
+			"oldSource", oldSource, "target", target, "fg", m.fgKey.String())
+		if m.recorder != nil {
+			m.recorder.Eventf(&fg, corev1.EventTypeNormal, v1alpha1.EventDragonflyPromotionStarted,
+				"active Dragonfly master %q is a new instance without the cache that replica %q still holds; promoting the replica instead of re-attaching it",
+				oldSource, target)
+		}
+		m.promoteLocked(workCtx, &fg, target, oldSource, noDragonflyTakeover)
 		return
 	}
 	if target, oldSource, ok := m.dragonflyOnlyPromotionCandidate(&fg, snap, hold); ok {
@@ -1134,18 +1158,21 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			// Defense-in-depth: ensure the stale master is shed from
 			// the active Service even if its labels somehow drift.
 			// This is independent of the auto-reconfigure attempt below
-			// — a stale master that fails the connected_slaves/offset
-			// gate must still not serve client traffic.
+			// — a stale master that fails the connected_slaves gate must
+			// still not serve client traffic.
 			if err := m.setTrafficLabel(ctx, fg, snap.Name, false); err != nil {
 				m.logger.Info("dragonfly: strip stale-master traffic", "site", snap.Name, "error", err)
 			}
 			// Auto-reconfigure only a stale master no replica is
-			// attached to (connected_slaves=0). master_repl_offset=0 is
-			// kept from when it was read as "never accepted writes"; it
-			// says nothing, because a Dragonfly master reports no
-			// replication offset (v1.38): a master that holds the whole
+			// attached to (connected_slaves=0): one with replicas is
+			// serving somebody, and REPLICAOF would take them with it.
+			// That is all the gate says. It is not a sign of an instance
+			// that never accepted writes: a master that holds the whole
 			// cache with no replica attached, like a target just
-			// promoted from a replica, reads as 0 too.
+			// promoted from a replica, has connected_slaves=0 too, and a
+			// Dragonfly master reports no replication offset to tell
+			// them apart (v1.38, v2.1; the gate once also required
+			// master_repl_offset=0, which is always the case).
 			//
 			// So one case is refused: the stale master holds keys and
 			// the active site holds none. REPLICAOF would discard the
@@ -1162,7 +1189,7 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			// master becomes the active site when the hold ends, which
 			// it could not as a replica of a site that is gone.
 			keepsOnlyCopy := snap.holdsKeys() && activeEmpty
-			if !keepsOnlyCopy && !heldOverEmpty && snap.Info.ConnectedSlaves == 0 && snap.Info.MasterReplOffset == 0 {
+			if !keepsOnlyCopy && !heldOverEmpty && snap.Info.ConnectedSlaves == 0 {
 				m.attemptStaleMasterReconfigure(ctx, fg, snap.Name, password, masterHost, masterPort)
 			}
 			continue
@@ -1179,12 +1206,29 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			// master pod), so without this branch the replica silently
 			// stays disconnected forever — same shape as upstream issue
 			// #2044 (orphaned downstream replicas after topology change).
-			// REPLICAOF to the same target is idempotent at the engine
-			// level, so re-issuing on every tick while the link is down
-			// is safe.
+			// While the master is the instance the replica synced from,
+			// or does not answer, REPLICAOF to the same target costs the
+			// replica nothing: it is refused in under 200ms against a
+			// dead master (`ERR replication cancelled`) and the replica
+			// keeps its keys and the replication id it followed.
+			//
+			// It is not safe against a master that came back as a new
+			// instance. With --break_replication_on_master_restart the
+			// replica does not attach to it by itself: it stays a
+			// replica with the link down, holding every key, and
+			// REPLICAOF is what makes it discard them for whatever the
+			// new instance holds. That replica is not re-attached while
+			// it holds the cache the master lost
+			// (dragonflyKeepsCacheOverRestartedMaster); Tick promotes it
+			// instead, before this point.
 			pointedRight := snap.Info.MasterHost == masterHost && snap.Info.MasterPort == int(masterPort)
 			linkUp := snap.Info.MasterLinkStatus == "up"
 			if pointedRight && linkUp {
+				continue
+			}
+			if why := m.dragonflyKeepsCacheOverRestartedMaster(fg, active, activeSnap, &snap); why != "" {
+				m.logger.Info("dragonfly: replica holds the cache its restarted master lost; not re-attaching it",
+					"site", snap.Name, "master", active, "reason", why, "fg", m.fgKey.String())
 				continue
 			}
 			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort)
@@ -1204,24 +1248,16 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 // that field, which is what the MySQL monitor counts before it calls a site
 // Unreachable: the cache does not fail over on less evidence than the
 // database.
+//
+// There is one threshold. A replica that reports its link to the master
+// down does not shorten it: that is a state, not an event (a replica whose
+// path to a live master is refused reports it for hours), and one missed
+// observation of a healthy master beside it would replace the master with
+// an old copy. What the shorter wait was for, a killed master whose pod
+// returns empty before the threshold, is decided on what the returned
+// instance and the replica report (dragonflyKeepsCacheOverRestartedMaster),
+// not on how fast the operator counts.
 const defaultDragonflyMasterLossThreshold = 3
-
-// defaultDragonflyCorroboratedMasterLossThreshold is the threshold when the
-// replica to promote also says the master is gone: it holds keys, and it
-// reports the link to the active master down (dragonflyMasterLossCorroborated).
-//
-// 1 keeps what the manager did before the threshold existed, for this case
-// only, and it is what saves the cache when the master's process dies. A
-// killed master closes the replication connection at once (the replica
-// reports the link down within 200ms), and its pod is back within seconds as
-// an empty master. From then on the recorded site answers as a master
-// again, no promotion is made, and the replica is reattached to it, which
-// discards the cache. The promotion has to come before the pod does.
-//
-// Set it to defaultDragonflyMasterLossThreshold to make every Dragonfly-only
-// promotion wait the same; a killed master pod that restarts within the
-// wait then costs the cache.
-const defaultDragonflyCorroboratedMasterLossThreshold = 1
 
 // dragonflyMasterLossThreshold is the number of consecutive observations
 // that must miss the active master before a replica is promoted in its
@@ -1248,9 +1284,17 @@ func dragonflyMasterMissed(s *DragonflySiteSnapshot) bool {
 // active Dragonfly master. Any observation that reaches it, as a master or
 // as a replica, ends the count, and so does a change of the active site.
 //
+// The misses have to follow each other. Every cycle that observes notes its
+// result here, also one that then yields to another owner, so a cycle that
+// reached the master always ends the count. A cycle that did not observe at
+// all (the group's gate was busy) notes nothing, and the count does not
+// survive that for long: a miss made more than dragonflyMissCountMaxGap
+// after the one before it starts a new count. observedAt is when this
+// cycle's observation began.
+//
 // The count is this process's: a restarted operator starts from zero, so a
 // master that was already gone is replaced one threshold after the restart.
-func (m *DragonflyManager) noteActiveMaster(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) {
+func (m *DragonflyManager) noteActiveMaster(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool, observedAt time.Time) {
 	active := activeDragonflySiteFromObservation(fg, snaps, holdUnobserved)
 	missed := active != "" && dragonflyMasterMissed(dragonflySnapshotOf(snaps, active))
 	m.mu.Lock()
@@ -1262,25 +1306,182 @@ func (m *DragonflyManager) noteActiveMaster(fg *v1alpha1.MysqlFailoverGroup, sna
 	if m.masterMissSite != active {
 		m.masterMissSite, m.masterMisses, m.masterWaitLogged = active, 0, false
 	}
+	if m.masterMisses > 0 && observedAt.Sub(m.masterMissAt) > m.missCountMaxGap() {
+		m.masterMisses, m.masterWaitLogged = 0, false
+	}
 	m.masterMisses++
+	m.masterMissAt = m.now()
 }
 
-// dragonflyMasterLossCorroborated reports whether the replica s says, by
-// itself, that the active master is gone and that there is a cache to save:
-// it holds keys, it replicates from the active site, and it reports that
-// link down. An unread key count or an unreported link state is not that.
+// dragonflyMissCountMaxGapPolls is how many poll intervals may pass between
+// the end of one cycle that missed the active master and the start of the
+// next one for the two misses to count as consecutive. Cycles follow each
+// other one poll interval apart, or without a pause when an observation
+// ran into a timeout, so two intervals allow for one late cycle and no
+// more.
+const dragonflyMissCountMaxGapPolls = 2
+
+// missCountMaxGap is dragonflyMissCountMaxGapPolls poll intervals.
+func (m *DragonflyManager) missCountMaxGap() time.Duration {
+	return dragonflyMissCountMaxGapPolls * m.effectivePollInterval()
+}
+
+// effectivePollInterval is the manager's poll interval, with Run's default.
+func (m *DragonflyManager) effectivePollInterval() time.Duration {
+	if m.pollInterval <= 0 {
+		return 2 * time.Second
+	}
+	return m.pollInterval
+}
+
+// dragonflyLinkSighting is an observation of a site as a replica in stable
+// sync: the replication id and address of the master it followed, and when.
+type dragonflyLinkSighting struct {
+	replID string
+	host   string
+	port   int
+	at     time.Time
+}
+
+// noteLinkedReplicas records, for every site observed as a replica in
+// stable sync (link up, no full sync in progress, not loading, following a
+// replication id), whom it follows and when it was seen.
+func (m *DragonflyManager) noteLinkedReplicas(snaps []DragonflySiteSnapshot) {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range snaps {
+		s := &snaps[i]
+		if !s.Reachable || s.Info.Role != "slave" || s.Info.MasterLinkStatus != "up" ||
+			s.Info.MasterSyncInProgress || s.Persist.Loading || s.Info.MasterReplID == "" {
+			continue
+		}
+		m.replicaLinked[s.Name] = dragonflyLinkSighting{replID: s.Info.MasterReplID, host: s.Info.MasterHost, port: s.Info.MasterPort, at: now}
+	}
+}
+
+// linkedSightingMaxAge is how old the last sighting of a replica in sync
+// may be for it to say that the replica had its master's cache when the
+// master's instance ended: the longest a master can stay unobserved before
+// the threshold promotion has replaced it (the threshold's worth of cycles,
+// each at most one poll interval and one failed observation long), plus one
+// cycle for the sighting itself.
 //
-// A Dragonfly replica reports the link down when the connection was closed
-// or reset, which is what a dying master process does. It keeps reporting
-// it up through a silent loss (a partition, a node that lost power): there
-// the operator's own observations are all there is, and the full threshold
-// applies.
-func dragonflyMasterLossCorroborated(fg *v1alpha1.MysqlFailoverGroup, s *DragonflySiteSnapshot, active string) bool {
-	if s == nil || !s.Reachable || !s.holdsKeys() || s.Info.MasterLinkStatus != "down" {
+// It also bounds what a wrong answer costs. A replica that lost its link
+// right after the sighting, to a master that went on taking writes and was
+// then restarted from a snapshot of them, is promoted without the writes
+// of at most this long.
+func (m *DragonflyManager) linkedSightingMaxAge(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
+	cycle := m.effectivePollInterval() + dragonfly.DefaultDialTimeout + dragonfly.DefaultIOTimeout
+	return time.Duration(dragonflyMasterLossThreshold(fg)+1) * cycle
+}
+
+// dragonflyReplicaOfEarlierMaster reports whether r is a replica left
+// behind by a restart of the active master: it replicates from the active
+// site's address, it follows a replication id other than the one the
+// instance at that address has now, its link is down, it is not in a full
+// sync or a load, and it holds keys.
+//
+// That is what a restart of the master leaves, on Dragonfly v1.38 and v2.1
+// with --break_replication_on_master_restart (which the operator always
+// sets): the new instance has a new master_replid, the replica keeps the
+// old one, keeps every key and does not attach to the new instance by
+// itself (the master lists it in state=preparation). A replica whose link
+// dropped while the master lived on reports the master's own id and is not
+// this. Any part that could not be read (a key count, a replication id on
+// either side) makes it false.
+func dragonflyReplicaOfEarlierMaster(fg *v1alpha1.MysqlFailoverGroup, active string, master, r *DragonflySiteSnapshot) bool {
+	if master == nil || r == nil || r.Name == active {
+		return false
+	}
+	if !master.Reachable || master.Info.Role != "master" || master.Info.MasterReplID == "" {
+		return false
+	}
+	if !r.Reachable || r.Info.Role != "slave" || r.Info.MasterReplID == "" || r.Info.MasterReplID == master.Info.MasterReplID {
+		return false
+	}
+	if r.Info.MasterLinkStatus != "down" || r.Info.MasterSyncInProgress || r.Persist.Loading || !r.holdsKeys() {
 		return false
 	}
 	host, port := splitHostPort(dragonflyAddr(fg, active), dragonflyPort(fg.Spec.Dragonfly))
-	return s.Info.MasterHost == host && s.Info.MasterPort == int(port)
+	return r.Info.MasterHost == host && r.Info.MasterPort == int(port)
+}
+
+// dragonflyKeepsCacheOverRestartedMaster returns why the replica r must not
+// be re-attached to the active master, or "" when it may be. It is the
+// answer for a replica left behind by a restart of the master
+// (dragonflyReplicaOfEarlierMaster) when re-attaching it would discard
+// cache that the master's new instance does not have:
+//
+//   - the new instance holds no keys: the replica holds the only copy;
+//   - or this process saw the replica in stable sync with the earlier
+//     instance (the same replication id, the same address) no longer ago
+//     than linkedSightingMaxAge. The replica then holds what the earlier
+//     instance held when it ended. Whatever the new instance holds is no
+//     newer than that, apart from what was written to it since it started:
+//     it either started empty and has taken a few writes (a busy cache
+//     writes to a recreated master within a second of its return, so "no
+//     keys" alone would miss this), or it loaded a snapshot the earlier
+//     instance wrote.
+//
+// REPLICAOF would make the replica discard all of it for the new instance's
+// content. Tick promotes the replica instead
+// (restartedMasterPromotionCandidate): REPLICAOF NO ONE keeps its keys, and
+// the restarted instance is then attached to it. What is given up is what
+// was written to the restarted instance before the promotion.
+//
+// Without either piece of evidence the replica is re-attached as before:
+// an operator that restarted during the outage has no sighting, and a
+// master whose key count cannot be read is neither "empty" nor known to
+// hold anything.
+func (m *DragonflyManager) dragonflyKeepsCacheOverRestartedMaster(fg *v1alpha1.MysqlFailoverGroup, active string, master, r *DragonflySiteSnapshot) string {
+	if !dragonflyReplicaOfEarlierMaster(fg, active, master, r) || master.Keys == nil {
+		return ""
+	}
+	if master.holdsNoKeys() {
+		return "the restarted master holds no keys"
+	}
+	m.mu.Lock()
+	seen, ok := m.replicaLinked[r.Name]
+	m.mu.Unlock()
+	if !ok || seen.replID != r.Info.MasterReplID || seen.host != r.Info.MasterHost || seen.port != r.Info.MasterPort {
+		return ""
+	}
+	if age := m.now().Sub(seen.at); age <= m.linkedSightingMaxAge(fg) {
+		return fmt.Sprintf("the replica was in sync with the master's earlier instance %s ago", age.Truncate(time.Second))
+	}
+	return ""
+}
+
+// restartedMasterPromotionCandidate returns the replica to promote in place
+// of an active master that restarted without the cache the replica holds
+// (dragonflyKeepsCacheOverRestartedMaster), and the active site it replaces.
+// With several such replicas it is the one that executed the most of the
+// earlier instance's journal (slave_repl_offset), the first in spec order
+// among equals; the others are then attached to it.
+//
+// This is not a failure-threshold decision: the active master answered, as
+// another instance than the one the replica followed. It needs no missed
+// observation and waits for none.
+func (m *DragonflyManager) restartedMasterPromotionCandidate(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot, holdUnobserved bool) (target, oldSource string, ok bool) {
+	active := activeDragonflySiteFromObservation(fg, snaps, holdUnobserved)
+	if active == "" {
+		return "", "", false
+	}
+	master := dragonflySnapshotOf(snaps, active)
+	best := -1
+	for i := range snaps {
+		if m.dragonflyKeepsCacheOverRestartedMaster(fg, active, master, &snaps[i]) == "" {
+			continue
+		}
+		if best < 0 || snaps[i].Info.SlaveReplOffset > snaps[best].Info.SlaveReplOffset {
+			best = i
+		}
+	}
+	if best < 0 {
+		return "", "", false
+	}
+	return snaps[best].Name, active, true
 }
 
 // dragonflyOnlyPromotionCandidate returns the single healthy replica to
@@ -1299,14 +1500,13 @@ func dragonflyMasterLossCorroborated(fg *v1alpha1.MysqlFailoverGroup, s *Dragonf
 // One missed observation of the master is not its loss. The promotion
 // waits until dragonflyMasterLossThreshold consecutive observations have
 // missed it (noteActiveMaster), as the MySQL monitor does before it calls a
-// site Unreachable; the wait is logged once per outage. Two observations
-// are evidence and do not wait for more:
-//   - the active site answers as a replica: it was reached and is not the
-//     master;
-//   - the replica to promote holds keys and reports its link to the active
-//     master down (dragonflyMasterLossCorroborated): two observers lost the
-//     master, and waiting risks the cache. That case needs
-//     corroboratedMasterLossThreshold misses.
+// site Unreachable; the wait is logged once per outage. One observation is
+// evidence and does not wait for more: the active site answers as a
+// replica. It was reached and is not the master.
+//
+// Nothing shortens the wait. A master that comes back within it, as a new
+// instance without the cache, is handled when it answers
+// (restartedMasterPromotionCandidate).
 //
 // The MySQL-follow promotions (Enqueue, mysqlActivePromotionCandidate) rest
 // on MySQL's own decision and do not come through here.
@@ -1341,13 +1541,6 @@ func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFai
 		return candidates[0], active, true
 	}
 	need := dragonflyMasterLossThreshold(fg)
-	corroborated := dragonflyMasterLossCorroborated(fg, dragonflySnapshotOf(snaps, candidates[0]), active)
-	if corroborated {
-		need = m.corroboratedMasterLossThreshold
-		if need <= 0 {
-			need = defaultDragonflyCorroboratedMasterLossThreshold
-		}
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	misses := 0
@@ -1704,6 +1897,11 @@ func defaultEmergencySettle(takeover time.Duration) time.Duration {
 	return dragonfly.ReplTakeoverServerHold(takeover) + time.Second
 }
 
+// noDragonflyTakeover is promoteLocked's takeover budget for a promotion
+// that must not send REPLTAKEOVER: the target is promoted with REPLICAOF NO
+// ONE at once.
+const noDragonflyTakeover time.Duration = -1
+
 const (
 	// defaultEmergencyTakeoverTimeout is the REPLTAKEOVER budget for an
 	// emergency promotion. A takeover against a healthy, in-sync master
@@ -1739,8 +1937,13 @@ const (
 //  3. Try REPLTAKEOVER on the target, bounded by its own context. If that
 //     succeeds, sessions are preserved (best case).
 //  4. Otherwise REPLICAOF NO ONE on the target, on a fresh connection and
-//     its own context, so application traffic can resume against an empty
-//     master. Sessions are lost in this branch.
+//     its own context. The target becomes a master and keeps every key it
+//     holds (300 of 300 on v1.38 and v2.1); what is lost is what the old
+//     master had written and the target had not received. The log line
+//     and the Event still say "sessions lost" for that.
+//     With takeover == noDragonflyTakeover steps 2 and 3 are skipped: the
+//     target does not follow the instance that answers at the old source's
+//     address, so there is nothing to take over from.
 //  5. If the outcome is unconfirmed (the fallback could not be sent or its
 //     reply was lost), wait until the server can no longer be acting on
 //     the commands, then observe the target's role: a master is a
@@ -1797,7 +2000,12 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 	var settleAt time.Time
 	takeoverAttempted := false
 	takeoverFailure := "REPLTAKEOVER failed"
-	if m.dragonflyReachable(ctx, fg, oldSource, password) {
+	if takeover == noDragonflyTakeover {
+		takeoverFailure = "REPLTAKEOVER not sent: the target follows an earlier instance of the old master"
+		// Nothing holds the replica's REPLICAOF lock and the open
+		// connection carries no pending reply.
+		fallbackWait = m.emergencyStepTimeout
+	} else if m.dragonflyReachable(ctx, fg, oldSource, password) {
 		takeoverAttempted = true
 		settleAt = time.Now().Add(m.emergencySettle(takeover))
 		takeoverCtx, cancelTakeover := context.WithTimeout(ctx, takeoverWait)
@@ -1819,6 +2027,13 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 			return true
 		}
 		m.logger.Warn("dragonfly emergency: REPLTAKEOVER failed; falling back", "site", target, "error", takeoverErr, "fg", fgKey)
+		// Whatever the error, this path does not conclude that no role
+		// changed (a takeover can complete on the master after the
+		// replica answered `Operation canceled`, or after the reply was
+		// lost): it sends REPLICAOF NO ONE, which makes the target a
+		// master holding its keys if it is not one already, and an old
+		// master that then exits and returns empty finds the target
+		// promoted.
 	} else {
 		takeoverFailure = "REPLTAKEOVER skipped: old master unreachable"
 		m.logger.Warn("dragonfly emergency: old master unreachable; skipping REPLTAKEOVER", "site", target, "oldSource", oldSource, "fg", fgKey)
@@ -1851,7 +2066,11 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 			fmt.Sprintf("%s; REPLICAOF NO ONE also failed: %v", takeoverFailure, noOneErr))
 	}
 	m.logger.Info("dragonfly emergency: target promoted via REPLICAOF NO ONE (sessions lost)", "site", target, "fg", fgKey)
-	m.recordSessionsLostPromotion(fg, target, "promoted via REPLICAOF NO ONE (sessions lost)")
+	what := "promoted via REPLICAOF NO ONE (sessions lost)"
+	if takeover == noDragonflyTakeover {
+		what = fmt.Sprintf("promoted via REPLICAOF NO ONE with the keys it holds; what was written to the restarted master %q since it started is discarded", oldSource)
+	}
+	m.recordSessionsLostPromotion(fg, target, what)
 	m.finishDragonflyPromotion(ctx, fg, target, oldSource, password)
 	return true
 }

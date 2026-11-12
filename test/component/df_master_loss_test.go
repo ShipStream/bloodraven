@@ -94,18 +94,98 @@ func TestDragonflyOnlyPromotionWaitsForTheFailureThreshold(t *testing.T) {
 	}
 }
 
-// A killed master leaves a replica that holds the cache and reports its
-// link down. It is promoted on the first missed poll: the master's pod is
-// back within seconds as an empty master, and the cache would go with the
-// reattach.
-func TestDragonflyOnlyPromotionOfAKilledMasterDoesNotWait(t *testing.T) {
+// A replica that holds the cache and reports its link to the master down
+// does not shorten the wait: that is what a killed master leaves, and also
+// what a refused path to a live master leaves for hours. One missed poll of
+// the master beside it promotes nothing.
+func TestDragonflyOnlyPromotionWithALinkDownReplicaWaitsTheSame(t *testing.T) {
 	replica := &keyedDF{keys: 3, stubDF: &stubDF{info: dragonfly.ReplicationInfo{
 		Role: "slave", MasterHost: "orders-dragonfly-iad.ns.svc.cluster.local", MasterPort: 6379,
 		MasterLinkStatus: "down", MasterLastIOSecondsAgo: 1}}}
 	mgr, c, key := dfMasterLossGroup(t, replica)
 
 	mgr.Tick(context.Background())
+	mgr.Tick(context.Background())
+	if got := dfActiveSite(t, c, key); got != "iad" {
+		t.Fatalf("dragonfly activeSite = %q after two missed polls beside a link-down replica, want iad", got)
+	}
+	mgr.Tick(context.Background())
 	if got := dfActiveSite(t, c, key); got != "pdx" {
-		t.Fatalf("dragonfly activeSite = %q after the first missed poll of a killed master, want pdx", got)
+		t.Fatalf("dragonfly activeSite = %q after three missed polls, want pdx", got)
+	}
+}
+
+// recordingDF is a keyedDF that records the role commands it is sent.
+type recordingDF struct {
+	*keyedDF
+	replicaOf []string
+	noOne     int
+	takeovers int
+}
+
+func (r *recordingDF) ReplicaOf(_ context.Context, host string, _ int32) error {
+	r.replicaOf = append(r.replicaOf, host)
+	return nil
+}
+
+func (r *recordingDF) ReplicaOfNoOne(context.Context) error { r.noOne++; return nil }
+
+func (r *recordingDF) ReplTakeover(context.Context, time.Duration) error {
+	r.takeovers++
+	return errors.New("ERR Full sync not done")
+}
+
+// A master that is killed and back before the threshold answers as a new
+// instance: a new replication id, and no keys or the few a client wrote
+// since. Its replica still follows the earlier instance and holds the
+// cache. It is promoted with REPLICAOF NO ONE; it is not sent the REPLICAOF
+// that would empty it. (Dragonfly v1.38.0 and v2.1: the replica keeps its
+// keys and master_replid with the link down until it is sent REPLICAOF.)
+func TestDragonflyReplicaIsPromotedOverAMasterThatRestartedWithoutTheCache(t *testing.T) {
+	const oldID, newID = "8c03c0ed9d972e36e6aaaa5a8222cabea1de09fd", "785aff8f33fc1d1f538aba5a75b76441669bdc2f"
+	for _, tc := range []struct {
+		name       string
+		masterKeys int64
+	}{
+		{"the restarted master holds no keys", 0},
+		{"a client already wrote to the restarted master", 49},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replica := &recordingDF{keyedDF: &keyedDF{keys: 300, stubDF: &stubDF{info: dragonfly.ReplicationInfo{
+				Role: "slave", MasterHost: "orders-dragonfly-iad.ns.svc.cluster.local", MasterPort: 6379,
+				MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, MasterReplID: oldID}}}}
+			master := &keyedDF{keys: 300, stubDF: &stubDF{info: dragonfly.ReplicationInfo{Role: "master", ConnectedSlaves: 1, MasterReplID: oldID}}}
+			mgr, c, key := dfMasterLossGroup(t, replica)
+			masterUp := true
+			mgr.SetConnector(func(_ context.Context, addr, _ string) (controller.DragonflyConnection, error) {
+				if strings.Contains(addr, "iad") {
+					if !masterUp {
+						return nil, errors.New("dial tcp: connection refused")
+					}
+					return master, nil
+				}
+				return replica, nil
+			})
+
+			mgr.Tick(context.Background()) // in sync
+			masterUp = false
+			replica.info.MasterLinkStatus = "down"
+			mgr.Tick(context.Background()) // one missed poll
+			if got := dfActiveSite(t, c, key); got != "iad" {
+				t.Fatalf("dragonfly activeSite = %q after one missed poll, want iad", got)
+			}
+			replica.replicaOf = nil
+
+			masterUp = true
+			master.info.MasterReplID, master.keys = newID, tc.masterKeys
+			mgr.Tick(context.Background())
+			if got := dfActiveSite(t, c, key); got != "pdx" {
+				t.Fatalf("dragonfly activeSite = %q, want pdx: the replica holds the cache the restarted master lost", got)
+			}
+			if len(replica.replicaOf) != 0 || replica.noOne != 1 || replica.takeovers != 0 {
+				t.Fatalf("replica was sent REPLICAOF %v, REPLICAOF NO ONE %d times, REPLTAKEOVER %d times; want only one REPLICAOF NO ONE",
+					replica.replicaOf, replica.noOne, replica.takeovers)
+			}
+		})
 	}
 }
