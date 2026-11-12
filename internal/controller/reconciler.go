@@ -116,6 +116,10 @@ type MysqlFailoverGroupReconciler struct {
 	// that case.
 	APIReader client.Reader
 
+	// rolloutWaitTimeout overrides how long ReconcileSiteDeployment waits
+	// for a site's rollout (default 5 minutes). Tests shorten it.
+	rolloutWaitTimeout time.Duration
+
 	// RolloutPacing holds release-driven pod changes until the group is
 	// admitted to the paced rollout (rollout.go). cmd/bloodraven sets it
 	// together with the RolloutPacer that writes the admissions; a
@@ -2770,7 +2774,11 @@ func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Conte
 		return err
 	}
 	deployName := types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)}
-	if err := r.waitForDeploymentRollout(ctx, deployName, 5*time.Minute); err != nil {
+	timeout := r.rolloutWaitTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	if err := r.waitForDeploymentRollout(ctx, deployName, timeout); err != nil {
 		return &RolloutIncompleteError{Site: siteName, Err: err}
 	}
 	return nil
