@@ -710,6 +710,34 @@ func (tm *TopologyManager) clearOwnLossAfterClone(site string) {
 	tm.RequestStatusRefresh()
 }
 
+// clearRestoredOwnLoss drops site's report when it is still the one
+// restored from status (no comparison of this manager has confirmed it):
+// the primary re-assert read every other site, all of them read-only, and
+// none holds transactions the site issued, under a server_uuid no clone
+// has superseded, and lacks. It reports whether a report was dropped.
+//
+// What the restored report rested on is not known. If it was a hole
+// against a primary under a server_uuid the site has since given up at a
+// clone, that site is divergent, not this one short, and the first
+// comparison with a confirmed primary reports whichever of the two it
+// finds again.
+func (tm *TopologyManager) clearRestoredOwnLoss(site string) bool {
+	const why = "no other site holds transactions it issued and lacks"
+	tm.mu.Lock()
+	rec := tm.ownLoss[site]
+	if rec == nil || rec.witness || rec.detectedBy != "" {
+		tm.mu.Unlock()
+		return false
+	}
+	delete(tm.ownLoss, site)
+	tm.forgetOwnLossRefusalLocked(site)
+	tm.noteOwnLossClearedLocked(site, why)
+	tm.mu.Unlock()
+	metrics.OwnTransactionsLost.WithLabelValues(site).Set(0)
+	tm.logger.Info("own transactions lost cleared: no site holds transactions the site lacks", "site", site, "reason", why)
+	return true
+}
+
 // refuseRejoinWithoutOwnTransactions compares site, whose replication an
 // ordered update is about to start from source (a follower it restarted,
 // or the old active it hands off from), with source, and returns
@@ -1455,15 +1483,4 @@ func (tm *TopologyManager) refuseOwnLossCandidate(name, serverUUID string, set m
 func gtidSetHolds(raw string, want mysql.GTIDSet) bool {
 	set, err := mysql.ParseGTIDSet(raw)
 	return err == nil && set.Contains(want)
-}
-
-// lacksOwnTransactions reports whether site, running under serverUUID with
-// the executed set raw, lacks transactions it issued itself that holder
-// has. A set that does not parse proves nothing.
-func (tm *TopologyManager) lacksOwnTransactions(site, serverUUID, raw string, holder mysql.GTIDSet) bool {
-	set, err := mysql.ParseGTIDSet(raw)
-	if err != nil || serverUUID == "" {
-		return false
-	}
-	return !ownLostTransactions(holder, set, tm.knownSiteServerUUIDs(site, serverUUID)).IsEmpty()
 }

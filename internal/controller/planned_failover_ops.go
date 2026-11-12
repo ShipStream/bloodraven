@@ -1613,6 +1613,12 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		}
 	}
 
+	// The sites that can show what the source lost: the target, and every
+	// other site that answers. They are read before the source, so a
+	// transaction a still-writable source issues after its own read is in
+	// none of their sets.
+	holders := tm.plannedSourceHolders(ctx, ref, live, liveErr)
+
 	// The source as it is now.
 	id, idErr := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 	if idErr == nil && !id.readOnly {
@@ -1636,7 +1642,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		if !attributed && pf.Fence != nil && pf.Fence.SourceServerUUID != "" {
 			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
 		}
-		if lost := tm.plannedSourceLost(ref.Source, id.uuid, id.gtid, F, fErr, live, liveErr); !lost.IsEmpty() {
+		if lost := tm.plannedSourceLost(ref.Source, id.uuid, id.gtid, F, fErr, holders); !lost.IsEmpty() {
 			// Writable, and without transactions it held: it restarted on an
 			// older data directory and was then made writable (an external
 			// read_only=0, or a pod that boots writable). What it commits
@@ -1674,7 +1680,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		// The run's own server is not enough: it must also hold the fenced
 		// set and everything the target holds, or the target is not pointed
 		// at it (plannedSourceTrustFor).
-		trust := tm.plannedSourceTrustFor(ref.Source, attributed, id.uuid, id.gtid, F, fErr, live, liveErr)
+		trust := tm.plannedSourceTrustFor(ref.Source, attributed, id.uuid, id.gtid, F, fErr, live, liveErr, holders)
 		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
 		return res, nil
@@ -1698,7 +1704,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	// held (plannedSourceLacksHistory).
 	leftTrust := plannedSourceUnverified
 	if idErr == nil {
-		leftTrust = tm.plannedSourceTrustFor(ref.Source, false, id.uuid, id.gtid, F, fErr, live, liveErr)
+		leftTrust = tm.plannedSourceTrustFor(ref.Source, false, id.uuid, id.gtid, F, fErr, live, liveErr, holders)
 	}
 	leftFenced := func() (RollbackResult, error) {
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
@@ -1740,10 +1746,11 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	}
 	// What the pinned server lacks decides before anything else: a source
 	// without part of the set it was fenced with, or without transactions
-	// it issued itself that the target holds, is never unfenced, and the
+	// it issued itself that another site holds, is never unfenced, and the
 	// target is never started or pointed at it.
-	lost := tm.plannedSourceLost(ref.Source, pinned.uuid, pinned.gtid, F, fErr, live, liveErr)
-	trust := tm.plannedSourceTrustFor(ref.Source, pinned.uuid == id.uuid, pinned.uuid, pinned.gtid, F, fErr, live, liveErr)
+	lost := tm.plannedSourceLost(ref.Source, pinned.uuid, pinned.gtid, F, fErr, holders)
+	trust := tm.plannedSourceTrustFor(ref.Source, pinned.uuid == id.uuid, pinned.uuid, pinned.gtid, F, fErr, live, liveErr, holders)
+	_, pinnedSetErr := mysql.ParseGTIDSet(pinned.gtid)
 	switch {
 	case pinned.uuid != id.uuid:
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
@@ -1754,25 +1761,23 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		// Made writable between the pooled read and this one: a second
 		// history, as in the already-writable branch above.
 		return tm.sourceLostTransactionsHold(ctx, p, ref, tgt, &live, liveErr, pinned, F, fErr, lost, res)
-	case !lost.IsEmpty() || (fErr == nil && !gtidSetHolds(pinned.gtid, F)) ||
-		(liveErr == nil && tm.lacksOwnTransactions(ref.Source, pinned.uuid, pinned.gtid, live.gtid)):
-		// (The last two conditions are the guard as it was before lost
-		// existed; lost covers both whenever the sets parse.)
-		//
+	case !lost.IsEmpty() || pinnedSetErr != nil:
 		// The same server_uuid on an older data directory: the source
 		// restarted without part of the set it was fenced with, or
 		// (restarted before the fence was read) without transactions it
-		// issued itself that the target already holds. Unfencing it would
-		// have it issue those GTIDs again, and the target, which holds
-		// them, must not be pointed at it. It stays fenced; the topology
-		// manager reports what it lacks (own_transactions_lost.go). A set
-		// that does not parse proves nothing about what the source holds,
-		// so it is not unfenced either. A target that holds transactions
-		// of another server is a divergent target, which does not keep
-		// the source fenced.
+		// issued itself that a site which answers still holds: the target,
+		// or any other site, also when the target cannot be read. Unfencing
+		// it would have it issue those GTIDs again, and the target is not
+		// pointed at it. It stays fenced; the topology manager reports what
+		// it lacks (own_transactions_lost.go). A set that does not parse
+		// proves nothing about what the source holds, so it is not unfenced
+		// either. A site that holds transactions of another server, or of
+		// an identity the source gave up at a clone, is a divergent site,
+		// which does not keep the source fenced.
 		tm.logger.Warn("planned failover: rollback leaves the source fenced, it lacks transactions it held",
 			"runId", ref.RunID, "site", ref.Source, "fenceGtid", truncateGtidSet(F.String()),
-			"sourceGtid", truncateGtidSet(pinned.gtid), "targetGtid", truncateGtidSet(live.gtidRaw))
+			"sourceGtid", truncateGtidSet(pinned.gtid), "targetGtid", truncateGtidSet(live.gtidRaw),
+			"lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()))
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
 		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 		return res, nil
@@ -1860,38 +1865,66 @@ const (
 	// and everything the target holds. A channel may be created toward it.
 	plannedSourceVerified
 	// plannedSourceLacksHistory: the server answered without part of the
-	// fenced set, or without transactions it issued that the target holds
-	// (plannedSourceLost). Nothing is started or pointed at it.
+	// fenced set, or without transactions it issued that the target or
+	// another site that answers holds (plannedSourceLost). Nothing is
+	// started or pointed at it.
 	plannedSourceLacksHistory
 )
+
+// plannedSourceHolders reads the sites whose GTID sets can show that the
+// run's source lacks transactions it issued itself: the target (live, read
+// by the caller) and every other site that answers, by the rules of every
+// other promotion decision (readOwnLossWitnesses): a site that does not
+// answer within the grace is no evidence, and neither is one queued for the
+// reclone of an in-place restore, whose data is void. The target is one
+// holder among the others. A run's target can be cut off from the operator
+// while a disaster-recovery site that answers holds the source's lost
+// tail, so the target alone does not decide.
+func (tm *TopologyManager) plannedSourceHolders(ctx context.Context, ref PlannedRunRef, live promotionLive, liveErr error) map[string]mysql.GTIDSet {
+	holders := tm.readOwnLossWitnesses(ctx, []string{ref.Source, ref.Target})()
+	tm.mu.RLock()
+	targetVoid := tm.ownLossWitnessExcludedLocked(ref.Target)
+	tm.mu.RUnlock()
+	if liveErr == nil && !targetVoid {
+		holders[ref.Target] = live.gtid
+	}
+	return holders
+}
 
 // plannedSourceLost returns what the source, answering under serverUUID
 // with the executed set raw, provably lacks:
 //   - the part of the fenced set F it no longer holds. F is what this
-//     source reported under the run's fence, so it held all of it;
-//   - the transactions it issued itself that the target holds and it does
+//     source reported under the run's fence, so it held all of it, under
+//     whatever server_uuid a transaction was issued: nothing is restricted
+//     to the source's own identities here;
+//   - the transactions it issued itself that one of holders (the target and
+//     the other sites that answered, plannedSourceHolders) has and it does
 //     not: it restarted on an older data directory before the fence was
-//     read, so F is already the short set (ownLostTransactions).
+//     read, so F is already the short set. No holder is the confirmed
+//     primary, so each is a witness and counts only under the source's
+//     server_uuids that no clone has superseded (ownLostOnWitness): what a
+//     site holds under an identity the source gave up at a clone the source
+//     discarded then, and that site is divergent, not the source short.
 //
 // It is empty when nothing is proven: a set that does not parse, an
-// unknown F and an unreadable target prove nothing. It is also empty once
+// unknown F and no holder that answers prove nothing. It is also empty once
 // the source has issued as many transactions as it lost: the GTIDs are
 // then the same and only the transactions differ, which no GTID comparison
 // shows (the residual documented in own_transactions_lost.go).
-func (tm *TopologyManager) plannedSourceLost(site, serverUUID, raw string, F mysql.GTIDSet, fErr error, live promotionLive, liveErr error) mysql.GTIDSet {
+func (tm *TopologyManager) plannedSourceLost(site, serverUUID, raw string, F mysql.GTIDSet, fErr error, holders map[string]mysql.GTIDSet) mysql.GTIDSet {
 	lost := mysql.GTIDSet{}
 	have, err := mysql.ParseGTIDSet(raw)
 	if err != nil {
 		return lost
 	}
-	if liveErr == nil && serverUUID != "" {
-		lost = ownLostTransactions(live.gtid, have, tm.knownSiteServerUUIDs(site, serverUUID))
+	if serverUUID != "" && len(holders) > 0 {
+		uuids := tm.liveSiteServerUUIDs(site, serverUUID)
+		for _, set := range holders {
+			lost = lost.Union(ownLostOnWitness(set, have, uuids))
+		}
 	}
 	if fErr == nil {
-		// What the target holds is listed above; this is the rest of F.
-		for sid, ivs := range F.Subtract(have).Subtract(lost) {
-			lost[sid] = append(lost[sid], ivs...)
-		}
+		lost = lost.Union(F.Subtract(have))
 	}
 	return lost
 }
@@ -1900,9 +1933,11 @@ func (tm *TopologyManager) plannedSourceLost(site, serverUUID, raw string, F mys
 // restorePlannedTargetChannel. ownServer is whether the server that
 // answered is proven the run's own source: its fence is attributable to
 // the run, or it is the pinned server the rollback is about to unfence.
+// Whether the target may replicate from it is a containment question and
+// takes the target's whole set, whatever server issued it.
 func (tm *TopologyManager) plannedSourceTrustFor(site string, ownServer bool, serverUUID, raw string, F mysql.GTIDSet, fErr error,
-	live promotionLive, liveErr error) plannedSourceTrust {
-	if !tm.plannedSourceLost(site, serverUUID, raw, F, fErr, live, liveErr).IsEmpty() {
+	live promotionLive, liveErr error, holders map[string]mysql.GTIDSet) plannedSourceTrust {
+	if !tm.plannedSourceLost(site, serverUUID, raw, F, fErr, holders).IsEmpty() {
 		return plannedSourceLacksHistory
 	}
 	have, err := mysql.ParseGTIDSet(raw)

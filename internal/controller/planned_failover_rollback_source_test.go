@@ -22,7 +22,9 @@ type rollbackSourceCase struct {
 	promoting bool
 	reason    v1alpha1.PlannedFailoverReason
 	third     state.SiteRole
-	mutate    func(f *opsFixture)
+	// fence replaces the run's fenced set (opsF) when set.
+	fence  string
+	mutate func(f *opsFixture)
 
 	outcome   v1alpha1.PlannedFailoverOutcome
 	outReason v1alpha1.PlannedFailoverReason
@@ -42,6 +44,9 @@ func runRollbackSourceCase(t *testing.T, tc rollbackSourceCase) {
 	pf := opsRun(v1alpha1.PlannedFailoverPhaseRollingBack)
 	if tc.promoting {
 		pf.Promotion = opsRun(v1alpha1.PlannedFailoverPhasePromoting).Promotion
+	}
+	if tc.fence != "" {
+		pf.Fence.GtidSet = &tc.fence
 	}
 	reason := tc.reason
 	if reason == "" {
