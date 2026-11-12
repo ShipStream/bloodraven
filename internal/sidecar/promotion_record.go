@@ -508,7 +508,7 @@ func (a *BinlogArchiver) observeRole(ctx context.Context, snap roleSnapshot) err
 // promotionSetReadBound and promotionSetMaxFiles bound the local file
 // reads of one promotion-set derivation: the record gates the episode's
 // uploads and must not wait for a slow volume or a long run of files.
-// Each header read is itself capped (localBinlogHeader: 1 MiB).
+// Each header read is itself capped (localBinlogs.header: 1 MiB).
 const (
 	promotionSetReadBound = time.Second
 	promotionSetMaxFiles  = 64

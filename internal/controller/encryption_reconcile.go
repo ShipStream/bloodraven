@@ -188,18 +188,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		publishKeyringMetrics(fg.Namespace, fg.Name, site)
 	}
 
-	noted := false
-	if c := apiMeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady); c != nil {
-		noted = strings.Contains(c.Message, pitrArchivePlainMarker)
-	}
-	setEncryptionCondition(fg)
-	if note := pitrArchivePlainNote(fg); note != "" && !noted {
-		// Once per appearance: the condition carries it from here on,
-		// also across an operator restart.
-		logger.Info("PITR archive of an encrypted group has no client-side encryption", "profile", fg.Spec.Backup.PITR.ProfileName)
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveNotEncrypted,
-			"encryption at rest is on%s", note)
-	}
+	// The persisted condition, before this pass: the report below is
+	// raised when the note first reaches the API server, whoever wrote it.
+	noted := encryptionConditionNotesPlainArchive(fg)
+	setEncryptionCondition(fg, pitrArchivePlainNote(fg))
 	written, err := r.patchEncryptionStatus(ctx, fg, baseline, false)
 	if errors.Is(err, errEncryptionStatusMoved) {
 		// Not persisted: the deferred settle publishes what is.
@@ -211,6 +203,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	}
 	persisted = true
 	fg.Status.EncryptionAtRest = written
+	if note := pitrArchivePlainNote(fg); note != "" && !noted {
+		// After the write: a pass that is discarded raises nothing, and
+		// the next one still finds the condition without the note.
+		logger.Info("PITR archive of an encrypted group has no client-side encryption", "profile", fg.Spec.Backup.PITR.ProfileName)
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveNotEncrypted,
+			"encryption at rest is on%s", note)
+	}
 	// Push immediately so the topology manager does not wait for the
 	// 30s runner sync before refusing (or unblocking) promotion. This is
 	// the persisted result, so it is authoritative for what it carries.
@@ -922,7 +921,13 @@ func (r *MysqlFailoverGroupReconciler) mutateSiteEncryption(
 			return err
 		}
 		if latest.Status.EncryptionAtRest != nil {
-			setEncryptionCondition(&latest)
+			// This writer keeps the archive note as it finds it: the
+			// reconcile pass adds it, with its Event.
+			note := ""
+			if encryptionConditionNotesPlainArchive(&latest) {
+				note = pitrArchivePlainNote(&latest)
+			}
+			setEncryptionCondition(&latest, note)
 		}
 		return r.Status().Update(ctx, &latest)
 	})
@@ -1075,8 +1080,16 @@ func setEncryptionRefusedCondition(fg *v1alpha1.MysqlFailoverGroup) {
 	})
 }
 
+// encryptionConditionNotesPlainArchive reports whether fg's
+// EncryptionAtRestReady condition carries pitrArchivePlainNote.
+func encryptionConditionNotesPlainArchive(fg *v1alpha1.MysqlFailoverGroup) bool {
+	c := apiMeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
+	return c != nil && strings.Contains(c.Message, pitrArchivePlainMarker)
+}
+
 // setEncryptionCondition summarizes the subsystem on .status.conditions.
-func setEncryptionCondition(fg *v1alpha1.MysqlFailoverGroup) {
+// archiveNote is appended to the message (pitrArchivePlainNote, or "").
+func setEncryptionCondition(fg *v1alpha1.MysqlFailoverGroup, archiveNote string) {
 	if !fg.Spec.EncryptionEnabled() {
 		return
 	}
@@ -1115,7 +1128,7 @@ func setEncryptionCondition(fg *v1alpha1.MysqlFailoverGroup) {
 		cond.Reason = v1alpha1.ReasonAllSitesSealed
 		cond.Message = "every site is sealed against an escrowed keyring"
 	}
-	cond.Message += pitrArchivePlainNote(fg)
+	cond.Message += archiveNote
 	setCondition(&fg.Status.Conditions, cond)
 }
 
@@ -1139,7 +1152,7 @@ func pitrArchivePlainNote(fg *v1alpha1.MysqlFailoverGroup) string {
 	if profile == nil || profile.Encryption != nil {
 		return ""
 	}
-	return fmt.Sprintf("; the PITR archive (backup profile %q) %s: archived binary logs are protected only by what the store provides (set spec.backup.profiles[].encryption, or encrypt the bucket or volume)",
+	return fmt.Sprintf("; the PITR archive (backup profile %q) %s: archived binary logs are protected only by what the store provides (archive through a profile that has spec.backup.profiles[].encryption, or encrypt the bucket or volume)",
 		profile.Name, pitrArchivePlainMarker)
 }
 
@@ -1200,7 +1213,12 @@ func (r *MysqlFailoverGroupReconciler) patchEncryptionStatus(
 		}
 		latest.Status.EncryptionAtRest = mergeEncryptionStatus(desired, latest.Status.EncryptionAtRest)
 		if latest.Spec.EncryptionEnabled() && latest.Status.EncryptionAtRest != nil {
-			setEncryptionCondition(&latest)
+			// The archive note is the calling pass's decision.
+			note := ""
+			if desiredCond != nil && strings.Contains(desiredCond.Message, pitrArchivePlainMarker) {
+				note = pitrArchivePlainNote(&latest)
+			}
+			setEncryptionCondition(&latest, note)
 		} else if desiredCond != nil {
 			setCondition(&latest.Status.Conditions, *desiredCond)
 		}

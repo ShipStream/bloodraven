@@ -1,10 +1,25 @@
 # Proposal: PITR Archiving of Binary Logs Encrypted by MySQL (`binlog_encryption=ON`)
 
 **Issue:** none yet (PR #280, "Known limitations and found, not fixed", item 3)
-**Status:** Draft. The recommendation is **pending Colin's sign-off**; nothing here is implemented.
+**Status:** Option 1 is implemented (decided by the maintainer on 2026-11-12), with D1 = report (Warning Event and condition message, no refusal) and D4 = archive the encrypted files still on disk. Options 2a and 2b were not built: option 1 landed directly, so there was no interim release to cover. See [As implemented](#as-implemented); everything below that section is the proposal as written and describes the state before.
 **Branch:** work package WP3 of the PR #280 follow-ups
 
 All names introduced here (reasons, Events, log messages, fields) are **proposed**. Citations are `path:line` at `56f7b2fb` (PR #280's head plus PR #281). "Measured" means observed on a `mysql:9.7` (9.7.4) server in a disposable container on 2026-11-11; the commands and the test that pins each fact are named.
+
+## As implemented
+
+Option 1, in the commit "PITR: archive binary logs that MySQL encrypted (binlog_encryption=ON)". Where it differs from the text below:
+
+- **The reader** is `internal/sidecar/local_binlog.go` (`localBinlogs.open`): every local read of the archiver goes through it. It also checks that the decrypted file starts with the binlog magic, so a wrong key or a header read during a master key rotation is an error (`the binlog file does not decrypt to a binlog with keyring key …`), in addition to the stability check the proposal names.
+- **D1, the report.** There is no new field in `status.encryptionAtRest`. The line is a sentence appended to the `EncryptionAtRestReady` condition's message (`pitrArchivePlainNote` in `internal/controller/encryption_reconcile.go`: "…the PITR archive (backup profile "X") has no encryption of its own…"), with a Warning Event `PITRArchiveNotEncrypted` and an operator INFO `PITR archive of an encrypted group has no client-side encryption` (field `profile`) once when the combination appears.
+- **D2 and D3 (options 2a, 2b)** were not built. There is no `BinaryLogEncrypted` reason, no `PITRBinaryLogEncrypted` Event and no admission rule. The sidecar's error for an encrypted file without a keyring names the cause (`the binlog file is encrypted by MySQL (binlog_encryption=ON) and the sidecar has no keyring file to decrypt it with (BLOODRAVEN_KEYRING_FILE is not set)`).
+- **D4.** The encrypted files still on the volume of an existing group are archived after the upgrade. The documented step is a full backup once `PITRArchiveReady=True`.
+- **Tests.** `TestPITRNativeEncryptedBinlogNotArchivedToday` became `TestPITRNativeEncryptedBinlogArchived` (opt-in, CI job `test-pitr-native`), which also asserts that `ALTER INSTANCE ROTATE BINLOG MASTER KEY` leads to no second upload. The committed capture is `internal/sidecar/testdata/encrypted-binlog.bin` with `encrypted-binlog.keyring` (`TestEncryptedBinlogFixture`, every `go test`). `BLOODRAVEN_TEST_ENCRYPTED_BINLOGS=1` makes the archiver simulations in `internal/sidecar` and `test/component` write encrypted local binlog files.
+- **Docs.** Doctor playbook 49 was kept and rewritten for the fail-closed errors and the `PITRArchiveNotEncrypted` report.
+
+The cluster run of [Open verification](#open-verification) was written for the state before and its expected results no longer apply.
+
+The rest of this document is the proposal as it was written. It describes the state before the implementation and is kept for the analysis.
 
 ## Summary
 

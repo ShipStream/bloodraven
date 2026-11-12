@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/replication"
 )
@@ -145,7 +146,7 @@ func (l localBinlogs) wrap(file *os.File) (*localBinlog, error) {
 			return nil, fmt.Errorf("read the encrypted binlog: %w", err)
 		}
 		if !bytes.Equal(magic[:], replication.BinLogFileHeader) {
-			return nil, fmt.Errorf("the binlog file does not decrypt to a binlog with keyring key %s (magic % x)", h.keyID, magic)
+			return nil, fmt.Errorf("the binlog file does not decrypt to a binlog with keyring key %q (magic % x)", h.keyID, magic)
 		}
 	}
 	return b, nil
@@ -264,6 +265,21 @@ func parseEncryptedBinlogHeader(header []byte) (encryptedBinlogHeader, error) {
 // read on every call: mysqld adds keys to an unsealed keyring, and a sealed
 // one is a Secret projection that the kubelet replaces.
 func readKeyringKey(path, id string) ([]byte, error) {
+	key, err := readKeyringKeyOnce(path, id)
+	if err != nil {
+		// mysqld rewrites the keyring file in place when it stores a key
+		// (measured: a read during the write sees a torn file about once
+		// in 200 under continuous rotation). One more look after a moment
+		// tells that from a keyring that does not hold the key.
+		time.Sleep(keyringRetryDelay)
+		key, err = readKeyringKeyOnce(path, id)
+	}
+	return key, err
+}
+
+const keyringRetryDelay = 50 * time.Millisecond
+
+func readKeyringKeyOnce(path, id string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read the keyring file: %w", err)
@@ -279,17 +295,23 @@ func readKeyringKey(path, id string) ([]byte, error) {
 		// Never the content: it is key material.
 		return nil, errors.New("the keyring file is not the JSON component_keyring_file writes")
 	}
+	// The id comes from the file's header: quoted, never trusted as text.
+	found := false
 	for _, e := range file.Elements {
 		if e.DataID != id {
 			continue
 		}
-		key, err := hex.DecodeString(e.Data)
-		if err != nil || len(key) != encryptedBinlogKeySize {
-			return nil, fmt.Errorf("keyring key %s is not a %d-byte hex-encoded key", id, encryptedBinlogKeySize)
+		found = true
+		// Another entry may carry the same id (the keyring is keyed by
+		// id and user): the binary log key is the one that is a key.
+		if key, err := hex.DecodeString(e.Data); err == nil && len(key) == encryptedBinlogKeySize {
+			return key, nil
 		}
-		return key, nil
 	}
-	return nil, fmt.Errorf("%w: %s", errBinlogKeyMissing, id)
+	if found {
+		return nil, fmt.Errorf("keyring key %q is not a %d-byte hex-encoded key", id, encryptedBinlogKeySize)
+	}
+	return nil, fmt.Errorf("%w: %q", errBinlogKeyMissing, id)
 }
 
 // encryptedBinlogStream reads the plaintext of an encrypted binlog file at

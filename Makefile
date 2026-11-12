@@ -97,9 +97,11 @@ test-all: ## Run all tests including integration (network listeners)
 
 test-unit: ## Run unit tests under internal/, cmd/ and charts/ (chart render tests need helm)
 	go test -race -timeout 20m ./internal/... ./cmd/... ./charts/...
+	BLOODRAVEN_TEST_ENCRYPTED_BINLOGS=1 go test -race ./internal/sidecar
 
 test-component: ## Run component tests (cross-package with fakes, no real cluster)
 	go test -race ./test/component/
+	BLOODRAVEN_TEST_ENCRYPTED_BINLOGS=1 go test -race ./test/component/ -run 'TestArchiveWriters|TestPITRBinding|TestPITRPlanProperty|TestKnownLimitation'
 
 test-license-roundtrip: ## Sign a throwaway token in Node and verify it with the Go verifier
 	go test -race ./test/license-roundtrip/

@@ -1683,6 +1683,23 @@ A real cluster loses such a tail with a volume that comes back older. The playgr
 
 **Status**: written and compiled, not yet run on a live cluster. It is in the full profile only; move it to the release profile after its first green run.
 
+### 72. PITR With an Encrypted Binary Log {#72-pitr-encrypted-binlog}
+**Category**: PITR, encryption at rest | **Risk**: Medium | **Automated**: `72-pitr-encrypted-binlog` (quarantined: needs the TLS + `spec.encryptionAtRest` baseline, run by the encryption jobs)
+
+**Hypothesis**: With `spec.encryptionAtRest` MySQL encrypts the binary log (`binlog_encryption=ON`). The sidecar archives the plaintext of those files, read with the key in the site's keyring, and reports no archiver error. A pinned `MysqlBackupVerification` then restores a full dump and replays the archived binlogs to a timestamp with `mysqlbinlog`, which reads plaintext only: the pre-target marker rows are there and the post-target rows are not.
+
+**Injection**: The steps of scenario 31 (RustFS profile with PITR, a baseline row, a full backup, marker rows around a target timestamp, a forced rotation) on the encryption baseline (`./playground/enable-encryption.sh`).
+
+**Verify**:
+
+- `@@global.binlog_encryption` is 1 on the active site and the replica, before PITR is enabled and after the archive was forced (enabling PITR rolls every site).
+- The archiver of the active site becomes ready and covers the target timestamp (scenario 31's checks).
+- The verification succeeds with the marker rows scenario 31 expects.
+
+Before the archiver could decrypt, this stopped at the archiver's readiness: nothing was archived and `PITRArchiveReady` was `False` with `ArchiverError`.
+
+**Status**: passed once on a four-node kind cluster (2026-11-12, about 5 minutes).
+
 ### Recorded, not automated
 
 - **Write stall is invisible (F9)**: `FLUSH TABLES WITH READ LOCK` held on the primary for 75s stalled every write for 75s, with no state change, condition, event or alert. Health is `SELECT @@read_only`, and nothing measures whether a write can commit. A write-heartbeat probe, metric and condition is the proposal.

@@ -2,7 +2,9 @@ package sidecar
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -291,5 +293,80 @@ func TestLocalBinlogPlaintextUnchanged(t *testing.T) {
 	}
 	if _, err := localBinlogHeader(short); err == nil {
 		t.Fatal("a two-byte file has a header")
+	}
+}
+
+// zeroFile is an endless file of zero bytes: its "plaintext" at an offset is
+// the keystream there.
+type zeroFile struct{}
+
+func (zeroFile) ReadAt(p []byte, _ int64) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// The counter is a 64-bit big-endian block number in the low half of the
+// counter block, whatever the offset: past 2^16 and 2^32 blocks (a 64 GiB
+// file) the keystream is still AES(key, nonce || block number).
+func TestEncryptedBinlogCounterAtLargeOffsets(t *testing.T) {
+	key := binlogenctest.TestKey()
+	header, err := parseEncryptedBinlogHeader(binlogenctest.EncryptDefault(nil, key)[:encryptedBinlogHeaderSize])
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := newEncryptedBinlogStream(zeroFile{}, key.Master[:], header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range []uint64{0, 1, 1<<16 - 1, 1 << 16, 1<<32 - 1, 1 << 32, 1<<32 + 7, 1 << 40} {
+		var counter, want [aes.BlockSize]byte
+		copy(counter[:8], stream.nonce[:])
+		binary.BigEndian.PutUint64(counter[8:], block)
+		stream.block.Encrypt(want[:], counter[:])
+		for _, skip := range []int{0, 5, 15} {
+			got := make([]byte, aes.BlockSize-skip)
+			if _, err := stream.ReadAt(got, int64(block)*aes.BlockSize+int64(skip)); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want[skip:]) {
+				t.Fatalf("keystream of block %d from byte %d = %x, want %x", block, skip, got, want[skip:])
+			}
+		}
+	}
+}
+
+// mysqld rewrites the keyring file in place when it stores a key. A read
+// that catches the file torn is repeated once; a keyring that stays
+// unreadable is an error.
+func TestKeyringReadSurvivesATornFile(t *testing.T) {
+	key := binlogenctest.TestKey()
+	path := filepath.Join(t.TempDir(), "keyring")
+	whole := binlogenctest.Keyring(key)
+	if err := os.WriteFile(path, whole[:len(whole)/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readKeyringKey(path, key.ID); err == nil {
+		t.Fatal("half a keyring file holds a key")
+	}
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(keyringRetryDelay / 5)
+		done <- os.WriteFile(path, whole, 0o600)
+	}()
+	got, err := readKeyringKey(path, key.ID)
+	if werr := <-done; werr != nil {
+		t.Fatal(werr)
+	}
+	if err != nil || !bytes.Equal(got, key.Master[:]) {
+		t.Fatalf("the key after the file was completed: %v", err)
+	}
+	// Two entries under the id (another user's): the one that is a key.
+	dup := `{"version":"1.0","elements":[{"user":"app","data_id":"` + key.ID + `","data_type":"SECRET","data":"00"},` +
+		strings.TrimPrefix(string(whole), `{"version":"1.0","elements":[`)
+	if err := os.WriteFile(path, []byte(dup), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readKeyringKey(path, key.ID); err != nil || !bytes.Equal(got, key.Master[:]) {
+		t.Fatalf("a keyring with two entries under the id: %v", err)
 	}
 }

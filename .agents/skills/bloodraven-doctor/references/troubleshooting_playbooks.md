@@ -1532,7 +1532,7 @@ Before a reclone (PITR enabled only) the operator reads that block (the baseline
 - `… which cannot be compared with <file> …`: the two names have different base names or no numeric suffix.
 - `the status request to the site's sidecar or the rotation of its binary log did not return within 10s`: a call hung past its own timeouts.
 - `the site's archiver still had N sealed binary log(s) to archive`: the upload did not finish in time (a large file, a slow store).
-- `the site's archiver cannot archive the tail: <reason>`: `Blocked`. The reason is a failed upload (`lastError`), or a refusal: the site's latest record is not a promotion record (it was recloned or reset since it last wrote), it has no promotion record, the archive session is not verified, or a binlog file cannot be read (MySQL encrypts it: `binlog_encryption=ON`).
+- `the site's archiver cannot archive the tail: <reason>`: `Blocked`. The reason is a failed upload (`lastError`), or a refusal: the site's latest record is not a promotion record (it was recloned or reset since it last wrote), it has no promotion record, the archive session is not verified, or a binlog file cannot be read (`read the header of mysql-bin.NNNNNN: …`; when the text names the keyring or an encrypted binlog, see playbook 49).
 - `the site's sidecar runs no binlog archiver`: the pod has not rolled onto the PITR configuration. This one ends the wait at once.
 
 ### Diagnostic steps
@@ -1548,7 +1548,7 @@ Before a reclone (PITR enabled only) the operator reads that block (the baseline
 ### Safe remediation
 - Nothing recovers a wiped tail. Take a full backup now and verify it, so later targets do not depend on it: `kubectl bloodraven backup <group> -n <ns>`.
 - For a target inside the lost tail, use the safe targets or backups the `PITRArchiveGap` message names (playbook 42).
-- Before recloning an old primary, check its tail first: `tail.state: Drained` means nothing is left to archive. For `Blocked`, fix the reason when it is fixable (store unreachable, archive session not verified, rotation not acknowledged). A site whose latest record is a reset record, or that has no promotion record, has no tail the archive accepts; a site with `binlog_encryption=ON` cannot archive its tail while read-only.
+- Before recloning an old primary, check its tail first: `tail.state: Drained` means nothing is left to archive. For `Blocked`, fix the reason when it is fixable (store unreachable, archive session not verified, rotation not acknowledged). A site whose latest record is a reset record, or that has no promotion record, has no tail the archive accepts. A site with `binlog_encryption=ON` archives its tail like any other; when its reason is a decryption error, follow playbook 49 first.
 - A tail that was archived with transactions the new primary never received makes restores across it refuse `PITRArchiveDivergentHistory` until they are in `excludeGtids` (playbook 42).
 
 Do not:
@@ -1668,41 +1668,68 @@ Do not:
 
 ---
 
-## 49. PITR archives nothing on a group with encryption at rest (`invalid binlog magic`)
+## 49. PITR archiver cannot decrypt a binary log (encryption at rest)
+
+On a group with `spec.encryptionAtRest` MySQL encrypts the binary log (`binlog_encryption=ON`) unless `coverage.binaryLog` is `false`. The sidecar decrypts each local binlog file with the binary log encryption key the file's header names, read from the site's keyring file (the file mysqld uses, mounted read-only into the sidecar), and archives the plaintext, exactly what a group without `binlog_encryption` archives. An encrypted file is read correctly or not at all: this playbook is for a file that is not, and for the report about an archive without encryption of its own.
 
 ### Symptoms
-- `PITRArchiveReady=False` with reason `ArchiverError` and a Warning `PITRArchiveNotReady`; `status.pitr.message` reads `<site>: archive mysql-bin.NNNNNN: invalid binlog magic`. Pods are Ready and applications are unaffected.
-- `/archiver/status` of the writable site: `filesArchived: 0`, `backlogFiles` equal to the number of sealed binlogs and rising with every rotation, `consecutiveFailedScans` rising, `tail.state: Blocked`. Sidecar WARN `archive binlog` with `error="invalid binlog magic"` once per sealed file per scan.
-- `/archiver/status` of a read-only site: `tail.state: Blocked` with `reason` `read the header of mysql-bin.NNNNNN: get event err EOF, need 1768714341 but got <n>` and WARN `binlog tail not archived while read-only`. A site that was never writable shows no `lastError`; a demoted primary keeps the `invalid binlog magic` error and its backlog.
-- Sidecar INFO `promotion set not recorded` with `reason="read the header of mysql-bin.NNNNNN: …"` at every promotion; the promotion record has no `promotionGtidExecuted`.
-- The archive prefix holds `archive.json` and the per-site manifests, and no binlog object. A reclone waits 2 minutes for the recipient's tail and then raises Warning `PITRArchiveTailNotArchived`.
-- A group that turned binary log encryption on after PITR had been archiving: the binlogs sealed before the change are in the archive, every one after it fails.
+- `PITRArchiveReady=False` with reason `ArchiverError` and a Warning `PITRArchiveNotReady`; `status.pitr.message` reads `<site>: archive mysql-bin.NNNNNN: <text>`. Pods are Ready and applications are unaffected. `/archiver/status` of the writable site shows the same `lastError`, a rising `backlogFiles` and `consecutiveFailedScans`; sidecar WARN `archive binlog` with the text in `error`. The texts:
+  - `the keyring does not hold the binary log encryption key the file names: MySQLReplicationKey_<server_uuid>_<n>`
+  - `the binlog file is encrypted by MySQL (binlog_encryption=ON) and the sidecar has no keyring file to decrypt it with (BLOODRAVEN_KEYRING_FILE is not set)`
+  - `encrypted binlog header version N is not supported (only version 1 is)`, or another text that starts with `encrypted binlog header:`
+  - `the binlog file does not decrypt to a binlog with keyring key <key id> (magic …)`
+  - `read the keyring file: …` or `the keyring file is not the JSON component_keyring_file writes`
+  - `invalid binlog magic`, with `filesArchived: 0` or an archive that stops where binary log encryption began: the pod's sidecar predates the release that archives encrypted binlogs.
+- `/archiver/status` of a read-only site: `tail.state: Blocked` with `reason` `read the header of mysql-bin.NNNNNN: <one of the texts above>` and WARN `binlog tail not archived while read-only`. A reclone of that site waits 2 minutes for its tail and then raises Warning `PITRArchiveTailNotArchived`.
+- Sidecar INFO `promotion set not recorded` with `reason="read the header of mysql-bin.NNNNNN: …"` at a promotion; that promotion record has no `promotionGtidExecuted`.
+- Separately, with archiving healthy: a Warning Event `PITRArchiveNotEncrypted`, and the `EncryptionAtRestReady` condition's message ends with `; the PITR archive (backup profile "<name>") has no encryption of its own: archived binary logs are protected only by what the store provides (archive through a profile that has spec.backup.profiles[].encryption, or encrypt the bucket or volume)`. Operator INFO `PITR archive of an encrypted group has no client-side encryption` with `profile`.
 
 ### Cause
-MySQL encrypts the binary log (`binlog_encryption=ON`), which `spec.encryptionAtRest` sets unless `coverage.binaryLog` is `false`. An encrypted binlog file starts with the magic `FD 62 69 6E` instead of `FE 62 69 6E`, followed by a 512-byte header that names the keyring key (`MySQLReplicationKey_<server_uuid>_<n>`); the events after it are AES-256-CTR ciphertext. The sidecar archiver reads sealed binlog files from the data volume and does not decrypt them, so it uploads nothing and cannot read any `Previous_gtids` header. Admission does not refuse `spec.encryptionAtRest` together with `spec.backup.pitr`. This is a known limitation, not a fault of the store, the credentials or the keyring.
+By error text:
+- **`the keyring does not hold the binary log encryption key the file names`**: on an unsealed site (first start, a clone, a keyring rotation) mysqld has not written the key to the keyring file yet; it passes within a few scans. If it stays, the file was encrypted under another keyring: a binlog file copied onto the volume from another server, or a volume paired with the wrong keyring.
+- **`the sidecar has no keyring file to decrypt it with`**: the sidecar was started without `BLOODRAVEN_KEYRING_FILE`, which the operator renders only with `spec.encryptionAtRest`, yet the server wrote encrypted binlog files. `binlog_encryption` was turned on outside the operator.
+- **`encrypted binlog header version N is not supported`** and the other `encrypted binlog header:` texts: the MySQL image writes an encrypted binlog file format this sidecar does not know. The reader knows version 1 (MySQL 8.0.14 through 9.7.4) and refuses anything else.
+- **`does not decrypt to a binlog`**: the key the header names does not decrypt the file. A header read while `ALTER INSTANCE ROTATE BINLOG MASTER KEY` rewrote it passes on the next scan; a lasting error means the file or the keyring file is damaged.
+- **`read the keyring file` / `not the JSON component_keyring_file writes`**: the keyring file is unreadable or not in the expected format. Check the site's keyring phase and the keyring playbooks first.
+- **`invalid binlog magic`**: the pod runs a sidecar from before encrypted binlogs were archived (the pod has not rolled since the operator upgrade, or `spec.sidecar.image` pins an older image). That sidecar does not decrypt anything.
+- **`PITRArchiveNotEncrypted`**: not a fault. The archive holds the plaintext of the binary logs, and the PITR profile has no `encryption`. The operator cannot see whether the store encrypts, so it reports the combination and does not refuse it.
+
+A group that ran with encryption at rest and PITR before the release that archives encrypted binlogs archived nothing until the upgrade. After it, the sidecar archives the encrypted binlogs still on the data volume; the ones MySQL had purged (`binlog-expire-logs-seconds`, 14 days unless overridden) are a gap, and promotion records from before have no promotion set. A point-in-time restore that needs a purged binlog refuses `PITRArchiveGap`.
 
 ### Diagnostic steps
-1. Confirm both features are on and what the binary log setting is:
+1. Confirm both features and the binary log setting:
    ```bash
-   kubectl get mfg <group> -n <ns> -o jsonpath='{.spec.encryptionAtRest.enabled} {.spec.encryptionAtRest.coverage.binaryLog} {.spec.backup.pitr.enabled}{"\n"}'
-   kubectl get mfg <group> -n <ns> -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name} binlogEncrypted={.coverage.binlogEncrypted}{"\n"}{end}'
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.spec.encryptionAtRest.enabled} {.spec.encryptionAtRest.coverage.binaryLog} {.spec.backup.pitr.enabled} {.spec.backup.pitr.profileName}{"\n"}'
+   kubectl get mfg <group> -n <ns> -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name} phase={.phase} binlogEncrypted={.coverage.binlogEncrypted}{"\n"}{end}'
    ```
-   Encryption and PITR enabled with `coverage.binaryLog` unset or `true`, and `binlogEncrypted=true`, is this playbook.
-2. Read the archiver: `scripts/sidecar-probe.sh -n <ns> <group> archiver`. `lastError` ending in `invalid binlog magic` with `filesArchived: 0` confirms it. Any other `lastError` (storage, credentials, manifest) is playbook 31.
-3. Confirm on the server (the third column of the output is `Encrypted`):
+2. Read the archiver: `scripts/sidecar-probe.sh -n <ns> <group> archiver`. Take the exact `lastError` (writable site) or `tail.reason` (read-only site) and match it against the list above. Any other `lastError` (storage, credentials, manifest) is playbook 31.
+3. For `invalid binlog magic`, compare the sidecar image of the pod with the one the operator renders:
    ```bash
-   kubectl exec -n <ns> <pod> -c mysql -- mysql -N -e "SELECT @@GLOBAL.binlog_encryption; SHOW BINARY LOGS"
+   kubectl get pod -n <ns> <pod> -o jsonpath='{range .spec.containers[*]}{.name}={.image}{"\n"}{end}'
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.spec.sidecar.image}{"\n"}'
    ```
-4. Check what the archive holds: `status.pitr` and the site's `manifestFileCount` in `/archiver/status`. They show no archived binlog, or stop where binary log encryption began.
+4. For a missing key, check whether the site is unsealed (`phase` in step 1) and whether the error is still there a minute later. Then compare the key the error names with the server's identity (the key id holds the `server_uuid` of the server that wrote the file):
+   ```bash
+   kubectl exec -n <ns> <pod> -c mysql -- mysql -N -e "SELECT @@server_uuid, @@GLOBAL.binlog_encryption; SHOW BINARY LOGS"
+   ```
+5. For the `PITRArchiveNotEncrypted` report, read the profile:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{range .spec.backup.profiles[*]}{.name} encryption={.encryption}{"\n"}{end}'
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="EncryptionAtRestReady")].message}{"\n"}'
+   ```
 
 ### Safe remediation
-- Treat the group as having no PITR: its restore points are its full backups. Check that the backup schedule matches the recovery point the group needs, and take a full backup now if the last one is old.
-- A new group that needs PITR and encryption at rest: create it with `spec.encryptionAtRest.coverage.binaryLog: false`. Binary and relay logs are then plaintext on the data volume (tablespaces, redo and undo logs stay encrypted) and are archived; protect the archive with the profile's `encryption`.
-- An existing group: setting `coverage.binaryLog: false` rolls every site (an ordered update) and narrows the encryption claim, so it is the owner's decision. After it, new binlogs are plaintext and are archived, but the encrypted ones written before still fail until MySQL purges them, so `PITRArchiveReady` stays `False` until then, and the archive starts after them. Take a full backup after the change; only targets after that backup are restorable.
-- Before recloning a former primary of such a group, do not wait for `tail.state: Drained`: it cannot drain. Take a full backup on the current primary first if transactions after the last backup matter.
+- `invalid binlog magic`: let the pod roll onto the current sidecar image (finish the ordered update; remove or raise a `spec.sidecar.image` pin). The new sidecar archives the encrypted binlogs still on the volume.
+- A missing key on an unsealed site: wait. One that stays on a sealed site, or that names another server's `server_uuid`: the file does not belong to this keyring and cannot be archived. Do not delete it by hand; it stops blocking once MySQL purges it. Take a full backup on the primary so later targets do not depend on it.
+- An unsupported header version or field: report it with the MySQL image tag and the error text. Until a sidecar that reads the format is released, `spec.encryptionAtRest.coverage.binaryLog: false` makes MySQL write plaintext binary and relay logs (tablespaces, redo and undo logs stay encrypted). It rolls every site and narrows the encryption claim, so it is the owner's decision; the unreadable files written before still fail until MySQL purges them.
+- No keyring file: find out how `binlog_encryption` came to be on (`SELECT * FROM performance_schema.persisted_variables`). The supported way to encrypt the binary log is `spec.encryptionAtRest`.
+- After any of these, and after the upgrade of a group that ran with both features before: wait for `PITRArchiveReady=True`, then take a full backup. Point-in-time restores are possible from that backup on; windows that cross binlogs that were never archived stay unrestorable.
+- `PITRArchiveNotEncrypted`: if the store encrypts the archive (bucket encryption, an encrypted volume) and the owner relies on that, nothing needs to change; the message stays. To encrypt client-side, `encryption` cannot be added to a profile that already archives: admission rejects the edit, and an edit it cannot see is refused at reconcile (`PITRArchiveBindingReady=False`/`EncryptionChangeRefused`, Warning `PITRArchiveEncryptionChangeRefused`). Follow the rotation procedure of the backup encryption docs: create a passphrase Secret, add a new profile with a new prefix (or sub-path) and `encryption`, switch `spec.backup.pitr.profileName` to it (the sites roll once), wait for `PITRArchiveBindingReady=True`, then take a full backup. Keep the old prefix for as long as restores from the old history are needed; it remains unencrypted.
 
 ### What NOT to do
 - Do not copy binlog files into the archive by hand or edit the manifest: restores verify every object against its manifest row, and `mysqlbinlog` cannot read an encrypted file (`Reading encrypted log files directly is not supported`).
 - Do not run `SET GLOBAL binlog_encryption=OFF` or `SET PERSIST` it: the operator owns the setting, the launcher reads a persisted value on a clone's restart, and the next pod restart restores the `my.cnf` value.
-- Do not restart sidecars, rotate the keyring or change the archive prefix to clear the error: none of them changes what the archiver can read.
+- Do not run `ALTER INSTANCE ROTATE BINLOG MASTER KEY` to clear an error. The operator never issues it and a sealed site refuses it; it does not change what the sidecar can read.
+- Do not edit, replace or copy the keyring file, and do not restart sidecars or change the archive prefix to clear a decryption error.
+- Do not add `encryption` to the bound profile in place or edit its Secret: the change is refused and the condition stays `False` until it is reverted.
 - Do not try to disable `spec.encryptionAtRest`: admission refuses turning it off.
