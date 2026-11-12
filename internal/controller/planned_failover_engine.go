@@ -2595,7 +2595,8 @@ func plannedHoldSitesUnknown(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.Plann
 // Not attributable: a fence the run found was not its own
 // (FenceNotAttributable), and authority that moved before the run's fence
 // was applied (AuthorityChanged with only an intent, when this process did
-// not send it either).
+// not send it either). A rollback that ends SourceLost at its deadline is
+// judged by the reason it rolled back for (plannedFenceAttributionReason).
 func (e *PlannedFailoverEngine) fenceAttributable(pf *v1alpha1.PlannedFailoverStatus, warnings []v1alpha1.PlannedFailoverWarning,
 	reason v1alpha1.PlannedFailoverReason) bool {
 	if slices.Contains(warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
@@ -2610,6 +2611,7 @@ func (e *PlannedFailoverEngine) fenceAttributable(pf *v1alpha1.PlannedFailoverSt
 	if m := e.runMemo(pf.RunID); m.fence.sent || m.fence.setSent {
 		return true
 	}
+	reason = plannedFenceAttributionReason(pf, reason)
 	return reason != v1alpha1.PlannedFailoverReasonAuthorityChanged && reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused
 }
 

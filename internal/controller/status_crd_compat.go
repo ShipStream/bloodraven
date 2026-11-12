@@ -61,8 +61,9 @@ const crdDegradedRetryInterval = 10 * time.Minute
 //     GTIDDiverged: the reason that goes with the same Blocked state.
 //   - sites[].lostGtid, lostTransactionCount and lostComparedTo are left
 //     out: a CRD without those values has no such fields and prunes them.
-//     An operator that restarts on such a status has no report to restore
-//     and finds the loss again by its own comparison.
+//     An operator that restarts on such a status restores the report
+//     without its set and holder (ownLossReportDegradedForOlderCRD), and
+//     its own comparisons find the set again.
 func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 	changed := false
 	for i := range st.Sites {
@@ -91,6 +92,18 @@ func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 // lost with the field the CRD pruned.
 func ownLossReportDegradedForOlderCRD(s v1alpha1.SiteStatus) bool {
 	return s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergentGtid == "" && s.LostGtid == ""
+}
+
+// ownLossReportWithoutSet reports whether s is what the current CRD stores
+// for a report that was restored without its set
+// (ownLossReportDegradedForOlderCRD) and has not ended since: recoveryState
+// RecloneRequired, which only an own-loss report sets, and no lostGtid. An
+// operator that restarts on it restores the report the same way. A report
+// without a set on a site that also carries a divergence block is stored
+// as that block alone and is not restored; the block keeps the site out of
+// promotion and replication, and the reclone that resolves it repairs both.
+func ownLossReportWithoutSet(s v1alpha1.SiteStatus) bool {
+	return s.RecoveryState == v1alpha1.RecoveryStateRecloneRequired && s.LostGtid == ""
 }
 
 // errStatusLostGtidPruned is what noteStatusDegradedForOlderCRD logs when

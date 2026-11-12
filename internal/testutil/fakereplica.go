@@ -74,6 +74,9 @@ type FakeReplicaState struct {
 	// statement reports the active file "binlog.NNNNNN", numbered from
 	// 000001 plus one per rotation in BinlogPreviousGtids.
 	BinlogStatusErr error
+	// BinlogOff makes SHOW BINARY LOG STATUS return no row, as a server
+	// without a binary log does.
+	BinlogOff bool
 	// BinlogPosition is the Position SHOW BINARY LOG STATUS reports (158,
 	// the position after the format description, when zero);
 	// BinlogPositionRaw, when set, is reported in its place as it is.
@@ -280,6 +283,9 @@ func (c *fakeReplicaConn) QueryContext(_ context.Context, query string, args []d
 	case "SHOW BINARY LOG STATUS":
 		if s.BinlogStatusErr != nil {
 			return nil, s.BinlogStatusErr
+		}
+		if s.BinlogOff {
+			return &fakeRows{cols: []string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"}}, nil
 		}
 		return &fakeRows{
 			cols: []string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"},

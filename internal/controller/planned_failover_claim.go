@@ -717,6 +717,21 @@ func plannedRunStartTime(pf *v1alpha1.PlannedFailoverStatus) time.Time {
 	return time.Time{}
 }
 
+// plannedFenceAttributionReason is the reason by which a run that ended
+// SourceLeftFenced with reason is judged for the attribution of its fence.
+// A rollback whose deadline passes over a source that cannot be read ends
+// SourceLost whatever it rolled back for. The reason it rolled back for
+// (status.plannedFailover.rollback.reason) still decides whether the fence
+// may be taken for the run's own: a rollback for AuthorityChanged or
+// LegacyRunRefused over a fence that was only intended does not become
+// attributable because the source stopped answering before the deadline.
+func plannedFenceAttributionReason(pf *v1alpha1.PlannedFailoverStatus, reason v1alpha1.PlannedFailoverReason) v1alpha1.PlannedFailoverReason {
+	if reason == v1alpha1.PlannedFailoverReasonSourceLost && pf != nil && pf.Rollback != nil && pf.Rollback.Reason != "" {
+		return pf.Rollback.Reason
+	}
+	return reason
+}
+
 // plannedFenceAttributableEnd reports whether the latest run ended
 // SourceLeftFenced (by its terminal record, or by a terminal marker naming
 // it) with a fence the topology manager may lift by a named re-assert
@@ -745,6 +760,7 @@ func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.
 	default:
 		return nil, false
 	}
+	reason = plannedFenceAttributionReason(pf, reason)
 	switch {
 	case reason == v1alpha1.PlannedFailoverReasonLegacyRunRefused:
 		return nil, false

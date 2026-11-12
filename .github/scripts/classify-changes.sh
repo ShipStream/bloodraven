@@ -11,6 +11,10 @@
 # and their contracts. The same job runs the native MySQL launcher test
 # (TestMySQLLauncherNative, #265), so pitr also covers what renders the mysql
 # container's launcher: mysql_launcher*.go and encryption.go's keyring steps.
+# It also runs the native own-loss lag proof test
+# (TestOwnLossLagProofNative), so pitr covers the proof and its caller:
+# own_transactions_lost*.go and gtid_audit.go (internal/mysql, which reads
+# the positions, is covered already).
 #
 # dragonfly gates test-dragonfly-native (the TestDragonflyNative* tests in
 # internal/dragonfly and internal/controller, against real Dragonfly
@@ -27,7 +31,7 @@ while IFS= read -r f || [ -n "$f" ]; do
   any=true
   case "$f" in *.go) go=true ;; esac
   case "$f" in
-    cmd/bloodraven/*|internal/pitrplan/*|internal/pitrarchive/*|internal/backupmeta/*|internal/sidecar/*|internal/mysql/*|internal/backupcrypto/*|internal/controller/pitr*.go|internal/controller/mysql_launcher*.go|internal/controller/encryption.go|internal/controller/backup.go|internal/controller/script_credentials_test.go|internal/controller/restore_script.py|internal/controller/verify_script.sh|go.mod|go.sum) pitr=true ;;
+    cmd/bloodraven/*|internal/pitrplan/*|internal/pitrarchive/*|internal/backupmeta/*|internal/sidecar/*|internal/mysql/*|internal/backupcrypto/*|internal/controller/pitr*.go|internal/controller/mysql_launcher*.go|internal/controller/encryption.go|internal/controller/own_transactions_lost*.go|internal/controller/gtid_audit.go|internal/controller/backup.go|internal/controller/script_credentials_test.go|internal/controller/restore_script.py|internal/controller/verify_script.sh|go.mod|go.sum) pitr=true ;;
   esac
   case "$f" in
     internal/dragonfly/*|internal/controller/dragonfly_*.go|internal/controller/planned_failover_df*.go|api/v1alpha1/dragonfly_types.go|playground/manifests/failovergroup.yaml|go.mod|go.sum) dragonfly=true ;;
