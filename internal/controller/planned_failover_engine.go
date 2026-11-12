@@ -2082,7 +2082,16 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 				return e.endManualRecovery(ctx, fg, pf, reason, "the promotion found the target in a state the run cannot explain", out.Sites...)
 			}
 			msg := fmt.Sprintf("promotion of %q aborted (%s); nothing was written to the target", pf.TargetSite, reason)
-			if out.MayHaveWritten || m.promote.mayHaveWritten {
+			if out.ClearsUnknown {
+				// A process without the promotion memo found the target
+				// writable with its channel. Usually someone else made it
+				// writable; it cannot rule out that an earlier process of the
+				// run did and the channel came afterwards.
+				msg = fmt.Sprintf("promotion of %q aborted (%s): the target is writable with its replication channel configured. "+
+					"This operator process sent it nothing. The run clears a target only after removing its channel, so either "+
+					"someone else made it writable, or an earlier operator process of the run did and the channel was configured "+
+					"afterwards; nothing more is sent to it and the source is not unfenced", pf.TargetSite, reason)
+			} else if out.MayHaveWritten || m.promote.mayHaveWritten {
 				// A WasWritable gate refusal: an earlier attempt may have made
 				// the target writable.
 				msg = fmt.Sprintf("promotion of %q aborted (%s); the target may have accepted writes from an earlier attempt", pf.TargetSite, reason)
@@ -2339,13 +2348,19 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 		m.warnings = addPlannedWarnings(m.warnings, res.Warnings...)
 		if res.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
 			why := "the rollback found writes on the target outside the fenced set"
-			if r == v1alpha1.PlannedFailoverReasonForeignWritable {
+			switch {
+			case r == v1alpha1.PlannedFailoverReasonForeignWritable:
 				why = "the rollback found another writable site beside the writable source"
+			case res.LostGtid != "":
+				why = plannedSourceLostMessage(pf, res.LostGtid)
 			}
 			return e.endManualRecovery(ctx, fg, pf, r, why)
 		}
-		return e.finish(ctx, fg, pf, plannedEnd{outcome: res.Outcome, reason: r,
-			msg: plannedRollbackMessage(pf, res.Outcome, r)})
+		msg := plannedRollbackMessage(pf, res.Outcome, r)
+		if res.Outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+			msg = fmt.Sprintf("planned failover to %q rolled back (%s); %s", pf.TargetSite, r, e.sourceLeftClause(pf))
+		}
+		return e.finish(ctx, fg, pf, plannedEnd{outcome: res.Outcome, reason: r, msg: msg})
 	}
 	if err != nil {
 		log.FromContext(ctx).Info("planned failover: rollback attempt failed; retrying", "fg", ref.Group.String(),
@@ -2354,10 +2369,48 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 	m.warnings = addPlannedWarnings(m.warnings, res.Warnings...)
 	if !e.clk.Now().Before(intended.Add(plannedFailoverRollbackDeadline)) {
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
-			msg: fmt.Sprintf("rollback (%s) could not confirm the source %q writable within %s; it stays fenced",
-				reason, pf.SourceSite, plannedFailoverRollbackDeadline)})
+			msg: fmt.Sprintf("rollback (%s) could not confirm the source %q writable within %s; %s",
+				reason, pf.SourceSite, plannedFailoverRollbackDeadline, e.sourceLeftClause(pf))})
 	}
 	return plannedRequeuePoll, nil
+}
+
+// sourceLeftClause is what a SourceLeftFenced record says about the source.
+// The outcome's name assumes a fence; the run only knows one is there when
+// it was proven applied. A run can also end SourceLeftFenced without ever
+// sending its fence (the source stopped answering first), or in a process
+// that cannot know whether an earlier one sent it, and then the source may
+// be writable, or read-only by someone else's doing. The record says which
+// of these the run knows.
+func (e *PlannedFailoverEngine) sourceLeftClause(pf *v1alpha1.PlannedFailoverStatus) string {
+	m := e.runMemo(pf.RunID)
+	switch {
+	case (pf.Fence != nil && pf.Fence.State == v1alpha1.PlannedFailoverFenceApplied) || m.fence.sent:
+		return fmt.Sprintf("source %q left fenced", pf.SourceSite)
+	case m.fence.setSent:
+		return fmt.Sprintf("source %q left as it is: the run's fence was sent to it but never read back", pf.SourceSite)
+	case m.granted:
+		return fmt.Sprintf("source %q left as it is: this run sent it no fence, so if it is read-only that is not this run's doing", pf.SourceSite)
+	}
+	return fmt.Sprintf("source %q left as it is: the run's fence was not read back, and an earlier operator process may or may not have sent it",
+		pf.SourceSite)
+}
+
+// plannedSourceLostMessage is why a rollback that found the source
+// writable without transactions it held (lost) ends with the hold. It names
+// the lost transactions, because the comparison that found them stops
+// working once the source has issued as many again.
+func plannedSourceLostMessage(pf *v1alpha1.PlannedFailoverStatus, lost string) string {
+	// The whole set matters here, so it is cut later than a hint is.
+	const maxLost = 256
+	if len(lost) > maxLost {
+		lost = lost[:maxLost] + "…"
+	}
+	return fmt.Sprintf("the rollback found source %q writable without transactions it held before (%s): "+
+		"it restarted on older data, and what it commits now is a second history that reuses those GTIDs. "+
+		"Nothing was sent to it and target %q was not pointed at it. Do not reclone a site that holds those transactions "+
+		"until they are saved or given up",
+		pf.SourceSite, lost, pf.TargetSite)
 }
 
 func plannedRollbackMessage(pf *v1alpha1.PlannedFailoverStatus, outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) string {
@@ -2447,6 +2500,9 @@ func (e *PlannedFailoverEngine) endWithoutMySQL(ctx context.Context, fg *v1alpha
 	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting {
 		outcome = v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed
 	}
+	if outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+		msg += "; " + e.sourceLeftClause(pf)
+	}
 	return e.finish(ctx, fg, pf, plannedEnd{outcome: outcome, reason: reason, msg: msg, why: why, noNaming: true})
 }
 
@@ -2507,17 +2563,40 @@ func plannedHoldSitesUnknown(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.Plann
 	return plannedHoldSites(pf, all...)
 }
 
-// fenceAttributable reports whether the source's fence is this run's own:
-// proven applied (durably, or by this process's memo).
-func (e *PlannedFailoverEngine) fenceAttributable(pf *v1alpha1.PlannedFailoverStatus, warnings []v1alpha1.PlannedFailoverWarning) bool {
+// fenceAttributable reports whether a run that ends SourceLeftFenced with
+// reason names its source for the re-assert (§6.5): a read-only state found
+// on the server the run's fence intent names may be lifted as the run's own
+// fence. That is §4.3's attribution, the rule a rollback unfences by: the
+// fence was proven applied (durably, or by this process's memo), or a
+// durable intent names the server. The intent alone is enough here because
+// an earlier operator process may have sent the fence without recording
+// its result (the fence landed, its Draining write did not commit, the
+// operator restarted), and without the name nothing would ever lift it: a
+// restarted manager names the source from the same record
+// (plannedFenceAttributableEnd), and the two must agree. The name is bound
+// to the intent's server, and the re-assert checks that binding and its own
+// preconditions (every site read-only and reachable, the source complete,
+// no hold) when it acts.
+//
+// Not attributable: a fence the run found was not its own
+// (FenceNotAttributable), and authority that moved before the run's fence
+// was applied (AuthorityChanged with only an intent, when this process did
+// not send it either).
+func (e *PlannedFailoverEngine) fenceAttributable(pf *v1alpha1.PlannedFailoverStatus, warnings []v1alpha1.PlannedFailoverWarning,
+	reason v1alpha1.PlannedFailoverReason) bool {
 	if slices.Contains(warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
 		return false
 	}
-	if pf.Fence != nil && pf.Fence.State == v1alpha1.PlannedFailoverFenceApplied {
+	if pf.Fence == nil || pf.Fence.SourceServerUUID == "" {
+		return false
+	}
+	if pf.Fence.State == v1alpha1.PlannedFailoverFenceApplied {
 		return true
 	}
-	m := e.runMemo(pf.RunID)
-	return m.fence.sent || m.fence.setSent
+	if m := e.runMemo(pf.RunID); m.fence.sent || m.fence.setSent {
+		return true
+	}
+	return reason != v1alpha1.PlannedFailoverReasonAuthorityChanged && reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused
 }
 
 // terminalRecord builds the terminal block of pf for end.
@@ -2681,10 +2760,10 @@ func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1alpha1
 	m := e.runMemo(pf.RunID)
 	switch end.outcome {
 	case v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
-		if ref.Source == "" || !e.fenceAttributable(pf, addPlannedWarnings(slices.Clone(m.warnings), end.warnings...)) {
+		if ref.Source == "" || !e.fenceAttributable(pf, addPlannedWarnings(slices.Clone(m.warnings), end.warnings...), end.reason) {
 			return
 		}
-		if err := e.topo.NameFencedSource(ref); err == nil {
+		if err := e.topo.NameFencedSource(ref, pf.Fence.SourceServerUUID); err == nil {
 			log.FromContext(ctx).Info("planned failover: named fenced source for re-assert", "fg", nn.String(),
 				"runId", pf.RunID, "site", ref.Source)
 		}
@@ -3011,7 +3090,7 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 			msg: fmt.Sprintf("status writes stalled before the fence was sent; source %q is untouched", pf.SourceSite)}
 	}
 	return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason, warnings: stalled,
-		msg: fmt.Sprintf("status writes stalled; source %q left fenced", pf.SourceSite)}
+		msg: "status writes stalled; " + e.sourceLeftClause(pf)}
 }
 
 // markedRunPass handles a run the terminal marker ended: retry its

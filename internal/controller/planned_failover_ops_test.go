@@ -752,7 +752,7 @@ func TestRollbackPreconditions(t *testing.T) {
 		// under the same server_uuid: it is not unfenced, and the target is
 		// not pointed at it.
 		{name: "source no longer holds the set it was fenced with", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			mutate: func(f *opsFixture) { f.fenced(); f.src.gtid, f.tgt.gtid = opsUUIDA+":1-7", opsUUIDA+":1-7" },
+			mutate:  func(f *opsFixture) { f.fenced(); f.src.gtid, f.tgt.gtid = opsUUIDA+":1-7", opsUUIDA+":1-7" },
 			outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
 			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored},
 		// ... or before the fence was read, so the recorded set is the
@@ -920,39 +920,79 @@ func TestReprove_RecognisesOwnRecord(t *testing.T) {
 
 // TestPF_SourceLeftFencedIsNamedAndReasserted: a run that leaves its own
 // fence names the source; after release, with every site read-only and no
-// lastFailoverTarget, the topology manager re-asserts it.
+// lastFailoverTarget, the topology manager re-asserts it. The name is
+// bound to the server the run's fence intent names: a server that answers
+// under another @@server_uuid (or whose identity cannot be read) is lifted
+// only as a site the operator merely observed, from mysqld's boot
+// read_only and never from a fence.
 func TestPF_SourceLeftFencedIsNamedAndReasserted(t *testing.T) {
-	site0 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: opsUUIDA + ":1-10"}
-	site1 := &mockMySQL{readOnly: true, gtidExecuted: opsUUIDA + ":1-10"}
-	tm, _, _ := newTestTopologyManager(site0, site1)
-	setWedgedTopology(tm, "")
-	tm.mu.Lock()
-	tm.lastActiveSite, tm.lastActiveSiteNamed = "dc1", false // observed only, as restored
-	tm.promotionGtidExecuted = opsUUIDA + ":1-10"
-	tm.mu.Unlock()
-	reg := &opsRegistry{current: tm, slot: &PlannedClaimSlot{}}
-	WireRegisteredManager(tm, ManagerWiring{Slot: reg.slot})
-	topo := newRunnerPlannedTopology(reg)
-	ref := PlannedRunRef{RunID: "run-1", Source: "dc1", Target: "dc2"}
-	reg.slot.hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
+	cases := []struct {
+		name string
+		// uuid is what dc1 answers; "" answers no identity at all.
+		uuid          string
+		superReadOnly bool
+		reasserted    bool
+	}{
+		{"the server the fence names, fenced", opsUUIDA, true, true},
+		{"the server the fence names, boot read_only", opsUUIDA, false, true},
+		{"another server, fenced", opsUUIDC, true, false},
+		{"another server, boot read_only", opsUUIDC, false, true},
+		{"no identity, fenced", "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			site0 := &mockMySQL{readOnly: true, superReadOnly: tc.superReadOnly, gtidExecuted: opsUUIDA + ":1-10"}
+			site1 := &mockMySQL{readOnly: true, gtidExecuted: opsUUIDA + ":1-10"}
+			tm, _, _ := newTestTopologyManager(site0, site1)
+			if tc.uuid != "" {
+				tm.sites[0].mysql = &identityMockMySQL{mockMySQL: site0, before: tc.uuid}
+			}
+			setWedgedTopology(tm, "")
+			tm.mu.Lock()
+			tm.lastActiveSite, tm.lastActiveSiteNamed = "dc1", false // observed only, as restored
+			tm.promotionGtidExecuted = opsUUIDA + ":1-10"
+			tm.mu.Unlock()
+			reg := &opsRegistry{current: tm, slot: &PlannedClaimSlot{}}
+			WireRegisteredManager(tm, ManagerWiring{Slot: reg.slot})
+			topo := newRunnerPlannedTopology(reg)
+			ref := PlannedRunRef{RunID: "run-1", Source: "dc1", Target: "dc2"}
+			reg.slot.hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
 
-	if tm.checkPrimaryReassert(context.Background()) {
-		t.Fatal("the topology manager re-asserted while the run held its claim")
+			if tm.checkPrimaryReassert(context.Background()) {
+				t.Fatal("the topology manager re-asserted while the run held its claim")
+			}
+			if err := topo.NameFencedSource(ref, opsUUIDA); err != nil {
+				t.Fatal(err)
+			}
+			if !topo.ReleasePlannedFailoverClaim(ref.Group, "run-1", ReleaseTerminal) {
+				t.Fatal("release refused")
+			}
+			if got := tm.checkPrimaryReassert(context.Background()); got != tc.reasserted {
+				t.Fatalf("re-asserted after release = %v, want %v", got, tc.reasserted)
+			}
+			site0.mu.Lock()
+			ro := site0.readOnly
+			site0.mu.Unlock()
+			if ro == tc.reasserted {
+				t.Fatalf("dc1 read-only = %v after the re-assert, want %v", ro, !tc.reasserted)
+			}
+		})
 	}
-	if err := topo.NameFencedSource(ref); err != nil {
-		t.Fatal(err)
+}
+
+// TestPF_FenceIntentWithoutServerNamesNothing: a fence intent that names no
+// server cannot attribute a fence to one, so the source is not named.
+func TestPF_FenceIntentWithoutServerNamesNothing(t *testing.T) {
+	f := newOpsFixture(t, "")
+	f.hold(false)
+	if err := f.topo.NameFencedSource(f.ref, ""); err == nil {
+		t.Fatal("a source was named without a server to bind it to")
 	}
-	if !topo.ReleasePlannedFailoverClaim(ref.Group, "run-1", ReleaseTerminal) {
-		t.Fatal("release refused")
-	}
-	if !tm.checkPrimaryReassert(context.Background()) {
-		t.Fatal("the named fenced source was not re-asserted after release")
-	}
-	site0.mu.Lock()
-	ro := site0.readOnly
-	site0.mu.Unlock()
-	if ro {
-		t.Fatal("dc1 still read-only after the re-assert")
+	f.tm.mu.RLock()
+	named := f.tm.lastActiveSiteNamed
+	f.tm.mu.RUnlock()
+	if named {
+		t.Fatal("lastActiveSite is named")
 	}
 }
 

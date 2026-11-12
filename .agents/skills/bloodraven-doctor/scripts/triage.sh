@@ -263,11 +263,12 @@ if [[ -n "$PF_PHASE" ]]; then
     fi
     case "$PF_OUTCOME" in
         SourceLeftFenced)
-            echo "  Nothing was written to the target and the source stays read-only. Check which site is writable before anything else: see playbook 37." ;;
+            echo "  Nothing was written to the target and the run did not make the source writable again (the message says whether the run proved its fence). Check which site is writable before anything else: see playbook 37." ;;
         PromotedUnconfirmed)
             echo "  super_read_only=OFF may have reached the target. Read read_only/super_read_only/gtid_executed on the source and the target: see the PromotedUnconfirmed row of the alert matrix." ;;
         ManualRecoveryRequired)
-            echo "  The run may have written to the target and could not explain the result; automation is held: see playbook 38." ;;
+            echo "  The run may have written to the target and could not explain the result; automation is held: see playbook 38."
+            echo "  With reason=SourceUnfenced the source restarted on older data and is writable: the message names the transactions it lost. Do not reclone a site that holds them (playbook 38, \"The source lost transactions\")." ;;
     esac
     if [[ "$PF_PHASE" == "Admitting" && "$PF_WAIT" == "PeerUnreadable" ]]; then
         echo "  Waiting because a PrimaryCandidate or DisasterRecovery site does not answer. Planned failovers are strict: it ends NotStarted/AdmissionTimeout after 2 minutes unless the site answers."

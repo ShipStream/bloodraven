@@ -111,6 +111,8 @@ func fingerprint(violations []Violation) string {
 			key = "HoldWithoutDataAtRisk(writableTargetWithChannel)"
 		case v.Invariant == "HoldWithoutDataAtRisk" && strings.Contains(v.Detail, replacedTargetSameProcessMarker):
 			key = "HoldWithoutDataAtRisk(replacedTargetSameProcess)"
+		case v.Invariant == "HoldWithoutDataAtRisk" && strings.Contains(v.Detail, regressedTargetMarker):
+			key = "HoldWithoutDataAtRisk(regressedTarget)"
 		case (v.Invariant == "OutcomeDishonest" || v.Invariant == "SucceededBesideWritable") && strings.Contains(v.Detail, unreadablePeerMarker):
 			key = v.Invariant + "(unreadablePeer)"
 		case v.Invariant == "OutcomeDishonest" && strings.Contains(v.Detail, targetLacksFencedSetMarker):

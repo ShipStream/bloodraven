@@ -1260,8 +1260,11 @@ func (tm *TopologyManager) namePlannedTargetUnconfirmed(target string) {
 }
 
 // NameFencedSource names the run's own fenced source for the topology
-// manager's re-assert (§6.5) before the claim is released.
-func (p *runnerPlannedTopology) NameFencedSource(ref PlannedRunRef) error {
+// manager's re-assert (§6.5) before the claim is released, bound to
+// sourceServerUUID, the server the run's fence intent names: the re-assert
+// lifts a fence only from that server (plannedFencedSource). Nothing is
+// read here, so a run that ends without reaching its source can name it.
+func (p *runnerPlannedTopology) NameFencedSource(ref PlannedRunRef, sourceServerUUID string) error {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
 		return err
@@ -1269,15 +1272,13 @@ func (p *runnerPlannedTopology) NameFencedSource(ref PlannedRunRef) error {
 	if err := tm.requireRunClaim(p.leader(), ref, true); err != nil {
 		return err
 	}
-	tm.nameFencedSource(ref.RunID, ref.Source)
-	return nil
-}
-
-func (tm *TopologyManager) nameFencedSource(runID, source string) {
 	tm.mu.Lock()
-	tm.lastActiveSite, tm.lastActiveSiteNamed = source, true
+	named := tm.nameFencedSourceLocked(ref.RunID, ref.Source, sourceServerUUID)
 	tm.mu.Unlock()
-	tm.logger.Info("planned failover: named fenced source for re-assert", "runId", runID, "site", source)
+	if !named {
+		return errors.New("planned failover: the run's fence intent names no server; the source is not named")
+	}
+	return nil
 }
 
 // CheckRunClaim is requireRunClaim for a side effect outside the facade.
@@ -1461,6 +1462,25 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	if ferr == nil {
 		if live, err := readPromotionLive(ctx, tgt.mysql); err == nil && live.readOnly {
 			if extra := live.gtid.Subtract(F); extra.IsEmpty() {
+				if replacedTargetWithinFence(live, F, plannedPromotionUUID(pf)) && !p.memoProvesNoWrite(ref.RunID) &&
+					(plannedOwnRecordDurable(fg, pf, tm.clock.Now()) || !tm.replacedTargetRollbackSafe(ctx, p, ref, pf, F)) {
+					// Read-only inside F, but not the data directory the run
+					// was promoting (another server, or an older copy of the
+					// intent's): what it holds says nothing about what a
+					// clear let onto the promoted one. The rollback needs
+					// the evidence the promotion attempt needs for the same
+					// finding (the DST-3 ruling: the run's record is not
+					// durable, the source holds F under the run's fence,
+					// every promotable peer answers read-only). Without it
+					// the run holds, as that attempt would.
+					tm.logger.Warn("planned failover: the re-proof found the target replaced and cannot prove nothing was written; holding",
+						"runId", ref.RunID, "site", ref.Target, "targetServerUUID", live.uuid)
+					reason := v1alpha1.PlannedFailoverReasonExecuteFailed
+					if recordChanged {
+						reason = v1alpha1.PlannedFailoverReasonAuthorityChanged
+					}
+					return ReproveResult{Hold: reasonPtr(reason)}, nil
+				}
 				// No transaction of the run committed: put the target back
 				// behind super_read_only and roll back. A failed SET is
 				// logged here and enforced by the rollback, which never
@@ -1612,6 +1632,21 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 				return res, nil
 			}
 		}
+		attributed := p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) != FenceUnattributed
+		if !attributed && pf.Fence != nil && pf.Fence.SourceServerUUID != "" {
+			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
+		}
+		if lost := tm.plannedSourceLost(ref.Source, id.uuid, id.gtid, F, fErr, live, liveErr); !lost.IsEmpty() {
+			// Writable, and without transactions it held: it restarted on an
+			// older data directory and was then made writable (an external
+			// read_only=0, or a pod that boots writable). What it commits
+			// from here is a second history: it issues the lost GTIDs again
+			// for other transactions, and a site that holds the originals
+			// skips them without an error. Once it has issued as many as it
+			// lost no GTID comparison tells the two histories apart, so the
+			// run records what it can still prove and holds automation.
+			return tm.sourceLostTransactionsHold(ctx, p, ref, tgt, &live, liveErr, id, F, fErr, lost, res)
+		}
 		// The target goes back behind super_read_only before the rollback
 		// completes: at read_only=ON, super_read_only=OFF it would accept
 		// SUPER writes beside the writable source. A re-fence that is not
@@ -1636,11 +1671,11 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 			res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
 			return res, nil
 		}
-		verified := p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) != FenceUnattributed
-		if !verified && pf.Fence != nil && pf.Fence.SourceServerUUID != "" {
-			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
-		}
-		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, verified, &res)
+		// The run's own server is not enough: it must also hold the fenced
+		// set and everything the target holds, or the target is not pointed
+		// at it (plannedSourceTrustFor).
+		trust := tm.plannedSourceTrustFor(ref.Source, attributed, id.uuid, id.gtid, F, fErr, live, liveErr)
+		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
 		return res, nil
 	}
@@ -1657,6 +1692,14 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	// that is not the run's (a replaced pod fenced by someone else, say),
 	// and the topology manager is never told to lift it (§6.5).
 	unattributed := idErr == nil && p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) == FenceUnattributed
+	// A source that is left fenced was not verified on a pinned session, so
+	// no channel is created toward it. A channel the promotion only stopped
+	// is started again, unless the source answered without part of what it
+	// held (plannedSourceLacksHistory).
+	leftTrust := plannedSourceUnverified
+	if idErr == nil {
+		leftTrust = tm.plannedSourceTrustFor(ref.Source, false, id.uuid, id.gtid, F, fErr, live, liveErr)
+	}
 	leftFenced := func() (RollbackResult, error) {
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
 		if unattributed {
@@ -1664,7 +1707,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		}
 		// The target's channel is not re-pointed at a source whose
 		// identity cannot be verified; one this run removed is reported.
-		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, false, &res)
+		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, leftTrust, &res)
 		return res, nil
 	}
 	if len(peers.writable) > 0 {
@@ -1692,32 +1735,49 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	}
 	defer func() { _ = sess.Close() }()
 	pinned, err := readSourceIdentity(ctx, sess)
-	switch {
-	case err != nil:
+	if err != nil {
 		return res, nil
+	}
+	// What the pinned server lacks decides before anything else: a source
+	// without part of the set it was fenced with, or without transactions
+	// it issued itself that the target holds, is never unfenced, and the
+	// target is never started or pointed at it.
+	lost := tm.plannedSourceLost(ref.Source, pinned.uuid, pinned.gtid, F, fErr, live, liveErr)
+	trust := tm.plannedSourceTrustFor(ref.Source, pinned.uuid == id.uuid, pinned.uuid, pinned.gtid, F, fErr, live, liveErr)
+	switch {
 	case pinned.uuid != id.uuid:
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
 		res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable)
-		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, false, &res)
+		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 		return res, nil
-	case (fErr == nil && !gtidSetHolds(pinned.gtid, F)) || (liveErr == nil && tm.lacksOwnTransactions(ref.Source, pinned.uuid, pinned.gtid, live.gtid)):
+	case !lost.IsEmpty() && !pinned.readOnly:
+		// Made writable between the pooled read and this one: a second
+		// history, as in the already-writable branch above.
+		return tm.sourceLostTransactionsHold(ctx, p, ref, tgt, &live, liveErr, pinned, F, fErr, lost, res)
+	case !lost.IsEmpty() || (fErr == nil && !gtidSetHolds(pinned.gtid, F)) ||
+		(liveErr == nil && tm.lacksOwnTransactions(ref.Source, pinned.uuid, pinned.gtid, live.gtid)):
+		// (The last two conditions are the guard as it was before lost
+		// existed; lost covers both whenever the sets parse.)
+		//
 		// The same server_uuid on an older data directory: the source
 		// restarted without part of the set it was fenced with, or
 		// (restarted before the fence was read) without transactions it
 		// issued itself that the target already holds. Unfencing it would
 		// have it issue those GTIDs again, and the target, which holds
 		// them, must not be pointed at it. It stays fenced; the topology
-		// manager reports what it lacks (own_transactions_lost.go). A
-		// target that holds transactions of another server is a
-		// divergent target, which does not keep the source fenced.
+		// manager reports what it lacks (own_transactions_lost.go). A set
+		// that does not parse proves nothing about what the source holds,
+		// so it is not unfenced either. A target that holds transactions
+		// of another server is a divergent target, which does not keep
+		// the source fenced.
 		tm.logger.Warn("planned failover: rollback leaves the source fenced, it lacks transactions it held",
 			"runId", ref.RunID, "site", ref.Source, "fenceGtid", truncateGtidSet(F.String()),
 			"sourceGtid", truncateGtidSet(pinned.gtid), "targetGtid", truncateGtidSet(live.gtidRaw))
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
-		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, false, &res)
+		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 		return res, nil
 	}
-	tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, true, &res)
+	tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 	if !pinned.readOnly {
 		res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
 		return res, nil
@@ -1785,15 +1845,131 @@ func (tm *TopologyManager) refencePlannedTarget(ctx context.Context, p *runnerPl
 	return nil
 }
 
+// plannedSourceTrust is what a rollback knows about the server it would
+// leave the target replicating from.
+type plannedSourceTrust int
+
+const (
+	// plannedSourceUnverified: the server is not proven to be the run's own
+	// source holding the target's history: it did not answer, it is another
+	// server, the target holds transactions of a third server, or a set did
+	// not parse. No channel is created toward it. A channel the promotion
+	// only stopped is started again, which puts back what the run found.
+	plannedSourceUnverified plannedSourceTrust = iota
+	// plannedSourceVerified: the run's own source, holding the fenced set
+	// and everything the target holds. A channel may be created toward it.
+	plannedSourceVerified
+	// plannedSourceLacksHistory: the server answered without part of the
+	// fenced set, or without transactions it issued that the target holds
+	// (plannedSourceLost). Nothing is started or pointed at it.
+	plannedSourceLacksHistory
+)
+
+// plannedSourceLost returns what the source, answering under serverUUID
+// with the executed set raw, provably lacks:
+//   - the part of the fenced set F it no longer holds. F is what this
+//     source reported under the run's fence, so it held all of it;
+//   - the transactions it issued itself that the target holds and it does
+//     not: it restarted on an older data directory before the fence was
+//     read, so F is already the short set (ownLostTransactions).
+//
+// It is empty when nothing is proven: a set that does not parse, an
+// unknown F and an unreadable target prove nothing. It is also empty once
+// the source has issued as many transactions as it lost: the GTIDs are
+// then the same and only the transactions differ, which no GTID comparison
+// shows (the residual documented in own_transactions_lost.go).
+func (tm *TopologyManager) plannedSourceLost(site, serverUUID, raw string, F mysql.GTIDSet, fErr error, live promotionLive, liveErr error) mysql.GTIDSet {
+	lost := mysql.GTIDSet{}
+	have, err := mysql.ParseGTIDSet(raw)
+	if err != nil {
+		return lost
+	}
+	if liveErr == nil && serverUUID != "" {
+		lost = ownLostTransactions(live.gtid, have, tm.knownSiteServerUUIDs(site, serverUUID))
+	}
+	if fErr == nil {
+		// What the target holds is listed above; this is the rest of F.
+		for sid, ivs := range F.Subtract(have).Subtract(lost) {
+			lost[sid] = append(lost[sid], ivs...)
+		}
+	}
+	return lost
+}
+
+// plannedSourceTrustFor classifies the source for
+// restorePlannedTargetChannel. ownServer is whether the server that
+// answered is proven the run's own source: its fence is attributable to
+// the run, or it is the pinned server the rollback is about to unfence.
+func (tm *TopologyManager) plannedSourceTrustFor(site string, ownServer bool, serverUUID, raw string, F mysql.GTIDSet, fErr error,
+	live promotionLive, liveErr error) plannedSourceTrust {
+	if !tm.plannedSourceLost(site, serverUUID, raw, F, fErr, live, liveErr).IsEmpty() {
+		return plannedSourceLacksHistory
+	}
+	have, err := mysql.ParseGTIDSet(raw)
+	if err != nil || !ownServer || (fErr == nil && !have.Contains(F)) || (liveErr == nil && !have.Contains(live.gtid)) {
+		return plannedSourceUnverified
+	}
+	return plannedSourceVerified
+}
+
+// sourceLostTransactionsHold ends a rollback that found the source
+// writable without transactions it held (lost, from plannedSourceLost):
+// ManualRecoveryRequired{SourceUnfenced} with LostGtid set, which the
+// engine turns into the automation hold. The reason is the existing one for
+// a source that is no longer behind the run's fence; the outcome and the
+// message say what else is wrong with it. The run sends nothing to the
+// source. The target is put back behind super_read_only when it reads
+// read-only without it (best effort: the hold stands either way), and its
+// channel is neither created nor started: it is the site most likely to
+// hold the originals of what the source lost, and replicating from the
+// source would have it skip the transactions the source issues under
+// those GTIDs.
+func (tm *TopologyManager) sourceLostTransactionsHold(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, tgt *siteTracker,
+	live *promotionLive, liveErr error, id sourceIdentity, F mysql.GTIDSet, fErr error, lost mysql.GTIDSet, res RollbackResult) (RollbackResult, error) {
+	// A simulation observes the sites as this read found them (the pinned
+	// read that leads here has no probe yield of its own).
+	p.hooks.yield(YieldPeerProbeForSim + ":sourceLost")
+	if err := tm.refencePlannedTarget(ctx, p, ref, tgt, live, liveErr); err != nil && plannedClaimError(err) {
+		return RollbackResult{}, err
+	}
+	fence := ""
+	if fErr == nil {
+		fence = F.String()
+	}
+	tm.logger.Error("planned failover: rollback found the source writable without transactions it held",
+		"runId", ref.RunID, "site", ref.Source, "lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()),
+		"fenceGtid", truncateGtidSet(fence), "sourceGtid", truncateGtidSet(id.gtid), "targetGtid", truncateGtidSet(live.gtidRaw))
+	res.Outcome, res.Reason = v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonSourceUnfenced
+	res.LostGtid = lost.String()
+	if liveErr != nil || live.repl == nil || !live.repl.IORunning || !live.repl.SQLRunning {
+		res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored)
+	}
+	return res, nil
+}
+
 // restorePlannedTargetChannel is §9 step 2: give the target its channel
 // back from the source when it is read-only, has no channel and holds a
 // non-empty subset of F; restart a stopped channel; otherwise leave it for
 // clone or reclone with the warning TargetReplicationNotRestored. A new
-// channel is pointed at the source host only when sourceVerified (the
-// source's identity was proven the run's on a pinned session, or it is
-// the run's writable source): never at a replaced or unverified server.
+// channel is pointed at the source host only when trust is
+// plannedSourceVerified (the run's own source, holding the fenced set and
+// the target's set): never at a replaced or unverified server. With
+// plannedSourceLacksHistory nothing is sent at all, not even the START
+// REPLICA of a channel the promotion stopped: the source answered without
+// transactions the target holds, and a receiver connected to it skips
+// whatever the source later issues under their GTIDs.
+//
+// Measured on MySQL 9.7 (a source restored to a copy of its data directory
+// two transactions old, same server_uuid, the replica holding both): while
+// the source is short the replica's receiver stops with error 13114 (fatal
+// error 1236, "Replica has more GTIDs than the source has, using the
+// source's SERVER_UUID"). Once the source has committed two other
+// transactions, which get the same two GTIDs, the receiver connects with no
+// error, both threads run, the two executed sets are equal, the replica
+// keeps its two rows and never receives the source's two, and every later
+// transaction replicates normally.
 func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, src, tgt *siteTracker,
-	live promotionLive, liveErr error, F mysql.GTIDSet, fErr error, sourceVerified bool, res *RollbackResult) {
+	live promotionLive, liveErr error, F mysql.GTIDSet, fErr error, trust plannedSourceTrust, res *RollbackResult) {
 	hooks := p.hooks
 	warn := func() {
 		if !slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
@@ -1805,6 +1981,10 @@ func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *r
 		return
 	}
 	if live.repl != nil && live.repl.IORunning && live.repl.SQLRunning {
+		return
+	}
+	if trust == plannedSourceLacksHistory {
+		warn()
 		return
 	}
 	if !live.superReadOnly {
@@ -1828,7 +2008,7 @@ func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *r
 		}
 		return
 	}
-	if !sourceVerified || live.gtid.IsEmpty() || !live.gtid.Subtract(F).IsEmpty() || tm.bootstrapCfg.ReplUser == "" {
+	if trust != plannedSourceVerified || live.gtid.IsEmpty() || !live.gtid.Subtract(F).IsEmpty() || tm.bootstrapCfg.ReplUser == "" {
 		warn()
 		return
 	}
@@ -1962,7 +2142,12 @@ func classifyPromotionStage(live promotionLive, F mysql.GTIDSet, U string, memoN
 		return inconsistent(v1alpha1.PlannedFailoverReasonExecuteFailed)
 	case !live.readOnly && live.repl != nil:
 		if memoNoWrite || !haveMemo {
-			return abort(v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+			stage, out := abort(v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+			// Without a memo this process cannot rule out the second
+			// reading (an earlier process of the run cleared the flags and
+			// someone then configured the channel); the record says so.
+			out.ClearsUnknown = !memoNoWrite
+			return stage, out
 		}
 		return inconsistent(v1alpha1.PlannedFailoverReasonForeignWritable)
 	case !live.readOnly && memoNoWrite:
@@ -2235,14 +2420,21 @@ func (tm *TopologyManager) checkPlannedPromotionManager(p *runnerPlannedTopology
 }
 
 // replacedTargetWithinFence reports whether live is a replaced target the
-// DST-3 ruling may roll back over: another server than the one the intent
-// names (@@server_uuid is not U), read-only, holding nothing outside the
-// fenced set F. The last condition tells a replaced data directory from the
-// intent's server restarted under a new server_uuid (auto.cnf removed): that
-// server keeps its data, so a transaction it accepted after the run's clear
-// is still in its GTID set, outside F, and the hold stands.
+// DST-3 ruling may roll back over: read-only, holding nothing outside the
+// fenced set F, and not the data directory the run was promoting. That is
+// another server than the one the intent names (@@server_uuid is not U), or
+// the intent's server on an older copy of its data: it lacks part of F,
+// which it held when the run entered Promoting (the lag wait proved it), so
+// its volume came back older under the same server_uuid. Either way,
+// whatever a clear of the run let onto the promoted directory is not on the
+// server that answers now.
+//
+// "Nothing outside F" tells both from the intent's server restarted on its
+// own data (also under a new server_uuid, when auto.cnf was removed): that
+// server keeps a transaction it accepted after the run's clear, in its GTID
+// set outside F, and the hold stands.
 func replacedTargetWithinFence(live promotionLive, F mysql.GTIDSet, U string) bool {
-	return live.readOnly && !strings.EqualFold(live.uuid, U) && live.gtid.Subtract(F).IsEmpty()
+	return live.readOnly && live.gtid.Subtract(F).IsEmpty() && (!strings.EqualFold(live.uuid, U) || !live.gtid.Contains(F))
 }
 
 // replacedTargetRollbackSafe is the facade's half of the DST-3 ruling for

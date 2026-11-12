@@ -444,6 +444,10 @@ type TopologyManager struct {
 	// operator history a fence stays for a human. Both protected by mu.
 	lastActiveSite      string
 	lastActiveSiteNamed bool
+	// plannedFencedSource (planned failover, F2) binds a source a planned
+	// run named to the server its fence intent names; see
+	// planned_failover_claim.go. Protected by mu.
+	plannedFencedSource plannedFencedSource
 
 	// failoverState persists lastFailover/lastFailoverTarget out of band
 	// from the CR status subresource, so a status-write outage that spans
@@ -5517,6 +5521,11 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		return false
 	}
 
+	// Planned failover (F2): a source a planned run left fenced counts as
+	// named only while it is the server that run's fence intent names.
+	if named && authority == "lastActiveSite" && !tm.plannedNamedSourceIsFenceServer(ctx, targetSite) {
+		named = false
+	}
 	if !named && !tm.bootReadOnlyOnly(ctx, targetSite) {
 		return false
 	}
