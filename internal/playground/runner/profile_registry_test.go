@@ -27,10 +27,22 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 	// replay), and the issue #115 reader scenarios (40-44) are release-graded.
 	// The four chaos-round 2026-10-15 regressions bring it to 24, and the
 	// #235 planned-failover claim restart scenario (63) to 25, and the three
-	// #206 cross-site PITR histories (37, 68, 70) to 28.
+	// #206 cross-site PITR histories (37, 68, 70) to 28, and the paced
+	// rollout halt (73, #244) to 29.
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 28 {
-		t.Fatalf("release profile selected %d scenarios, want 28", len(release))
+	if len(release) != 29 {
+		t.Fatalf("release profile selected %d scenarios, want 29", len(release))
+	}
+	if !containsScenarioID(release, "73-paced-rollout-bad-build-halt") {
+		t.Error("release profile must include 73-paced-rollout-bad-build-halt (#244)")
+	}
+	if containsScenarioID(smoke, "73-paced-rollout-bad-build-halt") {
+		t.Error("73-paced-rollout-bad-build-halt must not be in the smoke profile")
+	}
+	// The upgrade E2E needs a cluster installed at the previous release; the
+	// e2e upgrade job names it, and no profile selects it.
+	if containsScenarioID(runner.SelectForProfile(all, runner.ProfileFull), "74-upgrade-paced-rollout") {
+		t.Error("74-upgrade-paced-rollout must not be selected by any profile")
 	}
 	for _, id := range []string{
 		"37-pitr-planned-failback-no-reclone",

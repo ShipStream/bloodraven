@@ -23,7 +23,8 @@ import (
 //     fencing, and the source-convergence invariant), and the regressions
 //     from the 2026-10-15 chaos round (cooldown retry, hung primary, hung
 //     reader, killed clone), and the durable planned-failover claim
-//     surviving an operator restart (#235).
+//     surviving an operator restart (#235), and the paced rollout of a
+//     release-driven pod change halting at a bad build (#244).
 //   - full:   every registered scenario (existing run-all behaviour).
 type Profile string
 
@@ -87,6 +88,8 @@ var releaseScenarios = map[string]bool{
 	"57-hung-primary-detected-and-fenced":   true, // SIGSTOPped primary: detection, fence on resume, sidecar alive
 	"58-hung-reader-does-not-slow-failover": true, // a down site does not slow failover of the others
 	"59-killed-clone-never-promoted":        true, // failed clone reported as failed; empty site never promoted
+	// paced rollouts (#244)
+	"73-paced-rollout-bad-build-halt": true, // a bad release halts at the first group; a good one rolls one group at a time
 }
 
 // Profiles returns the list of valid profile names for CLI help and
