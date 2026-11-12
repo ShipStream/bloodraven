@@ -112,6 +112,7 @@ func (p *planner) latest(outcome Outcome) error {
 	if pl.Replay.IsEmpty() {
 		return refuse(pitrarchive.TokenNoArchivedReplay, "nothing is archived beyond the backup (the archive head %s holds no transaction the backup lacks); wait for archiving (FLUSH BINARY LOGS on the primary rotates the active binlog), or use an older backup", star.row.Label())
 	}
+	p.reportLoss = true
 	return p.searchAndFinish(outcome)
 }
 
@@ -191,8 +192,8 @@ func (p *planner) anyRowMeets(s Set) bool {
 //	oct(g) < R.observedAt − δ,  g ∉ R
 //
 // and refuses unless every such g is excluded (coverage.json records the
-// excluded ones as lost; lossEvidenceUnread completes that report with the
-// excluded transactions of rows the plan did not download).
+// excluded ones as lost; lossReport completes that list once the answer is
+// decided).
 //
 // R's server became writable without g, so a history holding g is a branch
 // R's site abandoned (a lost tail) or a concurrent writer's. Whether R
@@ -204,52 +205,47 @@ func (p *planner) anyRowMeets(s Set) bool {
 // inside ±δ of the record the order is unknown, so the window is not
 // evidence either. The record's own site's rows are its own later history.
 //
-// A binlog proves the same without a record (ownWrites): a file of site s
-// that holds a replayed transaction its own server originated shows that
-// server writable at that transaction's commit time, having executed at
-// most exec(f). A record is one sample of a writable server's state and
-// such a file is another, read from verified bytes, so a writable episode
-// that no sidecar observed leaves the same loss evidence as a recorded one
-// once its file is archived.
+// Only a promotion record is such evidence. A binlog in which a server
+// committed transactions of its own without g is not: a read-only replica
+// originates transactions too (FLUSH PRIVILEGES and its like consume a
+// GTID under super_read_only, and so does any errant write), it may do so
+// while it has yet to apply g, and it may be promoted later with nothing
+// lost. The archived bytes of that healthy history and those of a writable
+// episode that no sidecar recorded say the same thing, "this server wrote
+// x without g", so a rule on them refuses archives in which nothing was
+// lost and names transactions every server holds as the ones to exclude.
+// An unrecorded episode therefore plans where a recorded one refuses
+// (TestKnownLimitationUnrecordedEpisodeIsNoLossEvidence).
 func (p *planner) lossEvidence() error {
 	pl := p.plan
 	goal := p.lambda.Subtract(p.X)
-	points, err := p.lossPoints()
-	if err != nil {
-		return err
-	}
 	evidence := Set{}
-	var lostAt *lossPoint
-	for i := range points {
+	var lostAt *promoRef
+	for i := range p.promos {
 		if err := p.ctx.Err(); err != nil {
 			return err
 		}
-		pt := &points[i]
-		// Only the head's transactions the server lacked can be lost by it
-		// (review F053: points without candidates cost nothing).
-		cand := p.lambda.Subtract(pt.have)
+		pr := &p.promos[i]
+		// Only the head's transactions the record lacks can be lost by it
+		// (review F053: records without candidates cost nothing).
+		cand := p.lambda.Subtract(pr.set)
 		if cand.IsEmpty() {
 			continue
 		}
+		bound := pr.rec.ObservedAt.UnixMicro() - p.delta
 		for _, f := range p.order {
-			if f.row.Site == pt.site || f.idx.CommitMin >= pt.bound || !f.idx.GTIDs.Overlaps(cand) {
+			if f.row.Site == pr.site || f.idx.CommitMin >= bound || !f.idx.GTIDs.Overlaps(cand) {
 				continue
 			}
 			for j, t := range f.idx.Txns {
-				if t.OCT >= pt.bound {
+				if t.OCT >= bound {
 					continue
 				}
 				if g := f.gtid(j); cand.Has(g) && evidence.add(g) && lostAt == nil && !p.X.Has(g) {
-					lostAt = pt
+					lostAt = pr
 				}
 			}
 		}
-	}
-	// The report is complete: excluded transactions in rows this plan did
-	// not download are flagged too.
-	evidence, err = p.lossEvidenceUnread(points, evidence)
-	if err != nil {
-		return err
 	}
 	// The divergence audit is negative evidence too.
 	audit := Set{}
@@ -267,12 +263,17 @@ func (p *planner) lossEvidence() error {
 	}
 	// The complete set to exclude goes to coverage.json and to
 	// pitr-download's BLOODRAVEN_PITR_DIVERGENT_SET line (review F054);
-	// the message is bounded.
+	// the message is bounded. The run is refused, so the report is
+	// completed here: nothing it reads can change the answer any more.
 	pl.Lost = evidence
 	pl.Divergent = lost.Union(audit)
+	if err := p.lossReport(); err != nil {
+		return err
+	}
 	sort.Strings(auditRows)
 	if !lost.IsEmpty() {
-		msg := fmt.Sprintf("the newest archived state includes %s, %s", lost.bounded(1024), lostAt.describe())
+		msg := fmt.Sprintf("the newest archived state includes %s, committed before %s was promoted at %s without them; they were lost at that failover",
+			lost.bounded(1024), lostAt.site, lostAt.rec.ObservedAt.UTC().Format(microLayout))
 		if !audit.IsEmpty() {
 			msg += fmt.Sprintf("; the divergence audit also found %s missing from the history (rows %s)", audit.bounded(512), strings.Join(auditRows, ", "))
 		}
@@ -282,168 +283,168 @@ func (p *planner) lossEvidence() error {
 		audit.bounded(1024), strings.Join(auditRows, ", "))
 }
 
-// lossPoint is one sample of a writable server's state: at bound + δ the
-// server of site had executed at most have. It is a promotion record, or a
-// binlog holding a transaction the server originated (ownWrites).
-type lossPoint struct {
-	site  string
-	have  Set
-	bound int64 // µs: a transaction committed before it is provably older
-	rec   *promoRef
-	// file and own are set for a binlog: own is the newest replayed
-	// transaction the file's server originated, committed at ownOCT.
-	file   *file
-	own    GTID
-	ownOCT int64
+// LostUnread is a row the loss report could not take into account.
+type LostUnread struct {
+	Row RowRef
+	// Reason says why the row was not read.
+	Reason string
 }
 
-// describe is the half of the refusal that names the evidence.
-func (pt *lossPoint) describe() string {
-	if pt.rec != nil {
-		return fmt.Sprintf("committed before %s was promoted at %s without them; they were lost at that failover",
-			pt.site, pt.rec.rec.ObservedAt.UTC().Format(microLayout))
-	}
-	return fmt.Sprintf("committed before %s committed %s at %s in %s, whose server had not executed them; they were lost at a failover to %s that left no promotion record",
-		pt.site, pt.own, fmtMicros(pt.ownOCT), pt.file.row.Label(), pt.site)
-}
-
-// lossPoints are the promotion records, then the binlogs with own writes.
-func (p *planner) lossPoints() ([]lossPoint, error) {
-	points := make([]lossPoint, 0, len(p.promos))
-	for i := range p.promos {
-		pr := &p.promos[i]
-		points = append(points, lossPoint{site: pr.site, have: pr.set, bound: pr.rec.ObservedAt.UnixMicro() - p.delta, rec: pr})
-	}
-	for k, f := range p.order {
-		if k%1024 == 0 {
-			if err := p.ctx.Err(); err != nil {
-				return nil, err
-			}
-		}
-		if g, oct, ok := p.ownWrites(f); ok {
-			points = append(points, lossPoint{site: f.row.Site, have: f.exec, bound: oct - p.delta, file: f, own: g, ownOCT: oct})
-		}
-	}
-	return points, nil
-}
-
-// ownWrites returns the newest replayed transaction of f that f's own
-// server originated (its origin server_id is the file's writer), and its
-// commit time. Such a transaction was written on that server by a client,
-// so the server was writable then, and it had executed at most exec(f):
-// what the bytes of f prove about a writable episode, with or without a
-// promotion record of it.
-//
-// Only an active row of an unmarked site counts (a marked site's bytes
-// cannot certify history, and a quarantined row is waived evidence), and
-// only a transaction of P = Λ ∖ (B ∪ X): every row that may hold one is
-// downloaded before the evidence pass, so this evidence does not depend on
-// which other rows a plan happened to read.
-func (p *planner) ownWrites(f *file) (GTID, int64, bool) {
-	if f.marked || f.row.State != RowActive || !f.idx.GTIDs.Overlaps(p.plan.Replay) {
-		return GTID{}, 0, false
-	}
-	var own GTID
-	var newest int64
-	found := false
-	for j, t := range f.idx.Txns {
-		if !f.origin(j) || (found && t.OCT <= newest) {
-			continue
-		}
-		if g := f.gtid(j); p.plan.Replay.Has(g) {
-			own, newest, found = g, t.OCT, true
-		}
-	}
-	return own, newest, found
-}
-
-// lossEvidenceUnread adds to evidence the excluded transactions that
-// lossEvidence's rule flags and whose copies are in rows the plan did not
-// download. Every active row of an unmarked site that may hold a member of
-// P = Λ ∖ (B ∪ X) is downloaded before the evidence pass, so a row left
-// unread holds, of Λ ∖ B, only excluded transactions (a marked site's rows
-// are not downloaded for P at all, and count here like any other copy, as
-// they do in the pass over the downloaded files): without this pass
-// coverage.json's lost list depended on where the files were cut (lost
+// lossReport completes plan.Lost, coverage.json's lost list: it adds the
+// excluded transactions of the head that lossEvidence's rule flags through
+// a copy in any listed row, whether or not the plan downloaded that row.
+// Without it the list depended on where the files were cut (a file that
+// holds only excluded transactions is not needed for the replay: lost
 // A:2-5 in three files was reported as A:2,A:5).
 //
-// These transactions are in X, so they change the report and never the
-// answer, and the pass is built so that it cannot change the answer either:
+// Every listed row counts, as every downloaded file does in lossEvidence:
+// a quarantined row and a row of a marked site are never data, and a copy
+// in one still dates its transaction.
 //
-//   - A row whose manifest commit times lie on one side of the point's
-//     bound is decided from them (hmin/hmax are bound to the row's content
-//     and are what every unread row is planned on).
-//   - A row whose times straddle the bound, or are unknown, is read for its
-//     commit times only (reportIndex). It is not ingested: its copies are
-//     not compared with others, it is in no order check and not in the
-//     closure, so a row read for the report cannot cause a refusal.
-//   - A row that cannot be read is left out of the report. A store error
-//     that says nothing about the row ends planning, as in every download.
+// The report never changes the answer and cannot fail it:
 //
-// Members of B are outside this pass (X ∩ B = ∅): see
+//   - It runs when the answer is decided: after the last check of a plan
+//     (searchAndFinish), or when lossEvidence has refused. Every download
+//     the plan needs has happened by then, so no row is read for the
+//     report and downloaded again for the plan.
+//   - It adds members of X ∩ Λ only.
+//   - A downloaded row is read from its index. A row that was not
+//     downloaded is decided from its manifest commit times when every
+//     record that lacks one of its transactions has them all on one side
+//     of its bound (hmin/hmax are bound to the row's content and are what
+//     every unread row is planned on). Only a row that some record cannot
+//     decide that way, and that may hold a transaction no other row has
+//     flagged, is read (reportRead).
+//   - A row read for the report is not ingested (its copies are not
+//     compared with others and it is in no order check), and what its
+//     index charged to the budget, or spilled, is returned as soon as its
+//     commit times are read.
+//   - A row that cannot be read is left out of the report and named in
+//     plan.LostUnread, whatever the reason: a missing or damaged object, a
+//     store error after the fetcher's retries, a row that retention
+//     retired since the manifests were read, an index that does not fit
+//     the budget. After a store error no further row is read (each read
+//     would wait out the fetcher's retries). Only cancellation ends
+//     planning.
+//
+// Members of B are outside the report (X ∩ B = ∅): see
 // TestKnownLimitationLossEvidenceInsideTheBackup.
-func (p *planner) lossEvidenceUnread(points []lossPoint, evidence Set) (Set, error) {
+func (p *planner) lossReport() error {
 	excluded := p.lambda.Intersect(p.X)
 	if excluded.IsEmpty() {
-		return evidence, nil
+		return nil
 	}
-	for i := range points {
+	lost := p.plan.Lost.Clone()
+	type point struct {
+		bound int64
+		want  Set
+	}
+	var points []point
+	// undated are the rows that some point cannot decide from their hints;
+	// needs are the points that need a row's commit times.
+	var undated []*Row
+	needs := map[*Row][]int{}
+	for i := range p.promos {
 		if err := p.ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
-		pt := &points[i]
-		want := excluded.Subtract(pt.have)
+		pr := &p.promos[i]
+		want := excluded.Subtract(pr.set)
 		if want.IsEmpty() {
 			continue
 		}
-		bound := pt.bound
+		pt := point{bound: pr.rec.ObservedAt.UnixMicro() - p.delta, want: want}
+		points = append(points, pt)
 		for _, r := range p.rows {
-			if r.Site == pt.site || r.State != RowActive || p.files[r] != nil || p.failed[r] != nil ||
-				!r.Hints.Known || r.Hints.lo() >= bound || !r.Hints.GTIDs.Overlaps(want) {
+			if r.Site == pr.site {
 				continue
 			}
-			in := r.Hints.GTIDs.Intersect(want).Subtract(evidence)
-			if in.IsEmpty() {
+			if f := p.files[r]; f != nil {
+				if f.idx.CommitMin >= pt.bound || !f.idx.GTIDs.Overlaps(want) {
+					continue
+				}
+				for j, t := range f.idx.Txns {
+					if t.OCT < pt.bound {
+						if g := f.gtid(j); want.Has(g) {
+							lost.add(g)
+						}
+					}
+				}
 				continue
 			}
-			if r.Hints.hi() < bound {
-				evidence = evidence.Union(in)
+			if r.Hints.lo() >= pt.bound || !r.Hints.mayMeet(want) {
 				continue
 			}
-			idx, err := p.reportIndex(r)
-			if err != nil {
-				return nil, err
-			}
-			if idx == nil {
+			if r.Hints.Known && r.Hints.hi() < pt.bound {
+				lost = lost.Union(r.Hints.GTIDs.Intersect(want))
 				continue
 			}
-			found := Set{}
-			for j, t := range idx.Txns {
-				if t.OCT < bound {
-					if g := idx.GTID(j); in.Has(g) {
-						found.add(g)
+			if needs[r] == nil {
+				undated = append(undated, r)
+			}
+			needs[r] = append(needs[r], len(points)-1)
+		}
+	}
+	p.sortRows(undated)
+	storeFailed := false
+	for _, r := range undated {
+		// Nothing is read for transactions another row has flagged.
+		needed := false
+		for _, k := range needs[r] {
+			in := points[k].want
+			if r.Hints.Known {
+				in = r.Hints.GTIDs.Intersect(in)
+			}
+			if !lost.Contains(in) {
+				needed = true
+				break
+			}
+		}
+		if !needed {
+			continue
+		}
+		if err := p.failed[r]; err != nil {
+			p.plan.LostUnread = append(p.plan.LostUnread, LostUnread{Row: r.ref(), Reason: err.Error()})
+			continue
+		}
+		if storeFailed {
+			p.plan.LostUnread = append(p.plan.LostUnread, LostUnread{Row: r.ref(), Reason: "not read after the store error of the row before"})
+			continue
+		}
+		transient, err := p.reportRead(r, func(idx *FileIndex) {
+			for _, k := range needs[r] {
+				pt := &points[k]
+				for j, t := range idx.Txns {
+					if t.OCT < pt.bound {
+						if g := idx.GTID(j); pt.want.Has(g) {
+							lost.add(g)
+						}
 					}
 				}
 			}
-			evidence = evidence.Union(found)
+		})
+		if err != nil {
+			if cerr := p.ctx.Err(); cerr != nil {
+				return cerr
+			}
+			storeFailed = transient
+			p.plan.LostUnread = append(p.plan.LostUnread, LostUnread{Row: r.ref(), Reason: err.Error()})
 		}
 	}
-	return evidence, nil
+	p.plan.Lost = lost
+	return nil
 }
 
-// reportIndex downloads and indexes r for a report, without making it one
-// of the planner's files. It returns nil when the row cannot be read. The
-// index stays charged to the budget and is kept: a later fetch of the row
-// ingests it instead of downloading the row again.
-func (p *planner) reportIndex(r *Row) (*FileIndex, error) {
-	if idx, ok := p.reportRead[r]; ok {
-		return idx, nil
-	}
-	if err := p.ctx.Err(); err != nil {
-		return nil, err
-	}
+// reportRead downloads and indexes r for a report and hands the index to
+// use, without making the row one of the planner's files. The index lives
+// for the call only: what the read charged to the budget is returned, and
+// what it spilled is freed, before reportRead returns, so use must not
+// keep any part of the index. A nil error means use ran; otherwise
+// transient says whether the store failed rather than the row.
+func (p *planner) reportRead(r *Row, use func(*FileIndex)) (transient bool, err error) {
+	scope := p.budget.Checkpoint()
+	defer scope.Undo()
 	var idx *FileIndex
-	var err error
 	if sf, ok := p.fetcher.(StagingFetcher); ok {
 		idx, err = sf.FetchForPlan(p.ctx, r.ref(), false)
 	} else {
@@ -451,16 +452,10 @@ func (p *planner) reportIndex(r *Row) (*FileIndex, error) {
 	}
 	p.plan.Downloaded++
 	if err != nil {
-		if p.ctx.Err() != nil {
-			return nil, p.ctx.Err()
-		}
-		if IsTransient(err) {
-			return nil, err
-		}
-		idx = nil
+		return IsTransient(err), err
 	}
-	p.reportRead[r] = idx
-	return idx, nil
+	use(idx)
+	return false, nil
 }
 
 // maxSegmentGTIDBytes bounds a segment's canonical GTID set, which

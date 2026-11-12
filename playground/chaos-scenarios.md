@@ -103,7 +103,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 - **`kill-site` vs `scale --replicas=0`**: `kill-site` deletes the pod but Deployment recreates it in <5s. Use `scale --replicas=0` when you need a site to stay down (self-fencing, anti-flap, sustained outage tests).
 - **Network partition**: `chaos.sh network-partition` uses a NetworkPolicy deny-all. This blocks at the pod network level (not host netns). Cleanup: `chaos.sh recover`.
-- **Relay log drain**: Failover takes up to ~38s when the primary is dead (detection + a drain of at most 30s + the promotion's binary log rotation, bounded at 1s and usually a few milliseconds + promotion). The drain ends as soon as the replica has applied what it already received, so without a backlog it is much shorter. Plan wait times for the bound.
+- **Relay log drain**: Failover takes up to ~37s when the primary is dead (~6s detection + a drain of at most 30s + the promotion's binary log rotation, bounded at 1s and usually a few milliseconds; the promotion statements add milliseconds). The drain ends as soon as the replica has applied what it already received, so without a backlog it is much shorter. Plan wait times for the bound.
 - **Operator binlog rotations**: The operator sends one best-effort `FLUSH BINARY LOGS` (bounded at 1 s, never failing its caller) to a promotion candidate before its writes are enabled, to the fenced primary of a planned failover or maintenance handoff, and, with PITR enabled, to a reclone's recipient. So a scenario's own flushes are not the only thing that seals a binlog. With PITR enabled a read-only site's sidecar archives the tail those rotations seal (`/archiver/status` `tail.state`), and a reclone starts only once its recipient's tail is reported archived, or after 2 minutes with a Warning Event `PITRArchiveTailNotArchived`: budget a reclone wait for that.
 - **A clone changes `server_uuid`**: Every mysql container starts through the operator's launcher, which removes `auto.cnf` on the restart that installs a finished `CLONE INSTANCE` (a reclone, the fresh-deploy bootstrap, the auto-clone of an empty site, the post-restore reclone queue), so the recipient comes back with a new `@@server_uuid` and numbers its own transactions from `<new uuid>:1` (#265). Read a site's `server_uuid` after a clone, not before, and do not compare GTID sets by a UUID remembered from before one. An ordinary restart, a pod replacement and a clone that failed or was killed keep the `server_uuid`. The launcher logs one line to the mysql container when it acts (`bloodraven-launcher: …`), and the operator logs `clone recipient server_uuid rotated`, or raises a Warning Event `CloneServerUUIDNotRotated` when the recipient kept its identity. `pitrRecloneSite` and scenarios 51 and 59 assert the change.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
@@ -126,7 +126,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 **Verify**: activeSite flips, new primary read_only=0, DNS updated, old primary auto-recovers as replica (IO=Yes, SQL=Yes). Counter data preserved.
 
-**Timing**: up to ~38s to failover complete (the relay drain waits at most 30s for received backlog to apply, and the promotion's binary log rotation at most 1s). Recovery adds ~5s after old primary pod respawns.
+**Timing**: up to ~37s to failover complete (~6s detection; the relay drain waits at most 30s for received backlog to apply, and the promotion's binary log rotation at most 1s). Recovery adds ~5s after old primary pod respawns.
 
 **Caution — GTID divergence race**: When the old primary pod respawns, MySQL commits 1-3 internal transactions (system table updates, auto-increment counters) before the operator can fence it. This may create GTID divergence that blocks auto-recovery, requiring `reset-mysql.sh`. Whether divergence occurs is timing-dependent — it doesn't happen every time. If recovery logs "GTID divergence detected" instead of "no GTID divergence, auto-recovering", the scenario was affected.
 
@@ -380,7 +380,7 @@ kubectl -n $NS exec deploy/mysql-playground-$REPLICA -c mysql -- \
 
 # Kill primary
 ./playground/chaos.sh kill-site $PRIMARY
-# Wait for failover (up to ~38s)
+# Wait for failover (up to ~37s)
 
 # Check how many transactions survived on the new primary
 kubectl -n $NS exec deploy/mysql-playground-$REPLICA -c mysql -- \
@@ -1468,7 +1468,7 @@ Component coverage for the same gate lives in
 not repeat those cases.
 
 **Expected duration**: ~8-15 minutes (dominated by the rotation pod
-rolls and the up to ~38s emergency failover).
+rolls and the up to ~37s emergency failover).
 
 **Cleanup**: scales the primary back if the scenario bailed out while
 it was at 0; clears a leftover `rotate-keyring` annotation.

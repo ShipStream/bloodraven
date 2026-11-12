@@ -171,7 +171,14 @@ minutes against a thirty-second drain makes the drain decoration.
 | `RolledBack` | Failed before any write to the target (`LagTimeout`, `DivergentTarget`, `FenceFailed`, `TargetLost`, `PromotionAborted`) | Unfenced, still the primary | Nobody — nothing was lost |
 | `SourceLeftFenced` | Nothing was written to the target, but unfencing was unsafe (another site writable, a fence it cannot prove is its own, a lost source) | Still fenced | Often the operator's re-assert; sometimes a human |
 | `PromotedUnconfirmed` | A write may have reached the target and it could not be confirmed | Fenced; the target may be serving | A human, with the runbook |
-| `ManualRecoveryRequired` | A write may have reached the target and the result cannot be explained | Unknown | A human; automation is **held** until the hold is acknowledged |
+| `ManualRecoveryRequired` | A write may have reached the target and the result cannot be explained. Also, whatever the run sent: its rollback found the source writable without transactions it held when it was fenced (`SourceUnfenced`) | Unknown | A human; automation is **held** until the hold is acknowledged |
+
+One case crosses that line from the other side. A rollback that finds the source already writable
+normally ends `RolledBack` with nothing to undo. If that source is also missing transactions it held
+when it was fenced (it restarted on older data and was then made writable), it has begun a second
+history that reuses the lost GTIDs. The run ends `ManualRecoveryRequired` with reason `SourceUnfenced`
+and the same automation hold, although it may never have written to the target; the message names the
+lost transactions, nothing is sent to the source, and the target is not pointed at it.
 
 Draw the operational conclusion. A lag gate that never closes is the *good* failure: `iad` comes back
 writable, the counter app resumes, and you have lost nothing but the fenced window. So when `maxLagWait`

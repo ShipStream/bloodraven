@@ -1090,6 +1090,7 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 		}
 	}
 	res.plan = plan
+	logLostUnread(logger, plan)
 	if err != nil {
 		if _, ok := pitrplan.RefusalOf(err); !ok && ctx.Err() == nil {
 			// A read error that is not a refusal (a transient store
@@ -1148,6 +1149,22 @@ func planAndStage(ctx context.Context, store sidecar.ArchiveStore, req pitrDownl
 		fmt.Printf("BLOODRAVEN_PITR_DIVERGENT_SET gtids=%s\n", boundedText(plan.Divergent.String(), 64<<10))
 	}
 	return res, nil
+}
+
+// logLostUnread says which rows latest mode's loss report (coverage.json's
+// lost list) could not read. The plan, or the refusal, does not depend on
+// them: the list may lack excluded transactions whose only archived copies
+// are in those rows.
+func logLostUnread(logger *slog.Logger, plan *pitrplan.Plan) {
+	if plan == nil || len(plan.LostUnread) == 0 {
+		return
+	}
+	rows := make([]string, 0, len(plan.LostUnread))
+	for _, u := range plan.LostUnread {
+		rows = append(rows, u.Row.Site+"/"+u.Row.Name)
+	}
+	logger.Warn("pitr loss report incomplete", "rows", boundedText(strings.Join(rows, ","), 4<<10), "count", len(rows),
+		"error", boundedText(plan.LostUnread[0].Reason, 1<<10))
 }
 
 func quarantinedEntries(m *sidecar.Manifest) []sidecar.ManifestEntry {

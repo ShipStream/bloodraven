@@ -48,11 +48,19 @@ repair it, because a MySQL replica drops every event that carries its own `serve
 replicate everything else, report both threads running, and issue the same GTIDs again for different
 transactions the next time it was promoted.
 
-So the operator also asks whether `pdx` holds transactions under `iad`'s `server_uuid` that `iad` no
-longer has. If it does, `iad` is neither rejoined nor promotable. It reads `recoveryState:
-RecloneRequired` with `lostGtid` and `lostTransactionCount`, `RecoveryPending` carries the reason
-`OwnTransactionsLost`, and the operator reclones the site from the primary itself, with no annotation.
-Every clone gives its recipient a new `server_uuid`, so the lost numbers cannot be issued twice.
+So the operator also asks whether `pdx` holds transactions that `iad` issued, under any `server_uuid`
+`iad` has had, and no longer has. If it does, `iad` is neither rejoined nor promotable. It reads
+`recoveryState: RecloneRequired` with `lostGtid` and `lostTransactionCount`, `RecoveryPending` carries
+the reason `OwnTransactionsLost`, and the operator reclones the site from the primary itself, with no
+annotation. The clone discards `iad`'s data, so it is checked where it starts: the operator fences
+`iad` and clones only if `pdx` holds everything `iad` holds. If `iad` also holds transactions `pdx`
+lacks, nothing is cloned and it waits for you as `RecoveryBlocked`, with both sets reported. Every clone
+gives its recipient a new `server_uuid`, so the lost numbers cannot be issued twice.
+
+The same question is asked of every site that answers, not only the primary. If only another site (a
+witness) holds what `iad` lost and `pdx` does not, there is nothing to repair against the primary: `iad`
+keeps replicating and carries the same report, the operator never promotes it, and it is **not**
+recloned automatically. The report ends when the witness no longer holds those transactions.
 
 ## What the gate is not
 
