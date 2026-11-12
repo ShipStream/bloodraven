@@ -335,38 +335,90 @@ func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, kubeconfig,
 	return executor.Run(ctx, scen)
 }
 
-// waitForBaseline polls check until it returns nil or timeout elapses.
-// The first check runs immediately, so a healthy cluster costs one poll.
+// baselineStableWindow is how long the suite-entry baseline must stay
+// healthy before the first scenario starts. One healthy sample is not
+// enough: a site still coming up after setup.sh can read healthy and be
+// reported unreachable a few milliseconds later, which failed the first
+// scenario's precheck right after the wait had passed (#262). It covers
+// several operator polls (the playground's pollInterval is 2s and a site
+// is declared unreachable after failureThreshold=3 of them).
+const baselineStableWindow = 15 * time.Second
+
+// baselineWaitConfig tunes waitForBaseline.
+type baselineWaitConfig struct {
+	// Timeout bounds the wait for the baseline to become healthy.
+	Timeout time.Duration
+	// Interval is the poll interval while the baseline is unhealthy.
+	Interval time.Duration
+	// StableFor is how long every check must pass before the baseline is
+	// reported healthy. Zero accepts the first healthy check.
+	StableFor time.Duration
+	// StableInterval is the poll interval inside the stable window. Zero
+	// means Interval.
+	StableInterval time.Duration
+}
+
+// waitForBaseline polls check until it has returned nil for a whole stable
+// window (cfg.StableFor), or cfg.Timeout elapses without a healthy check.
+// The first check runs immediately. A failed check restarts the window.
 // progress is invoked after every failed check with the error and the
-// elapsed time. Returns nil once healthy; on timeout or context
-// cancellation it returns the last check error (or the context error if
-// no check ever ran).
-func waitForBaseline(ctx context.Context, timeout, interval time.Duration, check func(context.Context) error, progress func(err error, elapsed time.Duration)) error {
-	deadline := time.Now().Add(timeout)
+// elapsed time. Returns nil once the baseline held; on timeout it returns
+// the last check error, and on context cancellation the last check error,
+// or the context error when no check has failed.
+//
+// The timeout bounds the wait for a healthy check, not the window: a
+// baseline that turns healthy just before the deadline still gets its
+// window, and is reported unhealthy if it breaks inside it.
+func waitForBaseline(ctx context.Context, cfg baselineWaitConfig, check func(context.Context) error, progress func(err error, elapsed time.Duration)) error {
+	start := time.Now()
+	deadline := start.Add(cfg.Timeout)
+	stableInterval := cfg.StableInterval
+	if stableInterval <= 0 {
+		stableInterval = cfg.Interval
+	}
 	var lastErr error
+	var healthySince time.Time
 	for {
-		lastErr = check(ctx)
-		if lastErr == nil {
-			return nil
-		}
-		progress(lastErr, timeout-time.Until(deadline))
-		if time.Now().After(deadline) {
-			return lastErr
+		err := check(ctx)
+		now := time.Now()
+		pause := cfg.Interval
+		if err == nil {
+			if healthySince.IsZero() {
+				healthySince = now
+			}
+			if now.Sub(healthySince) >= cfg.StableFor {
+				return nil
+			}
+			pause = stableInterval
+		} else {
+			healthySince = time.Time{}
+			lastErr = err
+			progress(err, now.Sub(start))
+			if now.After(deadline) {
+				return lastErr
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return lastErr
-		case <-time.After(interval):
+			if lastErr != nil {
+				return lastErr
+			}
+			return ctx.Err()
+		case <-time.After(pause):
 		}
 	}
 }
 
-// suiteEntryBaseline waits up to wait for a healthy baseline. A timeout is
-// not fatal: it reports and returns true, and the scenario's precheck (and
-// --auto-reset) decide. It returns false only when ctx was cancelled.
+// suiteEntryBaseline waits up to wait for a baseline that stays healthy for
+// baselineStableWindow, by the predicate every scenario's Precheck uses
+// (scenarios.CheckBaseline: Ready, the active site, every site's state and
+// the structural checks). A timeout is not fatal: it reports and returns
+// true, and the scenario's precheck (and --auto-reset) decide. It returns
+// false only when ctx was cancelled.
 func suiteEntryBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string, wait time.Duration, cmd string, logger *slog.Logger) bool {
 	start := time.Now()
-	err := waitForBaseline(ctx, wait, 5*time.Second, func(ctx context.Context) error {
+	cfg := baselineWaitConfig{Timeout: wait, Interval: 5 * time.Second, StableFor: baselineStableWindow, StableInterval: time.Second}
+	err := waitForBaseline(ctx, cfg, func(ctx context.Context) error {
 		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		return scenarios.CheckBaseline(checkCtx, k, namespace, fg)
@@ -381,7 +433,8 @@ func suiteEntryBaseline(ctx context.Context, k *pgkube.Client, namespace, fg str
 		fmt.Fprintf(os.Stderr, "!! %s: baseline still unhealthy after %s (%v) — proceeding; per-scenario precheck and --auto-reset take it from here\n",
 			cmd, wait, err)
 	default:
-		logger.Info(cmd+" suite-entry baseline healthy", "elapsed", time.Since(start).Round(time.Second))
+		logger.Info(cmd+" suite-entry baseline healthy", "elapsed", time.Since(start).Round(time.Second),
+			"stableFor", baselineStableWindow.String())
 	}
 	return true
 }
