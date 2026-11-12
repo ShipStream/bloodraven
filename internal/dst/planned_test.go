@@ -14,10 +14,11 @@ import (
 // 1..2000. The actors draw from a stream of their own (§15.1, D18); this
 // pins that adding them, or any later actor-stream change, leaves every
 // existing seed's fault schedule byte-identical. A deliberate change to the
-// fault generator updates it knowingly: it last changed when the binary log
-// rotation faults (failFlush, slowFlush) and the pre-reclone wait
-// (recloneWait) were added.
-const scheduleGolden = "4d76e67d4b87f6a5a7354eadf67c973a480c13f5d638f1b5c5175cba4e921f6d"
+// fault generator updates it knowingly. It last changed when the own-loss
+// evidence faults (failedClone, silentWitness) were added; like the binary
+// log rotation faults and the data-directory regress before them, they come
+// from a stream of their own and only add ops, which the OnlyAdd tests pin.
+const scheduleGolden = "cd763dc76dd09d9d8df67ae4017b32ea22cea3add4dfb446651da70d210dc85f"
 
 // scheduleGoldenBeforeFlushFaults is the same hash at the commit before the
 // planned-failover actors and the rotation faults existed. The rotation
@@ -46,6 +47,11 @@ func TestGenerateTrial_FlushFaultsOnlyAdd(t *testing.T) {
 			if op.Kind == OpRegressSite || op.Kind == OpRegressBoot {
 				// Drawn from a stream of their own, after the rotation
 				// faults existed (TestGenerateTrial_OwnLossFaultsOnlyAdd).
+				continue
+			}
+			if isOwnLossEvidenceOp(op) {
+				// The same, later still
+				// (TestGenerateTrial_OwnLossEvidenceFaultsOnlyAdd).
 				continue
 			}
 			if op.Kind == OpFailFlush || op.Kind == OpSlowFlush {

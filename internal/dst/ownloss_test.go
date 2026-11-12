@@ -43,6 +43,11 @@ func TestGenerateTrial_OwnLossFaultsOnlyAdd(t *testing.T) {
 					t.Fatalf("seed %d: regress boot outside its shape: %s", seed, op)
 				}
 				continue
+			case OpFailedClone, OpSilentWitness, OpSilentWitnessHeal:
+				// Drawn from a stream of their own, after the regress
+				// faults existed
+				// (TestGenerateTrial_OwnLossEvidenceFaultsOnlyAdd).
+				continue
 			}
 			kept = append(kept, op)
 		}

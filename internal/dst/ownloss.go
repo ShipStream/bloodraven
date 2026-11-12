@@ -228,6 +228,67 @@ func ownLossFaults(seed uint64, names []string, warmup, faultWindow, healAt int)
 	return ops
 }
 
+// OpFailedClone is a clone the operator issued into Site that failed or
+// was killed before it installed: the operator records what it records
+// for every clone it issues, and the site keeps its data and its
+// server_uuid. What that record must not do is make the operator treat the
+// identity the site still runs under as one a clone superseded.
+//
+// OpSilentWitness cuts Site off from the operator for N polls and, in the
+// same poll, restarts the operator (K=0) or replaces the group's manager
+// (K=1; a restart in a trial without the actors): the new manager starts
+// from the stored status while one site does not answer. A report that
+// rests on that site must survive it. OpSilentWitnessHeal ends the cut.
+//
+// All three are drawn from a PRNG stream of their own
+// (ownLossEvidenceFaults), so they add to a seed's schedule without
+// changing the ops it had before.
+const (
+	OpFailedClone       OpKind = "failedClone"
+	OpSilentWitness     OpKind = "silentWitness"
+	OpSilentWitnessHeal OpKind = "silentWitnessHeal"
+
+	EvFailedClone EventKind = "fault.failedClone"
+)
+
+// NoteFailedClone records a failed clone into site in the event log.
+func (c *Cluster) NoteFailedClone(site string, recorded bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	detail := "recorded"
+	if !recorded {
+		detail = "skipped(operator could not read the site)"
+	}
+	c.event(site, EvFailedClone, detail, "")
+}
+
+// ownLossEvidenceStream salts the PRNG stream of the evidence faults.
+const ownLossEvidenceStream = 0x0e71de9ce5f6a110
+
+// ownLossEvidenceFaults draws the faults that test what the operator's
+// own-loss evidence survives: in one trial out of five a failed clone
+// into one site; in one out of four a site that falls silent for 3 to 42
+// polls as the operator restarts or its manager is replaced. A stream of
+// its own keeps the rest of every seed's schedule as it was
+// (TestGenerateTrial_OwnLossEvidenceFaultsOnlyAdd).
+func ownLossEvidenceFaults(seed uint64, names []string, warmup, faultWindow, healAt int) []Op {
+	rng := rand.New(rand.NewPCG(seed, ownLossEvidenceStream))
+	var ops []Op
+	if rng.IntN(100) < 20 {
+		ops = append(ops, Op{At: warmup + rng.IntN(faultWindow), Kind: OpFailedClone, Site: names[rng.IntN(len(names))]})
+	}
+	if rng.IntN(100) < 25 {
+		site := names[rng.IntN(len(names))]
+		at := warmup + rng.IntN(faultWindow)
+		n := 3 + rng.IntN(40)
+		ops = append(ops, Op{At: at, Kind: OpSilentWitness, Site: site, N: n, K: rng.IntN(2)})
+		if at+n < healAt {
+			ops = append(ops, Op{At: at + n, Kind: OpSilentWitnessHeal, Site: site})
+		}
+	}
+	return ops
+}
+
 // simSiteIdentityStore is the durable record of the server_uuids each site
 // has run under and of the clones issued into it (the group annotation in
 // production). It outlives every manager of the trial, as the annotation
