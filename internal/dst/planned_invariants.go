@@ -41,9 +41,9 @@ var engineReleaseReasons = []controller.ClaimReleaseReason{
 }
 
 // Markers that tag a violation's detail with the finding it belongs to
-// (README: Fixed findings, now regressions, and Open planned-failover
-// findings); fingerprint turns each into a class of its own, so a sweep
-// reports which finding a trial hit.
+// (README, Finding classes: the fixed ones and any open one); fingerprint
+// turns each into a class of its own, so a sweep reports which finding a
+// trial hit.
 const (
 	// writableTargetWithChannelMarker: the hold was set over a target that
 	// is the only writable site and still has its replication channel.

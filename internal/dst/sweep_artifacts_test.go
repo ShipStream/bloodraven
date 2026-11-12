@@ -21,7 +21,7 @@ import (
 // have known or was not asked to do. The tests below pin each such defect
 // with a firing and a quiet case, so the relaxed check is still shown to
 // catch what it was written for. The findings that were the operator's are
-// listed in the README (Known finding classes), are fixed, and fail the
+// listed in the README (Finding classes), are fixed, and fail the
 // sweep if they come back.
 
 // handRunner is a trial runner set up over a two-site hand trial.
@@ -787,7 +787,7 @@ func TestPlannedInvariant_HoldWithAnUnreadableTarget(t *testing.T) {
 }
 
 // TestFixedFindings_AreClassesOfTheirOwn: the first three planned-failover
-// findings that were the operator's (README, Known finding classes) still
+// findings that were the operator's (README, Finding classes) still
 // fail the sweep if the engine produces them again, each under a
 // fingerprint that names it. TestPlannedInvariant_HoldOverARegressedTarget
 // does the same for the regressed-target class.
@@ -1423,7 +1423,7 @@ func TestPlannedInvariant_HoldOverARegressedTarget(t *testing.T) {
 }
 
 // TestOutcomeFindings_AreClassesOfTheirOwn: the three outcome findings of
-// the wider sweep (README, Fixed findings, now regressions) turned out to
+// the wider sweep (README, Fixed in the monitor) turned out to
 // be the monitor's: each judged an honest record against something the run
 // could not have read. The rules were narrowed, not removed: each still
 // fires, under the fingerprint that names it, on the history it was written

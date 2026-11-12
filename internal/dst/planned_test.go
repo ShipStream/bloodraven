@@ -196,7 +196,7 @@ func TestDeterminism_Planned(t *testing.T) {
 }
 
 // plannedAllowedClasses are the only finding classes a trial with actors
-// may produce (README, Known finding classes):
+// may produce (README, Finding classes):
 //   - CooldownViolated(restart+stateLost): inherent. OpPFStatusDenied
 //     combines a status outage with operator restarts, and when the fault
 //     stream denies the out-of-band store over the same restarts, nothing

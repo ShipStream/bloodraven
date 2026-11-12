@@ -759,8 +759,8 @@ func TestDSTPF_RetiredManagerHandoffReachesReplacement(t *testing.T) {
 	}
 }
 
-// The three findings below are from a wider planned sweep (about one trial
-// in 15,000). Each changed a documented outcome row; the reasoning is in the
+// The three findings below are from a wider planned sweep. Each changed a
+// documented outcome row; the reasoning is in the
 // planned-failover documentation and on the code the test names.
 
 // TestDSTPF_WritableTargetWithChannelLeavesSourceFenced pins
