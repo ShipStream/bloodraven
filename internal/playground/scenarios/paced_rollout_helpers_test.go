@@ -83,9 +83,10 @@ func TestPacedAuxGroupManifest(t *testing.T) {
 			if site.Zone != "zone-iad" || !site.IsPromotable() || site.LoadBalancerIP == "" {
 				t.Errorf("%s site %s: zone=%q promotable=%v lb=%q", name, site.Name, site.Zone, site.IsPromotable(), site.LoadBalancerIP)
 			}
-			// No taintNodeSelector: an auxiliary group taints nothing.
-			if len(site.TaintNodeSelector) != 0 {
-				t.Errorf("%s site %s has a taintNodeSelector", name, site.Name)
+			// The selector the API requires names a label of the scenario's
+			// own, which no node carries: an auxiliary group taints nothing.
+			if len(site.TaintNodeSelector) != 1 || site.TaintNodeSelector[pacedAuxTaintLabel] != name+"-"+site.Name {
+				t.Errorf("%s site %s: taintNodeSelector %v", name, site.Name, site.TaintNodeSelector)
 			}
 			if seenIDs[site.ServerID] {
 				t.Errorf("%s site %s: serverID %d repeats", name, site.Name, site.ServerID)

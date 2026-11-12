@@ -29,8 +29,10 @@ import (
 // from the previous release is paced).
 //
 // Both need more than one failover group, and the playground has one. They
-// create small auxiliary groups for their duration (two sites, no Dragonfly,
-// no taintNodeSelector) and remove them in cleanup.
+// create small auxiliary groups for their duration (two sites, no Dragonfly)
+// and remove them in cleanup. A promotable site must have a
+// taintNodeSelector; theirs names a label no node carries
+// (pacedAuxTaintLabel), so an auxiliary group taints nothing.
 //
 // Where an auxiliary group may run is decided by the playground group's
 // db-readonly taint: the operator taints the nodes of every site of the
@@ -50,6 +52,13 @@ const (
 	// pacedAuxLabel marks the auxiliary groups, so cleanup finds what an
 	// abandoned run left behind.
 	pacedAuxLabel = "playground.bloodraven.shipstream.io/paced-rollout-aux"
+
+	// pacedAuxTaintLabel is the key of the auxiliary sites'
+	// taintNodeSelector. No node is ever given this label: the API requires
+	// the selector, and selecting no node is how an auxiliary group stays
+	// out of the node taints (the tainter lists the nodes a selector
+	// matches and taints those).
+	pacedAuxTaintLabel = "playground.bloodraven.shipstream.io/paced-rollout-aux-site"
 
 	// pacedOriginalEnvAnnotation keeps, on the operator Deployment, the
 	// environment values a scenario replaced. Cleanup restores from it, so
@@ -114,6 +123,8 @@ spec:
       serverID: %[6]d
       role: PrimaryCandidate
       zone: %[3]s
+      taintNodeSelector:
+        %[8]s: %[2]s-one
       loadBalancerIP: "10.96.%[4]d.10"
       storage:
         storageClassName: playground-fast
@@ -129,6 +140,8 @@ spec:
       serverID: %[7]d
       role: PrimaryCandidate
       zone: %[3]s
+      taintNodeSelector:
+        %[8]s: %[2]s-two
       loadBalancerIP: "10.96.%[4]d.20"
       storage:
         storageClassName: playground-fast
@@ -145,7 +158,7 @@ spec:
     peerCheckInterval: 5s
   replication:
     maxLagSeconds: 30
-`, namespace, name, zone, 110+index, pacedAuxLabel, 201+10*index, 202+10*index)
+`, namespace, name, zone, 110+index, pacedAuxLabel, 201+10*index, 202+10*index, pacedAuxTaintLabel)
 }
 
 // pacedAuxGroupObject parses pacedAuxGroupManifest strictly, so a field the
@@ -158,15 +171,31 @@ func pacedAuxGroupObject(namespace, name, zone string, index int) (*v1alpha1.Mys
 	return fg, nil
 }
 
+// PacedRolloutAuxGroups returns the auxiliary failover groups the
+// paced-rollout scenarios create, for zone. Exported for the envtest that
+// submits them to the API server: a CRD rule that refuses them would
+// otherwise only show on a cluster.
+func PacedRolloutAuxGroups(namespace, zone string) ([]*v1alpha1.MysqlFailoverGroup, error) {
+	groups := make([]*v1alpha1.MysqlFailoverGroup, 0, len(pacedAuxGroupNames))
+	for i, name := range pacedAuxGroupNames {
+		fg, err := pacedAuxGroupObject(namespace, name, zone, i)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, fg)
+	}
+	return groups, nil
+}
+
 // pacedCreateAuxGroups creates the auxiliary groups in zone.
 func pacedCreateAuxGroups(ctx context.Context, env *runner.Env, zone string) error {
-	for i, name := range pacedAuxGroupNames {
-		fg, err := pacedAuxGroupObject(env.Namespace, name, zone, i)
-		if err != nil {
-			return err
-		}
+	groups, err := PacedRolloutAuxGroups(env.Namespace, zone)
+	if err != nil {
+		return err
+	}
+	for _, fg := range groups {
 		if err := env.Kube.Controller.Create(ctx, fg); err != nil {
-			return fmt.Errorf("create auxiliary group %s: %w", name, err)
+			return fmt.Errorf("create auxiliary group %s: %w", fg.Name, err)
 		}
 	}
 	return nil
@@ -177,7 +206,7 @@ func pacedCreateAuxGroups(ctx context.Context, env *runner.Env, zone string) err
 // stableFor.
 func pacedWaitGroupsHealthy(ctx context.Context, env *runner.Env, groups []string, stableFor time.Duration) error {
 	var healthySince time.Time
-	last := "no observation yet"
+	var last string
 	started := time.Now()
 	lastLog := started
 	for {
@@ -614,7 +643,7 @@ func pacedDeploymentRolledOut(dep *appsv1.Deployment) bool {
 func pacedWaitOperatorRolledOut(ctx context.Context, env *runner.Env) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	last := "no observation yet"
+	var last string
 	for {
 		dep, err := env.Kube.GetDeployment(waitCtx, env.Namespace, pacedOperatorDeployment)
 		if err == nil && pacedDeploymentRolledOut(dep) {
@@ -1196,7 +1225,7 @@ func pacedWaitRollout(ctx context.Context, env *runner.Env, group, what string, 
 	defer cancel()
 	started := time.Now()
 	lastLog := started
-	last := "no observation yet"
+	var last string
 	for {
 		fg, err := env.Kube.GetMFGNamed(waitCtx, env.Namespace, group)
 		if err == nil {

@@ -176,4 +176,12 @@ Metrics: `bloodraven_rollout_groups{phase}`, `bloodraven_rollout_group_phase{nam
   default and a render-version change together with a pinned group; a pruned record.
 - `TestPacedRollout_BadBuildStopsAtTheFirstGroup`: two groups, the real ordered updater and the real Deployment
   write path, a replica that never becomes Ready, an operator restart and a second upgrade mid-rollout.
-- DST, a release-profile scenario and the upgrade E2E (v1.7.0 to the branch build): see the PR.
+- Scenario `73-paced-rollout-bad-build-halt` (release profile, and the e2e `paced-rollout` job): two groups and
+  the real operator; a default sidecar image that cannot be pulled halts the rollout at the first group, before
+  its primary is touched, across an operator restart; a second tag of the same build then completes the first
+  group before the second is admitted. A group that pins its sidecar image is not rolled.
+- The upgrade E2E (`playground/upgrade-e2e.sh`, scenario `74-upgrade-paced-rollout`, the e2e `upgrade` job): the
+  published v1.7.0 chart and images, three groups, an upgrade to the build under test with
+  `helm upgrade --reuse-values`; every MySQL pod rolls, one group at a time, in `admittedTime` order, and a
+  failover works afterwards. v1.7.0 stays the baseline: it is the last release without pacing.
+- DST: see the PR.
