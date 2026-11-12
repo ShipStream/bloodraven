@@ -109,7 +109,7 @@ $ ./starter/brprep.sh tests/fixtures/good.json --target-image mysql:9.8
 brprep: ledger-db/ledger
 plan: mysql:9.7 -> mysql:9.8
 1. upgrade standby pdx first (a replica may run a newer MySQL than its source; a source may not run a newer MySQL than its replica)
-2. promote pdx through the ordinary nine-step sequence
+2. promote pdx through the ordinary ten-step sequence
 3. upgrade the former active iad, now a standby
 active site after this rollout: pdx
 expect: bloodraven_failovers_total increments

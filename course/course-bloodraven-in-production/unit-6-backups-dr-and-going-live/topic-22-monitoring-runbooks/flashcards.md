@@ -47,7 +47,7 @@
 
 **Front:** `bloodraven_archiver_backlog_files` — which component emits it, and about what?
 
-**Back:** The per-site sidecar's PITR archiver, labels `{namespace, group, site}`. It counts sealed binlogs not yet uploaded at the end of the last scan; only the primary archives and only sealed binlogs ever upload.
+**Back:** The per-site sidecar's PITR archiver, labels `{namespace, group, site}`. It counts sealed binlogs not yet uploaded at the end of the last scan; a writable site archives every sealed binlog, a read-only site only the tail of its last writable era, and only sealed binlogs ever upload.
 
 ---
 

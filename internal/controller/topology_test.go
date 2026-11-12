@@ -938,7 +938,7 @@ func TestCanSkipCloneGTIDPredicate(t *testing.T) {
 			donor := &mockMySQL{gtidExecuted: tt.donor}
 			recipient := &mockMySQL{gtidExecuted: tt.recipient}
 			tm, _, _ := newTestTopologyManager(donor, recipient)
-			if got := tm.canSkipClone(context.Background(), donor, recipient); got != tt.want {
+			if got := tm.canSkipClone(context.Background(), donor, recipient, "pdx"); got != tt.want {
 				t.Fatalf("canSkipClone() = %v, want %v", got, tt.want)
 			}
 		})

@@ -150,6 +150,39 @@ type pfDragonflyMemo struct {
 	// included), and a terminal record built while it is pending carries
 	// it, so a completed takeover is never left behind an Intended record.
 	outcome *pfTakeoverOutcome
+	// source is the source's replication position this process read for
+	// the sync wait, per flow. The run's record holds only its sum
+	// (dragonfly.sourceOffset), so a process that takes the run over reads
+	// the source again: its wait then ends at a later position, never an
+	// earlier one.
+	source *dragonfly.Position
+	// sourceReread is set once this process has read the source again
+	// because the target follows another replication id than source
+	// carries (the source's process was replaced during the wait). It is
+	// done once per run, so a target that keeps following something else
+	// cannot keep the wait re-reading.
+	sourceReread bool
+}
+
+// errDragonflyTargetFollowsOther: the target is linked and in stable sync,
+// but follows another replication id than the source position carries. The
+// position was read from an earlier instance of the source.
+var errDragonflyTargetFollowsOther = errors.New("target follows another replication id than the source position")
+
+// errDragonflyPositionsIncomparable: the source and the target report their
+// positions in different forms (one per flow, the other a single offset
+// because it refused the per-flow command). Waiting does not change that.
+var errDragonflyPositionsIncomparable = errors.New("source and target report their replication positions in different forms")
+
+// dragonflySyncUnprovable reports whether err, from reading or comparing a
+// replication position, means that the sync can never be proven for this
+// pair, as opposed to not yet: a site refused the position command
+// (dragonfly.IsCommandRefused: no such command, wrong arguments, an ACL
+// that does not allow it), or the two positions are in different forms. A
+// transport error, a site that is unreachable and a target that is not yet
+// in stable sync or still behind are not that.
+func dragonflySyncUnprovable(err error) bool {
+	return err != nil && (dragonfly.IsCommandRefused(err) || errors.Is(err, errDragonflyPositionsIncomparable))
 }
 
 // wroteIntent reports whether this process wrote the takeover intent tk
@@ -218,11 +251,20 @@ func (e *PlannedFailoverEngine) applyPendingTakeoverOutcome(next *v1alpha1.Plann
 // the engine. Production: reconcilerDragonflyOps. Dragonfly is not modeled
 // in DST, where the engine runs without it.
 type plannedDragonflyOps interface {
-	// CaptureSourceOffset reads the source's master_repl_offset.
-	CaptureSourceOffset(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, source string) (int64, error)
-	// TargetSyncReady reports whether the target replica has reached
-	// sourceOffset; detail explains a not-ready answer.
-	TargetSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, sourceOffset int64) (ready bool, detail string, err error)
+	// CaptureSourceOffset reads the source's replication position: the
+	// journal position of each of its shards. An error means the source
+	// gave no position; the caller must not read that as zero.
+	CaptureSourceOffset(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, source string) (dragonfly.Position, error)
+	// TargetSyncReady reports whether the target replica is linked to the
+	// source and every one of its flows has reached the position source;
+	// detail explains a not-ready answer.
+	TargetSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, source dragonfly.Position) (ready bool, detail string, err error)
+	// TargetLinkReady is what is asked when the sync can never be proven
+	// by position (dragonflySyncUnprovable): whether the two sites' own
+	// INFO answers say the target is in stable sync with the instance that
+	// is the master at source now (dragonflyLinkProof). detail explains a
+	// "no"; err is a site that could not be read.
+	TargetLinkReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) (ready bool, detail string, err error)
 	// Takeover promotes the target under the group's Dragonfly gate: strip
 	// the source traffic label, REPLTAKEOVER, relabel. It finishes the
 	// promotion (relabel, demote and recreate the source) only on a
@@ -332,7 +374,16 @@ func (e *PlannedFailoverEngine) skipDragonfly(ctx context.Context, fg *v1alpha1.
 }
 
 // dragonflySyncStep waits for the target Dragonfly replica to reach the
-// source's offset, bounded by settings.dragonfly.maxSyncWait.
+// position the source had when the wait began, bounded by
+// settings.dragonfly.maxSyncWait.
+//
+// The source keeps taking cache writes during the wait (only MySQL is
+// fenced), so "caught up" is always relative to a moment: the wait proves
+// the target is linked to the source and applied everything the source had
+// written when its position was read. What the source writes after that is
+// REPLTAKEOVER's to carry over: the source stops taking commands, waits
+// for the target to acknowledge every shard's journal, and fails the
+// takeover when that does not happen within the budget.
 func (e *PlannedFailoverEngine) dragonflySyncStep(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
 	if d, err, done := e.dragonflyLossCheck(ctx, fg, pf, ref); done {
@@ -343,7 +394,11 @@ func (e *PlannedFailoverEngine) dragonflySyncStep(ctx context.Context, fg *v1alp
 		return e.skipDragonfly(ctx, fg, pf, ref)
 	}
 	if pf.Dragonfly == nil || pf.Dragonfly.SourceOffsetState == "" {
-		offset, err := e.dragonfly.CaptureSourceOffset(ctx, fg, pf.SourceSite)
+		pos, err := e.dragonfly.CaptureSourceOffset(ctx, fg, pf.SourceSite)
+		if err == nil {
+			e.runMemo(pf.RunID).dragonfly.source = &pos
+		}
+		offset := pos.Total()
 		out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
 			d := plannedDragonflyBlock(next)
 			if d.SyncWaitStartTime == nil {
@@ -369,13 +424,55 @@ func (e *PlannedFailoverEngine) dragonflySyncStep(ctx context.Context, fg *v1alp
 	}
 	elapsed := e.clk.Now().Sub(start)
 	if pf.Dragonfly.SourceOffsetState == v1alpha1.DragonflyOffsetUnavailable {
+		// The record does not say why the source gave no position. A
+		// source that refuses the position command is asked again, which
+		// costs nothing: that case is settled by the link checks and
+		// REPLTAKEOVER (dragonflySyncByLink). Any other cause applies
+		// onSyncTimeout at once, as before.
+		if _, cerr := e.dragonfly.CaptureSourceOffset(ctx, fg, pf.SourceSite); dragonflySyncUnprovable(cerr) {
+			return e.dragonflySyncByLink(ctx, fg, pf, elapsed, cerr)
+		}
 		return e.dragonflySyncTimeout(ctx, fg, pf, elapsed, "source offset could not be captured; cannot prove target sync")
 	}
-	var offset int64
-	if pf.Dragonfly.SourceOffset != nil {
-		offset = *pf.Dragonfly.SourceOffset
+	// The record says a position was captured; its per-flow form is this
+	// process's. A process that did not capture it (an operator restart or
+	// a leader change during the wait) reads the source again.
+	m := e.runMemo(pf.RunID)
+	ready, detail := false, ""
+	var err error
+	if m.dragonfly.source == nil {
+		var pos dragonfly.Position
+		if pos, err = e.dragonfly.CaptureSourceOffset(ctx, fg, pf.SourceSite); err == nil {
+			m.dragonfly.source = &pos
+		} else {
+			err = fmt.Errorf("source position unavailable: %w", err)
+		}
 	}
-	ready, detail, err := e.dragonfly.TargetSyncReady(ctx, fg, pf.TargetSite, offset)
+	if m.dragonfly.source != nil {
+		ready, detail, err = e.dragonfly.TargetSyncReady(ctx, fg, pf.TargetSite, *m.dragonfly.source)
+	}
+	if errors.Is(err, errDragonflyTargetFollowsOther) && !m.dragonfly.sourceReread {
+		// The source's process was replaced after its position was read
+		// and the target has synced from the new one: the goal belongs to
+		// an instance that is gone. Read the source again, once; the
+		// wait's deadline does not move.
+		m.dragonfly.sourceReread = true
+		pos, perr := e.dragonfly.CaptureSourceOffset(ctx, fg, pf.SourceSite)
+		if perr == nil {
+			log.FromContext(ctx).Info("dragonfly: source restarted during the sync wait; position read again",
+				"site", pf.SourceSite, "target", pf.TargetSite, "offset", pos.Total())
+			m.dragonfly.source = &pos
+			ready, detail, err = e.dragonfly.TargetSyncReady(ctx, fg, pf.TargetSite, pos)
+		} else {
+			err = fmt.Errorf("source position unavailable after the source restarted: %w", perr)
+		}
+	}
+	if dragonflySyncUnprovable(err) {
+		// A site that will not report a comparable position does not
+		// start to by being asked again. What is left is the link checks
+		// and REPLTAKEOVER's own catch-up wait.
+		return e.dragonflySyncByLink(ctx, fg, pf, elapsed, err)
+	}
 	if err == nil && ready {
 		secs := int64(elapsed.Seconds())
 		intent := e.newTakeoverIntent(pf.RunID)
@@ -394,6 +491,55 @@ func (e *PlannedFailoverEngine) dragonflySyncStep(ctx context.Context, fg *v1alp
 			why = err.Error()
 		}
 		return e.dragonflySyncTimeout(ctx, fg, pf, elapsed, why)
+	}
+	return dragonflySyncPollInterval, nil
+}
+
+// dragonflySyncByLink ends the sync wait of a run whose target's sync can
+// never be proven by position (cause: a site refuses the position command,
+// or the two report positions in different forms).
+//
+// When the link checks hold (dragonflyLinkProof), the run goes on to the
+// takeover without a sessions-lost mark: REPLTAKEOVER makes the source stop
+// taking commands and wait for the target to acknowledge every shard's
+// journal, and a takeover that fails changes no role and applies
+// onSyncTimeout (the planned takeover has no REPLICAOF NO ONE behind it).
+// The run says so once, in dragonfly.message, a Warning Event and a log
+// line. When they do not hold, the target is looked at again every second
+// until maxSyncWait, like a target that is not yet in stable sync; then
+// onSyncTimeout applies.
+//
+// Before, the refusal applied onSyncTimeout at once: Proceed recorded
+// sessions lost for a takeover that then preserved them, and Fail rolled
+// every planned failover of such a group back.
+func (e *PlannedFailoverEngine) dragonflySyncByLink(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+	elapsed time.Duration, cause error) (time.Duration, error) {
+	ok, detail, err := e.dragonfly.TargetLinkReady(ctx, fg, pf.TargetSite, pf.SourceSite)
+	if err == nil && ok {
+		msg := dragonflySyncUnprovenMessage(pf.TargetSite, pf.SourceSite, cause.Error())
+		log.FromContext(ctx).Info("dragonfly: sync could not be proven by position; relying on REPLTAKEOVER",
+			"source", pf.SourceSite, "target", pf.TargetSite, "error", cause)
+		secs := int64(elapsed.Seconds())
+		intent := e.newTakeoverIntent(pf.RunID)
+		out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
+			next.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
+			d := plannedDragonflyBlock(next)
+			d.SyncWaitSeconds = &secs
+			d.Takeover = intent.DeepCopy()
+			d.Message = msg
+		})
+		if out == WriteCommitted {
+			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySyncUnproven, msg)
+		}
+		return e.afterAdvance(ctx, fg, pf, out, werr)
+	}
+	if elapsed >= plannedSettings(pf).Dragonfly.MaxSyncWait.Duration {
+		why := detail
+		if err != nil {
+			why = err.Error()
+		}
+		return e.dragonflySyncTimeout(ctx, fg, pf, elapsed,
+			fmt.Sprintf("the sync cannot be proven by position (%v) and the target is not in stable sync: %s", cause, why))
 	}
 	return dragonflySyncPollInterval, nil
 }
@@ -587,37 +733,70 @@ type reconcilerDragonflyOps struct {
 
 var _ plannedDragonflyOps = reconcilerDragonflyOps{}
 
-func (o reconcilerDragonflyOps) CaptureSourceOffset(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, source string) (int64, error) {
-	conn, err := o.r.dragonflyDial(ctx, fg, source)
-	if err != nil {
-		return 0, fmt.Errorf("dial source: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	info, err := conn.InfoReplication(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("INFO replication: %w", err)
-	}
-	return info.MasterReplOffset, nil
+func (o reconcilerDragonflyOps) CaptureSourceOffset(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, source string) (dragonfly.Position, error) {
+	return o.r.dragonflySourcePosition(ctx, fg, source)
 }
 
-func (o reconcilerDragonflyOps) TargetSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, sourceOffset int64) (bool, string, error) {
-	conn, err := o.r.dragonflyDial(ctx, fg, target)
-	if err != nil {
-		return false, "", fmt.Errorf("target unreachable: %w", err)
+func (o reconcilerDragonflyOps) TargetSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, source dragonfly.Position) (bool, string, error) {
+	return o.r.dragonflyTargetReached(ctx, fg, target, source)
+}
+
+// dragonflySourcePosition reads the replication position of source, the
+// Dragonfly master a promotion is about to take over from. The site must
+// answer as a master: a position read from anything else proves nothing
+// about what a replica of the master has to reach.
+func (r *MysqlFailoverGroupReconciler) dragonflySourcePosition(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, source string) (dragonfly.Position, error) {
+	return dragonflySourcePositionVia(ctx, r.dragonflySiteDialer(fg), source)
+}
+
+// dragonflySiteDialer is the reconciler's dialer for fg's sites.
+func (r *MysqlFailoverGroupReconciler) dragonflySiteDialer(fg *v1alpha1.MysqlFailoverGroup) dragonflySiteDialer {
+	return func(ctx context.Context, site string) (DragonflyConnection, error) {
+		return r.dragonflyDial(ctx, fg, site)
 	}
-	info, err := conn.InfoReplication(ctx)
-	if err != nil {
-		// The RESP buffer is in an unknown state; do not issue another
-		// command on this connection.
-		_ = conn.Close()
-		return false, "", fmt.Errorf("INFO replication failed: %w", err)
-	}
-	persist, _ := conn.InfoPersistence(ctx)
-	_ = conn.Close()
-	if dragonfly.CandidateSyncReady(info, persist, sourceOffset) {
-		return true, "", nil
-	}
-	return false, fmt.Sprintf("target offset %d behind source %d", info.SlaveReplOffset, sourceOffset), nil
+}
+
+// dragonflyTargetReached reports whether target, a replica of the source
+// whose position is source, can be promoted without losing what the source
+// had written at that position: its own INFO answers say it is linked and
+// not syncing or loading (dragonfly.CandidateSyncReady), and its
+// replication position has reached source on every flow
+// (dragonfly.Position.ReachedBy). detail explains a not-ready answer.
+//
+// The position is the part that can tell a replica that fell behind: one
+// cut off from its master without a reset keeps reporting a healthy link.
+// A target whose position cannot be read is not ready.
+//
+// Two errors say more than "not ready": errDragonflyTargetFollowsOther (the
+// source position is from an earlier instance of the source) and one for
+// which dragonflySyncUnprovable holds (the comparison can never be made).
+func (r *MysqlFailoverGroupReconciler) dragonflyTargetReached(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, source dragonfly.Position) (bool, string, error) {
+	look, err := r.dragonflyTargetSync(ctx, fg, target, source)
+	return look.Reached, look.Detail, err
+}
+
+// dragonflyTargetLook is what one look at a promotion target says.
+type dragonflyTargetLook struct {
+	// Reached: the target is in stable sync and has reached the source
+	// position on every flow.
+	Reached bool
+	// Linked: the target's own INFO answers say it is in stable sync
+	// (dragonfly.CandidateSyncReady). When it is linked and has not
+	// reached the position, it is behind, and looking again shortly can
+	// help; when it is not linked (link down, full sync, loading), it
+	// cannot within seconds.
+	Linked bool
+	// Detail explains a look that did not reach the position.
+	Detail string
+}
+
+// dragonflyTargetSync looks at target once; see dragonflyTargetReached.
+func (r *MysqlFailoverGroupReconciler) dragonflyTargetSync(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, source dragonfly.Position) (dragonflyTargetLook, error) {
+	return dragonflyTargetSyncVia(ctx, r.dragonflySiteDialer(fg), target, source)
+}
+
+func (o reconcilerDragonflyOps) TargetLinkReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) (bool, string, error) {
+	return dragonflyLinkProof(ctx, o.r.dragonflySiteDialer(fg), target, source)
 }
 
 // underGate runs fn under the group's Dragonfly gate on a fresh, uncached
@@ -679,7 +858,7 @@ func (o reconcilerDragonflyOps) Abandon(ctx context.Context, fg *v1alpha1.MysqlF
 //     maxSyncWait).
 //  3. On a success reply, stamp role+traffic labels on the target and
 //     demote the source to role=replica with its traffic label restored.
-//  4. Best-effort CLIENT KILL TYPE NORMAL on the demoted source, and
+//  4. Best-effort close of the demoted source's client connections, and
 //     recreate its pod.
 //
 // Steps 3 and 4 run only on REPLTAKEOVER's success reply. On anything else
@@ -757,26 +936,60 @@ func (o reconcilerDragonflyOps) takeover(ctx context.Context, fg *v1alpha1.Mysql
 	if err := conn.ReplTakeover(ctx, timeout); err != nil {
 		_ = conn.Close()
 		why := fmt.Sprintf("REPLTAKEOVER: %v", err)
-		if !dragonfly.IsServerError(err, "") {
-			// The reply was lost (a transport error or a deadline, not a
-			// server error): the target may or may not have taken over.
-			why = fmt.Sprintf("unconfirmed: the REPLTAKEOVER reply was lost (%v); no Dragonfly role was changed", err)
+		if dragonfly.TakeoverOutcomeUnknown(err) {
+			// The reply was lost (a transport error or a deadline), or
+			// the target gave up waiting for the source (`Couldn't
+			// execute takeover: Operation canceled`): the takeover may
+			// have happened, or the source may still run it and exit
+			// (seen on v1.38). The run does not finish it and does not
+			// claim that nothing changed: it says what the two sites
+			// report now, and the Dragonfly manager reconciles from what
+			// they report once the run releases it.
+			why = fmt.Sprintf("unconfirmed: REPLTAKEOVER did not report its outcome (%v); the source may still complete it. "+
+				"The run changed no label or pod. Observed afterwards: %s", err, o.observedRoles(ctx, fg, pf))
 		}
 		o.fail(ctx, fg, pf, why)
 		return plannedTakeoverResult{Why: why}, nil
 	}
-	postInfo, _ := conn.InfoReplication(ctx)
+	// Best-effort record of where the promoted target's journal stands
+	// (takeover.targetOffset): absent when the target gives no position.
+	postPos, posErr := conn.ReplicationPosition(ctx)
 	_ = conn.Close()
 	o.finishPromotion(ctx, fg, pf)
 	res := plannedTakeoverResult{Succeeded: true}
-	offset := postInfo.MasterReplOffset
-	if offset == 0 {
-		offset = postInfo.SlaveReplOffset
-	}
-	if offset != 0 {
+	if posErr == nil && postPos.Role == "master" {
+		offset := postPos.Total()
 		res.TargetOffset = &offset
 	}
 	return res, nil
+}
+
+// observedRoles reads the replication role of the run's target and source
+// after a takeover whose outcome is unknown, for the run's record:
+// "target=slave, source=master", with "unreachable" for a site that does
+// not answer. It decides nothing.
+func (o reconcilerDragonflyOps) observedRoles(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) string {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plannedDragonflyCleanupBudget)
+	defer cancel()
+	role := func(site string) string {
+		if site == "" {
+			return "none"
+		}
+		conn, err := o.r.dragonflyDial(cctx, fg, site)
+		if err != nil {
+			return "unreachable"
+		}
+		defer func() { _ = conn.Close() }()
+		info, err := conn.InfoReplication(cctx)
+		if err != nil {
+			return "unreachable"
+		}
+		if info.Role == "" {
+			return "unknown"
+		}
+		return info.Role
+	}
+	return fmt.Sprintf("target=%s, source=%s", role(pf.TargetSite), role(pf.SourceSite))
 }
 
 // fail restores the source's traffic label after a failed takeover so the
@@ -855,9 +1068,13 @@ func (r *MysqlFailoverGroupReconciler) bestEffortRestoreSourceTraffic(ctx contex
 	}
 }
 
-// bestEffortClientKillSource issues `CLIENT KILL TYPE NORMAL` against
-// the old master so application clients reconnect through the active
-// Service. Bounded context, all errors logged and dropped.
+// bestEffortClientKillSource closes the client connections of the old
+// master (KillClients: every connection but the operator's own and the
+// replication links) so application clients reconnect through the active
+// Service. Bounded context, all errors logged and dropped. After a
+// successful REPLTAKEOVER the old master's process has exited (v1.38,
+// v2.1), which closes its connections by itself; the dial then fails and
+// `client-kill: source unreachable; skipping` is logged.
 //
 // Log lines include `fg` per the site/content/docs/8.observability/7.log-schema.md Event
 // reference contract — downstream pipelines filter on `fg`.
@@ -874,11 +1091,12 @@ func (r *MysqlFailoverGroupReconciler) bestEffortClientKillSource(ctx context.Co
 		return
 	}
 	defer func() { _ = conn.Close() }()
-	if err := conn.ClientKillType(killCtx, "NORMAL"); err != nil {
-		log.FromContext(ctx).Info("client-kill: source rejected CLIENT KILL", "fg", fgKey, "site", sourceSite, "error", err)
+	killed, err := conn.KillClients(killCtx)
+	if err != nil {
+		log.FromContext(ctx).Info("client-kill: source rejected CLIENT KILL", "fg", fgKey, "site", sourceSite, "killed", killed, "error", err)
 		return
 	}
-	log.FromContext(ctx).Info("client-kill: evicted clients from old master", "fg", fgKey, "site", sourceSite)
+	log.FromContext(ctx).Info("client-kill: evicted clients from old master", "fg", fgKey, "site", sourceSite, "killed", killed)
 }
 
 // bestEffortRecreateTakeoverSource deletes the demoted source pod after a

@@ -3,9 +3,9 @@ package sidecar
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,8 +184,8 @@ func TestOriginWalkTruncatedAndCorruptFiles(t *testing.T) {
 		}
 	}
 	encrypted := corrupt(func(b []byte) { b[0] = 0xfd })
-	if _, err := walkOrigin(t, encrypted); !errors.Is(err, errEncryptedBinlog) {
-		t.Errorf("an encrypted binlog: %v", err)
+	if _, err := walkOrigin(t, encrypted); err == nil || !strings.Contains(err.Error(), "not a binlog file") {
+		t.Errorf("the bytes of an encrypted binlog: %v", err)
 	}
 }
 

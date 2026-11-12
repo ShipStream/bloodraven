@@ -229,6 +229,17 @@ type dragonflyRolloutKey struct {
 type dragonflyRolloutState struct {
 	attempts    int
 	lastFailure time.Time
+	// The rollout's readiness check of the target (see
+	// noteDragonflyRolloutNotReady): what kept it from being ready when it
+	// was last logged, since when it has not been ready, and whether the
+	// stall has been reported in an Event.
+	notReady      string
+	notReadySince time.Time
+	stallReported bool
+	// unprovenReported is set once the rollout has said that the target's
+	// sync could not be proven by position and that it relies on
+	// REPLTAKEOVER (DragonflySyncUnproven).
+	unprovenReported bool
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch;create;update;patch;delete

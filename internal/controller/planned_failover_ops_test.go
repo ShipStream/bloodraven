@@ -380,32 +380,42 @@ func TestClassifyPromotionStage_EveryRow(t *testing.T) {
 		name     string
 		live     promotionLive
 		memo     bool // memo proves no SRO clear was sent
+		cleared  bool // memo says this process sent an SRO clear (neither: no memo, another process's run)
 		stage    PromotionStage
 		kind     PromoteOutcomeKind
 		reason   v1alpha1.PlannedFailoverReason
 		terminal v1alpha1.PlannedFailoverOutcome
 	}{
-		{"uuid changed, memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
-		{"uuid changed, no memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"writable with channel, memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"writable with channel, no memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
-		{"writable, own extras", promotionLive{uuid: opsUUIDB, gtidRaw: own}, false, PromotionStageWritable, 0, "", ""},
-		{"writable, foreign extras", promotionLive{uuid: opsUUIDB, gtidRaw: foreign}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
-		{"writable, missing F", promotionLive{uuid: opsUUIDB, gtidRaw: missing}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"writable, memo proves no write", promotionLive{uuid: opsUUIDB, gtidRaw: own}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"read-only, channel running", promotionLive{uuid: opsUUIDB, readOnly: true, repl: running, gtidRaw: opsF}, false, PromotionStageNotStarted, 0, "", ""},
-		{"read-only, channel stopped", promotionLive{uuid: opsUUIDB, readOnly: true, repl: stopped, gtidRaw: opsF}, false, PromotionStageReplicaStopped, 0, "", ""},
-		{"read-only, no channel, = F", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: opsF}, false, PromotionStageReplicaReset, 0, "", ""},
-		{"read-only, own extras, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonAuthorityChanged, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"read-only, own extras, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, false, PromotionStageWasWritable, 0, "", ""},
-		{"read-only, missing F, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, true, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
-		{"read-only, missing F, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"read-only, foreign extras", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: foreign}, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
+		{"uuid changed, memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
+		{"uuid changed, no memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable with channel, memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		// A channel on a writable target: no process of the run cleared the
+		// flags (the clears follow RESET REPLICA ALL and the gate's
+		// no-channel read), so a process without a memo ends as the one whose
+		// memo proves no clear; only a process that sent a clear holds.
+		{"writable with channel, no memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with stopped channel, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with channel and own extras, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: own}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with channel, memo of a clear", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
+		{"writable with channel, another server, no memo", promotionLive{uuid: opsUUIDC, repl: running, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"uuid changed, memo of a clear", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable, own extras", promotionLive{uuid: opsUUIDB, gtidRaw: own}, false, false, PromotionStageWritable, 0, "", ""},
+		{"writable, foreign extras", promotionLive{uuid: opsUUIDB, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
+		{"writable, missing F", promotionLive{uuid: opsUUIDB, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable, memo proves no write", promotionLive{uuid: opsUUIDB, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"read-only, channel running", promotionLive{uuid: opsUUIDB, readOnly: true, repl: running, gtidRaw: opsF}, false, false, PromotionStageNotStarted, 0, "", ""},
+		{"read-only, channel stopped", promotionLive{uuid: opsUUIDB, readOnly: true, repl: stopped, gtidRaw: opsF}, false, false, PromotionStageReplicaStopped, 0, "", ""},
+		{"read-only, no channel, = F", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: opsF}, false, false, PromotionStageReplicaReset, 0, "", ""},
+		{"read-only, own extras, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonAuthorityChanged, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"read-only, own extras, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, false, false, PromotionStageWasWritable, 0, "", ""},
+		{"read-only, missing F, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
+		{"read-only, missing F, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"read-only, foreign extras", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.live.gtid = opsSet(t, tc.live.gtidRaw)
-			stage, verdict := classifyPromotionStage(tc.live, F, opsUUIDB, tc.memo)
+			stage, verdict := classifyPromotionStage(tc.live, F, opsUUIDB, tc.memo, tc.memo || tc.cleared)
 			if stage != tc.stage {
 				t.Fatalf("stage = %q, want %q", stage, tc.stage)
 			}
@@ -738,6 +748,18 @@ func TestRollbackPreconditions(t *testing.T) {
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.down = true }, outcome: ""},
 		{name: "possible write, target extras", phase: v1alpha1.PlannedFailoverPhasePromoting, reason: v1alpha1.PlannedFailoverReasonPromotionAborted,
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDB + ":1" }, outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired},
+		// The source restarted during the run on an older data directory
+		// under the same server_uuid: it is not unfenced, and the target is
+		// not pointed at it.
+		{name: "source no longer holds the set it was fenced with", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+			mutate:  func(f *opsFixture) { f.fenced(); f.src.gtid, f.tgt.gtid = opsUUIDA+":1-7", opsUUIDA+":1-7" },
+			outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
+			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored},
+		// ... or before the fence was read, so the recorded set is the
+		// short one: the target holds what the source issued and lost.
+		{name: "source lacks its own transactions the target holds", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsUUIDA + ":1-13" }, outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
+			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored},
 		{name: "divergent target before Promoting still unfences", reason: v1alpha1.PlannedFailoverReasonDivergentTarget,
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDC + ":1" }, outcome: v1alpha1.PlannedFailoverOutcomeRolledBack,
 			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored, unfenced: true},
@@ -898,39 +920,79 @@ func TestReprove_RecognisesOwnRecord(t *testing.T) {
 
 // TestPF_SourceLeftFencedIsNamedAndReasserted: a run that leaves its own
 // fence names the source; after release, with every site read-only and no
-// lastFailoverTarget, the topology manager re-asserts it.
+// lastFailoverTarget, the topology manager re-asserts it. The name is
+// bound to the server the run's fence intent names: a server that answers
+// under another @@server_uuid (or whose identity cannot be read) is lifted
+// only as a site the operator merely observed, from mysqld's boot
+// read_only and never from a fence.
 func TestPF_SourceLeftFencedIsNamedAndReasserted(t *testing.T) {
-	site0 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: opsUUIDA + ":1-10"}
-	site1 := &mockMySQL{readOnly: true, gtidExecuted: opsUUIDA + ":1-10"}
-	tm, _, _ := newTestTopologyManager(site0, site1)
-	setWedgedTopology(tm, "")
-	tm.mu.Lock()
-	tm.lastActiveSite, tm.lastActiveSiteNamed = "dc1", false // observed only, as restored
-	tm.promotionGtidExecuted = opsUUIDA + ":1-10"
-	tm.mu.Unlock()
-	reg := &opsRegistry{current: tm, slot: &PlannedClaimSlot{}}
-	WireRegisteredManager(tm, ManagerWiring{Slot: reg.slot})
-	topo := newRunnerPlannedTopology(reg)
-	ref := PlannedRunRef{RunID: "run-1", Source: "dc1", Target: "dc2"}
-	reg.slot.hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
+	cases := []struct {
+		name string
+		// uuid is what dc1 answers; "" answers no identity at all.
+		uuid          string
+		superReadOnly bool
+		reasserted    bool
+	}{
+		{"the server the fence names, fenced", opsUUIDA, true, true},
+		{"the server the fence names, boot read_only", opsUUIDA, false, true},
+		{"another server, fenced", opsUUIDC, true, false},
+		{"another server, boot read_only", opsUUIDC, false, true},
+		{"no identity, fenced", "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			site0 := &mockMySQL{readOnly: true, superReadOnly: tc.superReadOnly, gtidExecuted: opsUUIDA + ":1-10"}
+			site1 := &mockMySQL{readOnly: true, gtidExecuted: opsUUIDA + ":1-10"}
+			tm, _, _ := newTestTopologyManager(site0, site1)
+			if tc.uuid != "" {
+				tm.sites[0].mysql = &identityMockMySQL{mockMySQL: site0, before: tc.uuid}
+			}
+			setWedgedTopology(tm, "")
+			tm.mu.Lock()
+			tm.lastActiveSite, tm.lastActiveSiteNamed = "dc1", false // observed only, as restored
+			tm.promotionGtidExecuted = opsUUIDA + ":1-10"
+			tm.mu.Unlock()
+			reg := &opsRegistry{current: tm, slot: &PlannedClaimSlot{}}
+			WireRegisteredManager(tm, ManagerWiring{Slot: reg.slot})
+			topo := newRunnerPlannedTopology(reg)
+			ref := PlannedRunRef{RunID: "run-1", Source: "dc1", Target: "dc2"}
+			reg.slot.hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
 
-	if tm.checkPrimaryReassert(context.Background()) {
-		t.Fatal("the topology manager re-asserted while the run held its claim")
+			if tm.checkPrimaryReassert(context.Background()) {
+				t.Fatal("the topology manager re-asserted while the run held its claim")
+			}
+			if err := topo.NameFencedSource(ref, opsUUIDA, ""); err != nil {
+				t.Fatal(err)
+			}
+			if !topo.ReleasePlannedFailoverClaim(ref.Group, "run-1", ReleaseTerminal) {
+				t.Fatal("release refused")
+			}
+			if got := tm.checkPrimaryReassert(context.Background()); got != tc.reasserted {
+				t.Fatalf("re-asserted after release = %v, want %v", got, tc.reasserted)
+			}
+			site0.mu.Lock()
+			ro := site0.readOnly
+			site0.mu.Unlock()
+			if ro == tc.reasserted {
+				t.Fatalf("dc1 read-only = %v after the re-assert, want %v", ro, !tc.reasserted)
+			}
+		})
 	}
-	if err := topo.NameFencedSource(ref); err != nil {
-		t.Fatal(err)
+}
+
+// TestPF_FenceIntentWithoutServerNamesNothing: a fence intent that names no
+// server cannot attribute a fence to one, so the source is not named.
+func TestPF_FenceIntentWithoutServerNamesNothing(t *testing.T) {
+	f := newOpsFixture(t, "")
+	f.hold(false)
+	if err := f.topo.NameFencedSource(f.ref, "", ""); err == nil {
+		t.Fatal("a source was named without a server to bind it to")
 	}
-	if !topo.ReleasePlannedFailoverClaim(ref.Group, "run-1", ReleaseTerminal) {
-		t.Fatal("release refused")
-	}
-	if !tm.checkPrimaryReassert(context.Background()) {
-		t.Fatal("the named fenced source was not re-asserted after release")
-	}
-	site0.mu.Lock()
-	ro := site0.readOnly
-	site0.mu.Unlock()
-	if ro {
-		t.Fatal("dc1 still read-only after the re-assert")
+	f.tm.mu.RLock()
+	named := f.tm.lastActiveSiteNamed
+	f.tm.mu.RUnlock()
+	if named {
+		t.Fatal("lastActiveSite is named")
 	}
 }
 

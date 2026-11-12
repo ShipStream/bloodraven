@@ -16,6 +16,10 @@ import (
 
 type binlogHeader struct {
 	previous string
+	// size is the size of the plaintext binlog: the file's, less the
+	// encryption header of a file MySQL encrypted. It is what a manifest
+	// row's Size holds.
+	size int64
 }
 
 // binlogHistoryTask re-identifies one sealed local binlog in the history
@@ -24,23 +28,37 @@ type binlogHeader struct {
 type binlogHistoryTask struct {
 	name   string
 	info   os.FileInfo
-	reader io.ReadCloser
+	file   *localBinlog // open while reader is set
+	reader io.Reader    // the file's plaintext
 	hash   hash.Hash
 	id     string
 }
 
 func (t *binlogHistoryTask) close() {
 	if t != nil && t.reader != nil {
-		_ = t.reader.Close()
-		t.reader = nil
+		_ = t.file.Close()
+		t.file, t.reader = nil, nil
 	}
 }
+
+// localBinlogHeader reads the header of a binlog file that MySQL did not
+// encrypt (an encrypted one is an error: no keyring).
 func localBinlogHeader(path string) (binlogHeader, error) {
-	f, err := os.Open(path)
+	return localBinlogs{}.header(path)
+}
+
+// binlogs opens this server's local binlog files.
+func (a *BinlogArchiver) binlogs() localBinlogs {
+	return localBinlogs{keyringFile: a.cfg.KeyringFile}
+}
+
+func (l localBinlogs) header(path string) (binlogHeader, error) {
+	file, err := l.open(path)
 	if err != nil {
 		return binlogHeader{}, err
 	}
-	defer f.Close()
+	defer file.Close()
+	f := file.NewReader()
 	var magic [4]byte
 	if _, err := io.ReadFull(f, magic[:]); err != nil {
 		return binlogHeader{}, err
@@ -74,7 +92,7 @@ func localBinlogHeader(path string) (binlogHeader, error) {
 	if !found {
 		return binlogHeader{}, fmt.Errorf("missing Previous_gtids header")
 	}
-	return binlogHeader{previous}, nil
+	return binlogHeader{previous: previous, size: file.Size()}, nil
 }
 func sameStoredIdentity(store ArchiveStore, stored, current string) bool {
 	return stored != "" && (stored == current || store.BinlogContentID(stored) == current)
@@ -124,11 +142,11 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 			continue
 		}
 		if i >= len(sealed)-8 && !validCache {
-			header, err := localBinlogHeader(path)
+			header, err := a.binlogs().header(path)
 			match := false
 			if err == nil {
 				for _, row := range rows[name] {
-					if row.Size == info.Size() && row.PreviousGTIDs == header.previous {
+					if row.Size == header.size && row.PreviousGTIDs == header.previous {
 						match = true
 						break
 					}
@@ -220,13 +238,20 @@ func (a *BinlogArchiver) scanFiles(ctx context.Context, m *Manifest, sealed []st
 			if cached, ok := a.localIDs[name]; ok && stableBinlogFile(cached.info, info) {
 				task.id = cached.id
 			} else {
-				f, err := os.Open(filepath.Join(a.cfg.BinlogDir, name))
+				f, err := a.binlogs().open(filepath.Join(a.cfg.BinlogDir, name))
 				if err != nil {
 					fail(name, err)
 					completed++
 					continue
 				}
-				task.reader = f
+				opened, err := f.Stat()
+				if err != nil || !stableBinlogFile(info, opened) {
+					// Not the file this scan saw: the next scan takes it.
+					_ = f.Close()
+					completed++
+					continue
+				}
+				task.file, task.reader = f, f.NewReader()
 			}
 			a.historyTask = task
 		}

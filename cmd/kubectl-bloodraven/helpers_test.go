@@ -357,3 +357,72 @@ func TestSiteCountSummaryBucketsUnknownStateAsUnhealthy(t *testing.T) {
 		t.Errorf("siteCountSummary = %q, want 1W/0RO/2X (unknown / future state counts as unhealthy)", got)
 	}
 }
+
+// The detailed view says which transactions a reported site lacks or
+// holds, and for a site that lacks its own why its reclone waits.
+func TestPrintGroupStatus_ShowsSiteReports(t *testing.T) {
+	lost, divergent := int64(10), int64(1)
+	waiting := "pdx lacks 10 transactions it issued itself that iad holds (22222222-0000-11f1-8000-0000000000b2:91-100); automatic reclone waiting: another topology change holds the sites (an ordered update, a planned failover or its hold, or a promotion that is not observed yet) (by hand: kubectl bloodraven reclone orders pdx --cold). Replication cannot bring these transactions back (the site's receiver drops events with its own server_id), so the site is not replicated and not promoted until it is recloned."
+	fg := &v1alpha1.MysqlFailoverGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
+			{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}, {Name: "dfw", ServerID: 103}}},
+		Status: v1alpha1.MysqlFailoverGroupStatus{
+			ActiveSite: "iad",
+			Sites: []v1alpha1.SiteStatus{
+				{Name: "iad", State: v1alpha1.SiteStateWritable},
+				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateRecloneRequired,
+					LostGtid: "22222222-0000-11f1-8000-0000000000b2:91-100", LostTransactionCount: &lost, LostComparedTo: "iad"},
+				{Name: "dfw", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked,
+					DivergentGtid: "33333333-0000-11f1-8000-0000000000c3:7", DivergentTransactionCount: &divergent, DivergenceComparedTo: "iad"},
+			},
+			Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonDivergentTransactions, Message: "dfw holds 1 transaction"},
+				{Type: v1alpha1.ConditionRecoveryPending, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonOwnTransactionsLost, Message: waiting},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	if err := printGroupStatus(&buf, fg, "table"); err != nil {
+		t.Fatalf("printGroupStatus: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"Site reports:\n",
+		"  pdx lacks 10 transactions it issued itself, which the primary iad holds: 22222222-0000-11f1-8000-0000000000b2:91-100\n",
+		"  dfw holds 1 transaction the primary lacks (compared with iad): 33333333-0000-11f1-8000-0000000000c3:7\n",
+		// The whole message, not the 80 characters of the conditions table.
+		"  Own transactions lost: " + waiting + "\n",
+		"RecloneRequired",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in output:\n%s", want, out)
+		}
+	}
+
+	// A report that rests on another site than the primary says so, and
+	// one whose holder the status does not carry says nothing about it.
+	for holder, want := range map[string]string{
+		"dfw": "  pdx lacks 10 transactions it issued itself, which dfw holds and the primary does not: 22222222-0000-11f1-8000-0000000000b2:91-100\n",
+		"":    "  pdx lacks 10 transactions it issued itself: 22222222-0000-11f1-8000-0000000000b2:91-100\n",
+	} {
+		fg.Status.Sites[1].LostComparedTo = holder
+		buf.Reset()
+		if err := printGroupStatus(&buf, fg, "table"); err != nil {
+			t.Fatalf("printGroupStatus: %v", err)
+		}
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("holder %q: missing %q in output:\n%s", holder, want, buf.String())
+		}
+	}
+
+	// A group without a report prints no section.
+	fg.Status.Sites = fg.Status.Sites[:1]
+	buf.Reset()
+	if err := printGroupStatus(&buf, fg, "table"); err != nil {
+		t.Fatalf("printGroupStatus: %v", err)
+	}
+	if strings.Contains(buf.String(), "Site reports") {
+		t.Errorf("a group without a report shows the section:\n%s", buf.String())
+	}
+}

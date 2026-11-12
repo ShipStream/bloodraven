@@ -42,14 +42,21 @@ func ArchiveEntryKey(prefix, site string, entry ManifestEntry) (string, error) {
 	return binlogObjectKey(prefix, site, entry.Name+"."+entry.ID), nil
 }
 
+// fileContentID is the SHA-256 of a binlog file that MySQL did not encrypt.
 func fileContentID(filePath string) (string, error) {
-	f, err := os.Open(filePath)
+	return localBinlogs{}.contentID(filePath)
+}
+
+// contentID is the SHA-256 of a local binlog's plaintext: the bytes that
+// are archived, and for an encrypted file the only ones that are stable.
+func (l localBinlogs) contentID(filePath string) (string, error) {
+	f, err := l.open(filePath)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, f.NewReader()); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
@@ -118,7 +125,7 @@ func MatchesBinlogDigest(store ArchiveStore, identity, digest string) bool {
 }
 
 func (a *BinlogArchiver) fileContentID(filePath string) (string, error) {
-	digest, err := fileContentID(filePath)
+	digest, err := a.binlogs().contentID(filePath)
 	if err != nil {
 		return "", err
 	}

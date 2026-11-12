@@ -779,7 +779,7 @@ func TestWaitForReplicaReady_FailFastOnWritableStandby(t *testing.T) {
 	}
 
 	start := time.Now()
-	err := uc.waitForReplicaReady(context.Background(), checker, 5*time.Minute)
+	err := uc.waitForReplicaReady(context.Background(), UpdateTarget{Checker: checker}, nil, 5*time.Minute)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("waitForReplicaReady should abort on writable standby")
@@ -814,7 +814,7 @@ func TestWaitForReplicaReady_AbortsDespiteTransientProbeErrors(t *testing.T) {
 	checker := &flappingChecker{writable: true, errorEvery: 3}
 
 	start := time.Now()
-	err := uc.waitForReplicaReady(context.Background(), checker, 2*time.Second)
+	err := uc.waitForReplicaReady(context.Background(), UpdateTarget{Checker: checker}, nil, 2*time.Second)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("waitForReplicaReady should abort on sustained writable standby")
@@ -853,7 +853,7 @@ func TestWaitForReplicaReady_AbortsWhenThreadsStoppedButSourceConfigured(t *test
 	}
 
 	start := time.Now()
-	err := uc.waitForReplicaReady(context.Background(), checker, time.Second)
+	err := uc.waitForReplicaReady(context.Background(), UpdateTarget{Checker: checker}, nil, time.Second)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("waitForReplicaReady should abort on writable standby with stopped replica threads")
@@ -880,7 +880,7 @@ func TestWaitForReplicaReady_AbortsWhenReplicaStatusErrors(t *testing.T) {
 	checker := &replicaStatusErrorChecker{writable: true}
 
 	start := time.Now()
-	err := uc.waitForReplicaReady(context.Background(), checker, 2*time.Second)
+	err := uc.waitForReplicaReady(context.Background(), UpdateTarget{Checker: checker}, nil, 2*time.Second)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("waitForReplicaReady should abort on sustained writable standby even with ShowReplicaStatus errors")
@@ -907,7 +907,7 @@ func TestWaitForReplicaReady_ProbeErrorsAloneDoNotAbortAsWritable(t *testing.T) 
 	// errorEvery=1 → every probe errors.
 	checker := &flappingChecker{writable: true, errorEvery: 1}
 
-	err := uc.waitForReplicaReady(context.Background(), checker, 80*time.Millisecond)
+	err := uc.waitForReplicaReady(context.Background(), UpdateTarget{Checker: checker}, nil, 80*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected deadline timeout")
 	}
@@ -938,7 +938,7 @@ func TestWaitForReplicaReady_StartsStoppedReplicaThreads(t *testing.T) {
 			uc := NewUpdateController(NewFailoverController(logger), logger)
 			uc.tickInterval = time.Millisecond
 
-			if err := uc.waitForReplicaReady(context.Background(), tc.checker, time.Second); err != nil {
+			if err := uc.waitForReplicaReady(context.Background(), UpdateTarget{Checker: tc.checker}, nil, time.Second); err != nil {
 				t.Fatalf("waitForReplicaReady: %v", err)
 			}
 			if tc.checker.starts < tc.expectedStarts {

@@ -129,7 +129,7 @@ A broken cross-site replication link triggers no automatic action, and the reaso
 You inject a partition against `iad` with `iptables -A INPUT -p tcp --dport 3306 -j DROP` on its k3d node. Forty-five seconds later the group status still reads `activeSite=iad, state=Writable, Ready=True`. What do you conclude first?
 
 - That you have proven nothing yet. Host-netns iptables does not partition Kubernetes Service traffic — kube-proxy's DNAT runs in different chains — so verify from an independent vantage point, against a disposable canary, that the partition exists before you treat any status as a symptom.
-- That the partition is real and detection simply has not completed: 6 s of detection plus the 30 s relay drain is a 36 s worst case, and you are barely past it.
+- That the partition is real and detection simply has not completed: 6 s of detection, the 30 s relay drain and the 1 s bound of the binary log rotation make a 37 s worst case, and you are barely past it.
 - That the partition is real and the poll has frozen, exactly as in the incident where the operator reported a believable status for two minutes under a deny-all policy — so restart the operator.
 - That the partition is real and the response is correct: the operator holds `iad` writable while its sidecar counts down `leaseTimeout`, so wait for the self-fence.
 

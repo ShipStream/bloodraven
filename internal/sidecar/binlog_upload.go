@@ -36,7 +36,7 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 			}
 		}
 	}
-	file, err := os.Open(path)
+	file, err := a.binlogs().open(path)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 			return fmt.Errorf("binlog changed while capturing purged base")
 		}
 	}
-	evidence, parseErr := InspectBinlog(io.NewSectionReader(file, 0, before.Size()), time.Time{})
+	evidence, parseErr := InspectBinlog(file.NewReader(), time.Time{})
 	if parseErr != nil && evidence.Metadata.FirstEventTime.IsZero() && evidence.Metadata.PreviousGTIDs == "" {
 		return parseErr
 	}
@@ -95,8 +95,8 @@ func (a *BinlogArchiver) archivePinned(ctx context.Context, path, name, id strin
 	}
 	// The non-seekable reader is hashed once; managed multipart retries use buffers.
 	digest := sha256.New()
-	upload := io.TeeReader(io.NewSectionReader(file, 0, before.Size()), digest)
-	if err := a.store.Put(ctx, key, upload, before.Size()); err != nil {
+	upload := io.TeeReader(file.NewReader(), digest)
+	if err := a.store.Put(ctx, key, upload, file.Size()); err != nil {
 		return err
 	}
 	after, statErr := file.Stat()

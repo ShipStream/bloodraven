@@ -72,17 +72,30 @@ func (s *groupCloneIdentityStore) Load(ctx context.Context) (map[string]CloneIde
 
 // mutate applies change to the stored records with a write conditioned on
 // the group's resourceVersion. change reports whether anything changed.
-func (s *groupCloneIdentityStore) mutate(ctx context.Context, change func(map[string]CloneIdentity) bool) error {
+// recipient, when it names a site, adds to that site's server_uuid
+// timeline, by the same write, the server_uuid it names.
+func (s *groupCloneIdentityStore) mutate(ctx context.Context, recipient [2]string, change func(map[string]CloneIdentity) bool) error {
 	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := s.client.Get(ctx, s.nn, &fresh); err != nil {
 			return err
 		}
+		base := fresh.DeepCopy()
+		historyChanged := false
+		if recipient[0] != "" {
+			changed, err := addServerUUIDHistory(&fresh, recipient[0], recipient[1], s.logger, s.nn)
+			if err != nil {
+				return err
+			}
+			historyChanged = changed
+		}
 		records := s.parseCloneIdentities(fresh.Annotations[v1alpha1.CloneServerUUIDAnnotation])
 		if !change(records) {
-			return nil
+			if !historyChanged {
+				return nil
+			}
+			return s.client.Patch(ctx, &fresh, metadataPatch(base))
 		}
-		base := fresh.DeepCopy()
 		annotations := fresh.GetAnnotations()
 		if len(records) == 0 {
 			delete(annotations, v1alpha1.CloneServerUUIDAnnotation)
@@ -101,8 +114,22 @@ func (s *groupCloneIdentityStore) mutate(ctx context.Context, change func(map[st
 	})
 }
 
+// Record stores site's record and, in the same write, adds the
+// server_uuid it names to the site's server_uuid timeline
+// (ServerUUIDHistoryAnnotation): the clone gives the recipient a new
+// server_uuid, and the one it gives up is one it issued transactions
+// under. A clone does not start unless this write succeeded, so a volume
+// that later comes back from before the clone is recognised by the
+// server_uuid recorded here.
+//
+// The clone itself is marked on the timeline when it is known to have
+// installed (TopologyManager.finishCloneIdentity), and the record stays
+// until that marker is stored: a manager that restarts in between finds
+// the record and settles the clone again. A clone that fails or never
+// begins leaves no marker, so the identity the site keeps is never taken
+// for one a clone replaced.
 func (s *groupCloneIdentityStore) Record(ctx context.Context, site string, rec CloneIdentity) error {
-	return s.mutate(ctx, func(records map[string]CloneIdentity) bool {
+	return s.mutate(ctx, [2]string{site, rec.ServerUUID}, func(records map[string]CloneIdentity) bool {
 		if cur, ok := records[site]; ok && cur.equal(rec) {
 			return false
 		}
@@ -112,7 +139,7 @@ func (s *groupCloneIdentityStore) Record(ctx context.Context, site string, rec C
 }
 
 func (s *groupCloneIdentityStore) Resolve(ctx context.Context, site string, rec CloneIdentity) error {
-	err := s.mutate(ctx, func(records map[string]CloneIdentity) bool {
+	err := s.mutate(ctx, [2]string{}, func(records map[string]CloneIdentity) bool {
 		if cur, ok := records[site]; !ok || !cur.equal(rec) {
 			return false
 		}

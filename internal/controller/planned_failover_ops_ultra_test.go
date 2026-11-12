@@ -174,24 +174,45 @@ func TestPFUltra_K010_K072_RollbackRefencesTargetBeforeUnfence(t *testing.T) {
 }
 
 // K052: a re-proof that fails only for lack of evidence after the
-// promotion deadline confirms a writable target live instead of handing
-// back a synthetic Unconfirmed (which ends PromotedUnconfirmed unseen).
+// promotion deadline classifies and confirms a writable target live instead
+// of handing back a synthetic Unconfirmed (which ends PromotedUnconfirmed
+// unseen). What the live confirmation needs is §7.3's: a lost fence on a
+// source that answers read-only confirms; a promotable peer this process
+// never read and that does not answer does not (the re-proof is no pre-write
+// gate, so the peer is not the documented residual).
 func TestPFUltra_K052_ReproveLackOfEvidenceConfirmsLive(t *testing.T) {
-	f := newOpsFixture(t, state.SiteRolePrimaryCandidate)
-	f.hold(true)
-	f.fenced()
-	f.third.down = true
-	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
-	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
-	pf.Promotion.IntentTime = metav1.NewTime(f.clk.Now().Add(-3 * plannedFailoverPromotionDeadline))
-	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(pf))
-	if err != nil || res.HandOff == nil || res.HandOff.Kind != PromoteConfirmed || res.HandOff.Stage != PromotionStageWritable ||
-		!slices.Contains(res.HandOff.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers) {
-		t.Fatalf("Reprove = %+v (handoff %+v), %v; want HandOff Confirmed from Writable with UnreachablePeers", res, res.HandOff, err)
+	setup := func(t *testing.T) (*opsFixture, *v1alpha1.PlannedFailoverStatus) {
+		f := newOpsFixture(t, state.SiteRolePrimaryCandidate)
+		f.hold(true)
+		f.fenced()
+		f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
+		pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+		pf.Promotion.IntentTime = metav1.NewTime(f.clk.Now().Add(-3 * plannedFailoverPromotionDeadline))
+		return f, pf
 	}
-	if v, _ := f.reg.slot.View(); v.NeedsReprove {
-		t.Fatal("HandOff left needsReprove set")
-	}
+	t.Run("every site answers read-only", func(t *testing.T) {
+		f, pf := setup(t)
+		f.src.sro = false // the run's fence is gone; the source still reads read_only=ON
+		res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(pf))
+		if err != nil || res.HandOff == nil || res.HandOff.Kind != PromoteConfirmed || res.HandOff.Stage != PromotionStageWritable {
+			t.Fatalf("Reprove = %+v (handoff %+v), %v; want HandOff Confirmed from Writable", res, res.HandOff, err)
+		}
+		if v, _ := f.reg.slot.View(); v.NeedsReprove {
+			t.Fatal("HandOff left needsReprove set")
+		}
+	})
+	t.Run("a promotable peer does not answer", func(t *testing.T) {
+		f, pf := setup(t)
+		f.third.down = true
+		res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(pf))
+		if err != nil || res.HandOff == nil || res.HandOff.Kind != PromoteUnconfirmed || res.HandOff.Stage != PromotionStageWritable ||
+			!res.HandOff.MayHaveWritten || !slices.Equal(res.HandOff.Sites, []string{"dc3"}) {
+			t.Fatalf("Reprove = %+v (handoff %+v), %v; want HandOff Unconfirmed from Writable naming dc3", res, res.HandOff, err)
+		}
+		if v, _ := f.reg.slot.View(); v.NeedsReprove {
+			t.Fatal("HandOff left needsReprove set")
+		}
+	})
 }
 
 // K053: one failed target read at a rollback that may follow a write is

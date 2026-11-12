@@ -643,12 +643,9 @@ func TestTailDrainRowOfAnotherSizeDoesNotHoldAFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(filepath.Join(sim.dir, "mysql-bin.000001"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if old := m.Files[0]; old.Name != "mysql-bin.000001" || old.PreviousGTIDs != "" || old.Size == info.Size() {
-		t.Fatalf("the old incarnation's row %+v must differ from the new file (%d bytes) in size only", old, info.Size())
+	size, _ := sim.plain("mysql-bin.000001")
+	if old := m.Files[0]; old.Name != "mysql-bin.000001" || old.PreviousGTIDs != "" || old.Size == size {
+		t.Fatalf("the old incarnation's row %+v must differ from the new file (%d bytes) in size only", old, size)
 	}
 	// A new process: nothing but the manifest and the files.
 	b := tailArchiver(sim, store)
@@ -677,18 +674,10 @@ func TestTailDrainQuarantinedRowHoldsItsFile(t *testing.T) {
 	at := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 	var quarantined []ArchiveQuarantine
 	for name, previous := range map[string]string{"mysql-bin.000001": "", "mysql-bin.000002": tailA + ":1-3"} {
-		path := filepath.Join(sim.dir, name)
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		digest, err := fileContentID(path)
-		if err != nil {
-			t.Fatal(err)
-		}
+		size, digest := sim.plain(name)
 		id := store.BinlogContentID(digest)
 		quarantined = append(quarantined, ArchiveQuarantine{Reason: "test", ResumeGTIDs: tailA + ":1-5", At: at,
-			Entry: ManifestEntry{Name: name, ID: id, Size: info.Size(), PreviousGTIDs: previous, ArchivedAt: at,
+			Entry: ManifestEntry{Name: name, ID: id, Size: size, PreviousGTIDs: previous, ArchivedAt: at,
 				GTIDCoverage: &BinlogGTIDCoverage{Complete: true, ContentID: id}}})
 	}
 	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad", Quarantined: quarantined}); err != nil {

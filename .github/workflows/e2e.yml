@@ -65,9 +65,9 @@ jobs:
       # healthy, 52 holds the primary down mid-rotation, 51 rebuilds the
       # replica datadir. Together they are the minimum set from
       # .tmp/chaos-plan-v1.0.md plus the #160 regression.
-      scenario: 48-keyring-seal-and-rotation,50-encrypted-pod-replace,52-rotation-promotion-refused,51-encrypted-reclone
+      scenario: 48-keyring-seal-and-rotation,50-encrypted-pod-replace,72-pitr-encrypted-binlog,52-rotation-promotion-refused,51-encrypted-reclone
       enable-encryption: true
-      # Four scenarios on one cluster; 51 and 52 each budget 20m.
+      # Five scenarios on one cluster; 51 and 52 each budget 20m, 72 24m.
       timeout-minutes: 180
       images-artifact: e2e-images
 

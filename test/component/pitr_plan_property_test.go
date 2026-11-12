@@ -17,8 +17,10 @@ package component
 //     it never includes a transaction lost at a failover unless excluded,
 //     and the model's loss evidence is excluded and reported;
 //   - when it refuses, the model justifies the token: TargetNotCovered only
-//     without a model witness, DivergentHistory only when the model's D (or
-//     loss evidence) is not excluded, StopAmbiguous only for a witness
+//     without a model witness, DivergentHistory only when the model's D is
+//     not excluded (timestamp mode) or a transaction that was lost at a
+//     failover is archived and not excluded (latest mode: what the trial
+//     did, not a copy of the planner's rule), StopAmbiguous only for a witness
 //     archived only as a replica copy that no promotion record or origin
 //     transaction anchors, ArchiveGap only when the model's history is not
 //     fully archived from the backup's position, and so on.
@@ -34,6 +36,17 @@ package component
 // origin had, and the transaction that was lost is not one of them at any
 // target after the loss. The model does not predict which refusal such a
 // trial gets.
+//
+// A read-only replica sometimes originates a transaction of its own (an
+// errant transaction: FLUSH PRIVILEGES and its like consume a GTID under
+// super_read_only), with copies of the primary's transactions still to
+// apply. Nothing is lost by it. When that site is promoted later, the
+// transaction is history and the old primary replicates it, after
+// transactions the new primary applied after it. When the site is not
+// promoted again, the transaction is on no other server; it is archived
+// only when it lands in the file that holds the site's last transactions
+// as a primary, and is then a branch of its own. Latest mode must not read
+// such a transaction as a sign that others were lost (it once did).
 //
 // Promotions are the operator's (#229, #269): the new primary drains its
 // relay log, rotates its binlog (most of the time; the rotation may not be
@@ -54,8 +67,13 @@ package component
 // same trials with the anchor on, so that the rule keeps its property
 // coverage until it is enabled.
 //
-// PITR_PLAN_SEED=<n> replays one trial; PITR_PLAN_SEEDS=<n> runs seeds 1..n
-// of TestPITRPlanProperty, PITR_PLAN_CONTAINMENT_SEEDS=<n> those of
+// Every seed is one trial without errant transactions; every second seed
+// is also run as a trial with them ("<seed>e"), so the trials without are
+// the ones the sweep has always run.
+//
+// PITR_PLAN_SEED=<n> replays one trial (PITR_PLAN_SEED=<n>e the one with
+// errant transactions); PITR_PLAN_SEEDS=<n> runs seeds 1..n of
+// TestPITRPlanProperty, PITR_PLAN_CONTAINMENT_SEEDS=<n> those of
 // TestPITRPlanPropertyContainmentAnchors.
 
 import (
@@ -199,6 +217,21 @@ type propTrial struct {
 	// inverted: a promoted server applied copies after its first own
 	// commit, so its log and the old primary's order them differently.
 	inverted bool
+	// errants are the transactions a read-only replica originated;
+	// pending are those of a site that the other site has yet to receive
+	// (it replicates them once their site is promoted). reordered: a site
+	// with such a transaction was promoted after applying copies behind
+	// it, so the old primary, which gets the transaction last, orders
+	// them differently.
+	errants         pitrplan.Set
+	pending         map[string][]binlogtest.Txn
+	reordered       bool
+	errantsPromoted int
+	// behind: site originated a pending transaction while copies were
+	// queued for it, and its binlog rotated before it applied them.
+	// behindPromoted: such a site was promoted (review R3 finding A1).
+	behind         map[string]bool
+	behindPromoted bool
 }
 
 // mutedStore is one site's view of the archive store. Once muted, the
@@ -247,7 +280,7 @@ type propPromotion struct {
 // propPromoted is one promotion as the model saw it.
 type propPromoted struct {
 	site   string
-	record int // index of its promotion record in the site's manifest
+	record int // which of the site's promotion records is its record (0: the first)
 	rotate bool
 	// set is what the server had executed when it became writable.
 	set pitrplan.Set
@@ -260,7 +293,8 @@ func newPropTrial(t *testing.T, confirmDelay time.Duration) *propTrial {
 	p := &propTrial{w: newWriterArchive(t), srv: map[string]*simServer{}, arch: map[string]*sidecar.BinlogArchiver{}, stop: map[string]func(){}, store: map[string]*mutedStore{},
 		model: &propModel{log: map[string][]propCommit{}, past: map[string][][]propCommit{}, oct: map[pitrplan.GTID]int64{}, origin: map[pitrplan.GTID]string{}},
 		uuid:  map[string]string{"a": writerUUIDA, "b": writerUUIDB}, id: map[string]uint32{"a": 101, "b": 102},
-		records: map[string]int{"a": 1, "b": 0}, queue: map[string][]binlogtest.Txn{"b": {}}, dead: pitrplan.Set{}, lostTail: pitrplan.Set{}}
+		records: map[string]int{"a": 1, "b": 0}, queue: map[string][]binlogtest.Txn{"b": {}}, dead: pitrplan.Set{}, lostTail: pitrplan.Set{},
+		errants: pitrplan.Set{}, pending: map[string][]binlogtest.Txn{}, behind: map[string]bool{}}
 	p.w.confirmDelay = confirmDelay
 	p.srv["a"] = newSimServer(t, writerUUIDA, 101, false)
 	p.srv["b"] = newSimServer(t, writerUUIDB, 102, true)
@@ -306,6 +340,31 @@ func (p *propTrial) newCommit(primary string) binlogtest.Txn {
 	return txn
 }
 
+// errant has the read-only replica site originate a transaction of its
+// own, which only it executes. Copies queued for it are applied later, so
+// it may write while it has yet to apply transactions the primary
+// committed long before.
+func (p *propTrial) errant(site string) binlogtest.Txn {
+	gno := int64(1)
+	for _, log := range p.model.logs(site) {
+		for _, c := range log {
+			if c.g.SID == p.uuid[site] && c.g.GNO >= gno {
+				gno = c.g.GNO + 1
+			}
+		}
+	}
+	at := p.model.tick()
+	txn := binlogtest.Txn{SID: p.uuid[site], GNO: gno, Commit: at, ServerID: p.id[site]}
+	g := pitrplan.GTID{SID: txn.SID, GNO: gno}
+	p.srv[site].apply(txn)
+	p.model.log[site] = append(p.model.log[site], propCommit{g, at.UnixMicro()})
+	p.model.oct[g] = at.UnixMicro()
+	p.model.origin[g] = site
+	p.errants = p.errants.Union(pitrplan.SetOf(g))
+	p.pending[site] = append(p.pending[site], txn)
+	return txn
+}
+
 // crash is the old primary's part of a failover in which it does not step
 // down: it crashes, loses its last lose transactions and restarts
 // read-only without them, with its sidecar when restart. Its log before
@@ -340,7 +399,22 @@ func (p *propTrial) crash(site string, lose int, restart bool) {
 			return true
 		})
 	}
-	p.records[site] = len(p.w.manifest(site).Promotions)
+	p.records[site] = len(p.promotionRecords(site))
+}
+
+// promotionRecords are the indices of site's promotion records in its
+// manifest. The model counts those only: a record of another kind (the
+// reset record of a server that lost transactions) is written by the role
+// probe when it next runs, which under load can be after the scans crash
+// waits for, and must not be taken for the next promotion's record.
+func (p *propTrial) promotionRecords(site string) []int {
+	var out []int
+	for i, rec := range p.w.manifest(site).Promotions {
+		if rec.Kind == pitrarchive.RecordPromotion {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // everExecuted is everything site has executed in the model, in any of its
@@ -477,7 +551,22 @@ func (p *propTrial) failover(primary, replica string, drop int, archiveTail bool
 		// The old primary is down for good: no further copies.
 		p.queue[primary] = nil
 	} else {
-		p.queue[primary] = []binlogtest.Txn{}
+		// It replicates from the new primary, starting with the
+		// transactions that site originated as a replica.
+		p.queue[primary] = append([]binlogtest.Txn{}, p.pending[replica]...)
+	}
+	if len(p.pending[replica]) > 0 {
+		p.errantsPromoted += len(p.pending[replica])
+		p.behindPromoted = p.behindPromoted || p.behind[replica]
+		p.behind[replica] = false
+		first := pitrplan.GTID{SID: p.pending[replica][0].SID, GNO: p.pending[replica][0].GNO}
+		log := p.model.log[replica]
+		if len(drained) > 0 || log[len(log)-1].g != first || len(p.pending[replica]) > 1 {
+			// Something follows the site's first errant transaction in
+			// its log that precedes it on the old primary.
+			p.reordered = true
+		}
+		p.pending[replica] = nil
 	}
 	p.copied(replica, drained)
 	p.promoted = append(p.promoted, propPromoted{site: replica, record: p.records[replica], rotate: how.rotate, set: p.executed(replica)})
@@ -499,7 +588,9 @@ func (p *propTrial) failover(primary, replica string, drop int, archiveTail bool
 		p.targets = append(p.targets, txn.Commit.Add(-time.Microsecond))
 	}
 	p.records[replica]++
-	p.w.waitRecords(replica, p.records[replica])
+	p.w.eventually(fmt.Sprintf("promotion record %d of %s", p.records[replica], replica), func() bool {
+		return len(p.promotionRecords(replica)) >= p.records[replica]
+	})
 	p.waitUploaded(replica)
 	recs := p.w.manifest(replica).Promotions
 	return recs[len(recs)-1].ObservedAt
@@ -524,12 +615,21 @@ type propStats struct {
 	// the plans certified in a crashed trial.
 	crashed, reissued bool
 	crashedPlanned    int
+	// errantPromoted: a site was promoted holding a transaction it had
+	// originated as a read-only replica. errantLatest: certified latest
+	// plans whose history holds such a transaction.
+	// behindLatest: those of a trial in which that site had originated it
+	// while it had copies to apply, its binlog rotating in between.
+	errantPromoted bool
+	errantLatest   int
+	behindLatest   int
 }
 
 // runPropTrial runs one trial. containment says whether the planner's
 // containment anchor is on (the caller turned it on): the oracle then
-// expects the lag window to plan, and otherwise to refuse.
-func runPropTrial(t *testing.T, seed int64, containment bool) (st propStats) {
+// expects the lag window to plan, and otherwise to refuse. errant: in this
+// trial read-only replicas originate transactions of their own.
+func runPropTrial(t *testing.T, seed int64, containment, errant bool) (st propStats) {
 	r := rand.New(rand.NewSource(seed))
 	p := newPropTrial(t, propConfirmDelay)
 	primary, replica := "a", "b"
@@ -556,6 +656,24 @@ func runPropTrial(t *testing.T, seed int64, containment bool) (st propStats) {
 			}
 			if r.Intn(4) == 0 && p.queue[replica] != nil {
 				p.drain(replica, 0)
+			}
+			// The replica originates a transaction, often with copies
+			// still queued (it lags), sometimes followed by a rotation of
+			// its binlog; a pause now and then puts more than the probe
+			// interval between it and what follows.
+			if errant && r.Intn(4) == 0 && p.queue[replica] != nil && commits > backupAt {
+				lagging := len(p.queue[replica]) > 0
+				txn := p.errant(replica)
+				if r.Intn(2) == 0 {
+					p.targets = append(p.targets, txn.Commit.Add(-time.Microsecond))
+				}
+				if r.Intn(3) != 0 {
+					p.srv[replica].rotate()
+					p.behind[replica] = p.behind[replica] || lagging
+				}
+				if r.Intn(3) == 0 {
+					time.Sleep(15 * time.Millisecond)
+				}
 			}
 			if era == 0 && commits == backupAt {
 				p.takeBackup(backupSite)
@@ -615,20 +733,31 @@ func runPropTrial(t *testing.T, seed int64, containment bool) (st propStats) {
 	p.targets = append(p.targets, time.Now().UTC().Add(time.Hour))
 	o := newPropOracle(t, p, time.Microsecond)
 	o.containment = containment
-	t.Logf("seed %d: %d eras, backup on %s, lossy=%v (lost %s), inverted=%v, crashed=%v (lost tail %s, issued again: %v), archived %s",
-		seed, eras, backupSite, p.lossy, p.dead, p.inverted, p.crashed, p.lostTail, p.reissued, o.archived)
+	t.Logf("seed %d: %d eras, backup on %s, lossy=%v (lost %s), inverted=%v, crashed=%v (lost tail %s, issued again: %v), errant %s (%d promoted with their site, reordered=%v), archived %s",
+		seed, eras, backupSite, p.lossy, p.dead, p.inverted, p.crashed, p.lostTail, p.reissued, p.errants, p.errantsPromoted, p.reordered, o.archived)
 	if os.Getenv("PITR_PLAN_SEED") != "" {
 		o.describe()
 	}
-	o.checkRecords(fmt.Sprintf("seed %d", seed))
-	res := o.run(fmt.Sprintf("seed %d", seed))
+	label := fmt.Sprintf("seed %d", seed)
+	if errant {
+		label += "e"
+	}
+	o.checkRecords(label)
+	res := o.run(label)
 	st.crashed, st.reissued = p.crashed, p.reissued
+	st.errantPromoted = p.errantsPromoted > 0
 	for _, r := range res {
 		if r.err != nil {
 			st.refused++
 			continue
 		}
 		st.planned++
+		if r.mode == pitrplan.ModeLatest && r.plan.Lineage.Overlaps(p.errants) {
+			st.errantLatest++
+			if p.behindPromoted {
+				st.behindLatest++
+			}
+		}
 		if o.byContainment(r.plan) {
 			if !containment {
 				t.Fatalf("seed %d: the shipped planner certified T=%s X=%s through a promotion record that holds the witness or was observed within δ of it: %+v",
@@ -993,7 +1122,10 @@ func (o *propOracle) checkRecords(label string) {
 				gro := pitrplan.MustParseSet(rec.ReadOnlyGTIDExecuted)
 				before := pitrplan.Set{}
 				for _, c := range p.model.log[sm.Site] {
-					if c.g.SID == uuid && !gro.Has(c.g) {
+					// The episode's first own transaction; one the server
+					// originated as a replica, perhaps after its sidecar's
+					// last read-only probe, is not of the episode.
+					if c.g.SID == uuid && !gro.Has(c.g) && !p.errants.Has(c.g) {
 						break
 					}
 					before = before.Union(pitrplan.SetOf(c.g))
@@ -1016,19 +1148,25 @@ func (o *propOracle) checkRecords(label string) {
 		}
 	}
 	for _, pr := range p.promoted {
-		recs := o.promotions(pr.site)
+		var recs []pitrarchive.PromotionRecord
+		var at []int
+		for i, rec := range o.promotions(pr.site) {
+			if rec.Kind == pitrarchive.RecordPromotion {
+				recs, at = append(recs, rec), append(at, i)
+			}
+		}
 		if pr.record >= len(recs) {
-			t.Fatalf("%s: %s has %d records, the model promoted it %d times", label, pr.site, len(recs), pr.record+1)
+			t.Fatalf("%s: %s has %d promotion records, the model promoted it %d times", label, pr.site, len(recs), pr.record+1)
 		}
 		rec := recs[pr.record]
 		// An empty promotion set is recorded as none: without the
 		// rotation it is the read-only observation, which is empty for a
 		// server that had executed nothing when it was last probed.
 		if rec.PromotionGTIDExecuted == "" && ((pr.rotate && !pr.set.IsEmpty()) || rec.ReadOnlyGTIDExecuted != "") {
-			t.Fatalf("%s: %s#%d, a promotion after a read-only period, carries no promotion set: %+v", label, pr.site, pr.record, rec)
+			t.Fatalf("%s: %s#%d, a promotion after a read-only period, carries no promotion set: %+v", label, pr.site, at[pr.record], rec)
 		}
 		if got := pitrplan.MustParseSet(rec.PromotionGTIDExecuted); pr.rotate && !got.Equal(pr.set) {
-			t.Fatalf("%s: %s#%d was promoted with the rotation at %s, its promotion set is %s", label, pr.site, pr.record, pr.set, got)
+			t.Fatalf("%s: %s#%d was promoted with the rotation at %s, its promotion set is %s", label, pr.site, at[pr.record], pr.set, got)
 		}
 	}
 }
@@ -1084,6 +1222,45 @@ func (o *propOracle) modelLostIn(X pitrplan.Set, rows map[pitrplan.RowRef]pitrpl
 	return lost.Subtract(X)
 }
 
+// lossReport is what a certified latest plan must report as lost
+// (coverage.json's lost list), computed from every archived copy, read or
+// not: the excluded transactions of lineage that a promotion record of
+// another site lacks although they were committed more than δ before it
+// was observed. It compares copies, a GTID with its commit time, so it also
+// holds for a GTID that was issued twice. The plan's report must not depend
+// on which files the replay needed: a file holding only excluded
+// transactions is not downloaded, and its lost transactions are reported
+// all the same.
+func (o *propOracle) lossReport(X, lineage pitrplan.Set) pitrplan.Set {
+	d := o.delta.Microseconds()
+	type point struct {
+		site  string
+		have  pitrplan.Set
+		bound int64
+	}
+	var points []point
+	for _, sm := range o.arch.Sites {
+		for _, rec := range sm.Promotions {
+			if rec.Kind == pitrarchive.RecordPromotion {
+				points = append(points, point{sm.Site, pitrplan.MustParseSet(rec.GTIDExecuted), rec.ObservedAt.UnixMicro() - d})
+			}
+		}
+	}
+	lost := pitrplan.Set{}
+	for _, c := range o.copies {
+		if !X.Has(c.g) || !lineage.Has(c.g) {
+			continue
+		}
+		for _, pt := range points {
+			if pt.site != c.row.Site && c.oct < pt.bound && !pt.have.Has(c.g) {
+				lost = lost.Union(pitrplan.SetOf(c.g))
+				break
+			}
+		}
+	}
+	return lost
+}
+
 // run plans every target (and latest mode) with X = ∅ and, when the loss
 // is excludable, X = the lost transactions, checking each answer against
 // the model.
@@ -1133,19 +1310,27 @@ func (o *propOracle) run(label string) []propResult {
 }
 
 // refusal fails the test unless err is a refusal whose token justified
-// allows.
-func (o *propOracle) refusal(what string, err error, justified map[pitrarchive.Token]bool) {
+// allows. lossStrict (latest mode) names what no trial excuses: the answer
+// that transactions were lost, or that the archive holds two branches,
+// when the trial lost nothing that is archived.
+func (o *propOracle) refusal(what string, err error, justified map[pitrarchive.Token]bool, lossStrict bool) {
 	ref, ok := pitrplan.RefusalOf(err)
 	if !ok {
 		o.t.Fatalf("%s: non-refusal error %v", what, err)
 	}
-	if o.p.inverted {
+	if lossStrict && !justified[ref.Token] && (ref.Token == pitrarchive.TokenArchiveDivergentHistory || ref.Token == pitrarchive.TokenArchiveSplitBrain) {
+		o.t.Fatalf("%s: refused as lost or split although no lost transaction is archived and unexcluded (lost %s, errant %s): %v", what, o.p.dead, o.p.errants, err)
+	}
+	if o.p.inverted || o.p.reordered {
 		// A promoted server that applied copies after its first own commit
 		// ordered them differently than the old primary did. The two
 		// sites' binlogs then disagree, and the planner may refuse for any
 		// of the reasons that follows from (an order inversion, a backup
 		// whose state no archived order passes through, a transaction
-		// committed before the witness outside its history). The model
+		// committed before the witness outside its history). The same
+		// holds once a site was promoted with a transaction it had
+		// originated as a replica, which the old primary applies after
+		// transactions the new primary applied behind it. The model
 		// does not predict which; every certified plan is still checked.
 		return
 	}
@@ -1206,6 +1391,11 @@ func (o *propOracle) checkCrashed(what string, mode pitrplan.Mode, T time.Time, 
 			t.Fatalf("%s: latest Λ %s is not a server state, or holds lost %s", what, plan.Lineage, p.dead)
 		}
 	}
+	if mode == pitrplan.ModeLatest {
+		if want := o.lossReport(X, plan.Lineage); !plan.Lost.Equal(want) {
+			t.Fatalf("%s: reported loss evidence %s; every archived copy gives %s", what, plan.Lost, want)
+		}
+	}
 	applied := o.checkSegments(what, X, plan)
 	var why []string
 	for _, h := range histories {
@@ -1259,7 +1449,7 @@ func (o *propOracle) checkTimestamp(what string, T time.Time, X pitrplan.Set, pl
 		if err == nil {
 			t.Fatalf("%s: certified %+v, but the model has no witness", what, plan.Witness)
 		}
-		o.refusal(what, err, justified)
+		o.refusal(what, err, justified, false)
 		return
 	}
 	lambda, ok := m.executedBefore(m.origin[w], w)
@@ -1275,13 +1465,21 @@ func (o *propOracle) checkTimestamp(what string, T time.Time, X pitrplan.Set, pl
 	}
 	if !X.Contains(refD) {
 		justified[pitrarchive.TokenArchiveDivergentHistory] = true
+		// A transaction a replica originated before the target, behind
+		// which its site applied the witness, is the planner's "member of
+		// D on top of the witness", and so is the primary's transaction
+		// that a replica applied behind a witness it originated itself:
+		// the planner names the target as ambiguous.
+		if refD.Subtract(X).Overlaps(o.p.errants) || o.p.errants.Has(w) {
+			justified[pitrarchive.TokenStopAmbiguous] = true
+		}
 	} else if !o.bPositioned() || !o.archived.Union(o.B).Contains(lambda.Subtract(X)) {
 		// The gap search runs after the D window, so it cannot answer for
 		// an unexcluded D.
 		justified[pitrarchive.TokenArchiveGap] = true
 	}
 	if err != nil {
-		o.refusal(what, err, justified)
+		o.refusal(what, err, justified, false)
 		return
 	}
 	if plan.Witness == nil || plan.Witness.GTID != w {
@@ -1303,12 +1501,35 @@ func (o *propOracle) checkLatest(what string, X pitrplan.Set, plan *pitrplan.Pla
 		return
 	}
 	justified := map[pitrarchive.Token]bool{}
+	// The ground truth of a loss: a transaction the trial lost at a
+	// failover (p.dead: the new primary never received it) is archived and
+	// not excluded. The planner's own evidence rule is not consulted to
+	// justify a refusal: a rule that flags transactions nobody lost would
+	// justify itself.
 	lostArchived := p.dead.Intersect(o.archived).Subtract(X)
-	lost := o.modelLost(X)
-	if !lostArchived.IsEmpty() || !lost.IsEmpty() {
+	// A transaction a replica originated can be archived before the
+	// transactions its site applied after it: in the file that held the
+	// site's last transactions as a primary (which the read-only site
+	// archives), or in the files a promotion seals while the site's later
+	// copies sit in a file that is not archived yet. Whether its site was
+	// promoted or not, the archive then holds it in no state that also
+	// holds the other site's archived transactions: two branches, as far
+	// as the archive goes. That is read from the archived rows' own
+	// content, not from a rule about losses.
+	errantSplit := false
+	if all := o.archived.Subtract(X); all.Overlaps(p.errants) {
+		errantSplit = true
+		for _, row := range o.rows {
+			if row.Hints.Previous.Union(row.Hints.GTIDs).Contains(all) {
+				errantSplit = false
+			}
+		}
+	}
+	if !lostArchived.IsEmpty() || errantSplit {
 		justified[pitrarchive.TokenArchiveDivergentHistory] = true
 		justified[pitrarchive.TokenArchiveSplitBrain] = true
 	}
+	lost := o.modelLost(X)
 	if p.dead.Overlaps(o.B) {
 		justified[pitrarchive.TokenBackupNotOnLineage] = true
 	}
@@ -1329,32 +1550,29 @@ func (o *propOracle) checkLatest(what string, X pitrplan.Set, plan *pitrplan.Pla
 		justified[pitrarchive.TokenArchiveGap] = true
 	}
 	if err != nil {
-		o.refusal(what, err, justified)
+		o.refusal(what, err, justified, true)
 		return
 	}
 	if !p.model.heldState(plan.Lineage) || plan.Lineage.Subtract(X).Overlaps(p.dead) {
 		t.Fatalf("%s: latest Λ %s is not a server state, or holds lost %s", what, plan.Lineage, p.dead)
 	}
 	// Loss evidence is about the head's own transactions: a record
-	// proves lost the members of Λ it lacks.
+	// proves lost the members of Λ it lacks. What the records flag was
+	// lost in the trial.
 	if l := lost.Intersect(plan.Lineage); !l.IsEmpty() {
 		t.Fatalf("%s: certified Λ %s although the model's loss evidence %s is not excluded", what, plan.Lineage, l)
 	}
-	// The planner reports the loss evidence it read (lossEvidence: a
-	// downloaded occurrence). A file that holds only excluded transactions
-	// is not downloaded, so the report holds every lost transaction of the
-	// head with a copy in a downloaded file, and nothing that was not lost.
-	o.mu.Lock()
-	read := map[pitrplan.RowRef]pitrplan.Row{}
-	for ref := range o.fetched {
-		if row, ok := o.rows[ref]; ok {
-			read[ref] = row
-		}
-	}
-	o.mu.Unlock()
+	// The planner reports every lost transaction of the head, whichever
+	// files it downloaded: a file that holds only excluded transactions is
+	// not needed for the replay, and its lost transactions are reported all
+	// the same (coverage.json's lost list once held only those with a copy
+	// in a downloaded file: lost B:2-5 was reported as B:2,B:5).
 	all := o.modelLost(pitrplan.Set{}).Intersect(plan.Lineage)
-	if want := o.modelLostIn(pitrplan.Set{}, read).Intersect(plan.Lineage); !plan.Lost.Contains(want) || !all.Contains(plan.Lost) || !p.dead.Contains(plan.Lost) {
-		t.Fatalf("%s: reported loss evidence %s; the model's is %s (%s in the downloaded files), the lost transactions %s", what, plan.Lost, all, want, p.dead)
+	if !plan.Lost.Equal(all) || !p.dead.Contains(plan.Lost) || !X.Contains(plan.Lost) {
+		t.Fatalf("%s: reported loss evidence %s; the model's is %s, the lost transactions %s", what, plan.Lost, all, p.dead)
+	}
+	if want := o.lossReport(X, plan.Lineage); !plan.Lost.Equal(want) {
+		t.Fatalf("%s: reported loss evidence %s; every archived copy gives %s", what, plan.Lost, want)
 	}
 	o.checkSegments(what, X, plan)
 }
@@ -1455,13 +1673,19 @@ func TestPITRPlanPropertyContainmentAnchors(t *testing.T) {
 // propSweep runs seeds 1..n (n from the environment variable seedsEnv, else
 // defaultSeeds), or the one seed of PITR_PLAN_SEED.
 func propSweep(t *testing.T, containment bool, defaultSeeds int64, seedsEnv string) {
+	type trial struct {
+		seed   int64
+		errant bool
+	}
+	trials := []trial{}
 	seeds := []int64{}
 	if v := os.Getenv("PITR_PLAN_SEED"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
+		n, err := strconv.ParseInt(strings.TrimSuffix(v, "e"), 10, 64)
 		if err != nil {
 			t.Fatal(err)
 		}
 		seeds = append(seeds, n)
+		trials = append(trials, trial{n, strings.HasSuffix(v, "e")})
 	} else {
 		last := defaultSeeds
 		if v := os.Getenv(seedsEnv); v != "" {
@@ -1473,13 +1697,22 @@ func propSweep(t *testing.T, containment bool, defaultSeeds int64, seedsEnv stri
 		}
 		for s := int64(1); s <= last; s++ {
 			seeds = append(seeds, s)
+			trials = append(trials, trial{s, false})
+			if s%2 == 0 {
+				trials = append(trials, trial{s, true})
+			}
 		}
 	}
 	planned, refused, contained := 0, 0, 0
 	crashed, reissued, crashedPlanned := 0, 0, 0
-	for _, seed := range seeds {
-		t.Run(strconv.FormatInt(seed, 10), func(t *testing.T) {
-			st := runPropTrial(t, seed, containment)
+	errantPromoted, errantLatest, behindLatest := 0, 0, 0
+	for _, tr := range trials {
+		name := strconv.FormatInt(tr.seed, 10)
+		if tr.errant {
+			name += "e"
+		}
+		t.Run(name, func(t *testing.T) {
+			st := runPropTrial(t, tr.seed, containment, tr.errant)
 			planned += st.planned
 			refused += st.refused
 			contained += st.contained
@@ -1490,10 +1723,15 @@ func propSweep(t *testing.T, containment bool, defaultSeeds int64, seedsEnv stri
 			if st.reissued {
 				reissued++
 			}
+			if st.errantPromoted {
+				errantPromoted++
+			}
+			errantLatest += st.errantLatest
+			behindLatest += st.behindLatest
 		})
 	}
-	t.Logf("containment anchors on: %v. %d certified plans (%d through a containment anchor), %d refusals over %d trials; an old primary lost its tail and rejoined in %d trials (%d certified plans), and issued a lost GTID again in %d",
-		containment, planned, contained, refused, len(seeds), crashed, crashedPlanned, reissued)
+	t.Logf("containment anchors on: %v. %d certified plans (%d through a containment anchor), %d refusals over %d trials; an old primary lost its tail and rejoined in %d trials (%d certified plans), and issued a lost GTID again in %d; a site was promoted with a transaction it originated as a replica in %d trials (%d certified latest plans hold one, %d of them after the site wrote it while behind)",
+		containment, planned, contained, refused, len(trials), crashed, crashedPlanned, reissued, errantPromoted, errantLatest, behindLatest)
 	if len(seeds) > 1 && planned < len(seeds) {
 		t.Errorf("the sweep certified only %d plans; the generator is not exercising the planner", planned)
 	}
@@ -1502,6 +1740,9 @@ func propSweep(t *testing.T, containment bool, defaultSeeds int64, seedsEnv stri
 	}
 	if len(seeds) >= 30 && (reissued == 0 || crashedPlanned == 0) {
 		t.Errorf("an old primary lost its tail in %d trials and issued a lost GTID again in %d, with %d certified plans; the generator is not exercising a rejoin after a loss", crashed, reissued, crashedPlanned)
+	}
+	if len(seeds) >= 30 && (errantPromoted == 0 || errantLatest == 0 || behindLatest == 0) {
+		t.Errorf("a site was promoted with a transaction it originated as a replica in %d trials, and %d certified latest plans hold one (%d written while the site was behind); the generator is not exercising errant transactions", errantPromoted, errantLatest, behindLatest)
 	}
 }
 

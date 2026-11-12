@@ -59,8 +59,8 @@ func ClassifySiteRole(info ReplicationInfo, reachable bool, mySite, expectedActi
 	}
 }
 
-// CandidateSyncReady reports whether a target replica is safe to promote
-// during planned switchover.
+// CandidateSyncReady reports whether a replica's own INFO answers allow
+// promoting it in a planned switchover or a rollout.
 //
 // Readiness requires:
 //   - master link is up
@@ -68,21 +68,23 @@ func ClassifySiteRole(info ReplicationInfo, reachable bool, mySite, expectedActi
 //     (master_last_io_seconds_ago != -1)
 //   - no full-sync transfer in progress
 //   - replica is not loading from disk
-//   - replica's applied offset has reached or exceeded the source's
-//     captured offset
 //
 // The persistence argument may be the zero value if the caller did not
 // fetch INFO persistence; in that case the loading check is skipped.
 //
-// sourceOffset is typically the master_repl_offset captured on the source
-// after Bloodraven set super_read_only and stopped accepting writes.
+// These are the replica's statements about its link, and none of them
+// says how far behind it is: a replica cut off from its master without a
+// TCP reset keeps reporting link up, last I/O 0 seconds ago and no sync in
+// progress (seen for more than ten seconds on v1.38 and v2.1). Whether it
+// has caught up is a separate question, answered by comparing replication
+// positions (Position.ReachedBy).
 //
 // The MasterLastIOSecondsAgo gate is load-bearing: Dragonfly reports
 // link_status=up the moment the TCP handshake completes, before any
 // replication payload has been transferred. A "never-synced" replica
 // reaching this function would otherwise pass the gate and be promoted
 // as an empty master, silently losing every cached value.
-func CandidateSyncReady(info ReplicationInfo, persistence PersistenceInfo, sourceOffset int64) bool {
+func CandidateSyncReady(info ReplicationInfo, persistence PersistenceInfo) bool {
 	if info.MasterLinkStatus != "up" {
 		return false
 	}
@@ -93,9 +95,6 @@ func CandidateSyncReady(info ReplicationInfo, persistence PersistenceInfo, sourc
 		return false
 	}
 	if persistence.Loading {
-		return false
-	}
-	if info.SlaveReplOffset < sourceOffset {
 		return false
 	}
 	return true

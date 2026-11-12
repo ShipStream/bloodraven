@@ -27,7 +27,11 @@ type Plan struct {
 	PostStop            Set // Q
 	Divergent           Set // D (⊆ X on success; the set to exclude on a DivergentHistory refusal)
 	OnHistoryExclusions Set // D-48
-	Lost                Set // latest-mode loss evidence (⊆ X on success)
+	Lost                Set // latest-mode loss evidence (⊆ X on success), whichever rows were downloaded
+	// LostUnread are the rows the loss report could not read (lossReport):
+	// Lost may lack excluded transactions whose only copies are in them.
+	// Nothing in the plan depends on it; pitr-download logs it.
+	LostUnread []LostUnread
 
 	// BackupNewestCommit is maxOct(B) in µs; 0 means −∞ (no archived
 	// member of B was read). BackupFrontierProven is false when it is only
@@ -42,7 +46,8 @@ type Plan struct {
 	Files    []PlanFile
 	Segments []Segment
 
-	// Downloaded counts rows fetched (each at most once).
+	// Downloaded counts rows fetched (each at most once), and the rows read
+	// only for the loss report (lossReport).
 	Downloaded          int
 	IndexedTransactions int64
 	Sites               []string
@@ -270,6 +275,9 @@ type planner struct {
 	lambda Set
 	// replayKnown is set once plan.Replay (P) is final.
 	replayKnown bool
+	// reportLoss: the plan is latest mode's, whose loss report is completed
+	// once the plan stands (lossReport).
+	reportLoss bool
 
 	plan *Plan
 }
@@ -873,6 +881,12 @@ func (p *planner) searchAndFinish(outcome Outcome) error {
 	}
 	if err := p.fillSegments(res); err != nil {
 		return err
+	}
+	if p.reportLoss {
+		// The plan stands: nothing read from here on can change it.
+		if err := p.lossReport(); err != nil {
+			return err
+		}
 	}
 	pl.Outcome = outcome
 	for _, rule := range p.req.Rules {

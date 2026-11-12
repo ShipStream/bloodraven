@@ -185,9 +185,15 @@ func TestWitnessLostTailReissued(t *testing.T) {
 // and so that nobody takes it for closed.
 //
 // A server_uuid issues a GTID twice when its server loses transactions its
-// replica already holds, rejoins by replication (the operator reclones only
-// a diverged old primary, and this one holds a subset) and is promoted
-// again: lostTailReissued. The archive holds only the first, lost issue of
+// replica already holds and is made writable again without a clone:
+// lostTailReissued. The operator reclones such a server when a site it can
+// read holds the lost transactions, so this history now needs one of the
+// cases it cannot see (site docs, failover, "What this cannot see"): the
+// server rejoined by replication under an operator from before that check
+// and was promoted before the replica audit compared it, it was made
+// writable while no site that holds the lost transactions answered
+// (reassertedInPlace, witness_residual_test.go), or the GTIDs were issued
+// again before the upgrade. The archive holds only the first, lost issue of
 // A:51-52, on the replica. A target that the promotion record of the
 // reissuing episode anchors by time is certified when nothing dates that
 // episode: its record carries no promotion set (a sidecar from before issue
@@ -197,10 +203,14 @@ func TestWitnessLostTailReissued(t *testing.T) {
 // carries a promotion set the same targets refuse
 // (TestWitnessLostTailReissued, TestWitnessLostTailReissuedInAnEarlierEpisode).
 //
-// What closes it is in the operator, not here: an old primary that lacks
-// transactions of its own server_uuid that the new primary holds must be
-// recloned, not rejoined by replication (site docs, known limitations,
-// "GTIDs issued twice").
+// The operator's reclone of a returning site that lacks its own
+// transactions narrows this to those cases; it does not close it, and
+// nothing in the archive tells them apart. Closing it here needs the
+// planner to refuse a time anchor while a record of the witness's
+// server_uuid carries no promotion set between the oldest transaction the
+// plan relies on under that server_uuid and the witness, which refuses
+// every such target of an archive written before promotion sets (site
+// docs, known limitations, "GTIDs issued twice").
 func TestKnownLimitationTimeAnchorCertifiesReissuedGTID(t *testing.T) {
 	eitherWay(t, func(t *testing.T) {
 		// The record of the reissuing episode is the anchor.

@@ -137,8 +137,9 @@ func s15ObserveSidecarRestart() runner.Step {
 // s15SettlePostRestart waits past the operator's failover detection
 // window so we can claim "no failover happened" rather than "no
 // failover happened YET". Playground config: pollInterval=2s,
-// failureThreshold=3 → ~6s to classify a probe as failed; clean
-// failover runs ~37s end-to-end. We wait 30s, which is well past the
+// failureThreshold=3 → ~6s to classify a probe as failed; a failover
+// runs up to ~37s end-to-end (that detection, a 30s drain bound and a 1s
+// bound on the promotion's binlog rotation). We wait 30s, which is well past the
 // detection threshold and short of a full failover cycle. If the
 // operator was going to fail over on a sidecar blip, we'd see at
 // least the LastFailoverTarget transition by then.

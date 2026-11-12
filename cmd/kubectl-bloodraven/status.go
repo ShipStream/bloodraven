@@ -195,6 +195,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	if err := siteTw.Flush(); err != nil {
 		return err
 	}
+	printSiteReports(out, fg)
 
 	if fg.Status.PlannedFailover != nil {
 		fmt.Fprintln(out)
@@ -222,6 +223,73 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 		printConditions(out, fg.Status.Conditions)
 	}
 	return nil
+}
+
+// printSiteReports says, below the site table, what each site with a
+// recovery report holds or lacks: the transactions it holds and the
+// primary lacks (divergentGtid), and the transactions it issued itself
+// and lacks (lostGtid), with the site that holds them (lostComparedTo):
+// the primary, from which the site cannot replicate them, or another
+// site. For the latter it also prints the operator's own
+// account of the report, which says whether the site is being recloned
+// and, if not, what the automatic reclone waits for: that is the message
+// of the condition whose reason is OwnTransactionsLost, printed whole
+// (the conditions table truncates it).
+func printSiteReports(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
+	var lines []string
+	lost := false
+	for _, s := range fg.Status.Sites {
+		if s.DivergentGtid != "" {
+			against := "the primary"
+			if s.DivergenceComparedTo != "" {
+				against = s.DivergenceComparedTo
+			}
+			lines = append(lines, fmt.Sprintf("  %s holds %s the primary lacks (compared with %s): %s",
+				s.Name, transactionCount(s.DivergentTransactionCount), against, truncate(s.DivergentGtid, 200)))
+		}
+		if s.LostGtid != "" {
+			lost = true
+			held := ""
+			switch {
+			case s.LostComparedTo == "":
+			case s.LostComparedTo == fg.Status.ActiveSite:
+				held = fmt.Sprintf(", which the primary %s holds", s.LostComparedTo)
+			default:
+				held = fmt.Sprintf(", which %s holds and the primary does not", s.LostComparedTo)
+			}
+			lines = append(lines, fmt.Sprintf("  %s lacks %s it issued itself%s: %s",
+				s.Name, transactionCount(s.LostTransactionCount), held, truncate(s.LostGtid, 200)))
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Site reports:")
+	for _, line := range lines {
+		fmt.Fprintln(out, line)
+	}
+	if !lost {
+		return
+	}
+	for _, ty := range []string{v1alpha1.ConditionRecoveryPending, v1alpha1.ConditionDegraded} {
+		if c := apimeta.FindStatusCondition(fg.Status.Conditions, ty); c != nil && c.Status == metav1.ConditionTrue &&
+			c.Reason == v1alpha1.ReasonOwnTransactionsLost && c.Message != "" {
+			fmt.Fprintf(out, "  Own transactions lost: %s\n", c.Message)
+			return
+		}
+	}
+}
+
+// transactionCount renders a transaction count that may be absent.
+func transactionCount(n *int64) string {
+	switch {
+	case n == nil:
+		return "transactions"
+	case *n == 1:
+		return "1 transaction"
+	}
+	return fmt.Sprintf("%d transactions", *n)
 }
 
 func printPlannedFailover(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {

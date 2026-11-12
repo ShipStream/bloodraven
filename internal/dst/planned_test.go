@@ -14,10 +14,11 @@ import (
 // 1..2000. The actors draw from a stream of their own (§15.1, D18); this
 // pins that adding them, or any later actor-stream change, leaves every
 // existing seed's fault schedule byte-identical. A deliberate change to the
-// fault generator updates it knowingly: it last changed when the binary log
-// rotation faults (failFlush, slowFlush) and the pre-reclone wait
-// (recloneWait) were added.
-const scheduleGolden = "b184a6370e18cf9382b844893e97f7d31d3b86ec9eafea28250131e7411f7c92"
+// fault generator updates it knowingly. It last changed when the own-loss
+// evidence faults (failedClone, silentWitness) were added; like the binary
+// log rotation faults and the data-directory regress before them, they come
+// from a stream of their own and only add ops, which the OnlyAdd tests pin.
+const scheduleGolden = "cd763dc76dd09d9d8df67ae4017b32ea22cea3add4dfb446651da70d210dc85f"
 
 // scheduleGoldenBeforeFlushFaults is the same hash at the commit before the
 // planned-failover actors and the rotation faults existed. The rotation
@@ -41,6 +42,16 @@ func TestGenerateTrial_FlushFaultsOnlyAdd(t *testing.T) {
 				if op.At < tr.WarmupPolls || op.At >= tr.HealAt || op.N < 5 || op.N > 34 || op.K < 0 || op.K > 3 {
 					t.Fatalf("seed %d: reclone wait outside its shape: %s", seed, op)
 				}
+				continue
+			}
+			if op.Kind == OpRegressSite || op.Kind == OpRegressBoot {
+				// Drawn from a stream of their own, after the rotation
+				// faults existed (TestGenerateTrial_OwnLossFaultsOnlyAdd).
+				continue
+			}
+			if isOwnLossEvidenceOp(op) {
+				// The same, later still
+				// (TestGenerateTrial_OwnLossEvidenceFaultsOnlyAdd).
 				continue
 			}
 			if op.Kind == OpFailFlush || op.Kind == OpSlowFlush {
@@ -191,7 +202,7 @@ func TestDeterminism_Planned(t *testing.T) {
 }
 
 // plannedAllowedClasses are the only finding classes a trial with actors
-// may produce (README, Known finding classes):
+// may produce (README, Finding classes):
 //   - CooldownViolated(restart+stateLost): inherent. OpPFStatusDenied
 //     combines a status outage with operator restarts, and when the fault
 //     stream denies the out-of-band store over the same restarts, nothing

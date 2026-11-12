@@ -37,14 +37,17 @@ func (s *stubDF) InfoReplication(context.Context) (dragonfly.ReplicationInfo, er
 func (s *stubDF) InfoPersistence(context.Context) (dragonfly.PersistenceInfo, error) {
 	return dragonfly.PersistenceInfo{}, nil
 }
-func (s *stubDF) KeyCount(context.Context) (int64, error)        { return 0, nil }
+func (s *stubDF) KeyCount(context.Context) (int64, error) { return 0, nil }
+func (s *stubDF) ReplicationPosition(context.Context) (dragonfly.Position, error) {
+	return dragonfly.Position{Role: s.info.Role, Flows: []int64{0}}, nil
+}
 func (s *stubDF) ReplicaOf(context.Context, string, int32) error { return nil }
 func (s *stubDF) ReplicaOfNoOne(context.Context) error           { return nil }
 func (s *stubDF) ReplTakeover(context.Context, time.Duration) error {
 	return s.replTakeoverErr
 }
-func (s *stubDF) Save(context.Context) error                   { return nil }
-func (s *stubDF) ClientKillType(context.Context, string) error { return nil }
+func (s *stubDF) Save(context.Context) error               { return nil }
+func (s *stubDF) KillClients(context.Context) (int, error) { return 0, nil }
 func (s *stubDF) HasCommand(context.Context, string) (bool, error) {
 	return !s.replTakeoverUnsupported, nil
 }
@@ -79,14 +82,16 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 	missing := &stubDF{
 		info:                    dragonfly.ReplicationInfo{Role: "master"},
 		replTakeoverUnsupported: true,
-		replTakeoverErr:         context.DeadlineExceeded,
+		// What a server without the command answers.
+		replTakeoverErr: &dragonfly.ServerError{Message: "ERR unknown command `REPLTAKEOVER`"},
 	}
 	replica := &stubDF{
 		info: dragonfly.ReplicationInfo{
 			Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0,
 		},
 		replTakeoverUnsupported: true,
-		replTakeoverErr:         context.DeadlineExceeded,
+		// What a server without the command answers.
+		replTakeoverErr: &dragonfly.ServerError{Message: "ERR unknown command `REPLTAKEOVER`"},
 	}
 	mgr.SetConnector(func(_ context.Context, addr, _ string) (controller.DragonflyConnection, error) {
 		if strings.Contains(addr, "iad") {

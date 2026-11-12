@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -37,11 +38,18 @@ type fakeDragonflyConn struct {
 	// that holds nothing.
 	keys    int64
 	keysErr error
+	// position, when set, is the replication position the instance
+	// reports; otherwise it is derived from info (fakeDragonflyPosition).
+	// positionErr fails the read.
+	position    *dragonfly.Position
+	positionErr error
 
 	replicaOfErr  error
 	replicaOfArgs []string
 
-	replicaOfNoOneErr error
+	replicaOfNoOneErr   error
+	replicaOfNoOneCalls int
+	replTakeoverCalls   int
 
 	replTakeoverErr error
 	saveCalls       int
@@ -71,14 +79,43 @@ func (c *fakeDragonflyConn) InfoPersistence(_ context.Context) (dragonfly.Persis
 
 func (c *fakeDragonflyConn) KeyCount(_ context.Context) (int64, error) { return c.keys, c.keysErr }
 
+func (c *fakeDragonflyConn) ReplicationPosition(_ context.Context) (dragonfly.Position, error) {
+	switch {
+	case c.positionErr != nil:
+		return dragonfly.Position{}, c.positionErr
+	case c.infoErr != nil:
+		return dragonfly.Position{}, c.infoErr
+	case c.position != nil:
+		return *c.position, nil
+	}
+	return fakeDragonflyPosition(c.info)
+}
+
+// fakeDragonflyPosition is the one-flow position of a fake instance: a
+// master's MasterReplOffset, a replica's SlaveReplOffset. Like the real
+// client, an instance that reports neither role has no position.
+func fakeDragonflyPosition(info dragonfly.ReplicationInfo) (dragonfly.Position, error) {
+	switch info.Role {
+	case "master":
+		return dragonfly.Position{Role: "master", Flows: []int64{info.MasterReplOffset}, ReplID: info.MasterReplID}, nil
+	case "slave":
+		return dragonfly.Position{Role: "slave", Flows: []int64{info.SlaveReplOffset}, ReplID: info.MasterReplID}, nil
+	}
+	return dragonfly.Position{}, fmt.Errorf("dragonfly: no replication position for role %q", info.Role)
+}
+
 func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32) error {
 	c.replicaOfArgs = []string{host, formatInt(port)}
 	return c.replicaOfErr
 }
 
-func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error { return c.replicaOfNoOneErr }
+func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error {
+	c.replicaOfNoOneCalls++
+	return c.replicaOfNoOneErr
+}
 
 func (c *fakeDragonflyConn) ReplTakeover(_ context.Context, _ time.Duration) error {
+	c.replTakeoverCalls++
 	return c.replTakeoverErr
 }
 
@@ -87,9 +124,12 @@ func (c *fakeDragonflyConn) Save(_ context.Context) error {
 	return c.saveErr
 }
 
-func (c *fakeDragonflyConn) ClientKillType(_ context.Context, kind string) error {
-	c.clientKillTypes = append(c.clientKillTypes, kind)
-	return c.clientKillErr
+// KillClients records one pass over the instance's client connections as
+// a "NORMAL" entry in clientKillTypes: normal clients, not replication
+// links.
+func (c *fakeDragonflyConn) KillClients(_ context.Context) (int, error) {
+	c.clientKillTypes = append(c.clientKillTypes, "NORMAL")
+	return 0, c.clientKillErr
 }
 
 func (c *fakeDragonflyConn) HasCommand(_ context.Context, _ string) (bool, error) {
@@ -262,6 +302,10 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 	rec := record.NewFakeRecorder(8)
 	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
 
+	// What a killed master leaves: the replica holds the cache and reports
+	// its link to the master down. That does not shorten the wait: the
+	// replica is promoted once the threshold's worth of observations
+	// missed the master.
 	target := &fakeDragonflyConn{
 		info: dragonfly.ReplicationInfo{
 			Role:                   "slave",
@@ -271,13 +315,16 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 			MasterLastIOSecondsAgo: 1,
 			SlaveReplOffset:        100,
 		},
+		keys: 5,
 	}
 	conn := newFakeConnector()
 	conn.dialFails("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", errors.New("connection refused"))
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
 	mgr.SetConnector(conn.connect)
 
-	mgr.Tick(context.Background())
+	for i := 0; i < defaultDragonflyMasterLossThreshold; i++ {
+		mgr.Tick(context.Background())
+	}
 
 	var got v1alpha1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
@@ -382,6 +429,9 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 			MasterPort:             6379,
 			MasterLinkStatus:       "up",
 			MasterLastIOSecondsAgo: 0,
+			// At the master's position: the take-back is made only for
+			// a replica proven in sync.
+			SlaveReplOffset: 100,
 		},
 	})
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
@@ -1030,14 +1080,17 @@ func (panicOnInfoConn) InfoReplication(_ context.Context) (dragonfly.Replication
 func (panicOnInfoConn) InfoPersistence(_ context.Context) (dragonfly.PersistenceInfo, error) {
 	return dragonfly.PersistenceInfo{}, nil
 }
-func (panicOnInfoConn) KeyCount(_ context.Context) (int64, error)            { return 0, nil }
+func (panicOnInfoConn) KeyCount(_ context.Context) (int64, error) { return 0, nil }
+func (panicOnInfoConn) ReplicationPosition(_ context.Context) (dragonfly.Position, error) {
+	return dragonfly.Position{}, nil
+}
 func (panicOnInfoConn) ReplicaOf(_ context.Context, _ string, _ int32) error { return nil }
 func (panicOnInfoConn) ReplicaOfNoOne(_ context.Context) error               { return nil }
 func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 	return nil
 }
-func (panicOnInfoConn) Save(_ context.Context) error                     { return nil }
-func (panicOnInfoConn) ClientKillType(_ context.Context, _ string) error { return nil }
+func (panicOnInfoConn) Save(_ context.Context) error               { return nil }
+func (panicOnInfoConn) KillClients(_ context.Context) (int, error) { return 0, nil }
 func (panicOnInfoConn) HasCommand(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }

@@ -1,4 +1,4 @@
-# Flashcards — The nine steps of a promotion
+# Flashcards — The ten steps of a promotion
 
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->

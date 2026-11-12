@@ -12,18 +12,20 @@ func TestParseInfoReplication(t *testing.T) {
 			name: "master with no replicas",
 			body: "# Replication\r\nrole:master\r\nconnected_slaves:0\r\nmaster_repl_offset:0\r\n",
 			want: ReplicationInfo{
-				Role:                   "master",
-				MasterLastIOSecondsAgo: -1,
+				Role:                     "master",
+				MasterLastIOSecondsAgo:   -1,
+				MasterReplOffsetReported: true,
 			},
 		},
 		{
 			name: "master with replication offset",
 			body: "# Replication\r\nrole:master\r\nconnected_slaves:1\r\nmaster_repl_offset:123456789\r\n",
 			want: ReplicationInfo{
-				Role:                   "master",
-				MasterLastIOSecondsAgo: -1,
-				MasterReplOffset:       123456789,
-				ConnectedSlaves:        1,
+				Role:                     "master",
+				MasterLastIOSecondsAgo:   -1,
+				MasterReplOffset:         123456789,
+				MasterReplOffsetReported: true,
+				ConnectedSlaves:          1,
 			},
 		},
 		{
@@ -34,9 +36,10 @@ func TestParseInfoReplication(t *testing.T) {
 			name: "connected_replicas alias",
 			body: "# Replication\nrole:master\nconnected_replicas:3\nmaster_repl_offset:0\n",
 			want: ReplicationInfo{
-				Role:                   "master",
-				MasterLastIOSecondsAgo: -1,
-				ConnectedSlaves:        3,
+				Role:                     "master",
+				MasterLastIOSecondsAgo:   -1,
+				MasterReplOffsetReported: true,
+				ConnectedSlaves:          3,
 			},
 		},
 		{
@@ -52,7 +55,9 @@ func TestParseInfoReplication(t *testing.T) {
 				MasterLastIOSecondsAgo:       1,
 				MasterLastIOReported:         true,
 				SlaveReplOffset:              123456000,
+				SlaveReplOffsetReported:      true,
 				MasterReplOffset:             123456789,
+				MasterReplOffsetReported:     true,
 			},
 		},
 		{
@@ -67,6 +72,7 @@ func TestParseInfoReplication(t *testing.T) {
 				MasterSyncInProgressReported: true,
 				MasterLastIOSecondsAgo:       0,
 				MasterLastIOReported:         true,
+				SlaveReplOffsetReported:      true,
 			},
 		},
 		{
@@ -85,20 +91,23 @@ func TestParseInfoReplication(t *testing.T) {
 			name: "dragonfly replica alias normalized to slave",
 			body: "role:replica\nmaster_link_status:up\nmaster_repl_offset:99\nreplica_repl_offset:99\n",
 			want: ReplicationInfo{
-				Role:                   "slave",
-				MasterLinkStatus:       "up",
-				MasterReplOffset:       99,
-				SlaveReplOffset:        99,
-				MasterLastIOSecondsAgo: -1,
+				Role:                     "slave",
+				MasterLinkStatus:         "up",
+				MasterReplOffset:         99,
+				MasterReplOffsetReported: true,
+				SlaveReplOffset:          99,
+				SlaveReplOffsetReported:  true,
+				MasterLastIOSecondsAgo:   -1,
 			},
 		},
 		{
 			name: "malformed lines are skipped",
 			body: "garbage\n# comment\nrole:master\nnoise without colon\n:lonely value\nmaster_repl_offset:7\n",
 			want: ReplicationInfo{
-				Role:                   "master",
-				MasterLastIOSecondsAgo: -1,
-				MasterReplOffset:       7,
+				Role:                     "master",
+				MasterLastIOSecondsAgo:   -1,
+				MasterReplOffset:         7,
+				MasterReplOffsetReported: true,
 			},
 		},
 		{
@@ -124,6 +133,56 @@ func TestParseInfoReplication(t *testing.T) {
 			name: "empty body",
 			body: "",
 			want: ReplicationInfo{MasterLastIOSecondsAgo: -1},
+		},
+		{
+			// Captured from Dragonfly v1.38.0 (v2.1 prints the same lines):
+			// a master prints no offset of its own.
+			name: "v1.38 master with a replica in stable sync",
+			body: infoReplicationMasterV138,
+			want: ReplicationInfo{
+				Role:                   "master",
+				MasterLastIOSecondsAgo: -1,
+				ConnectedSlaves:        1,
+				MasterReplID:           "c6abbdb2bdacc872709407ba9c10c81214d6d307",
+			},
+		},
+		{
+			name: "v1.38 replica in stable sync",
+			body: infoReplicationReplicaV138,
+			want: ReplicationInfo{
+				Role:                         "slave",
+				MasterHost:                   "wp5-m",
+				MasterPort:                   6379,
+				MasterLinkStatus:             "up",
+				MasterSyncInProgressReported: true,
+				MasterLastIOSecondsAgo:       0,
+				MasterLastIOReported:         true,
+				SlaveReplOffset:              2000002,
+				SlaveReplOffsetReported:      true,
+				MasterReplID:                 "c6abbdb2bdacc872709407ba9c10c81214d6d307",
+			},
+		},
+		{
+			// During the full sync a replica prints no slave_repl_offset.
+			name: "v1.38 replica in full sync",
+			body: infoReplicationReplicaFullSyncV138,
+			want: ReplicationInfo{
+				Role:                         "slave",
+				MasterHost:                   "wp5-m",
+				MasterPort:                   6379,
+				MasterLinkStatus:             "up",
+				MasterSyncInProgress:         true,
+				MasterSyncInProgressReported: true,
+				MasterLastIOSecondsAgo:       11,
+				MasterLastIOReported:         true,
+				MasterReplID:                 "c6abbdb2bdacc872709407ba9c10c81214d6d307",
+			},
+		},
+		{
+			// An offset that is not a number is not a reported offset.
+			name: "unparsable offsets",
+			body: "role:slave\nslave_repl_offset:lots\nmaster_repl_offset:-5\n",
+			want: ReplicationInfo{Role: "slave", MasterLastIOSecondsAgo: -1},
 		},
 	}
 	for _, tc := range cases {
@@ -208,3 +267,21 @@ func TestParseInfoKeyspace(t *testing.T) {
 		})
 	}
 }
+
+// INFO replication bodies captured from Dragonfly v1.38.0 (docker,
+// --proactor_threads=2). v2.1 printed the same lines.
+const (
+	infoReplicationMasterV138 = "# Replication\r\nrole:master\r\nconnected_slaves:1\r\n" +
+		"slave0:ip=192.168.176.3,port=6379,state=online,lag=0\r\n" +
+		"master_replid:c6abbdb2bdacc872709407ba9c10c81214d6d307\r\n"
+
+	infoReplicationReplicaV138 = "# Replication\r\nrole:slave\r\nmaster_host:wp5-m\r\nmaster_port:6379\r\n" +
+		"master_link_status:up\r\nmaster_last_io_seconds_ago:0\r\nmaster_sync_in_progress:0\r\n" +
+		"master_replid:c6abbdb2bdacc872709407ba9c10c81214d6d307\r\nslave_repl_offset:2000002\r\n" +
+		"slave_priority:100\r\nslave_read_only:1\r\npsync_attempts:0\r\npsync_successes:0\r\n"
+
+	infoReplicationReplicaFullSyncV138 = "# Replication\r\nrole:slave\r\nmaster_host:wp5-m\r\nmaster_port:6379\r\n" +
+		"master_link_status:up\r\nmaster_last_io_seconds_ago:11\r\nmaster_sync_in_progress:1\r\n" +
+		"master_replid:c6abbdb2bdacc872709407ba9c10c81214d6d307\r\n" +
+		"slave_priority:100\r\nslave_read_only:1\r\npsync_attempts:0\r\npsync_successes:0\r\n"
+)

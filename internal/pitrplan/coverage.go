@@ -111,6 +111,17 @@ type Coverage struct {
 	// Lost is latest mode's loss evidence (D-37): on success, the flagged
 	// transactions X excludes; on a PITRArchiveDivergentHistory refusal,
 	// every flagged transaction.
+	//
+	// The excluded transactions in the list do not depend on which files
+	// the plan downloaded: a copy in any listed row counts (active or
+	// quarantined, of a marked site or not), dated from the file's index
+	// when the plan downloaded it, else from the row's manifest commit
+	// times, else from a read of the file. A row that cannot be read (its
+	// object is missing or damaged, the store fails, or its index does not
+	// fit the planning memory) is left out, and pitr-download logs it
+	// ("pitr loss report incomplete"). The transactions that are not
+	// excluded (a refusal's) are those with a copy in a file the plan
+	// downloaded, as the refusal itself is decided.
 	Lost string `json:"lost"`
 
 	// Witness is set in timestamp mode with outcome TargetCovered.

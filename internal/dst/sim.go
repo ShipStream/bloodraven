@@ -232,6 +232,10 @@ type siteData struct {
 	// every later call once it moves (the connection broke), however the
 	// address resolves now.
 	incarnation int
+	// clonedAt is the incarnation the site's last clone created (0 when
+	// it was never cloned into): the streams it owned before that are
+	// superseded (supersededByClone).
+	clonedAt int
 	// history is a bounded log of executed-set snapshots, one per tick,
 	// that a regressing pod replacement rolls back to.
 	history []gtidVec
@@ -507,6 +511,10 @@ type SiteTruth struct {
 	Retrieved     gtidVec
 	ServerUUID    string
 	Incarnation   int
+	// ClonedAt is the incarnation the site's last clone created (0: never
+	// cloned). Streams the site issued before it are superseded
+	// (supersededByClone).
+	ClonedAt int
 	// BinlogSeq and BinlogPrev are the binary log model (siteData).
 	BinlogSeq  int
 	BinlogPrev gtidVec
@@ -544,6 +552,7 @@ func (c *Cluster) Truth() []SiteTruth {
 			Retrieved:     s.retrieved.clone(),
 			ServerUUID:    s.serverUUID,
 			Incarnation:   s.incarnation,
+			ClonedAt:      s.clonedAt,
 			BinlogSeq:     s.binlogSeq,
 			BinlogPrev:    s.binlogPrev.clone(),
 		})
@@ -569,6 +578,7 @@ func (c *Cluster) truthLocked(s *siteData) SiteTruth {
 		Retrieved:     s.retrieved.clone(),
 		ServerUUID:    s.serverUUID,
 		Incarnation:   s.incarnation,
+		ClonedAt:      s.clonedAt,
 		BinlogSeq:     s.binlogSeq,
 		BinlogPrev:    s.binlogPrev.clone(),
 	}
@@ -1091,6 +1101,12 @@ func (c *Cluster) Tick() {
 				s.ioWant = false
 			} else if !c.fetchStalled[s.name] {
 				for u, n := range src.executed {
+					if ownsStream(s, u) {
+						// The receiver drops events that carry the
+						// replica's own server_id (ownloss.go): a site
+						// never refetches what it issued itself.
+						continue
+					}
 					from := s.retrieved[u]
 					if s.executed[u] > from {
 						from = s.executed[u]

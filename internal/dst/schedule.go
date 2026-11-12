@@ -158,6 +158,9 @@ func (o Op) String() string {
 	if o.N != 0 || o.Kind == OpCrashOperatorMid {
 		s += fmt.Sprintf(" n=%d", o.N)
 	}
+	if o.Kind == OpRegressBoot {
+		s += fmt.Sprintf(" bootFenced=%v", o.Fenced)
+	}
 	if o.Kind == OpCrash {
 		s += fmt.Sprintf(" bootFenced=%v", o.Fenced)
 		if o.BootWritable {
@@ -504,6 +507,8 @@ func GenerateTrial(seed uint64) Trial {
 	}
 
 	ops = append(ops, flushFaults(seed, names, warmup, faultWindow)...)
+	ops = append(ops, ownLossFaults(seed, names, warmup, faultWindow, healAt)...)
+	ops = append(ops, ownLossEvidenceFaults(seed, names, warmup, faultWindow, healAt)...)
 	sort.SliceStable(ops, func(i, j int) bool { return ops[i].At < ops[j].At })
 
 	return Trial{

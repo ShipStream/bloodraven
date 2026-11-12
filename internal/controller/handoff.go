@@ -124,8 +124,10 @@ func (o HandoffOptions) withDefaults() HandoffOptions {
 // failover is not held off for the rest of the budget.
 //
 // Any abort before the candidate's read_only=OFF is issued clears both
-// super_read_only and read_only on the source. Once read_only=OFF has been
-// issued the candidate may be accepting writes, so the source stays fenced.
+// super_read_only and read_only on the source, provided the source still
+// holds every transaction this handoff last read from it (abortHandoff).
+// Once read_only=OFF has been issued the candidate may be accepting
+// writes, so the source stays fenced.
 func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, source mysql.Checker, candidateSite string, opts HandoffOptions) (string, error) {
 	opts = opts.withDefaults()
 
@@ -180,7 +182,7 @@ func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, sour
 		return source.SetSuperReadOnly(probeCtx, true)
 	}); err != nil {
 		// The statement may have applied before the error was returned.
-		return "", f.abortHandoff(ctx, candidateSite, source, fmt.Errorf("maintenance handoff: fence source: %w", err))
+		return "", f.abortHandoff(ctx, candidateSite, source, current, fmt.Errorf("maintenance handoff: fence source: %w", err))
 	}
 	var killed int
 	if err := withMySQLSafetyTimeout(fencedCtx, func(probeCtx context.Context) error {
@@ -195,7 +197,15 @@ func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, sour
 
 	fencedRaw, fenced, err := readGTIDSetRaw(fencedCtx, source)
 	if err != nil {
-		return "", f.abortHandoff(ctx, candidateSite, source, fmt.Errorf("maintenance handoff: read fenced source GTID set: %w", err))
+		return "", f.abortHandoff(ctx, candidateSite, source, current, fmt.Errorf("maintenance handoff: read fenced source GTID set: %w", err))
+	}
+	if !fenced.Contains(current) {
+		// The fence can only stop the set from growing. A fenced set that
+		// lacks transactions the source held a moment ago is a source
+		// that restarted on older data in between; the abort finds the
+		// same and leaves it read-only.
+		return "", f.abortHandoff(ctx, candidateSite, source, current,
+			errors.New("maintenance handoff: the fenced source no longer holds every transaction it held before the fence"))
 	}
 	f.logger.Info("maintenance handoff: fenced source", "candidate", candidateSite, "sourceGtid", fencedRaw)
 	// The source is read-only and its set is final: rotate its binary log,
@@ -207,9 +217,9 @@ func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, sour
 	if err := f.waitForCandidateGTIDs(fencedCtx, candidate, source, fenced, opts.CatchUp, opts); err != nil {
 		cause := fmt.Errorf("maintenance handoff: candidate %s did not reach the fenced source GTID set: %w", candidateSite, err)
 		if errors.Is(err, errActivePrimaryLost) {
-			return "", f.abortHandoffWithin(ctx, handoffLostSourceRollbackTimeout, candidateSite, source, cause)
+			return "", f.abortHandoffWithin(ctx, handoffLostSourceRollbackTimeout, candidateSite, source, fenced, cause)
 		}
-		return "", f.abortHandoff(ctx, candidateSite, source, cause)
+		return "", f.abortHandoff(ctx, candidateSite, source, fenced, cause)
 	}
 	cancelFenced()
 	f.logger.Info("maintenance handoff: candidate caught up to fenced source", "candidate", candidateSite, "sourceGtid", fencedRaw)
@@ -237,7 +247,7 @@ func (f *FailoverController) ExecuteHandoff(ctx context.Context, candidate, sour
 				abortErr = fmt.Errorf("%w (candidate replication may have been reset and could not be restored: %v)", abortErr, restoreErr)
 			}
 		}
-		return "", f.abortHandoff(ctx, candidateSite, source, abortErr)
+		return "", f.abortHandoff(ctx, candidateSite, source, fenced, abortErr)
 	}
 	return promotionGtid, nil
 }
@@ -278,13 +288,82 @@ func (f *FailoverController) refuseHandoff(candidateSite string, cause error) er
 // before the candidate could accept writes, and returns cause annotated with
 // the rollback outcome. Both flags are cleared: super_read_only=ON also sets
 // read_only=ON, and clearing super_read_only alone leaves it set.
-func (f *FailoverController) abortHandoff(ctx context.Context, candidateSite string, source mysql.Checker, cause error) error {
-	return f.abortHandoffWithin(ctx, handoffRollbackTimeout, candidateSite, source, cause)
+//
+// The abort lifts this handoff's fence and nothing else. A source that
+// restarted since it was fenced is read-only by its own start, and
+// whether it may be written again is the topology manager's re-assert to
+// decide, which compares it with its peers once the update has ended: it
+// may have come back on older data (its volume came back older, or a
+// crash lost the tail of its logs), and made writable it would issue the
+// lost GTIDs again. Two things show a restart:
+//
+//   - read_only is ON while super_read_only is OFF. The fence sets
+//     super_read_only; mysqld starts with read_only alone.
+//   - the source no longer holds every transaction of held, its GTID set
+//     as this handoff last read it. This also covers a source whose
+//     sidecar fenced it at its start, which the flags cannot tell from
+//     this handoff's fence.
+//
+// What neither shows: a source that restarted between the fence and the
+// read of its fenced set, was fenced by its sidecar at its start, and
+// lost fewer transactions than it had committed since the read before
+// the fence. A probe that fails (the abort may be for that very read
+// failing) is no evidence, and the source is unfenced as before.
+func (f *FailoverController) abortHandoff(ctx context.Context, candidateSite string, source mysql.Checker, held mysql.GTIDSet, cause error) error {
+	return f.abortHandoffWithin(ctx, handoffRollbackTimeout, candidateSite, source, held, cause)
 }
 
-func (f *FailoverController) abortHandoffWithin(ctx context.Context, budget time.Duration, candidateSite string, source mysql.Checker, cause error) error {
+func (f *FailoverController) abortHandoffWithin(ctx context.Context, budget time.Duration, candidateSite string, source mysql.Checker, held mysql.GTIDSet, cause error) error {
 	rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
+	// The source's flags as they are now. readOnlyKnown is false when the
+	// probe failed: nothing is said about the source's state then.
+	var readOnly, superReadOnly, superKnown bool
+	probeErr := withMySQLSafetyTimeout(rbCtx, func(probeCtx context.Context) error {
+		var err error
+		if c, ok := source.(superReadOnlyChecker); ok {
+			if superReadOnly, err = c.CheckSuperReadOnly(probeCtx); err != nil {
+				return err
+			}
+			superKnown = true
+		}
+		readOnly, err = source.CheckReadOnly(probeCtx)
+		return err
+	})
+	readOnlyKnown := probeErr == nil
+	if readOnlyKnown && superKnown && readOnly && !superReadOnly {
+		f.logger.Error("maintenance handoff: source left read-only: it restarted during the handoff",
+			"candidate", candidateSite, "cause", cause)
+		return fmt.Errorf("%w; source left read-only: it restarted during the handoff and is read-only by its own start, not by the handoff's fence", cause)
+	}
+	_, now, readErr := readGTIDSetRaw(rbCtx, source)
+	if missing := held.Subtract(now); readErr == nil && !missing.IsEmpty() {
+		switch {
+		case readOnlyKnown && !readOnly:
+			// Not behind any fence: it restarted on older data and came up
+			// writable, or something else made it writable. The handoff
+			// sends it nothing. It is the group's primary now, without
+			// transactions it issued; the replica GTID audit reports them
+			// on the site that still holds them, and that it is the
+			// primary which lacks them (crossCheckOwnLoss).
+			f.logger.Error("maintenance handoff: source is writable and no longer holds transactions it held before the handoff",
+				"candidate", candidateSite, "cause", cause,
+				"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
+			return fmt.Errorf("%w; source is writable without %d transactions it held before the handoff (restarted on older data, and not fenced by the handoff any more); it was left as found",
+				cause, missing.TransactionCount())
+		case !readOnlyKnown:
+			f.logger.Error("maintenance handoff: source not unfenced: it no longer holds transactions it held before the handoff",
+				"candidate", candidateSite, "cause", cause, "error", probeErr,
+				"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
+			return fmt.Errorf("%w; source not unfenced: it lacks %d transactions it held before the handoff (restarted on older data?); whether it is read-only could not be read",
+				cause, missing.TransactionCount())
+		}
+		f.logger.Error("maintenance handoff: source left read-only: it no longer holds transactions it held before the handoff",
+			"candidate", candidateSite, "cause", cause,
+			"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
+		return fmt.Errorf("%w; source left read-only: it lacks %d transactions it held before the handoff (restarted on older data?)",
+			cause, missing.TransactionCount())
+	}
 	rbErr := unfenceSite(rbCtx, source)
 	if rbErr != nil {
 		f.logger.Error("maintenance handoff: rollback failed: source may be left read-only", "candidate", candidateSite, "cause", cause, "error", rbErr)

@@ -256,6 +256,21 @@ func (g GTIDSet) Subtract(other GTIDSet) GTIDSet {
 	return result
 }
 
+// Union returns the transactions that are in g or in other, with each
+// source's intervals sorted and merged. Neither set is modified.
+func (g GTIDSet) Union(other GTIDSet) GTIDSet {
+	result := make(GTIDSet, len(g)+len(other))
+	for _, set := range []GTIDSet{g, other} {
+		for sid, intervals := range set {
+			result[sid] = append(result[sid], intervals...)
+		}
+	}
+	for sid, intervals := range result {
+		result[sid] = coalesceIntervals(intervals)
+	}
+	return result
+}
+
 // subtractAllIntervals removes all ranges covered by sub from the source intervals.
 func subtractAllIntervals(source, sub []Interval) []Interval {
 	var result []Interval
@@ -304,6 +319,31 @@ func (g GTIDSet) HasCommonUUIDs(other GTIDSet) bool {
 		}
 	}
 	return false
+}
+
+// OriginatedBy returns the transactions of g that were issued under one of
+// the given server UUIDs, tagged ones included. UUIDs are compared without
+// regard to case; an empty UUID matches nothing.
+func (g GTIDSet) OriginatedBy(uuids ...string) GTIDSet {
+	want := make(map[string]struct{}, len(uuids))
+	for _, u := range uuids {
+		if u = strings.ToLower(strings.TrimSpace(u)); u != "" {
+			want[u] = struct{}{}
+		}
+	}
+	result := make(GTIDSet)
+	if len(want) == 0 {
+		return result
+	}
+	for sid, intervals := range g {
+		if _, ok := want[strings.ToLower(sourceUUID(sid))]; !ok || len(intervals) == 0 {
+			continue
+		}
+		cp := make([]Interval, len(intervals))
+		copy(cp, intervals)
+		result[sid] = cp
+	}
+	return result
 }
 
 // sourceUUID returns the server UUID of a source identifier, dropping any

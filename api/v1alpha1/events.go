@@ -40,6 +40,66 @@ const (
 	// The old primary recovered after a failover and is now replicating
 	// from the new primary.
 	EventOldPrimaryRecovered = "OldPrimaryRecovered"
+	// A site lacks transactions it issued itself under a `server_uuid` it
+	// has had, and the primary holds them: its volume came back older, or
+	// a crash lost them. Replication cannot bring them back, because the
+	// site's receiver drops events that carry its own `server_id`, and a
+	// promoted site would issue the same GTIDs again. The message names
+	// the site, the set (`status.sites[].lostGtid`) and the primary it was
+	// compared with. The operator does not start the site's replication,
+	// does not promote it and reclones it (`recoveryState:
+	// RecloneRequired`); a site that also holds transactions the primary
+	// lacks stays `RecoveryBlocked` for an administrator. When the holder
+	// is not the primary but another site that holds transactions the
+	// primary lacks, the message says so: the site keeps replicating and
+	// is not recloned, and it is not promoted until no other site holds
+	// the transactions (that site is recloned, or they are replayed onto
+	// the primary and replicate back). For a site whose replication from
+	// the primary runs, raised only once the deficit cannot be replication
+	// lag. Emitted on detection and when the set changes; once more
+	// after an operator restart when the installed CRD does not store
+	// `lostGtid`. See [A returning site that lost its own
+	// transactions](/docs/operations/failover#a-returning-site-that-lost-its-own-transactions).
+	EventOwnTransactionsLost = ReasonOwnTransactionsLost
+	// A site's `OwnTransactionsLost` report ended. The message gives the
+	// cause: the site was recloned; a new comparison with the primary it
+	// was reported against found it holds every transaction it issued;
+	// or every other site was compared and none holds transactions the
+	// site issued and lacks (the site that held them was recloned, or
+	// they were replayed onto the primary and the site received them).
+	EventOwnTransactionsLostResolved = "OwnTransactionsLostResolved"
+	// The automatic reclone of a site that lacks transactions it issued
+	// itself has failed three or more times in a row. The operator keeps
+	// asking, with a wait that doubles from 5 minutes to at most 2 hours;
+	// every failed clone made the primary send its whole data set. The
+	// message gives the count and the next attempt; the clone's error is
+	// in the `BootstrapFailed` Degraded condition. Emitted for the third
+	// and every later failure.
+	EventOwnTransactionsLostRecloneFailing = "OwnTransactionsLostRecloneFailing"
+	// Automatic promotion refused: the remaining candidates lack
+	// transactions they issued themselves (`recoveryState:
+	// RecloneRequired`) and would issue those GTIDs again. The group stays
+	// without a writable primary until the primary returns (the sites are
+	// then recloned from it) or an administrator promotes one by hand.
+	EventPromotionRefusedOwnTransactionsLost = "PromotionRefusedOwnTransactionsLost"
+	// A site carrying an `OwnTransactionsLost` report became the primary
+	// without a reclone (an administrator made it writable) while every
+	// other site is read-only. Unless its
+	// `server_uuid` was changed first, it issues the lost GTIDs again:
+	// the same GTID then names two transactions, replicas that hold the
+	// first skip the second, and the PITR archive of the group cannot be
+	// trusted across them. The message names the site and the set.
+	EventOwnTransactionsLostSitePromoted = "OwnTransactionsLostSitePromoted"
+	// The source a planned failover left fenced (`SourceLeftFenced`) was
+	// made writable again by the primary re-assert although it no longer
+	// holds part of the GTID set it reported under the run's fence, and no
+	// other site holds that part either: the source restarted on older
+	// data while it was fenced, and those acknowledged transactions are
+	// lost. The re-assert restores the primary all the same, because
+	// every other site was compared and none is a better one. The message
+	// names the site, the run and the set. With PITR, see also
+	// `PITRArchiveReissueRiskDetected`.
+	EventPlannedSourceTransactionsLost = "PlannedSourceTransactionsLost"
 	// Both sites are writable (split brain). Also emitted when a second
 	// site answers writable before the debounce confirms it; the message
 	// names the unconfirmed sites, and fencing waits for the confirmation.
@@ -298,8 +358,10 @@ const (
 const (
 	// The operator is promoting a Dragonfly replica: in a planned
 	// failover's `PromotingDragonfly` phase, because the MySQL active site
-	// differs from the Dragonfly master, or because the Dragonfly master
-	// is unreachable and exactly one healthy replica can take over.
+	// differs from the Dragonfly master and the replica there is in sync,
+	// because the Dragonfly master is unreachable and a healthy replica can
+	// take over, or because the master restarted without the cache its
+	// replica holds.
 	EventDragonflyPromotionStarted = "DragonflyPromotionStarted"
 	// A Dragonfly target was promoted with `REPLTAKEOVER` and the active
 	// Service now points at it. A promotion that fell back to `REPLICAOF
@@ -311,6 +373,10 @@ const (
 	// run's source nor its target, or `PromotingDragonfly` passed its
 	// deadline. The source's traffic label is restored; a planned failover
 	// then continues best-effort or rolls back, as `onSyncTimeout` says.
+	// Outside a planned failover, a `REPLTAKEOVER` that failed while the
+	// old master still answers as a master is not followed by `REPLICAOF
+	// NO ONE`: the old master keeps the role and the promotion is tried
+	// again later.
 	// Also emitted when the old master could not be demoted after a
 	// promotion: it is kept out of the active Service and needs manual
 	// intervention.
@@ -322,16 +388,33 @@ const (
 	// `status.plannedFailover.dragonfly.message` says the same.
 	EventDragonflyPromotionDeferred = "DragonflyPromotionDeferred"
 	// A planned failover's target Dragonfly replica did not catch up
-	// within `spec.dragonfly.plannedFailover.maxSyncWait`. With
+	// within `spec.dragonfly.plannedFailover.maxSyncWait`, or the wait
+	// was ended at once because the source gave no replication position
+	// for another reason than refusing the command. With
 	// `onSyncTimeout: Proceed` (the default) the takeover goes ahead and
 	// `status.plannedFailover.dragonfly.sessions` records `Lost`; with
 	// `Fail` the run rolls back before MySQL is promoted.
 	EventDragonflySyncTimedOut = "DragonflySyncTimedOut"
-	// An emergency Dragonfly promotion succeeded without `REPLTAKEOVER`:
-	// it fell back to `REPLICAOF NO ONE` after the takeover failed or was
-	// skipped because the old master was unreachable, or its reply was
-	// lost and the target was then observed as master. The target is
-	// writable, but cached data and sessions may be lost.
+	// The sync of a Dragonfly replica with its master could not be proven
+	// by replication position before a takeover (a planned failover, a
+	// rollout of the active site, or the take-back to the MySQL active
+	// site): a site refuses `DFLY REPLICAOFFSET` or `DEBUG REPLICA OFFSET`
+	// (no such command, or the operator's ACL user may not run it), or the
+	// two report positions in different forms. The replica reports a
+	// healthy link to that master, so the operator goes on with
+	// `REPLTAKEOVER` alone, which waits for the replica itself and changes
+	// nothing when it fails; it never falls back to `REPLICAOF NO ONE`
+	// then. Give the operator's Dragonfly user the two commands to get the
+	// proof back. Emitted once per run, rollout or take-back.
+	EventDragonflySyncUnproven = "DragonflySyncUnproven"
+	// A Dragonfly promotion succeeded without `REPLTAKEOVER`: with
+	// `REPLICAOF NO ONE` after the takeover failed or was skipped because
+	// the old master was unreachable, or because the target held the
+	// cache of a master that restarted without it; or the takeover's
+	// reply was lost and the target was then observed as master. The
+	// target is writable and keeps every key it held. What the old master
+	// had written and the target had not received is lost (for a
+	// restarted master: what was written to the restarted instance).
 	EventDragonflySessionsLost = "DragonflySessionsLost"
 	// A Dragonfly site other than the active one reports the master role.
 	// The operator reattaches it as a replica, which discards what it
@@ -345,15 +428,39 @@ const (
 	// attached (`connected_slaves=0`) was reattached as a replica of the
 	// active master.
 	EventDragonflyOldSiteReconfigured = "DragonflyOldSiteReconfigured"
+	// The active Dragonfly master restarted without the cache, and its
+	// replica was not promoted in its place because the operator had seen
+	// the replica cut off from the master while the master was still
+	// running: its copy is stale by however long that lasted and can hold
+	// keys the application has since deleted. The replica is re-attached
+	// to the restarted master and takes its content, so with an empty
+	// master the cache starts empty. Check why the replica could not reach
+	// the master (a NetworkPolicy, a firewall, the replication password).
+	EventDragonflyStaleReplicaNotPromoted = "DragonflyStaleReplicaNotPromoted"
+	// The Dragonfly master is on another site than the MySQL active site
+	// and the operator has waited two minutes to take it over: the
+	// Dragonfly replica on the MySQL active site is not linked to the
+	// master, is still behind it, or cannot be read (the message says
+	// which). The master stays where it is, serving, until the replica is
+	// in sync. Emitted once per stall.
+	EventDragonflyFollowStalled = "DragonflyFollowStalled"
 	// Dragonfly advertises `REPLTAKEOVER` again after a
 	// `DragonflyReplTakeoverUnsupported` Warning, typically after an image
 	// change.
 	EventDragonflyReplTakeoverSupported = "DragonflyReplTakeoverSupported"
 	// A Dragonfly site does not advertise `REPLTAKEOVER`. Emergency
 	// promotions fall back to `REPLICAOF NO ONE`, which does not preserve
-	// session continuity. Emitted when the capability probe changes to
-	// unsupported; use a Dragonfly image that supports the command.
+	// session continuity; over an old master that still serves, only for a
+	// target that reports stable sync with it. Emitted when the capability
+	// probe changes to unsupported; use a Dragonfly image that supports
+	// the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
+	// A rollout of the active Dragonfly site (a changed pod template) has
+	// waited two minutes for the replica it promotes first to be in sync:
+	// the replica is not linked to the master, is still behind it, or
+	// cannot be read (the message says which). The active site keeps its
+	// old pod until the replica is in sync. Emitted once per stall.
+	EventDragonflyRolloutStalled = "DragonflyRolloutStalled"
 	// A snapshot-restore upgrade run started: `spec.dragonfly.upgradeStrategy`
 	// is `SnapshotRestore` and a site's live StatefulSet runs an image other
 	// than `spec.dragonfly.image`. `status.dragonfly.upgrade` records it;
@@ -788,6 +895,13 @@ const (
 	// `pitr archive binding changed` log line with `cause=recovery`
 	// instead ([log schema](/docs/observability/log-schema)).
 	EventPITRArchiveBound = "PITRArchiveBound"
+	// The group has encryption at rest and archives binary logs through a
+	// backup profile without `spec.backup.profiles[].encryption`. The
+	// archive holds the plaintext of the binary logs, so it is protected
+	// only by what the store provides. Raised when the combination
+	// appears; the `EncryptionAtRestReady` condition's message carries it
+	// afterwards.
+	EventPITRArchiveNotEncrypted = "PITRArchiveNotEncrypted"
 	// A binding was released and its key snapshots deleted.
 	EventPITRArchiveBindingReleased = "PITRArchiveBindingReleased"
 	// A profile in archive use has encryption that differs from its

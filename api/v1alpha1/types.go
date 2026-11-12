@@ -956,9 +956,45 @@ type SiteStatus struct {
 	// RecoveryBlocked means the site holds transactions the primary lacks
 	// (see DivergenceDetectedBy): it is not promoted by an ordered update or
 	// a planned failover, and it must be recloned or the primary made to
-	// contain the set. Replication may still be running.
+	// contain the set. Replication may still be running. RecloneRequired
+	// means the site lacks transactions it issued itself (LostGtid) and
+	// holds nothing the primary lacks: it is not promoted. When the
+	// primary holds those transactions, its replication is not started
+	// and the operator reclones it. When only another site holds them
+	// (the RecoveryPending condition names it), the site keeps
+	// replicating and is not recloned automatically: the report ends when
+	// that site is recloned or the primary contains the transactions.
 	// +optional
 	RecoveryState SiteRecoveryState `json:"recoveryState,omitempty"`
+
+	// LostGtid is the GTID set of transactions this site issued under a
+	// server_uuid it has had, that another site holds (the primary, or a
+	// site that holds transactions the primary lacks, or a peer when no
+	// site was writable) and the site no longer does (its volume came
+	// back older, or a crash lost them).
+	// Replication cannot bring them back: the site's receiver drops
+	// events that carry its own server_id. Populated while the loss
+	// stands, with RecoveryState RecloneRequired, or RecoveryBlocked when
+	// the site also holds transactions the primary lacks.
+	// +optional
+	LostGtid string `json:"lostGtid,omitempty"`
+
+	// LostTransactionCount is the number of transactions in LostGtid.
+	// +optional
+	LostTransactionCount *int64 `json:"lostTransactionCount,omitempty"`
+
+	// LostComparedTo names the site that holds LostGtid: the site this
+	// one was compared with when the loss was found. When it is the
+	// active primary (status.activeSite) the site cannot replicate the
+	// transactions and is recloned. When it is another site, the primary
+	// does not hold them: this site keeps replicating, is not promoted,
+	// and the report ends once every other site has been compared and
+	// none holds them (the named site was recloned, or the transactions
+	// were replayed onto the primary and replicated back). Empty when
+	// LostGtid is, and for a report restored from a status that did not
+	// carry the field.
+	// +optional
+	LostComparedTo string `json:"lostComparedTo,omitempty"`
 
 	// DivergentGtid is the GTID set of transactions on this site that
 	// the primary named by DivergenceComparedTo lacks. Populated when
@@ -1093,7 +1129,7 @@ const (
 )
 
 // SourceConvergenceReason explains a SourceConvergenceState.
-// +kubebuilder:validation:Enum=DirectSource;SourceMismatch;ProbeFailed;MutationFailed;GTIDDiverged;RestorePeerHold
+// +kubebuilder:validation:Enum=DirectSource;SourceMismatch;ProbeFailed;MutationFailed;GTIDDiverged;RestorePeerHold;OwnTransactionsLost
 type SourceConvergenceReason string
 
 const (
@@ -1115,11 +1151,15 @@ const (
 	// reclone (status.restoreReclones.pending) and its replication is held
 	// stopped, so convergence does not touch it.
 	SourceReasonRestorePeerHold SourceConvergenceReason = "RestorePeerHold"
+	// SourceReasonOwnTransactionsLost: the site lacks transactions it
+	// issued itself (status.sites[].lostGtid), so its replication is not
+	// started or repointed; it is recloned.
+	SourceReasonOwnTransactionsLost SourceConvergenceReason = "OwnTransactionsLost"
 )
 
 // SiteRecoveryState is status.sites[].recoveryState. Absent means no
 // recovery is needed.
-// +kubebuilder:validation:Enum=RecoveryInProgress;RecoveryBlocked
+// +kubebuilder:validation:Enum=RecoveryInProgress;RecoveryBlocked;RecloneRequired
 type SiteRecoveryState string
 
 const (
@@ -1129,6 +1169,10 @@ const (
 	// RecoveryStateBlocked means the site holds transactions the primary
 	// lacks.
 	RecoveryStateBlocked SiteRecoveryState = "RecoveryBlocked"
+	// RecoveryStateRecloneRequired means the site lacks transactions it
+	// issued itself and holds nothing the primary lacks. Replication
+	// cannot repair it, so it is recloned.
+	RecoveryStateRecloneRequired SiteRecoveryState = "RecloneRequired"
 )
 
 // DivergenceDetector names the check that recorded a divergence report.

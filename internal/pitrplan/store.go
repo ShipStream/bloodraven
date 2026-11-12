@@ -230,8 +230,8 @@ func (b *Budget) untrack(d *dirtyState) {
 	b.spilled -= int64(len(d.mem))
 	b.dirtyPages -= d.count
 	d.count = 0
-	if b.attempt != nil {
-		delete(b.attempt.blocks, d)
+	for c := b.attempt; c != nil; c = c.outer {
+		delete(c.blocks, d)
 	}
 	b.releaseSpilling(int64(len(d.mem)))
 	d.mem = nil
@@ -327,17 +327,23 @@ func (b *Budget) spillFailed(err error) {
 }
 
 // Checkpoint brackets work that may be abandoned: one download attempt,
-// whose partial index is garbage when the attempt fails.
+// whose partial index is garbage when the attempt fails, or a read whose
+// index is needed only until its commit times are read (the planner's
+// reportRead).
 type Checkpoint struct {
 	b      *Budget
 	used   int64
 	blocks map[*dirtyState]struct{}
+	// outer is the checkpoint this one was started inside, or nil.
+	outer *Checkpoint
 }
 
-// Checkpoint starts recording. Exactly one of Keep and Undo ends it;
-// checkpoints do not nest.
+// Checkpoint starts recording. Exactly one of Keep and Undo ends it.
+// Checkpoints nest (a report read brackets the fetcher's download
+// attempts): an inner one ends before the one it was started inside, and
+// what it keeps is then the outer one's to keep or undo.
 func (b *Budget) Checkpoint() *Checkpoint {
-	c := &Checkpoint{b: b, used: b.used, blocks: map[*dirtyState]struct{}{}}
+	c := &Checkpoint{b: b, used: b.used, blocks: map[*dirtyState]struct{}{}, outer: b.attempt}
 	b.attempt = c
 	return c
 }
@@ -345,8 +351,14 @@ func (b *Budget) Checkpoint() *Checkpoint {
 // Keep ends the checkpoint and keeps what was allocated since.
 func (c *Checkpoint) Keep() {
 	if c.b.attempt == c {
-		c.b.attempt = nil
+		c.b.attempt = c.outer
 	}
+	if c.outer != nil {
+		for d := range c.blocks {
+			c.outer.blocks[d] = struct{}{}
+		}
+	}
+	c.blocks = nil
 }
 
 // Undo returns every memory charge made since the checkpoint and frees
@@ -354,13 +366,17 @@ func (c *Checkpoint) Keep() {
 func (c *Checkpoint) Undo() {
 	b := c.b
 	if b.attempt == c {
-		b.attempt = nil
+		b.attempt = c.outer
 	}
 	for d := range c.blocks {
 		b.freeBlock(d)
 	}
 	c.blocks = nil
-	b.Release(b.used - c.used)
+	// Less may be charged now than at the checkpoint (something older was
+	// released since): then there is nothing to return.
+	if n := b.used - c.used; n > 0 {
+		b.Release(n)
+	}
 }
 
 // arr is an array of n records of T, on the heap or in the arena. T is a

@@ -65,7 +65,7 @@
 
 **Front:** What gates whether a sidecar's archiver uploads anything at all, and what does that buy you after a failover?
 
-**Back:** A `@@read_only` check each cycle: only the primary archives, so a promoted replica starts archiving on its next scan with no extra wiring.
+**Back:** A `@@read_only` check each cycle: a writable site uploads every sealed binlog, so a promoted replica starts archiving on its next scan with no extra wiring. A read-only site uploads only the tail of its last writable era.
 
 ---
 

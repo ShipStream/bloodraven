@@ -85,7 +85,7 @@ func TestFaultFreeBaseline(t *testing.T) {
 // across the fixed seed range fails the build. The range is deterministic, so
 // this is a stable gate, not a flake source — a new failure here means a real
 // behavior change. If a documented known-limitation class (see
-// README "Known finding classes") ever enters the range after an intentional
+// README "Finding classes") ever enters the range after an intentional
 // change, regenerate the expectations knowingly rather than widening this
 // filter silently.
 //

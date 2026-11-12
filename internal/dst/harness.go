@@ -50,6 +50,10 @@ type TrialResult struct {
 func (r TrialResult) Failed() bool { return len(r.Violations) > 0 }
 
 type trialRunner struct {
+	// siteIdentities is the durable record of the sites' server_uuids
+	// (ownloss.go).
+	siteIdentities simSiteIdentityStore
+
 	trial   Trial
 	cluster *Cluster
 	dns     *simDNS
@@ -94,7 +98,7 @@ type trialRunner struct {
 	// actors) lands after the last promotion and before any status write
 	// carried it. Before DST-1 was fixed the replacement restored from a
 	// status that never saw the record; the latch now only tags a
-	// regression of that fix (README, Known finding classes).
+	// regression of that fix (README, Finding classes).
 	replacedBeforeRecord bool
 	// retiredRecordPolls are the polls at which an ordered update recorded
 	// its handoff on a retired manager; the record is carried into its
@@ -359,6 +363,19 @@ func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.
 	// that started it, so the model sees one actor at a time and a trial
 	// replays exactly.
 	tm.ArchiveTail = simArchiveTail{r: r}
+	// A site that lacks transactions it issued itself is recloned. The
+	// operator's request and checkReclone's decisions are the production
+	// ones; the clone itself is the model's (Cluster.Reclone), applied
+	// inside the Poll that starts it. The server_uuids the sites have run
+	// under are recorded where they outlive every manager of the trial.
+	tm.SetSiteIdentityStore(&r.siteIdentities)
+	// As the runner does when it starts a manager.
+	_ = tm.LoadSiteIdentities(context.Background())
+	tm.SetRecloneRunnerForSim(r.cluster.Reclone)
+	// A promotion decision also reads the sites that are no candidates,
+	// and waits for them on the manager's clock. That clock stands still
+	// during a poll, so the decision waits for the reads themselves, which
+	// return at once in the model: a loaded machine cannot change a trial.
 	tm.SetRecloneTailStepRunnerForSim(func(step func()) { step() })
 	tm.ArchiveTailNotArchivedCallback = func(site, reason string) {
 		// A wait that reaches its bound goes on to CLONE, which the model
@@ -423,6 +440,12 @@ func (r *trialRunner) restoreSites(tm *controller.TopologyManager) {
 				tm.SetRecoveryInProgress(site.Name)
 			case "RecoveryBlocked":
 				tm.SetRecoveryBlockedFrom(site.Name, site.DivergentGtid, site.DivergentTxnCount, site.DivergenceDetectedBy, site.DivergenceComparedTo)
+			}
+			if site.LostGtid != "" {
+				// As the runner: a report of lost own transactions holds
+				// across the restart, with the site it was compared with
+				// (status.sites[].lostComparedTo).
+				tm.SetOwnTransactionsLostFrom(site.Name, site.LostGtid, site.LostTxnCount, site.LostComparedTo)
 			}
 		}
 	}
@@ -674,7 +697,7 @@ func (r *trialRunner) restartOperator(poll int) {
 // lost to a manager replacement: made on a retired manager, or made before
 // the replacement and not yet carried by any status write
 // (fingerprint AntiFlapStateLost(replacement): the fixed DST-1, now a
-// regression; README, Known finding classes).
+// regression; README, Finding classes).
 const replacedBeforeRecordMarker = "(the record was made on, or not yet written to status by, a replaced manager)"
 
 // checkRehydratedAntiFlap compares what the new process rehydrated against
@@ -754,6 +777,27 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 	case OpRecloneWait:
 		r.recloneWait = &simRecloneWait{site: op.Site, until: poll + op.N, sidecar: op.K}
 		r.recloneTold = nil
+	case OpRegressSite:
+		r.cluster.RegressSite(op.Site, op.K)
+	case OpRegressBoot:
+		r.cluster.Recover(op.Site, op.Fenced, false)
+	case OpFailedClone:
+		// Whatever the operator records for a clone it issued, and no
+		// clone: the site keeps its data and its server_uuid.
+		recorded := r.tm != nil && !r.cluster.OperatorDead() && r.tm.CloneIssuedAndFailedForSim(op.Site)
+		r.cluster.NoteFailedClone(op.Site, recorded)
+	case OpSilentWitness:
+		// The site stops answering the operator, and the operator process
+		// restarts (K=0) or replaces the group's manager (K=1) in the same
+		// poll: the new manager starts from status, without the site.
+		r.cluster.SetOperatorLink(op.Site, true)
+		if op.K == 1 && r.pl != nil {
+			r.pl.applyOp(Op{At: op.At, Kind: OpReplaceManager, N: op.N % 4}, poll)
+		} else {
+			r.restartOperator(poll)
+		}
+	case OpSilentWitnessHeal:
+		r.cluster.SetOperatorLink(op.Site, false)
 	case OpFailFlush:
 		r.cluster.AddFlushFailures(op.Site, op.N)
 	case OpSlowFlush:

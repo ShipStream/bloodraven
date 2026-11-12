@@ -727,7 +727,7 @@ func (r *trialRunner) plannedHoldStands() bool {
 // confirmedClaimMarker tags a DualWritableUnresolved during which a planned
 // run that had already made its target writable held the claim
 // (fingerprint DualWritableUnresolved(confirmedClaim): the fixed DST-4, now a
-// regression; README, Known finding classes).
+// regression; README, Finding classes).
 const confirmedClaimMarker = "(while a planned run that had made its target writable held the claim)"
 
 // flushGrant is one actor's standing grant of writes to a site: the event
@@ -759,11 +759,10 @@ type flushGrant struct {
 //     is writable already (often by the manager's own re-assert), and the
 //     pre-reclone rotation's recipient can be a former primary an operator
 //     partition has kept writable. Carried across polls, the rule flagged
-//     85 of 112,000 planned trials, every one the priorities path (seeds
-//     527, 942, 2123, ...). On that path the rotation lands on a writable
-//     site, so the file it opens need not start at the recorded promotion
-//     GTID; nothing in a trial writes inside a poll, so the model cannot
-//     show the difference.
+//     the priorities path and nothing else in the planned sweeps. On that
+//     path the rotation lands on a writable site, so the file it opens
+//     need not start at the recorded promotion GTID; nothing in a trial
+//     writes inside a poll, so the model cannot show the difference.
 type flushGrants struct {
 	granted map[string]flushGrant // actor|site
 }

@@ -25,6 +25,7 @@ jobs:
       site: ${{ steps.classify.outputs.site }}
       course: ${{ steps.classify.outputs.course }}
       pitr: ${{ steps.classify.outputs.pitr }}
+      dragonfly: ${{ steps.classify.outputs.dragonfly }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -36,7 +37,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          all() { printf 'go=true\nsite=true\ncourse=true\npitr=true\n' | tee -a "$GITHUB_OUTPUT"; }
+          all() { printf 'go=true\nsite=true\ncourse=true\npitr=true\ndragonfly=true\n' | tee -a "$GITHUB_OUTPUT"; }
           # Release calls inherit the caller's push event; every non-PR runs all jobs.
           if [ "$EVENT_NAME" != pull_request ]; then echo "non-PR event: full run"; all; exit 0; fi
           # HEAD^1 is the PR merge commit's base; include old paths when files move.
@@ -185,6 +186,9 @@ jobs:
   # mysql container launcher against real servers through first boot,
   # restarts, clones and a killed clone. It reads MySQL-internal file names
   # in the data directory, so this is where an upstream change shows.
+  # And the native own-loss lag proof test: the position proof that tells a
+  # replica that lost its own transactions from one that is behind, against
+  # two real servers.
   test-pitr-native:
     needs: changes
     if: needs.changes.outputs.pitr == 'true'
@@ -207,11 +211,44 @@ jobs:
       - name: Pull MySQL image
         run: docker pull mysql:9.7
       - name: Run native PITR tests
-        run: go test ./cmd/bloodraven ./internal/controller -run 'TestPITRNative' -v
+        run: go test ./cmd/bloodraven ./internal/controller ./internal/sidecar -run 'TestPITRNative' -v
       - name: Run native MySQL launcher test
         env:
           BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
         run: go test ./internal/controller -run 'TestMySQLLauncherNative' -v -timeout 20m
+      - name: Run native own-loss lag proof test
+        env:
+          BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
+        run: go test ./internal/controller -run 'TestOwnLossLagProofNative' -v -timeout 10m
+
+  # Opt-in native Dragonfly tests, against real Dragonfly servers at the
+  # supported floor: the client's replication positions (two
+  # Dragonfly-internal commands), and what a master and its replica report
+  # after the master's process was replaced, which the manager's handling
+  # of a restarted master rests on (run once against the client, once
+  # through the manager). This is where an upstream change shows. Runs when
+  # the `dragonfly` rule of classify-changes.sh matches.
+  test-dragonfly-native:
+    needs: changes
+    if: needs.changes.outputs.dragonfly == 'true'
+    name: Test / Dragonfly native
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOFLAGS: -count=1
+      BLOODRAVEN_DRAGONFLY_NATIVE_TEST: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: plain
+      - name: Run native Dragonfly tests
+        run: go test ./internal/dragonfly ./internal/controller -run 'TestDragonflyNative' -v -timeout 10m
 
   test-envtest:
     needs: changes
@@ -411,7 +448,7 @@ jobs:
   all-checks:
     name: All Checks
     runs-on: ubuntu-latest
-    needs: [changes, lint, build, test-unit, test-component, test-pitr-native, test-envtest, generate-check, license-roundtrip, docs-build, course-check]
+    needs: [changes, lint, build, test-unit, test-component, test-pitr-native, test-dragonfly-native, test-envtest, generate-check, license-roundtrip, docs-build, course-check]
     if: always()
     steps:
       - name: Check all jobs passed

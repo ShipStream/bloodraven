@@ -590,7 +590,8 @@ type PlannedFailoverHold struct {
 }
 
 // DragonflyOffsetState says whether the source Dragonfly's replication
-// offset was captured for the sync wait.
+// position was captured for the sync wait. Unavailable: the source could
+// not be reached, did not answer as a master, or gave no position.
 // +kubebuilder:validation:Enum=Captured;Unavailable
 type DragonflyOffsetState string
 
@@ -654,6 +655,9 @@ type DragonflyTakeoverRecord struct {
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 	// +optional
 	Method DragonflyTakeoverMethod `json:"method,omitempty"`
+	// TargetOffset is the promoted target's replication position right
+	// after a successful takeover, on the scale of sourceOffset. Absent
+	// when the target gave none.
 	// +optional
 	TargetOffset *int64 `json:"targetOffset,omitempty"`
 }
@@ -671,9 +675,10 @@ type PlannedFailoverDragonflyStatus struct {
 	// +optional
 	SourceOffsetState DragonflyOffsetState `json:"sourceOffsetState,omitempty"`
 
-	// SourceOffset is the source Dragonfly's master replication offset,
-	// the catch-up target of the sync wait. Set iff sourceOffsetState is
-	// Captured.
+	// SourceOffset is the source Dragonfly's replication position when
+	// the sync wait began: the journal records its shards had written,
+	// summed. The wait compares the target with it shard by shard; the
+	// sum is kept for the record. Set iff sourceOffsetState is Captured.
 	// +optional
 	SourceOffset *int64 `json:"sourceOffset,omitempty"`
 

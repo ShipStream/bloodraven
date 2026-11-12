@@ -103,7 +103,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 - **`kill-site` vs `scale --replicas=0`**: `kill-site` deletes the pod but Deployment recreates it in <5s. Use `scale --replicas=0` when you need a site to stay down (self-fencing, anti-flap, sustained outage tests).
 - **Network partition**: `chaos.sh network-partition` uses a NetworkPolicy deny-all. This blocks at the pod network level (not host netns). Cleanup: `chaos.sh recover`.
-- **Relay log drain**: Failover takes up to ~37s when the primary is dead (detection + a drain of at most 30s + promotion). The drain ends as soon as the replica has applied what it already received, so without a backlog it is much shorter. Plan wait times for the bound.
+- **Relay log drain**: Failover takes up to ~37s when the primary is dead (~6s detection + a drain of at most 30s + the promotion's binary log rotation, bounded at 1s and usually a few milliseconds; the promotion statements add milliseconds). The drain ends as soon as the replica has applied what it already received, so without a backlog it is much shorter. Plan wait times for the bound.
 - **Operator binlog rotations**: The operator sends one best-effort `FLUSH BINARY LOGS` (bounded at 1 s, never failing its caller) to a promotion candidate before its writes are enabled, to the fenced primary of a planned failover or maintenance handoff, and, with PITR enabled, to a reclone's recipient. So a scenario's own flushes are not the only thing that seals a binlog. With PITR enabled a read-only site's sidecar archives the tail those rotations seal (`/archiver/status` `tail.state`), and a reclone starts only once its recipient's tail is reported archived, or after 2 minutes with a Warning Event `PITRArchiveTailNotArchived`: budget a reclone wait for that.
 - **A clone changes `server_uuid`**: Every mysql container starts through the operator's launcher, which removes `auto.cnf` on the restart that installs a finished `CLONE INSTANCE` (a reclone, the fresh-deploy bootstrap, the auto-clone of an empty site, the post-restore reclone queue), so the recipient comes back with a new `@@server_uuid` and numbers its own transactions from `<new uuid>:1` (#265). Read a site's `server_uuid` after a clone, not before, and do not compare GTID sets by a UUID remembered from before one. An ordinary restart, a pod replacement and a clone that failed or was killed keep the `server_uuid`. The launcher logs one line to the mysql container when it acts (`bloodraven-launcher: …`), and the operator logs `clone recipient server_uuid rotated`, or raises a Warning Event `CloneServerUUIDNotRotated` when the recipient kept its identity. `pitrRecloneSite` and scenarios 51 and 59 assert the change.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
@@ -126,7 +126,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 **Verify**: activeSite flips, new primary read_only=0, DNS updated, old primary auto-recovers as replica (IO=Yes, SQL=Yes). Counter data preserved.
 
-**Timing**: up to ~37s to failover complete (the relay drain waits at most 30s for received backlog to apply). Recovery adds ~5s after old primary pod respawns.
+**Timing**: up to ~37s to failover complete (~6s detection; the relay drain waits at most 30s for received backlog to apply, and the promotion's binary log rotation at most 1s). Recovery adds ~5s after old primary pod respawns.
 
 **Caution — GTID divergence race**: When the old primary pod respawns, MySQL commits 1-3 internal transactions (system table updates, auto-increment counters) before the operator can fence it. This may create GTID divergence that blocks auto-recovery, requiring `reset-mysql.sh`. Whether divergence occurs is timing-dependent — it doesn't happen every time. If recovery logs "GTID divergence detected" instead of "no GTID divergence, auto-recovering", the scenario was affected.
 
@@ -380,7 +380,7 @@ kubectl -n $NS exec deploy/mysql-playground-$REPLICA -c mysql -- \
 
 # Kill primary
 ./playground/chaos.sh kill-site $PRIMARY
-# Wait for failover (~37s)
+# Wait for failover (up to ~37s)
 
 # Check how many transactions survived on the new primary
 kubectl -n $NS exec deploy/mysql-playground-$REPLICA -c mysql -- \
@@ -783,6 +783,10 @@ Live k3d status from May 3, 2026: scenarios 22, 23, 24, 25, 26, 27, and 29 pass 
 **Injection**: `make chaos-run SCENARIO=23-dragonfly-master-kill`
 
 **Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins with `status.dragonfly.sites[].role=Replica` and `linkStatus=up`, and the Dragonfly promotion metric increments.
+
+The kill closes the replication connection, so the replica holds the seeded key and reports its link down. That does not shorten the wait. The replica is promoted by whichever comes first: `spec.failureThreshold` consecutive missed polls of the master (4 to 6 s with the defaults when the dial is refused, 9 to 11 s when the deleted pod's endpoint swallows the dial), or the StatefulSet's replacement pod answering as a new, empty master, which the replica is not re-attached to (`dragonfly: active master restarted without the cache; promoting the replica that holds it`). Either way the promotion is a `REPLICAOF NO ONE` (`result="sessions_lost"`) and the seeded key survives. On the second path the replacement pod is deleted once more by the promotion before it rejoins as a replica. About 30 s after the promotion Dragonfly follows MySQL back to the original site with `REPLTAKEOVER`; the rejoin assertion is made before that. A master that is only partitioned (scenario 39) is promoted after `spec.failureThreshold` missed polls, about 9 to 11 s with the defaults.
+
+Not run since the single failure threshold and the restarted-master handling replaced the promotion on the first missed poll; the assertions were read against the new behaviour and left as they are.
 
 ---
 
@@ -1464,7 +1468,7 @@ Component coverage for the same gate lives in
 not repeat those cases.
 
 **Expected duration**: ~8-15 minutes (dominated by the rotation pod
-rolls and the ~37s emergency failover drain).
+rolls and the up to ~37s emergency failover).
 
 **Cleanup**: scales the primary back if the scenario bailed out while
 it was at 0; clears a leftover `rotate-keyring` annotation.
@@ -1660,6 +1664,41 @@ Every reclone (`bloodraven.shipstream.io/reclone-site=<a>:confirm=<group>:uid=<u
 **No longer covered on a cluster**: `PITRArchiveReissueRiskDetected`, `PITRArchiveHistoryReset` and the new-prefix remedy, which this scenario pinned until #265. They remain for a server that lost history and kept its `server_uuid`; the sidecar's, the planner's and the controller's tests cover them. The switch to a new prefix is still exercised by §69.
 
 **Timing**: 75-minute timeout. **Cleanup** (32-minute budget plus 12 minutes for the repair reclone): if the run got as far as applying the delay, clears b's `SOURCE_DELAY` only while b is still a read-only replica whose channel carries a delay (judged from b's live state, so a partly applied delay is cleared and a promoted b is not touched), reclones any `RecoveryBlocked` site (with PITR still enabled each such reclone first waits, at most 2 minutes, for the site's tail), then as §37. **Status**: written and compiled; first live runs in the e2e `pitr` job on the #206 PR (see §37). The #264 changes (L', step 4 and the reclones' tail assertions) and the #265 changes (steps 5 and 6) have not run on a cluster yet.
+
+### 71. Old Primary Lost Its Own Transactions {#71-old-primary-lost-own-transactions}
+**Category**: Old-primary recovery | **Risk**: High | **Automated**: `71-old-primary-lost-own-transactions` (full profile, `ResetBeforeRunAll`)
+
+**Hypothesis**: When the old primary comes back after a failover lacking transactions it issued itself that the new primary holds, the operator does not rejoin it by replication. It reports `OwnTransactionsLost` with the exact set (`status.sites[].recoveryState: RecloneRequired`, `lostGtid`), reclones the site without a request, and the site ends as a healthy replica under a new `server_uuid` that holds the lost transactions again.
+
+**Injection**: Write ten single-row transactions on the primary, wait for the replica to hold them, scale the primary to 0 and wait for the failover. The new primary writes three rows of its own. The set the old primary is to lose is then chosen among the transactions it issued that the new primary holds, and its GTID state is reduced to what the new primary holds minus that set: a counter-app write that reached the old primary only, between the catch-up wait and the scale-down, is left out like the lost tail (with it the site would come back divergent, which is another case). Then scale the operator to 0, scale the old primary back up and, on the read-only server, run `RESET BINARY LOGS AND GTIDS` and set `gtid_purged` to its former set minus its newest three own transactions. Scale the operator back to 1.
+
+A real cluster loses such a tail with a volume that comes back older. The playground cannot swap a volume's contents under a stopped pod, so the scenario gives the site the GTID state of the older volume instead. The rows of the three transactions stay in its tables, which an older volume would not have; the operator decides on GTID sets alone, and the reclone replaces the site's data either way.
+
+**Verify**:
+
+- An `OwnTransactionsLost` Warning names the old primary and counts three transactions.
+- The site reaches `recoveryState` empty with `lostGtid` empty, replicating from the new primary, while the active site does not move.
+- Its `server_uuid` differs from the one it had (it was cloned), an `OwnTransactionsLostResolved` Event exists, and no `OldPrimaryRecovered` Event names it (that Event announces a rejoin by replication).
+- `GTID_SUBTRACT(<lost set>, @@gtid_executed)` is empty on the site, and the marker table has 13 rows on both sites.
+
+**Status**: written and compiled, not yet run on a live cluster. It is in the full profile only; move it to the release profile after its first green run.
+
+### 72. PITR With an Encrypted Binary Log {#72-pitr-encrypted-binlog}
+**Category**: PITR, encryption at rest | **Risk**: Medium | **Automated**: `72-pitr-encrypted-binlog` (quarantined: needs the TLS + `spec.encryptionAtRest` baseline, run by the encryption jobs)
+
+**Hypothesis**: With `spec.encryptionAtRest` MySQL encrypts the binary log (`binlog_encryption=ON`). The sidecar archives the plaintext of those files, read with the key in the site's keyring, and reports no archiver error. A pinned `MysqlBackupVerification` then restores a full dump and replays the archived binlogs to a timestamp with `mysqlbinlog`, which reads plaintext only: the pre-target marker rows are there and the post-target rows are not.
+
+**Injection**: The steps of scenario 31 (RustFS profile with PITR, a baseline row, a full backup, marker rows around a target timestamp, a forced rotation) on the encryption baseline (`./playground/enable-encryption.sh`).
+
+**Verify**:
+
+- `@@global.binlog_encryption` is 1 on the active site and the replica, before PITR is enabled and after the archive was forced (enabling PITR rolls every site).
+- The archiver of the active site becomes ready and covers the target timestamp (scenario 31's checks).
+- The verification succeeds with the marker rows scenario 31 expects.
+
+Before the archiver could decrypt, this stopped at the archiver's readiness: nothing was archived and `PITRArchiveReady` was `False` with `ArchiverError`.
+
+**Status**: passed once on a four-node kind cluster (2026-11-12, about 5 minutes).
 
 ### Recorded, not automated
 

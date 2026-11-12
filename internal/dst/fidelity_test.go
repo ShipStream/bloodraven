@@ -447,7 +447,7 @@ func TestPlannedTrial_ExercisesTheActorOps(t *testing.T) {
 	counts := map[string]int{}
 	outcomes := map[string]int{}
 	replacedPods, regressed := 0, 0
-	for seed := uint64(1); seed <= 150; seed++ {
+	for seed := uint64(1); seed <= 300; seed++ {
 		r := RunTrial(GeneratePlannedTrial(seed), true, nil)
 		for k, v := range r.Planned.Counts {
 			counts[k] += v

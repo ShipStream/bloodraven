@@ -468,6 +468,29 @@ func TestEvalCrossSite_PromotionBlocked(t *testing.T) {
 			t.Fatalf("alert = %q, want the bring-back / remove-status.restoreReclones remedies", got.Alert)
 		}
 	})
+	t.Run("own transactions lost", func(t *testing.T) {
+		got := EvalCrossSite([]SiteObservation{
+			obs("iad", pc, StateUnreachable),
+			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true, PromotionBlockedReason: PromotionBlockedOwnTransactionsLost},
+		}, nil)
+		if got.Reason != "NoPrimary" || len(got.PromotionCandidates) != 0 {
+			t.Fatalf("got reason %q candidates %v, want NoPrimary with none", got.Reason, got.PromotionCandidates)
+		}
+		if !strings.Contains(got.Alert, "refusing to promote pdx (lacks transactions it issued itself") ||
+			strings.Contains(got.Alert, "UnsealReason=Rotation") || strings.Contains(got.Alert, "post-restore") {
+			t.Fatalf("alert = %q, want the own-transactions-lost refusal naming pdx only", got.Alert)
+		}
+	})
+	t.Run("a clean candidate is promoted past one that lost its own transactions", func(t *testing.T) {
+		got := EvalCrossSite([]SiteObservation{
+			obs("iad", pc, StateUnreachable),
+			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true, PromotionBlockedReason: PromotionBlockedOwnTransactionsLost},
+			obs("fra", pc, StateReadOnly),
+		}, []string{"pdx", "fra"})
+		if !equalStrings(got.PromotionCandidates, []string{"fra"}) {
+			t.Fatalf("candidates = %v, want [fra]", got.PromotionCandidates)
+		}
+	})
 	t.Run("both reasons", func(t *testing.T) {
 		got := EvalCrossSite([]SiteObservation{
 			obs("iad", pc, StateUnreachable),

@@ -439,6 +439,65 @@ func TestCheckpointUndo(t *testing.T) {
 	}
 }
 
+// TestCheckpointNests: a checkpoint started inside another (a report read
+// around the fetcher's download attempts) hands what it keeps to the outer
+// one, whose Undo returns it; what the inner one undoes, or frees itself,
+// is not returned twice.
+func TestCheckpointNests(t *testing.T) {
+	m := newMemArena()
+	b := NewBudget(1 << 20)
+	b.SetSpill(tinySpill(m))
+	kept, err := alloc[int64](b, 100, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	used, spilled := b.Used(), b.Spilled()
+	outer := b.Checkpoint()
+	mid, err := alloc[int64](b, 100, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A failed attempt, then one that is kept.
+	failed := b.Checkpoint()
+	if _, err := alloc[int64](b, 100, "x"); err != nil {
+		t.Fatal(err)
+	}
+	failed.Undo()
+	if b.attempt != outer || len(m.blocks) != 2 {
+		t.Fatalf("after the inner Undo: %d arena blocks, outer current: %v", len(m.blocks), b.attempt == outer)
+	}
+	inner := b.Checkpoint()
+	keptA, err := alloc[int64](b, 100, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alloc[int64](b, 200, "x"); err != nil {
+		t.Fatal(err)
+	}
+	// A block of the outer checkpoint that its owner frees while the inner
+	// one is current is no longer the outer one's to free.
+	mid.free()
+	inner.Keep()
+	if b.attempt != outer || len(m.blocks) != 3 {
+		t.Fatalf("after the inner Keep: %d arena blocks, outer current: %v", len(m.blocks), b.attempt == outer)
+	}
+	// One of the kept blocks is freed by its owner before the outer Undo.
+	keptA.free()
+	outer.Undo()
+	if b.attempt != nil || len(m.blocks) != 1 || b.Spilled() != spilled || b.Used() != used || b.spilledBlocks != 1 {
+		t.Fatalf("after the outer Undo: memory %d (want %d), spilled %d (want %d), %d arena blocks, %d counted", b.Used(), used, b.Spilled(), spilled, len(m.blocks), b.spilledBlocks)
+	}
+	// Undo never adds to the charge: with a block from before the
+	// checkpoint freed inside it, less is charged at the end than at the
+	// start, and nothing is returned.
+	cp := b.Checkpoint()
+	kept.free()
+	cp.Undo()
+	if b.Used() != 0 || len(m.blocks) != 0 {
+		t.Fatalf("after freeing inside a checkpoint: memory %d, %d arena blocks", b.Used(), len(m.blocks))
+	}
+}
+
 // TestSpilledWritesAreAllCounted: the bound on unwritten spill holds only
 // if every write to a spilled array goes through the budget. The arena
 // here keeps what was last written back for every block; at the planner's

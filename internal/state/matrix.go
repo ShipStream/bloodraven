@@ -52,6 +52,9 @@ type SiteObservation struct {
 const (
 	PromotionBlockedRotation       = "Rotation"
 	PromotionBlockedPendingReclone = "PendingReclone"
+	// PromotionBlockedOwnTransactionsLost: the site lacks transactions it
+	// issued itself and would issue their GTIDs again.
+	PromotionBlockedOwnTransactionsLost = "OwnTransactionsLost"
 )
 
 // CrossSiteAction describes the cross-site action implied by a poll
@@ -220,7 +223,7 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 				action.Reason = ReasonSiteUnhealthy
 				return action
 			}
-			rotating, pendingReclone := blockedCandidateNames(readOnly)
+			rotating, pendingReclone, ownLost := blockedCandidateNames(readOnly)
 			var refusals []string
 			if len(rotating) > 0 {
 				refusals = append(refusals, fmt.Sprintf(
@@ -232,6 +235,12 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 					"refusing to promote %s (pending post-restore reclone; holds pre-restore data); "+
 						"bring the primary back, or remove status.restoreReclones (kubectl patch --subresource=status) to accept that data",
 					strings.Join(pendingReclone, ", ")))
+			}
+			if len(ownLost) > 0 {
+				refusals = append(refusals, fmt.Sprintf(
+					"refusing to promote %s (lacks transactions it issued itself; it would issue their GTIDs again); "+
+						"bring the primary back so the site can be recloned from it",
+					strings.Join(ownLost, ", ")))
 			}
 			if len(refusals) > 0 {
 				action.Alert = "NO PRIMARY: " + strings.Join(refusals, "; ")
@@ -302,18 +311,21 @@ func RankPromotionCandidates(obs []SiteObservation, sitePriorities []string) []s
 
 // blockedCandidateNames splits the promotion-blocked primary-candidates
 // by reason.
-func blockedCandidateNames(obs []SiteObservation) (rotating, pendingReclone []string) {
+func blockedCandidateNames(obs []SiteObservation) (rotating, pendingReclone, ownLost []string) {
 	for _, c := range obs {
 		if c.Role != SiteRolePrimaryCandidate || !c.PromotionBlocked {
 			continue
 		}
-		if c.PromotionBlockedReason == PromotionBlockedPendingReclone {
+		switch c.PromotionBlockedReason {
+		case PromotionBlockedPendingReclone:
 			pendingReclone = append(pendingReclone, c.Name)
-		} else {
+		case PromotionBlockedOwnTransactionsLost:
+			ownLost = append(ownLost, c.Name)
+		default:
 			rotating = append(rotating, c.Name)
 		}
 	}
-	return rotating, pendingReclone
+	return rotating, pendingReclone, ownLost
 }
 
 // ResolveSplitBrain picks the winner and losers from a writable set

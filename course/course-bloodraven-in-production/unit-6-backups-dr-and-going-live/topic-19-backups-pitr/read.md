@@ -135,10 +135,18 @@ binlogs produced while the sidecar was offline. If inotify is unavailable — a 
 say — the archiver drops to poll-only. Rotation is then detected with worse latency, up to 60
 seconds, but never missed.
 
-Every cycle starts with a role gate: the archiver reads `@@read_only` and, on a replica, clears its
-error, zeroes its backlog and returns. Only the primary archives. That single check is the whole
-post-failover story — when `pdx` is promoted, its archiver's next scan finds `read_only=0` and
-starts uploading. No extra wiring, no operator intervention.
+Every cycle starts with a role check: the archiver reads `@@read_only`. A writable site uploads every
+sealed binlog. That single check is most of the post-failover story — when `pdx` is promoted, its
+archiver's next scan finds `read_only=0` and starts uploading. No extra wiring, no operator
+intervention.
+
+A read-only site is not idle, though. It uploads the **tail of its last writable era**: every sealed
+file up to the newest one that holds a transaction its own server originated, and nothing after it —
+the later files hold only replica copies. That is how the last binlogs `iad` wrote as the primary
+reach the bucket after it has been demoted. The operator seals them for it: every promotion sends the
+candidate one `FLUSH BINARY LOGS`, a planned handoff sends one to the fenced source, and a reclone
+rotates the site and waits for this tail before `CLONE INSTANCE` wipes it. A site that was never the
+primary, or was recloned since it last wrote, uploads nothing while read-only.
 
 Then the rule that surprises people: only **sealed** binlogs upload. The last entry in the index is
 the file MySQL is writing to right now, and the archiver drops it. Fewer than two entries means
@@ -162,8 +170,8 @@ wins. Contrast that with `gtid-mode`, `log-bin` and `log-replica-updates`, which
       "detail": "The directory watch delivers the rename. The archivePollInterval ticker (60s) would have caught it anyway."
     },
     {
-      "label": "Role gate",
-      "detail": "Read @@read_only. On a replica: clear error, backlog 0, return. Only the primary continues."
+      "label": "Role check",
+      "detail": "Read @@read_only. A writable site uploads every sealed file. A read-only site uploads only the tail of its last writable era — the files up to the newest one with a transaction of its own — and nothing from its time as a replica."
     },
     {
       "label": "Seal",
@@ -193,10 +201,14 @@ until you notice the bill.
 
 Two hard limits, and neither is a bug (objective 3). On **PVC loss**, the previously-active binlog
 lived on the destroyed PVC. It is gone forever, along with every transaction in it — PITR narrows
-your RPO to the rotation cadence only if the tail survives. And PITR **cannot reach past the
+your RPO to the rotation cadence only if the tail survives. And PITR **cannot replay past the
 async-replication cutoff**: transactions the old primary committed but never shipped are not in the
-replica's binlog stream, and therefore not in PITR's replay material. Restoring from the survivor
-cannot conjure writes the survivor never saw.
+replica's binlog stream, so no restore of the surviving history holds them. If the old primary comes
+back with its volume, its sidecar archives that tail, and a restore that crosses it refuses
+`PITRArchiveDivergentHistory` and prints the set: the archive then tells you exactly what was lost,
+and you list it in `excludeGtids` to restore what the cluster kept. If it never comes back, or is
+recloned before the tail is archived (Warning `PITRArchiveTailNotArchived`), those writes are in no
+archive at all. Restoring from the survivor cannot conjure writes the survivor never saw.
 
 Now the sting. A backup storage failure has **no data-plane impact whatsoever**. MySQL keeps
 serving reads and writes, the counter keeps counting, `playground` stays `Healthy`, and your PITR RPO

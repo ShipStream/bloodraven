@@ -8032,9 +8032,10 @@ spec:
                         type: string
                       sourceOffset:
                         description: |-
-                          SourceOffset is the source Dragonfly's master replication offset,
-                          the catch-up target of the sync wait. Set iff sourceOffsetState is
-                          Captured.
+                          SourceOffset is the source Dragonfly's replication position when
+                          the sync wait began: the journal records its shards had written,
+                          summed. The wait compares the target with it shard by shard; the
+                          sum is kept for the record. Set iff sourceOffsetState is Captured.
                         format: int64
                         type: integer
                       sourceOffsetState:
@@ -8085,6 +8086,10 @@ spec:
                             - Failed
                             type: string
                           targetOffset:
+                            description: |-
+                              TargetOffset is the promoted target's replication position right
+                              after a successful takeover, on the scale of sourceOffset. Absent
+                              when the target gave none.
                             format: int64
                             type: integer
                         required:
@@ -9385,6 +9390,36 @@ spec:
                         polled.
                       format: date-time
                       type: string
+                    lostComparedTo:
+                      description: |-
+                        LostComparedTo names the site that holds LostGtid: the site this
+                        one was compared with when the loss was found. When it is the
+                        active primary (status.activeSite) the site cannot replicate the
+                        transactions and is recloned. When it is another site, the primary
+                        does not hold them: this site keeps replicating, is not promoted,
+                        and the report ends once every other site has been compared and
+                        none holds them (the named site was recloned, or the transactions
+                        were replayed onto the primary and replicated back). Empty when
+                        LostGtid is, and for a report restored from a status that did not
+                        carry the field.
+                      type: string
+                    lostGtid:
+                      description: |-
+                        LostGtid is the GTID set of transactions this site issued under a
+                        server_uuid it has had, that another site holds (the primary, or a
+                        site that holds transactions the primary lacks, or a peer when no
+                        site was writable) and the site no longer does (its volume came
+                        back older, or a crash lost them).
+                        Replication cannot bring them back: the site's receiver drops
+                        events that carry its own server_id. Populated while the loss
+                        stands, with RecoveryState RecloneRequired, or RecoveryBlocked when
+                        the site also holds transactions the primary lacks.
+                      type: string
+                    lostTransactionCount:
+                      description: LostTransactionCount is the number of transactions
+                        in LostGtid.
+                      format: int64
+                      type: integer
                     name:
                       description: |-
                         Name is the site identifier, mirrored from spec: the key of
@@ -9399,10 +9434,18 @@ spec:
                         RecoveryBlocked means the site holds transactions the primary lacks
                         (see DivergenceDetectedBy): it is not promoted by an ordered update or
                         a planned failover, and it must be recloned or the primary made to
-                        contain the set. Replication may still be running.
+                        contain the set. Replication may still be running. RecloneRequired
+                        means the site lacks transactions it issued itself (LostGtid) and
+                        holds nothing the primary lacks: it is not promoted. When the
+                        primary holds those transactions, its replication is not started
+                        and the operator reclones it. When only another site holds them
+                        (the RecoveryPending condition names it), the site keeps
+                        replicating and is not recloned automatically: the report ends when
+                        that site is recloned or the primary contains the transactions.
                       enum:
                       - RecoveryInProgress
                       - RecoveryBlocked
+                      - RecloneRequired
                       type: string
                     replication:
                       description: |-
@@ -9436,6 +9479,7 @@ spec:
                       - MutationFailed
                       - GTIDDiverged
                       - RestorePeerHold
+                      - OwnTransactionsLost
                       type: string
                     sourceConvergenceState:
                       description: |-

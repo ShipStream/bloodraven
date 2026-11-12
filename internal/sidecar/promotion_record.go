@@ -508,7 +508,7 @@ func (a *BinlogArchiver) observeRole(ctx context.Context, snap roleSnapshot) err
 // promotionSetReadBound and promotionSetMaxFiles bound the local file
 // reads of one promotion-set derivation: the record gates the episode's
 // uploads and must not wait for a slow volume or a long run of files.
-// Each header read is itself capped (localBinlogHeader: 1 MiB).
+// Each header read is itself capped (localBinlogs.header: 1 MiB).
 const (
 	promotionSetReadBound = time.Second
 	promotionSetMaxFiles  = 64
@@ -517,7 +517,7 @@ const (
 // promotionSetReader is how promotionSet reads local binlog headers;
 // tests replace its parts.
 type promotionSetReader struct {
-	header func(path string) (binlogHeader, error) // nil: localBinlogHeader
+	header func(path string) (binlogHeader, error) // nil: the archiver's binlogs().header
 	bound  time.Duration                           // 0: promotionSetReadBound
 }
 
@@ -582,7 +582,7 @@ func (a *BinlogArchiver) promotionSet(ctx context.Context, snap roleSnapshot, fi
 	}
 	read := a.promotionSets.header
 	if read == nil {
-		read = localBinlogHeader
+		read = a.binlogs().header
 	}
 	bound := a.promotionSets.bound
 	if bound <= 0 {

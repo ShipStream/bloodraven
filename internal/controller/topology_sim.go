@@ -64,6 +64,15 @@ func (u *SimOrderedUpdate) ClaimOrderedUpdateForSim(ctx context.Context) (bool, 
 	return claimed, err
 }
 
+// HandoffRefusalForSim is the standby's handoff eligibility as
+// ExecuteTargets reads it when it chooses the handoff target
+// (UpdateTarget.HandoffBlocked, liveHandoffRefusal): nil, or why site must
+// not receive the handoff (mid-keyring-rotation, awaiting its post-restore
+// reclone, lacking transactions it issued itself, divergent).
+func (u *SimOrderedUpdate) HandoffRefusalForSim(site string) error {
+	return u.tm.liveHandoffRefusal(site)()
+}
+
 // RecordHandoffForSim records a completed handoff to target as the update's
 // goroutine does: recordFailover, then DNS.
 func (u *SimOrderedUpdate) RecordHandoffForSim(ctx context.Context, target, promotionGTID string) {
@@ -273,4 +282,88 @@ func (tm *TopologyManager) FailoverRecordForSim() (FailoverRecord, bool) {
 // run is in a phase that owns the sites.
 func PlannedFailoverOwnsSitesForSim(fg *v1alpha1.MysqlFailoverGroup) bool {
 	return plannedFailoverOwnsSites(fg)
+}
+
+// SetRecloneRunnerForSim replaces the clone of a reclone (the bootstrap
+// goroutine: CLONE INSTANCE, the wait for the restart, the replication
+// setup) with run, which applies a clone's effect to the simulation's
+// model and reports whether it could (the donor and the recipient are up
+// and can reach each other). checkReclone's own decisions stay the
+// production ones: the request, the donor confirmation, the claims and
+// the pre-reclone archive-tail wait. After a clone the recipient has no
+// replication channel; old-primary recovery configures it on a later poll,
+// as it would after an operator restart between a clone and its
+// replication setup. Call before the first Poll.
+func (tm *TopologyManager) SetRecloneRunnerForSim(run func(donor, recipient string) bool) {
+	tm.recloneForSim = run
+}
+
+// finishRecloneForSim runs the simulated clone of recipient from donor and
+// settles the request as the bootstrap goroutine does after a clone that
+// completed.
+func (tm *TopologyManager) finishRecloneForSim(donor string, recipient *siteTracker) bool {
+	if !tm.recloneForSim(donor, recipient.name) {
+		return false
+	}
+	tm.mu.Lock()
+	if tm.reclonePendingSite == recipient.name {
+		tm.reclonePendingSite, tm.reclonePendingOwner = "", ""
+	}
+	recipient.sourceHost = ""
+	recipient.sourceConvergenceState = ""
+	recipient.sourceConvergenceReason = ""
+	recipient.servingHealthy = false
+	tm.mu.Unlock()
+	tm.clearRecloneArchiveTail()
+	// The bootstrap marks an installed clone on the site's server_uuid
+	// timeline (cloneCompletedInProcess).
+	tm.markSiteCloned(context.Background(), recipient.name)
+	tm.clearOwnLossAfterClone(recipient.name)
+	return true
+}
+
+// CloneIssuedAndFailedForSim records what the bootstrap records when it
+// issues a clone into site, for a clone that then fails or is killed
+// before it installs: the production recordCloneIdentity, with the
+// server_uuid the site runs under, and nothing after it. A simulation
+// uses it to put the trace of a failed clone on the site's server_uuid
+// timeline. It reports whether the site's identity could be read.
+func (tm *TopologyManager) CloneIssuedAndFailedForSim(site string) bool {
+	s := tm.getSite(site)
+	if s == nil {
+		return false
+	}
+	ctx := context.Background()
+	uuid, err := readServerUUID(ctx, s.mysql)
+	if err != nil {
+		return false
+	}
+	tm.knownSiteServerUUIDs(site, uuid)
+	return tm.recordCloneIdentity(ctx, site, uuid, nil, nil) == nil
+}
+
+// CarryOwnLossReportsForSim is startManager's hand-over of the own-loss
+// reports of the manager tm replaces in the same process
+// (carryOwnLossReports).
+func (tm *TopologyManager) CarryOwnLossReportsForSim(prev *TopologyManager) {
+	tm.carryOwnLossReports(prev)
+}
+
+// OwnTransactionsLostForSim reports the set a site is recorded to lack of
+// the transactions it issued itself ("" when it has no report).
+func (tm *TopologyManager) OwnTransactionsLostForSim(site string) string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if rec := tm.ownLoss[site]; rec != nil {
+		return rec.lostGtid
+	}
+	return ""
+}
+
+// AppendServerUUIDEntryForSim appends entry to a site's server_uuid
+// timeline by the rule the group's store uses (appendServerUUIDEntry), for
+// a simulation's SiteIdentityStore.
+func AppendServerUUIDEntryForSim(timeline []string, entry string) []string {
+	timeline, _ = appendServerUUIDEntry(timeline, entry)
+	return timeline
 }

@@ -715,14 +715,25 @@ type PromoteOutcome struct {
 	TargetServerUUID string
 	TargetReachable  bool // feeds the target-loss window
 	MayHaveWritten   bool // the memo, or the stage, says SRO=OFF may have been sent
+	// ClearsUnknown marks an Aborted{ForeignWritable} verdict over a target
+	// found writable with its replication channel, decided by a process
+	// that has no promotion memo for the run. The outcome is the same in
+	// both readings (someone else made the target writable; or an earlier
+	// process of the run cleared its flags and someone then configured the
+	// channel), but only in the first is it true that the run wrote nothing
+	// to the target, so the record must not claim it.
+	ClearsUnknown bool
 	// RollbackIfUnrecorded marks an Inconsistent verdict for a target
-	// found replaced (@@server_uuid ≠ the intent's, no memo) where the
-	// source still holds all of F under the run's attributable fence and no
-	// site is writable (the DST-3 ruling). The engine rolls back instead of
-	// holding when the run's own failover record is not durable either: the
-	// run never reached RecordPlannedPromotion, so DNS never pointed at the
-	// target, and anything only the replaced pod could hold was written
-	// after the fence (the async-DR RPO).
+	// found replaced after a clear may have been sent (read-only, nothing
+	// outside F, and another @@server_uuid than the intent's or part of F
+	// missing; with or without this
+	// process's memo) where the source still holds all of F under the run's
+	// attributable fence and no site is writable (the DST-3 ruling). The
+	// engine rolls back instead of holding when the run's own failover
+	// record is not durable either: the run never reached
+	// RecordPlannedPromotion, so DNS never pointed at the target, and
+	// anything only the replaced pod could hold was written after the fence
+	// (the async-DR RPO).
 	RollbackIfUnrecorded bool
 	// Sites are the sites the refusal classified (a writable or unreadable
 	// peer, the target, the source): the hold of a ManualRecoveryRequired
@@ -747,6 +758,15 @@ type RollbackResult struct {
 	Outcome  v1alpha1.PlannedFailoverOutcome // "": not finished; retry until rollbackDeadline
 	Reason   v1alpha1.PlannedFailoverReason
 	Warnings []v1alpha1.PlannedFailoverWarning
+	// LostGtid is set only for ManualRecoveryRequired{SourceUnfenced}: the
+	// transactions the writable source provably lacks (plannedSourceLost).
+	LostGtid string
+	// SourceUnreachable is set on an unfinished pass (Outcome "") that
+	// could not read the source at all: the pass knows neither whether the
+	// source is fenced nor whether it is writable. The engine ends the run
+	// SourceLeftFenced{SourceLost} when the rollback deadline passes on
+	// such a pass.
+	SourceUnreachable bool
 }
 
 // PlannedFailoverTopology is the engine's only path to topology managers and
@@ -795,7 +815,10 @@ type PlannedFailoverTopology interface {
 	RecordPlannedPromotion(ctx context.Context, ref PlannedRunRef, confirmedAt time.Time, watermark string) error
 	ApplyDNS(ctx context.Context, ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error)
 	NameUnconfirmedTarget(ref PlannedRunRef) error // errManagerAbsent: no name recorded
-	NameFencedSource(ref PlannedRunRef) error      // errManagerAbsent: restoreFailoverState names it later
+	// NameFencedSource binds the name to sourceServerUUID, the server the
+	// run's fence intent names. errManagerAbsent: restoreFailoverState names
+	// it later.
+	NameFencedSource(ref PlannedRunRef, sourceServerUUID, fenceGtid string) error
 	Rollback(ctx context.Context, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (RollbackResult, error)
 	ActiveSite(nn types.NamespacedName) (site string, ok bool)
 }
