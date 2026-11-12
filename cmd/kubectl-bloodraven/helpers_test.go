@@ -290,6 +290,63 @@ func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 	}
 }
 
+// TestPrintGroupStatus_ShowsRollout: the detailed report says where the
+// group stands in the paced rollout while it waits for or holds the slot,
+// and says nothing for a group without a record or with a completed roll.
+func TestPrintGroupStatus_ShowsRollout(t *testing.T) {
+	fg := &v1alpha1.MysqlFailoverGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
+	}
+	render := func() string {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := printGroupStatus(&buf, fg, "table"); err != nil {
+			t.Fatalf("printGroupStatus: %v", err)
+		}
+		return buf.String()
+	}
+	if out := render(); strings.Contains(out, "Rollout:") {
+		t.Errorf("a group without status.rollout shows a rollout line:\n%s", out)
+	}
+	for _, tc := range []struct {
+		name string
+		rec  v1alpha1.RolloutStatus
+		want string
+	}{
+		{
+			name: "halted",
+			rec: v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhasePending, Reason: "RolloutHalted",
+				Message: "the rollout is halted: the roll of default/billing stalled; this group keeps its pods"},
+			want: "  Rollout: Pending (RolloutHalted): the rollout is halted: the roll of default/billing stalled; this group keeps its pods\n",
+		},
+		{
+			name: "stalled",
+			rec: v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseStalled, Reason: "OrderedUpdateStalled",
+				Message: "Ordered update stalled: site pdx was updated but its pod is not Ready"},
+			want: "  Rollout: Stalled (OrderedUpdateStalled): Ordered update stalled: site pdx was updated but its pod is not Ready\n",
+		},
+		{
+			name: "no reason or message",
+			rec:  v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseRolling},
+			want: "  Rollout: Rolling\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := tc.rec
+			fg.Status.Rollout = &rec
+			if out := render(); !strings.Contains(out, tc.want) {
+				t.Errorf("missing %q in output:\n%s", tc.want, out)
+			}
+		})
+	}
+	now := metav1.Now()
+	fg.Status.Rollout = &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseComplete, AdmittedTime: &now, StartedTime: &now, CompletedTime: &now}
+	if out := render(); strings.Contains(out, "Rollout:") {
+		t.Errorf("a completed roll shows a rollout line:\n%s", out)
+	}
+}
+
 // TestPrintGroupStatus_EmptyActiveRendersDash verifies the "-"
 // fallback so a freshly-deployed group with no active site doesn't
 // produce a confusing blank row mid-table.
