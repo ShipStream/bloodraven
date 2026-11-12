@@ -511,6 +511,10 @@ type SiteTruth struct {
 	Retrieved     gtidVec
 	ServerUUID    string
 	Incarnation   int
+	// ClonedAt is the incarnation the site's last clone created (0: never
+	// cloned). Streams the site issued before it are superseded
+	// (supersededByClone).
+	ClonedAt int
 	// BinlogSeq and BinlogPrev are the binary log model (siteData).
 	BinlogSeq  int
 	BinlogPrev gtidVec
@@ -548,6 +552,7 @@ func (c *Cluster) Truth() []SiteTruth {
 			Retrieved:     s.retrieved.clone(),
 			ServerUUID:    s.serverUUID,
 			Incarnation:   s.incarnation,
+			ClonedAt:      s.clonedAt,
 			BinlogSeq:     s.binlogSeq,
 			BinlogPrev:    s.binlogPrev.clone(),
 		})
@@ -573,6 +578,7 @@ func (c *Cluster) truthLocked(s *siteData) SiteTruth {
 		Retrieved:     s.retrieved.clone(),
 		ServerUUID:    s.serverUUID,
 		Incarnation:   s.incarnation,
+		ClonedAt:      s.clonedAt,
 		BinlogSeq:     s.binlogSeq,
 		BinlogPrev:    s.binlogPrev.clone(),
 	}

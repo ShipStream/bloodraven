@@ -39,7 +39,7 @@ The campaign stops at **coverage saturation**: a batch is "dry" when it
 produces no new failure fingerprint and fewer than 1% of its trials yield a
 new behavior signature; after `DST_DRY_BATCHES` consecutive dry batches, more
 trials are diminishing returns. Failures are deduplicated by the set of
-violated invariants (see the fingerprint table under Known finding classes)
+violated invariants (see Finding classes)
 and shrunk to a minimal fault schedule.
 
 Every actor added to the model widens the signature space, so keep an eye on
@@ -279,7 +279,11 @@ production planned-failover path end to end:
     it so; its sidecar may fence it again before the record commits), or,
     for a run that ends `RolledBack` straight from `Fencing`, at the peer
     probe of the pass that ended it, with no fence of the run's own after
-    that probe. `RolledBack` after a `read_only=OFF` that reached the
+    that probe, or, for a run a status stall ended before any fence of
+    its own landed, with no reading at all: the stall end touches no
+    server, and its record says that the source is untouched, not that
+    it is writable (`StalledBeforeFence`). `RolledBack` after a
+    `read_only=OFF` that reached the
     target (one the process died before sending did not) is judged by what
     the target held when the rollback was decided, not by the statement:
     the server that stood in for the target when the `RollingBack` record
@@ -304,11 +308,12 @@ production planned-failover path end to end:
     (`ReplacedTargetHold`). With that evidence the hold is
     `HoldWithoutDataAtRisk`, and so is one set by the process that wrote
     `Promoting` and sent no clear. A hold set by a rollback that read the
-    source writable without part of F, or without transactions of its own
-    stream that the target holds, is justified whatever the run sent
-    (`SourceLostHold`): two histories exist from then on, although the
-    GTID sets show it only until the source has issued as many
-    transactions as it lost;
+    source writable without part of F, or without transactions of one of
+    its own streams that a site the operator can read holds (the target
+    or any other; a stream a clone into the source superseded does not
+    count), is justified whatever the run sent (`SourceLostHold`): two
+    histories exist from then on, although the GTID sets show it only
+    until the source has issued as many transactions as it lost;
   - `FencedSourceNeverHealed` judges only the run's own fence (landed, in
     the source's current incarnation, still set, never healed) under the
     re-assert's preconditions, and only until the topology manager takes
@@ -421,8 +426,8 @@ clock: the harness builds the controller with
   the whole promotion on the policy winner, which is already writable, so
   that rotation lands on a writable site and the file it opens need not
   start at the recorded promotion GTID (carried across polls, the rule
-  flagged it in 85 of 112,000 planned trials; nothing writes inside a poll
-  in the model, so a trial cannot show the difference). The pre-reclone
+  flagged that path and nothing else; nothing writes inside a poll in the
+  model, so a trial cannot show the difference). The pre-reclone
   rotation's recipient can be a former primary an operator partition has
   kept writable. With
   the actors on: a planned run's rotation of a target it made writable,
@@ -494,7 +499,11 @@ clone of the site has superseded, whether the site may be made writable
   clone into it was issued, outlives every manager of a trial
   (`simSiteIdentityStore`, the group annotation in production). A manager
   loads it when it starts, as the runner does, so a manager that starts
-  into an outage knows it before its first promotion decision.
+  into an outage knows it before its first promotion decision. A site's
+  own-loss report is restored from the simulated status at every manager
+  start (`restoreSites`), as the runner restores it: with the lost set
+  and without what it was compared with, so the new manager does not know
+  whether it rests on the primary or on a witness.
 - **The witness wait** runs on the manager's clock (250 ms in production).
   The trial clock stands still during a poll, so a promotion decision
   waits for the witness reads themselves, which return at once in the
@@ -533,6 +542,13 @@ clone of the site has superseded, whether the site may be made writable
   - a planned failover's rollback unfenced a source that had restarted on
     an older data directory under the same `server_uuid` (it ends
     `SourceLeftFenced`);
+  - the same rollback, when the source restarted before the fence was
+    read (so the fenced set is the short one) and the target was cut off
+    from the operator: it compared the source with the fenced set and the
+    target only, and unfenced it although a disaster-recovery site that
+    answered held the lost transactions. The rollback reads every other
+    site, by the picker's rules
+    (`TestDSTPF_RollbackLeavesASourceFencedThatLostWhatAnotherSiteHolds`);
   - the automatic reclone ran on a comparison made before a hold: a site
     that took acknowledged writes meanwhile (made writable by an external
     writer while partitioned) was cloned over, and those writes existed
@@ -551,7 +567,17 @@ clone of the site has superseded, whether the site may be made writable
     it had loaded the sites' earlier `server_uuid`s;
   - a site with an own-loss report that an external writer made writable
     was left writable beside the primary when the split-brain policy
-    preferred it (the operator refused to resolve). It is fenced.
+    preferred it (the operator refused to resolve). It is fenced;
+  - a recorded primary that restarted without part of its history was
+    reported against its peer and then became complete again (its pod
+    was replaced onto the data directory that still had the tail). With
+    no writable site nothing compared it again, the report stood, and the
+    re-assert refused it for good (`WedgedNoPrimary`). A witness's report
+    is now reviewed every 30 seconds with or without a primary; one
+    restored from status after an operator restart, whose kind is not
+    known, is settled by the re-assert's own comparison with every peer
+    (`TestTrial_RestoredOwnLossReportDoesNotWedgeACompletePrimary`,
+    `TestOwnLoss_ReassertComparesAStandingReportAgain`).
 - **Residual, by design.** A site promoted while every holder of its lost
   transactions is down or unreachable: the operator cannot know. A trial
   then ends with one GTID naming two transactions, which the model's
@@ -560,13 +586,16 @@ clone of the site has superseded, whether the site may be made writable
   replica holds it ends with no writable site and the primary reported
   `RecloneRequired`: re-assert refuses a target a peer is ahead of, and the
   operator elects nobody among read-only sites (`WedgedNoPrimary` exempts a
-  target that is not GTID-complete, as before).
+  target that is not GTID-complete, as before). The same end for a source
+  a planned failover's rollback left fenced for that reason. A report
+  restored after an operator restart on a site that is not the recorded
+  primary is compared again only once a primary exists.
 - **Not modelled.** An in-place restore and its reclone queue (the model
-  has none), so the rule that a queued site is no witness is covered by
-  unit tests only. A planned failover's rollback that unfences a source
-  which regressed while the target cannot be read and another site holds
-  the evidence is a planned-failover finding, see the planned README
-  sections.
+  has none), so the rule that a queued site is no witness, at the picker,
+  the re-assert and the rollback, is covered by unit tests only
+  (`own_transactions_lost_evidence_test.go`,
+  `planned_failover_rollback_witness_test.go`). CLONE INSTANCE as a
+  statement: a reclone is its effect, applied in one step (above).
 
 ## Invariants
 
@@ -627,7 +656,11 @@ thread like error 1236; a receiver whose source is unreachable reports a
 connect error in `LastIOError`; relay drain aborts only on an applier
 (`LastSQLError`) error and applies local backlog even when the source is
 unreachable or the receiver has errored; crashed sites keep durable state and can boot fenced
-or writable (both happen in production).
+or writable (both happen in production); a receiver drops every event
+that carries its own `server_id`, whatever `server_uuid` issued it; a site
+can restart on an older data directory under the `server_uuid` it had; a
+clone makes the recipient a copy of its donor under a new `server_uuid`
+with no channel (see "A site that lost its own transactions" above).
 
 Operator death is modeled as "the process stops interacting", not as a
 panic: the fatal statement lands (or does not, per the op's `PreApply`), and
@@ -643,9 +676,12 @@ Not modeled (excluded from trials, guarded by loud errors): the bootstrap
 goroutine and CLONE INSTANCE as statements (the bootstrap controller is
 real and production-shaped, but the model never produces an empty site so
 no clone goroutine can start; a reclone the operator requests for a site
-that lost its own transactions is applied as its effect, see above; and a
-scripted reclone request is withdrawn before its pre-reclone wait ends),
-Dragonfly (the engine skips its Dragonfly phases with no Dragonfly ops; the
+that lost its own transactions is applied as its effect in one step,
+through `SetRecloneRunnerForSim`, so no clone fails, is killed part-way or
+spans an operator restart; and a scripted reclone request is withdrawn
+before its pre-reclone wait ends), an in-place restore and its reclone
+queue (`status.restoreReclones` is always empty, so no site is ever left
+out as a witness and no reclone is held by a restore), Dragonfly (the engine skips its Dragonfly phases with no Dragonfly ops; the
 Dragonfly rows of the #235 table are controller unit tests), deployment
 leases, and wall-clock `context.WithTimeout` expiry (timeouts are modeled as
 injected call errors instead; the engine's pass bounds are wall time and
@@ -666,45 +702,75 @@ The simulator only contains failure modes we teach it. When the playground or
 production surfaces a new MySQL behavior, encode it here too — and keep the
 playground E2E suite as the fidelity check for this model.
 
-## Known finding classes (expected in campaign output)
+## Finding classes
 
-- **`CooldownViolated(restart+stateLost)`** — a restart between the two
+A failing trial is reported under a fingerprint: the set of invariants it
+violated, with a tag in parentheses where one invariant covers several
+findings (`fingerprint` in `campaign.go`). Every fingerprint is one of
+three things:
+
+- **inherent**: the operator cannot do better, the limitation is
+  documented, and `TestDST_PlannedQuick` allows it. There is one;
+- **a regression**: a finding that was fixed, in the operator or in the
+  monitor. Its fingerprint must not appear again, and the quick sweeps fail
+  on it. A fixed operator finding is pinned as a component test in
+  `test/component/dst_regression_test.go` (or beside it) by its shape,
+  never by its seed: a seed's schedule changes whenever a fault or actor
+  generator does (the data-directory regress added one op to a quarter of
+  all schedules), so a seed quoted here would stop reproducing its
+  finding, while the component test keeps doing so. A fixed monitor
+  finding keeps a constructed history on which the rule still fires;
+- **open**: a real finding nobody has fixed. It gets a fingerprint of its
+  own, a row in the table under [Open findings](#open-findings), and is
+  never added to the allowed set.
+
+Anything else is new: triage it.
+
+### Inherent
+
+- **`CooldownViolated(restart+stateLost)`**: a restart between the two
   promotions that came up without the durable anti-flap record. That
   requires **both** durable paths (CR status and the out-of-band annotation
   store) to have been rejecting writes at once; nothing could then have
   carried the cooldown across the restart. With the actors on,
   `pfStatusDenied` deliberately puts restarts inside a status outage, so a
   trial whose fault stream also denies the out-of-band store lands here;
-  `TestDST_PlannedQuick` allows exactly this fingerprint and nothing else. See
-  `site/content/docs/3.get-started/1.known-limitations.md` → Operator availability.
+  `TestDST_PlannedQuick` allows exactly this fingerprint and nothing else
+  (`plannedAllowedClasses` in `planned_test.go`). See
+  `site/content/docs/3.get-started/1.known-limitations.md` → Operator
+  availability.
 
-Fixed findings, now regressions (`TestDST_PlannedQuick` fails on them):
+`CooldownViolated` splits three ways so the inherent class cannot absorb a
+regression, and only the third is expected:
+
+| Fingerprint | Meaning | Verdict |
+|---|---|---|
+| `CooldownViolated` | no restart between the promotions | regression |
+| `CooldownViolated(restart)` | a restart, but the record survived it | regression |
+| `CooldownViolated(restart+stateLost)` | a restart with every durable path denied | inherent |
+
+`CooldownViolated(restart)` was the expected class before the out-of-band
+store existed. It is a regression now: the restarted process had the record
+and promoted anyway.
+
+### Fixed in the operator (regressions now)
 
 - **`…(replacement)`: `CooldownViolated(replacement)`,
-  `AntiFlapStateLost(replacement)`, `WedgedNoPrimary(replacement)`** (DST-1,
-  fixed). An ordered update's handoff recorded on a manager that is then
-  replaced, or that finishes on a retired manager, used to never reach its
+  `AntiFlapStateLost(replacement)`, `WedgedNoPrimary(replacement)`** (DST-1).
+  An ordered update's handoff recorded on a manager that is then replaced,
+  or that finishes on a retired manager, used to never reach its
   replacement. The record is now carried into the successor
   (`ManagerWiring.Predecessors`, `CarryRetiredFailoverRecord`, the runner's
-  retired-record stash). Pinned in `test/component/dst_regression_test.go`.
-  The `(replacement)` tags stay so a regression reports where the record
-  was lost; `CooldownViolated(restart+stateLost)` keeps precedence over the
-  tag.
-- **`DualWritableUnresolved(confirmedClaim)`** (DST-4, fixed). A confirmed
-  run's claim used to be held through a stalled Publishing write, blocking
-  the manager's split-brain fence. The confirmed tail now releases the claim
-  once the run's own record is durable. Pinned in
-  `test/component/dst_regression_test.go`.
-
-The planned-failover findings of the wider sweeps follow. Each is described
-by what happens, not by a seed: a seed's schedule changes whenever a fault
-or actor generator does (the data-directory regress added one op to a
-quarter of all schedules), so a seed quoted here stops reproducing its
-finding, while the pinned component test keeps doing so.
-
-Classes that were the operator's, fixed:
-
-- **`HoldWithoutDataAtRisk(writableTargetWithChannel)`** (fixed). The
+  retired-record stash). The `(replacement)` tags stay so a regression
+  reports where the record was lost;
+  `CooldownViolated(restart+stateLost)` keeps precedence over the tag.
+  `TestDSTPF_RetiredManagerHandoffReachesReplacement`.
+- **`DualWritableUnresolved(confirmedClaim)`** (DST-4). A confirmed run's
+  claim used to be held through a stalled Publishing write, blocking the
+  manager's split-brain fence. The confirmed tail now releases the claim
+  once the run's own record is durable.
+  `TestDSTPF_ConfirmedRunReleasesBeforePublishing`.
+- **`HoldWithoutDataAtRisk(writableTargetWithChannel)`**. The
   operator restarts in `Promoting`
   before `RESET REPLICA ALL`, and before the new process classifies the
   target an external `read_only=0` makes it writable. Writable with a
@@ -718,7 +784,7 @@ Classes that were the operator's, fixed:
   afterwards; the outcome is the same and safe in both readings, and its
   record says which of the two it knows.
   `TestDSTPF_WritableTargetWithChannelLeavesSourceFenced`.
-- **`HoldWithoutDataAtRisk(replacedTargetSameProcess)`** (fixed).
+- **`HoldWithoutDataAtRisk(replacedTargetSameProcess)`**.
   `super_read_only=OFF` is applied but answers with an error, then the
   target pod is replaced under a new `server_uuid` and reads read-only
   inside F. The process that sent the clear used to hold, where another
@@ -726,7 +792,7 @@ Classes that were the operator's, fixed:
   take the facade's one decision (`replacedTargetRollbackSafe`); without
   the ruling's evidence the hold stands and is counted
   (`ReplacedTargetHold`). `TestDSTPF_ReplacedTargetAfterALostClearRollsBack`.
-- **`HoldWithoutDataAtRisk(regressedTarget)`** (fixed). The operator dies
+- **`HoldWithoutDataAtRisk(regressedTarget)`**. The operator dies
   in `Promoting` after `RESET REPLICA ALL`; the target restarts on an older
   data directory under the same `server_uuid` and reads read-only, without
   a channel, short of F, with nothing outside it. A process without the
@@ -740,8 +806,8 @@ Classes that were the operator's, fixed:
   the run's record durable); it now holds there, as the promotion attempt
   does. `TestDSTPF_RegressedTargetAfterAPossibleClearRollsBack`,
   `TestDSTPF_CrossProcessReplacedTargetRuling`.
-- **`OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)`**
-  (fixed). The confirmation used to take every unreadable
+- **`OutcomeDishonest(unreadablePeer)+SucceededBesideWritable(unreadablePeer)`**.
+  The confirmation used to take every unreadable
   primary-candidate as a warning. It now does so only for a site the
   confirming process last read read-only at its gate or an earlier confirm
   probe; a site it last read writable (the run's `ManualRecoveryRequired`
@@ -750,19 +816,30 @@ Classes that were the operator's, fixed:
   writable and cannot read the source) leaves the run `Promoting` until
   the site answers or the promotion deadline ends it `PromotedUnconfirmed`.
   `TestDSTPF_NoSuccessBesideAnUnreadWriter`.
-- **`RepointDivergent` by the planned path** (fixed). The source restarts
+- **`RepointDivergent` by the planned path**. The source restarts
   during a run on an older data directory under the same `server_uuid` and
   comes up writable; the run rolls back; the rollback's "source already
   writable" branch checked only the `server_uuid` and gave the target,
   which holds the transactions the source lost, a channel from that
   source. The rollback now compares the source with F and with what the
-  target holds (`plannedSourceLost`, `plannedSourceTrustFor`): no path
+  other sites hold (`plannedSourceLost`, `plannedSourceTrustFor`): no path
   creates or starts the target's channel toward a source that answers
   short of either, and a writable source in that state ends the run
   `ManualRecoveryRequired{SourceUnfenced}` with the hold (a second history
   has begun; the monitor counts it, `SourceLostHold`). A read-only one is
   left fenced. `TestDSTPF_RollbackHoldsOverASourceThatLostTransactions`.
-- **`FencedSourceNeverHealed`** (fixed). The fence lands, its `Draining`
+- **`PromotedWithoutOwnTransactions` by the planned path**. The source
+  restarts on an older data directory before the run's fence is read, so
+  F is the short set; the target is cut off from the operator and the lag
+  wait times out. The rollback compared the source with F and with the
+  target only, and unfenced it although a disaster-recovery site that
+  answered held the transactions it had issued and lost. The rollback now
+  reads every other site that answers, by the picker's rules: the target
+  and the other sites are witnesses (live `server_uuid`s only, never a
+  site queued for a post-restore reclone), F counts whole.
+  `TestDSTPF_RollbackLeavesASourceFencedThatLostWhatAnotherSiteHolds`,
+  `TestRollback_ComparesTheSourceWithEverySiteThatAnswers`.
+- **`FencedSourceNeverHealed`**. The fence lands, its `Draining`
   record never commits, the source is cut off, the operator restarts and
   the run ends `SourceLeftFenced{SourceLost}` with only the fence intent
   durable. The process that ended the run had neither the fence memo nor
@@ -772,13 +849,31 @@ Classes that were the operator's, fixed:
   the source from that record; the live engine now does too, by §4.3's
   rule (the durable intent names the server), and the name is bound to
   that server: the re-assert lifts a fence only while the source answers
-  under the intent's `server_uuid`.
+  under the intent's `server_uuid`, and, like every re-assert, only when
+  no peer holds transactions the source issued and lacks
+  (`TestReassert_PlannedNamedSourceAndOwnTransactions`).
   `TestDSTPF_FenceKnownOnlyByItsIntentIsHealed`.
+- **`WedgedNoPrimary` over a standing own-loss report**. See "What the
+  sweeps found in the operator" in the own-loss section above: a recorded
+  primary that is complete again was refused for a report nothing compared
+  again. `TestTrial_RestoredOwnLossReportDoesNotWedgeACompletePrimary`,
+  `TestOwnLoss_ReassertComparesAStandingReportAgain`.
 
-Classes that were the monitor's. Each judged an honest record against
-something the run could not have read. The rules were narrowed, not
-removed: `TestOutcomeFindings_AreClassesOfTheirOwn` and the tests it names
-keep each firing, under its fingerprint, on the history it was written for.
+The findings of the plain (actors-off) sweeps are pinned in the same file
+(`TestSplitBrainFence_*`, `TestRecovery_*`, `TestFreshDeploy_*`,
+`TestAntiFlapRecordSurvivesStatusOutage`) and, for the own-loss model, in
+`test/component/own_transactions_lost_test.go`; `TestSweep_OwnLossSeedsStayClean`
+names them.
+
+`TestFixedFindings_AreClassesOfTheirOwn` keeps the tagged fingerprints
+firing on the histories they name.
+
+### Fixed in the monitor (regressions now)
+
+Each of these judged an honest record against something the run could not
+have read. The rules were narrowed, not removed:
+`TestOutcomeFindings_AreClassesOfTheirOwn` and the tests it names keep each
+firing, under its fingerprint, on the history it was written for.
 
 - **`OutcomeDishonest(targetLacksFencedSet)`**. The run confirms over a
   target that holds F; before the terminal record lands the target loses
@@ -803,66 +898,76 @@ keep each firing, under its fingerprint, on the history it was written for.
   transaction outside F, fires; so does one whose pod is replaced after
   the decision, which the earlier rule (judged at the terminal record)
   let through.
-- **`OutcomeDishonest(rolledBackFencedSource)`**. The fence is never sent;
-  the pass that ends the run from `Fencing` reads the source writable
-  beside another writer (`RolledBack`: authority moved before the fence
-  was sent), and the source's sidecar fences it before the record commits.
-  The monitor now accepts a source the deciding pass read writable at its
-  peer probe, as it already did for a rollback; a `RolledBack` over a
-  source no pass read writable, or that the run fenced after the probe,
-  still fires. The related misleading record, a run that ends
-  `SourceLeftFenced` over a source it never fenced or never proved fenced,
-  was the operator's to make exact: the outcome stays (it is the
-  conservative one), and the terminal message now says what the run knows
-  of its fence (`sourceLeftClause`).
+- **`OutcomeDishonest(rolledBackFencedSource)`**, two histories.
+  (1) The fence is never sent; the pass that ends the run from `Fencing`
+  reads the source writable beside another writer (`RolledBack`: authority
+  moved before the fence was sent), and the source's sidecar fences it
+  before the record commits. The monitor now accepts a source the deciding
+  pass read writable at its peer probe, as it already did for a rollback.
+  The related misleading record, a run that ends `SourceLeftFenced` over a
+  source it never fenced or never proved fenced, was the operator's to
+  make exact: the outcome stays (it is the conservative one), and the
+  terminal message now says what the run knows of its fence
+  (`sourceLeftClause`).
+  (2) The fence is never sent; the source restarts and comes back
+  read-only, or its sidecar fences it; status writes fail for two minutes
+  and the run is ended in memory, with no MySQL access:
+  `RolledBack{StatusStalled}`, "status writes stalled before the fence was
+  sent; the source is untouched". That is what the process that granted
+  the claim knows, and what the planned-failover page documents for a
+  stall before the fence. The monitor judges that record by what it says:
+  no fence of the run landed on the source (`StalledBeforeFence`).
+  In both, a `RolledBack` over a source no pass read writable still
+  fires, and so does a stalled one after the run's own fence landed.
 
-`TestFixedFindings_AreClassesOfTheirOwn` keeps the earlier fingerprints
-firing on the histories they name.
+### Open findings
 
-`TestDST_PlannedQuick` allows only `CooldownViolated(restart+stateLost)`
-(`plannedAllowedClasses` in `planned_test.go`); anything else fails it. When
-a finding is fixed, pin its shrunk trial in
-`test/component/dst_regression_test.go`, by its shape and not by its seed.
+None on the tree that introduced this section: the sweeps below produced
+no fingerprint outside the inherent one. When a sweep finds one that needs
+a decision rather than a fix, it goes here, with the seed it was found
+under, its history and the verdict, under a fingerprint of its own, and it
+stays out of `plannedAllowedClasses`.
+
+| Fingerprint | Found | History | Verdict |
+|---|---|---|---|
+| (none) | | | |
 
 ### Sweeps
 
-`TestDST_PlannedQuick`'s 300 seeds run in `make test`. Wider ranges are run
-by hand, one range per process (`DST_PLANNED_START`, `DST_PLANNED_TRIALS`).
-The numbers below are of the last sweep of the merged tree:
+`TestDST_PlannedQuick`'s 300 seeds and `TestDST_Quick`'s 400 run in
+`make test`. Wider ranges are run by hand, one range per process
+(`DST_PLANNED_START`, `DST_PLANNED_TRIALS`, `DST_QUICK_TRIALS`).
 
-<!-- SWEEP-RESULTS -->
-<!-- Fill in above: the seed ranges swept, the trial count, the count per
-     fingerprint, and any planned-failover class that is still open. -->
+Measured on 2026-11-11, on the tree that introduced this section (every
+later change to the fault or actor generators, the model or the failover
+code makes these numbers history):
+
+| Sweep | Seeds | Trials | Failing | By fingerprint |
+|---|---|---|---|---|
+| `TestDST_PlannedQuick` | 1–336,000 | 336,000 | 61 | `CooldownViolated(restart+stateLost)` 61 |
+| `TestDST_PlannedQuick` | 336,001–440,000 | 104,000 | 18 | `CooldownViolated(restart+stateLost)` 18 |
+| `TestDST_Quick` | 1–20,000 | 20,000 | 0 | |
+| `make dst` (8 threads) | 1–413,000 | 413,000 | 2 | `CooldownViolated(restart+stateLost)` 2. Stopped at the 30-minute wall-clock cap, not saturated; 17,724 behavior signatures |
+| `DST_PLANNED=1 make dst` (8 threads) | 1–308,000 | 308,000 | 55 | `CooldownViolated(restart+stateLost)` 55. Stopped at the 30-minute wall-clock cap, not saturated; 136,268 behavior signatures |
+
+Every failing trial is the inherent class. The tree these sweeps started
+from (the merge of the own-loss and the planned-failover fixes) had, over
+planned seeds 1–336,000, ten `PromotedWithoutOwnTransactions` trials (the
+rollback finding above) and one `OutcomeDishonest(rolledBackFencedSource)`
+(the stall before the fence), beside 62 of the inherent class; no
+`HoldWithoutDataAtRisk` and no `WedgedNoPrimary`. The trials differ
+between the two trees also because a manager start now restores own-loss
+reports in the model.
 
 What the planned path leaves to others, by design:
 
 | State | Who owns it |
 |---|---|
 | A source that has issued as many transactions as it lost before the rollback reads it | Nobody can see it: the GTID sets are equal again (the residual of the own-loss check, above). |
+| A source that lost transactions which only sites that do not answer hold | Nobody can see it then; the topology manager reports the source, or the holder, when the holder answers. |
 | A primary that restarts on an older data directory after a run confirmed | The topology manager (the own-loss check and its reclone). |
+| A source the rollback left fenced because it lacks its own transactions | The topology manager: it reports the source and elects nobody; an administrator promotes the site that holds everything. |
 | A target whose channel ran all along while the source regressed | Not stopped by the rollback; the hold's record says to look. |
-
-Earlier open classes, for the record of what each turned out to be:
-
-| Fingerprint | Was | Now |
-|---|---|---|
-| `OutcomeDishonest(targetLacksFencedSet)` | open | the monitor's; judged at the confirm probe |
-| `OutcomeDishonest(rolledBackAfterClear)` | open | the monitor's; judged by GTIDs when the rollback is decided |
-| `OutcomeDishonest(rolledBackFencedSource)` | open | the monitor's; the record's wording was the operator's |
-| `FencedSourceNeverHealed` | open | the operator's; fixed |
-
-`CooldownViolated` splits three ways so the inherent class cannot absorb a
-regression, and only the third is expected:
-
-| Fingerprint | Meaning | Verdict |
-|---|---|---|
-| `CooldownViolated` | no restart between the promotions | regression |
-| `CooldownViolated(restart)` | a restart, but the record survived it | regression |
-| `CooldownViolated(restart+stateLost)` | a restart with every durable path denied | inherent |
-
-`CooldownViolated(restart)` was the expected class before the out-of-band
-store existed. It is a regression now: the restarted process had the record
-and promoted anyway.
 
 ## Model coverage gaps (documented, not yet closed)
 
@@ -870,6 +975,18 @@ and promoted anyway.
   never occur in trials** — the operator's empty-site guards and clone paths
   are covered by component tests only (CLONE is modeled only as the effect
   of a reclone of a site that lost its own transactions).
+- **Own-loss evidence is modeled as far as the model has the state for
+  it.** In trials: the data-directory regress, the receiver's `server_id`
+  filter, reports against the primary and against a witness, the witness
+  review, the automatic reclone's request, its check before the clone and
+  its effect, the `server_uuid` timeline with its clone markers, and
+  reports restored at a manager start without their kind. Not in trials:
+  a witness read that answers late (a simulated site answers at once or
+  fails at once, so the 250 ms grace is covered by
+  `TestOwnLoss_PickerDoesNotWaitForASilentWitness`), a site queued for a
+  post-restore reclone (no in-place restore exists in the model), a
+  reclone that fails (so the retry backoff never runs), and the installed
+  CRD being older than the operator.
 - Fault injection applies to mutations; **reads never fail independently**,
   so "mutation applied, subsequent read fails" interleavings inside a single
   operator action are unexplored. The sidecar shares the operator's

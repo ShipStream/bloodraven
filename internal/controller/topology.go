@@ -5502,7 +5502,21 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	tm.mu.RLock()
 	targetBlocked := tm.keyringRotationBlockedLocked(target)
 	targetPending := tm.restoreReclonePendingLocked(target)
-	targetLost := tm.ownLossLocked(target)
+	// A report of lost own transactions refuses the target, with one
+	// exception: a report restored from status says neither what it was
+	// compared with nor whether that was the primary or a witness, and
+	// with no writable site nothing but this function compares the target
+	// again (recovery and the audit need a primary, the witness review a
+	// witness's name). Such a report is settled by the comparison below,
+	// which reads every peer: it becomes a witness's report when one of
+	// them holds transactions the target issued and lacks, and it ends
+	// when none does. Left standing it would keep a target that is
+	// complete again read-only for good.
+	targetLost, targetLostRestored := false, false
+	if rec := tm.ownLoss[target]; rec != nil {
+		targetLostRestored = !rec.witness && rec.detectedBy == ""
+		targetLost = !targetLostRestored
+	}
 	tm.mu.RUnlock()
 	if targetBlocked {
 		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",
@@ -5549,6 +5563,12 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	targetGtid, err := mysql.ParseGTIDSet(targetGtidStr)
 	if err != nil {
 		tm.logger.Warn("primary re-assert: failed to parse target GTID_EXECUTED", "site", target, "error", err)
+		return false
+	}
+	if targetLostRestored && !targetIdentityKnown {
+		// The comparison that would settle the restored report cannot be
+		// made without the target's server_uuid: the report stands.
+		tm.refuseOwnLossPromotion([]string{target})
 		return false
 	}
 	if promotionGtidStr != "" {
@@ -5660,6 +5680,9 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 				"site", s.name, "peerGtid", peerGtidStr, "targetGtid", targetGtidStr)
 			return false
 		}
+	}
+	if targetLostRestored && tm.clearRestoredOwnLoss(target) {
+		tm.RequestStatusRefresh()
 	}
 
 	// Admission is taken before the cooldown is stamped: a refused topology

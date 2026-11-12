@@ -98,7 +98,7 @@ type trialRunner struct {
 	// actors) lands after the last promotion and before any status write
 	// carried it. Before DST-1 was fixed the replacement restored from a
 	// status that never saw the record; the latch now only tags a
-	// regression of that fix (README, Known finding classes).
+	// regression of that fix (README, Finding classes).
 	replacedBeforeRecord bool
 	// retiredRecordPolls are the polls at which an ordered update recorded
 	// its handoff on a retired manager; the record is carried into its
@@ -441,6 +441,12 @@ func (r *trialRunner) restoreSites(tm *controller.TopologyManager) {
 			case "RecoveryBlocked":
 				tm.SetRecoveryBlockedFrom(site.Name, site.DivergentGtid, site.DivergentTxnCount, site.DivergenceDetectedBy, site.DivergenceComparedTo)
 			}
+			if site.LostGtid != "" {
+				// As the runner: a report of lost own transactions holds
+				// across the restart, without its kind (against the primary
+				// or against a witness), which status does not carry.
+				tm.SetOwnTransactionsLost(site.Name, site.LostGtid, site.LostTxnCount)
+			}
 		}
 	}
 }
@@ -691,7 +697,7 @@ func (r *trialRunner) restartOperator(poll int) {
 // lost to a manager replacement: made on a retired manager, or made before
 // the replacement and not yet carried by any status write
 // (fingerprint AntiFlapStateLost(replacement): the fixed DST-1, now a
-// regression; README, Known finding classes).
+// regression; README, Finding classes).
 const replacedBeforeRecordMarker = "(the record was made on, or not yet written to status by, a replaced manager)"
 
 // checkRehydratedAntiFlap compares what the new process rehydrated against

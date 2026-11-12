@@ -41,9 +41,9 @@ var engineReleaseReasons = []controller.ClaimReleaseReason{
 }
 
 // Markers that tag a violation's detail with the finding it belongs to
-// (README: Fixed findings, now regressions, and Open planned-failover
-// findings); fingerprint turns each into a class of its own, so a sweep
-// reports which finding a trial hit.
+// (README, Finding classes: the fixed ones and any open one); fingerprint
+// turns each into a class of its own, so a sweep reports which finding a
+// trial hit.
 const (
 	// writableTargetWithChannelMarker: the hold was set over a target that
 	// is the only writable site and still has its replication channel.
@@ -182,8 +182,9 @@ type runObs struct {
 	fencingSawSourceWritable bool
 	// sourceLost: at a peer probe of the rollback the source was
 	// truth-writable without part of the fenced set, or without
-	// transactions of its own stream that the target holds. Two histories
-	// exist from then on, which is what a hold is for (sourceLacksHistory).
+	// transactions of its own stream that a site the operator can read
+	// holds (the target, or any other). Two histories exist from then on,
+	// which is what a hold is for (sourceLacksHistory).
 	sourceLost bool
 	// rollbackTarget is the server that stood in for the target when the
 	// run's RollingBack record committed: a RolledBack is judged against
@@ -280,6 +281,11 @@ type plannedStats struct {
 	// SourceLostHold counts holds set by a rollback that found the source
 	// writable without transactions it held (two histories; §9).
 	SourceLostHold int
+	// StalledBeforeFence counts runs ended RolledBack by a status stall
+	// before any fence of theirs landed, over a source that is not
+	// writable (§6.4: the stall end reads nothing and says only that the
+	// run sent no fence; the source's state is someone else's doing).
+	StalledBeforeFence int
 }
 
 // plannedMonitor checks the planned-failover invariants of §15.1. The
@@ -762,20 +768,18 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 func (m *plannedMonitor) onYield(point string) {
 	class := yieldClass(point)
 	if r := m.activeRun(); r != nil {
-		var src, tgt SiteTruth
-		for _, t := range m.c.Truth() {
-			switch t.Name {
-			case r.source:
+		var src SiteTruth
+		truth := m.c.Truth()
+		for _, t := range truth {
+			if t.Name == r.source {
 				src = t
-			case r.target:
-				tgt = t
 			}
 		}
 		switch m.cur.Status.PlannedFailover.Phase {
 		case v1alpha1.PlannedFailoverPhaseRollingBack:
 			if src.Name != "" && src.Writable() {
 				r.rollbackSawSourceWritable = true
-				if class == YieldPeerProbe && sourceLacksHistory(src, tgt, r.fenceSet) {
+				if class == YieldPeerProbe && sourceLacksHistory(src, truth, r.fenceSet) {
 					r.sourceLost = true
 				}
 			}
@@ -1079,7 +1083,19 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 		// (its sidecar's lease rule, a rogue) before the record commits. So
 		// may a source the pass that ended the run from Fencing read
 		// writable at its peer probe and did not fence.
-		if r.source != "" && !src.Writable() && !r.rollbackSawSourceWritable && !fencingSawSourceWritable {
+		//
+		// A run ended by a status stall is finished in memory, with no
+		// MySQL access (§6.4). Its RolledBack is the process that granted
+		// the claim saying that it never sent a fence: "the source is
+		// untouched", not "the source is writable". That is judged by what
+		// it says: no fence of the run landed on the source. A source that
+		// restarted read-only, or that its sidecar fenced, in the two
+		// minutes of the stall is not the run's doing.
+		switch {
+		case r.source == "" || src.Writable() || r.rollbackSawSourceWritable || fencingSawSourceWritable:
+		case r.reason == v1alpha1.PlannedFailoverReasonStatusStalled && r.fenceGen < 0:
+			m.stats.StalledBeforeFence++
+		default:
 			dishonest("the source " + r.source + " is not writable")
 		}
 		if r.fenceSet != "" {
@@ -1197,17 +1213,24 @@ func (r *runObs) closeGate() {
 }
 
 // sourceLacksHistory reports whether src lacks part of the fenced set, or
-// transactions of its own stream that tgt holds: the model's form of the
-// rollback's plannedSourceLost. An unknown fenced set proves nothing about
-// the first.
-func sourceLacksHistory(src, tgt SiteTruth, fence string) bool {
+// transactions of one of its own streams that one of others holds: the
+// model's form of the rollback's plannedSourceLost. As there, only a site
+// the operator can read is evidence (the run's target or any other site),
+// and a stream a clone into src superseded is not judged: what another site
+// holds of it beyond src's copy src gave up at the clone. An unknown fenced
+// set proves nothing about the first.
+func sourceLacksHistory(src SiteTruth, others []SiteTruth, fence string) bool {
 	if fence != "" && !containsSet(src, fence) {
 		return true
 	}
-	for u, n := range tgt.Executed {
-		own := u == src.ServerUUID || (len(u) > 8 && len(src.ServerUUID) > 8 && u[8:] == src.ServerUUID[8:])
-		if own && n > src.Executed[u] {
-			return true
+	for _, o := range others {
+		if o.Name == src.Name || !o.Reachable() {
+			continue
+		}
+		for u, n := range o.Executed {
+			if src.ownsLiveStream(u) && n > src.Executed[u] {
+				return true
+			}
 		}
 	}
 	return false

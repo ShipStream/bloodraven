@@ -13,7 +13,7 @@ import (
 )
 
 // Tests of the three outcome rows a 112,000-seed planned-failover DST sweep
-// found wrong (internal/dst/README.md, "Fixed findings, now regressions"):
+// found wrong (internal/dst/README.md, "Fixed in the operator"):
 // a writable target with its replication channel found by a process without
 // a promotion memo, a target replaced after the process that decides sent a
 // clear, and a confirmation beside a promotable site that does not answer.

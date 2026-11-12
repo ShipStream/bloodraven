@@ -256,6 +256,21 @@ func (g GTIDSet) Subtract(other GTIDSet) GTIDSet {
 	return result
 }
 
+// Union returns the transactions that are in g or in other, with each
+// source's intervals sorted and merged. Neither set is modified.
+func (g GTIDSet) Union(other GTIDSet) GTIDSet {
+	result := make(GTIDSet, len(g)+len(other))
+	for _, set := range []GTIDSet{g, other} {
+		for sid, intervals := range set {
+			result[sid] = append(result[sid], intervals...)
+		}
+	}
+	for sid, intervals := range result {
+		result[sid] = coalesceIntervals(intervals)
+	}
+	return result
+}
+
 // subtractAllIntervals removes all ranges covered by sub from the source intervals.
 func subtractAllIntervals(source, sub []Interval) []Interval {
 	var result []Interval

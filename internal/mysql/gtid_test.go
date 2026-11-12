@@ -683,3 +683,34 @@ func TestGTIDSet_OriginatedBy(t *testing.T) {
 		t.Fatal("OriginatedBy aliases the receiver's intervals")
 	}
 }
+
+func TestGTIDSet_Union(t *testing.T) {
+	const a, b = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	for _, tc := range []struct{ x, y, want string }{
+		{a + ":9-12", a + ":13-14", a + ":9-14"},       // adjacent intervals merge
+		{a + ":1-5", a + ":3-8", a + ":1-8"},           // overlapping
+		{a + ":1-2", a + ":5-6", a + ":1-2:5-6"},       // disjoint stay apart
+		{a + ":1-2", b + ":1", a + ":1-2," + b + ":1"}, // another source
+		{"", a + ":4", a + ":4"},
+		{"", "", ""},
+	} {
+		x, err := ParseGTIDSet(tc.x)
+		if err != nil {
+			t.Fatal(err)
+		}
+		y, err := ParseGTIDSet(tc.y)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := x.String()
+		if got := x.Union(y).String(); got != tc.want {
+			t.Errorf("union of %q and %q = %q, want %q", tc.x, tc.y, got, tc.want)
+		}
+		if got := y.Union(x).String(); got != tc.want {
+			t.Errorf("union of %q and %q = %q, want %q", tc.y, tc.x, got, tc.want)
+		}
+		if x.String() != before {
+			t.Errorf("Union modified its receiver: %q, was %q", x.String(), before)
+		}
+	}
+}
