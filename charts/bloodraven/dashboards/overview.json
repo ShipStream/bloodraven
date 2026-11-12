@@ -3,7 +3,7 @@
   "uid": "bloodraven-overview",
   "tags": ["bloodraven", "mysql", "failover"],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "timezone": "",
   "refresh": "30s",
@@ -285,6 +285,62 @@
         {"color": "green", "value": null},
         {"color": "yellow", "value": 300},
         {"color": "red", "value": 900}
+      ]}}}
+    },
+
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Paced rollout",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 47}
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "Groups by rollout phase",
+      "description": "bloodraven_rollout_groups: failover groups that wait for the rollout slot (pending), hold it (admitted, rolling) or started their roll and stalled. All zero when no operator release is being rolled. stalled > 0 with pending > 0 is a halted rollout. Fleet-wide: not filtered by namespace or group.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 48},
+      "targets": [
+        {"expr": "max by (phase) (bloodraven_rollout_groups)", "refId": "A", "legendFormat": "{{phase}}"}
+      ],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}
+      ]}},
+      "overrides": [
+        {"matcher": {"id": "byName", "options": "stalled"}, "properties": [{"id": "thresholds", "value": {"mode": "absolute", "steps": [
+          {"color": "green", "value": null},
+          {"color": "red", "value": 1}
+        ]}}]}
+      ]}
+    },
+    {
+      "id": 42,
+      "type": "state-timeline",
+      "title": "Rollout phase per group",
+      "description": "bloodraven_rollout_group_phase: the phase of each group that waits for or holds the rollout slot. A group with nothing to roll, or whose roll completed, has no series.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 48},
+      "targets": [
+        {"expr": "bloodraven_rollout_group_phase{namespace=~\"$ns\", group=~\"$group\"} == 1", "refId": "A", "legendFormat": "{{namespace}}/{{group}}: {{phase}}"}
+      ],
+      "options": {"mergeValues": true, "showValue": "never", "legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "Rollout records not stored (installed CRD older than the operator)",
+      "description": "bloodraven_rollout_record_not_stored: > 0 means the API server pruned status.rollout and no group is rolled until the release's CRDs are applied.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 54},
+      "targets": [
+        {"expr": "max(bloodraven_rollout_record_not_stored)", "refId": "A"}
+      ],
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "red", "value": 1}
       ]}}}
     }
   ]
