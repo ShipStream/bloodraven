@@ -222,3 +222,60 @@ func IsUnknownCommand(err error) bool {
 	}
 	return strings.Contains(strings.ToLower(se.Message), "unknown command")
 }
+
+// IsCommandRefused reports whether err is the server saying that it will
+// not run the command for this caller at all, as opposed to not being able
+// to answer it right now: the command or subcommand does not exist or was
+// given arguments this server does not take, or the caller's ACL does not
+// allow it. Retrying does not change the answer.
+//
+// The replies are the ones Dragonfly v1.38 and v2.1 give:
+//
+//	-ERR unknown command `DEBUG`                                 (no such command, or renamed away)
+//	-ERR Unknown subcommand or wrong number of arguments for …   (DEBUG REPLICA OFFSET on a server without it)
+//	-ERR syntax error                                            (DFLY with a subcommand it does not have)
+//	-NOPERM <user> has no ACL permissions                        (an ACL user without the command)
+//
+// Any other server error (`-ERR I am master` from a replica command sent
+// to an instance whose role just changed, `-LOADING`) and every transport
+// error is not a refusal.
+func IsCommandRefused(err error) bool {
+	var se *ServerError
+	if !errors.As(err, &se) {
+		return false
+	}
+	msg := strings.ToLower(se.Message)
+	return strings.HasPrefix(msg, "noperm") ||
+		strings.Contains(msg, "unknown command") ||
+		strings.Contains(msg, "unknown subcommand") ||
+		strings.Contains(msg, "wrong number of arguments") ||
+		strings.Contains(msg, "syntax error")
+}
+
+// TakeoverOutcomeUnknown reports whether err, returned by ReplTakeover,
+// leaves open whether the takeover happened or will still happen.
+//
+// A takeover is run by the master: the replica forwards the request and
+// waits for the answer. Two failures say nothing about what the master did
+// or will do:
+//
+//   - a transport error or a deadline on the caller's connection (the reply
+//     was lost);
+//   - `-ERR Couldn't execute takeover: Operation canceled`: the replica gave
+//     up waiting for its master. A master that was only cut off runs the
+//     request once it is reachable again: on v1.38 it then completes the
+//     takeover and exits although the replica had already answered with
+//     this error (the replica stays a replica); on v2.1 it fails it.
+//
+// Every other server error (`-ERR Full sync not done`, an unknown command)
+// is the replica refusing before it asked its master: no role changes.
+func TakeoverOutcomeUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *ServerError
+	if !errors.As(err, &se) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(se.Message), "couldn't execute takeover")
+}

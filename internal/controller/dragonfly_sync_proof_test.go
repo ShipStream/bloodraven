@@ -1,14 +1,18 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
@@ -53,7 +57,8 @@ func TestDragonflyTargetReached(t *testing.T) {
 		{name: "caught up on every flow", target: syncProofReplica("a", 24, 28), wantReady: true},
 		{name: "healthy link, both flows behind", target: syncProofReplica("a", 1, 1), wantDetail: "target flow 0 at 1 behind source 24"},
 		{name: "sum reached, one flow behind", target: syncProofReplica("a", 60, 1), wantDetail: "target flow 1 at 1 behind source 28"},
-		{name: "follows an earlier incarnation of the source", target: syncProofReplica("b", 24, 28), wantDetail: `replication id "b"`},
+		{name: "follows another instance than the source position is from", target: syncProofReplica("b", 24, 28),
+			wantErr: `target follows another replication id than the source position: target syncs from replication id "b"`},
 		{name: "position unreadable", target: &fakeDragonflyConn{
 			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
 			positionErr: errors.New("ERR unknown subcommand")}, wantErr: "target replication position"},
@@ -268,9 +273,9 @@ func TestDragonflyRolloutCandidateSyncReady(t *testing.T) {
 		r, _ := newReconciler(fg)
 		target := &syncProofCatchingUp{fakeDragonflyConn: syncProofReplica("a"), nth: 3, behind: []int64{20, 28}, flows: []int64{24, 28}}
 		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: syncProofMaster("a", 24, 28), syncProofDC2: target})
-		ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1")
-		if err != nil || !ready {
-			t.Fatalf("ready=%v err=%v, want ready after the target's third read", ready, err)
+		check := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1")
+		if check.Err != nil || !check.Ready {
+			t.Fatalf("check=%+v, want ready after the target's third read", check)
 		}
 		if target.reads != 3 {
 			t.Errorf("target position read %d times, want 3", target.reads)
@@ -280,22 +285,160 @@ func TestDragonflyRolloutCandidateSyncReady(t *testing.T) {
 		r, _ := newReconciler(fg)
 		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: syncProofMaster("a", 24, 28), syncProofDC2: syncProofReplica("a", 1, 1)})
 		start := time.Now()
-		ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1")
-		if err != nil || ready {
-			t.Fatalf("ready=%v err=%v, want not ready for a target behind on both flows", ready, err)
+		check := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1")
+		if check.Err != nil || check.Ready || check.State != dragonflyRolloutBehind {
+			t.Fatalf("check=%+v, want not ready (Behind) for a target behind on both flows", check)
 		}
-		if waited := time.Since(start); waited > dragonflyRolloutSyncWait+time.Second {
+		waited := time.Since(start)
+		if waited > dragonflyRolloutSyncWait+time.Second {
 			t.Errorf("waited %s, want at most about %s", waited, dragonflyRolloutSyncWait)
+		}
+		// A linked target that is behind is the one case worth the wait.
+		if waited < dragonflyRolloutSyncWait-2*dragonflyRolloutSyncPoll {
+			t.Errorf("waited %s, want about %s: a linked replica is a round trip behind a busy source", waited, dragonflyRolloutSyncWait)
 		}
 	})
 	t.Run("source without a position", func(t *testing.T) {
 		r, _ := newReconciler(fg)
 		source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}, positionErr: errors.New("ERR unknown subcommand")}
 		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: source, syncProofDC2: syncProofReplica("a", 24, 28)})
-		if ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1"); err == nil || ready {
-			t.Fatalf("ready=%v err=%v, want an error: the source gave no position", ready, err)
+		if check := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1"); check.Err == nil || check.Ready || check.State != dragonflyRolloutUnreadable {
+			t.Fatalf("check=%+v, want an error (Unreadable): the source gave no position", check)
 		}
 	})
+	// Where looking again cannot help, the check returns at once: it runs
+	// on the one worker that reconciles every group.
+	for _, tc := range []struct {
+		name      string
+		source    *fakeDragonflyConn
+		target    *fakeDragonflyConn
+		wantState string
+	}{
+		{"link down", syncProofMaster("a", 24, 28), func() *fakeDragonflyConn {
+			c := syncProofReplica("a", 1, 1)
+			c.info.MasterLinkStatus = "down"
+			return c
+		}(), dragonflyRolloutNotLinked},
+		{"full sync in progress", syncProofMaster("a", 24, 28), func() *fakeDragonflyConn {
+			c := syncProofReplica("a", 1, 1)
+			c.info.MasterSyncInProgress = true
+			return c
+		}(), dragonflyRolloutNotLinked},
+		{"loading", syncProofMaster("a", 24, 28), func() *fakeDragonflyConn {
+			c := syncProofReplica("a", 1, 1)
+			c.persist.Loading = true
+			return c
+		}(), dragonflyRolloutNotLinked},
+		{"target refuses the position command", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
+			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
+			positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}, dragonflyRolloutUnprovable},
+		{"positions in different forms", syncProofMaster("a", 24, 28), func() *fakeDragonflyConn {
+			c := syncProofReplica("a", 52)
+			c.position.Scalar = true
+			return c
+		}(), dragonflyRolloutUnprovable},
+		{"target answers with a transport error", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
+			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
+			positionErr: errors.New("i/o timeout")}, dragonflyRolloutUnreadable},
+		{"source replaced between the reads", syncProofMaster("a", 24, 28), syncProofReplica("b", 24, 28), dragonflyRolloutBehind},
+	} {
+		t.Run(tc.name+" returns at once", func(t *testing.T) {
+			r, _ := newReconciler(fg)
+			installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: tc.source, syncProofDC2: tc.target})
+			start := time.Now()
+			check := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1")
+			if check.Ready || check.State != tc.wantState {
+				t.Fatalf("check=%+v, want not ready with state %s", check, tc.wantState)
+			}
+			if waited := time.Since(start); waited >= dragonflyRolloutSyncPoll {
+				t.Fatalf("waited %s for a state that polling cannot change, want no wait", waited)
+			}
+		})
+	}
+	t.Run("the wait ends with the context", func(t *testing.T) {
+		r, _ := newReconciler(fg)
+		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: syncProofMaster("a", 24, 28), syncProofDC2: syncProofReplica("a", 1, 1)})
+		cctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		if check := r.dragonflyRolloutCandidateSyncReady(cctx, fg, "dc2", "dc1"); check.Ready || check.Err == nil {
+			t.Fatalf("check=%+v, want the context's error", check)
+		}
+		if waited := time.Since(start); waited > time.Second {
+			t.Fatalf("waited %s past a context that ended after 100ms", waited)
+		}
+	})
+}
+
+// A rollout that waits for its target says so once per state, not on every
+// pass, and reports a wait of two minutes in an Event.
+func TestNoteDragonflyRolloutReadiness(t *testing.T) {
+	fg := fgWithDragonfly()
+	r, _ := newReconciler(fg)
+	rec := record.NewFakeRecorder(8)
+	r.Recorder = rec
+	now := time.Unix(1_800_000_000, 0)
+	r.Now = func() time.Time { return now }
+	var logs bytes.Buffer
+	ctx := ctrllog.IntoContext(context.Background(), funcr.New(func(prefix, args string) { logs.WriteString(args + "\n") }, funcr.Options{}))
+	count := func(msg string) int { return strings.Count(logs.String(), msg) }
+	notLinked := dragonflyRolloutCheck{State: dragonflyRolloutNotLinked, Detail: "target not in stable sync (role=slave link=down fullSync=false loading=false)"}
+	behind := dragonflyRolloutCheck{State: dragonflyRolloutBehind, Detail: "target flow 0 at 1 behind source 24"}
+	events := func() []string { return drainEventsCh(rec.Events, 8, 20*time.Millisecond) }
+
+	for i := 0; i < 5; i++ {
+		r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", notLinked)
+		now = now.Add(2 * time.Second)
+	}
+	if n := count("dragonfly rollout: target not ready for promotion"); n != 1 {
+		t.Fatalf("not-ready logged %d times over 5 passes in one state, want once\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "link=down") {
+		t.Fatalf("the detail is missing from the log line:\n%s", logs.String())
+	}
+	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", behind)
+	if n := count("dragonfly rollout: target not ready for promotion"); n != 2 {
+		t.Fatalf("not-ready logged %d times after a change of state, want twice", n)
+	}
+	if got := events(); len(got) != 0 {
+		t.Fatalf("Events before the stall time: %v", got)
+	}
+
+	// The stall is counted from the first not-ready pass, whatever the
+	// state did since.
+	now = now.Add(dragonflyRolloutStallAfter)
+	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", behind)
+	got := events()
+	if len(got) != 1 || !strings.Contains(got[0], v1alpha1.EventDragonflyRolloutStalled) || !strings.Contains(got[0], "behind source 24") {
+		t.Fatalf("Events = %v, want one DragonflyRolloutStalled with the detail", got)
+	}
+	now = now.Add(time.Hour)
+	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", behind)
+	if got := events(); len(got) != 0 {
+		t.Fatalf("the stall was reported again: %v", got)
+	}
+
+	// Ready ends the record; the next stall is a new one.
+	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", dragonflyRolloutCheck{Ready: true})
+	if n := count("dragonfly rollout: target in sync"); n != 1 {
+		t.Fatalf("in-sync logged %d times, want once", n)
+	}
+	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", dragonflyRolloutCheck{Ready: true})
+	if n := count("dragonfly rollout: target in sync"); n != 1 {
+		t.Fatalf("in-sync logged again for a target that was ready before")
+	}
+	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", behind)
+	if got := events(); len(got) != 0 {
+		t.Fatalf("a new wait was reported as stalled at once: %v", got)
+	}
+	// The promotion backoff shares the record and is not disturbed.
+	if n := r.recordDragonflyRolloutPromotionFailure(fg, "dc2", "dc1"); n != 1 {
+		t.Fatalf("promotion failures = %d, want 1", n)
+	}
+	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", dragonflyRolloutCheck{Ready: true})
+	if n := r.recordDragonflyRolloutPromotionFailure(fg, "dc2", "dc1"); n != 2 {
+		t.Fatalf("promotion failures = %d after a ready check, want 2: the backoff count was dropped", n)
+	}
 }
 
 // A rollout does not promote a replica that is behind the active master:

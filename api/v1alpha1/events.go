@@ -400,6 +400,13 @@ const (
 	// session continuity. Emitted when the capability probe changes to
 	// unsupported; use a Dragonfly image that supports the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
+	// A rollout of the active Dragonfly site (a changed pod template) has
+	// waited two minutes for the replica it promotes first to be in sync:
+	// the replica is not linked to the master, is still behind it, cannot
+	// be read, or does not report a replication position the operator can
+	// compare (the message says which). The active site keeps its old pod
+	// until the replica is in sync. Emitted once per stall.
+	EventDragonflyRolloutStalled = "DragonflyRolloutStalled"
 	// A snapshot-restore upgrade run started: `spec.dragonfly.upgradeStrategy`
 	// is `SnapshotRestore` and a site's live StatefulSet runs an image other
 	// than `spec.dragonfly.image`. `status.dragonfly.upgrade` records it;
