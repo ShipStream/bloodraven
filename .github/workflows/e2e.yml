@@ -44,35 +44,48 @@ jobs:
        (github.event.action != 'labeled' || github.event.label.name == 'e2e'))
     uses: ./.github/workflows/_e2e-images.yml
 
-  # The smoke and release profiles run as one job. The full profile (manual
-  # dispatch only) runs as FULL_PROFILE_SHARDS jobs, each on its own kind
-  # cluster with its part of the profile (`run-all --shard=<i>/<n>`): one
-  # job could not finish it inside its timeout, so the scenarios that are
-  # only in the full profile never ran (#236). The runner splits the
-  # profile, balanced by scenario Timeout; `playground-chaos list
-  # --profile=full --shard=<i>/<n>` prints a part. A failed shard fails the
-  # run and the others still finish (fail-fast is off).
-  #
-  # The shard list, `shards` and the 300-minute timeout are pinned by
-  # TestFullProfileShardsFitCIJob (internal/playground/runner): every
-  # shard's scenario Timeouts and resets must fit the timeout with room for
-  # the cluster setup. Change the three together.
+  # The smoke and release profiles: one job. The full profile runs in
+  # e2e-full below instead.
   e2e:
     needs: images
-    name: e2e${{ matrix.shard != 0 && format(' (shard {0})', matrix.shard) || '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(github.event.inputs.profile == 'full' && '[1, 2, 3, 4]' || '[0]') }}
+    if: github.event.inputs.profile != 'full'
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: ${{ github.event_name == 'pull_request' && 'smoke' || (github.event.inputs.profile || 'release') }}
+      # The release profile includes the #206 cross-site PITR scenarios
+      # (37, 68, 70), which budget 60-75m each.
+      timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 300 }}
+      images-artifact: e2e-images
+
+  # The full profile (manual dispatch with profile=full) runs as one job per
+  # shard, each on its own kind cluster with its part of the profile
+  # (`run-all --shard=<i>/<n>`): one job could not finish it inside its
+  # timeout, so the scenarios that are only in the full profile never ran
+  # (#236). The runner splits the profile, balanced by scenario Timeout;
+  # `playground-chaos list --profile=full --shard=<i>/<n>` prints a part. A
+  # failed shard fails the run and the others still finish (fail-fast is
+  # off). It is a job of its own rather than a conditional matrix on `e2e`
+  # so that the smoke and release job keeps its name.
+  #
+  # The matrix list, `shards` and `timeout-minutes` are pinned by
+  # TestFullProfileShardsFitCIJob (internal/playground/runner): every
+  # shard's scenario Timeouts and resets must fit the timeout with room for
+  # the cluster setup. One of the 60-75m PITR scenarios (37, 68, 69, 70)
+  # lands in each shard. When that test fails, add a shard: extend the list
+  # and raise `shards` together.
+  e2e-full:
+    needs: images
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      profile: full
       shard: ${{ matrix.shard }}
       shards: 4
-      # The release profile includes the #206 cross-site PITR scenarios
-      # (37, 68, 70), which budget 60-75m each. So does each full-profile
-      # shard: one of 37, 68, 69 and 70 lands in each.
-      timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 300 }}
+      timeout-minutes: 300
       images-artifact: e2e-images
 
   # Label gating is intentionally PR-only: schedule and manual runs always

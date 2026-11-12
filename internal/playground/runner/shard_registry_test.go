@@ -34,23 +34,23 @@ func TestProfileShardsCoverProfile(t *testing.T) {
 }
 
 // ciFullProfileShards reads how e2e.yml runs the full profile: the shard
-// matrix, the `shards` input it passes with it, and the job timeout of a
-// dispatched run.
+// matrix of the e2e-full job, the `shards` input it passes with it, and the
+// job timeout.
 func ciFullProfileShards(t *testing.T) (shards int, timeout time.Duration) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", ".github", "workflows", "e2e.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, job, ok := strings.Cut(string(raw), "\n  e2e:\n")
+	_, job, ok := strings.Cut(string(raw), "\n  e2e-full:\n")
 	if !ok {
-		t.Fatal("e2e.yml has no e2e job")
+		t.Fatal("e2e.yml has no e2e-full job")
 	}
 	job, _, _ = strings.Cut(job, "\n\n")
 
-	m := regexp.MustCompile(`shard: \$\{\{ fromJSON\(github\.event\.inputs\.profile == 'full' && '\[([0-9, ]+)\]' \|\| '\[0\]'\) \}\}`).FindStringSubmatch(job)
+	m := regexp.MustCompile(`\n\s+shard: \[([0-9, ]+)\]\n`).FindStringSubmatch(job)
 	if m == nil {
-		t.Fatal("the e2e job must run the full profile as a shard matrix ('[1, 2, ...]') and every other profile as the single unsharded entry '[0]'")
+		t.Fatal("the e2e-full job must have a shard matrix (`shard: [1, 2, ...]`)")
 	}
 	list := strings.Split(m[1], ",")
 	for i, v := range list {
@@ -60,23 +60,42 @@ func ciFullProfileShards(t *testing.T) (shards int, timeout time.Duration) {
 	}
 	m = regexp.MustCompile(`\n\s+shards: ([0-9]+)\n`).FindStringSubmatch(job)
 	if m == nil {
-		t.Fatal("the e2e job must pass `shards: <n>`")
+		t.Fatal("the e2e-full job must pass `shards: <n>`")
 	}
 	shards, _ = strconv.Atoi(m[1])
 	if shards != len(list) {
-		t.Fatalf("the e2e job passes shards: %d but its matrix has %d shards; a mismatch would run the wrong parts", shards, len(list))
+		t.Fatalf("the e2e-full job passes shards: %d but its matrix has %d shards; a mismatch would leave part of the profile unrun or run it twice", shards, len(list))
 	}
-	if !strings.Contains(job, "shard: ${{ matrix.shard }}") {
-		t.Fatal("the e2e job must pass `shard: ${{ matrix.shard }}`")
+	for _, want := range []string{
+		"shard: ${{ matrix.shard }}",
+		"profile: full\n",
+		// One red shard must not cancel the others.
+		"fail-fast: false",
+		"if: github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'full'",
+	} {
+		if !strings.Contains(job, want) {
+			t.Fatalf("the e2e-full job must contain %q", want)
+		}
 	}
-	if !strings.Contains(job, "fail-fast: false") {
-		t.Fatal("the e2e shard matrix must set fail-fast: false, so one red shard does not cancel the others")
-	}
-	m = regexp.MustCompile(`timeout-minutes: \$\{\{ github\.event_name == 'pull_request' && [0-9]+ \|\| ([0-9]+) \}\}`).FindStringSubmatch(job)
+	m = regexp.MustCompile(`\n\s+timeout-minutes: ([0-9]+)\n`).FindStringSubmatch(job)
 	if m == nil {
-		t.Fatal("cannot read the e2e job's timeout-minutes for dispatched runs")
+		t.Fatal("the e2e-full job must set a literal timeout-minutes")
 	}
 	minutes, _ := strconv.Atoi(m[1])
+
+	// The unsharded job must leave the full profile to e2e-full, or a
+	// dispatch would run it twice (once in a job that cannot finish it).
+	_, single, ok := strings.Cut(string(raw), "\n  e2e:\n")
+	if !ok {
+		t.Fatal("e2e.yml has no e2e job")
+	}
+	single, _, _ = strings.Cut(single, "\n\n")
+	if !strings.Contains(single, "if: github.event.inputs.profile != 'full'") {
+		t.Fatal("the e2e job must skip profile=full (e2e-full runs it)")
+	}
+	if strings.Contains(single, "shard") {
+		t.Fatal("the e2e job (smoke, release) must stay unsharded")
+	}
 	return shards, time.Duration(minutes) * time.Minute
 }
 
