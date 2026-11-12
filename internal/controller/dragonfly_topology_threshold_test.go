@@ -156,59 +156,6 @@ func TestDragonflyManager_Tick_MasterLossThresholdIsSpecFailureThreshold(t *test
 	}
 }
 
-// A replica that holds keys and reports its link to the active master down
-// is a second witness, and the cache it holds is lost if the master's pod
-// returns empty first: that is promoted on the first missed observation.
-// Each part of that evidence is needed.
-func TestDragonflyManager_Tick_CorroboratedMasterLoss(t *testing.T) {
-	down := func(h *thresholdHarness) { h.dc2.info.MasterLinkStatus = "down" }
-	for _, tc := range []struct {
-		name         string
-		replica      func(h *thresholdHarness)
-		wantAtFirst  bool
-		corroborated int
-	}{
-		{name: "holds keys, link to the active master down", replica: down, wantAtFirst: true},
-		{name: "link up", replica: func(*thresholdHarness) {}},
-		{name: "link down, holds no keys", replica: func(h *thresholdHarness) { down(h); h.dc2.keys = 0 }},
-		{name: "link down, key count unreadable", replica: func(h *thresholdHarness) {
-			down(h)
-			h.dc2.keysErr = errors.New("no keyspace section")
-		}},
-		{name: "link down, replicating from another host", replica: func(h *thresholdHarness) {
-			down(h)
-			h.dc2.info.MasterHost = "lion-dragonfly-dc9.shared-lion.svc.cluster.local"
-		}},
-		{name: "link state not reported", replica: func(h *thresholdHarness) { h.dc2.info.MasterLinkStatus = "" }},
-		// The setting that makes every Dragonfly-only promotion wait alike.
-		{name: "corroborated threshold raised to the full one", replica: down, corroborated: defaultDragonflyMasterLossThreshold},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newThresholdHarness(t, nil)
-			if tc.corroborated > 0 {
-				h.mgr.corroboratedMasterLossThreshold = tc.corroborated
-			}
-			tc.replica(h)
-			h.missMaster()
-			h.tick(1)
-			got := h.promoted()
-			if tc.wantAtFirst && got != "dc2" {
-				t.Fatalf("promoted %q on the first miss, want dc2", got)
-			}
-			if !tc.wantAtFirst && got != "" {
-				t.Fatalf("promoted %q on the first miss, want none", got)
-			}
-			if tc.wantAtFirst {
-				return
-			}
-			h.tick(defaultDragonflyMasterLossThreshold - 1)
-			if got := h.promoted(); got != "dc2" {
-				t.Fatalf("promoted %q after the full threshold, want dc2", got)
-			}
-		})
-	}
-}
-
 // The active site answering as a replica is an observation, not a miss: it
 // was reached and says it is not the master. Answering without a role says
 // nothing and is counted as a miss.
@@ -321,40 +268,6 @@ func TestDragonflyManager_MySQLFollowDoesNotWaitForTheThreshold(t *testing.T) {
 			t.Fatalf("promoted %q, want dc2", got)
 		}
 	})
-}
-
-func TestDragonflyMasterLossCorroborated(t *testing.T) {
-	fg := fgWithDragonflyEnabledAndActive()
-	seven, zero := int64(7), int64(0)
-	replica := func(link string, keys *int64) *DragonflySiteSnapshot {
-		info := dragonflyReplicaOf("lion-dragonfly-dc1.shared-lion.svc.cluster.local")
-		info.MasterLinkStatus = link
-		return &DragonflySiteSnapshot{Name: "dc2", Reachable: true, Info: info, Keys: keys}
-	}
-	unreachable := replica("down", &seven)
-	unreachable.Reachable = false
-	wrongPort := replica("down", &seven)
-	wrongPort.Info.MasterPort = 7000
-	for _, tc := range []struct {
-		name string
-		snap *DragonflySiteSnapshot
-		want bool
-	}{
-		{"keys and link down", replica("down", &seven), true},
-		{"link up", replica("up", &seven), false},
-		{"link not reported", replica("", &seven), false},
-		{"no keys", replica("down", &zero), false},
-		{"key count unread", replica("down", nil), false},
-		{"unreachable", unreachable, false},
-		{"another port", wrongPort, false},
-		{"no snapshot", nil, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := dragonflyMasterLossCorroborated(fg, tc.snap, "dc1"); got != tc.want {
-				t.Errorf("dragonflyMasterLossCorroborated() = %v, want %v", got, tc.want)
-			}
-		})
-	}
 }
 
 // The count belongs to the site that was missed: misses counted against

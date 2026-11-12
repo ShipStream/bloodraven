@@ -368,16 +368,22 @@ const (
 	// `status.plannedFailover.dragonfly.message` says the same.
 	EventDragonflyPromotionDeferred = "DragonflyPromotionDeferred"
 	// A planned failover's target Dragonfly replica did not catch up
-	// within `spec.dragonfly.plannedFailover.maxSyncWait`. With
+	// within `spec.dragonfly.plannedFailover.maxSyncWait`, or the wait
+	// was ended at once because the sync can never be proven (the source
+	// gave no replication position; the target refuses the position
+	// command or reports it in another form). With
 	// `onSyncTimeout: Proceed` (the default) the takeover goes ahead and
 	// `status.plannedFailover.dragonfly.sessions` records `Lost`; with
 	// `Fail` the run rolls back before MySQL is promoted.
 	EventDragonflySyncTimedOut = "DragonflySyncTimedOut"
-	// An emergency Dragonfly promotion succeeded without `REPLTAKEOVER`:
-	// it fell back to `REPLICAOF NO ONE` after the takeover failed or was
-	// skipped because the old master was unreachable, or its reply was
-	// lost and the target was then observed as master. The target is
-	// writable, but cached data and sessions may be lost.
+	// A Dragonfly promotion succeeded without `REPLTAKEOVER`: with
+	// `REPLICAOF NO ONE` after the takeover failed or was skipped because
+	// the old master was unreachable, or because the target held the
+	// cache of a master that restarted without it; or the takeover's
+	// reply was lost and the target was then observed as master. The
+	// target is writable and keeps every key it held. What the old master
+	// had written and the target had not received is lost (for a
+	// restarted master: what was written to the restarted instance).
 	EventDragonflySessionsLost = "DragonflySessionsLost"
 	// A Dragonfly site other than the active one reports the master role.
 	// The operator reattaches it as a replica, which discards what it
@@ -400,6 +406,13 @@ const (
 	// session continuity. Emitted when the capability probe changes to
 	// unsupported; use a Dragonfly image that supports the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
+	// A rollout of the active Dragonfly site (a changed pod template) has
+	// waited two minutes for the replica it promotes first to be in sync:
+	// the replica is not linked to the master, is still behind it, cannot
+	// be read, or does not report a replication position the operator can
+	// compare (the message says which). The active site keeps its old pod
+	// until the replica is in sync. Emitted once per stall.
+	EventDragonflyRolloutStalled = "DragonflyRolloutStalled"
 	// A snapshot-restore upgrade run started: `spec.dragonfly.upgradeStrategy`
 	// is `SnapshotRestore` and a site's live StatefulSet runs an image other
 	// than `spec.dragonfly.image`. `status.dragonfly.upgrade` records it;

@@ -94,12 +94,15 @@ func (p Position) ReachedBy(target Position) (reached bool, detail string) {
 // ReplicationPosition reads the instance's Position: INFO replication for
 // the role and replication id, then the per-flow command of that role.
 //
-// When the server refuses the per-flow command (a server error, as from a
-// server that does not have it) and INFO carried the role's offset, that
-// offset is returned as a scalar position. Otherwise the refusal is the
-// error: the caller has no position, which it must not read as zero. A
-// transport error is always returned, and the connection must not be used
-// afterwards.
+// When the server refuses the per-flow command (IsCommandRefused: it does
+// not have the command, or the caller's ACL does not allow it) and INFO
+// carried the role's offset, that offset is returned as a scalar position.
+// Otherwise the refusal is the error, and IsCommandRefused holds for it:
+// the caller has no position, which it must not read as zero, and asking
+// again does not help. Any other server error (the role changed between
+// the two commands: `ERR I am master`) is returned as it is; it may pass.
+// A transport error is always returned, and the connection must not be
+// used afterwards.
 func (c *Client) ReplicationPosition(ctx context.Context) (Position, error) {
 	info, err := c.InfoReplication(ctx)
 	if err != nil {
@@ -116,9 +119,8 @@ func (c *Client) ReplicationPosition(ctx context.Context) (Position, error) {
 			}
 			return pos, nil
 		}
-		var se *ServerError
-		if !errors.As(err, &se) {
-			return Position{}, err
+		if !IsCommandRefused(err) {
+			return Position{}, fmt.Errorf("dragonfly: DFLY REPLICAOFFSET: %w", err)
 		}
 		if !info.MasterReplOffsetReported {
 			return Position{}, fmt.Errorf("dragonfly: master position unavailable: DFLY REPLICAOFFSET: %w, and INFO replication has no master_repl_offset", err)
@@ -134,9 +136,8 @@ func (c *Client) ReplicationPosition(ctx context.Context) (Position, error) {
 			}
 			return pos, nil
 		}
-		var se *ServerError
-		if !errors.As(err, &se) {
-			return Position{}, err
+		if !IsCommandRefused(err) {
+			return Position{}, fmt.Errorf("dragonfly: DEBUG REPLICA OFFSET: %w", err)
 		}
 		if !info.SlaveReplOffsetReported {
 			return Position{}, fmt.Errorf("dragonfly: replica position unavailable: DEBUG REPLICA OFFSET: %w, and INFO replication has no slave_repl_offset", err)

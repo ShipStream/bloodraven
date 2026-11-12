@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -771,12 +772,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 			}
 		}
 		if promotionTarget != "" {
-			ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fg, promotionTarget, activeSite)
-			if err != nil {
-				log.FromContext(ctx).Info("dragonfly rollout: sync-readiness check failed", "target", promotionTarget, "source", activeSite, "error", err)
-				return requeueAfter, nil
-			}
-			if !ready {
+			check := r.dragonflyRolloutCandidateSyncReady(ctx, fg, promotionTarget, activeSite)
+			r.noteDragonflyRolloutReadiness(ctx, fg, promotionTarget, activeSite, check)
+			if !check.Ready {
 				return requeueAfter, nil
 			}
 			if wait := r.dragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite); wait > 0 {
@@ -875,8 +873,10 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 			"reason", "a planned failover claim or automation hold owns the sites", "fg", nn)
 		return false, true
 	}
-	if ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fresh, target, oldSource); err != nil || !ready {
-		logger.Info("dragonfly rollout: target no longer in sync; skipping", "site", target, "error", err, "fg", nn)
+	if check := r.dragonflyRolloutCandidateSyncReady(ctx, fresh, target, oldSource); !check.Ready {
+		logger.Info("dragonfly rollout: target no longer in sync; skipping", "site", target, "error", check.Err,
+			"state", check.State, "detail", check.Detail, "fg", nn)
+		r.noteDragonflyRolloutReadiness(ctx, fresh, target, oldSource, check)
 		return false, true
 	}
 	promoter := NewDragonflyManager(r.Client, r.Recorder, slog.Default().With("fg", nn.String(), "subsystem", "dragonfly-rollout"), nn, 0)
@@ -898,29 +898,147 @@ const (
 	dragonflyRolloutSyncPoll = 200 * time.Millisecond
 )
 
+// dragonflyRolloutCheck is the result of one rollout readiness check.
+type dragonflyRolloutCheck struct {
+	// Ready: the target is linked and reached the source's position.
+	Ready bool
+	// State names what kept it from being ready, one of the
+	// dragonflyRollout* states; "" when Ready.
+	State string
+	// Detail is the look's own explanation, with its numbers.
+	Detail string
+	// Err is the error that made a site unreadable or the comparison
+	// impossible.
+	Err error
+}
+
+// The states of a rollout readiness check that is not Ready. They are the
+// `state` field of the rollout's log lines.
+const (
+	// The target is not in stable sync: link down, full sync, loading.
+	// Looking again within seconds does not change it.
+	dragonflyRolloutNotLinked = "NotLinked"
+	// The target is linked and behind the source's position after
+	// dragonflyRolloutSyncWait.
+	dragonflyRolloutBehind = "Behind"
+	// A site could not be read (unreachable, a transport error).
+	dragonflyRolloutUnreadable = "Unreadable"
+	// A site refuses the position command, or the two sites report their
+	// positions in different forms: the sync can never be proven
+	// (dragonflySyncUnprovable). The rollout does not promote on that;
+	// it stays until the cause is removed.
+	dragonflyRolloutUnprovable = "Unprovable"
+)
+
 // dragonflyRolloutCandidateSyncReady reports whether target can take over
 // from source for a rollout: it reads the source's replication position,
-// then waits up to dragonflyRolloutSyncWait for the target to be linked
-// and to have reached it on every flow (dragonflyTargetReached). An error
-// means a site could not be read; the caller retries on its next pass.
-func (r *MysqlFailoverGroupReconciler) dragonflyRolloutCandidateSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) (bool, error) {
+// then looks at the target (dragonflyTargetSync).
+//
+// It runs on the group controller's reconcile worker, which serves every
+// group, so it waits only where waiting can help: a target that is linked
+// and behind is looked at again every dragonflyRolloutSyncPoll for up to
+// dragonflyRolloutSyncWait, or until ctx ends. Everything else returns at
+// once: a target that is not in stable sync (link down, full sync,
+// loading), a site that cannot be read, a position that cannot be
+// compared. The caller comes back on its next pass.
+func (r *MysqlFailoverGroupReconciler) dragonflyRolloutCandidateSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) dragonflyRolloutCheck {
+	failed := func(err error) dragonflyRolloutCheck {
+		state := dragonflyRolloutUnreadable
+		if dragonflySyncUnprovable(err) {
+			state = dragonflyRolloutUnprovable
+		}
+		return dragonflyRolloutCheck{State: state, Detail: err.Error(), Err: err}
+	}
 	pos, err := r.dragonflySourcePosition(ctx, fg, source)
 	if err != nil {
-		return false, err
+		return failed(err)
 	}
 	deadline := time.Now().Add(dragonflyRolloutSyncWait)
 	for {
-		ready, _, err := r.dragonflyTargetReached(ctx, fg, target, pos)
-		if err != nil || ready {
-			return ready, err
+		look, err := r.dragonflyTargetSync(ctx, fg, target, pos)
+		switch {
+		case errors.Is(err, errDragonflyTargetFollowsOther):
+			// The source was replaced between the two reads; the next
+			// pass reads its position again.
+			return dragonflyRolloutCheck{State: dragonflyRolloutBehind, Detail: look.Detail}
+		case err != nil:
+			return failed(err)
+		case look.Reached:
+			return dragonflyRolloutCheck{Ready: true}
+		case !look.Linked:
+			return dragonflyRolloutCheck{State: dragonflyRolloutNotLinked, Detail: look.Detail}
 		}
 		if !time.Now().Add(dragonflyRolloutSyncPoll).Before(deadline) {
-			return false, nil
+			return dragonflyRolloutCheck{State: dragonflyRolloutBehind, Detail: look.Detail}
 		}
 		select {
 		case <-ctx.Done():
-			return false, ctx.Err()
+			return failed(ctx.Err())
 		case <-time.After(dragonflyRolloutSyncPoll):
+		}
+	}
+}
+
+// dragonflyRolloutStallAfter is how long a rollout's target may stay not
+// ready before the stall is reported in a DragonflyRolloutStalled Event. A
+// replica restarted by the same rollout needs a full sync first, which
+// takes this long on a large cache without anything being wrong.
+const dragonflyRolloutStallAfter = 2 * time.Minute
+
+// noteDragonflyRolloutReadiness makes a rollout that waits for its target
+// visible without a line every pass (the rollout requeues every two
+// seconds): the state is logged when it changes, with the detail, and a
+// target that has not been ready for dragonflyRolloutStallAfter is reported
+// once in a Warning Event (DragonflyRolloutStalled), as an ordered MySQL
+// update that waits for a pod is (OrderedUpdateStalled). A ready check ends
+// the record.
+func (r *MysqlFailoverGroupReconciler) noteDragonflyRolloutReadiness(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string, check dragonflyRolloutCheck) {
+	key := dragonflyRolloutKey{fg: types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, target: target, source: source}
+	now := r.now()
+	r.dragonflyRolloutMu.Lock()
+	if r.dragonflyRolloutBackoff == nil {
+		r.dragonflyRolloutBackoff = make(map[dragonflyRolloutKey]dragonflyRolloutState)
+	}
+	st := r.dragonflyRolloutBackoff[key]
+	was := st.notReady
+	if check.Ready {
+		st.notReady, st.notReadySince, st.stallReported = "", time.Time{}, false
+	} else {
+		if st.notReadySince.IsZero() {
+			st.notReadySince = now
+		}
+		st.notReady = check.State
+	}
+	waited := now.Sub(st.notReadySince)
+	report := !check.Ready && !st.stallReported && waited >= dragonflyRolloutStallAfter
+	if report {
+		st.stallReported = true
+	}
+	if st == (dragonflyRolloutState{}) {
+		delete(r.dragonflyRolloutBackoff, key)
+	} else {
+		r.dragonflyRolloutBackoff[key] = st
+	}
+	r.dragonflyRolloutMu.Unlock()
+
+	logger := log.FromContext(ctx)
+	switch {
+	case check.Ready && was != "":
+		logger.Info("dragonfly rollout: target in sync", "target", target, "source", source, "fg", key.fg)
+	case !check.Ready && was != check.State && check.Err != nil:
+		logger.Info("dragonfly rollout: sync-readiness check failed", "target", target, "source", source,
+			"state", check.State, "error", check.Err, "fg", key.fg)
+	case !check.Ready && was != check.State:
+		logger.Info("dragonfly rollout: target not ready for promotion", "target", target, "source", source,
+			"state", check.State, "detail", check.Detail, "fg", key.fg)
+	}
+	if report {
+		logger.Info("dragonfly rollout: stalled waiting for the target", "target", target, "source", source,
+			"state", check.State, "detail", check.Detail, "waited", waited.Truncate(time.Second).String(), "fg", key.fg)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyRolloutStalled,
+				"the rollout of active Dragonfly site %q has waited %s for replica %q to be in sync with it (%s): %s",
+				source, waited.Truncate(time.Second), target, check.State, check.Detail)
 		}
 	}
 }

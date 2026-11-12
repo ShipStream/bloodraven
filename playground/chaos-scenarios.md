@@ -784,7 +784,9 @@ Live k3d status from May 3, 2026: scenarios 22, 23, 24, 25, 26, 27, and 29 pass 
 
 **Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins with `status.dragonfly.sites[].role=Replica` and `linkStatus=up`, and the Dragonfly promotion metric increments.
 
-The kill closes the replication connection, so the replica holds the seeded key and reports its link down: the manager promotes it on the first missed poll, before the StatefulSet's replacement pod (an empty master) is up. A master that is only partitioned (scenario 39) is promoted after `spec.failureThreshold` missed polls, about 9 to 11 s with the defaults.
+The kill closes the replication connection, so the replica holds the seeded key and reports its link down. That does not shorten the wait. The replica is promoted by whichever comes first: `spec.failureThreshold` consecutive missed polls of the master (4 to 6 s with the defaults when the dial is refused, 9 to 11 s when the deleted pod's endpoint swallows the dial), or the StatefulSet's replacement pod answering as a new, empty master, which the replica is not re-attached to (`dragonfly: active master restarted without the cache; promoting the replica that holds it`). Either way the promotion is a `REPLICAOF NO ONE` (`result="sessions_lost"`) and the seeded key survives. On the second path the replacement pod is deleted once more by the promotion before it rejoins as a replica. About 30 s after the promotion Dragonfly follows MySQL back to the original site with `REPLTAKEOVER`; the rejoin assertion is made before that. A master that is only partitioned (scenario 39) is promoted after `spec.failureThreshold` missed polls, about 9 to 11 s with the defaults.
+
+Not run since the single failure threshold and the restarted-master handling replaced the promotion on the first missed poll; the assertions were read against the new behaviour and left as they are.
 
 ---
 
