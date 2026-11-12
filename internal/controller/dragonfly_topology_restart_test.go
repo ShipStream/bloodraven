@@ -500,6 +500,33 @@ func TestDragonflyManager_Tick_LateTakeoverSourceReturnsEmpty(t *testing.T) {
 	h.wantPromotedNotReattached("the cycle that saw the old master back")
 }
 
+// The stale-master reattach gate is "no replica attached", and nothing
+// else: a replication offset on a master says nothing on Dragonfly (it
+// prints none) and is not part of the gate on a server that prints one.
+func TestDragonflyManager_Tick_StaleMasterGateIsConnectedSlavesOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		slaves         int
+		offset         int64
+		wantReattached bool
+	}{
+		{"no replica attached", 0, 0, true},
+		{"no replica attached, a server that reports an offset", 0, 4242, true},
+		{"a replica attached", 1, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRestartHarness(t, nil)
+			h.dc2.info = dragonfly.ReplicationInfo{Role: "master", ConnectedSlaves: tc.slaves, MasterReplOffset: tc.offset,
+				MasterReplOffsetReported: tc.offset != 0, MasterReplID: restartTestNewReplID}
+			h.dc2.keys = 0
+			h.tick(1)
+			if got := len(h.dc2.replicaOfArgs) > 0; got != tc.wantReattached {
+				t.Fatalf("stale master re-attached = %v (%v), want %v", got, h.dc2.replicaOfArgs, tc.wantReattached)
+			}
+		})
+	}
+}
+
 func TestDragonflyReplicaOfEarlierMaster(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	many := int64(300)
