@@ -2006,18 +2006,10 @@ func (l *episodeLayout) targets() (names []string, at map[string]time.Time) {
 // verdict from both. The verdicts that matter are stated as well, so two
 // equal wrong answers do not pass.
 //
-// The last layout once differed: b is promoted again while it still holds
-// B:3, which a never had (lostIn with finish "b": a transaction the group
-// lost returns with its site, which the operator prevents by recloning
-// such a site first). The recorded history refuses latest mode on the
-// third episode's record, the evidence that B:3 was lost at that
-// promotion. Without the record the planner had no such evidence and
-// restored the head, which holds B:3. The episode's own file carries the
-// same evidence: a's server committed A:9-11 in a file whose
-// Previous_gtids lack B:3, which b had committed before. Latest mode reads
-// it (pitrplan's ownWrites), so both histories refuse, and name B:3.
+// One layout is left out, because its latest-mode verdicts do differ: b is
+// promoted again while it still holds B:3, which a never had.
+// TestKnownLimitationUnrecordedEpisodeInLatestMode pins it.
 func TestArchiveWritersUnrecordedEpisodePlansAsRecorded(t *testing.T) {
-	A, B := writerUUIDA, writerUUIDB
 	for _, tc := range []struct {
 		name string
 		o    episodeOptions
@@ -2054,52 +2046,211 @@ func TestArchiveWritersUnrecordedEpisodePlansAsRecorded(t *testing.T) {
 			"episode 3, before A:10": "TargetCovered lineage=A:1-9,B:1-3 witness=A:10 (Origin) in a/mysql-bin.000004",
 			"latest":                 "ArchiveHead lineage=A:1-11,B:1-3",
 		}},
-		{"the episode starts without b's last transaction, b is promoted again with it", episodeOptions{lostIn: true, finish: "b"}, map[string]string{
-			"episode 3, before A:10":               "refused PITRArchiveDivergentHistory divergent=B:3",
-			"episode 3, before A:10 excluding B:3": "TargetCovered lineage=A:1-9,B:1-2 witness=A:10 (Origin) in a/mysql-bin.000004",
-			"episode 4, before its transaction 2":  "TargetCovered lineage=A:1-11,B:1-4 witness=B:5 (Origin) in b/mysql-bin.000003",
-			"latest":                               "refused PITRArchiveDivergentHistory divergent=B:3 lost=B:3",
-			"latest excluding B:3":                 "ArchiveHead lineage=A:1-11,B:1-6 lost=B:3",
-			// Excluding one of the episode's own transactions sets neither
-			// the record nor the file aside (N1).
-			"latest excluding A:11": "refused PITRArchiveDivergentHistory divergent=B:3 lost=B:3",
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var layouts [2]*episodeLayout
-			for i, recorded := range []bool{true, false} {
-				o := tc.o
-				o.recorded = recorded
-				layouts[i] = newEpisodeLayout(t, o)
+			compareEpisodeLayouts(t, tc.o, tc.want, nil)
+		})
+	}
+}
+
+// compareEpisodeLayouts builds the layout o twice, with a's third episode
+// recorded and unrecorded, and plans every target of both (without
+// exclusions, excluding B:3 and excluding A:11). The two verdicts must be
+// equal, except at the targets of differ, where the unrecorded layout's
+// verdict is the one stated there. want states verdicts of the recorded
+// layout. Keys are "target" or "target excluding <set>", with the
+// server_uuids written A, B and C.
+func compareEpisodeLayouts(t *testing.T, o episodeOptions, want, differ map[string]string) {
+	t.Helper()
+	A, B := writerUUIDA, writerUUIDB
+	var layouts [2]*episodeLayout
+	for i, recorded := range []bool{true, false} {
+		o := o
+		o.recorded = recorded
+		layouts[i] = newEpisodeLayout(t, o)
+	}
+	recorded, unrecorded := layouts[0], layouts[1]
+	names, at := recorded.targets()
+	_, unrecordedAt := unrecorded.targets()
+	seen := map[string]bool{}
+	for _, exclude := range []string{"", B + ":3", A + ":11"} {
+		for _, name := range names {
+			with := recorded.verdict(at[name], exclude)
+			without := unrecorded.verdict(unrecordedAt[name], exclude)
+			key := name
+			if exclude != "" {
+				key += " excluding " + strings.NewReplacer(A, "A", B, "B").Replace(exclude)
 			}
-			recorded, unrecorded := layouts[0], layouts[1]
-			names, at := recorded.targets()
-			_, unrecordedAt := unrecorded.targets()
-			seen := map[string]bool{}
-			for _, exclude := range []string{"", B + ":3", A + ":11"} {
-				for _, name := range names {
-					want := recorded.verdict(at[name], exclude)
-					got := unrecorded.verdict(unrecordedAt[name], exclude)
-					key := name
-					if exclude != "" {
-						key += " excluding " + strings.NewReplacer(A, "A", B, "B").Replace(exclude)
-					}
-					if got != want {
-						t.Errorf("%s:\n  with the episode recorded: %s\n  unrecorded:                %s", key, want, got)
-					}
-					if stated, ok := tc.want[key]; ok {
-						seen[key] = true
-						if want != stated {
-							t.Errorf("%s: %s, want %s", key, want, stated)
-						}
-					}
+			if stated, ok := differ[key]; ok {
+				seen[key] = true
+				if without != stated || without == with {
+					t.Errorf("%s:\n  with the episode recorded: %s\n  unrecorded:                %s\n  want, unrecorded:          %s", key, with, without, stated)
+				}
+			} else if without != with {
+				t.Errorf("%s:\n  with the episode recorded: %s\n  unrecorded:                %s", key, with, without)
+			}
+			if stated, ok := want[key]; ok {
+				seen[key] = true
+				if with != stated {
+					t.Errorf("%s: %s, want %s", key, with, stated)
 				}
 			}
-			for key := range tc.want {
-				if !seen[key] {
-					t.Errorf("no target %q in this layout", key)
+		}
+	}
+	for _, m := range []map[string]string{want, differ} {
+		for key := range m {
+			if !seen[key] {
+				t.Errorf("no target %q in this layout", key)
+			}
+		}
+	}
+}
+
+// Known limitation: a writable episode that no sidecar recorded is no loss
+// evidence in latest mode. b is promoted again while it still holds B:3,
+// which a never had while it was writable (lostIn with finish "b": a
+// transaction the group lost returns with its site, which the operator
+// prevents by recloning such a site first). With a's third episode
+// recorded, latest mode refuses on that record, the evidence that B:3 was
+// lost at that promotion, until B:3 is excluded. Without the record the
+// planner restores the head, which holds B:3. Timestamp targets agree.
+//
+// The archive cannot decide it. The unrecorded episode's own file shows
+// that a's server committed A:9-11 after a state without B:3. A read-only
+// replica's file shows the same when the replica originates a transaction
+// (FLUSH PRIVILEGES and its like consume a GTID under super_read_only, and
+// so does any errant write) while it has yet to apply B:3, and is promoted
+// later with nothing lost: the bytes say that a server wrote, not that it
+// was the group's primary. Latest mode once read such a file as loss
+// evidence; it then refused that healthy history and named transactions
+// every server holds as the ones to exclude
+// (TestArchiveWritersErrantTransactionOnAReplicaPlans, and pitrplan's
+// TestLatestErrantTransactionOnALaggingReplicaLosesNothing). The promotion
+// record is the evidence that a server was promoted. The sidecar writes
+// one for every writable episode it observes, so an episode is unrecorded
+// only when the site's sidecar was down for all of it.
+//
+// This test fails when the two histories start to agree.
+func TestKnownLimitationUnrecordedEpisodeInLatestMode(t *testing.T) {
+	compareEpisodeLayouts(t, episodeOptions{lostIn: true, finish: "b"}, map[string]string{
+		"episode 3, before A:10":               "refused PITRArchiveDivergentHistory divergent=B:3",
+		"episode 3, before A:10 excluding B:3": "TargetCovered lineage=A:1-9,B:1-2 witness=A:10 (Origin) in a/mysql-bin.000004",
+		"episode 4, before its transaction 2":  "TargetCovered lineage=A:1-11,B:1-4 witness=B:5 (Origin) in b/mysql-bin.000003",
+		"latest":                               "refused PITRArchiveDivergentHistory divergent=B:3 lost=B:3",
+		"latest excluding B:3":                 "ArchiveHead lineage=A:1-11,B:1-6 lost=B:3",
+		// Excluding one of the episode's own transactions does not set its
+		// record aside (N1).
+		"latest excluding A:11": "refused PITRArchiveDivergentHistory divergent=B:3 lost=B:3",
+	}, map[string]string{
+		"latest":                "ArchiveHead lineage=A:1-11,B:1-6",
+		"latest excluding B:3":  "ArchiveHead lineage=A:1-11,B:1-6",
+		"latest excluding A:11": "ArchiveHead lineage=A:1-11,B:1-6",
+	})
+}
+
+// An errant transaction on a read-only replica that is promoted later is
+// history, and nothing is lost by it: FLUSH PRIVILEGES and its like consume
+// a GTID under super_read_only, and any account that may write there can
+// commit one. b originates B:1 while a is the primary, and a planned
+// failover to b follows; a then replicates B:1 from b. With lag, b has yet
+// to apply A:6-10 when it writes B:1, its binlog rotates in between, and it
+// applies them in its next file.
+//
+// Latest mode once read a file holding a transaction its own server
+// originated as a sample of a writable server's state (as a promotion
+// record is). It then refused the lagging history, naming A:6-10, which
+// every server holds, as lost "at a failover to b that left no promotion
+// record", and refused the other for every backup taken on b between B:1
+// and the failover, with no remedy. The archive plans, with the real
+// archivers' rows, as it does without that rule.
+func TestArchiveWritersErrantTransactionOnAReplicaPlans(t *testing.T) {
+	for _, lag := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lag=%v", lag), func(t *testing.T) {
+			t.Parallel()
+			w := newWriterArchive(t)
+			A, B := writerUUIDA, writerUUIDB
+			srvA := newSimServer(t, A, 101, false)
+			srvB := newSimServer(t, B, 102, true)
+			id := w.identity(writerGroup, w.dest)
+			a := w.start("a", srvA, w.store, id)
+			b := w.start("b", srvB, w.store, id)
+			w.waitRecords("a", 1)
+			era1 := liveTxns(A, 101, 1, 5)
+			srvA.apply(era1...)
+			srvB.apply(era1...)
+			dump := writerDump(t, "a", 101, A+":1-5")
+			var errant, more []binlogtest.Txn
+			if lag {
+				more = liveTxns(A, 101, 6, 10)
+				srvA.apply(more...)
+				time.Sleep(20 * time.Millisecond) // more than δ
+				errant = liveTxns(B, 102, 1, 1)
+				srvB.apply(errant...)
+				srvB.rotate()
+				srvB.apply(more...)
+			} else {
+				errant = liveTxns(B, 102, 1, 1)
+				srvB.apply(errant...)
+				time.Sleep(20 * time.Millisecond)
+				more = liveTxns(A, 101, 6, 10)
+				srvA.apply(more...)
+				srvB.apply(more...)
+			}
+			srvA.rotate()
+			w.eventually("a's file archived", func() bool { return len(w.manifest("a").Files) == 1 })
+			srvA.setReadOnly(true)
+			w.waitDemoted(a)
+			srvB.promote(true, nil, nil)
+			w.waitRecords("b", 1)
+			era2 := liveTxns(B, 102, 2, 4)
+			srvB.apply(era2...)
+			srvA.apply(errant...)
+			srvA.apply(era2...)
+			srvB.rotate()
+			files := 2
+			if lag {
+				files = 3
+			}
+			w.eventually("b's files archived", func() bool { return len(w.manifest("b").Files) == files })
+			short := strings.NewReplacer(A, "A", B, "B")
+			for _, q := range []struct {
+				name    string
+				T       time.Time
+				exclude string
+				want    string
+			}{
+				{"latest", time.Time{}, "", "ArchiveHead A:1-10,B:1-4"},
+				{"before B:4", before(era2[2]), "", "TargetCovered A:1-10,B:1-3"},
+				{"before B:2", before(era2[0]), "", "TargetCovered A:1-10,B:1"},
+			} {
+				plan, err := w.plan(dump, q.T, q.exclude)
+				if err != nil {
+					t.Errorf("%s: %s", q.name, short.Replace(err.Error()))
+					continue
 				}
+				if got := short.Replace(fmt.Sprintf("%s %s", plan.Outcome, plan.Lineage)); got != q.want || !plan.Lost.IsEmpty() {
+					t.Errorf("%s: %s lost=%s, want %s", q.name, got, plan.Lost, q.want)
+				}
+			}
+			// A failback: a is promoted again and archives its copies, B:1
+			// after A:6-10, where b's files have B:1 before them. That is
+			// the order check's case, not loss evidence, and it answers as
+			// it always did: two sites applied the same transactions in
+			// different orders (PITRArchiveOrderInversion, whose message
+			// names the errant transaction as the likely cause).
+			srvB.setReadOnly(true)
+			w.waitDemoted(b)
+			srvA.promote(true, nil, nil)
+			w.waitRecords("a", 2)
+			era3 := liveTxns(A, 101, 11, 12)
+			srvA.apply(era3...)
+			srvB.apply(era3...)
+			srvA.rotate()
+			w.eventually("a's files archived", func() bool { return len(w.manifest("a").Files) == 3 })
+			plan, err := w.plan(dump, time.Time{}, "")
+			if ref, ok := pitrplan.RefusalOf(err); !ok || ref.Token != pitrarchive.TokenArchiveOrderInversion || !plan.Lost.IsEmpty() {
+				t.Fatalf("latest after the failback: %+v %v, want PITRArchiveOrderInversion", plan, err)
 			}
 		})
 	}
