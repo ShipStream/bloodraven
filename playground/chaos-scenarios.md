@@ -1728,7 +1728,7 @@ Before the archiver could decrypt, this stopped at the archiver's readiness: not
 
 **What it does not cover**: the stall is found by `stallAfter`, shortened to 45s; the ordered updater's own report (`OrderedUpdateStalled`, after its 5m wait for the rolled pod) is covered by `TestPacedRollout_BadBuildStopsAtTheFirstGroup`. `Recreate` groups and Dragonfly StatefulSets are covered by the controller tests only.
 
-**Status**: not run on a cluster yet (written 2026-11-12 on a host where no local cluster could start). The e2e `paced-rollout` job is its first run; expected runtime about 10 to 12 minutes.
+**Status**: not run on a cluster yet (written 2026-11-12 on a host where no local cluster could start). Its checks, its cleanup and the objects it creates are tested without one (`paced_rollout_*_test.go`, and `TestPacedRolloutScenarioObjectsAdmitted` in envtest). The e2e `paced-rollout` job is its first run; expected runtime about 10 to 12 minutes, unmeasured.
 
 ### 74. Upgrade From the Previous Release Is Paced {#74-upgrade-paced-rollout}
 **Category**: Upgrade, paced rollout (#244; C-8 in `proposals/20-api-v1beta1.md`) | **Risk**: Medium | **Automated**: `74-upgrade-paced-rollout` (quarantined: needs a cluster installed at v1.7.0 with a spare node, run by the e2e `upgrade` job)
@@ -1751,7 +1751,7 @@ Before the archiver could decrypt, this stopped at the archiver's readiness: not
 
 **Scope**: v1.7.0 is the last release without paced rollouts, and the precheck requires workloads without `rendered-by`. This is the gate for the release that introduces pacing, not a rolling check of "the previous release": an upgrade between two releases that both pace may change no pod template at all.
 
-**Status**: not run on a cluster yet (written 2026-11-12). Checked without a cluster: the v1.7.0 chart and both images pull anonymously, the v1.7.0 chart renders with the values `setup.sh` passes, and the checkout's chart renders over v1.7.0's values. The e2e `upgrade` job is its first run.
+**Status**: not run on a cluster yet (written 2026-11-12). Checked without a cluster: the v1.7.0 chart and both images pull anonymously, the v1.7.0 chart renders with the values `setup.sh` passes, the checkout's chart renders over v1.7.0's values (`TestRolloutValuesChart`), and the auxiliary groups are admitted by the published v1.7.0 CRD and survive this build's CRD being applied over it, after which `status.rollout` is stored (`TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170`, envtest). The e2e `upgrade` job is its first run.
 
 ### Recorded, not automated
 
