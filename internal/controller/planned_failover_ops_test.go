@@ -961,7 +961,7 @@ func TestPF_SourceLeftFencedIsNamedAndReasserted(t *testing.T) {
 			if tm.checkPrimaryReassert(context.Background()) {
 				t.Fatal("the topology manager re-asserted while the run held its claim")
 			}
-			if err := topo.NameFencedSource(ref, opsUUIDA); err != nil {
+			if err := topo.NameFencedSource(ref, opsUUIDA, ""); err != nil {
 				t.Fatal(err)
 			}
 			if !topo.ReleasePlannedFailoverClaim(ref.Group, "run-1", ReleaseTerminal) {
@@ -985,7 +985,7 @@ func TestPF_SourceLeftFencedIsNamedAndReasserted(t *testing.T) {
 func TestPF_FenceIntentWithoutServerNamesNothing(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.hold(false)
-	if err := f.topo.NameFencedSource(f.ref, ""); err == nil {
+	if err := f.topo.NameFencedSource(f.ref, "", ""); err == nil {
 		t.Fatal("a source was named without a server to bind it to")
 	}
 	f.tm.mu.RLock()

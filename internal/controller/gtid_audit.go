@@ -256,16 +256,27 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 		return unverified(fmt.Errorf("parse primary GTID set: %w", err)), true
 	}
 	extra := followerSet.Subtract(primarySet)
-	// What the follower lacks of the transactions it issued itself. This
-	// direction needs no ordering of the reads: whatever the primary holds
-	// under a server_uuid of the follower was committed on the follower
-	// first, so lag cannot explain it (own_transactions_lost.go).
+	// What the follower lacks of the transactions it issued itself. The
+	// follower's receiver drops them when they carry its server_id, but
+	// not when they were applied on the primary from a decoded binary log:
+	// those it receives like any other, so a deficit seen here may be lag.
+	// proveOwnLossHole tells the two apart by the applier's position; an
+	// unproven deficit publishes nothing about the loss, in either
+	// direction, and the follower is audited again soon.
 	var lost mysql.GTIDSet
 	var ownUUIDs []string
 	identityKnown := followerSnap.ServerUUID != ""
+	lossProven := true
 	if identityKnown {
 		ownUUIDs = tm.noteSiteServerUUID(ctx, follower.name, followerSnap.ServerUUID)
 		lost = ownLostTransactions(primarySet, followerSet, ownUUIDs)
+		if lost.IsEmpty() {
+			tm.mu.Lock()
+			delete(tm.ownLossProof, follower.name)
+			tm.mu.Unlock()
+		} else {
+			lost, lossProven = tm.proveOwnLossHole(ctx, active, follower, primarySnap.ServerUUID, followerSnap.ServerUUID, ownUUIDs, lost)
+		}
 	}
 	if primarySnap.ServerUUID != "" {
 		// The primary issues transactions under this server_uuid now.
@@ -290,8 +301,26 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 	tm.stampGTIDAuditLocked(follower.name)
 	lossChanged := false
 	var lossLog func()
-	if identityKnown {
+	switch {
+	case !identityKnown:
+	case lossProven:
 		lossChanged, lossLog = tm.settleOwnLossLocked(follower.name, lost, active.name, divergenceDetectedByAudit, ownUUIDs, false)
+	default:
+		// Possibly lag: look again before the next regular audit.
+		tm.gtidAudit[follower.name] = &gtidAuditSchedule{nextAt: tm.clock.Now().Add(ownLossProofRetry)}
+		if !tm.ownLossLagNoted[follower.name] {
+			if tm.ownLossLagNoted == nil {
+				tm.ownLossLagNoted = map[string]bool{}
+			}
+			tm.ownLossLagNoted[follower.name] = true
+			lossLog = func() {
+				tm.logger.Info("replica GTID audit: the follower lacks transactions under its own server_uuid that the primary holds, and its applier has not executed the primary's log that far yet; not reported unless they are still missing once it has",
+					"site", follower.name, "primary", active.name)
+			}
+		}
+	}
+	if lossProven {
+		delete(tm.ownLossLagNoted, follower.name)
 	}
 	reportLoss := func() {
 		if lossLog != nil {
@@ -355,7 +384,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 	}
 	// Transactions the follower holds and the primary lacks may be ones
 	// another site issued and no longer has.
-	witnessChanged := tm.crossCheckOwnLoss(ctx, follower, followerSet, extra, active.name)
+	witnessChanged := tm.crossCheckOwnLoss(ctx, follower, extra, active.name)
 	return !sameSet || !sameProvenance || lossChanged || witnessChanged, false
 }
 

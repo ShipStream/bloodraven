@@ -330,7 +330,7 @@ func (f *pfFakeTopology) NameUnconfirmedTarget(ref PlannedRunRef) error {
 	return nil
 }
 
-func (f *pfFakeTopology) NameFencedSource(ref PlannedRunRef, serverUUID string) error {
+func (f *pfFakeTopology) NameFencedSource(ref PlannedRunRef, serverUUID, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.named = append(f.named, "source:"+ref.Source)

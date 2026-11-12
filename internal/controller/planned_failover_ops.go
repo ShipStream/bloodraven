@@ -1264,7 +1264,7 @@ func (tm *TopologyManager) namePlannedTargetUnconfirmed(target string) {
 // sourceServerUUID, the server the run's fence intent names: the re-assert
 // lifts a fence only from that server (plannedFencedSource). Nothing is
 // read here, so a run that ends without reaching its source can name it.
-func (p *runnerPlannedTopology) NameFencedSource(ref PlannedRunRef, sourceServerUUID string) error {
+func (p *runnerPlannedTopology) NameFencedSource(ref PlannedRunRef, sourceServerUUID, fenceGtid string) error {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
 		return err
@@ -1273,7 +1273,7 @@ func (p *runnerPlannedTopology) NameFencedSource(ref PlannedRunRef, sourceServer
 		return err
 	}
 	tm.mu.Lock()
-	named := tm.nameFencedSourceLocked(ref.RunID, ref.Source, sourceServerUUID)
+	named := tm.nameFencedSourceLocked(ref.RunID, ref.Source, sourceServerUUID, fenceGtid)
 	tm.mu.Unlock()
 	if !named {
 		return errors.New("planned failover: the run's fence intent names no server; the source is not named")
@@ -2028,6 +2028,14 @@ func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *r
 		warn()
 		return
 	}
+	if tm.plannedTargetLacksOwnTransactions(ref, live, F) {
+		// The target answers without transactions it issued itself that
+		// the source holds (the fenced set is the source's): its receiver
+		// would drop them, so its channel is neither started nor created.
+		// It is reported, and recloned once the source is the primary.
+		warn()
+		return
+	}
 	if live.repl != nil {
 		if tm.requireRunClaim(p.leader(), ref, false) != nil {
 			warn()
@@ -2062,6 +2070,42 @@ func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *r
 	if err != nil {
 		warn()
 	}
+}
+
+// plannedTargetLacksOwnTransactions reports whether the run's target, as
+// read (live), lacks transactions it issued itself that are part of F, the
+// set the source was fenced with, and records the report when it does.
+//
+// A rollback starts or creates the target's channel toward the source. A
+// target that restarted on older data during the run (the same
+// server_uuid, short of F) may have lost transactions it issued when it
+// was the primary; the source holds them, and the target's receiver drops
+// them. The replication start gate refuses a site with a report, but
+// nothing has compared this target since it restarted, so the rollback
+// compares it here, before the gate is asked. The target has no running
+// channel at this point (the caller returned for one that runs), so the
+// comparison is the single exact one (own_transactions_lost.go).
+func (tm *TopologyManager) plannedTargetLacksOwnTransactions(ref PlannedRunRef, live promotionLive, F mysql.GTIDSet) bool {
+	if live.uuid == "" {
+		return false
+	}
+	uuids := tm.knownSiteServerUUIDs(ref.Target, live.uuid)
+	lost := ownLostTransactions(F, live.gtid, uuids)
+	if lost.IsEmpty() {
+		return false
+	}
+	tm.mu.Lock()
+	changed, lossLog := tm.settleOwnLossLocked(ref.Target, lost, ref.Source, divergenceDetectedByRecovery, uuids, false)
+	tm.mu.Unlock()
+	if lossLog != nil {
+		lossLog()
+	}
+	if changed {
+		tm.RequestStatusRefresh()
+	}
+	tm.logger.Warn("planned failover: rollback does not restore the target's replication, it lacks transactions it issued itself that the source holds",
+		"runId", ref.RunID, "site", ref.Target, "lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()))
+	return true
 }
 
 // ---------- promotion (§7) ----------

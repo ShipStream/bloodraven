@@ -122,8 +122,8 @@ func (f *pfEnvTopology) RecordPlannedPromotion(context.Context, controller.Plann
 func (f *pfEnvTopology) ApplyDNS(context.Context, controller.PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error) {
 	return v1alpha1.PlannedFailoverDNSApplied, nil
 }
-func (f *pfEnvTopology) NameUnconfirmedTarget(controller.PlannedRunRef) error    { return nil }
-func (f *pfEnvTopology) NameFencedSource(controller.PlannedRunRef, string) error { return nil }
+func (f *pfEnvTopology) NameUnconfirmedTarget(controller.PlannedRunRef) error            { return nil }
+func (f *pfEnvTopology) NameFencedSource(controller.PlannedRunRef, string, string) error { return nil }
 func (f *pfEnvTopology) Rollback(context.Context, controller.PlannedRunRef, *v1alpha1.PlannedFailoverStatus) (controller.RollbackResult, error) {
 	return controller.RollbackResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack}, nil
 }

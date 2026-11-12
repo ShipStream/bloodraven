@@ -17,9 +17,12 @@ type handoffBlock struct {
 	reclonePending bool
 	// divergence is the recorded RecoveryBlocked report, if any.
 	divergence siteRecovery
-	// ownLost: the site lacks transactions it issued itself and awaits
-	// its reclone.
-	ownLost bool
+	// ownLost: the site carries a report of transactions it issued itself
+	// and lacks. ownLostRemedy says what ends the report: its reclone when
+	// the primary holds them, the repair of the site that does when the
+	// primary does not (ownLossPromotionRemedyLocked).
+	ownLost       bool
+	ownLostRemedy string
 }
 
 // handoffBlockLocked reads site's handoff eligibility. Must hold tm.mu.
@@ -28,6 +31,7 @@ func (tm *TopologyManager) handoffBlockLocked(site string) handoffBlock {
 		rotation:       tm.keyringRotationBlockedLocked(site),
 		reclonePending: tm.restoreReclonePendingLocked(site),
 		ownLost:        tm.ownLossLocked(site),
+		ownLostRemedy:  tm.ownLossPromotionRemedyLocked(site),
 	}
 	if rec := tm.recovery[site]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
 		b.divergence = *rec
@@ -42,7 +46,7 @@ func (b handoffBlock) err(site string) error {
 	case b.reclonePending:
 		return fmt.Errorf("%s pending post-restore reclone; wait for status.restoreReclones to drain", site)
 	case b.ownLost:
-		return fmt.Errorf("%s lacks transactions it issued itself (status.sites[].lostGtid) and would issue their GTIDs again; wait for its reclone", site)
+		return fmt.Errorf("%s lacks transactions it issued itself (status.sites[].lostGtid) and would issue their GTIDs again; %s", site, b.ownLostRemedy)
 	case b.divergence.state == v1alpha1.RecoveryStateBlocked:
 		return errors.New(divergentStandbyMessage(UpdateTarget{Name: site, DivergentTransactions: b.divergence.divergentCount}))
 	}

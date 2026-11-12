@@ -86,6 +86,16 @@ const (
 	// first skip the second, and the PITR archive of the group cannot be
 	// trusted across them. The message names the site and the set.
 	EventOwnTransactionsLostSitePromoted = "OwnTransactionsLostSitePromoted"
+	// The source a planned failover left fenced (`SourceLeftFenced`) was
+	// made writable again by the primary re-assert although it no longer
+	// holds part of the GTID set it reported under the run's fence, and no
+	// other site holds that part either: the source restarted on older
+	// data while it was fenced, and those acknowledged transactions are
+	// lost. The re-assert restores the primary all the same, because
+	// every other site was compared and none is a better one. The message
+	// names the site, the run and the set. With PITR, see also
+	// `PITRArchiveReissueRiskDetected`.
+	EventPlannedSourceTransactionsLost = "PlannedSourceTransactionsLost"
 	// Both sites are writable (split brain). Also emitted when a second
 	// site answers writable before the debounce confirms it; the message
 	// names the unconfirmed sites, and fencing waits for the confirmation.

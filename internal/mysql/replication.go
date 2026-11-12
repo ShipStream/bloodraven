@@ -43,6 +43,34 @@ type ReplicaStatus struct {
 	SourceUUID       string
 	ExecutedGtidSet  string
 	RetrievedGtidSet string
+	// ExecSourceLogFile and ExecSourceLogPos are the coordinates in the
+	// source's binary log up to which the applier has executed
+	// (Relay_Source_Log_File, Exec_Source_Log_Pos): every transaction the
+	// source logged before them is applied on this replica, or was
+	// dropped by its receiver because it carries the replica's own
+	// server_id. With a multithreaded applier they are its checkpoint,
+	// which no applied gap precedes. Measured on MySQL 9.7: they reach
+	// the source's own position (SHOW BINARY LOG STATUS) while the
+	// replica lacks transactions the receiver dropped, and stay behind it
+	// for as long as a transaction is received but not applied. The file
+	// is "" when the server did not report them.
+	ExecSourceLogFile string
+	ExecSourceLogPos  uint64
+}
+
+// ExecutedPast reports whether the applier has executed the source's
+// binary log up to pos: the same log (base name), and a later file or the
+// same file at pos or beyond. False when either side is unknown.
+func (rs *ReplicaStatus) ExecutedPast(pos BinlogPosition) bool {
+	if rs == nil || rs.ExecSourceLogFile == "" || pos.File == "" {
+		return false
+	}
+	base, seq, ok := BinlogFileSeq(rs.ExecSourceLogFile)
+	wantBase, wantSeq, wantOK := BinlogFileSeq(pos.File)
+	if !ok || !wantOK || base != wantBase {
+		return false
+	}
+	return seq > wantSeq || (seq == wantSeq && rs.ExecSourceLogPos >= pos.Pos)
 }
 
 // ReplicationSourceOpts configures CHANGE REPLICATION SOURCE TO.
@@ -226,6 +254,16 @@ func showReplicaStatus(ctx context.Context, r sqlRunner) (*ReplicaStatus, error)
 
 	if v, ok := colMap["Retrieved_Gtid_Set"]; ok && v.Valid {
 		rs.RetrievedGtidSet = v.String
+	}
+
+	file, pos := colMap["Relay_Source_Log_File"], colMap["Exec_Source_Log_Pos"]
+	if !file.Valid || strings.TrimSpace(file.String) == "" {
+		file, pos = colMap["Relay_Master_Log_File"], colMap["Exec_Master_Log_Pos"]
+	}
+	if file.Valid && pos.Valid {
+		if n, err := strconv.ParseUint(strings.TrimSpace(pos.String), 10, 64); err == nil {
+			rs.ExecSourceLogFile, rs.ExecSourceLogPos = strings.TrimSpace(file.String), n
+		}
 	}
 
 	return rs, nil

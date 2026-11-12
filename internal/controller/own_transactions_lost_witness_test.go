@@ -120,7 +120,7 @@ func TestOwnLoss_AuditFindsASiteThatLacksWhatADivergentFollowerHolds(t *testing.
 	}
 	warns := f.logged(t, "own transactions lost")
 	if len(warns) != 1 || warns[0]["site"] != "dc2" || warns[0]["comparedTo"] != "dc3" ||
-		!strings.Contains(warns[0]["remedy"].(string), "reclone dc3 to discard them or make the primary contain them") {
+		!strings.Contains(warns[0]["remedy"].(string), "reclone dc3 to discard them, or replay them onto the primary (this site then receives them by replication)") {
 		t.Fatalf("own transactions lost log = %v, want one for dc2 against dc3 with the witness remedy", warns)
 	}
 
@@ -140,7 +140,7 @@ func TestOwnLoss_AuditFindsASiteThatLacksWhatADivergentFollowerHolds(t *testing.
 	f.tm.mu.RLock()
 	pending := f.tm.reclonePendingSite
 	f.tm.mu.RUnlock()
-	if pending != "" || !strings.Contains(rec.recloneWaiting, "held by dc3 only") {
+	if pending != "" || !strings.Contains(rec.recloneWaiting, "held by dc3, not by the primary") {
 		t.Fatalf("pending reclone %q, waiting %q: want none, waiting for dc3", pending, rec.recloneWaiting)
 	}
 	if f.tm.verifyOwnLossReclone(context.Background(), f.tm.getSite("dc1"), f.tm.getSite("dc2")) {
@@ -162,7 +162,7 @@ func TestOwnLoss_AuditFindsASiteThatLacksWhatADivergentFollowerHolds(t *testing.
 	if rec := ownLossOf(f.tm, "dc2"); rec != nil {
 		t.Fatalf("dc2 own-loss record = %+v after dc3 lost the transactions, want none", rec)
 	}
-	if got := f.logged(t, "own transactions lost cleared: the witness no longer holds transactions the site lacks"); len(got) != 1 {
+	if got := f.logged(t, "own transactions lost cleared: no site holds transactions the site lacks"); len(got) != 1 {
 		t.Fatalf("witness clear logged %d times, want once", len(got))
 	}
 	if err := f.tm.liveHandoffRefusal("dc2")(); err != nil {
@@ -170,11 +170,16 @@ func TestOwnLoss_AuditFindsASiteThatLacksWhatADivergentFollowerHolds(t *testing.
 	}
 }
 
-// The transactions a witness holds reach the primary (an administrator
-// chose to keep them): now the site lacks transactions the primary holds,
-// which is the stronger report. Its replication is refused and it is
-// recloned.
-func TestOwnLoss_WitnessReportBecomesAHoleWhenThePrimaryGetsTheTransactions(t *testing.T) {
+// The transactions a witness holds reach the primary, and nothing can tell
+// whether replication will deliver them to the site: the checkers of this
+// fixture read no binary log coordinates, as for a primary whose position
+// cannot be read. The single comparison then stands, on the safe side: the
+// site lacks transactions the primary holds, which is the stronger report.
+// Its replication is refused and it is recloned. What a real server does
+// when an administrator replays them onto the primary, and a site whose
+// channel runs receives them, is pinned by
+// TestOwnLoss_WitnessReportEndsWhenTheTransactionsAreReplayedOntoThePrimary.
+func TestOwnLoss_WitnessReportBecomesAHoleWithoutAProofOfLag(t *testing.T) {
 	f := newWitnessFixture(t, witnessPrimarySet, witnessPrimarySet, witnessHolderSet)
 	// The clone the hole leads to is held at its keyring unseal, so the
 	// report can be looked at.
@@ -232,7 +237,7 @@ func TestOwnLoss_WitnessReportReview(t *testing.T) {
 			}
 			tc.arrange(f)
 			f.clk.Advance(gtidAuditInterval)
-			f.tm.reviewWitnessOwnLoss(context.Background())
+			f.tm.reviewOwnLossReports(context.Background())
 			if rec := ownLossOf(f.tm, "dc2"); (rec != nil) != tc.kept {
 				t.Fatalf("dc2 own-loss record = %+v, kept=%v wanted", rec, tc.kept)
 			}

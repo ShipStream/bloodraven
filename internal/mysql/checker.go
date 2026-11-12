@@ -231,20 +231,49 @@ func (m *checker) RotateBinaryLog(ctx context.Context) (string, error) {
 // activeBinlogFile reads the File column of SHOW BINARY LOG STATUS, by
 // column name: the binary log file the server writes now.
 func activeBinlogFile(ctx context.Context, conn *sql.Conn) (string, error) {
-	rows, err := conn.QueryContext(ctx, "SHOW BINARY LOG STATUS")
+	pos, err := readBinlogPosition(ctx, conn)
+	if pos.File != "" {
+		// Only the name matters here.
+		return pos.File, nil
+	}
+	return "", err
+}
+
+// BinlogPosition is where a server's binary log ends, with the executed
+// GTID set it had at that point: one row of SHOW BINARY LOG STATUS, which
+// the server fills under its log lock, so every transaction of
+// GtidExecuted that this server logged is logged before File:Pos.
+type BinlogPosition struct {
+	File         string
+	Pos          uint64
+	GtidExecuted string
+}
+
+// ReadBinlogPosition reads the server's current binary log coordinates
+// together with its executed GTID set (SHOW BINARY LOG STATUS; it needs
+// the REPLICATION CLIENT privilege). The replica GTID audit uses it to
+// tell a replica that is behind from one whose receiver dropped
+// transactions (ReplicaStatus.ExecutedPast).
+func (m *checker) ReadBinlogPosition(ctx context.Context) (BinlogPosition, error) {
+	return readBinlogPosition(ctx, m.db)
+}
+
+// readBinlogPosition reads SHOW BINARY LOG STATUS by column name.
+func readBinlogPosition(ctx context.Context, r sqlRunner) (BinlogPosition, error) {
+	rows, err := r.QueryContext(ctx, "SHOW BINARY LOG STATUS")
 	if err != nil {
-		return "", fmt.Errorf("show binary log status: %w", err)
+		return BinlogPosition{}, fmt.Errorf("show binary log status: %w", err)
 	}
 	defer rows.Close()
 	cols, err := rows.Columns()
 	if err != nil {
-		return "", fmt.Errorf("show binary log status: %w", err)
+		return BinlogPosition{}, fmt.Errorf("show binary log status: %w", err)
 	}
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return "", fmt.Errorf("show binary log status: %w", err)
+			return BinlogPosition{}, fmt.Errorf("show binary log status: %w", err)
 		}
-		return "", fmt.Errorf("show binary log status returned no row; binary logging is off")
+		return BinlogPosition{}, fmt.Errorf("show binary log status returned no row; binary logging is off")
 	}
 	values := make([]sql.NullString, len(cols))
 	dest := make([]any, len(cols))
@@ -252,17 +281,35 @@ func activeBinlogFile(ctx context.Context, conn *sql.Conn) (string, error) {
 		dest[i] = &values[i]
 	}
 	if err := rows.Scan(dest...); err != nil {
-		return "", fmt.Errorf("show binary log status: %w", err)
+		return BinlogPosition{}, fmt.Errorf("show binary log status: %w", err)
 	}
+	var pos BinlogPosition
+	hasFile := false
+	var posErr error
 	for i, col := range cols {
-		if strings.EqualFold(col, "File") {
-			if file := strings.TrimSpace(values[i].String); file != "" {
-				return file, nil
-			}
-			return "", fmt.Errorf("show binary log status reports no file name")
+		switch {
+		case strings.EqualFold(col, "File"):
+			hasFile = true
+			pos.File = strings.TrimSpace(values[i].String)
+		case strings.EqualFold(col, "Position"):
+			pos.Pos, posErr = strconv.ParseUint(strings.TrimSpace(values[i].String), 10, 64)
+		case strings.EqualFold(col, "Executed_Gtid_Set"):
+			pos.GtidExecuted = strings.TrimSpace(values[i].String)
 		}
 	}
-	return "", fmt.Errorf("show binary log status has no File column (columns: %s)", strings.Join(cols, ", "))
+	if !hasFile {
+		return BinlogPosition{}, fmt.Errorf("show binary log status has no File column (columns: %s)", strings.Join(cols, ", "))
+	}
+	if pos.File == "" {
+		return BinlogPosition{}, fmt.Errorf("show binary log status reports no file name")
+	}
+	if posErr != nil {
+		// The file name is good for RotateBinaryLog; the position is not
+		// used there. A caller that compares positions sees Pos 0 only
+		// with this error.
+		return BinlogPosition{File: pos.File}, fmt.Errorf("show binary log status: position: %w", posErr)
+	}
+	return pos, nil
 }
 
 // BinlogFileSeq splits a binary log file name into its base name and its

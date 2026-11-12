@@ -19,7 +19,7 @@ func TestStartManager_RestoresOwnTransactionsLostAndWiresTheHistory(t *testing.T
 	lost := int64(10)
 	fg.Status.Sites = []v1alpha1.SiteStatus{
 		{Name: "dc1"},
-		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, LostGtid: lossLostGTID, LostTransactionCount: &lost},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, LostGtid: lossLostGTID, LostTransactionCount: &lost, LostComparedTo: "dc1"},
 	}
 	t.Cleanup(func() { metrics.OwnTransactionsLost.WithLabelValues("dc2").Set(0) })
 	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
@@ -36,6 +36,9 @@ func TestStartManager_RestoresOwnTransactionsLostAndWiresTheHistory(t *testing.T
 	mt.tm.mu.RUnlock()
 	if rec == nil || rec.lostGtid != lossLostGTID || rec.lostCount != 10 {
 		t.Fatalf("restored report = %+v, want %s (10)", rec, lossLostGTID)
+	}
+	if rec.comparedTo != "dc1" || rec.witness || rec.detectedBy != "" {
+		t.Fatalf("restored report = %+v, want the site it was compared with (dc1) and no kind until it is compared again", rec)
 	}
 	if other != nil {
 		t.Fatalf("dc1 got a report: %+v", other)

@@ -17,7 +17,7 @@ import (
 // groupSiteIdentityStore keeps the server_uuids each site of a group has
 // run under in ServerUUIDHistoryAnnotation on the group: per site a
 // timeline, oldest first, of server_uuids and of serverUUIDCloneMarker
-// where a clone into the site was issued (SiteIdentityStore).
+// where a clone was installed into the site (SiteIdentityStore).
 //
 // Metadata, not status, for the reasons groupCloneIdentityStore gives: the
 // topology status writer rebuilds status from its own snapshot, and a

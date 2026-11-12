@@ -372,7 +372,7 @@ func TestPrintGroupStatus_ShowsSiteReports(t *testing.T) {
 			Sites: []v1alpha1.SiteStatus{
 				{Name: "iad", State: v1alpha1.SiteStateWritable},
 				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateRecloneRequired,
-					LostGtid: "22222222-0000-11f1-8000-0000000000b2:91-100", LostTransactionCount: &lost},
+					LostGtid: "22222222-0000-11f1-8000-0000000000b2:91-100", LostTransactionCount: &lost, LostComparedTo: "iad"},
 				{Name: "dfw", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked,
 					DivergentGtid: "33333333-0000-11f1-8000-0000000000c3:7", DivergentTransactionCount: &divergent, DivergenceComparedTo: "iad"},
 			},
@@ -389,7 +389,7 @@ func TestPrintGroupStatus_ShowsSiteReports(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"Site reports:\n",
-		"  pdx lacks 10 transactions it issued itself: 22222222-0000-11f1-8000-0000000000b2:91-100\n",
+		"  pdx lacks 10 transactions it issued itself, which the primary iad holds: 22222222-0000-11f1-8000-0000000000b2:91-100\n",
 		"  dfw holds 1 transaction the primary lacks (compared with iad): 33333333-0000-11f1-8000-0000000000c3:7\n",
 		// The whole message, not the 80 characters of the conditions table.
 		"  Own transactions lost: " + waiting + "\n",
@@ -397,6 +397,22 @@ func TestPrintGroupStatus_ShowsSiteReports(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in output:\n%s", want, out)
+		}
+	}
+
+	// A report that rests on another site than the primary says so, and
+	// one whose holder the status does not carry says nothing about it.
+	for holder, want := range map[string]string{
+		"dfw": "  pdx lacks 10 transactions it issued itself, which dfw holds and the primary does not: 22222222-0000-11f1-8000-0000000000b2:91-100\n",
+		"":    "  pdx lacks 10 transactions it issued itself: 22222222-0000-11f1-8000-0000000000b2:91-100\n",
+	} {
+		fg.Status.Sites[1].LostComparedTo = holder
+		buf.Reset()
+		if err := printGroupStatus(&buf, fg, "table"); err != nil {
+			t.Fatalf("printGroupStatus: %v", err)
+		}
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("holder %q: missing %q in output:\n%s", holder, want, buf.String())
 		}
 	}
 

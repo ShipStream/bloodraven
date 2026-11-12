@@ -74,6 +74,16 @@ type FakeReplicaState struct {
 	// statement reports the active file "binlog.NNNNNN", numbered from
 	// 000001 plus one per rotation in BinlogPreviousGtids.
 	BinlogStatusErr error
+	// BinlogPosition is the Position SHOW BINARY LOG STATUS reports (158,
+	// the position after the format description, when zero);
+	// BinlogPositionRaw, when set, is reported in its place as it is.
+	BinlogPosition    uint64
+	BinlogPositionRaw string
+	// ExecSourceLogFile and ExecSourceLogPos are reported as
+	// Relay_Source_Log_File and Exec_Source_Log_Pos: how far the applier
+	// has executed the source's binary log.
+	ExecSourceLogFile string
+	ExecSourceLogPos  uint64
 }
 
 // NewFakeReplica returns a fake replica in the given state.
@@ -273,7 +283,7 @@ func (c *fakeReplicaConn) QueryContext(_ context.Context, query string, args []d
 		}
 		return &fakeRows{
 			cols: []string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"},
-			rows: [][]driver.Value{{fmt.Sprintf("binlog.%06d", 1+len(s.BinlogPreviousGtids)), int64(158), "", "", s.ExecutedGtidSet}},
+			rows: [][]driver.Value{{fmt.Sprintf("binlog.%06d", 1+len(s.BinlogPreviousGtids)), binlogPositionValue(s), "", "", s.ExecutedGtidSet}},
 		}, nil
 	case "SELECT @@server_uuid, @@global.gtid_executed":
 		return &fakeRows{cols: []string{"@@server_uuid", "@@global.gtid_executed"}, rows: [][]driver.Value{{s.ServerUUID, s.ExecutedGtidSet}}}, nil
@@ -308,6 +318,17 @@ var replicaStatusColumns = []string{
 	"Last_Errno", "Last_Error", "Seconds_Behind_Source",
 	"Last_IO_Errno", "Last_IO_Error", "Last_SQL_Errno", "Last_SQL_Error",
 	"Retrieved_Gtid_Set", "Executed_Gtid_Set", "Source_UUID",
+	"Relay_Source_Log_File", "Exec_Source_Log_Pos",
+}
+
+func binlogPositionValue(s *FakeReplicaState) driver.Value {
+	switch {
+	case s.BinlogPositionRaw != "":
+		return s.BinlogPositionRaw
+	case s.BinlogPosition != 0:
+		return int64(s.BinlogPosition)
+	}
+	return int64(158)
 }
 
 func replicaStatusRow(s *FakeReplicaState) []driver.Value {
@@ -331,6 +352,7 @@ func replicaStatusRow(s *FakeReplicaState) []driver.Value {
 		strconv.Itoa(s.LastSQLErrno), s.LastSQLError, sbs,
 		strconv.Itoa(s.LastIOErrno), s.LastIOError, strconv.Itoa(s.LastSQLErrno), s.LastSQLError,
 		s.RetrievedGtidSet, s.ExecutedGtidSet, s.SourceUUID,
+		s.ExecSourceLogFile, strconv.FormatUint(s.ExecSourceLogPos, 10),
 	}
 }
 

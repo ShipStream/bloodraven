@@ -812,7 +812,7 @@ type PlannedFailoverTopology interface {
 	// NameFencedSource binds the name to sourceServerUUID, the server the
 	// run's fence intent names. errManagerAbsent: restoreFailoverState names
 	// it later.
-	NameFencedSource(ref PlannedRunRef, sourceServerUUID string) error
+	NameFencedSource(ref PlannedRunRef, sourceServerUUID, fenceGtid string) error
 	Rollback(ctx context.Context, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (RollbackResult, error)
 	ActiveSite(nn types.NamespacedName) (site string, ok bool)
 }

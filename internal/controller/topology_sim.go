@@ -315,11 +315,38 @@ func (tm *TopologyManager) finishRecloneForSim(donor string, recipient *siteTrac
 	recipient.servingHealthy = false
 	tm.mu.Unlock()
 	tm.clearRecloneArchiveTail()
-	// The bootstrap marks the clone on the site's server_uuid timeline
-	// with the clone identity record (recordCloneIdentity).
+	// The bootstrap marks an installed clone on the site's server_uuid
+	// timeline (cloneCompletedInProcess).
 	tm.markSiteCloned(context.Background(), recipient.name)
 	tm.clearOwnLossAfterClone(recipient.name)
 	return true
+}
+
+// CloneIssuedAndFailedForSim records what the bootstrap records when it
+// issues a clone into site, for a clone that then fails or is killed
+// before it installs: the production recordCloneIdentity, with the
+// server_uuid the site runs under, and nothing after it. A simulation
+// uses it to put the trace of a failed clone on the site's server_uuid
+// timeline. It reports whether the site's identity could be read.
+func (tm *TopologyManager) CloneIssuedAndFailedForSim(site string) bool {
+	s := tm.getSite(site)
+	if s == nil {
+		return false
+	}
+	ctx := context.Background()
+	uuid, err := readServerUUID(ctx, s.mysql)
+	if err != nil {
+		return false
+	}
+	tm.knownSiteServerUUIDs(site, uuid)
+	return tm.recordCloneIdentity(ctx, site, uuid, nil, nil) == nil
+}
+
+// CarryOwnLossReportsForSim is startManager's hand-over of the own-loss
+// reports of the manager tm replaces in the same process
+// (carryOwnLossReports).
+func (tm *TopologyManager) CarryOwnLossReportsForSim(prev *TopologyManager) {
+	tm.carryOwnLossReports(prev)
 }
 
 // OwnTransactionsLostForSim reports the set a site is recorded to lack of

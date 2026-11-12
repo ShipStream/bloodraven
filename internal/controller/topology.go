@@ -883,6 +883,12 @@ type TopologyManager struct {
 	// (verifyCloneServerUUIDRotated); the runner records the
 	// CloneServerUUIDNotRotated Event.
 	CloneServerUUIDNotRotatedCallback func(site, serverUUID string)
+	// ReassertDataLossCallback reports a source a planned failover left
+	// fenced that the re-assert makes writable again although it no
+	// longer holds part of the set it was fenced with, and no site holds
+	// that part (reassertNamedSourceCheck). The runner raises the
+	// PlannedSourceTransactionsLost Event.
+	ReassertDataLossCallback func(site, runID, lostGtid string, lostCount int64)
 	// cloneIdentity holds the recorded pre-clone server_uuids whose clone
 	// has no outcome yet (clone_server_uuid.go). It has its own locks.
 	cloneIdentity cloneIdentityTracker
@@ -892,6 +898,15 @@ type TopologyManager struct {
 	// refused for it. Protected by mu.
 	ownLoss                 map[string]*ownLossRecord
 	ownLossPromotionRefused []string
+	// ownLossProof holds, by site, the snapshot of the primary a follower
+	// with a running channel must have executed past before a deficit of
+	// its own transactions counts as a hole (proveOwnLossHole);
+	// ownLossLagNoted the followers whose unproven deficit was logged.
+	ownLossProof    map[string]*ownLossProof
+	ownLossLagNoted map[string]bool
+	// primaryOwnLossLogged is the last finding
+	// notePrimaryLacksOwnTransactions logged.
+	primaryOwnLossLogged string
 	// ownLossCleared says, by site, why its last report ended (until the
 	// site is reported again). Protected by mu.
 	ownLossCleared map[string]string
@@ -957,6 +972,7 @@ type SiteStatusEntry struct {
 	DivergenceComparedTo      string                           `json:"divergenceComparedTo,omitempty"`
 	LostGtid                  string                           `json:"lostGtid,omitempty"`
 	LostTransactionCount      *int64                           `json:"lostTransactionCount,omitempty"`
+	LostComparedTo            string                           `json:"lostComparedTo,omitempty"`
 }
 
 // StatusResponse is returned by the /status endpoint.
@@ -1107,7 +1123,7 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	tm.mu.Lock()
 	tm.authorityEpoch++
 	tm.authorityChanges++
-	tm.lastActiveSite, tm.lastActiveSiteNamed = target, true
+	tm.nameActiveSiteLocked(target, true)
 	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
 	if strings.TrimSpace(promotionGtid) != "" {
@@ -1338,6 +1354,7 @@ func (tm *TopologyManager) Status() StatusResponse {
 				c := loss.lostCount
 				sites[i].LostTransactionCount = &c
 			}
+			sites[i].LostComparedTo = loss.comparedTo
 		}
 	}
 	return StatusResponse{
@@ -1684,7 +1701,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		tm.reconcilePendingPromotionLocked()
 	}
 	if active := tm.activeSiteLocked(); active != "" && active != tm.lastActiveSite {
-		tm.lastActiveSite, tm.lastActiveSiteNamed = active, false
+		tm.nameActiveSiteLocked(active, false)
 	}
 	tm.mu.Unlock()
 
@@ -1855,7 +1872,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	recoveryChanged := tm.checkRecoveryWithConvergence(ctx, siteRepl, handledConvergence) || auditChanged
 	// Compare the sites whose own-loss report rests on a witness with
 	// that witness again.
-	recoveryChanged = tm.reviewWitnessOwnLoss(ctx) || recoveryChanged
+	recoveryChanged = tm.reviewOwnLossReports(ctx) || recoveryChanged
 
 	// Restore writability on the promoted primary if its sidecar fenced
 	// it back to read-only and no writable site remains (poll-driven so
@@ -2748,9 +2765,13 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// here is not the last attempt.
 	if action.SplitBrain && lastFailoverTarget != "" && !tm.bootstrapBlocksCrossSite() {
 		// Same usability guard as the poll-driven retry: only a live,
-		// promotable, writable target justifies fencing everything else.
-		if keepSite := tm.getSite(lastFailoverTarget); keepSite != nil && keepSite.state == state.StateWritable && keepSite.isPromotable() {
-			tm.fenceSitesExcept(ctx, lastFailoverTarget, false)
+		// promotable, writable target without an own-loss report
+		// justifies fencing everything else (splitBrainKeepSite). A
+		// target with a report is itself the site to fence.
+		if keep, reported := tm.splitBrainKeepSite(lastFailoverTarget); keep != "" {
+			tm.fenceSitesExcept(ctx, keep, false)
+		} else if reported {
+			tm.fenceWritableOwnLossSites(ctx, false)
 		}
 	}
 
@@ -3067,8 +3088,8 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 		return false
 	}
 
-	keep := lastFailoverTarget
-	if keep != "" {
+	keep := ""
+	if lastFailoverTarget != "" {
 		// The history branch protects the failover target's authority by
 		// fencing everything else — which only makes sense while the target
 		// IS a live writable authority. A rehydrated target that names no
@@ -3077,11 +3098,12 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 		// OTHER writable site to be fenced into a zero-primary outage.
 		// Fall through to the priorities policy instead of giving up
 		// entirely, so a stale target cannot disable both resolution paths.
-		keepSite := tm.getSite(keep)
-		if keepSite == nil || keepSite.state != state.StateWritable || !keepSite.isPromotable() {
+		// A target that carries an own-loss report is no authority either:
+		// the path below fences it.
+		var reported bool
+		if keep, reported = tm.splitBrainKeepSite(lastFailoverTarget); keep == "" {
 			tm.logger.Debug("split-brain fence retry: failover target is not a live promotable writable authority; deferring to priorities policy",
-				"target", keep)
-			keep = ""
+				"target", lastFailoverTarget, "ownTransactionsLost", reported)
 		}
 	}
 	if keep == "" {
@@ -3178,15 +3200,41 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 	return attempted
 }
 
+// splitBrainKeepSite returns target, the recorded failover target, when it
+// is the site a split brain is resolved in favour of: a configured,
+// writable primary-candidate without an own-loss report. Otherwise it
+// returns "", and reported says whether a report is the reason.
+//
+// The failover record says which site the operator made the primary. It
+// does not say that the site still holds what it issued: a target that
+// restarted on older data is refused by the re-assert and reported, an
+// administrator promotes the site that holds everything (as the failover
+// page tells them to), and the record still names the first one. If that
+// site then turns up writable, keeping it would fence the sound primary
+// and leave the one that issues its lost GTIDs again.
+func (tm *TopologyManager) splitBrainKeepSite(target string) (keep string, reported bool) {
+	site := tm.getSite(target)
+	if site == nil || site.state != state.StateWritable || !site.isPromotable() {
+		return "", false
+	}
+	if tm.ownLossSite(target) {
+		return "", true
+	}
+	return target, false
+}
+
 // fenceWritableOwnLossSites fences every writable site that carries an
 // own-loss report while a primary-candidate without one is writable, and returns
 // the writable sites without a report: the only ones a split-brain policy
 // may choose from. A site with a report was fenced by the operator and
 // made writable by someone else; every write it takes is issued under a
 // GTID that may already name another transaction, so it never wins a
-// split brain and is not left writable beside another site. When every
-// writable site carries a report nothing is fenced: there is no site to
-// prefer, and that state needs an administrator; the same when the only
+// split brain, whatever the failover record or the priorities say, and is
+// not left writable beside another site. Every report counts, also one
+// restored from status: it is evidence the operator had. When every
+// writable site carries a report nothing is fenced: no site is provably
+// the one to keep, and that state needs an administrator (the refusal is
+// recorded: PromotionRefusedOwnTransactionsLost); the same when the only
 // other writable sites are not primary-candidates (they are fenced by
 // their own path). It reports whether a fence was attempted.
 func (tm *TopologyManager) fenceWritableOwnLossSites(ctx context.Context, quiet bool) (sound []state.SiteObservation, attempted bool) {
@@ -4758,7 +4806,7 @@ func (tm *TopologyManager) seedFreshDeploy(ctx context.Context) string {
 	tm.mu.Lock()
 	tm.authorityEpoch++
 	tm.authorityChanges++
-	tm.lastActiveSite, tm.lastActiveSiteNamed = seed, true
+	tm.nameActiveSiteLocked(seed, true)
 	if tm.autoBootstrapSuppressed {
 		tm.initRestoreSeed = seed
 	}
@@ -5502,21 +5550,15 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	tm.mu.RLock()
 	targetBlocked := tm.keyringRotationBlockedLocked(target)
 	targetPending := tm.restoreReclonePendingLocked(target)
-	// A report of lost own transactions refuses the target, with one
-	// exception: a report restored from status says neither what it was
-	// compared with nor whether that was the primary or a witness, and
-	// with no writable site nothing but this function compares the target
-	// again (recovery and the audit need a primary, the witness review a
-	// witness's name). Such a report is settled by the comparison below,
-	// which reads every peer: it becomes a witness's report when one of
-	// them holds transactions the target issued and lacks, and it ends
-	// when none does. Left standing it would keep a target that is
-	// complete again read-only for good.
-	targetLost, targetLostRestored := false, false
-	if rec := tm.ownLoss[target]; rec != nil {
-		targetLostRestored = !rec.witness && rec.detectedBy == ""
-		targetLost = !targetLostRestored
-	}
+	// A report of lost own transactions on the target is settled by the
+	// comparison below, whatever its kind: this function reads every peer
+	// (it refuses unless each answers read-only), which is the one rule
+	// that ends a report (ownLossRecord). The target is refused, under a
+	// witness's report, when a peer holds transactions it issued and
+	// lacks, and the report ends when none does. Left standing it would
+	// keep a target that is complete again read-only for good: with no
+	// writable site, recovery and the audit compare nothing.
+	targetLost := tm.ownLoss[target] != nil
 	tm.mu.RUnlock()
 	if targetBlocked {
 		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",
@@ -5528,10 +5570,6 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
 			"sites", []string{target})
 		tm.recordRestoreReclonePromotionRefused([]string{target})
-		return false
-	}
-	if targetLost {
-		tm.refuseOwnLossPromotion([]string{target})
 		return false
 	}
 
@@ -5565,10 +5603,17 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		tm.logger.Warn("primary re-assert: failed to parse target GTID_EXECUTED", "site", target, "error", err)
 		return false
 	}
-	if targetLostRestored && !targetIdentityKnown {
-		// The comparison that would settle the restored report cannot be
-		// made without the target's server_uuid: the report stands.
+	if targetLost && !targetIdentityKnown {
+		// The comparison that would settle the report cannot be made
+		// without the target's server_uuid: the report stands.
 		tm.refuseOwnLossPromotion([]string{target})
+		return false
+	}
+	// A source a planned run named is lifted from its fence only as the
+	// server that fence was meant for, on this read too: the one that read
+	// the server_uuid with the set the comparisons below decide on.
+	planNamed := named && authority == "lastActiveSite"
+	if planNamed && !tm.reassertNamedSourceCheck(target, targetSnap.ServerUUID, targetIdentityKnown, targetGtid, false) {
 		return false
 	}
 	if promotionGtidStr != "" {
@@ -5681,8 +5726,15 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 			return false
 		}
 	}
-	if targetLostRestored && tm.clearRestoredOwnLoss(target) {
+	// Every peer answered and none holds transactions the target issued
+	// and lacks, nor anything else the target lacks: a report on it ends.
+	if targetLost && tm.clearOwnLossNoHolder(target) {
 		tm.RequestStatusRefresh()
+	}
+	if planNamed {
+		// What the source no longer holds of the set it was fenced with,
+		// no site holds: reported as lost (reassertNamedSourceCheck).
+		tm.reassertNamedSourceCheck(target, targetSnap.ServerUUID, targetIdentityKnown, targetGtid, true)
 	}
 
 	// Admission is taken before the cooldown is stamped: a refused topology
@@ -6278,7 +6330,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(float64(count))
 	// Transactions the site holds and the primary lacks may be ones
 	// another site issued and no longer has.
-	witnessChanged := tm.crossCheckOwnLoss(ctx, oldPrimary, oldGtid, divergent, newPrimary.name)
+	witnessChanged := tm.crossCheckOwnLoss(ctx, oldPrimary, divergent, newPrimary.name)
 	return !sameReport || lossChanged || witnessChanged, true, false
 }
 

@@ -2763,7 +2763,7 @@ func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1alpha1
 		if ref.Source == "" || !e.fenceAttributable(pf, addPlannedWarnings(slices.Clone(m.warnings), end.warnings...), end.reason) {
 			return
 		}
-		if err := e.topo.NameFencedSource(ref, pf.Fence.SourceServerUUID); err == nil {
+		if err := e.topo.NameFencedSource(ref, pf.Fence.SourceServerUUID, plannedFenceGtidString(pf)); err == nil {
 			log.FromContext(ctx).Info("planned failover: named fenced source for re-assert", "fg", nn.String(),
 				"runId", pf.RunID, "site", ref.Source)
 		}

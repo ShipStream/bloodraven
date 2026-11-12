@@ -215,3 +215,41 @@ func TestExecuteTargets_HandoffAbortLeavesARestartedSourceReadOnly(t *testing.T)
 		t.Fatalf("the restarted source was unfenced: role calls %v", calls)
 	}
 }
+
+// writableRegressedSource is a regressedSource that came back writable:
+// after the fenced read it answers read_only=OFF (a pod that boots
+// writable, or something that lifted its read_only).
+type writableRegressedSource struct {
+	*regressedSource
+}
+
+func (s *writableRegressedSource) CheckReadOnly(ctx context.Context) (bool, error) {
+	if s.fenced() && s.fencedReads.Load() >= 1 {
+		return false, nil
+	}
+	return s.regressedSource.CheckReadOnly(ctx)
+}
+
+// The abort says what it found. A source that restarted on older data and
+// is writable is not "left read-only": the handoff sends it nothing, and
+// the error says it is writable without the transactions. (The follower
+// that holds them is then reported by the replica GTID audit, and the log
+// names the primary as the site that lost them:
+// TestOwnLoss_AWritablePrimaryThatLacksItsOwnTransactionsIsNamed.)
+func TestExecuteTargets_HandoffAbortSaysAWritableRegressedSourceIsWritable(t *testing.T) {
+	src := &testutil.FakeMySQL{ReadOnlyVal: false}
+	source := &writableRegressedSource{&regressedSource{
+		fencedGTIDSource: &fencedGTIDSource{FakeMySQL: src, beforeFence: handoffUUID + ":1-90", afterFence: handoffUUID + ":1-100"},
+		afterRestart:     handoffUUID + ":1-95",
+	}}
+	run := runHandoff(t, source, handoffCandidate(handoffUUID+":1-90").Checker())
+	if run.err == nil || !strings.Contains(run.err.Error(), "source is writable without 5 transactions it held before the handoff") {
+		t.Fatalf("ExecuteTargets() error = %v, want it to say the source is writable without the 5 transactions", run.err)
+	}
+	if strings.Contains(run.err.Error(), "left read-only") {
+		t.Fatalf("ExecuteTargets() error = %v: it says the source was left read-only, and it is writable", run.err)
+	}
+	if calls := roleCalls(src.GetCalls()); slices.Contains(calls, "SetReadOnly(OFF)") || slices.Contains(calls, "SetSuperReadOnly(OFF)") {
+		t.Fatalf("the handoff sent the regressed source an unfence: role calls %v", calls)
+	}
+}

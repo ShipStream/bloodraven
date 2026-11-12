@@ -59,13 +59,15 @@ const crdDegradedRetryInterval = 10 * time.Minute
 //     resumes that rejoin.
 //   - sites[].sourceConvergenceReason OwnTransactionsLost becomes
 //     GTIDDiverged: the reason that goes with the same Blocked state.
-//   - sites[].lostGtid and lostTransactionCount are left out: a CRD
-//     without those values has no such fields and prunes them.
+//   - sites[].lostGtid, lostTransactionCount and lostComparedTo are left
+//     out: a CRD without those values has no such fields and prunes them.
+//     An operator that restarts on such a status has no report to restore
+//     and finds the loss again by its own comparison.
 func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 	changed := false
 	for i := range st.Sites {
-		if st.Sites[i].LostGtid != "" || st.Sites[i].LostTransactionCount != nil {
-			st.Sites[i].LostGtid, st.Sites[i].LostTransactionCount = "", nil
+		if st.Sites[i].LostGtid != "" || st.Sites[i].LostTransactionCount != nil || st.Sites[i].LostComparedTo != "" {
+			st.Sites[i].LostGtid, st.Sites[i].LostTransactionCount, st.Sites[i].LostComparedTo = "", nil, ""
 			changed = true
 		}
 		if st.Sites[i].RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
