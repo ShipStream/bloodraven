@@ -441,6 +441,12 @@ func (r *trialRunner) restoreSites(tm *controller.TopologyManager) {
 			case "RecoveryBlocked":
 				tm.SetRecoveryBlockedFrom(site.Name, site.DivergentGtid, site.DivergentTxnCount, site.DivergenceDetectedBy, site.DivergenceComparedTo)
 			}
+			if site.LostGtid != "" {
+				// As the runner: a report of lost own transactions holds
+				// across the restart, without its kind (against the primary
+				// or against a witness), which status does not carry.
+				tm.SetOwnTransactionsLost(site.Name, site.LostGtid, site.LostTxnCount)
+			}
 		}
 	}
 }

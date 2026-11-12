@@ -1256,7 +1256,7 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
 		src, tgt := truthNamed(f.c.Truth(), "alpha"), truthNamed(f.c.Truth(), "beta")
-		if !containsSet(src, fence) || !sourceLacksHistory(src, tgt, fence) {
+		if !containsSet(src, fence) || !sourceLacksHistory(src, []SiteTruth{tgt}, fence) {
 			t.Fatalf("setup: source %s, target %s, fence %s; want the source to hold the fenced set and lack what the target holds of its stream",
 				src.Executed, tgt.Executed, fence)
 		}
@@ -1272,6 +1272,97 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 			t.Fatalf("SourceLostHold %d, want 1", f.mon.stats.SourceLostHold)
 		}
 	})
+	// The rollback compares the source with every site that answers, not
+	// only the target. The source lost its own transactions before the
+	// fence was read; the target is out of the operator's reach, so only
+	// the disaster-recovery site can show it.
+	witnessed := func(t *testing.T, gammaReadable bool) *monFixture {
+		f := newMonFixture(t, state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleDROnly)
+		for range 6 {
+			f.c.Tick()
+		}
+		if !f.c.RegressSite("alpha", 3) {
+			t.Fatal("setup: the source did not regress")
+		}
+		f.c.Recover("alpha", false, true)
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		fence := f.fenceSet()
+		f.c.SetOperatorLink("beta", true)
+		if !gammaReadable {
+			f.c.SetOperatorLink("gamma", true)
+		}
+		src := truthNamed(f.c.Truth(), "alpha")
+		if !containsSet(src, fence) || sourceLacksHistory(src, f.c.Truth(), fence) != gammaReadable {
+			t.Fatalf("setup: source %s, fence %s, gamma readable %v; want the source to hold the fenced set and gamma to be the only evidence",
+				src.Executed, fence, gammaReadable)
+		}
+		f.write(v1alpha1.PlannedFailoverPhaseWaitingForLag, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.c.RogueWritable("alpha")
+		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.mon.onYield(YieldPeerProbe)
+		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
+			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		}, setHold)
+		return f
+	}
+	t.Run("aSiteTheOperatorCanReadHoldsTheSourcesOwnTransactions", func(t *testing.T) {
+		f := witnessed(t, true)
+		f.want()
+		if f.mon.stats.SourceLostHold != 1 {
+			t.Fatalf("SourceLostHold %d, want 1", f.mon.stats.SourceLostHold)
+		}
+	})
+	t.Run("noSiteTheOperatorCanReadHoldsThem", func(t *testing.T) {
+		// The run could not have known: the hold is not the documented one.
+		f := witnessed(t, false)
+		if f.mon.stats.SourceLostHold != 0 {
+			t.Fatalf("SourceLostHold %d, want 0", f.mon.stats.SourceLostHold)
+		}
+		f.want("OutcomeDishonest")
+	})
+}
+
+// TestSourceLacksHistory_WhoseSetIsEvidence: the model's form of the
+// rollback's comparison takes the fenced set whole, and another site's set
+// only when the operator can read the site and only under a stream of the
+// source that no clone into it superseded.
+func TestSourceLacksHistory_WhoseSetIsEvidence(t *testing.T) {
+	const (
+		first  = "00000000-0000-0000-0000-000000000001" // the source's original stream
+		second = "00000002-0000-0000-0000-000000000001" // its stream after incarnation 2
+		other  = "00000000-0000-0000-0000-000000000002"
+	)
+	src := SiteTruth{Name: "alpha", ServerUUID: second, Executed: gtidVec{first: 100, second: 5, other: 7}}
+	holder := func(mut func(*SiteTruth)) []SiteTruth {
+		h := SiteTruth{Name: "gamma", ServerUUID: "00000000-0000-0000-0000-000000000003", Executed: gtidVec{first: 100, second: 5, other: 7}}
+		mut(&h)
+		return []SiteTruth{src, h}
+	}
+	cloned := src
+	cloned.ClonedAt = 2
+	for _, tc := range []struct {
+		name   string
+		src    SiteTruth
+		others []SiteTruth
+		fence  string
+		want   bool
+	}{
+		{"nothing more anywhere", src, holder(func(*SiteTruth) {}), "", false},
+		{"more under the stream it runs under", src, holder(func(h *SiteTruth) { h.Executed[second] = 6 }), "", true},
+		{"more under an earlier stream, no clone since", src, holder(func(h *SiteTruth) { h.Executed[first] = 104 }), "", true},
+		{"more under an earlier stream a clone superseded", cloned, holder(func(h *SiteTruth) { h.Executed[first] = 104 }), "", false},
+		{"more under the stream a clone gave it", cloned, holder(func(h *SiteTruth) { h.Executed[second] = 6 }), "", true},
+		{"more under another server's stream", src, holder(func(h *SiteTruth) { h.Executed[other] = 9 }), "", false},
+		{"the holder is down", src, holder(func(h *SiteTruth) { h.Executed[second] = 6; h.Crashed = true }), "", false},
+		{"the holder is cut off from the operator", src, holder(func(h *SiteTruth) { h.Executed[second] = 6; h.OpLinkDown = true }), "", false},
+		{"short of the fenced set under a superseded stream", cloned, holder(func(*SiteTruth) {}), first + ":1-104", true},
+		{"holds the fenced set", cloned, holder(func(*SiteTruth) {}), first + ":1-100," + second + ":1-5", false},
+	} {
+		if got := sourceLacksHistory(tc.src, tc.others, tc.fence); got != tc.want {
+			t.Errorf("%s: sourceLacksHistory = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
 
 // TestPlannedInvariant_HoldOverARegressedTarget: a hold over the intent's
@@ -1446,6 +1537,50 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		promoting(f)
 		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
 		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackFencedSource)" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	// A run ended by a status stall reads nothing. Its RolledBack says
+	// that the process which granted the claim sent no fence, and is
+	// judged by that.
+	stalled := func(f *monFixture, reason v1alpha1.PlannedFailoverReason) {
+		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
+			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, Reason: reason}
+		}, nil)
+	}
+	t.Run("stalledBeforeTheFenceOverASourceItsSidecarFenced", func(t *testing.T) {
+		// The sweep's history: the fence is never sent; the source restarts
+		// and its sidecar fences it; no pass reads it writable; status
+		// writes stall and the run ends "the source is untouched".
+		f := newMonFixture(t)
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.c.NewChecker("alpha").SetSuperReadOnly(WithActor(context.Background(), ActorSidecar), true)
+		stalled(f, v1alpha1.PlannedFailoverReasonStatusStalled)
+		if fp := fingerprint(f.mon.violations); fp != "" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+		if f.mon.stats.StalledBeforeFence != 1 {
+			t.Fatalf("StalledBeforeFence %d, want 1", f.mon.stats.StalledBeforeFence)
+		}
+	})
+	t.Run("stalledAfterTheRunsFenceLanded", func(t *testing.T) {
+		// The run fenced the source: "untouched" is false, whatever the
+		// reason says.
+		f := newMonFixture(t)
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
+		stalled(f, v1alpha1.PlannedFailoverReasonStatusStalled)
+		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackFencedSource)" {
+			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
+		}
+	})
+	t.Run("notStalledOverASourceItsSidecarFenced", func(t *testing.T) {
+		// Any other RolledBack claims a source the run read writable.
+		f := newMonFixture(t)
+		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		_ = f.c.NewChecker("alpha").SetSuperReadOnly(WithActor(context.Background(), ActorSidecar), true)
+		stalled(f, v1alpha1.PlannedFailoverReasonAuthorityChanged)
 		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackFencedSource)" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}

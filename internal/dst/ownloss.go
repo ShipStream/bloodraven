@@ -149,6 +149,20 @@ func supersededByClone(s *siteData, u string) bool {
 	return err == nil && n < uint64(s.clonedAt)
 }
 
+// ownsLiveStream is ownsStream && !supersededByClone on a truth snapshot:
+// the streams of t whose transactions t can only lack by having lost them.
+func (t SiteTruth) ownsLiveStream(u string) bool {
+	own := u == t.ServerUUID || (len(u) > 8 && len(t.ServerUUID) > 8 && u[8:] == t.ServerUUID[8:])
+	if !own {
+		return false
+	}
+	if t.ClonedAt == 0 || len(u) < 8 {
+		return true
+	}
+	n, err := strconv.ParseUint(u[:8], 16, 64)
+	return err != nil || n >= uint64(t.ClonedAt)
+}
+
 // checkOwnHistoryAtGrantLocked is the model-level invariant
 // PromotedWithoutOwnTransactions: an operator actor must never make a
 // site writable while another site holds transactions of one of that
