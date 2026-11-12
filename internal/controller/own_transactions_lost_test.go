@@ -50,6 +50,8 @@ type lossServer struct {
 	cloneUUID  string
 	snapErr    error
 	cloneFails error
+	// cloneGate, when set, holds CLONE INSTANCE until it is closed.
+	cloneGate chan struct{}
 }
 
 func (s *lossServer) ReadGTIDSnapshot(context.Context) (mysql.GTIDSnapshot, error) {
@@ -67,8 +69,11 @@ func (s *lossServer) ReadGTIDSnapshot(context.Context) (mysql.GTIDSnapshot, erro
 func (s *lossServer) CloneInstance(ctx context.Context, user, host, password string, ssl bool, timeout int) error {
 	_ = s.mockMySQL.CloneInstance(ctx, user, host, password, ssl, timeout)
 	s.lmu.Lock()
-	fails := s.cloneFails
+	fails, gate := s.cloneFails, s.cloneGate
 	s.lmu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	if fails != nil {
 		return fails
 	}
@@ -294,9 +299,25 @@ func TestOwnLoss_ReturningOldPrimaryIsRecloned(t *testing.T) {
 		return nil
 	}
 	conditions, events := statusRunner(t, f.tm)
+	// A real clone outlasts a status write. Hold this one until the report
+	// is in the status: a clone that ended within the poll that started it
+	// would leave no report for a status write to see, and no Event.
+	gate := make(chan struct{})
+	f.site.cloneGate = gate
 	for i := 0; i < 10; i++ {
 		f.tm.Poll(context.Background())
+		if gate != nil {
+			if conditions()["RecoveryPending"].Reason != v1alpha1.ReasonOwnTransactionsLost {
+				continue
+			}
+			close(gate)
+			gate = nil
+		}
 		f.waitBootstrapEnd(t)
+	}
+	if gate != nil {
+		close(gate)
+		t.Fatal("the report never reached the status")
 	}
 
 	changes, starts, clones, _ := f.site.counts()
