@@ -621,7 +621,10 @@ func pacedRestoreOperatorEnv(ctx context.Context, env *runner.Env) (bool, error)
 		return nil
 	})
 	if err != nil {
-		return false, fmt.Errorf("restore operator environment: %w (./playground/setup.sh renders the Deployment again)", err)
+		// helm upgrade does not put these back: the chart's manifest did not
+		// change, so its three-way merge leaves the live values alone.
+		return false, fmt.Errorf("restore operator environment: %w (the values from before the run are in the %s annotation of deployment/%s; running the scenario again restores them in its first step)",
+			err, pacedOriginalEnvAnnotation, pacedOperatorDeployment)
 	}
 	if !restored {
 		return false, nil
