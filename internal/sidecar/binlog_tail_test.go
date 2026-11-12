@@ -18,6 +18,7 @@ import (
 
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
+	"github.com/shipstream/bloodraven/internal/sidecar/binlogenctest"
 	"github.com/shipstream/bloodraven/internal/sidecar/binlogtest"
 )
 
@@ -59,7 +60,7 @@ func (s *tailSim) start() {
 
 func (s *tailSim) write() {
 	s.t.Helper()
-	if err := os.WriteFile(filepath.Join(s.dir, s.names[len(s.names)-1]), s.active.MustBytes(), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(s.dir, s.names[len(s.names)-1]), binlogenctest.Local(s.dir, s.active.MustBytes()), 0o600); err != nil {
 		s.t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(s.dir, "mysql-bin.index"), []byte(strings.Join(s.names, "\n")+"\n"), 0o600); err != nil {
@@ -127,8 +128,25 @@ func (s *tailSim) reclone(executed string) {
 	s.start()
 }
 
+// plain returns the size and the SHA-256 of a binlog file's plaintext, which
+// is what a manifest row holds of it.
+func (s *tailSim) plain(name string) (size int64, digest string) {
+	s.t.Helper()
+	path := filepath.Join(s.dir, name)
+	binlogs := localBinlogs{keyringFile: binlogenctest.KeyringFile(s.dir)}
+	header, err := binlogs.header(path)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	digest, err = binlogs.contentID(path)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return header.size, digest
+}
+
 func (s *tailSim) config() *PITRConfig {
-	return &PITRConfig{BinlogDir: s.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour}
+	return &PITRConfig{BinlogDir: s.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour, KeyringFile: binlogenctest.KeyringFile(s.dir)}
 }
 
 // tailStore is a memStore that counts this site's manifest reads, records
@@ -805,7 +823,7 @@ func TestTailDrainRefusesAReplacedFile(t *testing.T) {
 			if err := os.Remove(path); err != nil {
 				t.Error(err)
 			}
-			if err := os.WriteFile(path, replacement, 0o600); err != nil {
+			if err := os.WriteFile(path, binlogenctest.Local(sim.dir, replacement), 0o600); err != nil {
 				t.Error(err)
 			}
 		}
@@ -1046,15 +1064,12 @@ func TestTailDrainConfirmsTheTailByContent(t *testing.T) {
 	sim := newTailSim(t, tailA, 101, true)
 	sim.apply(originTxns(tailA, 101, 1, 3)...)
 	sim.rotate()
-	info, err := os.Stat(filepath.Join(sim.dir, "mysql-bin.000001"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	size, _ := sim.plain("mysql-bin.000001")
 	other := strings.Repeat("0123456789abcdef", 4)
 	at := time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 	if err := seedManifest(ctx, store, "binlogs", &Manifest{Site: "iad",
 		Promotions: []PromotionRecord{{ServerUUID: tailA, ServerID: 101, ObservedAt: at, ProbeInterval: pitrarchive.Duration(5 * time.Second)}},
-		Files: []ManifestEntry{{Name: "mysql-bin.000001", ID: other, Size: info.Size(), ArchivedAt: at,
+		Files: []ManifestEntry{{Name: "mysql-bin.000001", ID: other, Size: size, ArchivedAt: at,
 			GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: tailB + ":1", ContentID: other}}},
 	}); err != nil {
 		t.Fatal(err)

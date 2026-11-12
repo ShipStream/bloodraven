@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,41 +23,45 @@ import (
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
-// TestPITRNativeEncryptedBinlogNotArchivedToday is opt-in
+// TestPITRNativeEncryptedBinlogArchived is opt-in
 // (BLOODRAVEN_PITR_NATIVE_TEST=1, docker, the mysql:9.7 image; CI job
-// test-pitr-native). It pins what the PITR archiver does TODAY on a server
-// with binlog_encryption=ON, which spec.encryptionAtRest renders by default
-// (coverage.binaryLog): it archives nothing. proposals/22-pitr-binlog-
-// encryption.md describes the options; a fix has to change this test on
-// purpose.
+// test-pitr-native). It runs the PITR archiver on a server with
+// binlog_encryption=ON, which spec.encryptionAtRest renders by default
+// (coverage.binaryLog), and checks that it archives the plaintext of every
+// sealed file, read with the key in the server's keyring
+// (local_binlog.go). The reader rests on a MySQL file format, so this test
+// is what fails when a server changes it.
 //
 // The server is a real mysqld with component_keyring_file configured as the
 // operator renders it (keyringManifestJSON and keyringComponentConfigJSON in
 // internal/controller/encryption.go) and the encryption settings of
 // encryptionMySQLSettings. The archiver is the sidecar's own, over the
 // server's data directory, with the sidecar's MySQL client as its role
-// probe. The test asserts:
+// probe and the server's keyring file. The test asserts:
 //
 //   - the file format: every binlog starts with the magic 0xFD 'b' 'i' 'n'
 //     and a version-1 header that names the keyring key
 //     MySQLReplicationKey_<server_uuid>_<seqno>, a 32-byte encrypted file
 //     password and a 16-byte IV, and the keyring file holds that key;
-//   - a read-only site: the tail is Blocked on the first header read, with
-//     no archiver error (a quiet standby);
-//   - the promotion: the record is written without a promotion set;
-//   - a writable site: every sealed file fails with "invalid binlog magic",
-//     nothing is uploaded, no manifest row is written, and the failure is
-//     reported (lastError, backlogFiles, consecutiveFailedScans), which the
-//     operator turns into PITRArchiveReady=False/ArchiverError;
-//   - the demoted site again: the tail stays Blocked.
-//
-// It then records two facts the proposal's options rest on, with test-only
-// code (the sidecar has no such code): a sealed file decrypts with the
-// keyring's key to a plaintext binlog the archiver's parser accepts, and
-// ALTER INSTANCE ROTATE BINLOG MASTER KEY rewrites the header of every
-// sealed file in place, so the bytes of a sealed encrypted file are not
-// stable while its plaintext is.
-func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
+//   - the reader: its plaintext is byte for byte what the test's own
+//     decryption gives (written apart from it, with one whole-file
+//     AES-CTR pass), at every offset it is asked for, for every sealed
+//     file, one of them over 2^16 cipher blocks; every plaintext parses to
+//     its end with its checksums verified; without a keyring the file is
+//     refused with an error that says so;
+//   - a read-only site before any promotion: no header read fails;
+//   - the promotion: the record carries a promotion set;
+//   - a writable site: every sealed file is uploaded, the uploaded bytes
+//     are the plaintext, and its manifest row holds the plaintext's size
+//     and SHA-256;
+//   - the demoted site: its tail drains;
+//   - ALTER INSTANCE ROTATE BINLOG MASTER KEY, which rewrites the header of
+//     every file in place: the archiver identifies the files again as the
+//     same content, uploads none of them twice and reports no error, and a
+//     file written under the new key is archived;
+//   - an archiver that was given no keyring archives nothing and names the
+//     reason.
+func TestPITRNativeEncryptedBinlogArchived(t *testing.T) {
 	if os.Getenv("BLOODRAVEN_PITR_NATIVE_TEST") != "1" {
 		t.Skip("set BLOODRAVEN_PITR_NATIVE_TEST=1 (needs docker and the mysql:9.7 image)")
 	}
@@ -83,6 +88,20 @@ func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
 	if encryption != 1 {
 		t.Fatalf("binlog_encryption = %d, want ON", encryption)
 	}
+	keyringFile := filepath.Join(srv.keyringDir, "keyring")
+	binlogs := localBinlogs{keyringFile: keyringFile}
+	sealedNames := func() []string {
+		t.Helper()
+		index, err := readBinlogIndex(filepath.Join(srv.dataDir, "mysql-bin.index"))
+		if err != nil || len(index) < 2 {
+			t.Fatalf("binlog index: %v, %v", index, err)
+		}
+		names := make([]string, 0, len(index)-1)
+		for _, entry := range index[:len(index)-1] {
+			names = append(names, filepath.Base(entry))
+		}
+		return names
+	}
 
 	// A writable era the archiver never saw, then read-only: the state of
 	// a site whose sidecar starts beside a standby.
@@ -92,15 +111,11 @@ func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
 		"INSERT INTO wp.t (v) VALUES ('one'), ('two')", "FLUSH BINARY LOGS", "SET GLOBAL super_read_only = ON")
 
 	// The file format.
-	index, err := readBinlogIndex(filepath.Join(srv.dataDir, "mysql-bin.index"))
-	if err != nil || len(index) < 2 {
-		t.Fatalf("binlog index: %v, %v", index, err)
-	}
 	wantKey := "MySQLReplicationKey_" + uuid + "_1"
-	for _, entry := range index {
-		h := readEncNativeHeader(t, filepath.Join(srv.dataDir, filepath.Base(entry)))
+	for _, name := range sealedNames() {
+		h := readEncNativeHeader(t, filepath.Join(srv.dataDir, name))
 		if h.version != 1 || h.keyID != wantKey || len(h.password) != 32 || len(h.iv) != 16 {
-			t.Fatalf("%s: header %+v, want version 1 and key %s", entry, h, wantKey)
+			t.Fatalf("%s: header %+v, want version 1 and key %s", name, h, wantKey)
 		}
 	}
 	keys := srv.keyring(t)
@@ -108,41 +123,97 @@ func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
 		t.Fatalf("keyring entries %v lack the binary log key %s or its sequence number", encNativeKeyNames(keys), wantKey)
 	}
 
-	// The sidecar's readers, one by one, on a sealed file.
-	sealed := filepath.Join(srv.dataDir, filepath.Base(index[0]))
-	raw, err := os.ReadFile(sealed)
-	if err != nil {
-		t.Fatal(err)
+	// The reader against the test's own decryption.
+	plaintexts := map[string][]byte{}
+	checkReader := func(name string) {
+		t.Helper()
+		path := filepath.Join(srv.dataDir, name)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := decryptEncNativeBinlog(t, raw, srv.keyring(t))
+		if old, ok := plaintexts[name]; ok && !bytes.Equal(old, want) {
+			t.Fatalf("%s: the plaintext of a sealed file changed", name)
+		}
+		plaintexts[name] = want
+		if _, err := InspectBinlog(bytes.NewReader(raw), time.Time{}); err == nil {
+			t.Fatalf("%s: the bytes on disk parse as a binlog; the file is not encrypted", name)
+		}
+		if _, err := localBinlogHeader(path); !errors.Is(err, errEncryptedBinlogNoKeyring) {
+			t.Fatalf("%s without a keyring: %v, want %v", name, err, errEncryptedBinlogNoKeyring)
+		}
+		file, err := binlogs.open(path)
+		if err != nil {
+			t.Fatalf("open %s: %v", name, err)
+		}
+		defer file.Close()
+		if file.Size() != int64(len(want)) || int64(len(raw)) != file.Size()+encryptedBinlogHeaderSize {
+			t.Fatalf("%s: plaintext size %d of a %d-byte file, want %d", name, file.Size(), len(raw), len(want))
+		}
+		got, err := io.ReadAll(file.NewReader())
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("%s: the reader's plaintext differs from the test's decryption (%d and %d bytes, %v)", name, len(got), len(want), err)
+		}
+		// Random access, as the origin walk reads: across block and
+		// 2^16-block boundaries and up to the end.
+		for _, at := range []struct{ off, n int }{{0, 4}, {1, 31}, {15, 2}, {16, 16}, {4093, 9000}, {1<<20 - 7, 40}, {len(want) - 5, 5}, {len(want) - 5, 50}} {
+			if at.off < 0 || at.off >= len(want) {
+				continue
+			}
+			buf := make([]byte, at.n)
+			n, err := file.ReadAt(buf, int64(at.off))
+			end := min(at.off+at.n, len(want))
+			if !bytes.Equal(buf[:n], want[at.off:end]) || (n < at.n) != (err == io.EOF) || (err != nil && err != io.EOF) {
+				t.Fatalf("%s: ReadAt(%d, %d) = %d bytes, %v; want the plaintext at that offset", name, at.off, at.n, n, err)
+			}
+		}
+		evidence, err := InspectBinlog(bytes.NewReader(got), time.Time{})
+		if err != nil {
+			t.Fatalf("the plaintext of %s does not parse: %v", name, err)
+		}
+		sum := sha256.Sum256(want)
+		if id, err := binlogs.contentID(path); err != nil || id != hex.EncodeToString(sum[:]) || id != evidence.Digest {
+			t.Fatalf("%s: content identity %s, %v; want the SHA-256 of the plaintext", name, id, err)
+		}
+		header, err := binlogs.header(path)
+		if err != nil || header.size != int64(len(want)) || header.previous != evidence.Metadata.PreviousGTIDs {
+			t.Fatalf("%s: header %+v, %v; want Previous_gtids %q and the plaintext size", name, header, err, evidence.Metadata.PreviousGTIDs)
+		}
 	}
-	if _, err := InspectBinlog(bytes.NewReader(raw), time.Time{}); err == nil || err.Error() != "invalid binlog magic" {
-		t.Fatalf("InspectBinlog: %v, want invalid binlog magic", err)
+	largest := 0
+	for _, name := range sealedNames() {
+		checkReader(name)
+		largest = max(largest, len(plaintexts[name]))
 	}
-	if _, err := parseBinlogMetadata(sealed); err == nil || err.Error() != "invalid binlog magic" {
-		t.Fatalf("parseBinlogMetadata: %v, want invalid binlog magic", err)
-	}
-	_, headerErr := localBinlogHeader(sealed)
-	if headerErr == nil {
-		t.Fatal("localBinlogHeader read the Previous_gtids of an encrypted file")
-	}
-	t.Logf("localBinlogHeader: %v", headerErr)
-	if _, err := (&originWalk{}).Walk(bytes.NewReader(raw), int64(len(raw)), newOriginBudget()); !errors.Is(err, errEncryptedBinlog) {
-		t.Fatalf("origin walk: %v, want %v", err, errEncryptedBinlog)
+	if largest < 1<<20 {
+		t.Fatalf("the largest sealed file has %d plaintext bytes, want one over 1 MiB", largest)
 	}
 
 	// The archiver.
 	store := newTailStore()
 	log := &psLog{}
-	cfg := &PITRConfig{BinlogDir: srv.dataDir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour}
+	cfg := &PITRConfig{BinlogDir: srv.dataDir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour, KeyringFile: keyringFile}
 	a := newTestArchiver(cfg, "iad", srv.live, store, slog.New(slog.NewTextHandler(log, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	scan := func(times int) Status {
+		for range times {
+			a.roleTick(ctx)
+			a.scanAndArchive(ctx)
+		}
+		return a.Snapshot(ctx)
+	}
 
-	// Read-only, before any promotion.
+	// Read-only, before any promotion: nothing to archive, nothing fails.
 	a.scanAndArchive(ctx)
 	st := a.Snapshot(ctx)
 	t.Logf("read-only: %s", encNativeStatus(st))
-	if st.Tail == nil || st.Tail.State != internalmysql.ArchiverTailBlocked || !strings.Contains(st.Tail.Reason, "read the header of mysql-bin.") {
-		t.Fatalf("read-only tail = %+v, want Blocked on a header read", st.Tail)
+	if st.Tail != nil && strings.Contains(st.Tail.Reason, "read the header") {
+		t.Fatalf("read-only tail = %+v: a header could not be read", st.Tail)
 	}
 	assertQuiet(t, st)
+	if store.uploaded() != "" {
+		t.Fatalf("uploads %q before any promotion record", store.uploaded())
+	}
 
 	// The promotion, as the operator does it: writable, then a rotation.
 	sql("SET GLOBAL read_only = OFF", "FLUSH BINARY LOGS", "INSERT INTO wp.t (v) VALUES ('three')")
@@ -160,121 +231,156 @@ func TestPITRNativeEncryptedBinlogNotArchivedToday(t *testing.T) {
 		}
 	}
 	t.Logf("records: %+v", records)
-	if len(records) != 1 || records[0].ServerUUID != uuid || records[0].ReadOnlyGTIDExecuted == "" || records[0].PromotionGTIDExecuted != "" {
-		t.Fatalf("promotion records = %+v, want one of %s with a read-only observation and no promotion set", records, uuid)
-	}
-	if text := log.String(); !strings.Contains(text, `msg="promotion set not recorded"`) || !strings.Contains(text, `reason="read the header of mysql-bin.`) {
-		t.Fatalf("the log does not say why the promotion set is missing:\n%s", text)
+	if len(records) != 1 || records[0].ServerUUID != uuid || records[0].ReadOnlyGTIDExecuted == "" || records[0].PromotionGTIDExecuted == "" {
+		t.Fatalf("promotion records = %+v, want one of %s with a read-only observation and a promotion set\n%s", records, uuid, log.String())
 	}
 
 	sql("INSERT INTO wp.t (v) VALUES ('four')", "FLUSH BINARY LOGS", "INSERT INTO wp.t (v) VALUES ('five')", "FLUSH BINARY LOGS")
-	for range 3 {
-		a.scanAndArchive(ctx)
-	}
-	st = a.Snapshot(ctx)
-	t.Logf("writable: %s", encNativeStatus(st))
-	index, err = readBinlogIndex(filepath.Join(srv.dataDir, "mysql-bin.index"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealedFiles := int64(len(index) - 1)
-	if !st.Primary || st.FilesArchived != 0 || st.BacklogFiles != sealedFiles || st.ConsecutiveFailedScans < 2 ||
-		!strings.HasPrefix(st.LastError, "archive mysql-bin.") || !strings.HasSuffix(st.LastError, ": invalid binlog magic") ||
-		st.Tail == nil || st.Tail.State != internalmysql.ArchiverTailBlocked || st.Tail.PendingFiles != sealedFiles {
-		t.Fatalf("writable status = %s, want every one of the %d sealed files failing with invalid binlog magic", encNativeStatus(st), sealedFiles)
-	}
-	m, err := loadManifest(ctx, store, "binlogs", "iad")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(m.Files) != 0 || store.uploaded() != "" {
-		t.Fatalf("the archive holds %d rows and the uploads %q, want nothing", len(m.Files), store.uploaded())
-	}
-
-	sql("SET GLOBAL super_read_only = ON")
-	for range 2 {
-		a.scanAndArchive(ctx)
-	}
-	st = a.Snapshot(ctx)
-	t.Logf("demoted: %s", encNativeStatus(st))
-	// The upload failure of the writable era stands (the drain cannot
-	// decide), so the demoted site keeps reporting it.
-	if st.Primary || st.FilesArchived != 0 || st.Tail == nil || st.Tail.State != internalmysql.ArchiverTailBlocked ||
-		!strings.Contains(st.Tail.Reason, "read the header of mysql-bin.") || !strings.HasSuffix(st.LastError, ": invalid binlog magic") ||
-		store.uploaded() != "" {
-		t.Fatalf("demoted status = %s, uploads %q; want a Blocked tail, the standing error and no upload", encNativeStatus(st), store.uploaded())
-	}
-
-	// What the options of the proposal rest on. Every sealed file
-	// decrypts to a binlog the archiver's parser reads to its end, with
-	// checksums verified, and together they hold the server's transactions.
-	logged := internalmysql.GTIDSet{}
-	var plain []byte
-	largest := 0
-	for i, entry := range index[:len(index)-1] {
-		data, err := os.ReadFile(filepath.Join(srv.dataDir, filepath.Base(entry)))
+	assertArchived := func(when string) {
+		t.Helper()
+		var st Status
+		sealed := sealedNames()
+		for i := 0; i < 40; i++ {
+			if st = scan(1); st.LastError == "" && st.BacklogFiles == 0 && int(st.FilesArchived) >= len(sealed) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Logf("%s: %s", when, encNativeStatus(st))
+		if st.LastError != "" || st.BacklogFiles != 0 || st.UploadFailures != 0 {
+			t.Fatalf("%s: status = %s, want every sealed file archived without an error\n%s", when, encNativeStatus(st), log.String())
+		}
+		m, err := loadManifest(ctx, store, "binlogs", "iad")
 		if err != nil {
 			t.Fatal(err)
 		}
-		decrypted := decryptEncNativeBinlog(t, data, keys)
-		if len(decrypted) != len(data)-encNativeHeaderSize {
-			t.Fatalf("%s: %d plaintext bytes of %d", entry, len(decrypted), len(data))
+		rows := map[string]ManifestEntry{}
+		for _, row := range m.Files {
+			if _, twice := rows[row.Name]; twice {
+				t.Fatalf("%s: two manifest rows for %s", when, row.Name)
+			}
+			rows[row.Name] = row
 		}
-		evidence, err := InspectBinlog(bytes.NewReader(decrypted), time.Time{})
-		if err != nil {
-			t.Fatalf("decrypted %s does not parse: %v", entry, err)
+		if len(rows) != len(sealed) {
+			t.Fatalf("%s: %d manifest rows for %d sealed files", when, len(rows), len(sealed))
 		}
-		logged = UnionBinlogGTIDs(logged, evidence.GTIDs)
-		largest = max(largest, len(decrypted))
-		if i == 0 {
-			plain = decrypted
+		for _, name := range sealed {
+			checkReader(name)
+			want := plaintexts[name]
+			sum := sha256.Sum256(want)
+			row := rows[name]
+			if row.Size != int64(len(want)) || row.ID != store.BinlogContentID(hex.EncodeToString(sum[:])) {
+				t.Fatalf("%s: row of %s has size %d and id %s; want the plaintext's %d bytes and SHA-256", when, name, row.Size, row.ID, len(want))
+			}
+			key, err := ArchiveEntryKey("binlogs", "iad", row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			object, ok, err := store.Get(ctx, key)
+			if err != nil || !ok || !bytes.Equal(object, want) {
+				t.Fatalf("%s: the archived object of %s is not the plaintext (%d bytes, found %v, %v)", when, name, len(object), ok, err)
+			}
 		}
 	}
-	if !hasSourceUUID(logged, uuid) || largest < 1<<20 {
-		t.Fatalf("the decrypted files hold %s (the largest has %d bytes); want transactions of %s and a file over 1 MiB", logged, largest, uuid)
+	assertArchived("writable")
+
+	// Demoted: the tail drains.
+	sql("SET GLOBAL super_read_only = ON", "FLUSH BINARY LOGS")
+	st = scan(3)
+	t.Logf("demoted: %s", encNativeStatus(st))
+	if st.Primary || st.LastError != "" || st.Tail == nil || st.Tail.State != internalmysql.ArchiverTailDrained {
+		t.Fatalf("demoted status = %s, want a drained tail and no error\n%s", encNativeStatus(st), log.String())
 	}
-	t.Logf("decrypted %d sealed files (the largest %d bytes): %s", len(index)-1, largest, logged)
-	raw, err = os.ReadFile(sealed)
+	uploads := store.uploaded()
+
+	// A master key rotation rewrites every header in place. The files
+	// are the same content under another key: none is uploaded again.
+	first := sealedNames()[0]
+	raw, err := os.ReadFile(filepath.Join(srv.dataDir, first))
 	if err != nil {
 		t.Fatal(err)
 	}
 	before := sha256.Sum256(raw)
 	sql("SET GLOBAL read_only = OFF", "ALTER INSTANCE ROTATE BINLOG MASTER KEY")
-	rotated, err := os.ReadFile(sealed)
+	rotated, err := os.ReadFile(filepath.Join(srv.dataDir, first))
 	if err != nil {
 		t.Fatal(err)
 	}
 	after := sha256.Sum256(rotated)
-	h := readEncNativeHeader(t, sealed)
+	h := readEncNativeHeader(t, filepath.Join(srv.dataDir, first))
 	keys = srv.keyring(t)
 	t.Logf("after rotation: key %s, same bytes %v, same size %v, keyring %v", h.keyID, before == after, len(raw) == len(rotated), encNativeKeyNames(keys))
 	if h.keyID != "MySQLReplicationKey_"+uuid+"_2" || before == after || len(raw) != len(rotated) || keys[wantKey] != nil || len(keys[h.keyID]) != 32 {
-		t.Fatalf("after the rotation %s names %s (keyring %v); want its header rewritten in place for key 2 and key 1 removed", filepath.Base(sealed), h.keyID, encNativeKeyNames(keys))
+		t.Fatalf("after the rotation %s names %s (keyring %v); want its header rewritten in place for key 2 and key 1 removed", first, h.keyID, encNativeKeyNames(keys))
 	}
-	if !bytes.Equal(decryptEncNativeBinlog(t, rotated, keys), plain) {
-		t.Fatal("the plaintext changed with the master key")
+	assertArchived("after the master key rotation")
+	// The rotation and the demotion's flush each sealed a file; those are
+	// new. Every file uploaded before it is uploaded once.
+	if got := store.uploaded(); !strings.HasPrefix(got, uploads) || got != strings.Join(sealedNames(), ",") {
+		t.Fatalf("uploads after the rotation %q, before %q: a file whose header was rewritten was uploaded again", got, uploads)
+	}
+	sql("INSERT INTO wp.t (v) VALUES ('six')", "FLUSH BINARY LOGS")
+	assertArchived("a file written under the new key")
+
+	if dir := os.Getenv("BLOODRAVEN_WRITE_ENCRYPTED_BINLOG_FIXTURE"); dir != "" {
+		writeEncNativeFixture(t, srv, dir)
 	}
 
-	// Turning binlog_encryption off later (coverage.binaryLog: false on a
-	// group that ran with it on) does not repair the archive: the files
-	// written from then on are plaintext and are uploaded, the encrypted
-	// ones before them still fail, so the error stands and the archive
-	// starts with a gap.
-	sql("SET GLOBAL binlog_encryption = OFF", "INSERT INTO wp.t (v) VALUES ('six')", "FLUSH BINARY LOGS",
-		"INSERT INTO wp.t (v) VALUES ('seven')", "FLUSH BINARY LOGS")
-	for range 4 {
-		a.roleTick(ctx)
-		a.scanAndArchive(ctx)
+	// An archiver without the keyring archives nothing and says why.
+	bare := newTestArchiver(&PITRConfig{BinlogDir: srv.dataDir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour},
+		"pdx", srv.live, newTailStore(), slog.New(slog.NewTextHandler(&psLog{}, nil)))
+	for range 3 {
+		bare.roleTick(ctx)
+		bare.scanAndArchive(ctx)
 	}
-	st = a.Snapshot(ctx)
-	t.Logf("binlog_encryption off again: %s, uploads %q", encNativeStatus(st), store.uploaded())
-	if st.FilesArchived != 2 || len(strings.Split(store.uploaded(), ",")) != 2 || st.BacklogFiles == 0 || !strings.HasSuffix(st.LastError, ": invalid binlog magic") {
-		t.Fatalf("status = %s, uploads %q; want the two plaintext files uploaded and the encrypted ones still failing", encNativeStatus(st), store.uploaded())
+	st = bare.Snapshot(ctx)
+	t.Logf("without a keyring: %s", encNativeStatus(st))
+	if st.FilesArchived != 0 || !strings.Contains(st.LastError, "BLOODRAVEN_KEYRING_FILE is not set") {
+		t.Fatalf("without a keyring: status = %s, want no upload and the reason", encNativeStatus(st))
+	}
+}
+
+// writeEncNativeFixture copies the server's smallest sealed binlog that
+// holds a transaction, and its keyring file, to dir: the committed fixture
+// of TestEncryptedBinlogFixture. The keyring is this throwaway server's and
+// protects nothing else.
+func writeEncNativeFixture(t *testing.T, srv *encNativeServer, dir string) {
+	t.Helper()
+	index, err := readBinlogIndex(filepath.Join(srv.dataDir, "mysql-bin.index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := srv.keyring(t)
+	var smallest []byte
+	for _, entry := range index[:len(index)-1] {
+		data, err := os.ReadFile(filepath.Join(srv.dataDir, filepath.Base(entry)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence, err := InspectBinlog(bytes.NewReader(decryptEncNativeBinlog(t, data, keys)), time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(evidence.GTIDs) > 0 && (smallest == nil || len(data) < len(smallest)) {
+			smallest = data
+		}
+	}
+	if smallest == nil {
+		t.Fatal("no sealed file holds a transaction")
+	}
+	keyring, err := os.ReadFile(filepath.Join(srv.keyringDir, "keyring"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"encrypted-binlog.bin": smallest, "encrypted-binlog.keyring": keyring} {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil { //nolint:gosec // a test fixture
+			t.Fatal(err)
+		}
 	}
 }
 
 // TestPITRNativeEncryptionAtRestWithoutBinlogEncryptionArchives is the
-// control of TestPITRNativeEncryptedBinlogNotArchivedToday (same opt-in):
+// control of TestPITRNativeEncryptedBinlogArchived (same opt-in):
 // the same server with the keyring and every other encryption setting on
 // and binlog_encryption off (spec.encryptionAtRest.coverage.binaryLog:
 // false) writes plaintext binlogs, and the archiver uploads every sealed

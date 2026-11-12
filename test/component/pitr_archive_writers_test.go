@@ -30,6 +30,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
 	"github.com/shipstream/bloodraven/internal/sidecar"
+	"github.com/shipstream/bloodraven/internal/sidecar/binlogenctest"
 	"github.com/shipstream/bloodraven/internal/sidecar/binlogtest"
 )
 
@@ -232,7 +233,7 @@ func (s *simServer) writeLocked() {
 		name := fmt.Sprintf("mysql-bin.%06d", s.first+i)
 		index = append(index, name)
 		if i >= s.written {
-			writeAtomic(s.t, filepath.Join(s.dir, name), f.MustBytes())
+			writeAtomic(s.t, filepath.Join(s.dir, name), binlogenctest.Local(s.dir, f.MustBytes()))
 		}
 	}
 	s.written = len(s.files) - 1
@@ -435,7 +436,7 @@ func (w *writerArchive) identity(uid string, dest pitrarchive.Destination) sidec
 // start runs a real archiver for site over srv until the test ends.
 func (w *writerArchive) start(site string, srv *simServer, store sidecar.ArchiveStore, identity sidecar.ArchiveIdentity) *sidecar.BinlogArchiver {
 	cfg := &sidecar.PITRConfig{
-		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
+		BinlogDir: srv.dir, KeyringFile: binlogenctest.KeyringFile(srv.dir), BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
 		PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond, Archive: identity,
 		PromotionConfirmDelay: w.confirmDelay,
 	}
@@ -928,7 +929,7 @@ func (w *writerArchive) startRestartable(site string, srv *simServer, identity s
 func (w *writerArchive) startRestartableOn(site string, srv *simServer, store sidecar.ArchiveStore, identity sidecar.ArchiveIdentity) (*sidecar.BinlogArchiver, func()) {
 	ctx, cancel := context.WithCancel(w.ctx)
 	cfg := &sidecar.PITRConfig{
-		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
+		BinlogDir: srv.dir, KeyringFile: binlogenctest.KeyringFile(srv.dir), BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
 		PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond, Archive: identity,
 		PromotionConfirmDelay: w.confirmDelay,
 	}
@@ -1249,7 +1250,7 @@ func (s auditedServer) BinlogState(context.Context) (string, string, error) {
 // against the server's state.
 func (w *writerArchive) startAudited(site string, srv *simServer, identity sidecar.ArchiveIdentity) *sidecar.BinlogArchiver {
 	cfg := &sidecar.PITRConfig{
-		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
+		BinlogDir: srv.dir, KeyringFile: binlogenctest.KeyringFile(srv.dir), BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs",
 		PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond, Archive: identity,
 	}
 	a := sidecar.NewBinlogArchiver(cfg, site, auditedServer{srv}, w.store, slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -45,6 +45,8 @@ type tailFile struct {
 	// previous is the file's Previous_gtids header.
 	previous     string
 	havePrevious bool
+	// plainSize is the size of the file's plaintext, read with previous.
+	plainSize int64
 	// origin is whether the file holds an origin transaction;
 	// originUnfinished until it was examined.
 	origin originVerdict
@@ -458,11 +460,11 @@ func (a *BinlogArchiver) tailStat(name string) (*tailFile, error) {
 func (a *BinlogArchiver) tailPrevious(name string, f *tailFile) (string, error) {
 	if !f.havePrevious {
 		a.tail.headerReads++
-		header, err := localBinlogHeader(filepath.Join(a.cfg.BinlogDir, name))
+		header, err := a.binlogs().header(filepath.Join(a.cfg.BinlogDir, name))
 		if err != nil {
 			return "", fmt.Errorf("read the header of %s: %w", name, err)
 		}
-		f.previous, f.havePrevious = header.previous, true
+		f.previous, f.plainSize, f.havePrevious = header.previous, header.size, true
 	}
 	return f.previous, nil
 }
@@ -550,7 +552,7 @@ func (a *BinlogArchiver) examineOrigin(entries []string, i int, f *tailFile, obs
 			}
 		} else {
 			a.tail.headerReads++
-			header, err := localBinlogHeader(filepath.Join(a.cfg.BinlogDir, nextName))
+			header, err := a.binlogs().header(filepath.Join(a.cfg.BinlogDir, nextName))
 			if err != nil {
 				return originUnfinished, fmt.Errorf("read the header of %s: %w", nextName, err)
 			}
@@ -572,7 +574,7 @@ func (a *BinlogArchiver) examineOrigin(entries []string, i int, f *tailFile, obs
 		a.tail.walk, a.tail.walkName = &originWalk{}, name
 		a.tail.walks++
 	}
-	file, err := os.Open(filepath.Join(a.cfg.BinlogDir, name))
+	file, err := a.binlogs().open(filepath.Join(a.cfg.BinlogDir, name))
 	if err != nil {
 		a.tail.walk, a.tail.walkName = nil, ""
 		return originUnfinished, err
@@ -583,7 +585,7 @@ func (a *BinlogArchiver) examineOrigin(entries []string, i int, f *tailFile, obs
 		a.tail.walk, a.tail.walkName = nil, ""
 		return originUnfinished, fmt.Errorf("binlog %s changed while it was examined", name)
 	}
-	verdict, err := a.tail.walk.Walk(file, opened.Size(), budget)
+	verdict, err := a.tail.walk.Walk(file, file.Size(), budget)
 	if err != nil {
 		a.tail.walk, a.tail.walkName = nil, ""
 		return originUnfinished, fmt.Errorf("examine %s: %w", name, err)
@@ -669,7 +671,7 @@ func (a *BinlogArchiver) unarchivedTail(m *Manifest, retired map[binlogIdentity]
 		}
 		byRow, record := false, false
 		for _, row := range rows[name] {
-			byRow = byRow || (row.Size == f.info.Size() && row.PreviousGTIDs == previous)
+			byRow = byRow || (row.Size == f.plainSize && row.PreviousGTIDs == previous)
 		}
 		for _, p := range records[name] {
 			record = record || p == previous

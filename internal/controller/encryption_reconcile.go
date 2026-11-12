@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8sretry "k8s.io/client-go/util/retry"
@@ -187,7 +188,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		publishKeyringMetrics(fg.Namespace, fg.Name, site)
 	}
 
+	noted := false
+	if c := apiMeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady); c != nil {
+		noted = strings.Contains(c.Message, pitrArchivePlainMarker)
+	}
 	setEncryptionCondition(fg)
+	if note := pitrArchivePlainNote(fg); note != "" && !noted {
+		// Once per appearance: the condition carries it from here on,
+		// also across an operator restart.
+		logger.Info("PITR archive of an encrypted group has no client-side encryption", "profile", fg.Spec.Backup.PITR.ProfileName)
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventPITRArchiveNotEncrypted,
+			"encryption at rest is on%s", note)
+	}
 	written, err := r.patchEncryptionStatus(ctx, fg, baseline, false)
 	if errors.Is(err, errEncryptionStatusMoved) {
 		// Not persisted: the deferred settle publishes what is.
@@ -1103,7 +1115,32 @@ func setEncryptionCondition(fg *v1alpha1.MysqlFailoverGroup) {
 		cond.Reason = v1alpha1.ReasonAllSitesSealed
 		cond.Message = "every site is sealed against an escrowed keyring"
 	}
+	cond.Message += pitrArchivePlainNote(fg)
 	setCondition(&fg.Status.Conditions, cond)
+}
+
+// pitrArchivePlainMarker is the fixed part of pitrArchivePlainNote.
+const pitrArchivePlainMarker = "has no encryption of its own"
+
+// pitrArchivePlainNote is the sentence EncryptionAtRestReady carries, and
+// the PITRArchiveNotEncrypted Event repeats, while the group archives
+// binary logs through a backup profile without client-side encryption, or
+// "". The sidecar archives the plaintext of the binary logs (it decrypts
+// what MySQL encrypted with binlog_encryption), so every row change leaves
+// the encrypted volume for the archive, where only the profile's
+// encryption or the store's protects it. The API allows relying on the
+// store (bucket SSE, an encrypted volume), which the operator cannot see:
+// this is reported, never refused.
+func pitrArchivePlainNote(fg *v1alpha1.MysqlFailoverGroup) string {
+	if !fg.Spec.EncryptionEnabled() || !pitrEnabled(fg) {
+		return ""
+	}
+	profile := findProfile(fg, fg.Spec.Backup.PITR.ProfileName)
+	if profile == nil || profile.Encryption != nil {
+		return ""
+	}
+	return fmt.Sprintf("; the PITR archive (backup profile %q) %s: archived binary logs are protected only by what the store provides (set spec.backup.profiles[].encryption, or encrypt the bucket or volume)",
+		profile.Name, pitrArchivePlainMarker)
 }
 
 // errEncryptionStatusMoved means the persisted encryption lifecycle

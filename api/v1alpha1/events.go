@@ -895,6 +895,13 @@ const (
 	// `pitr archive binding changed` log line with `cause=recovery`
 	// instead ([log schema](/docs/observability/log-schema)).
 	EventPITRArchiveBound = "PITRArchiveBound"
+	// The group has encryption at rest and archives binary logs through a
+	// backup profile without `spec.backup.profiles[].encryption`. The
+	// archive holds the plaintext of the binary logs, so it is protected
+	// only by what the store provides. Raised when the combination
+	// appears; the `EncryptionAtRestReady` condition's message carries it
+	// afterwards.
+	EventPITRArchiveNotEncrypted = "PITRArchiveNotEncrypted"
 	// A binding was released and its key snapshots deleted.
 	EventPITRArchiveBindingReleased = "PITRArchiveBindingReleased"
 	// A profile in archive use has encryption that differs from its

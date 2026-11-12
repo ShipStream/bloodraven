@@ -35,6 +35,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar"
+	"github.com/shipstream/bloodraven/internal/sidecar/binlogenctest"
 )
 
 const (
@@ -247,7 +248,7 @@ func (e *bindingEnv) startArchiver(site string, srv *simServer, dest pitrarchive
 		ident.KeyRevision = "plaintext"
 	}
 	ctx, cancel := context.WithCancel(e.w.ctx)
-	cfg := &sidecar.PITRConfig{BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", ManifestPrefix: dest.KeyPrefix,
+	cfg := &sidecar.PITRConfig{BinlogDir: srv.dir, KeyringFile: binlogenctest.KeyringFile(srv.dir), BinlogIndex: "mysql-bin.index", ManifestPrefix: dest.KeyPrefix,
 		PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond, Archive: ident}
 	a := sidecar.NewBinlogArchiver(cfg, site, srv, e.store(dest, keyFile), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	done := make(chan struct{})
@@ -434,7 +435,7 @@ func TestPITRBindingMissingSnapshotFile(t *testing.T) {
 	srv := newSimServer(t, writerUUIDA, 101, false)
 	dest := e.dest(a)
 	cfg := &sidecar.PITRConfig{StorageType: "PVC", ManifestPrefix: dest.KeyPrefix, PassphraseFile: filepath.Join(t.TempDir(), "absent"),
-		BinlogDir: srv.dir, BinlogIndex: "mysql-bin.index", PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond,
+		BinlogDir: srv.dir, KeyringFile: binlogenctest.KeyringFile(srv.dir), BinlogIndex: "mysql-bin.index", PollInterval: 10 * time.Millisecond, RoleProbeInterval: 10 * time.Millisecond,
 		PVC: &sidecar.PITRPVCConfig{MountPath: e.w.root, MountVerifier: sidecar.TempDirMountVerifierForTest},
 		Archive: sidecar.ArchiveIdentity{Source: pitrarchive.Source{Namespace: pbcNS, Name: pbcGroupName, UID: types.UID(writerGroup)},
 			Destination: dest, Encryption: pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM},

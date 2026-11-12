@@ -66,10 +66,6 @@ type originWalk struct {
 	bufOff int64  // file offset of buf[0]
 }
 
-// errEncryptedBinlog: the file is encrypted by MySQL (binlog_encryption), so
-// its events cannot be read here.
-var errEncryptedBinlog = errors.New("the binlog file is encrypted (binlog_encryption=ON)")
-
 // Walk continues the walk of r, a file of size bytes, within budget. Any
 // malformed or truncated framing is an error (fail closed: the caller then
 // uploads nothing), and the walk must not be continued after one.
@@ -102,10 +98,9 @@ func (w *originWalk) next(r io.ReaderAt, size int64, budget *originBudget) (kind
 		if err != nil {
 			return 0, 0, false, fmt.Errorf("read binlog magic: %w", err)
 		}
-		switch {
-		case magic[0] == 0xfd && magic[1] == 'b' && magic[2] == 'i' && magic[3] == 'n':
-			return 0, 0, false, errEncryptedBinlog
-		case magic[0] != 0xfe || magic[1] != 'b' || magic[2] != 'i' || magic[3] != 'n':
+		// A file MySQL encrypted is read through localBinlogs, as its
+		// plaintext; the bytes of one are not a binlog.
+		if magic[0] != 0xfe || magic[1] != 'b' || magic[2] != 'i' || magic[3] != 'n' {
 			return 0, 0, false, fmt.Errorf("not a binlog file: magic % x", magic)
 		}
 		if size == 4 {

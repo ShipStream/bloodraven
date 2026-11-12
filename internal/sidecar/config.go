@@ -75,6 +75,13 @@ type Config struct {
 // archiver polls its own role, uploads at most the sealed tail of its
 // server's last writable era, and takes over after failover.
 type PITRConfig struct {
+	// KeyringFile is component_keyring_file's data file, the keyring
+	// mysqld uses (BLOODRAVEN_KEYRING_FILE), or "" on a site without
+	// encryption at rest. The archiver reads the binary log encryption
+	// key from it to decrypt binlog files written with
+	// binlog_encryption=ON; what it archives is their plaintext.
+	KeyringFile string
+
 	// BinlogDir is the directory holding the MySQL binary logs. The
 	// archiver watches the index file inside this directory with
 	// inotify. Matches MySQL's log_bin_basename directory.
@@ -487,6 +494,7 @@ func pitrConfigFromEnv() (*PITRConfig, error) {
 	manifestPrefix := os.Getenv("BLOODRAVEN_PITR_MANIFEST_PREFIX")
 
 	cfg := &PITRConfig{
+		KeyringFile:    os.Getenv("BLOODRAVEN_KEYRING_FILE"),
 		BinlogDir:      binlogDir,
 		BinlogIndex:    binlogIndex,
 		PollInterval:   pollInterval,
