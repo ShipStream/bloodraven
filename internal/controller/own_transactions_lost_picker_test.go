@@ -78,7 +78,6 @@ func (h hangingServer) GetGtidExecuted(ctx context.Context) (string, error) {
 // does not answer is not waited for.
 func TestOwnLoss_PickerDoesNotWaitForASilentWitness(t *testing.T) {
 	tm := threeSiteLoss(t, hangingServer{witnessServer(lossUUIDOld + ":1-100")})
-	tm.ownLossWitnessGrace = 50 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

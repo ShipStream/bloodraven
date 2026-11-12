@@ -45,8 +45,11 @@ func TestStartManager_RestoresOwnTransactionsLostAndWiresTheHistory(t *testing.T
 	}
 
 	mt.tm.siteIdentity.mu.Lock()
-	store := mt.tm.siteIdentity.store
+	store, loaded := mt.tm.siteIdentity.store, mt.tm.siteIdentity.loaded
 	mt.tm.siteIdentity.mu.Unlock()
+	if store != nil && !loaded {
+		t.Fatal("the history was not loaded when the manager started: a manager that starts into an outage would choose a promotion target without it")
+	}
 	if store == nil {
 		t.Fatal("the runner's manager has no SiteIdentityStore: a site back on a volume from before a reclone would be compared under its current server_uuid only")
 	}

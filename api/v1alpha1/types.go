@@ -958,15 +958,20 @@ type SiteStatus struct {
 	// a planned failover, and it must be recloned or the primary made to
 	// contain the set. Replication may still be running. RecloneRequired
 	// means the site lacks transactions it issued itself (LostGtid) and
-	// holds nothing the primary lacks: it is not promoted, its replication
-	// is not started, and the operator reclones it.
+	// holds nothing the primary lacks: it is not promoted. When the
+	// primary holds those transactions, its replication is not started
+	// and the operator reclones it. When only another site holds them
+	// (the RecoveryPending condition names it), the site keeps
+	// replicating and is not recloned automatically: the report ends when
+	// that site is recloned or the primary contains the transactions.
 	// +optional
 	RecoveryState SiteRecoveryState `json:"recoveryState,omitempty"`
 
 	// LostGtid is the GTID set of transactions this site issued under a
 	// server_uuid it has had, that another site holds (the primary, or a
-	// peer when no site was writable) and the site no longer does (its
-	// volume came back older, or a crash lost them).
+	// site that holds transactions the primary lacks, or a peer when no
+	// site was writable) and the site no longer does (its volume came
+	// back older, or a crash lost them).
 	// Replication cannot bring them back: the site's receiver drops
 	// events that carry its own server_id. Populated while the loss
 	// stands, with RecoveryState RecloneRequired, or RecoveryBlocked when

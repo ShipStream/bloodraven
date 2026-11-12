@@ -91,10 +91,10 @@ func (tm *TopologyManager) checkSourceConvergence(ctx context.Context, siteRepl 
 			continue
 		}
 
-		if tm.ownLossSite(site.name) {
-			// It lacks transactions it issued itself: its replication is
-			// not restarted or repointed, it is recloned
-			// (own_transactions_lost.go).
+		if tm.ownLossHoleSite(site.name) {
+			// It lacks transactions it issued itself that the primary
+			// holds: its replication is not restarted or repointed, it is
+			// recloned (own_transactions_lost.go).
 			changed = tm.setSourceConvergence(site, repl, sourceConvergenceBlocked, sourceReasonOwnLoss, active.host) || changed
 			continue
 		}
@@ -253,7 +253,7 @@ func (tm *TopologyManager) ensureGTIDContained(ctx context.Context, active, foll
 		uuids := tm.noteSiteServerUUID(ctx, follower.name, followerSnap.ServerUUID)
 		if lost := ownLostTransactions(activeGTID, followerGTID, uuids); !lost.IsEmpty() {
 			tm.mu.Lock()
-			_, lossLog := tm.settleOwnLossLocked(follower.name, lost, active.name, divergenceDetectedByAudit, uuids)
+			_, lossLog := tm.settleOwnLossLocked(follower.name, lost, active.name, divergenceDetectedByAudit, uuids, false)
 			tm.mu.Unlock()
 			if lossLog != nil {
 				lossLog()

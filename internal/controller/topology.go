@@ -175,6 +175,16 @@ type SiteSnapshot struct {
 	LostTxnCount   int64
 	LostComparedTo string
 	RecloneWaiting string
+	// LostToWitness is true when LostComparedTo is a witness, not the
+	// primary: the site holds everything the primary does, replicates,
+	// and is not recloned automatically; it is not promoted.
+	LostToWitness bool
+	// RecloneFailures is the number of automatic reclones of the site
+	// that failed in a row (0 when none did, or the site has no report).
+	RecloneFailures int
+	// LostCleared says why the site's last own-loss report ended ("" while
+	// one stands, or none ever did).
+	LostCleared string
 }
 
 // SourceConvergenceState is the persisted per-follower source state.
@@ -878,15 +888,15 @@ type TopologyManager struct {
 	// refused for it. Protected by mu.
 	ownLoss                 map[string]*ownLossRecord
 	ownLossPromotionRefused []string
+	// ownLossCleared says, by site, why its last report ended (until the
+	// site is reported again). Protected by mu.
+	ownLossCleared map[string]string
 	// siteIdentity holds the server_uuids each site has run under. It has
 	// its own lock.
 	siteIdentity siteIdentityTracker
 	// recloneForSim, when set, stands in for the clone of a reclone
 	// (topology_sim.go). Never set in production.
 	recloneForSim func(donor, recipient string) bool
-	// ownLossWitnessGrace overrides the constant of the same name when
-	// positive (tests and simulations, whose reads never hang).
-	ownLossWitnessGrace time.Duration
 	// recloneTail is the pre-reclone wait in progress and
 	// recloneTailSettled the site whose wait ended while its clone has not
 	// started yet. Only Poll's goroutine (checkReclone) uses them. The
@@ -1039,6 +1049,7 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checke
 	tm.followerMutationGate.clock = clk
 	if updater != nil {
 		updater.SetReplicaStartGate(tm.withReplicaStartGate)
+		updater.SetReplicaRejoinCheck(tm.refuseRejoinWithoutOwnTransactions)
 	}
 	return tm
 }
@@ -1534,6 +1545,10 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	pollAuthorityEpoch := tm.authorityEpoch
 	tm.mu.RUnlock()
 
+	// The sites' recorded server_uuids are loaded when the manager starts;
+	// a load that failed then is retried off the poll loop.
+	tm.loadSiteIdentitiesInBackground(ctx)
+
 	pollSite := func(site *siteTracker) pollResult {
 		start := tm.clock.Now()
 		pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -1638,6 +1653,14 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 			tm.logger.Info("state transition", "site", tm.sites[i].name, "from", string(apiSiteState(prevStates[i])), "to", string(apiSiteState(newStates[i])))
 			metrics.StateTransitions.WithLabelValues(tm.sites[i].name, labels.SiteState(apiSiteState(prevStates[i])), labels.SiteState(apiSiteState(newStates[i]))).Inc()
 			tm.applyPerSiteAction(ctx, &tm.sites[i], state.EvalPerSiteTransition(prevStates[i], newStates[i]))
+			if newStates[i] == state.StateReadOnly {
+				// A site that comes back read-only may have come back
+				// without transactions it issued, which a divergent
+				// follower still holds: the followers are audited, and the
+				// witness reports reviewed, now rather than at their
+				// interval.
+				tm.wakeOwnLossChecks()
+			}
 		}
 	}
 
@@ -1826,6 +1849,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 
 	// Check if old primary recovery is needed.
 	recoveryChanged := tm.checkRecoveryWithConvergence(ctx, siteRepl, handledConvergence) || auditChanged
+	// Compare the sites whose own-loss report rests on a witness with
+	// that witness again.
+	recoveryChanged = tm.reviewWitnessOwnLoss(ctx) || recoveryChanged
 
 	// Restore writability on the promoted primary if its sidecar fenced
 	// it back to read-only and no writable site remains (poll-driven so
@@ -2344,6 +2370,10 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			sites[i].LostTxnCount = loss.lostCount
 			sites[i].LostComparedTo = loss.comparedTo
 			sites[i].RecloneWaiting = loss.recloneWaiting
+			sites[i].LostToWitness = loss.witness
+			sites[i].RecloneFailures = loss.recloneFailures
+		} else {
+			sites[i].LostCleared = tm.ownLossCleared[tm.sites[i].name]
 		}
 	}
 
@@ -2735,13 +2765,15 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// authority is what matters.
 	promote := ""
 	if action.SplitBrain && lastFailoverTarget == "" && !tm.bootstrapBlocksCrossSite() && len(tm.cfg.SitePriorities) > 0 {
-		writable := tm.writableObservations()
+		// A writable site that lacks transactions it issued itself is no
+		// contender: it is fenced (fenceWritableOwnLossSites), and the
+		// policy chooses among the others.
+		writable, _ := tm.fenceWritableOwnLossSites(ctx, false)
 		winner, losers := state.ResolveSplitBrain(writable, tm.cfg.SitePriorities)
 		if winner != "" {
 			tm.mu.RLock()
 			winnerBlocked := tm.keyringRotationBlockedLocked(winner)
 			winnerPending := tm.restoreReclonePendingLocked(winner)
-			winnerLost := tm.ownLossLocked(winner)
 			tm.mu.RUnlock()
 			if winnerBlocked {
 				tm.logger.Warn("promotion refused: split-brain winner is mid-keyring-rotation",
@@ -2755,11 +2787,6 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
 					"sites", []string{winner})
 				tm.recordRestoreReclonePromotionRefused([]string{winner})
-				tm.clearKeyringRotationBlockedDirty()
-				return
-			}
-			if winnerLost {
-				tm.refuseOwnLossPromotion([]string{winner})
 				tm.clearKeyringRotationBlockedDirty()
 				return
 			}
@@ -3054,8 +3081,20 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 		}
 	}
 	if keep == "" {
+		// Whatever the policy, a writable site with an own-loss report is
+		// fenced while another site is writable: the operator has it on
+		// record as a site that must not issue transactions.
+		tm.mu.Lock()
+		quietLoss := !tm.lastFenceRetryLog.IsZero() && tm.clock.Since(tm.lastFenceRetryLog) < 30*time.Second
+		tm.mu.Unlock()
+		writable, fencedLossy := tm.fenceWritableOwnLossSites(ctx, quietLoss)
+		if fencedLossy && !quietLoss {
+			tm.mu.Lock()
+			tm.lastFenceRetryLog = tm.clock.Now()
+			tm.mu.Unlock()
+		}
 		if len(tm.cfg.SitePriorities) == 0 {
-			return false // manual resolution by design
+			return fencedLossy // the rest is manual resolution by design
 		}
 		// Mirror applyCrossSiteAction's fresh-deploy precedence with the
 		// read-only, data-aware isFreshDeploy check. An empty writable site
@@ -3064,17 +3103,17 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 		// before cloning it, so deferring here would only leave the
 		// split-brain running while a stuck bootstrap made no progress.
 		if tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" && tm.isFreshDeploy(ctx) {
-			return false
+			return fencedLossy
 		}
-		winner, losers := state.ResolveSplitBrain(tm.writableObservations(), tm.cfg.SitePriorities)
+		winner, losers := state.ResolveSplitBrain(writable, tm.cfg.SitePriorities)
 		if winner == "" {
-			return false
+			return fencedLossy
 		}
 		tm.mu.RLock()
-		winnerBlocked := tm.keyringRotationBlockedLocked(winner) || tm.restoreReclonePendingLocked(winner) || tm.ownLossLocked(winner)
+		winnerBlocked := tm.keyringRotationBlockedLocked(winner) || tm.restoreReclonePendingLocked(winner)
 		tm.mu.RUnlock()
 		if winnerBlocked {
-			return false
+			return fencedLossy
 		}
 		// Poll-driven retry of the policy resolution: same documented log
 		// message as the transition-driven path, rate-limited to the shared
@@ -3088,7 +3127,7 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 			tm.lastFenceRetryLog = tm.clock.Now()
 		}
 		tm.mu.Unlock()
-		attempted := false
+		attempted := fencedLossy
 		for _, loser := range losers {
 			site := tm.getSite(loser)
 			if site == nil || site.state != state.StateWritable {
@@ -3133,6 +3172,60 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 		tm.fenceSitesExcept(ctx, keep, quiet)
 	}
 	return attempted
+}
+
+// fenceWritableOwnLossSites fences every writable site that carries an
+// own-loss report while a primary-candidate without one is writable, and returns
+// the writable sites without a report: the only ones a split-brain policy
+// may choose from. A site with a report was fenced by the operator and
+// made writable by someone else; every write it takes is issued under a
+// GTID that may already name another transaction, so it never wins a
+// split brain and is not left writable beside another site. When every
+// writable site carries a report nothing is fenced: there is no site to
+// prefer, and that state needs an administrator; the same when the only
+// other writable sites are not primary-candidates (they are fenced by
+// their own path). It reports whether a fence was attempted.
+func (tm *TopologyManager) fenceWritableOwnLossSites(ctx context.Context, quiet bool) (sound []state.SiteObservation, attempted bool) {
+	writable := tm.writableObservations()
+	var lossy []string
+	tm.mu.RLock()
+	for _, obs := range writable {
+		if tm.ownLossLocked(obs.Name) {
+			lossy = append(lossy, obs.Name)
+		} else {
+			sound = append(sound, obs)
+		}
+	}
+	tm.mu.RUnlock()
+	if len(lossy) == 0 {
+		return sound, false
+	}
+	if !slices.ContainsFunc(sound, func(o state.SiteObservation) bool { return o.Role == state.SiteRolePrimaryCandidate }) {
+		tm.refuseOwnLossPromotion(lossy)
+		return sound, false
+	}
+	for _, name := range lossy {
+		site := tm.getSite(name)
+		if site == nil {
+			continue
+		}
+		if quiet {
+			tm.logger.Debug("split-brain: fencing a writable site that lacks transactions it issued itself", "site", name)
+		} else {
+			tm.logger.Warn("split-brain: fencing a writable site that lacks transactions it issued itself", "site", name)
+		}
+		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			return site.mysql.SetSuperReadOnly(probeCtx, true)
+		})
+		if err != nil {
+			if quiet {
+				tm.logger.Debug("failed to fence a writable site that lacks transactions it issued itself", "site", name, "error", err)
+			} else {
+				tm.logger.Error("failed to fence a writable site that lacks transactions it issued itself", "site", name, "error", err)
+			}
+		}
+	}
+	return sound, true
 }
 
 // previousPrimary returns the name of the most likely "old primary" —
@@ -4782,7 +4875,13 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 				err = fmt.Errorf("bootstrap donor authority moved from %s to %s", donorSite.name, confirmed.name)
 			}
 		}
-		if err == nil {
+		// The operator's own reclone of a site that lacks its own
+		// transactions is checked once more against the donor, as late as
+		// this goroutine can: the keyring unseal above may have taken a
+		// pod roll. A check that fails starts no clone and is no failure.
+		withdrawn := err == nil && source == "reclone" && recloneOwner == recloneOwnerOwnLoss &&
+			!tm.verifyOwnLossReclone(ctx, donorSite, recipientSite)
+		if err == nil && !withdrawn {
 			err = tm.runBootstrap(ctx, donorSite.mysql, recipientSite.mysql, donorSite.host, recipient, allowSkipClone)
 		}
 		if gate := tm.getKeyringGate(); gate == nil {
@@ -4825,16 +4924,22 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 			tm.recloneCompletedSite = recipient
 			tm.recloneCompletedOwner = recloneOwner
 		}
+		if withdrawn {
+			// Nothing was cloned and nothing failed.
+			tm.bootstrapPhase = BootstrapPhaseNone
+			tm.bootstrapRecipient = ""
+			tm.mu.Unlock()
+			tm.emitBootstrapStatus()
+			return
+		}
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
 			tm.bootstrapFailureResolved = false
 			tm.bootstrapErr = err
 			tm.bootstrapFailedTarget = recipient
-			if rec := tm.ownLoss[recipient]; rec != nil {
-				// The operator asks again for a site that lacks its own
-				// transactions, but not at poll frequency.
-				rec.recloneRetryAfter = tm.clock.Now().Add(ownLossRecloneRetryDelay)
-			}
+			// The operator asks again for a site that lacks its own
+			// transactions, later each time (ownLossRecloneBackoff).
+			tm.noteOwnLossCloneFailedLocked(recipient)
 			tm.logger.Error("bootstrap failed", "source", source, "error", err)
 		} else {
 			tm.bootstrapPhase = BootstrapPhaseDone
@@ -4883,10 +4988,14 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 	// new server_uuid on the restart, and the check after the clone
 	// compares against this one.
 	uuidBefore := tm.cloneServerUUIDBefore(ctx, replica, replicaSite)
-	// The identity the site gives up is one it issued transactions under.
-	tm.noteSiteServerUUID(ctx, replicaSite, uuidBefore)
-	// ... and durably, before the clone is issued: a clone can finish
-	// after this manager is gone, and the check must still be made.
+	// The identity the site gives up is one it issued transactions under:
+	// it is remembered here and stored with the clone identity record
+	// below, by the same write (groupCloneIdentityStore.Record).
+	tm.knownSiteServerUUIDs(replicaSite, uuidBefore)
+	// Durably, before the clone is issued: a clone can finish after this
+	// manager is gone, and the check must still be made; and a volume
+	// that later comes back from before this clone must be recognised by
+	// the server_uuid recorded now.
 	if err := tm.recordCloneIdentity(ctx, replicaSite, uuidBefore, prevClone, prevErr); err != nil {
 		return fmt.Errorf("clone not started: %w", err)
 	}
@@ -5479,18 +5588,49 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 			tm.logger.Warn("primary re-assert: failed to parse peer GTID_EXECUTED", "site", s.name, "error", gerr)
 			return false
 		}
+		// What the peer holds under a server_uuid of the target that no
+		// clone has superseded (liveServerUUIDs) and the target lacks, the
+		// target lost: it came back without part of its own history (an
+		// older volume), and under the server_uuid it runs under now it
+		// would issue those GTIDs a second time. It is reported and kept out of
+		// promotion and replication until it is recloned from whichever
+		// site becomes the primary. This is asked of the peer's whole set,
+		// before its recorded divergence is set aside below: a divergence
+		// that consists of the target's own transactions is the target's
+		// lost tail, and the peer's block would clear by itself once the
+		// target had issued those numbers again. A peer that awaits its
+		// post-restore reclone is no evidence (ownLossWitnessExcludedLocked).
+		tm.mu.RLock()
+		witness := !tm.ownLossWitnessExcludedLocked(s.name)
+		var recorded string
+		if rec := tm.recovery[s.name]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
+			recorded = rec.divergentGtid
+		}
+		tm.mu.RUnlock()
+		if targetIdentityKnown && witness {
+			if lost := ownLostOnWitness(peerGtid, targetGtid, tm.liveSiteServerUUIDs(target, targetSnap.ServerUUID)); !lost.IsEmpty() {
+				uuids := tm.noteSiteServerUUID(ctx, target, targetSnap.ServerUUID)
+				tm.mu.Lock()
+				changed, lossLog := tm.settleOwnLossLocked(target, lost, s.name, divergenceDetectedByRecovery, uuids, true)
+				tm.mu.Unlock()
+				if lossLog != nil {
+					lossLog()
+				}
+				tm.logger.Warn("primary re-assert refused: a peer holds transactions the target issued itself and lacks",
+					"site", target, "peer", s.name, "lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()))
+				tm.refuseOwnLossPromotion([]string{target})
+				if changed {
+					tm.RequestStatusRefresh()
+				}
+				return false
+			}
+		}
 		// A peer's recorded divergence is already reported and stays on the
 		// peer, which keeps its block and is re-audited against the
 		// re-asserted primary. Holding it against the target would wedge a
 		// group whose emergency failover deliberately chose a clean
 		// candidate over that peer. Anything beyond the recorded set still
 		// refuses.
-		tm.mu.RLock()
-		var recorded string
-		if rec := tm.recovery[s.name]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
-			recorded = rec.divergentGtid
-		}
-		tm.mu.RUnlock()
 		if recorded != "" {
 			if set, perr := mysql.ParseGTIDSet(recorded); perr == nil {
 				peerGtid = peerGtid.Subtract(set)
@@ -5509,25 +5649,6 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 			}
 			tm.logger.Warn("primary re-assert refused: peer has transactions the target lacks — divergence needs human review",
 				"site", s.name, "peerGtid", peerGtidStr, "targetGtid", targetGtidStr)
-			if targetIdentityKnown {
-				// When what the target lacks are transactions it issued
-				// itself, the target came back without part of its own
-				// history (an older volume): say so, and keep it out of
-				// promotion and replication until it is recloned from
-				// whichever site an administrator makes the primary.
-				uuids := tm.noteSiteServerUUID(ctx, target, targetSnap.ServerUUID)
-				if lost := ownLostTransactions(peerGtid, targetGtid, uuids); !lost.IsEmpty() {
-					tm.mu.Lock()
-					changed, lossLog := tm.settleOwnLossLocked(target, lost, s.name, divergenceDetectedByRecovery, uuids)
-					tm.mu.Unlock()
-					if lossLog != nil {
-						lossLog()
-					}
-					if changed {
-						tm.RequestStatusRefresh()
-					}
-				}
-			}
 			return false
 		}
 	}
@@ -6019,7 +6140,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		}
 		if oldIdentityKnown {
 			tm.mu.Lock()
-			lossChanged, lossLog := tm.settleOwnLossLocked(oldPrimary.name, lost, newPrimary.name, divergenceDetectedByRecovery, ownUUIDs)
+			lossChanged, lossLog := tm.settleOwnLossLocked(oldPrimary.name, lost, newPrimary.name, divergenceDetectedByRecovery, ownUUIDs, false)
 			if !lost.IsEmpty() {
 				// Not rejoined: replication is not configured, the site
 				// stays fenced, and requestOwnLossReclone reclones it. The
@@ -6115,7 +6236,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	lossChanged := false
 	var lossLog func()
 	if oldIdentityKnown {
-		lossChanged, lossLog = tm.settleOwnLossLocked(oldPrimary.name, lost, newPrimary.name, divergenceDetectedByRecovery, ownUUIDs)
+		lossChanged, lossLog = tm.settleOwnLossLocked(oldPrimary.name, lost, newPrimary.name, divergenceDetectedByRecovery, ownUUIDs, false)
 	}
 	tm.mu.Unlock()
 	if lossLog != nil {
@@ -6123,7 +6244,10 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	}
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(float64(count))
-	return !sameReport || lossChanged, true, false
+	// Transactions the site holds and the primary lacks may be ones
+	// another site issued and no longer has.
+	witnessChanged := tm.crossCheckOwnLoss(ctx, oldPrimary, oldGtid, divergent, newPrimary.name)
+	return !sameReport || lossChanged || witnessChanged, true, false
 }
 
 // executeRecovery reconfigures the old primary as a replica of the new primary.
@@ -6227,6 +6351,7 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 	}()
 	tm.mu.RLock()
 	site := tm.reclonePendingSite
+	owner := tm.reclonePendingOwner
 	completedSite := tm.recloneCompletedSite
 	completedOwner := tm.recloneCompletedOwner
 	tm.mu.RUnlock()
@@ -6318,6 +6443,14 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 	busy := tm.bootstrapClaimRefusedLocked() != ""
 	tm.mu.RUnlock()
 	if busy {
+		return false
+	}
+	// The operator's own request for a site that lacks its own
+	// transactions rests on what is read now, in the poll that starts the
+	// clone, not on the report that led to it: the recipient is fenced
+	// and compared with the donor before anything is done to it (the
+	// rotation of the wait below included), in every poll of the wait.
+	if owner == recloneOwnerOwnLoss && !tm.verifyOwnLossReclone(ctx, donor, recipient) {
 		return false
 	}
 	waitDriven = true

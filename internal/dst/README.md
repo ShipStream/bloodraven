@@ -430,10 +430,13 @@ A site that restarts on an older data directory while another site holds
 what it issued can therefore never get those transactions back by
 replication: it replicates everything else, both threads run, no error is
 raised, and promoted it issues the same GTIDs again. The operator's answer
-is `controller/own_transactions_lost.go`: compare the site with the
-primary (or with every site that answers, when a promotion target is
-chosen) under each `server_uuid` the site has had, never start its
-replication, never promote it, and reclone it.
+is `controller/own_transactions_lost.go`. It asks two questions with
+different evidence: against the confirmed primary, under each
+`server_uuid` the site has had, whether the site can be a replica (if not:
+never start its replication, never promote it, reclone it); and against
+every other site that answers (a witness), under the `server_uuid`s no
+clone of the site has superseded, whether the site may be made writable
+(if not: never promote it).
 
 - **The model** (`ownloss.go`). `Cluster.Tick` no longer lets a site fetch
   a stream it owns: the stream under its original uuid and under every
@@ -452,39 +455,85 @@ replication, never promote it, and reclone it.
   the donor's executed set, no channel and a new `server_uuid`, and refuses
   when the operator cannot reach the recipient or the recipient cannot
   reach a running donor. The operator's side is production code up to that
-  point: the request (`requestOwnLossReclone`), `checkReclone`'s donor
-  confirmation, its claim checks and the pre-reclone archive-tail wait.
-  `SetRecloneRunnerForSim` replaces only the bootstrap goroutine (CLONE
-  INSTANCE, the wait for the restart, the replication setup), which runs
-  on wall-clock retries a trial cannot replay. After the clone the site has
-  no channel, and old-primary recovery configures it on a later poll, as
-  after an operator restart between a clone and its replication setup.
-  Not covered: a clone that fails or is killed part-way, an operator
-  restart during a clone, the clone identity record and the keyring hold;
-  unit and component tests cover those
-  (`own_transactions_lost_test.go`, `clone_server_uuid_record_test.go`,
+  point: the request (`requestOwnLossReclone`, made again every poll),
+  `checkReclone`'s donor confirmation, its claim checks, the check before
+  the clone (`verifyOwnLossReclone`: the fenced recipient is read, then
+  the donor, and the clone runs only if the donor holds everything the
+  recipient holds and still holds transactions it issued and lacks) and
+  the pre-reclone archive-tail wait. `SetRecloneRunnerForSim` replaces
+  only the bootstrap goroutine (CLONE INSTANCE, the wait for the restart,
+  the replication setup, and that goroutine's second run of the check),
+  which runs on wall-clock retries a trial cannot replay. After the clone
+  the site has no channel, and old-primary recovery configures it on a
+  later poll, as after an operator restart between a clone and its
+  replication setup. Not covered: a clone that fails or is killed
+  part-way, an operator restart during a clone, the clone identity record
+  and the keyring hold; unit and component tests cover those
+  (`own_transactions_lost_test.go`, `own_transactions_lost_evidence_test.go`,
+  `clone_server_uuid_record_test.go`,
   `test/component/own_transactions_lost_test.go`).
-- **Durable state.** The `server_uuid`s each site has run under outlive
-  every manager of a trial (`simSiteIdentityStore`, the group annotation
-  in production).
+- **Durable state.** Each site's timeline, its `server_uuid`s and where a
+  clone into it was issued, outlives every manager of a trial
+  (`simSiteIdentityStore`, the group annotation in production). A manager
+  loads it when it starts, as the runner does, so a manager that starts
+  into an outage knows it before its first promotion decision.
+- **The witness wait** runs on the manager's clock (250 ms in production).
+  The trial clock stands still during a poll, so a promotion decision
+  waits for the witness reads themselves, which return at once in the
+  model; no special value is configured.
 - **Invariant `PromotedWithoutOwnTransactions`** (model-level, at the
   statement). An operator actor never makes a site writable while a site
   the operator can read holds transactions of one of that site's own
-  streams that the site lacks. A statement on a site that was writable
+  streams that the site lost. A statement on a site that was writable
   already is no grant. A holder the operator cannot read (crashed, or cut
   off from it) is not counted: with no evidence the promotion is the
-  documented residual, see below. With the comparison switched off
-  (`ownLostTransactions` returning nothing) the 400-seed quick sweep fails
-  35 trials `NonConvergence` (a replica with both threads running that
-  never holds the primary's set) and one `PromotedWithoutOwnTransactions`;
-  with it the sweep is clean (also seeds 1–6,000, and 1–4,000 with the
-  actors on).
-- **What the sweep found in the operator**, fixed with the change: an
-  emergency failover promoted the regressed candidate although a
-  disaster-recovery site that answered held its lost transactions (the
-  picker now reads the other sites too), and a planned failover's rollback
-  unfenced a source that had restarted on an older data directory under
-  the same `server_uuid` (it now ends `SourceLeftFenced`).
+  documented residual, see below. A stream a clone into the site
+  superseded is not judged (`supersededByClone`): after a clone the site
+  holds of its earlier streams exactly what its donor held and never
+  receives more, so what another site holds beyond that the site gave up
+  at the clone. Those are the transactions an administrator discards by
+  recloning a divergent site, and refusing the recloned site for them
+  would be the operator's defect, not its duty. Three constructed cases
+  pin what the invariant still catches
+  (`TestModel_PromotedWithoutOwnTransactions_ClonedSites`): a site regressed under
+  its own `server_uuid`, a site whose pod was replaced on an older data
+  directory under a fresh `server_uuid` (no clone superseded the earlier
+  one), and a site that was recloned and then regressed.
+- **The update actor** (`update_actor.go`) is a step model, but the
+  invariant judges two things it used to do differently from
+  `ExecuteHandoff`, so it follows production there: it reads the
+  standby's handoff eligibility (`HandoffRefusalForSim`, the recorded
+  blocks), confirms the active site is writable and reads the standby's
+  and the active site's sets before it fences anything, and an abort
+  lifts only the handoff's own fence (a source with `read_only` but not
+  `super_read_only`, or without part of the set the handoff read from it,
+  restarted in between and is left read-only).
+- **What the sweeps found in the operator**, fixed with the changes:
+  - an emergency failover promoted the regressed candidate although a
+    disaster-recovery site that answered held its lost transactions (the
+    picker reads the other sites too);
+  - a planned failover's rollback unfenced a source that had restarted on
+    an older data directory under the same `server_uuid` (it ends
+    `SourceLeftFenced`);
+  - the automatic reclone ran on a comparison made before a hold: a site
+    that took acknowledged writes meanwhile (made writable by an external
+    writer while partitioned) was cloned over, and those writes existed
+    nowhere (`ModelHole`). The clone now rests on the check made when it
+    starts;
+  - the primary re-assert set a peer's recorded divergence aside before
+    it compared, so it re-asserted a primary although the peer held
+    transactions that primary had issued and lost;
+  - an ordered update's abort unfenced an active site that had restarted
+    on an older data directory during the handoff;
+  - an ordered update handed off to a standby that lacked transactions it
+    had issued which only a third, divergent site held: nothing compared
+    the standby with that site. The audit and recovery now report such a
+    standby when they find the divergent site;
+  - a manager that started into an outage chose a promotion target before
+    it had loaded the sites' earlier `server_uuid`s;
+  - a site with an own-loss report that an external writer made writable
+    was left writable beside the primary when the split-brain policy
+    preferred it (the operator refused to resolve). It is fenced.
 - **Residual, by design.** A site promoted while every holder of its lost
   transactions is down or unreachable: the operator cannot know. A trial
   then ends with one GTID naming two transactions, which the model's
@@ -494,6 +543,12 @@ replication, never promote it, and reclone it.
   `RecloneRequired`: re-assert refuses a target a peer is ahead of, and the
   operator elects nobody among read-only sites (`WedgedNoPrimary` exempts a
   target that is not GTID-complete, as before).
+- **Not modelled.** An in-place restore and its reclone queue (the model
+  has none), so the rule that a queued site is no witness is covered by
+  unit tests only. A planned failover's rollback that unfences a source
+  which regressed while the target cannot be read and another site holds
+  the evidence is a planned-failover finding, see the planned README
+  sections.
 
 ## Invariants
 
@@ -511,7 +566,8 @@ Per poll:
   point a site at a source missing that site's transactions.
 - **PromotedWithoutOwnTransactions** (model-level) — an operator actor never
   makes a site writable while a site the operator can read holds
-  transactions the site issued itself and lacks (see above).
+  transactions the site issued itself and lost; a stream a clone into the
+  site superseded is not judged (see above).
 
 At end of trial (post-heal, post-settle):
 - **EndSplitBrain / WedgedNoPrimary / NonConvergence** — the cluster

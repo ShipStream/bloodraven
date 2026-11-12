@@ -190,20 +190,28 @@ const (
 	// Stability: Internal (may change).
 	CloneServerUUIDAnnotation = "bloodraven.shipstream.io/clone-server-uuid"
 
-	// ServerUUIDHistoryAnnotation records the server_uuid values the
-	// operator has seen each site run under, newest last (at most 8 per
+	// ServerUUIDHistoryAnnotation records, per site and oldest first, the
+	// server_uuid values the operator has seen the site run under and
+	// where a clone into the site was issued (at most 8 entries per
 	// site). A site's replication receiver drops events that carry the
 	// site's own server_id, whatever server_uuid issued them, so a site
 	// whose volume came back from before a reclone lacks the transactions
 	// it issued under its later server_uuid and cannot get them by
 	// replication. The operator compares a returning site with the
 	// primary under every recorded server_uuid (status.sites[].lostGtid).
-	// Removing the annotation narrows that check to the site's current
+	// When there is no primary and a promotion target is chosen, another
+	// site's set counts against a candidate only under the server_uuids
+	// recorded after the candidate's last clone and the one it runs
+	// under: what it lacks of an earlier one it gave up at that clone.
+	// The pre-clone server_uuid and the clone are written by the same
+	// write as the clone identity record, before the clone is issued.
+	// Removing the annotation narrows both checks to the site's current
 	// server_uuid until the operator has seen the others again.
 	//
 	// On: MysqlFailoverGroup.
 	// Writer: operator.
-	// Value: `{"<site>":["<uuid>", ...]}`.
+	// Value: `{"<site>":["<uuid>", "clone", "<uuid>", ...]}`, where
+	// `clone` stands for a clone issued into the site.
 	// Stability: Internal (may change).
 	ServerUUIDHistoryAnnotation = "bloodraven.shipstream.io/server-uuid-history"
 
