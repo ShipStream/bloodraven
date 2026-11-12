@@ -45,7 +45,8 @@ gives its recipient a new <code>server_uuid</code>, so the lost numbers cannot b
 <p>The same question is asked of every site that answers, not only the primary. If only another site (a
 witness) holds what <code>iad</code> lost and <code>pdx</code> does not, there is nothing to repair against the primary: <code>iad</code>
 keeps replicating and carries the same report, the operator never promotes it, and it is <strong>not</strong>
-recloned automatically. The report ends when the witness no longer holds those transactions.</p>
+recloned automatically. The report ends when, in one pass, every other site of the group has answered
+and none holds those transactions, or when <code>iad</code> is recloned. One site that does not answer keeps it.</p>
 <h2 id="what-the-gate-is-not">What the gate is not</h2>
 <p>Recovery is deliberately <strong>not</strong> gated on the recorded failover target (<code>lastFailover.target</code>), because a primary can change hands with
 no failover recorded at all: a replica may be made writable by hand (or respawn writable on a pod that

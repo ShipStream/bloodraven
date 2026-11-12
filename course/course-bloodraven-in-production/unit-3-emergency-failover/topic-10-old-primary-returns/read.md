@@ -60,7 +60,8 @@ gives its recipient a new `server_uuid`, so the lost numbers cannot be issued tw
 The same question is asked of every site that answers, not only the primary. If only another site (a
 witness) holds what `iad` lost and `pdx` does not, there is nothing to repair against the primary: `iad`
 keeps replicating and carries the same report, the operator never promotes it, and it is **not**
-recloned automatically. The report ends when the witness no longer holds those transactions.
+recloned automatically. The report ends when, in one pass, every other site of the group has answered
+and none holds those transactions, or when `iad` is recloned. One site that does not answer keeps it.
 
 ## What the gate is not
 
