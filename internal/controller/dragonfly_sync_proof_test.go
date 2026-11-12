@@ -329,14 +329,28 @@ func TestDragonflyRolloutCandidateSyncReady(t *testing.T) {
 			c.persist.Loading = true
 			return c
 		}(), dragonflyRolloutNotLinked},
-		{"target refuses the position command", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
+		// A position that can never be compared leaves the link checks.
+		// They do not hold here, so the target is not ready, like any
+		// other target that is not linked to the source.
+		{"target refuses the position command and follows another replication id", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
+			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterReplID: "b"},
+			positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}, dragonflyRolloutNotLinked},
+		{"target refuses the position command and reports no replication id", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
 			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
-			positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}, dragonflyRolloutUnprovable},
-		{"positions in different forms", syncProofMaster("a", 24, 28), func() *fakeDragonflyConn {
-			c := syncProofReplica("a", 52)
-			c.position.Scalar = true
+			positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}, dragonflyRolloutNotLinked},
+		{"source refuses the position command and the target's link is down", func() *fakeDragonflyConn {
+			c := syncProofMaster("a", 24, 28)
+			c.positionErr = &dragonfly.ServerError{Message: "ERR unknown command `DFLY`"}
 			return c
-		}(), dragonflyRolloutUnprovable},
+		}(), func() *fakeDragonflyConn {
+			c := syncProofReplica("a", 1, 1)
+			c.info.MasterLinkStatus = "down"
+			return c
+		}(), dragonflyRolloutNotLinked},
+		{"target refuses the position command and its persistence state cannot be read", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
+			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterReplID: "a"},
+			persistErr:  errors.New("i/o timeout"),
+			positionErr: &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}}, dragonflyRolloutUnreadable},
 		{"target answers with a transport error", syncProofMaster("a", 24, 28), &fakeDragonflyConn{
 			info:        dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up"},
 			positionErr: errors.New("i/o timeout")}, dragonflyRolloutUnreadable},
@@ -352,6 +366,40 @@ func TestDragonflyRolloutCandidateSyncReady(t *testing.T) {
 			}
 			if waited := time.Since(start); waited >= dragonflyRolloutSyncPoll {
 				t.Fatalf("waited %s for a state that polling cannot change, want no wait", waited)
+			}
+		})
+	}
+	// A site that refuses the position command, or reports it in another
+	// form, can never be compared. With the link checks holding, the target
+	// is ready for a takeover that has no fallback.
+	refusal := &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}
+	for _, tc := range []struct {
+		name   string
+		source *fakeDragonflyConn
+		target *fakeDragonflyConn
+	}{
+		{"target refuses the position command", syncProofMaster("a", 24, 28), func() *fakeDragonflyConn {
+			c := syncProofReplica("a", 1, 1)
+			c.positionErr = refusal
+			return c
+		}()},
+		{"source refuses the position command", func() *fakeDragonflyConn {
+			c := syncProofMaster("a", 24, 28)
+			c.positionErr = refusal
+			return c
+		}(), syncProofReplica("a", 1, 1)},
+		{"positions in different forms", syncProofMaster("a", 24, 28), func() *fakeDragonflyConn {
+			c := syncProofReplica("a", 52)
+			c.position.Scalar = true
+			return c
+		}()},
+	} {
+		t.Run(tc.name+": ready for a takeover only", func(t *testing.T) {
+			r, _ := newReconciler(fg)
+			installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: tc.source, syncProofDC2: tc.target})
+			check := r.dragonflyRolloutCandidateSyncReady(ctx, fg, "dc2", "dc1")
+			if !check.Ready || !check.TakeoverOnly || check.Detail == "" {
+				t.Fatalf("check=%+v, want ready with TakeoverOnly and the reason", check)
 			}
 		})
 	}

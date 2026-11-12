@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -785,6 +784,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 			} else if promoted {
 				r.clearDragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite)
 			} else if r.recordDragonflyRolloutPromotionFailure(fg, promotionTarget, activeSite) >= 3 {
+				// The last resort: the takeover to a target that was
+				// found ready failed three times, so the active site's pod
+				// is restarted where it is. No REPLICAOF NO ONE is sent
+				// over the live master for this (promoteLocked); the
+				// Dragonfly manager then handles the restarted master as
+				// it handles any other (a replica that holds the cache
+				// the restarted instance lost is promoted, one known to be
+				// stale is not).
 				log.FromContext(ctx).Info("dragonfly rollout: promotion failed repeatedly; applying active StatefulSet update", "target", promotionTarget, "source", activeSite)
 				if err := r.reconcileDragonflyStatefulSet(ctx, fg, *activeDrift); err != nil {
 					return 0, fmt.Errorf("reconcile active dragonfly statefulset %s after promotion failures: %w", activeDrift.Name, err)
@@ -873,18 +880,25 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 			"reason", "a planned failover claim or automation hold owns the sites", "fg", nn)
 		return false, true
 	}
-	if check := r.dragonflyRolloutCandidateSyncReady(ctx, fresh, target, oldSource); !check.Ready {
+	check := r.dragonflyRolloutCandidateSyncReady(ctx, fresh, target, oldSource)
+	r.noteDragonflyRolloutReadiness(ctx, fresh, target, oldSource, check)
+	if !check.Ready {
 		logger.Info("dragonfly rollout: target no longer in sync; skipping", "site", target, "error", check.Err,
 			"state", check.State, "detail", check.Detail, "fg", nn)
-		r.noteDragonflyRolloutReadiness(ctx, fresh, target, oldSource, check)
 		return false, true
+	}
+	// A target whose sync rests on its link alone is promoted with
+	// REPLTAKEOVER or not at all.
+	fallback := dragonflyFallbackUnlessSourceServes
+	if check.TakeoverOnly {
+		fallback = dragonflyTakeoverOnly
 	}
 	promoter := NewDragonflyManager(r.Client, r.Recorder, slog.Default().With("fg", nn.String(), "subsystem", "dragonfly-rollout"), nn, 0)
 	promoter.SetAuthorityReader(r.authorityReader())
 	if r.dragonflyConnector != nil {
 		promoter.SetConnector(r.dragonflyConnector)
 	}
-	return promoter.rolloutPromoteFG(context.WithoutCancel(ctx), fresh, target, oldSource), false
+	return promoter.rolloutPromoteFG(context.WithoutCancel(ctx), fresh, target, oldSource, fallback), false
 }
 
 // dragonflyRolloutSyncWait is how long one rollout readiness check waits
@@ -899,84 +913,29 @@ const (
 )
 
 // dragonflyRolloutCheck is the result of one rollout readiness check.
-type dragonflyRolloutCheck struct {
-	// Ready: the target is linked and reached the source's position.
-	Ready bool
-	// State names what kept it from being ready, one of the
-	// dragonflyRollout* states; "" when Ready.
-	State string
-	// Detail is the look's own explanation, with its numbers.
-	Detail string
-	// Err is the error that made a site unreadable or the comparison
-	// impossible.
-	Err error
-}
-
-// The states of a rollout readiness check that is not Ready. They are the
-// `state` field of the rollout's log lines.
-const (
-	// The target is not in stable sync: link down, full sync, loading.
-	// Looking again within seconds does not change it.
-	dragonflyRolloutNotLinked = "NotLinked"
-	// The target is linked and behind the source's position after
-	// dragonflyRolloutSyncWait.
-	dragonflyRolloutBehind = "Behind"
-	// A site could not be read (unreachable, a transport error).
-	dragonflyRolloutUnreadable = "Unreadable"
-	// A site refuses the position command, or the two sites report their
-	// positions in different forms: the sync can never be proven
-	// (dragonflySyncUnprovable). The rollout does not promote on that;
-	// it stays until the cause is removed.
-	dragonflyRolloutUnprovable = "Unprovable"
-)
+type dragonflyRolloutCheck = dragonflySyncCheck
 
 // dragonflyRolloutCandidateSyncReady reports whether target can take over
-// from source for a rollout: it reads the source's replication position,
-// then looks at the target (dragonflyTargetSync).
+// from source for a rollout (dragonflyProveSync): it reads the source's
+// replication position, then looks at the target.
 //
 // It runs on the group controller's reconcile worker, which serves every
 // group, so it waits only where waiting can help: a target that is linked
 // and behind is looked at again every dragonflyRolloutSyncPoll for up to
 // dragonflyRolloutSyncWait, or until ctx ends. Everything else returns at
 // once: a target that is not in stable sync (link down, full sync,
-// loading), a site that cannot be read, a position that cannot be
-// compared. The caller comes back on its next pass.
+// loading) and a site that cannot be read. The caller comes back on its
+// next pass.
+//
+// A position that can never be compared (a site refuses the position
+// command) does not hold the rollout for good: when the link checks hold,
+// the target is ready for a takeover with no fallback (TakeoverOnly).
+// Before, such a rollout never completed: the check returned "not ready"
+// on every pass, ahead of the promotion whose three failures are what end
+// a rollout that cannot promote, so a group whose Dragonfly user or image
+// refuses `DEBUG` or `DFLY` kept its old active pod indefinitely.
 func (r *MysqlFailoverGroupReconciler) dragonflyRolloutCandidateSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) dragonflyRolloutCheck {
-	failed := func(err error) dragonflyRolloutCheck {
-		state := dragonflyRolloutUnreadable
-		if dragonflySyncUnprovable(err) {
-			state = dragonflyRolloutUnprovable
-		}
-		return dragonflyRolloutCheck{State: state, Detail: err.Error(), Err: err}
-	}
-	pos, err := r.dragonflySourcePosition(ctx, fg, source)
-	if err != nil {
-		return failed(err)
-	}
-	deadline := time.Now().Add(dragonflyRolloutSyncWait)
-	for {
-		look, err := r.dragonflyTargetSync(ctx, fg, target, pos)
-		switch {
-		case errors.Is(err, errDragonflyTargetFollowsOther):
-			// The source was replaced between the two reads; the next
-			// pass reads its position again.
-			return dragonflyRolloutCheck{State: dragonflyRolloutBehind, Detail: look.Detail}
-		case err != nil:
-			return failed(err)
-		case look.Reached:
-			return dragonflyRolloutCheck{Ready: true}
-		case !look.Linked:
-			return dragonflyRolloutCheck{State: dragonflyRolloutNotLinked, Detail: look.Detail}
-		}
-		if !time.Now().Add(dragonflyRolloutSyncPoll).Before(deadline) {
-			return dragonflyRolloutCheck{State: dragonflyRolloutBehind, Detail: look.Detail}
-		}
-		select {
-		case <-ctx.Done():
-			return failed(ctx.Err())
-		case <-time.After(dragonflyRolloutSyncPoll):
-		}
-	}
+	return dragonflyProveSync(ctx, r.dragonflySiteDialer(fg), target, source, dragonflyRolloutSyncWait, dragonflyRolloutSyncPoll)
 }
 
 // dragonflyRolloutStallAfter is how long a rollout's target may stay not
@@ -1014,6 +973,12 @@ func (r *MysqlFailoverGroupReconciler) noteDragonflyRolloutReadiness(ctx context
 	if report {
 		st.stallReported = true
 	}
+	// A target that is ready on its link alone is said to be so once per
+	// rollout; a later check that proves it by position ends that.
+	reportUnproven := check.Ready && check.TakeoverOnly && !st.unprovenReported
+	if check.Ready {
+		st.unprovenReported = check.TakeoverOnly
+	}
 	if st == (dragonflyRolloutState{}) {
 		delete(r.dragonflyRolloutBackoff, key)
 	} else {
@@ -1022,6 +987,14 @@ func (r *MysqlFailoverGroupReconciler) noteDragonflyRolloutReadiness(ctx context
 	r.dragonflyRolloutMu.Unlock()
 
 	logger := log.FromContext(ctx)
+	if reportUnproven {
+		logger.Info("dragonfly: sync could not be proven by position; relying on REPLTAKEOVER",
+			"source", source, "target", target, "error", check.Detail, "fg", key.fg)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflySyncUnproven, "%s",
+				dragonflySyncUnprovenMessage(target, source, check.Detail))
+		}
+	}
 	switch {
 	case check.Ready && was != "":
 		logger.Info("dragonfly rollout: target in sync", "target", target, "source", source, "fg", key.fg)

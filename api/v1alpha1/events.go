@@ -358,8 +358,10 @@ const (
 const (
 	// The operator is promoting a Dragonfly replica: in a planned
 	// failover's `PromotingDragonfly` phase, because the MySQL active site
-	// differs from the Dragonfly master, or because the Dragonfly master
-	// is unreachable and exactly one healthy replica can take over.
+	// differs from the Dragonfly master and the replica there is in sync,
+	// because the Dragonfly master is unreachable and a healthy replica can
+	// take over, or because the master restarted without the cache its
+	// replica holds.
 	EventDragonflyPromotionStarted = "DragonflyPromotionStarted"
 	// A Dragonfly target was promoted with `REPLTAKEOVER` and the active
 	// Service now points at it. A promotion that fell back to `REPLICAOF
@@ -371,6 +373,10 @@ const (
 	// run's source nor its target, or `PromotingDragonfly` passed its
 	// deadline. The source's traffic label is restored; a planned failover
 	// then continues best-effort or rolls back, as `onSyncTimeout` says.
+	// Outside a planned failover, a `REPLTAKEOVER` that failed while the
+	// old master still answers as a master is not followed by `REPLICAOF
+	// NO ONE`: the old master keeps the role and the promotion is tried
+	// again later.
 	// Also emitted when the old master could not be demoted after a
 	// promotion: it is kept out of the active Service and needs manual
 	// intervention.
@@ -383,13 +389,24 @@ const (
 	EventDragonflyPromotionDeferred = "DragonflyPromotionDeferred"
 	// A planned failover's target Dragonfly replica did not catch up
 	// within `spec.dragonfly.plannedFailover.maxSyncWait`, or the wait
-	// was ended at once because the sync can never be proven (the source
-	// gave no replication position; the target refuses the position
-	// command or reports it in another form). With
+	// was ended at once because the source gave no replication position
+	// for another reason than refusing the command. With
 	// `onSyncTimeout: Proceed` (the default) the takeover goes ahead and
 	// `status.plannedFailover.dragonfly.sessions` records `Lost`; with
 	// `Fail` the run rolls back before MySQL is promoted.
 	EventDragonflySyncTimedOut = "DragonflySyncTimedOut"
+	// The sync of a Dragonfly replica with its master could not be proven
+	// by replication position before a takeover (a planned failover, a
+	// rollout of the active site, or the take-back to the MySQL active
+	// site): a site refuses `DFLY REPLICAOFFSET` or `DEBUG REPLICA OFFSET`
+	// (no such command, or the operator's ACL user may not run it), or the
+	// two report positions in different forms. The replica reports a
+	// healthy link to that master, so the operator goes on with
+	// `REPLTAKEOVER` alone, which waits for the replica itself and changes
+	// nothing when it fails; it never falls back to `REPLICAOF NO ONE`
+	// then. Give the operator's Dragonfly user the two commands to get the
+	// proof back. Emitted once per run, rollout or take-back.
+	EventDragonflySyncUnproven = "DragonflySyncUnproven"
 	// A Dragonfly promotion succeeded without `REPLTAKEOVER`: with
 	// `REPLICAOF NO ONE` after the takeover failed or was skipped because
 	// the old master was unreachable, or because the target held the
@@ -411,21 +428,38 @@ const (
 	// attached (`connected_slaves=0`) was reattached as a replica of the
 	// active master.
 	EventDragonflyOldSiteReconfigured = "DragonflyOldSiteReconfigured"
+	// The active Dragonfly master restarted without the cache, and its
+	// replica was not promoted in its place because the operator had seen
+	// the replica cut off from the master while the master was still
+	// running: its copy is stale by however long that lasted and can hold
+	// keys the application has since deleted. The replica is re-attached
+	// to the restarted master and takes its content, so with an empty
+	// master the cache starts empty. Check why the replica could not reach
+	// the master (a NetworkPolicy, a firewall, the replication password).
+	EventDragonflyStaleReplicaNotPromoted = "DragonflyStaleReplicaNotPromoted"
+	// The Dragonfly master is on another site than the MySQL active site
+	// and the operator has waited two minutes to take it over: the
+	// Dragonfly replica on the MySQL active site is not linked to the
+	// master, is still behind it, or cannot be read (the message says
+	// which). The master stays where it is, serving, until the replica is
+	// in sync. Emitted once per stall.
+	EventDragonflyFollowStalled = "DragonflyFollowStalled"
 	// Dragonfly advertises `REPLTAKEOVER` again after a
 	// `DragonflyReplTakeoverUnsupported` Warning, typically after an image
 	// change.
 	EventDragonflyReplTakeoverSupported = "DragonflyReplTakeoverSupported"
 	// A Dragonfly site does not advertise `REPLTAKEOVER`. Emergency
 	// promotions fall back to `REPLICAOF NO ONE`, which does not preserve
-	// session continuity. Emitted when the capability probe changes to
-	// unsupported; use a Dragonfly image that supports the command.
+	// session continuity; over an old master that still serves, only for a
+	// target that reports stable sync with it. Emitted when the capability
+	// probe changes to unsupported; use a Dragonfly image that supports
+	// the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
 	// A rollout of the active Dragonfly site (a changed pod template) has
 	// waited two minutes for the replica it promotes first to be in sync:
-	// the replica is not linked to the master, is still behind it, cannot
-	// be read, or does not report a replication position the operator can
-	// compare (the message says which). The active site keeps its old pod
-	// until the replica is in sync. Emitted once per stall.
+	// the replica is not linked to the master, is still behind it, or
+	// cannot be read (the message says which). The active site keeps its
+	// old pod until the replica is in sync. Emitted once per stall.
 	EventDragonflyRolloutStalled = "DragonflyRolloutStalled"
 	// A snapshot-restore upgrade run started: `spec.dragonfly.upgradeStrategy`
 	// is `SnapshotRestore` and a site's live StatefulSet runs an image other

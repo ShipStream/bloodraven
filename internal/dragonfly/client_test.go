@@ -341,21 +341,63 @@ func TestReplTakeoverIOTimeoutCoversServerBudget(t *testing.T) {
 	}
 }
 
-func TestClientKillType(t *testing.T) {
+// KillClients lists the connections and closes each by id, leaving its own
+// connection and a replica's links alone. The list is one captured from
+// Dragonfly v1.38.0 (a replica attached, three clients), shortened.
+func TestClientKillClients(t *testing.T) {
+	const list = "id=3 addr=192.168.240.3:36118 laddr=192.168.240.2:6379 fd=10 name=repl_flow_1 tid=0 phase=readsock\n" +
+		"id=5 addr=127.0.0.1:33438 laddr=127.0.0.1:6379 fd=12 name=app1 tid=0 phase=readsock\n" +
+		"id=7 addr=127.0.0.1:33452 laddr=127.0.0.1:6379 fd=14 name=7 tid=0 phase=process\n" +
+		"id=2 addr=192.168.240.3:36102 laddr=192.168.240.2:6379 fd=9 name=repl_ctrl_1 tid=1 phase=readsock\n" +
+		"id=6 addr=127.0.0.1:33450 laddr=127.0.0.1:6379 fd=13 name=6 tid=1 flags=P phase=readsock\n" +
+		"id=9 addr=127.0.0.1:33460 laddr=127.0.0.1:6379 fd=15 name=9 tid=1 phase=readsock\n"
 	srv := newFakeServer(t)
-	// Real Dragonfly returns the count of killed connections as an
-	// integer reply. Programme that explicitly so we exercise the
-	// integer-reply branch in readReply rather than falling through to
-	// the default "+OK\r\n".
-	srv.reply("CLIENT KILL TYPE NORMAL", ":7\r\n")
+	srv.reply("CLIENT ID", ":7\r\n")
+	srv.reply("CLIENT LIST", bulkString(list))
+	srv.reply("CLIENT KILL ID 5", ":1\r\n")
+	srv.reply("CLIENT KILL ID 6", ":1\r\n")
+	// Gone by the time its turn came.
+	srv.reply("CLIENT KILL ID 9", ":0\r\n")
 	c := mustNewClient(t, srv.addr(), "")
 	defer c.Close()
-	if err := c.ClientKillType(context.Background(), "NORMAL"); err != nil {
-		t.Fatalf("ClientKillType: %v", err)
+	killed, err := c.KillClients(context.Background())
+	if err != nil || killed != 2 {
+		t.Fatalf("KillClients = %d, %v; want 2 closed", killed, err)
 	}
-	got := <-srv.commandsCh
-	if want := []string{"CLIENT", "KILL", "TYPE", "NORMAL"}; !equalSlices(got, want) {
-		t.Errorf("got command %v, want %v", got, want)
+	var kills []string
+	for len(srv.commandsCh) > 0 {
+		if cmd := <-srv.commandsCh; len(cmd) == 4 && cmd[1] == "KILL" {
+			kills = append(kills, strings.Join(cmd, " "))
+		}
+	}
+	want := []string{"CLIENT KILL ID 5", "CLIENT KILL ID 6", "CLIENT KILL ID 9"}
+	if !equalSlices(kills, want) {
+		t.Fatalf("kill commands %v, want %v: not the caller (7), not the replication links (2, 3)", kills, want)
+	}
+}
+
+// A server that refuses one kill does not keep the others; a server that
+// refuses CLIENT LIST closes nothing and says why.
+func TestClientKillClients_Errors(t *testing.T) {
+	srv := newFakeServer(t)
+	srv.reply("CLIENT ID", ":1\r\n")
+	srv.reply("CLIENT LIST", bulkString("id=4 name=a\nid=5 name=b\n"))
+	srv.reply("CLIENT KILL ID 4", "-ERR no such client\r\n")
+	srv.reply("CLIENT KILL ID 5", ":1\r\n")
+	c := mustNewClient(t, srv.addr(), "")
+	defer c.Close()
+	killed, err := c.KillClients(context.Background())
+	if killed != 1 || err == nil || !strings.Contains(err.Error(), "CLIENT KILL ID 4") {
+		t.Fatalf("KillClients = %d, %v; want 1 closed and the first refusal", killed, err)
+	}
+
+	refusing := newFakeServer(t)
+	refusing.reply("CLIENT ID", ":1\r\n")
+	refusing.reply("CLIENT LIST", "-NOPERM default has no ACL permissions\r\n")
+	c2 := mustNewClient(t, refusing.addr(), "")
+	defer c2.Close()
+	if killed, err := c2.KillClients(context.Background()); killed != 0 || !IsCommandRefused(err) {
+		t.Fatalf("KillClients = %d, %v; want the refusal of CLIENT LIST", killed, err)
 	}
 }
 
