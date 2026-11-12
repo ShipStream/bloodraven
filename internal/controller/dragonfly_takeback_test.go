@@ -56,6 +56,20 @@ func (h *restartHarness) ledElsewhere() {
 	shrinkEmergencyWaits(h.mgr)
 }
 
+// agePromotionRecord makes status.dragonfly.lastPromotionTime 40 s old.
+func (h *restartHarness) agePromotionRecord() {
+	h.t.Helper()
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := h.c.Get(context.Background(), h.key, &fg); err != nil {
+		h.t.Fatal(err)
+	}
+	then := metav1.NewTime(time.Now().Add(-40 * time.Second))
+	fg.Status.Dragonfly.LastPromotionTime = &then
+	if err := h.c.Status().Update(context.Background(), &fg); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 // takenBack reports whether the Dragonfly master was moved back to dc1.
 func (h *restartHarness) takenBack() bool {
 	h.t.Helper()
@@ -293,6 +307,16 @@ func TestDragonflyManager_Tick_TakeBackWithoutAPositionIsTakeoverOnly(t *testing
 		}
 		if !strings.Contains(h.logs.String(), "the target's sync was not proven by position") {
 			t.Fatalf("the reason was not logged\n%s", h.logs.String())
+		}
+		// The failed attempt holds the next one off for 30 s. The retry
+		// does not say again that the position is missing.
+		h.agePromotionRecord()
+		h.tick(1)
+		if h.dc1.replTakeoverCalls != 2 {
+			t.Fatalf("REPLTAKEOVER sent %d times, want a second attempt once the record is 30 s old", h.dc1.replTakeoverCalls)
+		}
+		if got := h.eventsOf(v1alpha1.EventDragonflySyncUnproven); len(got) != 1 {
+			t.Fatalf("DragonflySyncUnproven emitted %d times over two attempts, want once", len(got))
 		}
 	})
 	t.Run("the takeover fails and the old master is gone by then: still no fallback", func(t *testing.T) {

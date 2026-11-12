@@ -480,7 +480,9 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 			if check.TakeoverOnly {
 				fallback = dragonflyTakeoverOnly
 			}
-			m.promoteLocked(workCtx, &fg, target, oldSource, m.emergencyTakeoverTimeout, fallback)
+			if m.promoteLocked(workCtx, &fg, target, oldSource, m.emergencyTakeoverTimeout, fallback) {
+				m.endFollowWait()
+			}
 			return
 		}
 	} else {
@@ -692,8 +694,19 @@ func (m *DragonflyManager) takeBackCheck(ctx context.Context, fg *v1alpha1.Mysql
 	return check, check.Ready
 }
 
-// clearFollowWait forgets a take-back that is no longer wanted.
+// clearFollowWait ends the wait of a take-back that is not wanted in this
+// cycle: the two sites agree, or a failed attempt holds the next one off.
+// The pair and whether its missing position proof was reported stay, so a
+// take-back that fails and is tried again 30 s later does not report it
+// again.
 func (m *DragonflyManager) clearFollowWait() {
+	m.mu.Lock()
+	m.followWait.state, m.followWait.since, m.followWait.stallReported = "", time.Time{}, false
+	m.mu.Unlock()
+}
+
+// endFollowWait forgets a take-back that was made.
+func (m *DragonflyManager) endFollowWait() {
 	m.mu.Lock()
 	m.followWait = dragonflyFollowWait{}
 	m.mu.Unlock()
@@ -1485,6 +1498,7 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			pointedRight := snap.Info.MasterHost == masterHost && snap.Info.MasterPort == int(masterPort)
 			linkUp := snap.Info.MasterLinkStatus == "up"
 			if pointedRight && linkUp {
+				m.noteRestartWait(snap.Name, active, false, "")
 				continue
 			}
 			verdict, why := m.restartedMasterVerdict(fg, active, snaps, activeSnap, &snap)
@@ -2529,7 +2543,7 @@ const (
 //
 // Step 4 is for an old master that is gone. After a REPLTAKEOVER that
 // failed, REPLICAOF NO ONE is not sent while the old master still answers
-// as a master (sourceStillServes): it holds the whole cache, and the
+// as a master (noFallbackAfterTakeover): it holds the whole cache, and the
 // target, which Dragonfly just refused to hand it to, would replace it
 // with what it happens to hold, after which the old master's pod is
 // deleted. The promotion then fails and the old master keeps its role and
@@ -2908,7 +2922,10 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 // logged and dropped. After a REPLTAKEOVER the old source's process has
 // exited (v1.38, v2.1) and there is nothing to reach; the connections that
 // matter are those to an old source that is still up, which a connection
-// already established through the active Service stays pinned to.
+// already established through the active Service stays pinned to. The
+// connections are closed one command each within two seconds; on an old
+// source with more clients than that allows, the rest go when its pod is
+// deleted right after.
 //
 // Log lines include `fg` per the site/content/docs/8.observability/7.log-schema.md Event
 // reference contract.
