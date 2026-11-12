@@ -1733,3 +1733,56 @@ A group that ran with encryption at rest and PITR before the release that archiv
 - Do not edit, replace or copy the keyring file, and do not restart sidecars or change the archive prefix to clear a decryption error.
 - Do not add `encryption` to the bound profile in place or edit its Secret: the change is refused and the condition stays `False` until it is reverted.
 - Do not try to disable `spec.encryptionAtRest`: admission refuses turning it off.
+
+## 50. Pods did not roll after an operator upgrade, or the paced rollout is halted
+
+### Symptoms
+- After an operator upgrade some or all groups still run the previous release's pods (no launcher `command` on the mysql container, the old sidecar image), and no ordered update started for them.
+- A spec change that should restart a group's pods (`spec.image`, MySQL configuration) is accepted and nothing rolls.
+- `status.rollout.phase` is `Pending`, `Stalled`, or absent on every group; alerts `BloodravenRolloutStalled`, `BloodravenRolloutPendingTooLong` or `BloodravenRolloutRecordNotStored`; Events `RolloutStalled`, `RolloutDeferred`, `RolloutRecordNotStored`.
+
+### Cause
+The operator rolls a pod change that its own release causes (a new launcher, a pod render change, a new default sidecar image) one failover group at a time. Each site Deployment and Dragonfly StatefulSet carries `bloodraven.shipstream.io/rendered-by`, the release that last wrote its pod template. A workload another release wrote, whose template the running operator would change, is written only once the group is admitted in `status.rollout`. The drift check reads the same record, so an unadmitted group starts no ordered update. Consequences that look like faults and are not:
+- Waiting groups keep their old pods. That is the design: one group holds the slot at a time, in namespace and name order, with a soak (`rollout.soak`, 1m) between groups.
+- While a group waits, spec changes that restart its pods wait with it, together with the site ConfigMaps.
+- A group that is not stable (not `Ready`, a restore, a planned failover, an ordered update, `AutomaticFailoverHeld`) is passed over (`Pending` / `GroupNotStable`) and is never admitted on its own while it stays unstable.
+- A group whose roll started and cannot finish keeps the slot (`Stalled`). Every other group reports `Pending` / `RolloutHalted`. A bad release stops at that first group.
+- With a `MysqlFailoverGroup` CRD older than the operator the API server drops `status.rollout`, no admission can be stored, and no group is rolled at all.
+
+Not held by the pacer: a change that comes from the group itself on a workload the running release already wrote, a new site's Deployment, and the restart of a clone recipient under encryption at rest (`unsealReason: Clone`).
+
+### Diagnostic steps
+1. Read every group's record:
+   ```bash
+   kubectl get mysqlfailovergroup -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.status.rollout.phase}{"\t"}{.status.rollout.reason}{"\t"}{.status.rollout.message}{"\n"}{end}'
+   ```
+   `scripts/triage.sh` prints the same record for one group as `Paced rollout:`, and `kubectl bloodraven status <group>` as `Rollout:` while it is not `Complete`.
+2. No group has a record although pods should roll: check the CRD and the operator.
+   ```bash
+   kubectl get crd mysqlfailovergroups.shipstream.io -o yaml | grep -c 'rollout:'      # 0 = CRD older than the operator
+   kubectl get events -A --field-selector reason=RolloutRecordNotStored
+   kubectl logs -n <operator-ns> deploy/bloodraven | jq -c 'select(.msg | startswith("paced rollout"))'
+   ```
+   `paced rollouts are disabled (BLOODRAVEN_ROLLOUT_PACING)…` at operator start means `rollout.pacing=false`: nothing is paced and `status.rollout` is not written. No `paced rollout: pacer started` line means this pod is not the leader or the operator predates pacing.
+3. One group is `Stalled`: that group is the problem, not the waiting ones. `reason: OrderedUpdateStalled` copies the `Updating` condition's message (site, pod, cause): continue with [playbook 34](#34-ordered-update-stalled-on-a-pod-that-is-not-ready-orderedupdatestalled). `reason: StallTimeout` lists what is outstanding after `rollout.stallAfter` (30m): workloads not rolled yet, rollouts not finished, or why the group is not stable (a handoff that keeps being refused: playbooks 23 and 33).
+4. Groups are `Pending` and none is `Rolling` or `Stalled`: read each reason. `GroupNotStable` names the unstable reason in the message; `NotStarted` follows a `RolloutDeferred` Event whose message says what held the group after it was admitted.
+5. Compare a workload's renderer with the record when in doubt:
+   ```bash
+   kubectl get deploy -n <ns> -l bloodraven.shipstream.io/failover-group=<group> -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.bloodraven\.shipstream\.io/rendered-by}{"\n"}{end}'
+   kubectl get mysqlfailovergroup <group> -n <ns> -o jsonpath='{.status.rollout.renderer}{"\n"}'
+   ```
+   A Deployment whose annotation equals the record's `renderer` was written by the running release.
+
+### Safe remediation
+- **CRD older than the operator**: apply the CRDs of the release the operator runs with server-side apply. The rollout starts within seconds. Never apply v1.7.0 or later CRDs to a cluster that still runs v1.6.0.
+- **Stalled, cause in the group** (a custom `spec.image` without `/bin/bash` or the entrypoint, an unschedulable pod, a divergent standby): fix the group. It is admitted, so its spec changes are not held. When its roll completes the next group is admitted after the soak.
+- **Stalled, cause in the release**: roll the operator back to the release that ran before. Waiting groups then have nothing to roll; the groups already rolled are rolled back one at a time, the stalled one first. A rollback to v1.7.0, which has no pacing, rolls them back at the same time.
+- **Stalled, cause in the group, no fix soon**: `kubectl annotate mysqlfailovergroup <group> -n <ns> bloodraven.shipstream.io/rollout-release-slot=true` lets the next group be admitted. The group's own roll continues and its record stays `Stalled`. Remove the annotation when it has completed.
+- **One waiting group must roll now** (a spec change waits, or the group is never stable): check the group first, then `kubectl annotate mysqlfailovergroup <group> -n <ns> bloodraven.shipstream.io/rollout-admit=true`. This admits it outside the queue, past a halt and without the stability check. Remove the annotation when the roll has completed: while it is set every later release rolls this group without waiting, and the operator reads the key, not the value.
+- **Every group must roll now**: `helm upgrade … --reuse-values --set rollout.pacing=false` rolls every group with a pending change at once. State the blast radius before proposing it: an ordered update with a handoff in every `OrderedUpdate` group at the same time, every site of every `Recreate` group restarted together.
+
+Do not:
+- Edit `status.rollout` or the `rendered-by` annotation by hand, or patch a site Deployment to "push" the new template: the operator reverts workloads and decides on the record.
+- Delete pods to make them pick up the release: a pod is recreated from the Deployment's template, which has not changed.
+- Use `rollout-release-slot` or `rollout.pacing=false` while it is unknown why the first group stalled. If the release is the cause, the next groups fail the same way.
+- Switch a group to `Recreate` to get it past a stall: every site then restarts together.

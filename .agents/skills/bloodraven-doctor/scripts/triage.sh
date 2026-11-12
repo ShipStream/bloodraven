@@ -198,6 +198,27 @@ if [[ -n "$UPDATING" ]]; then
         echo "  The ordered update stopped on a site whose pod is not Ready and rolls nothing else until it is: see playbook 34."
     fi
 fi
+# The group's place in the operator's paced rollout of a pod change that an
+# operator release causes (status.rollout). Absent when the group has had
+# nothing to roll, and when the installed CRD is older than the operator
+# (the API server then drops the field and no group is rolled).
+ROLLOUT=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.rollout.phase}{" reason="}{.status.rollout.reason}{" renderer="}{.status.rollout.renderer}{" message="}{.status.rollout.message}' 2>/dev/null || true)
+if [[ -n "$ROLLOUT" && "$ROLLOUT" != " reason= renderer= message=" ]]; then
+    echo "Paced rollout:       $ROLLOUT"
+    case "${ROLLOUT%% *}" in
+        Stalled)
+            echo "  This group's roll started and has not finished. It keeps the rollout slot, so no other group is rolled: see playbook 50." ;;
+        Pending)
+            case "$ROLLOUT" in
+                *"reason=RolloutHalted "*)
+                    echo "  The rollout is halted at the group named in the message. This group keeps its old pods, and spec changes that restart pods wait: see playbook 50." ;;
+                *"reason=GroupNotStable "*)
+                    echo "  The group is passed over until it is stable; it keeps its old pods and is never admitted on its own while unstable: see playbook 50." ;;
+                *)
+                    echo "  The group waits for the rollout slot and keeps its old pods; spec changes that restart pods wait with it (playbook 50)." ;;
+            esac ;;
+    esac
+fi
 # status.plannedFailoverHold (summarised by a True AutomaticFailoverHeld
 # condition) means a planned failover ended ManualRecoveryRequired: automatic
 # failover is off for this group until a human resolves the split brain and
