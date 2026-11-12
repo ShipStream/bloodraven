@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -165,6 +166,17 @@ type siteStateConnector struct {
 	mu        sync.Mutex
 	master    string
 	replicaOf map[string]string
+	// promoted lists the sites made master, in order. A test that must
+	// know that a promotion happened reads it here: the master of now and
+	// the status record are both overwritten by the next promotion.
+	promoted []string
+}
+
+// promotions returns the sites made master so far, in order.
+func (s *siteStateConnector) promotions() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.promoted...)
 }
 
 func (s *siteStateConnector) connect(_ context.Context, addr, _ string) (DragonflyConnection, error) {
@@ -201,6 +213,7 @@ func (c *siteStateConn) ReplicationPosition(ctx context.Context) (dragonfly.Posi
 func (c *siteStateConn) ReplTakeover(context.Context, time.Duration) error {
 	c.s.mu.Lock()
 	c.s.master = c.site
+	c.s.promoted = append(c.s.promoted, c.site)
 	c.s.mu.Unlock()
 	return nil
 }
@@ -272,7 +285,24 @@ func TestDragonflyManager_PublishedMySQLFollowSurvivesInFlightTickPromotion(t *t
 	next := time.Now().Truncate(time.Second).Add(time.Second + 50*time.Millisecond)
 	time.Sleep(time.Until(next))
 	close(resume)
-	waitUntil(t, "Tick's promotion to be recorded", dragonflyPromotedTo(mgr.client, mgr.fgKey, "dc2"))
+	// Tick's promotion of dc2 and the queued request run one after the
+	// other on Run, with nothing between them. The status record of the
+	// dc2 promotion is therefore a state that lasts as long as the queued
+	// request takes to start, and a wait that polls for it misses it when
+	// this goroutine is not scheduled in that time (it timed out in 2 of
+	// 30 runs on a loaded machine, and in most runs under GOMAXPROCS=1,
+	// with the manager having done everything right). The list of
+	// promotions only grows.
+	waitUntil(t, "Tick's promotion of dc2", func() bool { return slices.Contains(state.promotions(), "dc2") })
+	waitUntil(t, "the queued request to be decided", func() bool {
+		if got := state.promotions(); len(got) >= 2 && got[len(got)-1] == "dc1" {
+			return true
+		}
+		// The failure this test pins: the request is dropped.
+		logs.mu.Lock()
+		defer logs.mu.Unlock()
+		return slices.ContainsFunc(logs.msgs, func(m string) bool { return strings.Contains(m, "superseded") })
+	})
 	waitUntil(t, "the queued request to run", func() bool {
 		mgr.pendingMu.Lock()
 		defer mgr.pendingMu.Unlock()
