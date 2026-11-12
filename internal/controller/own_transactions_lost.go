@@ -158,7 +158,9 @@ var errOwnTransactionsLost = errors.New("the site lacks transactions it issued i
 //     a hole (no replication start, no promotion) and asks for no reclone.
 //     The first comparison with the confirmed primary makes it a hole (the
 //     primary holds transactions the site lacks) or a witness report (it
-//     does not).
+//     does not; if status named that primary as the holder, the report
+//     names no site from then on). Until then the review gives it no other
+//     holder while any site is silent (reviewOwnLossReports).
 //
 // One rule ends a report that is not a hole against the current primary
 // (reviewOwnLossReports, and the primary re-assert for its target): every
@@ -637,8 +639,12 @@ func (tm *TopologyManager) ownLossHoleSite(site string) bool {
 // what that site holds, and the primary not holding it is no proof that
 // nobody does: such a report becomes (or stays) a witness report, the site
 // may replicate from the primary again, and reviewOwnLossReports ends it
-// when every other site has answered and none holds the set. An empty set
-// from a comparison with one witness changes nothing, for the same reason.
+// when every other site has answered and none holds the set. A report that
+// names this primary and was not made as a hole against it (restored from
+// status, or made by a promotion decision while it was no primary yet)
+// loses its holder at that point: the primary is known not to hold the
+// set. An empty set from a comparison with one witness changes nothing,
+// for the same reason.
 //
 // It reports whether the report changed, and returns the log call to make
 // once tm.mu is released (nil when there is nothing to say). Caller holds
@@ -657,12 +663,22 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 					"site", site, "comparedTo", comparedTo, "reason", why)
 			}
 		}
-		if rec.witness && rec.detectedBy != "" {
-			// A witness report: the primary was never its holder.
+		if rec.witness && rec.detectedBy != "" && rec.comparedTo != comparedTo {
+			// A witness report that names another site (or none): the
+			// primary was never its holder.
 			return false, nil
 		}
-		// A hole against another primary, or a restored report: the
-		// primary of now does not hold the transactions.
+		// A hole against another primary, a restored report, or a witness
+		// report that names the site which is the primary now: the primary
+		// of now does not hold the transactions.
+		if rec.comparedTo == comparedTo {
+			// The report named this primary (restored from status after the
+			// hole closed, or made while it was no primary yet). It is
+			// known not to hold them, so it is no longer the holder: kept
+			// as the holder it would make the report hold like a hole
+			// (ownLossHoleLocked) for as long as any other site is silent.
+			rec.comparedTo = ""
+		}
 		holder := rec.comparedTo
 		rec.witness = true
 		if rec.detectedBy == "" {
@@ -1098,11 +1114,12 @@ func (tm *TopologyManager) readOwnLossSubject(ctx context.Context, site *siteTra
 // site that left the group is not asked. Any other site that does not
 // answer proves nothing, and the report stays: a site is not made
 // promotable again on silence. A site that holds the transactions becomes
-// the report's holder. The primary is asked under every server_uuid the
-// site has had: what it holds of them is a hole, which the audit and
-// recovery report with their own proof, and until they have, this pass
-// leaves the report alone. It runs with or without a primary, and only
-// reads.
+// the report's holder, except in two cases in which this pass leaves the
+// report as it is. The primary is asked under every server_uuid the site
+// has had: what it holds of them is a hole, which the audit and recovery
+// report with their own proof. And a report restored from status gets no
+// holder while any site is silent (the silent site may be the primary).
+// It runs with or without a primary, and only reads.
 func (tm *TopologyManager) reviewOwnLossReports(ctx context.Context) bool {
 	now := tm.clock.Now()
 	tm.mu.Lock()
@@ -1147,9 +1164,10 @@ func (tm *TopologyManager) reviewOwnLossReports(ctx context.Context) bool {
 		live := tm.liveSiteServerUUIDs(name, snap.ServerUUID)
 		uuids := tm.noteSiteServerUUID(ctx, name, snap.ServerUUID)
 		tm.mu.RLock()
-		named := ""
+		named, restored := "", false
 		if rec := tm.ownLoss[name]; rec != nil {
 			named = rec.comparedTo
+			restored = rec.detectedBy == ""
 		}
 		silent, primaryHolds := false, false
 		var peers []string
@@ -1183,6 +1201,18 @@ func (tm *TopologyManager) reviewOwnLossReports(ctx context.Context) bool {
 			}
 			return strings.Compare(a, b)
 		})
+		if primaryHolds || (restored && silent) {
+			// The primary holds transactions the site issued and lacks:
+			// that is a hole, which recovery and the audit report with
+			// their own proof, and another site that holds them too (every
+			// healthy replica of that primary does) is not the report's
+			// holder. And a report restored from status is not given a
+			// holder while a site is silent: the silent site may be the
+			// primary this manager has not classified yet (its first poll
+			// after a restart), and the report would then name a healthy
+			// replica and let the site's replication start over a hole.
+			continue
+		}
 		held := false
 		for _, peer := range peers {
 			lost := ownLostOnWitness(sets[peer], siteSet, live)
@@ -1323,8 +1353,16 @@ func (tm *TopologyManager) proveOwnLossHole(ctx context.Context, primary, site *
 				pos, err = positions.ReadBinlogPosition(probeCtx)
 				return err
 			}); err != nil {
-				// The coordinates cannot be read (binary logging off, a
-				// missing privilege): the single comparison stands.
+				if !errors.Is(err, mysql.ErrBinlogPositionUnavailable) {
+					// A timeout or a lost connection says nothing about
+					// the primary's log: nothing is concluded, and the
+					// next look asks again. Taken for "no position" it
+					// would turn lag into a reported hole during a replay.
+					return mysql.GTIDSet{}, false
+				}
+				// The primary reports no coordinates however often it is
+				// asked (binary logging off, or its account may not run
+				// the statement): the single comparison stands.
 				tm.logger.Warn("own transactions lost: the primary's binary log position could not be read; a deficit is not checked against replication lag",
 					"site", site.name, "primary", primary.name, "error", err)
 				return lost, true

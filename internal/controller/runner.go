@@ -1167,6 +1167,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			tm.SetOwnTransactionsLostUnknown(site.Name)
 			r.logger.Info("restored own transactions lost state from CR status without its set: the installed CRD is older than the operator",
 				"fg", nn, "site", site.Name, "remedy", "apply the CRDs of this release (helm does not upgrade the crds/ of a chart)")
+		} else if ownLossReportWithoutSet(site) {
+			// Such a report, restored once and then stored against the
+			// current CRD: it still has no set, and reads RecloneRequired.
+			// Without this branch a second restart would lose it.
+			tm.SetOwnTransactionsLostUnknown(site.Name)
+			r.logger.Info("restored own transactions lost state from CR status without its set",
+				"fg", nn, "site", site.Name)
 		}
 		if site.RecoveryState != v1alpha1.RecoveryStateBlocked && site.RecoveryState != v1alpha1.RecoveryStateInProgress && site.DivergentGtid == "" {
 			continue

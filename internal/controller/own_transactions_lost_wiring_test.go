@@ -136,3 +136,69 @@ func TestStartManager_RestoresAnOwnLossReportDegradedForAnOlderCRD(t *testing.T)
 		t.Fatal("the restored report does not keep the site's replication from being started")
 	}
 }
+
+// A report restored without its set is stored, once the CRDs of this
+// release are applied, as recoveryState RecloneRequired with no lostGtid.
+// A second operator restart restores it from that shape too: before, no
+// branch of the restore matched it and the report was lost.
+func TestStartManager_RestoresAnOwnLossReportWithoutASetAtASecondRestart(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	fg.Status.Sites = []v1alpha1.SiteStatus{
+		{Name: "dc1"},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateBlocked},
+	}
+	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	first := registeredManager(r, FailoverGroupNamespacedName(fg))
+	if first == nil {
+		t.Fatal("no manager registered")
+	}
+	// What the first manager publishes for the report once the restored
+	// (empty) divergence block is gone.
+	first.tm.mu.Lock()
+	delete(first.tm.recovery, "dc2")
+	first.tm.mu.Unlock()
+	var stored v1alpha1.SiteStatus
+	for _, s := range first.tm.buildSnapshot(nil).Sites {
+		if s.Name == "dc2" {
+			stored = v1alpha1.SiteStatus{Name: s.Name, RecoveryState: s.RecoveryState, LostGtid: s.LostGtid, DivergentGtid: s.DivergentGtid}
+		}
+	}
+	if stored.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || stored.LostGtid != "" {
+		t.Fatalf("published site = %+v, want RecloneRequired without a lostGtid", stored)
+	}
+	if !ownLossReportWithoutSet(stored) || ownLossReportDegradedForOlderCRD(stored) {
+		t.Fatalf("%+v is not recognised as a report stored without its set", stored)
+	}
+	for _, s := range []v1alpha1.SiteStatus{
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, LostGtid: lossLostGTID},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateInProgress},
+		{Name: "dc2"},
+	} {
+		if ownLossReportWithoutSet(s) {
+			t.Fatalf("%+v was taken for a report stored without its set", s)
+		}
+	}
+
+	// The second restart, on that status.
+	r2, _, fg2, _ := lifecycleRunner(t)
+	fg2.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1"}, stored}
+	if err := r2.startManager(context.Background(), fg2, mustTopologyConfig(fg2), nil); err != nil {
+		t.Fatalf("second startManager: %v", err)
+	}
+	mt := registeredManager(r2, FailoverGroupNamespacedName(fg2))
+	if mt == nil {
+		t.Fatal("no manager registered at the second start")
+	}
+	rec := ownLossOf(mt.tm, "dc2")
+	if rec == nil || rec.lostGtid != "" || rec.witness || rec.detectedBy != "" {
+		t.Fatalf("report after the second restart = %+v, want it restored without a set and without a kind", rec)
+	}
+	if err := mt.tm.liveHandoffRefusal("dc2")(); err == nil {
+		t.Fatal("handoff to dc2 is not refused after the second restart")
+	}
+	if err := mt.tm.withReplicaStartGate("dc2", func() error { return nil }); err == nil {
+		t.Fatal("the report restored at the second restart does not keep the site's replication from being started")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -249,11 +250,23 @@ type BinlogPosition struct {
 	GtidExecuted string
 }
 
+// ErrBinlogPositionUnavailable marks a ReadBinlogPosition error that says
+// the server will not report a position however often it is asked: the
+// account may not run the statement (error 1227), or the server has no
+// binary log (no row). Any other error (a timeout, a lost connection) says
+// nothing about the server and is worth another try.
+var ErrBinlogPositionUnavailable = errors.New("the server reports no binary log position")
+
+// errSpecificAccessDenied is ER_SPECIFIC_ACCESS_DENIED_ERROR: the account
+// lacks the privilege the statement needs.
+const errSpecificAccessDenied = 1227
+
 // ReadBinlogPosition reads the server's current binary log coordinates
 // together with its executed GTID set (SHOW BINARY LOG STATUS; it needs
 // the REPLICATION CLIENT privilege). The replica GTID audit uses it to
 // tell a replica that is behind from one whose receiver dropped
-// transactions (ReplicaStatus.ExecutedPast).
+// transactions (ReplicaStatus.ExecutedPast). An error that wraps
+// ErrBinlogPositionUnavailable is definitive; any other may be transient.
 func (m *checker) ReadBinlogPosition(ctx context.Context) (BinlogPosition, error) {
 	return readBinlogPosition(ctx, m.db)
 }
@@ -262,6 +275,10 @@ func (m *checker) ReadBinlogPosition(ctx context.Context) (BinlogPosition, error
 func readBinlogPosition(ctx context.Context, r sqlRunner) (BinlogPosition, error) {
 	rows, err := r.QueryContext(ctx, "SHOW BINARY LOG STATUS")
 	if err != nil {
+		var myErr *mysqldriver.MySQLError
+		if errors.As(err, &myErr) && myErr.Number == errSpecificAccessDenied {
+			return BinlogPosition{}, fmt.Errorf("show binary log status: %w (%w)", err, ErrBinlogPositionUnavailable)
+		}
 		return BinlogPosition{}, fmt.Errorf("show binary log status: %w", err)
 	}
 	defer rows.Close()
@@ -273,7 +290,7 @@ func readBinlogPosition(ctx context.Context, r sqlRunner) (BinlogPosition, error
 		if err := rows.Err(); err != nil {
 			return BinlogPosition{}, fmt.Errorf("show binary log status: %w", err)
 		}
-		return BinlogPosition{}, fmt.Errorf("show binary log status returned no row; binary logging is off")
+		return BinlogPosition{}, fmt.Errorf("show binary log status returned no row; binary logging is off: %w", ErrBinlogPositionUnavailable)
 	}
 	values := make([]sql.NullString, len(cols))
 	dest := make([]any, len(cols))

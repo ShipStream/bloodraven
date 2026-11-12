@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -289,7 +290,8 @@ func TestOwnLossLag_WithoutARunningChannelTheComparisonStands(t *testing.T) {
 		}, ""},
 		{"the primary's position cannot be read", func(f *lagFixture) {
 			f.primary.pmu.Lock()
-			f.primary.posErr = errors.New("Access denied; you need the REPLICATION CLIENT privilege")
+			f.primary.posErr = fmt.Errorf("show binary log status: Error 1227 (42000): Access denied; you need the REPLICATION CLIENT privilege (%w)",
+				mysql.ErrBinlogPositionUnavailable)
 			f.primary.pmu.Unlock()
 		}, "own transactions lost: the primary's binary log position could not be read"},
 	} {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
+
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/testutil"
 )
@@ -34,6 +36,34 @@ func TestReadBinlogPosition(t *testing.T) {
 	r = testutil.NewFakeReplica(testutil.FakeReplicaState{ExecutedGtidSet: "uuid1:1-100", BinlogStatusErr: denied})
 	if _, err := r.Checker().(binlogPositionReader).ReadBinlogPosition(ctx); !errors.Is(err, denied) {
 		t.Fatalf("ReadBinlogPosition error = %v, want the statement's", err)
+	}
+
+	// Only an error that says the server will never report a position is
+	// marked unavailable: the account may not run the statement (1227), or
+	// the server has no binary log (no row). A statement that failed for
+	// any other reason may succeed the next time, and a caller that took it
+	// for "no position" would stop telling replication lag from a loss.
+	if errors.Is(err, mysql.ErrBinlogPositionUnavailable) {
+		t.Fatalf("a successful read reports %v", err)
+	}
+	for _, tc := range []struct {
+		name        string
+		state       testutil.FakeReplicaState
+		unavailable bool
+	}{
+		{"error 1227", testutil.FakeReplicaState{BinlogStatusErr: &mysqldriver.MySQLError{Number: 1227,
+			Message: "Access denied; you need (at least one of) the SUPER, REPLICATION CLIENT privilege(s) for this operation"}}, true},
+		{"no row", testutil.FakeReplicaState{BinlogOff: true}, true},
+		{"another server error", testutil.FakeReplicaState{BinlogStatusErr: &mysqldriver.MySQLError{Number: 1053, Message: "Server shutdown in progress"}}, false},
+		{"a timeout", testutil.FakeReplicaState{BinlogStatusErr: context.DeadlineExceeded}, false},
+		{"a lost connection", testutil.FakeReplicaState{BinlogStatusErr: errors.New("invalid connection")}, false},
+		{"a text that only looks like 1227", testutil.FakeReplicaState{BinlogStatusErr: denied}, false},
+	} {
+		tc.state.ExecutedGtidSet = "uuid1:1-100"
+		_, err := testutil.NewFakeReplica(tc.state).Checker().(binlogPositionReader).ReadBinlogPosition(ctx)
+		if err == nil || errors.Is(err, mysql.ErrBinlogPositionUnavailable) != tc.unavailable {
+			t.Fatalf("%s: ReadBinlogPosition error = %v, want unavailable %v", tc.name, err, tc.unavailable)
+		}
 	}
 
 	// A position that does not parse is an error, never position 0: a
