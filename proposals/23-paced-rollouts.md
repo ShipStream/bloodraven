@@ -125,8 +125,31 @@ admitted, so nothing rolls; the operator emits `RolloutRecordNotStored` once per
 ### 2.6 Dragonfly (#217)
 
 Dragonfly StatefulSets are workloads of the group: a release-driven template change waits for the same
-admission, latches the same start, and counts toward the same completion. The serial rollout inside a group is
-made strict in the same change (see the PR description).
+admission, latches the same start, and counts toward the same completion. The gate comes first: a StatefulSet
+the group is not admitted to roll is not part of the group's serial rollout, and no takeover is sent for it.
+
+The serial rollout inside a group is made strict in the same change (`dragonfly_rollout.go`):
+
+- Nothing is written until the operator knows the Dragonfly master: status names a site, that site answers as a
+  master, and no other site does.
+- One site at a time. The template write marks the StatefulSet
+  (`bloodraven.shipstream.io/dragonfly-rollout-in-flight`) in the same update; the mark is removed when the pod
+  is Ready on the new template and the site is back in sync with the master (per-flow positions, `DFLY
+  REPLICAOFFSET` against `DEBUG REPLICA OFFSET`). No other site is written meanwhile. The mark lives on the
+  StatefulSet, so it survives an operator restart. The pacer's completion (2.3) does not read it: the group's roll
+  counts as complete when every StatefulSet's own rollout status is, which can be before the last restarted site
+  has finished its full sync.
+- The master's site is last. A replica proven in sync takes the master over with `REPLTAKEOVER`; the takeover
+  writes the former master's template before that pod is deleted. A takeover that fails is retried with a
+  backoff, indefinitely. The rollout sends no `REPLICAOF NO ONE` and never restarts the master where it is.
+- `bloodraven.shipstream.io/dragonfly-restart-in-place: <site>` is the administrator's way past a wait: one
+  site's template is applied without those proofs, and the operator removes the annotation. *Pending Colin's
+  sign-off.*
+
+A Dragonfly rollout that waits keeps the group's roll unfinished, so it holds the slot (2.4): after `stallAfter`
+the roll is recorded as stalled and the fleet halts there. That is the intended direction for a release whose
+Dragonfly template does not come up. A group whose replica was already broken before the release halts the
+fleet too; `rollout-release-slot` lets the queue continue past it. *Pending Colin's sign-off.*
 
 ### 2.7 Operator controls
 
