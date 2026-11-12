@@ -518,9 +518,7 @@ func (p *RolloutPacer) apply(ctx context.Context, a rolloutAction) error {
 		return nil
 	}
 	p.logger.Info("paced rollout: "+a.EventReason, "fg", a.Key, "renderer", rendererIdentity(), "detail", a.EventMessage)
-	if p.recorder != nil {
-		p.recorder.Eventf(&fresh, a.EventType, a.EventReason, "%s", a.EventMessage)
-	}
+	p.recordEvent(&fresh, a)
 	switch a.EventReason {
 	case v1alpha1.EventRolloutAdmitted:
 		metrics.RolloutAdmissionsTotal.WithLabelValues(a.To.Reason).Inc()
@@ -532,6 +530,25 @@ func (p *RolloutPacer) apply(ctx context.Context, a rolloutAction) error {
 		metrics.RolloutCompletionsTotal.Inc()
 	}
 	return nil
+}
+
+// recordEvent emits a decision's Event. Each reason is spelled with its one
+// Event type here, so the Event reference (internal/apiregistry) can pair
+// them; the planner sets the same type on the action.
+func (p *RolloutPacer) recordEvent(fg *v1alpha1.MysqlFailoverGroup, a rolloutAction) {
+	if p.recorder == nil {
+		return
+	}
+	switch a.EventReason {
+	case v1alpha1.EventRolloutAdmitted:
+		p.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRolloutAdmitted, "%s", a.EventMessage)
+	case v1alpha1.EventRolloutDeferred:
+		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRolloutDeferred, "%s", a.EventMessage)
+	case v1alpha1.EventRolloutStalled:
+		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRolloutStalled, "%s", a.EventMessage)
+	case v1alpha1.EventRolloutCompleted:
+		p.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRolloutCompleted, "%s", a.EventMessage)
+	}
 }
 
 // noteNotStored reports, once per group, that the CRD pruned the record.
