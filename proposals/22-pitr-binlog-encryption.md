@@ -193,4 +193,4 @@ Expected, from the docker run and the code: after `enable-encryption.sh` the bin
 ## Docs that change when implemented
 
 - Option 1: remove the limitation from `3.get-started/1.known-limitations.md`, `7.backup-and-restore/2.backup-restore.md` ("Encryption at rest and PITR") and the interaction table of `4.configuration/8.encryption-at-rest.md`; state the archive-protection rule (D1); retire doctor playbook 49 or reduce it to the fail-closed errors; update `8.observability/7.log-schema.md` for any new message.
-- Option 2a: add the reason and Event to the same pages, `2.crd-reference.md`, the events reference and playbooks 31 and 48.
+- Option 2a: add the reason and Event to the same pages, `2.crd-reference.md`, the events reference and playbooks 31 and 49.
