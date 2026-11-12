@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -150,9 +151,11 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 
 	// Later writes: nothing is refused again, the report is not announced
 	// again although the stored status has no lostGtid, and an unchanged
-	// status is not rewritten.
+	// status is not rewritten (the wait puts the writes in different
+	// seconds: a status written again would carry new timestamps).
 	rv := got.ResourceVersion
 	for i := 0; i < 3; i++ {
+		time.Sleep(600 * time.Millisecond)
 		if err := runner.WriteStatusForTest(ctx, nn, snapshot(lost)); err != nil {
 			t.Fatalf("status write %d: %v", i, err)
 		}
@@ -177,6 +180,89 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 	}
 	if n := events(v1alpha1.EventOwnTransactionsLostResolved); n != 1 {
 		t.Fatalf("%d OwnTransactionsLostResolved Events, want 1", n)
+	}
+}
+
+// The other way an older CRD shows: no value it refuses, only a field it
+// prunes. A site that is RecoveryBlocked and carries lostGtid passes the
+// old enum, the write succeeds, and lostGtid does not come back. The
+// writer notices, logs the older CRD once, and does not write the same
+// status again on every poll.
+func TestEnvtest_StatusWrite_OlderCRDPrunesLostGtid(t *testing.T) {
+	oldScheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme, apiextensionsv1.AddToScheme} {
+		if err := add(oldScheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldEnv := &envtest.Environment{
+		CRDDirectoryPaths: []string{filepath.Join("testdata", "crd-pre-own-loss")},
+		Scheme:            oldScheme,
+	}
+	oldCfg, err := oldEnv.Start()
+	if err != nil {
+		t.Fatalf("start a second envtest with the previous CRD: %v", err)
+	}
+	t.Cleanup(func() { _ = oldEnv.Stop() })
+	c, err := client.New(oldCfg, client.Options{Scheme: oldScheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "status-older-crd-pruned"}}
+	if err := c.Create(ctx, ns); err != nil {
+		t.Fatal(err)
+	}
+	fg := newTestFG(ns.Name)
+	if err := c.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	nn := types.NamespacedName{Name: fg.Name, Namespace: ns.Name}
+	var logs bytes.Buffer
+	rec := record.NewFakeRecorder(64)
+	runner := controller.NewTopologyManagerRunner(c, nil, nil, rec, slog.New(slog.NewTextHandler(&logs, nil)))
+	runner.SetManagerForTest(nn, &controller.TopologyManager{})
+	const lost, divergent = "22222222-0000-11f1-8000-0000000000b2:91-100", "22222222-0000-11f1-8000-0000000000b2:101-105"
+	snap := controller.TopologySnapshot{ActiveSite: "dc1", DegradedReason: v1alpha1.ReasonHealthy,
+		RecoverySite: "dc2", RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: divergent, DivergentTxnCount: 5,
+		Sites: []controller.SiteSnapshot{
+			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
+			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly,
+				RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: divergent, DivergentTxnCount: 5, DivergenceComparedTo: "dc1",
+				LostGtid: lost, LostTxnCount: 10, LostComparedTo: "dc1"},
+		}}
+	var rv string
+	ownLossEvents := 0
+	for i := 0; i < 4; i++ {
+		if i > 0 {
+			time.Sleep(600 * time.Millisecond)
+		}
+		if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
+			t.Fatalf("status write %d: %v", i, err)
+		}
+		var got v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, nn, &got); err != nil {
+			t.Fatal(err)
+		}
+		if s := got.Status.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.DivergentGtid != divergent || s.LostGtid != "" {
+			t.Fatalf("write %d: dc2 = %+v, want RecoveryBlocked with its divergent set and lostGtid pruned", i, s)
+		}
+		// The first write finds out; from the second on nothing changes.
+		if i == 1 {
+			rv = got.ResourceVersion
+		} else if i > 1 && got.ResourceVersion != rv {
+			t.Fatalf("write %d: resourceVersion moved %s -> %s: the same status was written again", i, rv, got.ResourceVersion)
+		}
+		for len(rec.Events) > 0 {
+			if e := <-rec.Events; strings.Contains(e, " "+v1alpha1.EventOwnTransactionsLost+" ") {
+				ownLossEvents++
+			}
+		}
+	}
+	if ownLossEvents != 1 {
+		t.Fatalf("%d OwnTransactionsLost Events over four writes of one report, want 1", ownLossEvents)
+	}
+	if n := strings.Count(logs.String(), "status written with the values an older CRD accepts"); n != 1 {
+		t.Fatalf("the older-CRD condition was logged %d times, want once:\n%s", n, logs.String())
 	}
 }
 
@@ -212,5 +298,24 @@ func TestEnvtest_StatusWrite_CurrentCRDKeepsRecloneRequired(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "older CRD") {
 		t.Fatalf("the current CRD was reported as older:\n%s", logs.String())
+	}
+	// An unchanged status is not written again, and Degraded keeps its
+	// transition time (it is built in two steps: the wait puts the two
+	// writes in different seconds).
+	time.Sleep(1100 * time.Millisecond)
+	if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
+		t.Fatal(err)
+	}
+	var again v1alpha1.MysqlFailoverGroup
+	if err := k8sClient.Get(ctx, nn, &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.ResourceVersion != got.ResourceVersion {
+		t.Fatalf("resourceVersion moved %s -> %s on an unchanged status write", got.ResourceVersion, again.ResourceVersion)
+	}
+	before := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionDegraded)
+	after := apimeta.FindStatusCondition(again.Status.Conditions, v1alpha1.ConditionDegraded)
+	if before == nil || after == nil || !before.LastTransitionTime.Equal(&after.LastTransitionTime) {
+		t.Fatalf("Degraded = %+v, then %+v: lastTransitionTime moved without a transition", before, after)
 	}
 }

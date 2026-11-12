@@ -32,6 +32,14 @@ import (
 // the current ones first, then the current ones are tried again, so an
 // upgraded CRD is taken up without a restart.
 //
+// The fields that came with those values are left out of a degraded
+// write too. The old CRD prunes them, so a status that carried them would
+// never compare equal to the stored one and would be written again on
+// every poll. That also happens without a refusal (a site that is
+// RecoveryBlocked and carries lostGtid passes the old enum): the writer
+// notices that a lostGtid it sent did not come back
+// (statusLostGtidPruned) and degrades from then on.
+//
 // Add a value here in the release that adds it to an enum of
 // MysqlFailoverGroupStatus, and extend TestEnvtest_StatusWrite_OlderCRD
 // (test/envtest), which writes against the CRD in
@@ -51,9 +59,15 @@ const crdDegradedRetryInterval = 10 * time.Minute
 //     resumes that rejoin.
 //   - sites[].sourceConvergenceReason OwnTransactionsLost becomes
 //     GTIDDiverged: the reason that goes with the same Blocked state.
+//   - sites[].lostGtid and lostTransactionCount are left out: a CRD
+//     without those values has no such fields and prunes them.
 func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 	changed := false
 	for i := range st.Sites {
+		if st.Sites[i].LostGtid != "" || st.Sites[i].LostTransactionCount != nil {
+			st.Sites[i].LostGtid, st.Sites[i].LostTransactionCount = "", nil
+			changed = true
+		}
 		if st.Sites[i].RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
 			st.Sites[i].RecoveryState = v1alpha1.RecoveryStateBlocked
 			changed = true
@@ -64,6 +78,37 @@ func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 		}
 	}
 	return changed
+}
+
+// errStatusLostGtidPruned is what noteStatusDegradedForOlderCRD logs when
+// the API server accepted a status write and dropped a lostGtid.
+var errStatusLostGtidPruned = errors.New("the API server accepted the status and pruned status.sites[].lostGtid")
+
+// statusLostGtid returns the sites of st that carry a lostGtid.
+func statusLostGtid(st *v1alpha1.MysqlFailoverGroupStatus) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range st.Sites {
+		if s.LostGtid != "" {
+			out[s.Name] = true
+		}
+	}
+	return out
+}
+
+// statusLostGtidPruned reports whether stored, the status the API server
+// answered a write with, lacks a lostGtid that the write carried for one
+// of the sites in sent: the installed CRD has no such field.
+func statusLostGtidPruned(sent map[string]bool, stored *v1alpha1.MysqlFailoverGroupStatus) bool {
+	if len(sent) == 0 {
+		return false
+	}
+	kept := statusLostGtid(stored)
+	for site := range sent {
+		if !kept[site] {
+			return true
+		}
+	}
+	return false
 }
 
 // statusRefusedForUnsupportedValue reports whether err is the API server

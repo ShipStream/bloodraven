@@ -92,7 +92,10 @@ type managedTopology struct {
 	// field, and a comparison with the stored status would then announce
 	// the same report on every write and never resolve it. In memory, so
 	// with such a CRD a report is announced once more after a restart.
-	ownLossAnnounced map[string]ownLossAnnouncement
+	// Status is written from the poll loop and from an ordered update's
+	// goroutine, so the map has a lock of its own.
+	ownLossAnnouncedMu sync.Mutex
+	ownLossAnnounced   map[string]ownLossAnnouncement
 	// crdDegraded is until when status writes are made with the values
 	// the installed CRD accepted (degradeStatusForOlderCRD), without
 	// trying the current ones first; crdDegradedLogged says the condition
@@ -2187,6 +2190,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	if statusMT != nil && time.Now().UnixNano() < statusMT.crdDegraded.Load() {
 		degradeStatusForOlderCRD(&freshFG.Status)
 	}
+	// A condition that ends this computation with the status it is stored
+	// with has not made a transition, whatever happened in between: the
+	// Degraded overlays above set it False and then True again.
+	keepConditionTransitionTimes(existingStatus.Conditions, freshFG.Status.Conditions)
 
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	// Keyring promotion Events compare in-memory last-seen, so they must
@@ -2318,6 +2325,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionPITRArchiveReady)
 		}
 		r.applyPITRArchiveStatus(ctx, nn, &fresh)
+		sentLost := statusLostGtid(&fresh.Status)
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
 			// A CRD from before this operator's enum values refuses the
 			// whole write (active site, failover record and conditions
@@ -2330,6 +2338,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				return retryErr
 			}
 			r.noteStatusDegradedForOlderCRD(nn, statusMT, err)
+		} else if statusLostGtidPruned(sentLost, &fresh.Status) {
+			// Accepted, but the lost set did not come back: the installed
+			// CRD prunes it, and a status that carries it would be written
+			// again on every poll.
+			r.noteStatusDegradedForOlderCRD(nn, statusMT, errStatusLostGtidPruned)
 		}
 		freshFG = fresh
 		return nil
@@ -2745,6 +2758,10 @@ func (r *TopologyManagerRunner) emitOwnLossEvents(fg *v1alpha1.MysqlFailoverGrou
 	stored := make(map[string]string, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
 		stored[s.Name] = s.LostGtid
+	}
+	if mt != nil {
+		mt.ownLossAnnouncedMu.Lock()
+		defer mt.ownLossAnnouncedMu.Unlock()
 	}
 	for _, s := range snap.Sites {
 		prev := ownLossAnnouncement{lostGtid: stored[s.Name]}
@@ -3414,6 +3431,26 @@ func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 		}
 	}
 	*conditions = append(*conditions, c)
+}
+
+// keepConditionTransitionTimes gives every condition of next that stored
+// holds with the same status the lastTransitionTime stored has. The
+// status writer builds some conditions in several steps (Degraded is set
+// from the topology alert first and then overlaid by the divergence, the
+// own-loss or a replication reason), and setCondition stamps a new time
+// whenever a step changes the status. Without this a group with such an
+// overlay never compares equal to its stored status: it was written again
+// on every status callback, and Degraded's lastTransitionTime moved each
+// time.
+func keepConditionTransitionTimes(stored, next []metav1.Condition) {
+	for i := range next {
+		for j := range stored {
+			if stored[j].Type == next[i].Type && stored[j].Status == next[i].Status {
+				next[i].LastTransitionTime = stored[j].LastTransitionTime
+				break
+			}
+		}
+	}
 }
 
 // removeCondition drops a condition type from the slice. Used when a
