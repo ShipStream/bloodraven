@@ -5,7 +5,7 @@
 
 **Front:** A returning old primary: what decides whether it rejoins automatically?
 
-**Back:** Whether the NEW primary's GTID set contains the OLD primary's, and whether the old primary still holds every transaction it issued itself. Both hold — auto-rejoin. New does not contain old — RecoveryBlocked. The old primary lost transactions of its own — RecloneRequired, and the operator reclones it.
+**Back:** Whether the NEW primary's GTID set contains the OLD primary's, and whether the old primary still holds every transaction it issued itself. Both hold — auto-rejoin. New does not contain old — RecoveryBlocked. The old primary lost transactions of its own that the primary holds — RecloneRequired, and the operator reclones it. Only another site holds them — RecloneRequired and never promoted, but it keeps replicating and is not recloned automatically.
 
 ---
 

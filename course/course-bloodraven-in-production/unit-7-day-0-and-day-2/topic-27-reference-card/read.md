@@ -36,7 +36,7 @@ quote a version, an issue number or a documentation defect.
 | `backup.pitr.maxBinlogSize` | `100M` | — | Written *before* `spec.mysqlConf`, so your override wins. |
 | `backup.retention` | `7` | — | Backups kept per profile. |
 | Measured failover, clean | **12.0 s** | — | Nine-plus recorded runs, 12.004–12.02 s, one outlier at 13.008 s. |
-| Failover worst case, full drain | **36–37 s** | — | 6 s detection + a drain that spent its whole 30 s budget, because the candidate could not apply its received backlog in time, + the binary log rotation (about 12 ms, bounded at 1 s). |
+| Failover worst case, full drain | **up to ≈ 37 s** | — | 6 s detection + a drain that spent its whole 30 s budget, because the candidate could not apply its received backlog in time, + the binary log rotation (bounded at 1 s, about 12 ms on a healthy server, so such a run usually reads about 36 s). The promotion statements add milliseconds. |
 
 ## The five condition reasons
 
