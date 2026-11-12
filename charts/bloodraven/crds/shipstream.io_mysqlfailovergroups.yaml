@@ -9347,6 +9347,74 @@ spec:
                 - confirmToken
                 - phase
                 type: object
+              rollout:
+                description: |-
+                  Rollout is the group's place in the operator's paced rollout of a
+                  pod change that an operator release causes (a new launcher, render or
+                  default sidecar image). The operator admits one group at a time; a
+                  group that is not admitted keeps its current pods.
+                  Durable: the admission, the latched start and a stall are restored
+                  after an operator restart, so a halted rollout stays halted.
+                properties:
+                  admittedTime:
+                    description: |-
+                      AdmittedTime is when the group was given the rollout slot. Set while
+                      the group holds the slot and after it completed.
+                    format: date-time
+                    type: string
+                  completedTime:
+                    description: CompletedTime is when the roll completed.
+                    format: date-time
+                    type: string
+                  deferredTime:
+                    description: |-
+                      DeferredTime is when an admission that had not started was last
+                      withdrawn, because the group could not start in time. A deferred
+                      group goes to the back of the queue.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is the human-readable detail of Reason.
+                    maxLength: 1024
+                    type: string
+                  phase:
+                    description: Phase summarises the record.
+                    enum:
+                    - Pending
+                    - Admitted
+                    - Rolling
+                    - Stalled
+                    - Complete
+                    type: string
+                  reason:
+                    description: |-
+                      Reason says why the group is in its phase, as a CamelCase word:
+                      WaitingForSlot, RolloutHalted, GroupNotStable, NotStarted, Admitted,
+                      AdmittedByAnnotation, StallTimeout, OrderedUpdateStalled.
+                    maxLength: 64
+                    type: string
+                  renderer:
+                    description: |-
+                      Renderer identifies the operator release the record is for: a
+                      digest of the operator image, its default sidecar image and its
+                      render versions. Workloads carry the renderer that last wrote their
+                      pod template in the bloodraven.shipstream.io/rendered-by annotation.
+                    maxLength: 64
+                    type: string
+                  stalledTime:
+                    description: |-
+                      StalledTime is when a started roll was found stalled. It stays set
+                      until the roll completes.
+                    format: date-time
+                    type: string
+                  startedTime:
+                    description: |-
+                      StartedTime is the latch: it is written before the first workload of
+                      the group is changed and stays set until the roll completes, through
+                      any stall. An admission that has started is never withdrawn.
+                    format: date-time
+                    type: string
+                type: object
               sites:
                 description: Sites is the observed state of each site, keyed by name.
                 items:

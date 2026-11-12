@@ -27,7 +27,7 @@ func TestSpecDriftView_RefusesWithoutSidecarImage(t *testing.T) {
 	SetSidecarImageDefault("")
 	t.Cleanup(func() { SetSidecarImageDefault(testSidecarImage) })
 	fg.Spec.Sidecar.Image = ""
-	if _, _, ok := runner.specDriftView(context.Background(), c, fg); ok {
+	if _, _, _, ok := runner.specDriftView(context.Background(), c, fg); ok {
 		t.Fatal("drift was evaluated for a group whose Deployments cannot be rendered")
 	}
 }

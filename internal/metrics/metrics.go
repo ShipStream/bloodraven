@@ -59,6 +59,52 @@ var (
 		Help: "Age in seconds of the oldest active deployment lease per group and kind.",
 	}, []string{"group", "kind"})
 
+	// RolloutGroups is the paced rollout of a release-driven pod change at
+	// a glance: how many groups wait for the slot (pending), hold it
+	// without having changed a workload (admitted), are rolling, or
+	// started their roll and stalled. A stalled group keeps the slot, so
+	// stalled > 0 with pending > 0 is a halted rollout.
+	RolloutGroups = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_rollout_groups",
+		Help: "Failover groups by phase of the paced rollout of a release-driven pod change (pending, admitted, rolling, stalled).",
+	}, []string{"phase"})
+
+	// RolloutGroupPhase is 1 for the phase a group is in while it waits
+	// for or holds the rollout slot. No series exists for a group with
+	// nothing to roll or whose roll completed.
+	RolloutGroupPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_rollout_group_phase",
+		Help: "1 for the paced-rollout phase (pending, admitted, rolling, stalled) of a failover group that waits for or holds the rollout slot.",
+	}, []string{"namespace", "group", "phase"})
+
+	RolloutAdmissionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_rollout_admissions_total",
+		Help: "Total admissions of a failover group to the paced rollout, by reason (Admitted, AdmittedByAnnotation).",
+	}, []string{"reason"})
+
+	RolloutDeferralsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "bloodraven_rollout_deferrals_total",
+		Help: "Total paced-rollout admissions withdrawn because the group did not start its roll in time.",
+	})
+
+	RolloutStallsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_rollout_stalls_total",
+		Help: "Total paced-rollout rolls recorded as stalled, by reason (OrderedUpdateStalled, StallTimeout).",
+	}, []string{"reason"})
+
+	RolloutCompletionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "bloodraven_rollout_completions_total",
+		Help: "Total failover group rolls completed under the paced rollout.",
+	})
+
+	// RolloutRecordNotStored counts the groups whose status.rollout the
+	// API server pruned: the installed CRD is older than the operator, and
+	// no group is rolled until the release's CRDs are applied.
+	RolloutRecordNotStored = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "bloodraven_rollout_record_not_stored",
+		Help: "Failover groups whose paced-rollout record could not be stored because the installed CRD is older than the operator.",
+	})
+
 	PlannedFailoversDeferredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "bloodraven_planned_failovers_deferred_total",
 		Help: "Total planned failover deferrals by reason.",
@@ -544,7 +590,9 @@ func Register(reg prometheus.Registerer) {
 		KeyringPhase, KeyringEscrowVersion, KeyringEscrowPushesTotal, KeyringRotationsTotal,
 		KeyringPromotionsBlockedTotal,
 		EncryptionCoverageGaps, EncryptionCoverageFlag,
-		LicenseInfo, LicenseUpdatesExpiry)
+		LicenseInfo, LicenseUpdatesExpiry,
+		RolloutGroups, RolloutGroupPhase, RolloutAdmissionsTotal, RolloutDeferralsTotal,
+		RolloutStallsTotal, RolloutCompletionsTotal, RolloutRecordNotStored)
 }
 
 // LicenseLabels is the identity of a license series for one group.

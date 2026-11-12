@@ -131,6 +131,10 @@ type TopologyManagerRunner struct {
 	recorder         record.EventRecorder
 	logger           *slog.Logger
 
+	// rolloutPacing mirrors MysqlFailoverGroupReconciler.RolloutPacing: the
+	// drift check holds the sites the write path would refuse.
+	rolloutPacing bool
+
 	// deployReconciler is set after the reconciler is created (circular dependency).
 	// Used by the ordered update callback to reconcile a single site's Deployment.
 	deployReconciler DeploymentReconciler
@@ -206,6 +210,10 @@ func NewTopologyManagerRunner(c client.Client, clientset kubernetes.Interface, h
 func (r *TopologyManagerRunner) SetDeploymentReconciler(dr DeploymentReconciler) {
 	r.deployReconciler = dr
 }
+
+// SetRolloutPacing turns the paced rollout's hold on for the drift check.
+// Set it together with MysqlFailoverGroupReconciler.RolloutPacing.
+func (r *TopologyManagerRunner) SetRolloutPacing(on bool) { r.rolloutPacing = on }
 
 // PlannedClaimHeld reports whether the group's planned-failover claim slot
 // is held, in either mode (a provisional grant included).
@@ -895,7 +903,7 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 		return
 	}
 
-	driftSites, refused, ok := r.specDriftView(ctx, r.client, fg)
+	driftSites, refused, held, ok := r.specDriftView(ctx, r.client, fg)
 	if !ok {
 		return
 	}
@@ -905,14 +913,15 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 			r.logger.Warn("failed to confirm spec drift with an uncached read; preserving current drift set", "error", err)
 			return
 		}
-		confirmed, confirmedRefused, ok := r.specDriftView(ctx, r.apiReader, &fresh)
+		confirmed, confirmedRefused, confirmedHeld, ok := r.specDriftView(ctx, r.apiReader, &fresh)
 		if !ok {
 			return
 		}
-		driftSites, refused = confirmed, confirmedRefused
+		driftSites, refused, held = confirmed, confirmedRefused, confirmedHeld
 	}
 
 	tm.SetSpecRefusedSites(refused)
+	tm.SetSpecHeldSites(held)
 	tm.SetSpecDriftSites(driftSites)
 }
 
@@ -920,21 +929,25 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 // reader) carries a spec hash other than the desired one, or ok=false when
 // an input could not be read (the caller keeps the current set).
 func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) ([]string, bool) {
-	drift, _, ok := r.specDriftView(ctx, reader, fg)
+	drift, _, _, ok := r.specDriftView(ctx, reader, fg)
 	return drift, ok
 }
 
 // specDriftView is specDriftSites plus the sites whose Deployment is
 // refused for its selector: those are never drift, and never evidence
-// that a site runs the current template either.
-func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (drift, refused []string, ok bool) {
+// that a site runs the current template either. held lists the sites that
+// differ but wait for the paced rollout (rolloutHoldsSite): another
+// operator release rendered them and the group is not admitted. They are
+// not drift, so no ordered update starts for them; the write path refuses
+// the same sites by the same record.
+func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (drift, refused, held []string, ok bool) {
 	// With no sidecar image to render (no pin and no operator default)
 	// every site would hash as drift the render then refuses to apply,
 	// and the ordered updater would retry it for ever. Keep the current
 	// set; the reconcile reports the refusal.
 	if _, err := effectiveSidecarImage(fg); err != nil {
 		r.logger.Warn("cannot render the group's Deployments; preserving current drift set", "fg", client.ObjectKeyFromObject(fg), "error", err)
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	// The reconciler creates the digest key before the first Deployment;
 	// until it exists no live hash can match, so keep the current set.
@@ -943,18 +956,18 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 		if err != errDigestKeyMissing {
 			r.logger.Warn("failed to read secret digest key; preserving current drift set", "error", err)
 		}
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	secretInputs, err := specSecretInputs(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to read spec secrets; preserving current drift set", "error", err)
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	secretDigest := secretContentDigest(digestKey, secretInputs)
 	deploys, err := listPITRSiteDeployments(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to list site deployments; preserving current drift set", "error", err)
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	pitr, action := resolvePITRRender(fg, deploys)
 	byName := make(map[string]*appsv1.Deployment, len(deploys))
@@ -974,7 +987,7 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 					continue // Deployment doesn't exist yet — reconciler will create it
 				}
 				r.logger.Warn("failed to inspect deployment spec drift; preserving current drift set", "site", site.Name, "error", err)
-				return nil, nil, false
+				return nil, nil, nil, false
 			}
 			deploy = &d
 		}
@@ -994,10 +1007,14 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 		// hash matches.
 		if deploy.Annotations[v1alpha1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
 			deploy.Annotations[v1alpha1.PITRRenderAnnotation] != pitr.Canonical() {
+			if rolloutHoldsSite(r.rolloutPacing, fg, site.Name, deploy) {
+				held = append(held, site.Name)
+				continue
+			}
 			drift = append(drift, site.Name)
 		}
 	}
-	return drift, refused, true
+	return drift, refused, held, true
 }
 
 // startManager creates and starts a TopologyManager for a single
@@ -1265,7 +1282,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 
 	archiver := r.newPITRArchiverPoller(ctx, fg, nn, buildSidecarClients(fg), prev)
-	archiver.awaitingRollout = tm.SpecDriftSites
+	archiver.awaitingRollout = tm.SitesAwaitingRollout
 	archiver.rolloutKnown = tm.specDriftComputed
 	// A reclone waits, bounded, for its recipient's sidecar to archive the
 	// binary log tail CLONE wipes; a reclone that goes ahead without that

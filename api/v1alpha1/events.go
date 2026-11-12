@@ -455,6 +455,26 @@ const (
 	// probe changes to unsupported; use a Dragonfly image that supports
 	// the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
+	// The group was given the slot in the operator's paced rollout of a
+	// release-driven pod change, and may now roll its pods. The message
+	// names the renderer and says when an annotation admitted it.
+	EventRolloutAdmitted = "RolloutAdmitted"
+	// An admission that had not changed any workload was withdrawn: the
+	// group did not start its roll in time (the message says what held
+	// it). The group keeps its pods and goes to the back of the queue.
+	EventRolloutDeferred = "RolloutDeferred"
+	// The group's admitted roll has started and not finished in time, or
+	// its ordered update stopped on a pod that is not Ready. The group
+	// keeps the rollout slot, so no other group is rolled: a bad release
+	// stops here. See [Paced rollouts](/docs/operations/upgrade-policy#paced-rollouts).
+	EventRolloutStalled = "RolloutStalled"
+	// Every workload of the group runs the release's pod template and the
+	// group is stable; the slot is free for the next group.
+	EventRolloutCompleted = "RolloutCompleted"
+	// The operator could not store the group's rollout record: the
+	// installed CRD is older than the operator and prunes status.rollout.
+	// No group is rolled until the release's CRDs are applied.
+	EventRolloutRecordNotStored = "RolloutRecordNotStored"
 	// A rollout of the active Dragonfly site (a changed pod template) has
 	// waited two minutes for the replica it promotes first to be in sync:
 	// the replica is not linked to the master, is still behind it, or

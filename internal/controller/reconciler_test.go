@@ -1102,7 +1102,7 @@ func TestLegacyConfigMapCleanupIsReferenceDriven(t *testing.T) {
 	objects := []client.Object{fg, legacy}
 	objects = append(objects, deployments...)
 	r, c := newReconciler(objects...)
-	if err := r.reconcileSiteConfigMaps(context.Background(), fg, testGroupPITRRender(fg)); err != nil {
+	if err := r.reconcileSiteConfigMaps(context.Background(), fg, testGroupPITRRender(fg), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.cleanupLegacyConfigMap(context.Background(), fg, testPITRRender(fg)); err != nil {

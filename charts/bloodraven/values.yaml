@@ -23,6 +23,21 @@ sidecar:
     # -- Sidecar image tag (defaults to .Chart.AppVersion)
     tag: ""
 
+rollout:
+  # -- Roll a pod change that an operator release causes (a new launcher,
+  # render or default sidecar image) one failover group at a time. A group
+  # that is not admitted keeps its pods; a group whose roll stalls keeps the
+  # slot, so a bad release stops at the first group. Set to false to roll
+  # every group at once, as releases before v1.8.0 did.
+  pacing: true
+  # -- How long the slot stays empty after a group completed its roll.
+  soak: 1m
+  # -- How long a started roll may take before it is recorded as stalled.
+  stallAfter: 30m
+  # -- How long an admitted group has to start its roll before the next
+  # group is tried instead.
+  startGrace: 5m
+
 # -- Image pull secrets for private registries
 imagePullSecrets: []
 

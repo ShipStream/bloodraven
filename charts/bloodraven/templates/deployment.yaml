@@ -95,6 +95,15 @@ spec:
             # sidecar.image.tag).
             - name: BLOODRAVEN_SIDECAR_IMAGE
               value: {{ include "bloodraven.sidecarImage" . | quote }}
+            # Paced rollouts of release-driven pod changes (rollout.*).
+            - name: BLOODRAVEN_ROLLOUT_PACING
+              value: {{ .Values.rollout.pacing | quote }}
+            - name: BLOODRAVEN_ROLLOUT_SOAK
+              value: {{ .Values.rollout.soak | quote }}
+            - name: BLOODRAVEN_ROLLOUT_STALL_AFTER
+              value: {{ .Values.rollout.stallAfter | quote }}
+            - name: BLOODRAVEN_ROLLOUT_START_GRACE
+              value: {{ .Values.rollout.startGrace | quote }}
             # Default operator auxiliary endpoint injected into MySQL sidecars
             # when spec.sidecar.operatorEndpoint is not set.
             - name: BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT

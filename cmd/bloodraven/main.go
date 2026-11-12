@@ -285,6 +285,27 @@ func main() {
 	}
 	controller.SetSidecarImageDefault(sidecarImage)
 
+	// Paced rollouts: a pod change this release causes is rolled one group
+	// at a time (controller.RolloutPacer). The renderer identity is built
+	// from the image defaults set above, so this must come after them.
+	if rolloutPacingEnabled(os.Getenv("BLOODRAVEN_ROLLOUT_PACING")) {
+		pacerCfg, err := rolloutPacerConfigFromEnv(os.Getenv)
+		if err != nil {
+			logger.Error("invalid paced rollout configuration", "error", err)
+			os.Exit(1)
+		}
+		reconciler.RolloutPacing = true
+		runner.SetRolloutPacing(true)
+		pacer := controller.NewRolloutPacer(mgr.GetClient(), mgr.GetAPIReader(), recorder, logger,
+			reconciler, deploymentLeases.UnstableReason, pacerCfg)
+		if err := mgr.Add(pacer); err != nil {
+			logger.Error("unable to add rollout pacer", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Warn("paced rollouts are disabled (BLOODRAVEN_ROLLOUT_PACING): a release-driven pod change rolls every group at once")
+	}
+
 	if err := mgr.Add(runner); err != nil {
 		logger.Error("unable to add topology manager runner", "error", err)
 		os.Exit(1)
@@ -654,4 +675,48 @@ func newEscrowMux(k8sClient client.Client, logger *slog.Logger) *http.ServeMux {
 		controller.NewKeyringEscrowHandler(k8sClient, logger)))
 	mux.Handle("/", auxLoggingMiddleware(logger, "notfound", http.NotFoundHandler()))
 	return mux
+}
+
+// rolloutPacingEnabled reads BLOODRAVEN_ROLLOUT_PACING: pacing is on unless
+// the value is an explicit "false", "0" or "off".
+func rolloutPacingEnabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "0", "off", "no":
+		return false
+	}
+	return true
+}
+
+// rolloutPacerConfigFromEnv reads the pacer's durations
+// (BLOODRAVEN_ROLLOUT_SOAK, _STALL_AFTER, _START_GRACE). An unset or empty
+// variable takes the default; "0" is valid for the soak only.
+func rolloutPacerConfigFromEnv(getenv func(string) string) (controller.RolloutPacerConfig, error) {
+	var cfg controller.RolloutPacerConfig
+	for _, f := range []struct {
+		name      string
+		dst       *time.Duration
+		allowZero bool
+	}{
+		{"BLOODRAVEN_ROLLOUT_SOAK", &cfg.Soak, true},
+		{"BLOODRAVEN_ROLLOUT_STALL_AFTER", &cfg.StallAfter, false},
+		{"BLOODRAVEN_ROLLOUT_START_GRACE", &cfg.StartGrace, false},
+	} {
+		raw := strings.TrimSpace(getenv(f.name))
+		if raw == "" {
+			continue
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return cfg, fmt.Errorf("%s=%q: %w", f.name, raw, err)
+		}
+		if d < 0 || d == 0 && !f.allowZero {
+			return cfg, fmt.Errorf("%s=%q: must be greater than zero", f.name, raw)
+		}
+		if d == 0 {
+			// The config's zero means "default"; a negative soak means none.
+			d = -1
+		}
+		*f.dst = d
+	}
+	return cfg, nil
 }

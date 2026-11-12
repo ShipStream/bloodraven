@@ -147,6 +147,8 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 
 	labels := dragonflyCommonLabels(fg.Name, site.Name)
 	sts.Labels = labels
+	// The operator release that wrote this template (rollout.go).
+	stampRenderedBy(sts)
 
 	var replicas int32 = 1
 	port := dragonflyPort(spec)
@@ -731,6 +733,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 			return 0, fmt.Errorf("build desired dragonfly statefulset %s: %w", site.Name, err)
 		}
 		if !dragonflyStatefulSetTemplateEqual(&current, desired) {
+			// A template another operator release rendered moves only once
+			// the group is admitted to the paced rollout (rollout.go).
+			if held, err := r.gateDragonflyRollout(ctx, fg, &current); err != nil {
+				return 0, fmt.Errorf("paced rollout of dragonfly statefulset %s: %w", site.Name, err)
+			} else if held {
+				continue
+			}
 			if site.Name == activeSite {
 				activeDrift = &fg.Spec.Sites[i]
 				continue
@@ -739,6 +748,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 				return requeue, err
 			}
 			return requeueAfter, nil
+		}
+		if r.RolloutPacing && renderedByOther(&current) {
+			if err := r.restampWorkload(ctx, &current); err != nil {
+				return 0, fmt.Errorf("restamp dragonfly statefulset %s: %w", site.Name, err)
+			}
 		}
 	}
 
