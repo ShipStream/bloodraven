@@ -147,11 +147,11 @@ func TestDragonflyNativeManagerKeepsCacheOverRestartedMaster(t *testing.T) {
 	c := cb.Build()
 	mgr := NewDragonflyManager(c, record.NewFakeRecorder(256), slog.Default(), key, 2*time.Second)
 	mgr.SetConnector(func(ctx context.Context, addr, _ string) (DragonflyConnection, error) {
-		real, ok := published[addr]
+		hostPort, ok := published[addr]
 		if !ok {
 			return nil, fmt.Errorf("no container for %s", addr)
 		}
-		return dragonfly.New(ctx, dragonfly.Config{Addr: real})
+		return dragonfly.New(ctx, dragonfly.Config{Addr: hostPort})
 	})
 	tickUntil := func(what string, within time.Duration, done func() bool) {
 		t.Helper()

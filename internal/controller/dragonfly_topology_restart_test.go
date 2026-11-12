@@ -422,6 +422,85 @@ func TestDragonflyManager_Tick_MissCountExpires(t *testing.T) {
 	}
 }
 
+// The gap that ends a count is the time between cycles, not the time a
+// cycle takes. A cycle that misses a silent master spends seconds in the
+// dial timeout, and one that re-issues REPLICAOF to a replica whose master
+// swallows packets waits for that command too; the next cycle follows at
+// once and its miss is consecutive.
+func TestDragonflyManager_Tick_LongCyclesDoNotExpireTheMissCount(t *testing.T) {
+	h := newRestartHarness(t, nil)
+	h.mgr.pollInterval = 2 * time.Second
+	h.dc2.info.MasterLinkStatus = "down"
+	h.missMaster()
+	replicaDials := 0
+	h.mgr.SetConnector(func(ctx context.Context, addr, password string) (DragonflyConnection, error) {
+		switch addr {
+		case holdTestDC1:
+			h.advance(3 * time.Second) // the dial timeout
+		case holdTestDC2:
+			if replicaDials++; replicaDials%2 == 0 {
+				h.advance(5 * time.Second) // the REPLICAOF the replica holds
+			}
+		}
+		return h.conn.connect(ctx, addr, password)
+	})
+	h.tick(defaultDragonflyMasterLossThreshold - 1)
+	if got := h.promoted(); got != "" {
+		t.Fatalf("promoted %q before the threshold", got)
+	}
+	if n := h.waitLogged(); n != 1 {
+		t.Fatalf("wait logged %d times, want once: the count was started again by a long cycle", n)
+	}
+	h.tick(1)
+	if got := h.promoted(); got != "dc2" {
+		t.Fatalf("promoted %q after %d back-to-back cycles of 8s each, want dc2", got, defaultDragonflyMasterLossThreshold)
+	}
+}
+
+// replicaOfDeadline records the time left on the context of the last
+// REPLICAOF.
+type replicaOfDeadline struct {
+	*fakeDragonflyConn
+	bounded   bool
+	remaining time.Duration
+}
+
+func (c *replicaOfDeadline) ReplicaOf(ctx context.Context, host string, port int32) error {
+	d, ok := ctx.Deadline()
+	c.bounded, c.remaining = ok, time.Until(d)
+	return c.fakeDragonflyConn.ReplicaOf(ctx, host, port)
+}
+
+// A REPLICAOF that points a replica at a master the cycle did not reach is
+// bounded at a second: a replica holds it for about 20s when the master's
+// address swallows packets, and the cycle is one of those the failure
+// threshold counts. Toward a master that answered it has no bound of its
+// own.
+func TestDragonflyManager_Tick_ReplicaOfTowardAMissedMasterIsBounded(t *testing.T) {
+	h := newRestartHarness(t, nil)
+	replica := &replicaOfDeadline{fakeDragonflyConn: h.dc2}
+	h.mgr.SetConnector(func(ctx context.Context, addr, password string) (DragonflyConnection, error) {
+		conn, err := h.conn.connect(ctx, addr, password)
+		if err == nil && addr == holdTestDC2 {
+			return replica, nil
+		}
+		return conn, err
+	})
+	h.dc2.info.MasterLinkStatus = "down"
+
+	h.tick(1) // the master answers: the same instance, the link is down
+	if len(h.dc2.replicaOfArgs) == 0 || replica.bounded {
+		t.Fatalf("REPLICAOF toward an observed master: sent=%v bounded=%v, want sent with no bound of its own", h.dc2.replicaOfArgs, replica.bounded)
+	}
+	h.missMaster()
+	h.dc2.replicaOfArgs = nil
+	h.tick(1)
+	if len(h.dc2.replicaOfArgs) == 0 || !replica.bounded || replica.remaining > dragonflyReplicaOfMissedMasterBudget || replica.remaining <= 0 {
+		t.Fatalf("REPLICAOF toward a missed master: sent=%v bounded=%v remaining=%s, want sent within %s",
+			h.dc2.replicaOfArgs, replica.bounded, replica.remaining, dragonflyReplicaOfMissedMasterBudget)
+	}
+}
+
 // The count belongs to the active site: when the active site changes, the
 // misses of the previous one do not count against the new one.
 func TestDragonflyManager_Tick_MissCountStartsAgainWithTheActiveSite(t *testing.T) {

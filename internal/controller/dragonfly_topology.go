@@ -71,12 +71,13 @@ type DragonflyManager struct {
 	// missed in dragonflyMasterLossThreshold consecutive observations; see
 	// noteActiveMaster and dragonflyOnlyPromotionCandidate.
 	// masterMissSite is the active site being missed, masterMisses the
-	// consecutive observations that missed it, masterMissAt when the last
-	// of them was made, and masterWaitLogged is set once the wait has been
-	// logged for this outage. Guarded by mu.
+	// consecutive observations that missed it, cycleEndedAt when the last
+	// cycle that observed ended (what it then did included), and
+	// masterWaitLogged is set once the wait has been logged for this
+	// outage. Guarded by mu.
 	masterMissSite   string
 	masterMisses     int
-	masterMissAt     time.Time
+	cycleEndedAt     time.Time
 	masterWaitLogged bool
 	// replicaLinked is, per site, the last observation of it as a replica
 	// in stable sync: whom it followed and when. It is what says that a
@@ -409,6 +410,7 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 	}
 
 	observedAt := m.now()
+	defer m.noteCycleEnd()
 	snap := m.observe(ctx, &fg)
 	// What was observed is noted before the cycle can yield: an
 	// observation that reached the master ends the miss count whether or
@@ -1198,14 +1200,14 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			//  (a) it points at the wrong master, or
 			//  (b) the link to the right master is down.
 			//
-			// (b) covers the master-pod-restart case: the Service-backed
-			// hostname stays the same but the underlying TCP connection to
-			// the killed pod's IP dies. Dragonfly's auto-reconnect doesn't
-			// always recover (especially after the operator's
-			// --break_replication_on_master_restart kicks in on the new
-			// master pod), so without this branch the replica silently
-			// stays disconnected forever — same shape as upstream issue
-			// #2044 (orphaned downstream replicas after topology change).
+			// (b) covers a link that Dragonfly's own reconnect does not
+			// bring back, and a replica that holds nothing beside a master
+			// that restarted: with --break_replication_on_master_restart
+			// it does not attach to the new instance by itself, so without
+			// this branch it stays disconnected for good (the shape of
+			// upstream issue #2044, orphaned downstream replicas after a
+			// topology change).
+			//
 			// While the master is the instance the replica synced from,
 			// or does not answer, REPLICAOF to the same target costs the
 			// replica nothing: it is refused in under 200ms against a
@@ -1231,15 +1233,34 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 					"site", snap.Name, "master", active, "reason", why, "fg", m.fgKey.String())
 				continue
 			}
-			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort)
+			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort, replicaOfBudget(activeSnap))
 		case dragonfly.RoleUnconfigured:
 			if snap.Name == active {
 				// Fresh master; no replication to wire.
 				continue
 			}
-			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort)
+			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort, replicaOfBudget(activeSnap))
 		}
 	}
+}
+
+// dragonflyReplicaOfMissedMasterBudget bounds a REPLICAOF that points a
+// replica at an active master this cycle's observation missed. Against a
+// master that refuses connections the replica answers in under 200ms
+// (`ERR replication cancelled`); against one whose address swallows packets
+// it holds the command for about 20s, and the client's 5s I/O timeout would
+// then be added to every cycle that counts a miss, stretching the failure
+// threshold from three 3s cycles to three 8s ones.
+const dragonflyReplicaOfMissedMasterBudget = time.Second
+
+// replicaOfBudget is the budget of a REPLICAOF toward the active master:
+// dragonflyReplicaOfMissedMasterBudget when this cycle did not reach it, no
+// bound of its own (0) otherwise.
+func replicaOfBudget(active *DragonflySiteSnapshot) time.Duration {
+	if active == nil || !active.Reachable {
+		return dragonflyReplicaOfMissedMasterBudget
+	}
+	return 0
 }
 
 // defaultDragonflyMasterLossThreshold is how many consecutive observations
@@ -1288,9 +1309,12 @@ func dragonflyMasterMissed(s *DragonflySiteSnapshot) bool {
 // result here, also one that then yields to another owner, so a cycle that
 // reached the master always ends the count. A cycle that did not observe at
 // all (the group's gate was busy) notes nothing, and the count does not
-// survive that for long: a miss made more than dragonflyMissCountMaxGap
-// after the one before it starts a new count. observedAt is when this
-// cycle's observation began.
+// survive that for long: a miss whose cycle began more than
+// missCountMaxGap after the cycle before it ended starts a new count.
+// observedAt is when this cycle's observation began. The gap is the time
+// between cycles, not the time a cycle takes: a cycle that runs long (an
+// observation into a timeout, a REPLICAOF that a replica holds for
+// seconds) is followed by the next one at once.
 //
 // The count is this process's: a restarted operator starts from zero, so a
 // master that was already gone is replaced one threshold after the restart.
@@ -1306,19 +1330,24 @@ func (m *DragonflyManager) noteActiveMaster(fg *v1alpha1.MysqlFailoverGroup, sna
 	if m.masterMissSite != active {
 		m.masterMissSite, m.masterMisses, m.masterWaitLogged = active, 0, false
 	}
-	if m.masterMisses > 0 && observedAt.Sub(m.masterMissAt) > m.missCountMaxGap() {
+	if m.masterMisses > 0 && observedAt.Sub(m.cycleEndedAt) > m.missCountMaxGap() {
 		m.masterMisses, m.masterWaitLogged = 0, false
 	}
 	m.masterMisses++
-	m.masterMissAt = m.now()
+}
+
+// noteCycleEnd records when a cycle that observed ended.
+func (m *DragonflyManager) noteCycleEnd() {
+	m.mu.Lock()
+	m.cycleEndedAt = m.now()
+	m.mu.Unlock()
 }
 
 // dragonflyMissCountMaxGapPolls is how many poll intervals may pass between
-// the end of one cycle that missed the active master and the start of the
-// next one for the two misses to count as consecutive. Cycles follow each
-// other one poll interval apart, or without a pause when an observation
-// ran into a timeout, so two intervals allow for one late cycle and no
-// more.
+// the end of one cycle and the start of the next one that missed the active
+// master for the two misses to count as consecutive. Cycles start one poll
+// interval apart, or without a pause after one that ran longer than that,
+// so two intervals allow for one late cycle and no more.
 const dragonflyMissCountMaxGapPolls = 2
 
 // missCountMaxGap is dragonflyMissCountMaxGapPolls poll intervals.
@@ -1598,8 +1627,14 @@ func (m *DragonflyManager) attemptStaleMasterReconfigure(ctx context.Context, fg
 
 // applyReplicaOf opens a one-shot connection to the named site and
 // issues REPLICAOF. Errors are logged but not surfaced to the caller —
-// the next tick will retry.
-func (m *DragonflyManager) applyReplicaOf(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, password, masterHost string, masterPort int32) {
+// the next tick will retry. A budget above zero bounds the dial and the
+// command together.
+func (m *DragonflyManager) applyReplicaOf(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, password, masterHost string, masterPort int32, budget time.Duration) {
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	addr := dragonflyAddr(fg, siteName)
 	conn, err := m.connector(ctx, addr, password)
 	if err != nil {
