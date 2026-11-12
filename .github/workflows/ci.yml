@@ -186,6 +186,9 @@ jobs:
   # mysql container launcher against real servers through first boot,
   # restarts, clones and a killed clone. It reads MySQL-internal file names
   # in the data directory, so this is where an upstream change shows.
+  # And the native own-loss lag proof test: the position proof that tells a
+  # replica that lost its own transactions from one that is behind, against
+  # two real servers.
   test-pitr-native:
     needs: changes
     if: needs.changes.outputs.pitr == 'true'
@@ -213,6 +216,10 @@ jobs:
         env:
           BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
         run: go test ./internal/controller -run 'TestMySQLLauncherNative' -v -timeout 20m
+      - name: Run native own-loss lag proof test
+        env:
+          BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
+        run: go test ./internal/controller -run 'TestOwnLossLagProofNative' -v -timeout 10m
 
   # Opt-in native Dragonfly tests, against real Dragonfly servers at the
   # supported floor: the client's replication positions (two

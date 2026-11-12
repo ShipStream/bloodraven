@@ -58,6 +58,9 @@ check pitr-fragments 'internal/controller/pitr.go'    true  false false true  fa
 check pitr-dump-meta-render 'internal/controller/pitr_dump_meta.go' true false false true false
 check verify-script 'internal/controller/verify_script.sh' true false false true false
 check mysql-client-other 'internal/mysql/sidecar_client.go' true false false true false
+check own-loss-lag-proof 'internal/controller/own_transactions_lost.go' true false false true false
+check own-loss-native-test 'internal/controller/own_transactions_lost_native_test.go' true false false true false
+check own-loss-audit 'internal/controller/gtid_audit.go' true false false true false
 check controller-restore-go 'internal/controller/restore.go' true false false false false
 check mysql-launcher 'internal/controller/mysql_launcher.go' true false false true false
 check mysql-launcher-native-test 'internal/controller/mysql_launcher_native_test.go' true false false true false
