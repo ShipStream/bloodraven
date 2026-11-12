@@ -13,7 +13,7 @@ import (
 )
 
 // Tests of the fixes that followed the second review of the planned-failover
-// DST findings (internal/dst/README.md, "Fixed findings, now regressions"):
+// DST findings (internal/dst/README.md, "Fixed in the operator"):
 // the fenced source named from the durable intent, the replaced or
 // regressed target in the re-proof and the promotion attempt, the
 // confirmation memo, and what the terminal records say.

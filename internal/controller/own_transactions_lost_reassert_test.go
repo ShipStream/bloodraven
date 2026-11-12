@@ -85,3 +85,34 @@ func TestOwnLoss_ReassertComparesAStandingReportAgain(t *testing.T) {
 		}
 	})
 }
+
+// TestClearRestoredOwnLoss_OnlyTheRestoredReport: the re-assert decides to
+// settle a restored report before it reads the sites. A report that a
+// comparison confirmed in the meantime (recovery or the audit against a
+// primary, the picker or the review against a witness) is not the one it
+// decided about and stays.
+func TestClearRestoredOwnLoss_OnlyTheRestoredReport(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rec     *ownLossRecord
+		cleared bool
+	}{
+		{"restored from status", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10}, true},
+		{"confirmed against the primary", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1", detectedBy: divergenceDetectedByAudit}, false},
+		{"a witness's", &ownLossRecord{lostGtid: lossLostGTID, lostCount: 10, comparedTo: "dc1", detectedBy: divergenceDetectedByRecovery, witness: true}, false},
+		{"none", nil, false},
+	} {
+		f := newLossFixture(t, lossUUIDOld+":1-100", lossUUIDOld+":1-100", false)
+		if tc.rec != nil {
+			f.tm.mu.Lock()
+			f.tm.ownLoss = map[string]*ownLossRecord{"dc2": tc.rec}
+			f.tm.mu.Unlock()
+		}
+		if got := f.tm.clearRestoredOwnLoss("dc2"); got != tc.cleared {
+			t.Errorf("%s: cleared = %v, want %v", tc.name, got, tc.cleared)
+		}
+		if gone := f.loss() == nil; gone != (tc.cleared || tc.rec == nil) {
+			t.Errorf("%s: record gone = %v", tc.name, gone)
+		}
+	}
+}

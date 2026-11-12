@@ -1477,10 +1477,3 @@ func (tm *TopologyManager) refuseOwnLossCandidate(name, serverUUID string, set m
 	}
 	return false
 }
-
-// gtidSetHolds reports whether the GTID set raw (as a server reports it)
-// contains want. A set that does not parse proves nothing.
-func gtidSetHolds(raw string, want mysql.GTIDSet) bool {
-	set, err := mysql.ParseGTIDSet(raw)
-	return err == nil && set.Contains(want)
-}

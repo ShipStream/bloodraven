@@ -77,6 +77,18 @@ func TestRollback_ComparesTheSourceWithEverySiteThatAnswers(t *testing.T) {
 				f.tm.mu.Unlock()
 			},
 			outcome: rolledBack, unfenced: true},
+		{name: "a target queued for the reclone of an in-place restore is no evidence",
+			reason: lag,
+			mutate: func(f *opsFixture) {
+				f.fenced()
+				f.tgt.gtid = opsUUIDA + ":1-13"
+				f.tm.mu.Lock()
+				f.tm.restoreReclonePending = []string{"dc2"}
+				f.tm.mu.Unlock()
+			},
+			// Nothing is pointed at the source either: it does not hold what
+			// the target holds. The target's channel runs and is left alone.
+			outcome: rolledBack, unfenced: true},
 		{name: "a site ahead under another server's uuid is no evidence",
 			third: state.SiteRoleDROnly, reason: lag,
 			mutate:  func(f *opsFixture) { f.fenced(); f.third.gtid = opsF + "," + opsUUIDB + ":1-4" },
