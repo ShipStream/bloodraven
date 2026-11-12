@@ -212,6 +212,13 @@ func TestOwnLossLagProofNative(t *testing.T) {
 		t.Fatalf("B lacks %q of its own transactions before it replicates, want %s", lost.String(), wantHole)
 	}
 	b.replicateFrom(a, 0)
+	// A receiver that is still connecting is no running channel, and a
+	// site without one is reported at once: wait, so that the hole below
+	// is proven by the applier's position.
+	lagNativeWait(t, "B's channel from A to run", 30*time.Second, func() bool {
+		rs, err := b.checker.ShowReplicaStatus(ctx)
+		return err == nil && rs != nil && rs.IORunning && rs.SQLRunning
+	})
 	a.exec("INSERT INTO t.w1 (v) VALUES ('after the loss')")
 	a.exec("INSERT INTO t.w1 (v) VALUES ('after the loss')")
 
