@@ -24,13 +24,23 @@ func init() {
 //   - increment bloodraven_dragonfly_promotions_total{result="success|sessions_lost"}
 //   - re-attach the respawned old master as a replica with link=up
 //
+// The promotion comes from one of two paths, whichever is first: the
+// failure threshold (spec.failureThreshold consecutive missed polls of the
+// killed master), or the replacement pod answering as a new, empty master
+// before that, which the replica that holds the cache is not re-attached
+// to. Both promote with REPLICAOF NO ONE (result="sessions_lost") and keep
+// the seeded key. About 30s after the promotion Dragonfly follows MySQL
+// back to the original site with REPLTAKEOVER; the rejoin step observes
+// the old master as a replica before that.
+//
 // Mapped to PLANS-Dragonfly-Chaos-Scenarios.md scenario D7.
 func scenario23DragonflyMasterKill() runner.Scenario {
 	return runner.Scenario{
 		ID:    "23-dragonfly-master-kill",
 		Title: "Dragonfly master kill — replica promoted, MySQL untouched",
 		Hypothesis: "Force-deleting the active Dragonfly pod causes Bloodraven to autonomously promote the surviving " +
-			"replica via TryEmergencyPromote: status.dragonfly.activeSite flips to the peer, MySQL status.activeSite " +
+			"replica, after the failure threshold or when the replacement pod answers as a new empty master, whichever " +
+			"is first: status.dragonfly.activeSite flips to the peer with the cache kept, MySQL status.activeSite " +
 			"is unchanged, and once the StatefulSet respawns the old pod it re-attaches as a healthy replica.",
 		Risk:     "low",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D7)",
