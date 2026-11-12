@@ -210,12 +210,23 @@ func nowTxns(uuid string, serverID uint32, from, to int64) []binlogtest.Txn {
 
 // reclone replaces the datadir with a clone of donor: every local binlog is
 // gone, gtid_executed is the donor's, and server_uuid is kept (F25).
-func (s *simServer) reclone(donor *simServer) {
+func (s *simServer) reclone(donor *simServer) { s.recloneAs(donor, "") }
+
+// recloneAs is reclone by an operator that rotates the recipient's
+// server_uuid (the mysql launcher), or keeps it for "": the clone's data
+// and the new identity appear together, as on a server that restarts into
+// its clone. An archiver that probed between the two would see the cloned
+// data under the old server_uuid, an incarnation no real server has, and
+// record it.
+func (s *simServer) recloneAs(donor *simServer, uuid string) {
 	donor.mu.Lock()
 	executed := sidecar.UnionBinlogGTIDs(donor.executed)
 	donor.mu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if uuid != "" {
+		s.uuid = uuid
+	}
 	entries, _ := os.ReadDir(s.dir)
 	for _, e := range entries {
 		_ = os.Remove(filepath.Join(s.dir, e.Name()))
@@ -1256,15 +1267,6 @@ func (w *writerArchive) startAudited(site string, srv *simServer, identity sidec
 	w.wg.Add(1)
 	go func() { defer w.wg.Done(); a.Run(w.ctx) }()
 	return a
-}
-
-// recloneAs is reclone by an operator that rotates the recipient's
-// server_uuid: the clone starts as a new server.
-func (s *simServer) recloneAs(donor *simServer, uuid string) {
-	s.reclone(donor)
-	s.mu.Lock()
-	s.uuid = uuid
-	s.mu.Unlock()
 }
 
 // lossyRecloneLayout runs the layout of #271's audit: a archives A:1-5, then
