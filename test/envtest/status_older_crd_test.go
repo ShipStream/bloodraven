@@ -135,6 +135,13 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 		t.Fatalf("lostGtid = %q, lostComparedTo = %q: the previous CRD was expected to prune them; the fixture is not the previous CRD",
 			dc2.LostGtid, dc2.LostComparedTo)
 	}
+	// What is stored is RecoveryBlocked without any set: the shape an
+	// operator that restarts on this status takes for an own-loss report
+	// whose set the CRD pruned, and restores as one (controller test
+	// TestStartManager_RestoresAnOwnLossReportDegradedForAnOlderCRD).
+	if dc2.DivergentGtid != "" || dc2.DivergentTransactionCount != nil {
+		t.Fatalf("dc2 = %+v: the degraded report carries a divergent set, so a restart would take it for a divergence", dc2)
+	}
 	// The conditions carry the real reason: the group does not read
 	// healthy, and says what is wrong.
 	for _, ty := range []string{v1alpha1.ConditionDegraded, v1alpha1.ConditionRecoveryPending} {

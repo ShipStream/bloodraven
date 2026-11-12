@@ -397,15 +397,16 @@ func TestOwnLoss_AWritablePrimaryThatLacksItsOwnTransactionsIsNamed(t *testing.T
 // primary lacks. What the primary holds too is compared with the primary,
 // where lag can be told from a hole.
 func TestOwnLoss_CrossCheckCountsOnlyWhatThePrimaryLacks(t *testing.T) {
-	// dc3 is divergent by a transaction of its own; it also holds
-	// Old:91-100, which the primary holds too and dc2 has not applied.
-	f := newWitnessFixture(t, witnessHolderSet, witnessPrimarySet, witnessHolderSet+","+lossUUIDThird+":1")
+	// dc3 is divergent by Old:101, which dc2 issued and still holds and
+	// the primary lacks. dc3 also holds Old:91-100, which the primary
+	// holds too and dc2 has not applied yet (a replay onto the primary).
+	f := newWitnessFixture(t, witnessHolderSet, witnessPrimarySet+","+lossUUIDOld+":101", witnessHolderSet+","+lossUUIDOld+":101")
 	site := f.tm.getSite("dc3")
 	f.tm.knownSiteServerUUIDs("dc2", lossUUIDOld)
 	f.tm.mu.Lock()
 	f.tm.sites[0].state, f.tm.sites[1].state, f.tm.sites[2].state = state.StateWritable, state.StateReadOnly, state.StateReadOnly
 	f.tm.mu.Unlock()
-	if f.tm.crossCheckOwnLoss(context.Background(), site, mustGTIDSet(t, lossUUIDThird+":1"), "dc1") {
+	if f.tm.crossCheckOwnLoss(context.Background(), site, mustGTIDSet(t, lossUUIDOld+":101"), "dc1") {
 		t.Fatal("a report changed")
 	}
 	if rec := ownLossOf(f.tm, "dc2"); rec != nil {
@@ -524,4 +525,35 @@ func TestOwnLoss_RestoredReportWithoutAPrimary(t *testing.T) {
 			t.Fatalf("record = %+v, want a confirmed witness report against dc3", rec)
 		}
 	})
+}
+
+// The restart on a status an older CRD stored, with a silent witness: the
+// report restored without its set does not end by the clean comparison
+// with the primary, and holds until the witness answers.
+func TestOwnLoss_ReportRestoredWithoutItsSetSurvivesASilentWitness(t *testing.T) {
+	f := newWitnessFixture(t, witnessPrimarySet, witnessPrimarySet, witnessHolderSet)
+	f.tm.SetOwnTransactionsLostUnknown("dc2")
+	f.tm.SetRecoveryBlockedFrom("dc2", "", 0, "", "") // what the same status restores beside it
+	silence(f.dc3, true)
+	f.poll(t, 6)
+	f.clk.Advance(gtidAuditInterval)
+	f.poll(t, 6)
+	rec := ownLossOf(f.tm, "dc2")
+	if rec == nil || !rec.witness {
+		t.Fatalf("record = %+v, want the report kept as a witness report while dc3 is silent", rec)
+	}
+	if err := f.tm.liveHandoffRefusal("dc2")(); err == nil {
+		t.Fatal("handoff to dc2 is not refused")
+	}
+	msg := ownLossMessage(f.tm.buildSnapshot(nil), "lion")
+	if !strings.Contains(msg, "dc2 was reported as lacking transactions it issued itself before the operator restarted") {
+		t.Fatalf("condition message = %q, want it to say the report was restored without its set", msg)
+	}
+	// dc3 answers: it holds them, and the report gets its set and holder.
+	silence(f.dc3, false)
+	f.clk.Advance(gtidAuditInterval)
+	f.poll(t, 3)
+	if rec := ownLossOf(f.tm, "dc2"); rec == nil || rec.lostGtid != lossLostGTID || rec.comparedTo != "dc3" {
+		t.Fatalf("record = %+v, want %s against dc3", rec, lossLostGTID)
+	}
 }

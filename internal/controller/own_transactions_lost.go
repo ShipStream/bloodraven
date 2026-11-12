@@ -779,6 +779,26 @@ func (tm *TopologyManager) SetOwnTransactionsLostFrom(site, lostGtid string, los
 	metrics.OwnTransactionsLost.WithLabelValues(site).Set(float64(lostCount))
 }
 
+// SetOwnTransactionsLostUnknown restores a report whose lost set and holder
+// the stored status does not carry: the installed CRD is older than the
+// operator, so the report was stored as recoveryState RecoveryBlocked with
+// no set at all (degradeStatusForOlderCRD). Nothing is known but
+// that the site was reported, so the report takes the conservative rule
+// whole: it keeps the site out of replication and promotion, a comparison
+// with the primary makes it a hole or a witness report, and it ends only
+// when every other site has answered and none holds transactions the site
+// issued and lacks (reviewOwnLossReports), or by the site's reclone.
+func (tm *TopologyManager) SetOwnTransactionsLostUnknown(site string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.ownLoss == nil {
+		tm.ownLoss = map[string]*ownLossRecord{}
+	}
+	if tm.ownLoss[site] == nil {
+		tm.ownLoss[site] = &ownLossRecord{}
+	}
+}
+
 // carryOwnLossReports takes over the reports of the manager this one
 // replaces in the same process (a spec or credential change), for the
 // sites both have: prev's reports are newer than the status this manager

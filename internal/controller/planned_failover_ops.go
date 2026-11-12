@@ -1724,6 +1724,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		return leftFenced()
 	}
 	if idErr != nil {
+		res.SourceUnreachable = true
 		return res, nil // unreachable: retry until rollbackDeadline
 	}
 	if unattributed {

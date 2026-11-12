@@ -1220,3 +1220,46 @@ func TestDSTPF_RegressedTargetAfterAPossibleClearRollsBack(t *testing.T) {
 		}
 	})
 }
+
+// TestDSTPF_RollbackThatCannotReachTheSourceDoesNotCallItFenced: a run
+// rolls back and unfences its source, the record of that end does not
+// commit, the operator restarts, and the source does not answer the new
+// process. Past the rollback deadline that process ends the run. It has
+// not reached the source and has no memory of the unfence, so it must not
+// record "source left fenced" over a source that is writable and serving:
+// it ends SourceLeftFenced{SourceLost}, the outcome of a run that ended
+// without reaching its source, and says that an earlier attempt may have
+// unfenced it. The rollback's own reason stays in the rollback record.
+//
+// Found by the simulation's silent-witness fault (a site cut off from the
+// operator in the poll the operator restarts), as
+// OutcomeDishonest: "ended SourceLeftFenced but the source is writable".
+func TestDSTPF_RollbackThatCannotReachTheSourceDoesNotCallItFenced(t *testing.T) {
+	h := newPFHarness(t, pfOpts{})
+	h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // lags: the run waits, then rolls back
+	h.request("dc2")
+	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhaseRollingBack))
+	if h.src.isReadOnly() == false {
+		t.Fatal("setup: the source is writable before the rollback ran")
+	}
+	// The rollback pass unfences the source; its terminal record is lost.
+	h.store.LoseWrites(1)
+	h.pass()
+	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || h.src.isReadOnly() {
+		t.Fatalf("setup: phase %s, source read-only %v; want the source unfenced and the run still RollingBack", pf.Phase, h.src.isReadOnly())
+	}
+	reason := h.pf().Rollback.Reason
+	h.src.setError(errors.New("dial tcp: i/o timeout"))
+	h.newProcess()
+	pf := h.runUntil(90, terminal)
+	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonSourceLost)
+	if pf.Rollback == nil || pf.Rollback.Reason != reason {
+		t.Fatalf("rollback record %+v, want its reason %s kept", pf.Rollback, reason)
+	}
+	if !strings.Contains(pf.Message, "could not reach the source") || strings.Contains(pf.Message, "left fenced") {
+		t.Fatalf("message %q: want it to say the source was not reached, not that it was left fenced", pf.Message)
+	}
+	if h.holdCondition() {
+		t.Fatal("an automation hold was set")
+	}
+}

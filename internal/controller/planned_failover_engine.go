@@ -2368,6 +2368,20 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 	}
 	m.warnings = addPlannedWarnings(m.warnings, res.Warnings...)
 	if !e.clk.Now().Before(intended.Add(plannedFailoverRollbackDeadline)) {
+		if err == nil && res.SourceUnreachable {
+			// The deadline passed on a pass that could not read the source.
+			// The run ends without reaching it, which is what SourceLost
+			// says (§6.2): whether the source is fenced is not known. An
+			// earlier attempt of this rollback, in this process or in one
+			// that died before it could record its end, may have unfenced
+			// it; a record that said "left fenced" over a source that is
+			// writable and serving would be wrong. The rollback's own
+			// reason stays in status.plannedFailover.rollback.
+			return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
+				reason: v1alpha1.PlannedFailoverReasonSourceLost,
+				msg: fmt.Sprintf("rollback (%s) could not reach the source %q within %s, so whether it is fenced or writable is not known: an earlier attempt of this rollback may have unfenced it",
+					reason, pf.SourceSite, plannedFailoverRollbackDeadline)})
+		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
 			msg: fmt.Sprintf("rollback (%s) could not confirm the source %q writable within %s; %s",
 				reason, pf.SourceSite, plannedFailoverRollbackDeadline, e.sourceLeftClause(pf))})

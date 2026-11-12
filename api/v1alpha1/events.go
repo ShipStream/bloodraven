@@ -52,18 +52,21 @@ const (
 	// lacks stays `RecoveryBlocked` for an administrator. When the holder
 	// is not the primary but another site that holds transactions the
 	// primary lacks, the message says so: the site keeps replicating and
-	// is not recloned, and it is not promoted until that other site is
-	// repaired. Emitted on detection and when the set changes; once more
+	// is not recloned, and it is not promoted until no other site holds
+	// the transactions (that site is recloned, or they are replayed onto
+	// the primary and replicate back). For a site whose replication from
+	// the primary runs, raised only once the deficit cannot be replication
+	// lag. Emitted on detection and when the set changes; once more
 	// after an operator restart when the installed CRD does not store
 	// `lostGtid`. See [A returning site that lost its own
 	// transactions](/docs/operations/failover#a-returning-site-that-lost-its-own-transactions).
 	EventOwnTransactionsLost = ReasonOwnTransactionsLost
 	// A site's `OwnTransactionsLost` report ended. The message gives the
-	// cause: the site was recloned; a new comparison found it holds every
-	// transaction it issued that the primary holds; the report had been
-	// made against another site and the current primary never held those
-	// transactions (nothing was repaired); or the witness that held them
-	// no longer does.
+	// cause: the site was recloned; a new comparison with the primary it
+	// was reported against found it holds every transaction it issued;
+	// or every other site was compared and none holds transactions the
+	// site issued and lacks (the site that held them was recloned, or
+	// they were replayed onto the primary and the site received them).
 	EventOwnTransactionsLostResolved = "OwnTransactionsLostResolved"
 	// The automatic reclone of a site that lacks transactions it issued
 	// itself has failed three or more times in a row. The operator keeps
@@ -80,7 +83,8 @@ const (
 	// then recloned from it) or an administrator promotes one by hand.
 	EventPromotionRefusedOwnTransactionsLost = "PromotionRefusedOwnTransactionsLost"
 	// A site carrying an `OwnTransactionsLost` report became the primary
-	// without a reclone (an administrator made it writable). Unless its
+	// without a reclone (an administrator made it writable) while every
+	// other site is read-only. Unless its
 	// `server_uuid` was changed first, it issues the lost GTIDs again:
 	// the same GTID then names two transactions, replicas that hold the
 	// first skip the second, and the PITR archive of the group cannot be

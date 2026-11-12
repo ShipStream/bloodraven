@@ -82,6 +82,17 @@ func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 	return changed
 }
 
+// ownLossReportDegradedForOlderCRD reports whether s is what a status
+// write for an older CRD stores for a site with an own-loss report and no
+// divergence: recoveryState RecoveryBlocked without a divergent set (a
+// divergence block always carries its set) and without lostGtid. An
+// operator that restarts on it restores the report without its set
+// (TopologyManager.SetOwnTransactionsLostUnknown): the report must not be
+// lost with the field the CRD pruned.
+func ownLossReportDegradedForOlderCRD(s v1alpha1.SiteStatus) bool {
+	return s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergentGtid == "" && s.LostGtid == ""
+}
+
 // errStatusLostGtidPruned is what noteStatusDegradedForOlderCRD logs when
 // the API server accepted a status write and dropped a lostGtid.
 var errStatusLostGtidPruned = errors.New("the API server accepted the status and pruned status.sites[].lostGtid")

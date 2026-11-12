@@ -91,3 +91,48 @@ func TestPlannedClaim_RefusesATargetThatLacksItsOwnTransactions(t *testing.T) {
 		t.Fatalf("decision = %+v (decided %v), want a TargetUnhealthy rejection naming the lost transactions", d, decided)
 	}
 }
+
+// A status written against a CRD from before lostGtid stores a site's
+// own-loss report as RecoveryBlocked without any set. A manager that starts
+// on it restores the report all the same, without its set: the site stays
+// out of promotion, and the report ends only by the rule of every report.
+func TestStartManager_RestoresAnOwnLossReportDegradedForAnOlderCRD(t *testing.T) {
+	r, _, fg, _ := lifecycleRunner(t)
+	fg.Status.Sites = []v1alpha1.SiteStatus{
+		{Name: "dc1"},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateBlocked},
+	}
+	if !ownLossReportDegradedForOlderCRD(fg.Status.Sites[1]) {
+		t.Fatal("the degraded shape is not recognised")
+	}
+	// What a real divergence block looks like, and a site without a report.
+	div := int64(3)
+	for _, s := range []v1alpha1.SiteStatus{
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: lossUUIDOld + ":101-103", DivergentTransactionCount: &div},
+		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateInProgress},
+		{Name: "dc2"},
+	} {
+		if ownLossReportDegradedForOlderCRD(s) {
+			t.Fatalf("%+v was taken for a degraded own-loss report", s)
+		}
+	}
+	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
+		t.Fatalf("startManager: %v", err)
+	}
+	mt := registeredManager(r, FailoverGroupNamespacedName(fg))
+	if mt == nil {
+		t.Fatal("no manager registered")
+	}
+	mt.tm.mu.RLock()
+	rec := mt.tm.ownLoss["dc2"]
+	mt.tm.mu.RUnlock()
+	if rec == nil || rec.lostGtid != "" || rec.witness || rec.detectedBy != "" {
+		t.Fatalf("restored report = %+v, want one without a set and without a kind", rec)
+	}
+	if err := mt.tm.liveHandoffRefusal("dc2")(); err == nil {
+		t.Fatal("handoff to dc2 is not refused after a restart on a status an older CRD stored")
+	}
+	if err := mt.tm.withReplicaStartGate("dc2", func() error { return nil }); err == nil {
+		t.Fatal("the restored report does not keep the site's replication from being started")
+	}
+}

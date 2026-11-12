@@ -1159,6 +1159,15 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			r.logger.Info("restored own transactions lost state from CR status",
 				"fg", nn, "site", site.Name, "lostGtid", site.LostGtid, "lostTransactions", lost, "comparedTo", site.LostComparedTo)
 		}
+		if ownLossReportDegradedForOlderCRD(site) {
+			// A CRD from before lostGtid stored the site's own-loss report
+			// as a RecoveryBlocked without a set. The report is restored
+			// without its set and holder, and held by the conservative
+			// rule: it ends only once every other site has been compared.
+			tm.SetOwnTransactionsLostUnknown(site.Name)
+			r.logger.Info("restored own transactions lost state from CR status without its set: the installed CRD is older than the operator",
+				"fg", nn, "site", site.Name, "remedy", "apply the CRDs of this release (helm does not upgrade the crds/ of a chart)")
+		}
 		if site.RecoveryState != v1alpha1.RecoveryStateBlocked && site.RecoveryState != v1alpha1.RecoveryStateInProgress && site.DivergentGtid == "" {
 			continue
 		}
@@ -3233,6 +3242,13 @@ func ownLossMessage(snap TopologySnapshot, group string) string {
 	var parts, witnessOnly []string
 	for _, s := range snap.Sites {
 		if s.LostGtid == "" {
+			if s.RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
+				// Restored from a status that did not carry the set (an
+				// older CRD), and not compared again yet.
+				witnessOnly = append(witnessOnly, s.Name)
+				parts = append(parts, fmt.Sprintf("%s was reported as lacking transactions it issued itself before the operator restarted, and the installed CRD did not store which (apply the CRDs of this release); it is not promoted until it has been compared with every other site (or reclone it: kubectl bloodraven reclone %s %s --cold)",
+					s.Name, group, s.Name))
+			}
 			continue
 		}
 		part := fmt.Sprintf("%s lacks %d transactions it issued itself that %s holds (%s)",

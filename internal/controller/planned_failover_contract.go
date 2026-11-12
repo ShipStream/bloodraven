@@ -761,6 +761,12 @@ type RollbackResult struct {
 	// LostGtid is set only for ManualRecoveryRequired{SourceUnfenced}: the
 	// transactions the writable source provably lacks (plannedSourceLost).
 	LostGtid string
+	// SourceUnreachable is set on an unfinished pass (Outcome "") that
+	// could not read the source at all: the pass knows neither whether the
+	// source is fenced nor whether it is writable. The engine ends the run
+	// SourceLeftFenced{SourceLost} when the rollback deadline passes on
+	// such a pass.
+	SourceUnreachable bool
 }
 
 // PlannedFailoverTopology is the engine's only path to topology managers and
