@@ -79,7 +79,7 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 
 	timeout := s.Timeout
 	if timeout == 0 {
-		timeout = 5 * time.Minute
+		timeout = DefaultScenarioTimeout
 	}
 	scenarioCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

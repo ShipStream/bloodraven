@@ -11,7 +11,10 @@ make chaos-list                           # list registered scenarios
 make chaos-check                          # verify the playground baseline is healthy
 make chaos-run SCENARIO=01-clean-primary-kill
 make chaos-run-all                        # bail on first failure (default)
+make test-e2e E2E_PROFILE=full E2E_SHARD=2/4   # part 2 of 4 of the full profile, on this cluster
 ```
+
+`run-all --shard=<i>/<n>` runs one of `n` parts of a profile. The parts are disjoint, together they are the whole profile, and they are balanced by each scenario's `Timeout` (plus an allowance for a `ResetBeforeRunAll` reset), so the long PITR scenarios land in different parts. Each part needs its own cluster; CI runs the full profile as four such jobs because one job cannot finish it inside its timeout. `./bin/playground-chaos list --profile=full --shard=<i>/<n>` prints a part. Adding a scenario or changing a `Timeout` can move other scenarios between parts, so do not write a scenario that depends on another one having run before it. `--shard` is refused together with `--scenarios`.
 
 The runner stamps an in-progress marker (`playground.bloodraven.shipstream.io/in-progress` annotation on the MFG) after Precheck and clears it on cleanup or on the pass path. A subsequent run that finds a leftover marker refuses to start and tells you whether the prior owner is still alive (same host + live pid), abandoned (same host + dead pid), or on another host. Override with:
 

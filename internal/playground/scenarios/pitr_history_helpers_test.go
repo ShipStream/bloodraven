@@ -310,8 +310,14 @@ func TestPITRScenariosInPITRE2EJob(t *testing.T) {
 		t.Fatal("_e2e.yml has no JUnit upload step")
 	}
 	upload, _, _ = strings.Cut(upload, "- name:")
-	if strings.Contains(upload, "inputs.scenario == ''") || !strings.Contains(upload, "e2e-scenarios-junit.xml") && !strings.Contains(upload, "'scenarios'") {
+	// The report path is one job-level variable (E2E_JUNIT_OUT) that the
+	// run steps write and the upload reads, so the two cannot drift; it
+	// names the scenario-list report as well as a profile's or a shard's.
+	if strings.Contains(upload, "inputs.scenario == ''") || !strings.Contains(upload, "path: ${{ env.E2E_JUNIT_OUT }}") {
 		t.Errorf("the JUnit upload must cover scenario-list jobs:\n%s", upload)
+	}
+	if !strings.Contains(string(reusable), "\n      E2E_JUNIT_OUT: playground/chaos-results/e2e-${{ inputs.scenario != '' && 'scenarios' ||") {
+		t.Error("_e2e.yml's job-level E2E_JUNIT_OUT must name the scenario-list report (e2e-scenarios-junit.xml)")
 	}
 }
 

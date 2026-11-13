@@ -41,6 +41,10 @@ while IFS= read -r f || [ -n "$f" ]; do
     site/public/courses/*) site=true; course=true ;;
     site/*) site=true ;;
     course/*) course=true ;;
+    # Go tests pin these two workflows: the full profile's shard matrix and
+    # job timeout (TestFullProfileShardsFitCIJob) and the pitr job's
+    # scenario list (TestPITRScenariosInPITRE2EJob).
+    .github/workflows/e2e.yml|.github/workflows/_e2e.yml) go=true ;;
     .github/*|proposals/*|skills/*|.agents/*|.claude/*|.thespider/*) ;;
     api/*|cmd/*|internal/*|test/*|config/*|charts/*|playground/*|examples/*|hack/*) go=true ;;
     go.mod|go.sum|tools.go|.golangci.yml|Dockerfile|.dockerignore) go=true ;;
