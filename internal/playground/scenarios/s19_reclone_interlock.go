@@ -289,14 +289,16 @@ func observeDivergenceRecorded() runner.Step {
 
 // verifyRecloneRejectedBare submits the bare site name, with no confirm=
 // or uid=, which must be rejected with RecloneRejected (a reclone wipes
-// the datadir and must be confirmed) and the annotation cleared.
+// the datadir and must be confirmed) and the annotation cleared. Since the
+// action annotations share one grammar (E14), the rejection names the
+// missing pair rather than the old "must be confirmed" wording.
 func verifyRecloneRejectedBare() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
 		Name:  "sub-case A (bare): unconfirmed bare site name is rejected against divergent site",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			site := ctxFetch(env, "divergentSite")
-			return submitAndExpectRejection(ctx, env, site, "must be confirmed")
+			return submitAndExpectRejection(ctx, env, site, "the confirm= pair is missing")
 		},
 	}
 }

@@ -572,7 +572,7 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 
 | Sub-case | Expected outcome |
 |---|---|
-| A. bare site, then cold form, divergent | The bare `<site>`: a `RecloneRejected` Warning event saying the value must be confirmed; annotation removed. The cold form: a `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
+| A. bare site, then cold form, divergent | The bare `<site>`: a `RecloneRejected` Warning event saying the `confirm=` pair is missing (the value must be confirmed); annotation removed. The cold form: a `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
 | B. mismatched prefix | `RecloneRejected` Warning event with "does not match the observed divergentGtid" text; annotation removed; site still fenced; no clone executed. |
 | C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) and returns to `False`/`NotBootstrapping`, with the recloned site replicating; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
 | D. cold form | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms the non-divergent case needs no `gtidPrefix`. |
