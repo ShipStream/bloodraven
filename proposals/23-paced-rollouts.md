@@ -176,6 +176,17 @@ Metrics: `bloodraven_rollout_groups{phase}`, `bloodraven_rollout_group_phase{nam
   default and a render-version change together with a pinned group; a pruned record.
 - `TestPacedRollout_BadBuildStopsAtTheFirstGroup`: two groups, the real ordered updater and the real Deployment
   write path, a replica that never becomes Ready, an operator restart and a second upgrade mid-rollout.
+- `TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart` (`test/component`): the same fleet through the
+  controller package's exported API, with the runner's own status write and `DeploymentUnstableReason` as the
+  stability check, for an `OrderedUpdate` fleet and for a `Recreate` group ahead of a group that pins its sidecar
+  (a render-version bump with a new sidecar default, R-7).
+- DST (`internal/dst`, README "Paced rollouts"): seeded fleets of two to four groups under the real pacer, gate,
+  drift check and ordered updater, with releases, operator restarts between passes and at API writes (the start
+  latch included), pods that do not become Ready and the two annotations. `TestDST_RolloutQuick` runs in
+  `make test`; `DST_ROLLOUT=1 make dst` is the campaign. It found no violation of R-1 to R-7 and one state the
+  rollout cannot leave by itself: an operator restart while a `Recreate` roll has the primary's pod away leaves a
+  group that never failed over without a primary, and the fleet halted behind it
+  (`TestKnownLimitationOperatorRestartDuringRecreateRollLeavesNoPrimary`).
 - Scenario `73-paced-rollout-bad-build-halt` (release profile, and the e2e `paced-rollout` job): two groups and
   the real operator; a default sidecar image that cannot be pulled halts the rollout at the first group, before
   its primary is touched, across an operator restart; a second tag of the same build then completes the first
@@ -184,4 +195,3 @@ Metrics: `bloodraven_rollout_groups{phase}`, `bloodraven_rollout_group_phase{nam
   published v1.7.0 chart and images, three groups, an upgrade to the build under test with
   `helm upgrade --reuse-values`; every MySQL pod rolls, one group at a time, in `admittedTime` order, and a
   failover works afterwards. v1.7.0 stays the baseline: it is the last release without pacing.
-- DST: see the PR.

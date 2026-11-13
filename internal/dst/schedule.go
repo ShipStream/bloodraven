@@ -124,12 +124,14 @@ const (
 
 // Op is one scheduled fault operation, applied at the start of poll At.
 type Op struct {
-	At     int
-	Kind   OpKind
-	Site   string
-	Peer   string // destination for one-way cuts; partner for pair partitions
-	N      int    // count for ambiguous/failing mutations, or crash countdown
-	Fenced bool   // crash boot mode: true = sidecar re-fences on boot
+	At   int
+	Kind OpKind
+	Site string
+	Peer string // destination for one-way cuts; partner for pair partitions
+	// Group is the failover group of a rollout-stream op (rollout_schedule.go).
+	Group  string
+	N      int  // count for ambiguous/failing mutations, or crash countdown
+	Fenced bool // crash boot mode: true = sidecar re-fences on boot
 	// BootWritable (crash boot mode, with Fenced false) boots read_only=OFF:
 	// a pod not yet rolled to the read_only=ON mysqld flag, mid-upgrade.
 	// Otherwise an unfenced boot is read_only=ON with super_read_only OFF.
@@ -149,13 +151,16 @@ type Op struct {
 
 func (o Op) String() string {
 	s := fmt.Sprintf("@p%03d %s", o.At, o.Kind)
+	if o.Group != "" {
+		s += " group=" + o.Group
+	}
 	if o.Site != "" {
 		s += " site=" + o.Site
 	}
 	if o.Peer != "" {
 		s += " peer=" + o.Peer
 	}
-	if o.N != 0 || o.Kind == OpCrashOperatorMid {
+	if o.N != 0 || o.Kind == OpCrashOperatorMid || o.Kind == OpCrashOperatorWrite {
 		s += fmt.Sprintf(" n=%d", o.N)
 	}
 	if o.Kind == OpRegressBoot {
@@ -167,7 +172,7 @@ func (o Op) String() string {
 			s += " bootWritable=true"
 		}
 	}
-	if o.Kind == OpCrashOperatorMid {
+	if o.Kind == OpCrashOperatorMid || o.Kind == OpCrashOperatorWrite {
 		s += fmt.Sprintf(" preApply=%v down=%d", o.PreApply, o.Down)
 	}
 	if o.K != 0 {
@@ -214,6 +219,12 @@ type Trial struct {
 	// (GenerateTrial's) disables it, and the trial runs exactly as before
 	// the actors existed.
 	Actors Actors
+
+	// Rollout is the paced-rollout fleet and schedule
+	// (rollout_schedule.go). The zero value (GenerateTrial's) is no
+	// rollout trial; with it enabled the trial is a rollout trial and the
+	// failover fields above are unused.
+	Rollout RolloutPlan
 }
 
 // ActiveOps returns the ops not masked out by Skip.
@@ -235,6 +246,12 @@ func (t Trial) String() string {
 	seed := fmt.Sprintf("%d", t.Seed)
 	if t.Seed == 0 {
 		seed = "hand-built"
+	}
+	if t.Rollout.Enabled {
+		fmt.Fprintf(&b, "seed=%s rollout groups=%d warmup=%d healAt=%d polls=%d\n",
+			seed, len(t.Rollout.Groups), t.WarmupPolls, t.HealAt, t.Polls)
+		b.WriteString(t.Rollout.String())
+		return b.String()
 	}
 	fmt.Fprintf(&b, "seed=%s sites=%d roles=%v priorities=%v cooldown=%ds history=%v warmup=%d healAt=%d polls=%d\n",
 		seed, len(t.SiteNames), t.Roles, t.Priorities, t.CooldownSec, t.SeedHistory, t.WarmupPolls, t.HealAt, t.Polls)

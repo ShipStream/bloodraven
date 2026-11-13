@@ -1132,3 +1132,17 @@ func (c *Cluster) Tick() {
 
 	c.recordHistoryLocked()
 }
+
+// KillOperator marks the operator process dead now, as a mutation's armed
+// countdown does (killOperatorLocked), for a death that lands outside
+// MySQL: a rollout trial's process dies at an API write. Every later
+// operator-side call on this cluster fails until ReviveOperator.
+func (c *Cluster) KillOperator(during string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.operatorDead {
+		return
+	}
+	c.operatorDead = true
+	c.event("", EvOperatorDie, "during="+during, "")
+}
