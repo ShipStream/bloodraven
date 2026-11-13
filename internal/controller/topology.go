@@ -831,6 +831,11 @@ type TopologyManager struct {
 	keyringPromotionSkipped []string
 	keyringPromotionRefused []string
 
+	// handoffFencedSource names the source of a maintenance handoff until
+	// the first poll that started after it consumes it
+	// (recordHandoffPromotion).
+	handoffFencedSource string
+
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
 	// Protected by mu.
@@ -1637,6 +1642,16 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	}
 	if tm.deploymentChanging == 0 {
 		tm.deploymentAwaitingObservation = false
+	}
+	// The first poll after a maintenance handoff takes the fenced source as
+	// read-only when it did not answer (recordHandoffPromotion).
+	if fenced := tm.handoffFencedSource; fenced != "" {
+		tm.handoffFencedSource = ""
+		for i := range tm.sites {
+			if tm.sites[i].name == fenced && results[i].err != nil && newStates[i] == state.StateWritable {
+				newStates[i] = state.StateReadOnly
+			}
+		}
 	}
 	prevStates := make([]state.SiteState, len(tm.sites))
 	// classificationLapsed records that a site ran out of its probe budget
@@ -3937,6 +3952,32 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 	return false
 }
 
+// recordHandoffPromotion records a maintenance handoff of the primary role
+// from source to target: the failover record, the metric and DNS.
+//
+// The handoff set super_read_only=ON on the source and read its GTID set
+// under the fence before it promoted target, and the ordered update
+// replaces the source's pod right after, so the polls that follow often
+// cannot read it. A Writable state from the last poll before the handoff
+// would then stand until FailureThreshold probes failed: two writable sites
+// in status and a SPLIT BRAIN alert, and the pending promotion cleared as
+// superseded by the fenced source, with DNS pointed back at it. The first
+// poll after the handoff therefore takes a source it cannot read as read
+// only (handoffFencedSource); one that answers keeps its answer.
+func (tm *TopologyManager) recordHandoffPromotion(ctx context.Context, source, target, promotionGTID string) {
+	tm.mu.Lock()
+	tm.handoffFencedSource = source
+	tm.mu.Unlock()
+	targetSite := tm.getSite(target)
+	tm.recordFailover(ctx, tm.clock.Now(), target, promotionGTID)
+	metrics.FailoversTotal.WithLabelValues(target).Inc()
+	if targetSite != nil {
+		if dnsErr := tm.applyDNS(ctx, target, targetSite.lbIP); dnsErr != nil {
+			tm.logger.Error("ordered update: DNS flip failed after handoff", "site", target, "error", dnsErr)
+		}
+	}
+}
+
 func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	if tm.updater == nil || tm.ApplyUpdate == nil {
 		return false
@@ -4097,14 +4138,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			tm.mu.Unlock()
 		}()
 		processed, err := tm.updater.ExecuteTargets(ctx, active, followers, applyUpdate, func(target, promotionGTID string) {
-			targetSite := tm.getSite(target)
-			tm.recordFailover(ctx, tm.clock.Now(), target, promotionGTID)
-			metrics.FailoversTotal.WithLabelValues(target).Inc()
-			if targetSite != nil {
-				if dnsErr := tm.applyDNS(ctx, target, targetSite.lbIP); dnsErr != nil {
-					tm.logger.Error("ordered update: DNS flip failed after handoff", "site", target, "error", dnsErr)
-				}
-			}
+			tm.recordHandoffPromotion(ctx, activeName, target, promotionGTID)
 		})
 		if err != nil {
 			tm.logger.Error("ordered update failed", "error", err)
