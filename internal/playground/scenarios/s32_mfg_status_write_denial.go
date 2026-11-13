@@ -153,17 +153,23 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 					_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 						fmt.Sprintf("status.activeSite==%s with lastFailoverTarget and promotionGtid populated", peerSite),
 						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-							msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q promotionGtid=%q ready=%s",
-								mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), truncGtid(mfg.Status.PromotionGtidExecuted()), readyOf(mfg))
+							msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q promotionGtid=%q ready=%s/%s",
+								mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), truncGtid(mfg.Status.PromotionGtidExecuted()), readyOf(mfg), readyReasonOf(mfg))
 							for _, s := range mfg.Status.Sites {
 								if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 									return false, msg, fmt.Errorf("site %s RecoveryBlocked during status heal", s.Name)
 								}
 							}
+							// The old primary is still scaled to 0, so Ready
+							// stays False for its replication
+							// (ReplicationUnhealthy) until the settle step brings
+							// it back; what heals here is the writable site.
+							ready := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady)
+							writableReady := ready != nil && (ready.Reason == v1alpha1.ReasonHealthy || ready.Reason == v1alpha1.ReasonReplicationUnhealthy)
 							done := mfg.Status.ActiveSite == peerSite &&
 								mfg.Status.LastFailoverTarget() == peerSite &&
 								mfg.Status.PromotionGtidExecuted() != "" &&
-								readyOf(mfg) == "True"
+								writableReady
 							return done, msg, nil
 						})
 					if err != nil {
@@ -241,6 +247,13 @@ func readyOf(mfg *v1alpha1.MysqlFailoverGroup) string {
 		if c.Type == v1alpha1.ConditionReady {
 			return string(c.Status)
 		}
+	}
+	return "<none>"
+}
+
+func readyReasonOf(mfg *v1alpha1.MysqlFailoverGroup) string {
+	if c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady); c != nil {
+		return c.Reason
 	}
 	return "<none>"
 }
