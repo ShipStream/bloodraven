@@ -282,15 +282,21 @@ func verifyS26PromotionsFailedMetric() runner.Step {
 	}
 }
 
-// settleS26SourceDragonflyRejoinsAsReplica force-deletes the source's
-// Dragonfly pod so it comes up empty (master_repl_offset=0,
-// connected_slaves=0) and the DragonflyManager auto-rejoin gate fires
-// (REPLICAOF target). Without this step the source would otherwise
-// be classified as a stale-master forever — its in-memory state from
-// before the failover carries master_repl_offset > 0, which the
-// auto-rejoin gate refuses to touch on purpose. The next scenario's
-// AssertHealthyBaseline would then trip on "expected 1 dragonfly
-// master, got 2" or "site is unreachable".
+// settleS26SourceDragonflyRejoinsAsReplica holds the source's Dragonfly
+// down until the manager has promoted another site, then brings it back
+// empty (master_repl_offset=0, connected_slaves=0) so that the
+// DragonflyManager's auto-rejoin gate fires (REPLICAOF the new master).
+// Without this step the source would otherwise be classified as a
+// stale-master forever — its in-memory state from before the failover
+// carries master_repl_offset > 0, which the auto-rejoin gate refuses to
+// touch on purpose. The next scenario's AssertHealthyBaseline would then
+// trip on "expected 1 dragonfly master, got 2" or "site is unreachable".
+//
+// The source is scaled to 0, not only killed: a killed pod is back within
+// seconds, and when that is sooner than the manager's three missed
+// observations nothing is promoted and the source stays the (empty)
+// master. Which of the two happened was a race, lost about as often as it
+// was won on a fast node.
 //
 // PhaseSettle (not PhaseCleanup) so a wait failure is reported as a
 // scenario failure rather than a cleanup-only error. The 4-minute
@@ -303,9 +309,26 @@ func settleS26SourceDragonflyRejoinsAsReplica() runner.Step {
 		Name:  "force-respawn source dragonfly so it rejoins as replica",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			source := ctxFetch(env, "s26Source")
-			env.Capture.Note(fmt.Sprintf("force-respawn dragonfly on %s (clears stale-master state)", source))
-			if err := env.Chaos.KillDragonflyPod(ctx, source); err != nil {
-				return fmt.Errorf("kill source dragonfly pod: %w", err)
+			env.Capture.Note(fmt.Sprintf("hold dragonfly on %s down until another site is the master (clears stale-master state)", source))
+			if err := env.Chaos.ScaleDragonflyToZero(ctx, source); err != nil {
+				return fmt.Errorf("scale source dragonfly to 0: %w", err)
+			}
+			promoteCtx, cancelPromote := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancelPromote()
+			if _, err := env.Wait.UntilCR(promoteCtx, env.Namespace,
+				fmt.Sprintf("dragonfly master moved away from %s", source),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					if mfg.Status.Dragonfly == nil {
+						return false, "no status.dragonfly", nil
+					}
+					active := mfg.Status.Dragonfly.ActiveSite
+					return active != "" && active != source, fmt.Sprintf("status.dragonfly.activeSite=%q", active), nil
+				},
+			); err != nil {
+				return err
+			}
+			if err := env.Chaos.K.ScaleDragonflyStatefulSet(ctx, env.Chaos.Namespace, env.Chaos.FG, source, 1); err != nil {
+				return fmt.Errorf("scale source dragonfly back to 1: %w", err)
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 			defer cancel()
