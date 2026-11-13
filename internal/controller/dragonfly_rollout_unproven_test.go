@@ -135,10 +135,11 @@ func TestReconcileDragonflyResources_RolloutWithoutAPositionWaitsForTheLink(t *t
 }
 
 // A takeover that keeps failing for a target that is ready on its link
-// alone is never replaced by REPLICAOF NO ONE. After three failures the
-// rollout's last resort applies, as for any rollout that cannot promote:
-// the active site's StatefulSet is updated where it is.
-func TestReconcileDragonflyResources_RolloutTakeoverOnlyFailuresEndInTheActiveUpdate(t *testing.T) {
+// alone is never replaced by REPLICAOF NO ONE, also when the old master
+// stops answering right after it. And no number of failures makes the
+// rollout update the active site's StatefulSet where it is (until #217,
+// three did): the active site keeps its pod and the takeover is retried.
+func TestReconcileDragonflyResources_RolloutTakeoverOnlyFailuresNeverEndInTheActiveUpdate(t *testing.T) {
 	target := syncProofReplica("a", 1, 1)
 	target.positionErr = &dragonfly.ServerError{Message: "NOPERM ops has no ACL permissions"}
 	target.replTakeoverErr = &dragonfly.ServerError{Message: "ERR Full sync not done"}
@@ -155,7 +156,7 @@ func TestReconcileDragonflyResources_RolloutTakeoverOnlyFailuresEndInTheActiveUp
 		}
 		return dial(ctx, addr, password)
 	}
-	for attempt := 1; attempt <= 3; attempt++ {
+	for attempt := 1; attempt <= 6; attempt++ {
 		sent = target.replTakeoverCalls
 		if img := dragonflyStatefulSetImageForTest(t, c, "dc1"); img != oldImage {
 			t.Fatalf("before attempt %d: active image = %q, want %q", attempt, img, oldImage)
@@ -180,7 +181,7 @@ func TestReconcileDragonflyResources_RolloutTakeoverOnlyFailuresEndInTheActiveUp
 	if got := rolloutActiveSite(t, c, fg); got != "dc1" {
 		t.Fatalf("dragonfly activeSite = %q, want dc1: nothing was promoted", got)
 	}
-	if img := dragonflyStatefulSetImageForTest(t, c, "dc1"); img == oldImage {
-		t.Fatalf("active image still %q after three failed takeovers: the rollout did not end", img)
+	if img := dragonflyStatefulSetImageForTest(t, c, "dc1"); img != oldImage {
+		t.Fatalf("active image = %q after six failed takeovers, want %q: the master was restarted where it is", img, oldImage)
 	}
 }

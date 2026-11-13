@@ -128,7 +128,7 @@ func TestPlannedFailoverDragonfly_RestartedTargetIsNotATakeover(t *testing.T) {
 func TestRollDragonflyReplicaStatefulSet_HoldsPlannedTarget(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
 	r, c := newReconciler(fg)
-	requeue, err := r.rollDragonflyReplicaStatefulSet(context.Background(), fg, fg.Spec.Sites[1])
+	requeue, err := r.rollDragonflyReplicaStatefulSet(context.Background(), fg, fg.Spec.Sites[1], effectiveDragonflyMasterSite(fg))
 	if err != nil || requeue != dragonflyGateRetry {
 		t.Fatalf("roll of the planned target = (%s, %v), want held with a %s requeue", requeue, err, dragonflyGateRetry)
 	}
@@ -143,7 +143,7 @@ func TestRollDragonflyReplicaStatefulSet_HoldsPlannedTarget(t *testing.T) {
 	if err := c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if requeue, err := r.rollDragonflyReplicaStatefulSet(context.Background(), fg, fg.Spec.Sites[1]); err != nil || requeue != 0 {
+	if requeue, err := r.rollDragonflyReplicaStatefulSet(context.Background(), fg, fg.Spec.Sites[1], effectiveDragonflyMasterSite(fg)); err != nil || requeue != 0 {
 		t.Fatalf("roll with no planned owner = (%s, %v), want applied", requeue, err)
 	}
 }

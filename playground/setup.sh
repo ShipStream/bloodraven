@@ -18,6 +18,12 @@
 #     manifests/failovergroup-3site.yaml (iad, pdx, fra) instead of
 #     manifests/failovergroup.yaml (iad, pdx, reader). Sites cannot be
 #     removed, so switching topology needs ./playground/teardown.sh first.
+#     To install another operator release than the checkout (the upgrade
+#     E2E, ./playground/upgrade-e2e.sh, installs the previous one):
+#       BLOODRAVEN_SETUP_CHART_DIR                  chart directory (CRDs included)
+#       BLOODRAVEN_SETUP_OPERATOR_IMAGE_REPOSITORY  BLOODRAVEN_SETUP_OPERATOR_IMAGE_TAG
+#       BLOODRAVEN_SETUP_OPERATOR_PULL_POLICY       (default Never: the image is loaded)
+#       BLOODRAVEN_SETUP_SIDECAR_IMAGE_REPOSITORY   BLOODRAVEN_SETUP_SIDECAR_IMAGE_TAG
 #
 # Cluster setup (do once, before running this script):
 #
@@ -140,6 +146,16 @@ if [[ "$RUNTIME" == "podman" ]]; then
   IMG_PREFIX="localhost/"
 fi
 
+# The operator release to install: the checkout's chart and the images built
+# from it, unless overridden (see the header).
+CHART_DIR="${BLOODRAVEN_SETUP_CHART_DIR:-$PROJECT_ROOT/charts/bloodraven}"
+[[ -f "$CHART_DIR/Chart.yaml" ]] || fail "BLOODRAVEN_SETUP_CHART_DIR=$CHART_DIR is not a chart directory"
+OPERATOR_IMAGE_REPOSITORY="${BLOODRAVEN_SETUP_OPERATOR_IMAGE_REPOSITORY:-${IMG_PREFIX}bloodraven}"
+OPERATOR_IMAGE_TAG="${BLOODRAVEN_SETUP_OPERATOR_IMAGE_TAG:-playground}"
+OPERATOR_PULL_POLICY="${BLOODRAVEN_SETUP_OPERATOR_PULL_POLICY:-Never}"
+SIDECAR_IMAGE_REPOSITORY="${BLOODRAVEN_SETUP_SIDECAR_IMAGE_REPOSITORY:-${IMG_PREFIX}bloodraven-sidecar}"
+SIDECAR_IMAGE_TAG="${BLOODRAVEN_SETUP_SIDECAR_IMAGE_TAG:-playground}"
+
 kubectl cluster-info >/dev/null 2>&1 || fail "No Kubernetes cluster reachable. Set up a cluster first (see script header)."
 
 # ── 1. Verify at least 3 worker nodes ────────────────────────────────────
@@ -199,6 +215,18 @@ fi
 
 # ── 4. Auto-detect cluster tool and load images ──────────────────────────
 IMAGES=(bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground)
+
+# A second tag of the same sidecar build. To the operator it is another
+# default sidecar image, which is what a new release ships: scenario
+# 73-paced-rollout-bad-build-halt switches the operator to it to roll the
+# groups without a second build. Tagged here also when the build was
+# skipped, from the image the caller built or loaded.
+if $RUNTIME image inspect bloodraven-sidecar:playground >/dev/null 2>&1; then
+  $RUNTIME tag bloodraven-sidecar:playground bloodraven-sidecar:playground-next
+  IMAGES+=(bloodraven-sidecar:playground-next)
+else
+  warn "bloodraven-sidecar:playground is not in the local $RUNTIME image store; bloodraven-sidecar:playground-next is not tagged or loaded (scenario 73 needs it)"
+fi
 
 podman_save() {
   TARFILE=$(mktemp "${TMPDIR:-/tmp}/bloodraven-images-XXXXXX.tar")
@@ -305,10 +333,10 @@ ok "DNSEndpoint CRD installed"
 
 # ── 6. Install Bloodraven CRDs ───────────────────────────────────────────
 if [[ "$HELM_INSTALL_CRDS" == "true" ]]; then
-  info "Skipping manual Bloodraven CRD install; fresh Helm install will install chart CRDs from charts/bloodraven/crds"
+  info "Skipping manual Bloodraven CRD install; fresh Helm install will install chart CRDs from $CHART_DIR/crds"
 else
   info "Installing Bloodraven CRDs..."
-  kubectl apply --server-side --force-conflicts -f "$PROJECT_ROOT/charts/bloodraven/crds/"
+  kubectl apply --server-side --force-conflicts -f "$CHART_DIR/crds/"
   ok "Bloodraven CRDs installed"
 fi
 
@@ -341,14 +369,14 @@ kubectl -n "$NAMESPACE" rollout status deployment/rustfs --timeout=180s
 ok "RustFS ready (scenario 29 creates the dragonfly bucket on demand)"
 
 # ── 8. Deploy the operator via Helm ──────────────────────────────────────
-info "Deploying Bloodraven operator via Helm..."
-helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
+info "Deploying Bloodraven operator via Helm (chart $CHART_DIR, image $OPERATOR_IMAGE_REPOSITORY:$OPERATOR_IMAGE_TAG, sidecar $SIDECAR_IMAGE_REPOSITORY:$SIDECAR_IMAGE_TAG)..."
+helm upgrade --install bloodraven "$CHART_DIR" \
   --namespace "$NAMESPACE" \
-  --set image.repository="${IMG_PREFIX}bloodraven" \
-  --set image.tag=playground \
-  --set image.pullPolicy=Never \
-  --set sidecar.image.repository="${IMG_PREFIX}bloodraven-sidecar" \
-  --set sidecar.image.tag=playground \
+  --set image.repository="$OPERATOR_IMAGE_REPOSITORY" \
+  --set image.tag="$OPERATOR_IMAGE_TAG" \
+  --set image.pullPolicy="$OPERATOR_PULL_POLICY" \
+  --set sidecar.image.repository="$SIDECAR_IMAGE_REPOSITORY" \
+  --set sidecar.image.tag="$SIDECAR_IMAGE_TAG" \
   --set auxiliary.service.enabled=true \
   --set 'nodeSelector=null' \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \

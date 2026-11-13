@@ -345,7 +345,7 @@ func TestReconcileSiteConfigMapsDeferKeepsExisting(t *testing.T) {
 	r, c := newReconciler(fg, existing)
 	in, _ := resolvePITRRender(fg, nil)
 	render := groupPITRRender{inputs: in, action: pitrRenderDefer, existing: map[string]bool{resourceName(fg.Name, "dc1"): true}}
-	if err := r.reconcileSiteConfigMaps(context.Background(), fg, render); err != nil {
+	if err := r.reconcileSiteConfigMaps(context.Background(), fg, render, nil); err != nil {
 		t.Fatal(err)
 	}
 	var cm corev1.ConfigMap

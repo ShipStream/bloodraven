@@ -82,6 +82,28 @@ const (
 	// Stability: Public.
 	AcknowledgePlannedFailoverHoldAnnotation = "bloodraven.shipstream.io/acknowledge-planned-failover-hold"
 
+	// RolloutAdmitAnnotation admits the group to the paced rollout of a
+	// release-driven pod change now, whatever the queue or a halt says.
+	// It is declarative: while it is set, every new release rolls this
+	// group without waiting for the slot. Remove it afterwards.
+	//
+	// On: MysqlFailoverGroup.
+	// Writer: administrator.
+	// Value: `true`.
+	// Stability: Public.
+	RolloutAdmitAnnotation = "bloodraven.shipstream.io/rollout-admit"
+
+	// RolloutReleaseSlotAnnotation lets the paced rollout continue past
+	// this group: while it is set, the group's unfinished or stalled roll
+	// does not hold the rollout slot, so the next group is admitted. The
+	// group's own roll continues as before.
+	//
+	// On: MysqlFailoverGroup.
+	// Writer: administrator.
+	// Value: `true`.
+	// Stability: Public.
+	RolloutReleaseSlotAnnotation = "bloodraven.shipstream.io/rollout-release-slot"
+
 	// RecloneAnnotation asks the operator to reclone one site from the
 	// current primary with CLONE INSTANCE, which wipes the site's datadir.
 	// When the site has a recorded divergent GTID set
@@ -446,6 +468,46 @@ const (
 	// Value: a hash.
 	// Stability: Internal (may change).
 	SpecHashAnnotation = "bloodraven.shipstream.io/spec-hash"
+
+	// RenderedByAnnotation names the operator release (its renderer
+	// identity) that last wrote the workload's pod template. A workload
+	// that carries another value, or none, and whose template the running
+	// operator would change is rolled only once the group is admitted to
+	// the paced rollout (status.rollout).
+	//
+	// On: site Deployments and Dragonfly StatefulSets.
+	// Writer: operator.
+	// Value: a hash.
+	// Stability: Internal (may change).
+	RenderedByAnnotation = "bloodraven.shipstream.io/rendered-by"
+
+	// DragonflyRolloutInFlightAnnotation marks the Dragonfly site whose pod
+	// the group's template rollout is replacing. It is written in the same
+	// update as the template and removed once the site's pod runs that
+	// template, is Ready, and the site is either a replica proven in sync
+	// with the Dragonfly master or the master itself. While a site carries
+	// it, the rollout changes no other site's template.
+	//
+	// On: Dragonfly StatefulSets.
+	// Writer: operator.
+	// Value: an RFC 3339 time, when the template was written.
+	// Stability: Internal (may change).
+	DragonflyRolloutInFlightAnnotation = "bloodraven.shipstream.io/dragonfly-rollout-in-flight"
+
+	// DragonflyRestartInPlaceAnnotation lets the Dragonfly template rollout
+	// apply the pending pod template of one site without the proofs it
+	// otherwise waits for: that the site is not the Dragonfly master, or
+	// that the master was first taken over by a replica in sync. If the
+	// site holds the master, its cache is lost. It is for a group whose
+	// rollout cannot proceed by itself (no replica that can be promoted, a
+	// master the operator cannot read). The operator removes the annotation
+	// when it has applied the template, or when no template is pending.
+	//
+	// On: MysqlFailoverGroup.
+	// Writer: administrator.
+	// Value: the site name.
+	// Stability: Public.
+	DragonflyRestartInPlaceAnnotation = "bloodraven.shipstream.io/dragonfly-restart-in-place"
 
 	// ManagedServiceAnnotationsAnnotation lists the Service annotations the
 	// operator manages, so it can remove one that leaves the spec.

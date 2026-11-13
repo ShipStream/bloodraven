@@ -116,6 +116,19 @@ type MysqlFailoverGroupReconciler struct {
 	// that case.
 	APIReader client.Reader
 
+	// rolloutWaitTimeout overrides how long ReconcileSiteDeployment waits
+	// for a site's rollout (default 5 minutes). Tests shorten it.
+	rolloutWaitTimeout time.Duration
+
+	// RolloutPacing holds release-driven pod changes until the group is
+	// admitted to the paced rollout (rollout.go). cmd/bloodraven sets it
+	// together with the RolloutPacer that writes the admissions; a
+	// reconciler built without it (unit tests) rolls as before.
+	RolloutPacing bool
+	// rolloutTemplatePending is noteRolloutTemplatePending's record.
+	rolloutTemplatePendingMu sync.Mutex
+	rolloutTemplatePending   map[string]bool
+
 	// rolloutPollInterval overrides the production-default 2s cadence used by
 	// waitForDeploymentRollout. Tests set this to a small value so the timeout
 	// path exercises the ticker quickly.
@@ -183,6 +196,10 @@ type MysqlFailoverGroupReconciler struct {
 
 	dragonflyRolloutMu      sync.Mutex
 	dragonflyRolloutBackoff map[dragonflyRolloutKey]dragonflyRolloutState
+	// dragonflyRolloutWaits is what each group's Dragonfly template rollout
+	// is waiting for, when that is not its promotion target's sync
+	// (noteDragonflyRolloutWait). Guarded by dragonflyRolloutMu.
+	dragonflyRolloutWaits map[types.NamespacedName]dragonflyRolloutWaitState
 
 	restorePrivMu       sync.Mutex
 	restorePrivRejected map[types.NamespacedName]restorePrivilegeCheck
@@ -411,9 +428,16 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
+	// Sites whose pods wait for the paced rollout keep their ConfigMap too;
+	// it is written with the Deployment once the group is admitted.
+	rolloutPending, err := r.rolloutPendingSites(ctx, &fg, pitrRender)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("paced rollout: %w", err)
+	}
+
 	// Desired per-site ConfigMaps are created before any Deployment reference
 	// changes. This ordering makes migration from the legacy shared map safe.
-	if err := r.reconcileSiteConfigMaps(ctx, &fg, pitrRender); err != nil {
+	if err := r.reconcileSiteConfigMaps(ctx, &fg, pitrRender, rolloutPending); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile site configmaps: %w", err)
 	}
 
@@ -488,6 +512,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 					// Refused, not retried: the next reconcile checks again
 					// without writing.
 					r.noteWorkloadSelector(&fg, "Deployment", deployName, mismatch)
+				} else if stderrors.Is(err, errRolloutHeld) {
+					// The site keeps its pods until the pacer admits the
+					// group; its status write wakes this reconcile.
+					logger.V(1).Info("paced rollout: site deployment held until the group is admitted", "site", site.Name)
 				} else if err != nil {
 					return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
 				} else {
@@ -1015,7 +1043,7 @@ func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.Sit
 // its ConfigMap as it is: my.cnf follows the render (max_binlog_size), and
 // a restarted pod of the untouched Deployment must start with the
 // configuration it was rendered with (U09).
-func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr groupPITRRender) error {
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr groupPITRRender, rolloutPending map[string]bool) error {
 	if _, refused := effectivePITRMaxBinlogSize(fg); refused != "" && pitr.inputs.Enabled && r.Recorder != nil {
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventMysqlConfIgnored,
 			"ignoring spec.backup.pitr.maxBinlogSize %q: it must be a byte count with an optional k, m or g suffix; max-binlog-size is %s",
@@ -1032,7 +1060,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Conte
 				"site %s: ignoring mysqlConf keys %s: they override an operator-owned setting",
 				site.Name, strings.Join(keys, ", "))
 		}
-		if pitr.defers(resourceName(fg.Name, site.Name)) {
+		if pitr.defers(resourceName(fg.Name, site.Name)) || rolloutPending[site.Name] {
 			continue
 		}
 		if err := r.reconcileSiteConfigMap(ctx, fg, site, pitr.inputs); err != nil {
@@ -1429,7 +1457,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 	specHash := ComputeSpecHash(fg, site, secretContentDigest(digestKey, secretInputs), pitr.inputs)
 	pitrCanonical := pitr.inputs.Canonical()
 
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+	mutate := func() error {
 		// The selector is immutable: a live Deployment with another one
 		// is refused, not updated (workload_selector.go).
 		if mismatch := deploymentSelectorMismatch(deploy, fg, site.Name); mismatch != nil {
@@ -1458,6 +1486,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			deploy.Annotations = make(map[string]string)
 		}
 		deploy.Annotations[v1alpha1.SpecHashAnnotation] = specHash
+		// The operator release that wrote this template (rollout.go).
+		stampRenderedBy(deploy)
 		// The render this Deployment carries: the group hold's source
 		// (groupPITRHold) and the rendered identity backups stamp (K5).
 		deploy.Annotations[v1alpha1.PITRRenderAnnotation] = pitrCanonical
@@ -1906,7 +1936,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		deploy.Spec.Template.Spec.AutomountServiceAccountToken = mysqlPodAutomountToken(fg)
 		return nil
-	})
+	}
+	// A Deployment another operator release rendered is written only once
+	// the group is admitted to the paced rollout (rollout.go).
+	if done, err := r.gateDeploymentRollout(ctx, fg, site, deploy, mutate, specHash, pitrCanonical, pitr); err != nil || done {
+		return err
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, mutate)
 	return err
 }
 
@@ -2742,7 +2778,11 @@ func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Conte
 		return err
 	}
 	deployName := types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)}
-	if err := r.waitForDeploymentRollout(ctx, deployName, 5*time.Minute); err != nil {
+	timeout := r.rolloutWaitTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	if err := r.waitForDeploymentRollout(ctx, deployName, timeout); err != nil {
 		return &RolloutIncompleteError{Site: siteName, Err: err}
 	}
 	return nil
@@ -2781,7 +2821,13 @@ func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, 
 	for _, site := range fg.Spec.Sites {
 		if site.Name == siteName {
 			siteFound = true
-			if !pitrRender.defers(resourceName(fg.Name, site.Name)) {
+			// A site whose pod waits for the paced rollout gets its
+			// ConfigMap from the Deployment write, after admission.
+			rolloutPending, err := r.rolloutPendingSites(ctx, &fg, pitrRender)
+			if err != nil {
+				return fmt.Errorf("paced rollout: %w", err)
+			}
+			if !pitrRender.defers(resourceName(fg.Name, site.Name)) && !rolloutPending[site.Name] {
 				if err := r.reconcileSiteConfigMap(ctx, &fg, site, pitrRender.inputs); err != nil {
 					return fmt.Errorf("reconcile site configmap: %w", err)
 				}

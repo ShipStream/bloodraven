@@ -809,6 +809,15 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	UpdatePhase UpdatePhase `json:"updatePhase,omitempty"`
 
+	// Rollout is the group's place in the operator's paced rollout of a
+	// pod change that an operator release causes (a new launcher, render or
+	// default sidecar image). The operator admits one group at a time; a
+	// group that is not admitted keeps its current pods.
+	// Durable: the admission, the latched start and a stall are restored
+	// after an operator restart, so a halted rollout stays halted.
+	// +optional
+	Rollout *RolloutStatus `json:"rollout,omitempty"`
+
 	// Restore tracks an in-flight or completed initFromBackup operation.
 	// Durable: until it records Succeeded the group is treated as still
 	// restoring (no DNS, no application endpoints, no fresh-deploy clone).
@@ -1190,4 +1199,121 @@ const (
 
 func init() {
 	SchemeBuilder.Register(&MysqlFailoverGroup{}, &MysqlFailoverGroupList{})
+}
+
+// RolloutPhase is where a group stands in the paced rollout of a
+// release-driven pod change.
+// +kubebuilder:validation:Enum=Pending;Admitted;Rolling;Stalled;Complete
+type RolloutPhase string
+
+const (
+	// RolloutPhasePending means the group has a release-driven pod change
+	// to roll and is not admitted: it keeps its current pods.
+	RolloutPhasePending RolloutPhase = "Pending"
+	// RolloutPhaseAdmitted means the group holds the rollout slot and has
+	// not changed a workload yet.
+	RolloutPhaseAdmitted RolloutPhase = "Admitted"
+	// RolloutPhaseRolling means the group holds the slot and has started
+	// to change its workloads.
+	RolloutPhaseRolling RolloutPhase = "Rolling"
+	// RolloutPhaseStalled means the group started its roll and has not
+	// finished it in time. It keeps the slot, so no other group is admitted.
+	RolloutPhaseStalled RolloutPhase = "Stalled"
+	// RolloutPhaseComplete means every workload of the group runs the
+	// release's pod template and the group is stable again.
+	RolloutPhaseComplete RolloutPhase = "Complete"
+)
+
+// RolloutReason is a value of status.rollout.reason that the paced rollout
+// sets by itself. The reason label of the rollout metrics carries the same
+// values.
+type RolloutReason string
+
+const (
+	// RolloutReasonWaitingForSlot: another group holds the rollout slot,
+	// or the soak after the last completed roll has not elapsed.
+	RolloutReasonWaitingForSlot RolloutReason = "WaitingForSlot"
+	// RolloutReasonHalted: the group that holds the slot is stalled.
+	RolloutReasonHalted RolloutReason = "RolloutHalted"
+	// RolloutReasonGroupNotStable: the group is passed over until it is
+	// stable (a restore, not Ready, a planned failover, a failover hold).
+	RolloutReasonGroupNotStable RolloutReason = "GroupNotStable"
+	// RolloutReasonNotStarted: an admission was withdrawn before the
+	// group changed a workload; the group is at the back of the queue.
+	RolloutReasonNotStarted RolloutReason = "NotStarted"
+	// RolloutReasonAdmitted: the group was given the slot from the queue.
+	RolloutReasonAdmitted RolloutReason = "Admitted"
+	// RolloutReasonAdmittedByAnnotation: the rollout-admit annotation
+	// admitted the group outside the queue.
+	RolloutReasonAdmittedByAnnotation RolloutReason = "AdmittedByAnnotation"
+	// RolloutReasonStarted: the start latch is set; the group is rolling.
+	RolloutReasonStarted RolloutReason = "Started"
+	// RolloutReasonStallTimeout: a started roll did not finish in time.
+	RolloutReasonStallTimeout RolloutReason = "StallTimeout"
+)
+
+// RolloutStatus is a group's record in the operator's paced rollout.
+type RolloutStatus struct {
+	// Renderer identifies the operator release the record is for: a
+	// digest of the operator image, its default sidecar image and its
+	// render versions. Workloads carry the renderer that last wrote their
+	// pod template in the bloodraven.shipstream.io/rendered-by annotation.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	Renderer string `json:"renderer,omitempty"`
+
+	// Phase summarises the record.
+	// +optional
+	Phase RolloutPhase `json:"phase,omitempty"`
+
+	// Reason says why the group is in its phase, as a CamelCase word: a
+	// RolloutReason (WaitingForSlot, RolloutHalted, GroupNotStable,
+	// NotStarted, Admitted, AdmittedByAnnotation, Started, StallTimeout),
+	// or OrderedUpdateStalled when the group's ordered update reported the
+	// stall.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	Reason string `json:"reason,omitempty"`
+
+	// Message is the human-readable detail of Reason.
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Message string `json:"message,omitempty"`
+
+	// AdmittedTime is when the group was given the rollout slot. Set while
+	// the group holds the slot and after it completed.
+	// +optional
+	AdmittedTime *metav1.Time `json:"admittedTime,omitempty"`
+
+	// StartedTime is the latch: it is written before the first workload of
+	// the group is changed and stays set until the roll completes, through
+	// any stall. An admission that has started is never withdrawn.
+	// +optional
+	StartedTime *metav1.Time `json:"startedTime,omitempty"`
+
+	// StalledTime is when a started roll was found stalled. It stays set
+	// until the roll completes.
+	// +optional
+	StalledTime *metav1.Time `json:"stalledTime,omitempty"`
+
+	// CompletedTime is when the roll completed.
+	// +optional
+	CompletedTime *metav1.Time `json:"completedTime,omitempty"`
+
+	// DeferredTime is when an admission that had not started was last
+	// withdrawn, because the group could not start in time. A deferred
+	// group goes to the back of the queue.
+	// +optional
+	DeferredTime *metav1.Time `json:"deferredTime,omitempty"`
+}
+
+// InFlight reports whether the record holds an admission that has not
+// completed, for any renderer.
+func (r *RolloutStatus) InFlight() bool {
+	return r != nil && r.AdmittedTime != nil && r.CompletedTime == nil
+}
+
+// Started reports whether the record's roll has started and not completed.
+func (r *RolloutStatus) Started() bool {
+	return r.InFlight() && r.StartedTime != nil
 }

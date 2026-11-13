@@ -354,6 +354,33 @@ const (
 	EventDeploymentLeaseRevoked = "DeploymentLeaseRevoked"
 )
 
+// Events: Paced rollouts. On: MysqlFailoverGroup.
+//
+// The operator rolls a pod change that its own release causes one group
+// at a time. See [Paced rollouts](/docs/operations/upgrade-policy#paced-rollouts).
+const (
+	// The group was given the slot in the operator's paced rollout of a
+	// release-driven pod change, and may now roll its pods. The message
+	// names the renderer and says when an annotation admitted it.
+	EventRolloutAdmitted = "RolloutAdmitted"
+	// An admission that had not changed any workload was withdrawn: the
+	// group did not start its roll in time (the message says what held
+	// it). The group keeps its pods and goes to the back of the queue.
+	EventRolloutDeferred = "RolloutDeferred"
+	// The group's admitted roll has started and not finished in time, or
+	// its ordered update stopped on a pod that is not Ready. The group
+	// keeps the rollout slot, so no other group is rolled: a bad release
+	// stops here. See [Paced rollouts](/docs/operations/upgrade-policy#paced-rollouts).
+	EventRolloutStalled = "RolloutStalled"
+	// Every workload of the group runs the release's pod template and the
+	// group is stable; the slot is free for the next group.
+	EventRolloutCompleted = "RolloutCompleted"
+	// The operator could not store the group's rollout record: the
+	// installed CRD is older than the operator and prunes status.rollout.
+	// No group is rolled until the release's CRDs are applied.
+	EventRolloutRecordNotStored = "RolloutRecordNotStored"
+)
+
 // Events: Dragonfly. On: MysqlFailoverGroup.
 const (
 	// The operator is promoting a Dragonfly replica: in a planned
@@ -455,12 +482,23 @@ const (
 	// probe changes to unsupported; use a Dragonfly image that supports
 	// the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
-	// A rollout of the active Dragonfly site (a changed pod template) has
-	// waited two minutes for the replica it promotes first to be in sync:
-	// the replica is not linked to the master, is still behind it, or
-	// cannot be read (the message says which). The active site keeps its
-	// old pod until the replica is in sync. Emitted once per stall.
+	// A Dragonfly template rollout (a changed pod template) has waited two
+	// minutes and changes no StatefulSet until the cause is gone. The
+	// message names the state: `NotLinked`, `Behind` or `Unreadable` (the
+	// replica to promote before the active site is not in sync with it),
+	// `MasterUnknown` (the operator cannot tell which site is the master,
+	// or status and the sites disagree), `SiteInFlight` (a site the rollout
+	// restarted is not back in sync) or `TakeoverFailed` (`REPLTAKEOVER`
+	// keeps failing). The active site keeps its pod: it is restarted only
+	// after a takeover moved the master away from it, or when an
+	// administrator sets `bloodraven.shipstream.io/dragonfly-restart-in-place`.
+	// Emitted once per stall.
 	EventDragonflyRolloutStalled = "DragonflyRolloutStalled"
+	// An administrator set `bloodraven.shipstream.io/dragonfly-restart-in-place`
+	// and the rollout applied the named site's pod template without first
+	// moving the Dragonfly master away from it. If the site held the
+	// master, its cache is lost.
+	EventDragonflyRestartedInPlace = "DragonflyRestartedInPlace"
 	// A snapshot-restore upgrade run started: `spec.dragonfly.upgradeStrategy`
 	// is `SnapshotRestore` and a site's live StatefulSet runs an image other
 	// than `spec.dragonfly.image`. `status.dragonfly.upgrade` records it;

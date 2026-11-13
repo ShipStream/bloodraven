@@ -1,0 +1,27 @@
+# kind cluster configuration for the upgrade E2E (issue #244, C-8;
+# playground/upgrade-e2e.sh, scenario 74-upgrade-paced-rollout).
+#
+# The same as e2e-calico.yaml with a fourth worker. setup.sh gives the first
+# three workers to the playground group's sites; the scenario puts its
+# auxiliary failover groups on the fourth. They cannot share a node with a
+# site of the playground group: that group rolls during the upgrade, its
+# ordered update ends in a handoff, and the db-readonly taint of the demoted
+# site evicts every pod that is not the playground group's own.
+#
+# The other E2E jobs keep three workers on purpose: a spare node would give
+# the playground's application pods somewhere to run that no failover taints,
+# which changes what the eviction scenarios observe.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: bloodraven-e2e
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+  - role: worker
+  - role: worker
+networking:
+  # Disable kindnet so Calico can manage CNI instead.
+  disableDefaultCNI: true
+  # Match the stock Calico manifest's default IPv4 pool.
+  podSubnet: "192.168.0.0/16"

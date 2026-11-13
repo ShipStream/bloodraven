@@ -52,7 +52,7 @@ func TestReconcileSiteConfigMaps_WarnsOnRefusedMaxBinlogSize(t *testing.T) {
 	fg.Spec.Backup = &v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "64M\nskip-grant-tables"}}
 	r, _ := newReconciler(fg)
 	render := groupPITRRender{inputs: pitrRenderInputs{Enabled: true}, action: pitrRenderApply}
-	if err := r.reconcileSiteConfigMaps(context.Background(), fg, render); err != nil {
+	if err := r.reconcileSiteConfigMaps(context.Background(), fg, render, nil); err != nil {
 		t.Fatal(err)
 	}
 	events := r.Recorder.(*record.FakeRecorder).Events

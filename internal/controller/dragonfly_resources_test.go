@@ -420,7 +420,8 @@ func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t
 		t.Fatalf("create dc2 pod: %v", err)
 	}
 
-	fg.Spec.Dragonfly.Image = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"
+	const newImage = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"
+	fg.Spec.Dragonfly.Image = newImage
 	requeue, err := r.reconcileDragonflyResources(ctx, fg)
 	if err != nil {
 		t.Fatalf("first rollout reconcile: %v", err)
@@ -428,10 +429,10 @@ func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t
 	if requeue == 0 {
 		t.Fatal("first rollout reconcile requeue=0, want non-zero")
 	}
-	if got := dragonflyStatefulSetImageForTest(t, c, "dc2"); got != fg.Spec.Dragonfly.Image {
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc2"); got != newImage {
 		t.Fatalf("replica image=%q, want target image", got)
 	}
-	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got == fg.Spec.Dragonfly.Image {
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got == newImage {
 		t.Fatalf("active image advanced before replica rollout completed")
 	}
 
@@ -450,20 +451,18 @@ func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t
 	if promoted.Status.Dragonfly == nil || promoted.Status.Dragonfly.ActiveSite != "dc2" {
 		t.Fatalf("dragonfly activeSite=%v, want dc2 after replica promotion", promoted.Status.Dragonfly)
 	}
-	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got == fg.Spec.Dragonfly.Image {
-		t.Fatalf("old active image advanced in the same reconcile as promotion")
+	// The takeover that moved the master away is what writes the former
+	// master's template, in the same reconcile and before its pod is
+	// deleted, so the pod comes back once (#217).
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got != newImage {
+		t.Fatalf("former master image=%q, want the target image written with the takeover", got)
 	}
-	promoted.Spec.Dragonfly.Image = fg.Spec.Dragonfly.Image
-
-	requeue, err = r.reconcileDragonflyResources(ctx, &promoted)
-	if err != nil {
-		t.Fatalf("third rollout reconcile: %v", err)
+	var former appsv1.StatefulSet
+	if err := c.Get(ctx, types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &former); err != nil {
+		t.Fatalf("get dc1 StatefulSet: %v", err)
 	}
-	if requeue == 0 {
-		t.Fatal("third rollout reconcile requeue=0, want non-zero")
-	}
-	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got != fg.Spec.Dragonfly.Image {
-		t.Fatalf("old active image=%q, want target image after promotion", got)
+	if former.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] == "" {
+		t.Fatal("former master's StatefulSet is not marked in flight")
 	}
 }
 
@@ -517,8 +516,8 @@ func TestReconcileDragonflyResources_SerializesImageRolloutWhenActiveSiteIsSecon
 	if promoted.Status.Dragonfly == nil || promoted.Status.Dragonfly.ActiveSite != "dc1" {
 		t.Fatalf("dragonfly activeSite=%v, want dc1 after replica promotion", promoted.Status.Dragonfly)
 	}
-	if got := dragonflyStatefulSetImageForTest(t, c, "dc2"); got == fg.Spec.Dragonfly.Image {
-		t.Fatalf("old active image advanced in the same reconcile as promotion")
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc2"); got != "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0" {
+		t.Fatalf("former master image=%q, want the target image written with the takeover", got)
 	}
 }
 
@@ -583,15 +582,23 @@ func TestReconcileDragonflyResources_HoldsActiveImageUntilReplicaReady(t *testin
 	fg.Status.ActiveSite = "dc1"
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
+	target := syncProofReplica("a", 24, 28)
+	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: syncProofMaster("a", 24, 28), syncProofDC2: target})
 	ctx := context.Background()
 	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {
 		t.Fatalf("initial reconcile: %v", err)
 	}
 
-	fg.Spec.Dragonfly.Image = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"
+	const newImage = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"
+	fg.Spec.Dragonfly.Image = newImage
 	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {
 		t.Fatalf("replica rollout reconcile: %v", err)
 	}
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc2"); got != newImage {
+		t.Fatalf("replica image=%q, want target image", got)
+	}
+	// The replica's StatefulSet has no Ready pod on the new template yet:
+	// although it answers as a replica in sync, nothing is taken over.
 	requeue, err := r.reconcileDragonflyResources(ctx, fg)
 	if err != nil {
 		t.Fatalf("active-hold reconcile: %v", err)
@@ -599,8 +606,11 @@ func TestReconcileDragonflyResources_HoldsActiveImageUntilReplicaReady(t *testin
 	if requeue == 0 {
 		t.Fatal("active-hold reconcile requeue=0, want non-zero")
 	}
-	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got == fg.Spec.Dragonfly.Image {
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got == newImage {
 		t.Fatalf("active image advanced while replica rollout was not complete")
+	}
+	if target.replTakeoverCalls != 0 {
+		t.Fatalf("REPLTAKEOVER sent %d times while the replica's rollout was not complete", target.replTakeoverCalls)
 	}
 }
 

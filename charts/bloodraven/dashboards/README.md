@@ -4,7 +4,7 @@ Five dashboards covering every metric the operator publishes on `:8080/metrics`.
 
 | File | UID | Purpose |
 |---|---|---|
-| `overview.json` | `bloodraven-overview` | Start here. Writable/unreachable sites, replication lag, backup + archiver freshness, failover activity. |
+| `overview.json` | `bloodraven-overview` | Start here. Writable/unreachable sites, replication lag, backup + archiver freshness, failover activity, paced rollout of an operator release. |
 | `failover.json` | `bloodraven-failover` | Auto + planned failovers, duration/lag-wait histograms, state-transition flap detector, DNS flips, taints, split-brain auto-resolves. |
 | `replication.json` | `bloodraven-replication` | Replication lag per site, IO/SQL thread up/down state timeline, divergent transactions, reclones, poll latency. |
 | `backups.json` | `bloodraven-backups` | Backup runs by result, duration p50/p95, size, verification freshness and PITR replay lag. |

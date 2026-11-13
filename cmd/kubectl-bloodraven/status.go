@@ -170,6 +170,9 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating); c != nil && c.Reason == v1alpha1.ReasonOrderedUpdateStalled {
 		fmt.Fprintf(out, "  Update stalled: %s\n", c.Message)
 	}
+	if s := rolloutSummary(fg.Status.Rollout); s != "" {
+		fmt.Fprintf(out, "  Rollout: %s\n", s)
+	}
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Sites:")

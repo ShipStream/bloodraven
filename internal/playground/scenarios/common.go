@@ -132,6 +132,15 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		}
 		return fmt.Errorf("baseline unhealthy: no active site (run ./playground/setup.sh)")
 	}
+	// Every site of the spec, the non-active and the read-only ones
+	// included, must have been observed. A site the operator has not
+	// reported yet (a reader still coming up after setup.sh) has no
+	// status entry, and iterating status.sites alone would pass it (#262).
+	for _, s := range mfg.Spec.Sites {
+		if !siteInStatus(mfg, s.Name) {
+			return fmt.Errorf("baseline unhealthy: site %s state=%q (no status reported yet) — wait for recovery or run ./playground/reset-mysql.sh", s.Name, "")
+		}
+	}
 	for _, s := range mfg.Status.Sites {
 		if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
 			return fmt.Errorf("baseline unhealthy: site %s has RecoveryBlocked — run ./playground/reset-mysql.sh and retry", s.Name)
@@ -139,6 +148,13 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		if s.State == "" || s.State == v1alpha1.SiteStateUnknown || s.State == v1alpha1.SiteStateUnreachable {
 			return fmt.Errorf("baseline unhealthy: site %s state=%q — wait for recovery or run ./playground/reset-mysql.sh", s.Name, s.State)
 		}
+	}
+
+	// A paced rollout that waits, rolls or is stalled restarts pods (or
+	// will) under whatever the scenario does next.
+	if r := mfg.Status.Rollout; r != nil && r.Phase != "" && r.Phase != v1alpha1.RolloutPhaseComplete {
+		return fmt.Errorf("baseline unhealthy: paced rollout in phase %q (%s) — wait for it to complete; kubectl -n %s get mysqlfailovergroup %s -o jsonpath='{.status.rollout}'",
+			r.Phase, emptyAsNone(r.Reason), namespace, fg)
 	}
 
 	// Replication off on a non-active site. The active site is the
@@ -243,6 +259,15 @@ func bothReadOnly(mfg *v1alpha1.MysqlFailoverGroup) bool {
 
 func siteInSpec(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 	for _, s := range mfg.Spec.Sites {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func siteInStatus(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
+	for _, s := range mfg.Status.Sites {
 		if s.Name == name {
 			return true
 		}

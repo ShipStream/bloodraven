@@ -154,6 +154,24 @@ func plannedOutcomeReason(outcome v1alpha1.PlannedFailoverOutcome, reason v1alph
 	return string(outcome) + ":" + string(reason)
 }
 
+// rolloutSummary is the group's place in the operator's paced rollout
+// (status.rollout) as one line: "<phase> (<reason>): <message>". It is
+// empty when the group has no record or its roll completed, so a group
+// with nothing to wait for prints nothing.
+func rolloutSummary(r *v1alpha1.RolloutStatus) string {
+	if r == nil || r.Phase == "" || r.Phase == v1alpha1.RolloutPhaseComplete {
+		return ""
+	}
+	s := string(r.Phase)
+	if r.Reason != "" {
+		s += " (" + r.Reason + ")"
+	}
+	if r.Message != "" {
+		s += ": " + r.Message
+	}
+	return s
+}
+
 func recoverySummary(fg *v1alpha1.MysqlFailoverGroup) string {
 	for _, s := range fg.Status.Sites {
 		if s.RecoveryState != "" {

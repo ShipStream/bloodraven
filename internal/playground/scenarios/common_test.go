@@ -105,6 +105,79 @@ func TestAssertHealthyBaselineRejectsPlannedFailoverHold(t *testing.T) {
 	}
 }
 
+// Issue #262: run-all's suite-entry wait reports a healthy baseline by
+// CheckBaseline, the predicate of every scenario's Precheck. A baseline
+// whose non-active site is unreachable is not healthy, whatever the active
+// site and the Ready condition say, and neither is one with a site the
+// operator has not reported yet.
+func TestCheckBaselineRejectsUnreachableNonActiveSite(t *testing.T) {
+	withReader := func() *v1alpha1.MysqlFailoverGroup {
+		mfg := testBaselineMFG(false)
+		mfg.Spec.Sites = append(mfg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
+		mfg.Status.Sites = append(mfg.Status.Sites, v1alpha1.SiteStatus{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy})
+		return mfg
+	}
+	check := func(mfg *v1alpha1.MysqlFailoverGroup) error {
+		env := testScenarioEnv(t, mfg)
+		return CheckBaseline(context.Background(), env.Kube, env.Namespace, env.FG)
+	}
+
+	if err := check(withReader()); err != nil {
+		t.Fatalf("healthy three-site baseline: %v", err)
+	}
+
+	// The run of #262: Ready=True, the active site writable, the reader
+	// (not promotable, not active) unreachable.
+	mfg := withReader()
+	mfg.Status.Sites[2].State = v1alpha1.SiteStateUnreachable
+	mfg.Status.Sites[2].Replication = ""
+	err := check(mfg)
+	if err == nil || !strings.Contains(err.Error(), `site reader state="Unreachable"`) {
+		t.Fatalf("unreachable reader: baseline error = %v, want the reader's state", err)
+	}
+
+	// An unreachable promotable standby is the same.
+	mfg = withReader()
+	mfg.Status.Sites[1].State = v1alpha1.SiteStateUnreachable
+	if err := check(mfg); err == nil || !strings.Contains(err.Error(), "site pdx") {
+		t.Fatalf("unreachable standby: baseline error = %v, want site pdx", err)
+	}
+
+	// A site of the spec with no status entry yet (still coming up after
+	// setup.sh) used to pass, because only status.sites was walked.
+	mfg = withReader()
+	mfg.Status.Sites = mfg.Status.Sites[:2]
+	if err := check(mfg); err == nil || !strings.Contains(err.Error(), "site reader") || !strings.Contains(err.Error(), "no status reported yet") {
+		t.Fatalf("unreported reader: baseline error = %v, want site reader with no status", err)
+	}
+}
+
+// A paced rollout that waits, rolls or is stalled is not a baseline; a
+// completed one is.
+func TestCheckBaselineRejectsUnfinishedPacedRollout(t *testing.T) {
+	for _, tc := range []struct {
+		phase   v1alpha1.RolloutPhase
+		healthy bool
+	}{
+		{v1alpha1.RolloutPhasePending, false},
+		{v1alpha1.RolloutPhaseAdmitted, false},
+		{v1alpha1.RolloutPhaseRolling, false},
+		{v1alpha1.RolloutPhaseStalled, false},
+		{v1alpha1.RolloutPhaseComplete, true},
+	} {
+		mfg := testBaselineMFG(false)
+		mfg.Status.Rollout = &v1alpha1.RolloutStatus{Phase: tc.phase, Reason: "WaitingForSlot"}
+		env := testScenarioEnv(t, mfg)
+		err := CheckBaseline(context.Background(), env.Kube, env.Namespace, env.FG)
+		if tc.healthy && err != nil {
+			t.Errorf("phase %s: %v", tc.phase, err)
+		}
+		if !tc.healthy && (err == nil || !strings.Contains(err.Error(), "paced rollout in phase")) {
+			t.Errorf("phase %s: baseline error = %v, want the paced rollout", tc.phase, err)
+		}
+	}
+}
+
 func testScenarioEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup) *runner.Env {
 	t.Helper()
 	scheme := runtime.NewScheme()

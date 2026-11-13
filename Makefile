@@ -66,9 +66,10 @@ docker-build: ## Build Docker images for both operator and sidecar
 	docker build --target bloodraven -t bloodraven .
 	docker build --target sidecar -t bloodraven-sidecar .
 
-e2e-images: ## Build the five playground images the E2E suite loads into kind
+e2e-images: ## Build the five playground images the E2E suite loads into kind (and the sidecar's second tag)
 	docker build --target bloodraven -t bloodraven:playground .
 	docker build --target sidecar -t bloodraven-sidecar:playground .
+	docker tag bloodraven-sidecar:playground bloodraven-sidecar:playground-next
 	docker build -t bloodraven-counter:playground playground/counter-app
 	docker build -t bloodraven-dashboard:playground playground/dashboard
 	docker build -t bloodraven-dns-webhook:playground playground/dns-webhook

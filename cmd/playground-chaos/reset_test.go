@@ -196,6 +196,7 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 		"pitr":                "backup/PITR state",
 		"encryptionAtRest":    "cleared by the wipe pass only (asserted above)",
 		"pitrArchiveBindings": "cleared by the wipe pass only (asserted above)",
+		"rollout":             "the paced-rollout record of the group's workloads, which the reset keeps; the pacer re-derives it every pass",
 	}
 	statusType := reflect.TypeOf(v1alpha1.MysqlFailoverGroupStatus{})
 	all := map[string]bool{}

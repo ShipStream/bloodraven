@@ -85,3 +85,65 @@ spec:
               MySQL only encrypts data written after default_table_encryption takes effect;
               pre-existing tables need ALTER TABLE ... ENCRYPTION='Y'.
             runbook_url: https://bloodraven.dev/docs/configuration/encryption-at-rest#coverage
+        # --- paced rollouts ----------------------------------------------
+        # Paced rollout of a pod change that an operator release causes
+        # (chart value rollout.pacing). The rules are inert while nothing
+        # is being rolled and while pacing is off. The gauges are written
+        # by the operator pod that holds the leader lease, hence max().
+        - alert: BloodravenRolloutStalled
+          # A group's roll started and has not finished: this is the halt.
+          # The group keeps the rollout slot and every other group keeps
+          # its pods. The operator records the stall at once when an
+          # ordered update stops on a pod that is not Ready, otherwise
+          # after rollout.stallAfter (30m), and keeps it recorded until
+          # the roll completes. for: 10m lets a pod that was only slow to
+          # become Ready finish its roll without a page.
+          expr: max by (namespace, group) (bloodraven_rollout_group_phase{phase="stalled"}) == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Paced rollout halted, the roll of {{ $labels.namespace }}/{{ $labels.group }} stalled
+            description: >-
+              Failover group {{ $labels.namespace }}/{{ $labels.group }} started rolling to the
+              operator release's pod template and has not finished. It keeps the rollout
+              slot, so no other group is rolled. Read status.rollout.message on the group.
+            runbook_url: https://bloodraven.dev/docs/operations/runbooks#paced-rollout-halted
+        - alert: BloodravenRolloutPendingTooLong
+          # Groups wait for the slot and no group is rolling or stalled:
+          # every waiting group is unstable, admitted groups do not start
+          # (each is deferred after rollout.startGrace), or the rollout
+          # record cannot be stored. In a normal fleet rollout the time
+          # with nothing rolling is the soak (1m) plus the seconds an
+          # admitted group needs to start, and each roll resets this
+          # timer, so 30m does not fire. Raise it if you set rollout.soak
+          # or rollout.startGrace to 20m or more.
+          expr: |
+            max(bloodraven_rollout_groups{phase="pending"}) > 0
+            unless max(bloodraven_rollout_groups{phase=~"rolling|stalled"}) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $value }} failover groups wait for the paced rollout and none is rolling"
+            description: >-
+              The waiting groups keep their old pods, and spec changes that restart pods
+              wait with them. List them with bloodraven_rollout_group_phase{phase="pending"}
+              and read status.rollout.reason on each.
+            runbook_url: https://bloodraven.dev/docs/operations/runbooks#paced-rollout-not-progressing
+        - alert: BloodravenRolloutRecordNotStored
+          # The installed MysqlFailoverGroup CRD is older than the
+          # operator: the API server drops status.rollout, so no group is
+          # rolled. Zero when the CRDs are applied before the operator;
+          # for: 5m covers an upgrade that applies them right after it.
+          expr: max(bloodraven_rollout_record_not_stored) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: The paced rollout record of {{ $value }} failover groups cannot be stored
+            description: >-
+              The installed MysqlFailoverGroup CRD is older than the operator, so no group
+              is rolled to the release's pod template. Apply the CRDs of the running
+              operator release.
+            runbook_url: https://bloodraven.dev/docs/operations/runbooks#rollout-record-not-stored

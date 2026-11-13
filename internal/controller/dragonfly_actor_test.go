@@ -1069,7 +1069,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if err != nil || requeue != dragonflyGateRetry {
 		t.Fatalf("planned phase with the gate held = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 	}
-	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), live, "dc1", "dc2"); promoted || !deferred {
+	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), live, "dc1", "dc2", v1alpha1.SiteSpec{Name: "dc2"}); promoted || !deferred {
 		t.Fatalf("rollout promotion with the gate held = (promoted %v, deferred %v), want deferred", promoted, deferred)
 	}
 	if _, err := r.syncDragonflyPodLabels(context.Background(), live); err != nil {
