@@ -385,10 +385,13 @@ func s34RestoreMemory() runner.Step {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during revert roll", s.Name)
 						}
 					}
-					msg := fmt.Sprintf("updatePhase=%q writable=%d read-only=%d ready=%s", mfg.Status.UpdatePhase, writable, readOnly, readyOf(mfg))
+					// The revert is drift the operator rolls later, with
+					// updatePhase empty until it starts.
+					unapplied := env.Kube.SiteDeploymentProblems(waitCtx, env.Namespace, mfg)
+					msg := fmt.Sprintf("updatePhase=%q writable=%d read-only=%d ready=%s unapplied=%v", mfg.Status.UpdatePhase, writable, readOnly, readyOf(mfg), unapplied)
 					// Every site but the primary is read-only: the playground
 					// has a reader besides the two primary-candidates.
-					return mfg.Status.UpdatePhase == "" && writable == 1 && readOnly == len(mfg.Status.Sites)-1 && readyOf(mfg) == "True", msg, nil
+					return mfg.Status.UpdatePhase == "" && writable == 1 && readOnly == len(mfg.Status.Sites)-1 && readyOf(mfg) == "True" && len(unapplied) == 0, msg, nil
 				})
 			return err
 		},
