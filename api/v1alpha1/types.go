@@ -1224,6 +1224,34 @@ const (
 	RolloutPhaseComplete RolloutPhase = "Complete"
 )
 
+// RolloutReason is a value of status.rollout.reason that the paced rollout
+// sets by itself. The reason label of the rollout metrics carries the same
+// values.
+type RolloutReason string
+
+const (
+	// RolloutReasonWaitingForSlot: another group holds the rollout slot,
+	// or the soak after the last completed roll has not elapsed.
+	RolloutReasonWaitingForSlot RolloutReason = "WaitingForSlot"
+	// RolloutReasonHalted: the group that holds the slot is stalled.
+	RolloutReasonHalted RolloutReason = "RolloutHalted"
+	// RolloutReasonGroupNotStable: the group is passed over until it is
+	// stable (a restore, not Ready, a planned failover, a failover hold).
+	RolloutReasonGroupNotStable RolloutReason = "GroupNotStable"
+	// RolloutReasonNotStarted: an admission was withdrawn before the
+	// group changed a workload; the group is at the back of the queue.
+	RolloutReasonNotStarted RolloutReason = "NotStarted"
+	// RolloutReasonAdmitted: the group was given the slot from the queue.
+	RolloutReasonAdmitted RolloutReason = "Admitted"
+	// RolloutReasonAdmittedByAnnotation: the rollout-admit annotation
+	// admitted the group outside the queue.
+	RolloutReasonAdmittedByAnnotation RolloutReason = "AdmittedByAnnotation"
+	// RolloutReasonStarted: the start latch is set; the group is rolling.
+	RolloutReasonStarted RolloutReason = "Started"
+	// RolloutReasonStallTimeout: a started roll did not finish in time.
+	RolloutReasonStallTimeout RolloutReason = "StallTimeout"
+)
+
 // RolloutStatus is a group's record in the operator's paced rollout.
 type RolloutStatus struct {
 	// Renderer identifies the operator release the record is for: a
@@ -1238,9 +1266,11 @@ type RolloutStatus struct {
 	// +optional
 	Phase RolloutPhase `json:"phase,omitempty"`
 
-	// Reason says why the group is in its phase, as a CamelCase word:
-	// WaitingForSlot, RolloutHalted, GroupNotStable, NotStarted, Admitted,
-	// AdmittedByAnnotation, StallTimeout, OrderedUpdateStalled.
+	// Reason says why the group is in its phase, as a CamelCase word: a
+	// RolloutReason (WaitingForSlot, RolloutHalted, GroupNotStable,
+	// NotStarted, Admitted, AdmittedByAnnotation, Started, StallTimeout),
+	// or OrderedUpdateStalled when the group's ordered update reported the
+	// stall.
 	// +optional
 	// +kubebuilder:validation:MaxLength=64
 	Reason string `json:"reason,omitempty"`

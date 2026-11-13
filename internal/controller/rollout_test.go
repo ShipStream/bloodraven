@@ -689,3 +689,39 @@ func TestRolloutPacer_DefaultStabilityCheck(t *testing.T) {
 		t.Fatal("an admission without completion is not in flight")
 	}
 }
+
+// Only the value "true" arms the administrator's annotations: a
+// rollout-admit set to "false" must not admit a group past the queue.
+func TestRolloutPacer_AnnotationValueMustBeTrue(t *testing.T) {
+	lion := newTestFG()
+	tiger := newTestFG()
+	tiger.Name, tiger.UID = "tiger", "uid-tiger"
+	tiger.Annotations = map[string]string{v1alpha1.RolloutAdmitAnnotation: "false"}
+	r, c := newReconciler(lion, tiger)
+	for _, fg := range []*v1alpha1.MysqlFailoverGroup{lion, tiger} {
+		rolloutReconcile(t, r, fg)
+		ageDeployments(t, c, fg, oldReleaseHash)
+	}
+	r.RolloutPacing = true
+	pacer := NewRolloutPacer(c, c, record.NewFakeRecorder(100), testutil.TestLogger(), r, stubUnstable{}.reason, RolloutPacerConfig{Soak: -1})
+	tick := func() {
+		t.Helper()
+		if err := pacer.Tick(context.Background()); err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+	}
+	tick()
+	if rec := freshGroup(t, c, tiger).Status.Rollout; rec == nil || rec.Phase != v1alpha1.RolloutPhasePending {
+		t.Fatalf("tiger with rollout-admit=false: %+v, want Pending behind lion", rec)
+	}
+
+	fresh := freshGroup(t, c, tiger)
+	fresh.Annotations[v1alpha1.RolloutAdmitAnnotation] = "true"
+	if err := c.Update(context.Background(), fresh); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if rec := freshGroup(t, c, tiger).Status.Rollout; rec == nil || rec.Reason != rolloutReasonAdmittedByAnnotation {
+		t.Fatalf("tiger with rollout-admit=true: %+v, want AdmittedByAnnotation", rec)
+	}
+}

@@ -666,6 +666,73 @@ func TestDragonflyRollout_PacedGateHoldsAnUnadmittedGroup(t *testing.T) {
 	}
 }
 
+// An admitted group whose Dragonfly rollout cannot act (here: the master is
+// unknown) has not started its roll: the latch stays unset, so the pacer can
+// withdraw the admission and the fleet does not wait behind this group. The
+// latch is written when the rollout acts.
+func TestDragonflyRollout_PacedAdmissionIsNotLatchedWhileTheRolloutWaits(t *testing.T) {
+	f := newRolloutFixture(t, "dc1", "dc2")
+	f.r.RolloutPacing = true
+	ageDragonflyStatefulSets(f)
+	f.newImage()
+	admitGroup(t, f.c, f.fg)
+
+	fg := freshGroup(t, f.c, f.fg)
+	fg.Status.ActiveSite, fg.Status.Dragonfly = "", nil
+	if err := f.c.Status().Update(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		f.pass()
+		f.wantImages("master unknown")
+	}
+	if got := freshGroup(t, f.c, f.fg).Status.Rollout; got == nil || got.StartedTime != nil {
+		t.Fatalf("a rollout that changed nothing latched the start of the roll: %+v", got)
+	}
+
+	fg = freshGroup(t, f.c, f.fg)
+	fg.Status.ActiveSite = "dc1"
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	if err := f.c.Status().Update(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	f.pass()
+	f.wantImages("master known: replica first", "dc2")
+	if got := freshGroup(t, f.c, f.fg).Status.Rollout; got == nil || got.StartedTime == nil {
+		t.Fatalf("the first write did not latch the start of the roll: %+v", got)
+	}
+}
+
+// The group's roll is not complete while a Dragonfly site the serial rollout
+// restarted carries the in-flight mark, also when its pod is Ready again:
+// the pacer must not free the slot before the site is back in sync.
+func TestDragonflyRollout_InFlightSiteKeepsTheGroupRollIncomplete(t *testing.T) {
+	f := newRolloutFixture(t, "dc1", "dc2")
+	f.r.RolloutPacing = true
+	if _, err := ensureDigestKey(context.Background(), f.c, f.c, testScheme(), f.fg); err != nil {
+		t.Fatalf("ensureDigestKey: %v", err)
+	}
+	state := func() rolloutGroupState {
+		t.Helper()
+		st, err := f.r.RolloutGroupState(context.Background(), f.c, freshGroup(t, f.c, f.fg))
+		if err != nil {
+			t.Fatalf("RolloutGroupState: %v", err)
+		}
+		return st
+	}
+	if st := state(); len(st.Incomplete) != 0 {
+		t.Fatalf("settled group reports incomplete workloads: %v", st.Incomplete)
+	}
+	sts := f.sts("dc2")
+	sts.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] = f.now.UTC().Format(time.RFC3339)
+	if err := f.c.Update(context.Background(), sts); err != nil {
+		t.Fatal(err)
+	}
+	if st := state(); len(st.Incomplete) != 1 {
+		t.Fatalf("incomplete = %v, want the in-flight Dragonfly site", st.Incomplete)
+	}
+}
+
 // A StatefulSet another renderer wrote whose template the running render
 // would not change is restamped: the annotation alone, no template write,
 // no in-flight mark, and no admission needed.

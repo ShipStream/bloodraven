@@ -416,7 +416,9 @@ func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, re
 		if statefulSetSelectorMismatch(&sts, fg, site.Name) != nil {
 			continue
 		}
-		if !dragonflyStatefulSetRolloutComplete(&sts) {
+		// A site the serial rollout restarted counts until it is back in
+		// sync (the in-flight mark), not only until its pod is Ready.
+		if !dragonflyStatefulSetRolloutComplete(&sts) || sts.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] != "" {
 			st.Incomplete = append(st.Incomplete, rolloutDragonflyWorkload(site.Name))
 		}
 		if !renderedByOther(&sts) {
@@ -433,17 +435,31 @@ func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, re
 	return st, nil
 }
 
-// gateDragonflyRollout runs before the serial rollout changes the template
-// of a Dragonfly StatefulSet that differs from the running render. It
-// reports held=true when another renderer wrote it and the group is not
-// admitted to the paced rollout; otherwise the start of the roll is latched.
+// gateDragonflyRollout classifies a Dragonfly StatefulSet that differs from
+// the running render. It reports held=true when another renderer wrote it
+// and the group is not admitted to the paced rollout. It does not latch the
+// start of the roll: the serial rollout can wait a long time before it acts
+// (a master it cannot name, a replica that is not in sync), and an admission
+// that changed nothing must stay withdrawable. latchDragonflyRollout latches
+// before the first action.
 func (r *MysqlFailoverGroupReconciler) gateDragonflyRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, current *appsv1.StatefulSet) (held bool, err error) {
 	if !r.RolloutPacing || !renderedByOther(current) {
 		return false, nil
 	}
-	err = r.admitRolloutWrite(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
-	if errors.Is(err, errRolloutHeld) {
-		return true, nil
+	fresh, err := r.freshFailoverGroup(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
+	if err != nil {
+		return false, fmt.Errorf("re-read failover group for the paced rollout: %w", err)
 	}
-	return false, err
+	return !rolloutAdmitted(fresh), nil
+}
+
+// latchDragonflyRollout runs before the serial rollout acts on a Dragonfly
+// StatefulSet another renderer wrote: a template write, or the takeover
+// that moves the master away from the site first. It returns errRolloutHeld
+// when the admission was withdrawn since gateDragonflyRollout read it.
+func (r *MysqlFailoverGroupReconciler) latchDragonflyRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, current *appsv1.StatefulSet) error {
+	if !r.RolloutPacing || current == nil || !renderedByOther(current) {
+		return nil
+	}
+	return r.admitRolloutWrite(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
 }

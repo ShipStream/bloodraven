@@ -23,14 +23,14 @@ import (
 
 // status.rollout.reason values.
 const (
-	rolloutReasonWaitingForSlot       = "WaitingForSlot"
-	rolloutReasonHalted               = "RolloutHalted"
-	rolloutReasonGroupNotStable       = "GroupNotStable"
-	rolloutReasonNotStarted           = "NotStarted"
-	rolloutReasonAdmitted             = "Admitted"
-	rolloutReasonAdmittedByAnnotation = "AdmittedByAnnotation"
-	rolloutReasonStarted              = "Started"
-	rolloutReasonStallTimeout         = "StallTimeout"
+	rolloutReasonWaitingForSlot       = string(v1alpha1.RolloutReasonWaitingForSlot)
+	rolloutReasonHalted               = string(v1alpha1.RolloutReasonHalted)
+	rolloutReasonGroupNotStable       = string(v1alpha1.RolloutReasonGroupNotStable)
+	rolloutReasonNotStarted           = string(v1alpha1.RolloutReasonNotStarted)
+	rolloutReasonAdmitted             = string(v1alpha1.RolloutReasonAdmitted)
+	rolloutReasonAdmittedByAnnotation = string(v1alpha1.RolloutReasonAdmittedByAnnotation)
+	rolloutReasonStarted              = string(v1alpha1.RolloutReasonStarted)
+	rolloutReasonStallTimeout         = string(v1alpha1.RolloutReasonStallTimeout)
 	rolloutReasonUpdateStalled        = v1alpha1.ReasonOrderedUpdateStalled
 )
 
@@ -464,8 +464,9 @@ func (p *RolloutPacer) view(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup
 		Record:   fg.Status.Rollout.DeepCopy(),
 		Unstable: p.unstable(fg),
 	}
-	_, v.Admit = fg.Annotations[v1alpha1.RolloutAdmitAnnotation]
-	_, v.ReleaseSlot = fg.Annotations[v1alpha1.RolloutReleaseSlotAnnotation]
+	// Only "true" arms an annotation: "false" must not admit a group.
+	v.Admit = fg.Annotations[v1alpha1.RolloutAdmitAnnotation] == "true"
+	v.ReleaseSlot = fg.Annotations[v1alpha1.RolloutReleaseSlotAnnotation] == "true"
 	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating); c != nil &&
 		c.Status == metav1.ConditionTrue && c.Reason == v1alpha1.ReasonOrderedUpdateStalled {
 		v.UpdateStalled = c.Message

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"time"
 
@@ -356,6 +357,13 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyMasterSite(ctx context.Conte
 	if wait, attempts := r.dragonflyRolloutPromotionBackoff(fg, target, source); wait > 0 {
 		return wait, failed(attempts), nil
 	}
+	// The takeover is the roll's first action on this site: latch first.
+	if err := r.latchDragonflyRollout(ctx, fg, master.current); err != nil {
+		if stderrors.Is(err, errRolloutHeld) {
+			return dragonflyRolloutRequeue, dragonflyRolloutWait{}, nil
+		}
+		return 0, dragonflyRolloutWait{}, fmt.Errorf("paced rollout of dragonfly statefulset %s: %w", source, err)
+	}
 	promoted, deferred := r.promoteDragonflyForRollout(ctx, fg, target, source, master.site)
 	switch {
 	case deferred:
@@ -458,6 +466,17 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyStatefulSetTemplate(ctx cont
 			Name:      dragonflyStatefulSetName(fg.Name, site.Name),
 			Namespace: fg.Namespace,
 		},
+	}
+	// The paced rollout's start is latched before the write (rollout.go).
+	current := &appsv1.StatefulSet{}
+	switch err := r.authorityReader().Get(ctx, client.ObjectKeyFromObject(sts), current); {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return err
+	default:
+		if err := r.latchDragonflyRollout(ctx, fg, current); err != nil {
+			return err
+		}
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
 		if err := r.applyDragonflyStatefulSetSpec(fg, site, sts); err != nil {

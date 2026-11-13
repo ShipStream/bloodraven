@@ -9388,9 +9388,11 @@ spec:
                     type: string
                   reason:
                     description: |-
-                      Reason says why the group is in its phase, as a CamelCase word:
-                      WaitingForSlot, RolloutHalted, GroupNotStable, NotStarted, Admitted,
-                      AdmittedByAnnotation, StallTimeout, OrderedUpdateStalled.
+                      Reason says why the group is in its phase, as a CamelCase word: a
+                      RolloutReason (WaitingForSlot, RolloutHalted, GroupNotStable,
+                      NotStarted, Admitted, AdmittedByAnnotation, Started, StallTimeout),
+                      or OrderedUpdateStalled when the group's ordered update reported the
+                      stall.
                     maxLength: 64
                     type: string
                   renderer:
