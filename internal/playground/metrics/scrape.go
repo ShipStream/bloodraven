@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -22,13 +23,25 @@ import (
 // OperatorPodSelector is the deployment label used by the Helm chart.
 const OperatorPodSelector = "app.kubernetes.io/name=bloodraven"
 
-// Scraper port-forwards the operator pod's :8080 once and reuses the
-// tunnel for every Scrape. Callers Close() it at the end of a scenario.
+// Scraper port-forwards the operator pod's :8080 and reuses the tunnel for
+// every Scrape. A scrape whose tunnel fails (the operator pod was replaced,
+// or the tunnel went to a pod that was terminating) opens a new one to the
+// newest live operator pod and retries. Callers Close() it at the end of a
+// scenario.
 type Scraper struct {
+	k         *pgkube.Client
+	namespace string
+
+	mu  sync.Mutex
 	pf  *pgkube.PortForward
 	cli *http.Client
 	url string
 }
+
+// scrapeRedialBudget bounds how long Scrape re-opens the tunnel after a
+// transport error: an operator pod that was just replaced needs a few
+// seconds to serve /metrics.
+const scrapeRedialBudget = 30 * time.Second
 
 // NewScraper opens a port-forward to the operator pod (port 8080,
 // where controller-runtime serves /metrics) and returns a Scraper.
@@ -36,36 +49,48 @@ func NewScraper(ctx context.Context, k *pgkube.Client, namespace string) (*Scrap
 	if namespace == "" {
 		namespace = pgkube.PlaygroundNamespace
 	}
-	deadline := time.Now().Add(20 * time.Second)
+	s := &Scraper{k: k, namespace: namespace, cli: &http.Client{Timeout: 4 * time.Second}}
+	if err := s.dial(ctx, 20*time.Second); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// dial replaces the tunnel with one to the newest live operator pod.
+func (s *Scraper) dial(ctx context.Context, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
 	var last error
 	for {
-		pod, err := k.FindPodWithLabel(ctx, namespace, OperatorPodSelector)
+		pod, err := s.k.NewestLivePod(ctx, s.namespace, OperatorPodSelector)
 		if err != nil {
 			last = fmt.Errorf("find operator pod: %w", err)
 		} else {
-			pf, err := k.PortForwardPod(ctx, namespace, pod.Name, 8080)
+			pf, err := s.k.PortForwardPod(ctx, s.namespace, pod, 8080)
 			if err == nil {
-				return &Scraper{
-					pf:  pf,
-					cli: &http.Client{Timeout: 4 * time.Second},
-					url: fmt.Sprintf("http://127.0.0.1:%d/metrics", pf.LocalPort),
-				}, nil
+				s.mu.Lock()
+				old := s.pf
+				s.pf = pf
+				s.url = fmt.Sprintf("http://127.0.0.1:%d/metrics", pf.LocalPort)
+				s.mu.Unlock()
+				if old != nil {
+					old.Stop()
+				}
+				return nil
 			}
 			last = fmt.Errorf("port-forward operator metrics: %w", err)
 			if !retryablePortForwardError(err) {
-				break
+				return last
 			}
 		}
 		if time.Now().After(deadline) {
-			break
+			return last
 		}
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("operator metrics scraper: %w (last: %v)", ctx.Err(), last)
+			return fmt.Errorf("operator metrics scraper: %w (last: %v)", ctx.Err(), last)
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return nil, last
 }
 
 func retryablePortForwardError(err error) bool {
@@ -80,6 +105,8 @@ func retryablePortForwardError(err error) bool {
 
 // Close releases the SPDY tunnel.
 func (s *Scraper) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.pf != nil {
 		s.pf.Stop()
 	}
@@ -95,23 +122,44 @@ type Snapshot struct {
 // Scrape pulls /metrics and parses it. The raw text payload is
 // retained so forensic capture can dump it verbatim on failure.
 func (s *Scraper) Scrape(ctx context.Context) (*Snapshot, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+	deadline := time.Now().Add(scrapeRedialBudget)
+	for {
+		body, transport, err := s.get(ctx)
+		if err == nil {
+			return ParseSnapshot(body)
+		}
+		if !transport || time.Now().After(deadline) || ctx.Err() != nil {
+			return nil, err
+		}
+		if derr := s.dial(ctx, time.Until(deadline)); derr != nil {
+			return nil, fmt.Errorf("%w (re-opening the tunnel: %v)", err, derr)
+		}
+	}
+}
+
+// get reads /metrics once; transport reports a failure of the tunnel or
+// the connection rather than an answer.
+func (s *Scraper) get(ctx context.Context) (body []byte, transport bool, err error) {
+	s.mu.Lock()
+	url := s.url
+	s.mu.Unlock()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	resp, err := s.cli.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http GET /metrics: %w", err)
+		return nil, true, fmt.Errorf("http GET /metrics: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read /metrics: %w", err)
+		return nil, true, fmt.Errorf("read /metrics: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("/metrics returned %d", resp.StatusCode)
+		return nil, false, fmt.Errorf("/metrics returned %d", resp.StatusCode)
 	}
-	return ParseSnapshot(body)
+	return body, false, nil
 }
 
 // ParseSnapshot parses raw Prometheus text output into a Snapshot.
