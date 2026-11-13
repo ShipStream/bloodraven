@@ -55,9 +55,6 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 					if err != nil {
 						return err
 					}
-					if mfg.Status.ActiveSite != activeSite {
-						return fmt.Errorf("CR status advanced during RBAC denial: activeSite=%q, want stale %q", mfg.Status.ActiveSite, activeSite)
-					}
 					activeSite = mfg.Status.ActiveSite
 					peerSite, err = PeerOf(mfg, activeSite)
 					if err != nil {
@@ -128,8 +125,14 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 					if err != nil {
 						return err
 					}
-					env.Capture.Note(fmt.Sprintf("CR status during denial (may be stale): activeSite=%q lastFailoverTarget=%q ready=%s",
+					env.Capture.Note(fmt.Sprintf("CR status during denial (expected stale): activeSite=%q lastFailoverTarget=%q ready=%s",
 						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), readyOf(mfg)))
+					// The denial is what the verify step's catch-up proves
+					// recovery from: a status that already names the peer
+					// means the writes were not denied.
+					if mfg.Status.ActiveSite != activeSite {
+						return fmt.Errorf("CR status advanced during RBAC denial: activeSite=%q, want stale %q", mfg.Status.ActiveSite, activeSite)
+					}
 					return nil
 				},
 			},

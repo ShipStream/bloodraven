@@ -36,8 +36,8 @@ const (
 // that failed after its DROP left the peers as damaged as the primary.
 //
 // The scenario seeds a marker schema (one row in the backup, one written
-// after it), starts a full-instance restore, takes RustFS away while the
-// restore is fencing so the Job drops the schemas and then fails to load,
+// after it), takes RustFS away, starts a full-instance restore so the
+// Job drops the schemas and then fails to load,
 // and requires: the restore Failed after the DROP step, the reclone queue is
 // Held, every peer's replication receiver is stopped (and stays stopped
 // across a two-minute window with the topology unfrozen), and every peer
@@ -197,7 +197,7 @@ func s62WriteAfterBackup() runner.Step {
 func s62StartRestoreAndCutStorage() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "start a full-instance restore and scale RustFS to 0 while it fences",
+		Name:  "scale RustFS to 0, then start a full-instance restore",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			active := ctxFetch(env, "activeAtRestore")
 			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
@@ -215,6 +215,18 @@ func s62StartRestoreAndCutStorage() runner.Step {
 			if err := ctxStash(ctx, env, "s62Confirm", confirm); err != nil {
 				return err
 			}
+			// Cut storage before the restore is requested. Nothing before
+			// the Job reads object storage (preflight, the reclone queue and
+			// the offline_mode fence are MySQL and API state), and the Job
+			// checks offline_mode and drops every user schema before it
+			// reads the dump, so it fails right after the DROP. Cutting it
+			// once the status reads Fencing raced the restore: a small dump
+			// went from the request to Succeeded in six seconds, between
+			// two polls (#236).
+			pod, err := env.Chaos.ScaleRustFSToZero(ctx)
+			if err != nil {
+				return err
+			}
 			spec := v1alpha1.RestoreInPlaceSpec{
 				Confirm: confirm,
 				Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: ctxFetch(env, "backupName")}},
@@ -222,19 +234,7 @@ func s62StartRestoreAndCutStorage() runner.Step {
 			if _, err := patchRestoreInPlace(ctx, env, spec); err != nil {
 				return fmt.Errorf("patch full-instance restoreInPlace: %w", err)
 			}
-			// Cut storage before the Job exists: the Job then passes its
-			// offline_mode check, drops every user schema, and fails reading
-			// the dump. Waiting for the Job instead races a small dump's load.
-			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-			if _, err := waitRestoreInPlacePhase(waitCtx, env, v1alpha1.RestoreInPlaceFencing); err != nil {
-				return fmt.Errorf("restore did not reach Fencing: %w", err)
-			}
-			pod, err := env.Chaos.ScaleRustFSToZero(ctx)
-			if err != nil {
-				return err
-			}
-			env.Capture.Note(fmt.Sprintf("restore of %s fencing; scaled RustFS to 0 (pod was %s)", active, pod))
+			env.Capture.Note(fmt.Sprintf("scaled RustFS to 0 (pod was %s), then requested the restore of %s", pod, active))
 			return nil
 		},
 	}
