@@ -118,3 +118,42 @@ jobs:
       scenario: 02-planned-switchover,35-planned-switchover-lag-timeout-rollback,22-planned-dragonfly-switchover,26-planned-dragonfly-sync-timeout-proceed,25-operator-restart-mid-dragonfly-failover,63-planned-failover-operator-restart-mid-lag,64-emergency-failover-during-planned-admission,23-failover-state-durability,53-deployment-hold-expiry
       timeout-minutes: 120
       images-artifact: e2e-images
+
+  # Paced rollouts (#244). Scenario 73 is in the release profile, which a PR
+  # never runs (the PR job above is the smoke profile), so it gets a
+  # targeted job here, label-gated through `images` like the others: a PR
+  # that touches the pacer shows a real run before it merges. On the nightly
+  # run it repeats what the release profile already ran; it is one scenario.
+  paced-rollout:
+    needs: images
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      label: paced-rollout
+      scenario: 73-paced-rollout-bad-build-halt
+      # Scenario Timeout 30m plus its 10m cleanup allowance and setup.
+      timeout-minutes: 60
+      images-artifact: e2e-images
+
+  # Upgrade E2E (#244; C-8 in proposals/20-api-v1beta1.md). Installs the
+  # published v1.7.0 chart and images, then scenario 74 creates two more
+  # groups, upgrades to this build (its CRDs first, then the chart with the
+  # operator and sidecar.image.{repository,tag} set to the build) and
+  # checks that every MySQL pod of the three groups rolls, one group at a
+  # time. 01 then proves that a failover still works on the upgraded build.
+  #
+  # upgrade-from is the last release without paced rollouts. Scenario 74's
+  # precheck requires workloads without the rendered-by annotation, so it
+  # stays 1.7.0 for as long as this job exists: it is the gate for the
+  # release that introduces pacing, not a rolling "previous release" check.
+  upgrade:
+    needs: images
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      label: upgrade
+      upgrade-from: "1.7.0"
+      # A fourth worker for the two auxiliary groups (see the file).
+      kind-config: .github/kind/e2e-upgrade.yaml
+      scenario: 74-upgrade-paced-rollout,01-clean-primary-kill
+      # Scenario Timeouts 45m + 01's, plus the v1.7.0 install.
+      timeout-minutes: 90
+      images-artifact: e2e-images

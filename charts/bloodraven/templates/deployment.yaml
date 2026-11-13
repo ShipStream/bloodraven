@@ -96,14 +96,20 @@ spec:
             - name: BLOODRAVEN_SIDECAR_IMAGE
               value: {{ include "bloodraven.sidecarImage" . | quote }}
             # Paced rollouts of release-driven pod changes (rollout.*).
+            # The keys are read through a map that may be missing or
+            # partial: `helm upgrade --reuse-values` from a release older
+            # than v1.8.0 renders these templates over that release's
+            # values, which have no `rollout`. Pacing is then on, and an
+            # empty duration takes the operator's default.
+            {{- $rollout := .Values.rollout | default dict }}
             - name: BLOODRAVEN_ROLLOUT_PACING
-              value: {{ .Values.rollout.pacing | quote }}
+              value: {{ if hasKey $rollout "pacing" }}{{ $rollout.pacing | quote }}{{ else }}"true"{{ end }}
             - name: BLOODRAVEN_ROLLOUT_SOAK
-              value: {{ .Values.rollout.soak | quote }}
+              value: {{ $rollout.soak | default "" | quote }}
             - name: BLOODRAVEN_ROLLOUT_STALL_AFTER
-              value: {{ .Values.rollout.stallAfter | quote }}
+              value: {{ $rollout.stallAfter | default "" | quote }}
             - name: BLOODRAVEN_ROLLOUT_START_GRACE
-              value: {{ .Values.rollout.startGrace | quote }}
+              value: {{ $rollout.startGrace | default "" | quote }}
             # Default operator auxiliary endpoint injected into MySQL sidecars
             # when spec.sidecar.operatorEndpoint is not set.
             - name: BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT

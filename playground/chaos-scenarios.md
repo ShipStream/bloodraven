@@ -82,6 +82,8 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `68-pitr-failback-with-reclone` ([§68](#68-pitr-failback-with-reclone); release profile, `ResetBeforeRunAll`; failback with reclone is exact in every era, including an era b never flushed, which the failback archives as b's tail (#264; it refused `PITRArchiveGap` before); each reclone starts only after the operator confirmed the recipient's binlog tail archived, with no `PITRArchiveTailNotArchived` Event, and gives the recipient a new `server_uuid` (#265))
 - `69-pitr-encryption-binding-refusal` ([§69](#69-pitr-encryption-binding-refusal); full profile and the e2e `pitr` job, `ResetBeforeRunAll`; the encrypted archive binds to an immutable, ownerless key snapshot; refused rotations, encryption edits and aliases do not roll, restarted writers keep the accepted key, bindings survive a status wipe, and the new-prefix procedure and release work, issue #203)
 - `70-pitr-lossy-failover` ([§70](#70-pitr-lossy-failover); release profile, `ResetBeforeRunAll`; lost archived set, `excludeGtids`, a backup after the loss, the returning old primary archiving the lost transactions it had not archived (#264), and a reclone and failback that leave the archive usable (#265): the recloned old primary has a new `server_uuid`, its lost rows are divergent evidence, no `PITRArchiveReissueRiskDetected`, no `PITRArchiveHistoryReset`)
+- `73-paced-rollout-bad-build-halt` ([§73](#73-paced-rollout-bad-build-halt); release profile and the e2e `paced-rollout` job; a release-driven pod change across two auxiliary groups: one is admitted, a release whose pods cannot become Ready stalls it before its primary is touched and the other group keeps its pods, across an operator restart too; a release that works then completes the first group before the second is admitted; the playground group, pinned to its sidecar image, is never rolled)
+- `74-upgrade-paced-rollout` ([§74](#74-upgrade-paced-rollout); quarantined: needs a cluster installed at the published v1.7.0 with a spare node, run by the e2e `upgrade` job after `./playground/upgrade-e2e.sh install`; the upgrade to the build under test rolls every MySQL pod of three groups, one group at a time)
 
 Scenarios `32`–`36`, `38` and `39` (seven scenarios) are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. Scenario `37` is not among them: #206 replaced it with `37-pitr-planned-failback-no-reclone`, which is in the `release` profile and has no live-pass history yet. As of 2026-07-11 the seven full-only scenarios and the retired original scenario 37 (`37-pitr-archive-handoff-across-failover`) had passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Those passes belong to the retired scenario 37, not to its replacement. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). The seven remain full-profile-only while this new, high-risk coverage matures. Scenarios `36`, `37`, `68`, `69` and `70` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
@@ -1699,6 +1701,57 @@ A real cluster loses such a tail with a volume that comes back older. The playgr
 Before the archiver could decrypt, this stopped at the archiver's readiness: nothing was archived and `PITRArchiveReady` was `False` with `ArchiverError`.
 
 **Status**: passed once on a four-node kind cluster (2026-11-12, about 5 minutes).
+
+### 73. Paced Rollout: a Bad Build Halts at the First Group {#73-paced-rollout-bad-build-halt}
+**Category**: Upgrade, paced rollout (#244, `proposals/23-paced-rollouts.md`) | **Risk**: Medium | **Automated**: `73-paced-rollout-bad-build-halt` (release profile; the e2e `paced-rollout` job)
+
+**Hypothesis**: When an operator release changes the pod template of two groups, the pacer admits one and the other keeps its pods (`status.rollout.phase=Pending`). A release whose pods cannot become Ready stalls the admitted group (`Stalled`) before its primary is rolled or handed over, and the waiting group stays untouched (`Pending`/`RolloutHalted`), across an operator restart too. After a release that works, the first group completes and only then the second is admitted and rolled. A group that pins its sidecar image is not rolled by a change of the default.
+
+**Setup**: The playground has one group, so the scenario creates two auxiliary groups for its duration (`paced-a`, `paced-b`: two sites each, no Dragonfly, 256Mi requests, and a `taintNodeSelector` that matches no node, so they taint nothing) and deletes them in cleanup. Both sites of an auxiliary group run in the zone of the playground group's active site: the operator taints the nodes of the playground group's other sites (`NoExecute`), and a pod of another group does not tolerate that taint. For the same reason the playground group must not fail over during the run, so the scenario pins its `spec.sidecar.image` to the image it already runs. The effective image does not change, so the pin restarts nothing, and it keeps the release from rolling the group (an ordered update ends in a handoff).
+
+**Injection**: A release is a change of the operator's default sidecar image (`BLOODRAVEN_SIDECAR_IMAGE` on the operator Deployment), which changes the renderer identity and the spec hash of every group that does not pin `spec.sidecar.image`.
+
+1. Bad release: the default becomes `bloodraven-sidecar:playground-s73-missing`, a tag no node or registry has, with `BLOODRAVEN_ROLLOUT_STALL_AFTER=45s` and `BLOODRAVEN_ROLLOUT_SOAK=10s`.
+2. The operator pod is killed while the rollout is halted.
+3. Good release: the default becomes `bloodraven-sidecar:playground-next`, the same sidecar build under a second tag (`setup.sh`, `rebuild.sh sidecar` and `make e2e-images` tag and load it), with `stallAfter` back at 30m.
+
+**Verify**:
+
+- Exactly one auxiliary group gets `status.rollout.startedTime`; the other reports `Pending` with the pods it had (same UIDs, no container restarts).
+- The first group reports `Stalled`. Its follower Deployment carries the bad image and that pod is not Ready; its active site, its primary pod and its primary Deployment (renderer, hash, image) are what they were. The second group reports `Pending`/`RolloutHalted` with its pods and Deployments unchanged.
+- After the operator restart, the new process reports `bloodraven_rollout_groups{phase="stalled"} 1` and `{phase="pending"} >= 1`, and the same checks hold for 30s more; `admittedTime`, `startedTime` and `stalledTime` of the stalled record did not change.
+- After the good release the first group completes on the admission that stalled (same `admittedTime` and `startedTime`), then the second is admitted and completes.
+- Over samples taken once a second from the bad release to the end: never more than one group with an unfinished admission; a group without an admission always runs the pods and Deployments it started with; the second group's pods changed only in samples where the first shows `completedTime`; `admittedTime` of the second is not before `completedTime` of the first.
+- At the end every site Deployment of both groups carries one new `rendered-by` value, a new spec hash and the good image, on new Ready pods, and both groups pass the shared baseline. The playground group's pods are the ones it started with.
+
+**Cleanup**: Reads what to undo from the cluster, so it also undoes a run that was killed: it deletes the auxiliary groups, restores the operator's environment from the `playground.bloodraven.shipstream.io/paced-rollout-original-env` annotation on the operator Deployment, then removes the pin. On a failure the capture directory also holds the auxiliary groups (`paced-rollout-groups.yaml`), their pods, the sampled timeline and the log of the operator pod that runs.
+
+**What it does not cover**: the stall is found by `stallAfter`, shortened to 45s; the ordered updater's own report (`OrderedUpdateStalled`, after its 5m wait for the rolled pod) is covered by `TestPacedRollout_BadBuildStopsAtTheFirstGroup`. `Recreate` groups and Dragonfly StatefulSets are covered by the controller tests only.
+
+**Status**: not run on a cluster yet (written 2026-11-12 on a host where no local cluster could start). Its checks, its cleanup and the objects it creates are tested without one (`paced_rollout_*_test.go`, and `TestPacedRolloutScenarioObjectsAdmitted` in envtest). The e2e `paced-rollout` job is its first run; expected runtime about 10 to 12 minutes, unmeasured.
+
+### 74. Upgrade From the Previous Release Is Paced {#74-upgrade-paced-rollout}
+**Category**: Upgrade, paced rollout (#244; C-8 in `proposals/20-api-v1beta1.md`) | **Risk**: Medium | **Automated**: `74-upgrade-paced-rollout` (quarantined: needs a cluster installed at v1.7.0 with a spare node, run by the e2e `upgrade` job)
+
+**Hypothesis**: Upgrading the operator from v1.7.0 changes the pod template of every failover group (`deployment-pod-render-v8-mysql-launcher`), and nothing v1.7.0 rendered carries the `rendered-by` annotation, so every MySQL pod of every group rolls, one group at a time.
+
+**Setup**: `./playground/upgrade-e2e.sh install` installs the published v1.7.0 chart (from the chart repository) with `ghcr.io/shipstream/bloodraven:1.7.0` and `bloodraven-sidecar:1.7.0`, and the playground group and apps as `setup.sh` does. The scenario adds the two auxiliary groups of scenario 73, under the old operator. Here the playground group rolls too and hands off, so the auxiliary groups run on a spare node, one that carries none of the playground group's labels (a fourth worker: `.github/kind/e2e-upgrade.yaml`, or `k3d cluster create bloodraven --agents 4`).
+
+**Injection**: `./playground/upgrade-e2e.sh upgrade`: this checkout's CRDs are applied first (Helm does not upgrade `crds/`, and without them the API server prunes `status.rollout`), then `helm upgrade --reuse-values` to this checkout's chart with the operator image and `sidecar.image.{repository,tag}` set to the build, and `rollout.soak=10s`. `--reuse-values` is the upgrade the operations guide shows; it renders the new templates over values that have no `rollout` key.
+
+**Verify** (samples once a second from before the upgrade until every group completed):
+
+- Never more than one group with an unfinished admission.
+- A group without an admission runs the pods and site Deployments it had before the upgrade.
+- A group's pods changed only in samples where every group admitted before it shows `completedTime`; each group's `admittedTime` is not before its predecessor's `completedTime`; the order the samples saw the admissions in is the order of `admittedTime`.
+- At the end every site Deployment of the three groups carries one `rendered-by` value and a new spec hash, on a new Ready pod, and every group passes the shared baseline.
+- The job then runs `01-clean-primary-kill`: one failover works on the upgraded build.
+
+**Cleanup**: Deletes the auxiliary groups and the spare node's zone label. The upgrade is not undone.
+
+**Scope**: v1.7.0 is the last release without paced rollouts, and the precheck requires workloads without `rendered-by`. This is the gate for the release that introduces pacing, not a rolling check of "the previous release": an upgrade between two releases that both pace may change no pod template at all.
+
+**Status**: not run on a cluster yet (written 2026-11-12). Checked without a cluster: the v1.7.0 chart and both images pull anonymously, the v1.7.0 chart renders with the values `setup.sh` passes, the checkout's chart renders over v1.7.0's values (`TestRolloutValuesChart`), and the auxiliary groups are admitted by the published v1.7.0 CRD and survive this build's CRD being applied over it, after which `status.rollout` is stored (`TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170`, envtest). The e2e `upgrade` job is its first run.
 
 ### Recorded, not automated
 

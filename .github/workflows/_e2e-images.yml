@@ -19,7 +19,7 @@ jobs:
       - name: Save E2E images
         run: |
           mkdir -p "$RUNNER_TEMP/e2e-images"
-          docker save bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground \
+          docker save bloodraven:playground bloodraven-sidecar:playground bloodraven-sidecar:playground-next bloodraven-counter:playground \
             bloodraven-dashboard:playground bloodraven-dns-webhook:playground -o "$RUNNER_TEMP/e2e-images/e2e-images.tar"
       - uses: actions/upload-artifact@v7
         with:

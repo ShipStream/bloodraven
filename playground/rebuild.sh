@@ -88,7 +88,10 @@ fi
 if want sidecar; then
   info "Building sidecar image..."
   $RUNTIME build --target sidecar -t bloodraven-sidecar:playground "$PROJECT_ROOT"
-  IMAGES+=(bloodraven-sidecar:playground)
+  # The second tag scenario 73 uses as a "new release" of the sidecar must
+  # be the same build (see setup.sh).
+  $RUNTIME tag bloodraven-sidecar:playground bloodraven-sidecar:playground-next
+  IMAGES+=(bloodraven-sidecar:playground bloodraven-sidecar:playground-next)
   # Sidecar runs inside every MySQL pod; derive the deployments from the CR.
   mapfile -t mysql_sites < <(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
     -o jsonpath='{range .spec.sites[*]}{.name}{"\n"}{end}')
