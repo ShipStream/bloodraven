@@ -381,6 +381,10 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 			}
 			bad = append(bad, dragonflyReconvergeProblems(mfg)...)
 			bad = append(bad, plannedReconvergeProblems(mfg)...)
+			// A reverted spec change (a memory patch) is drift the
+			// operator may roll only minutes later, with updatePhase
+			// empty until then.
+			bad = append(bad, env.Kube.SiteDeploymentProblems(ctx, env.Namespace, mfg)...)
 			healthy := ready && len(bad) == 0 && mfg.Status.ActiveSite != ""
 			if healthy {
 				if healthySince.IsZero() {

@@ -11,8 +11,12 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgwait "github.com/shipstream/bloodraven/internal/playground/wait"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -179,6 +183,27 @@ func TestWaitForClusterReconvergeAcceptsDragonflyReady(t *testing.T) {
 	}
 }
 
+// A reverted spec change the operator has not rolled yet keeps the gate
+// closed although status reads healthy with no update phase (#236: the
+// next scenario ran under the roll).
+func TestWaitForClusterReconvergeWaitsForUnappliedSpec(t *testing.T) {
+	mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
+	mfg.Spec.Sites[0].Resources = corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("384Mi")}}
+	stale := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: pgkube.MysqlDeploymentName(mfg.Name, mfg.Spec.Sites[0].Name), Namespace: mfg.Namespace}}
+	stale.Spec.Template.Spec.Containers = []corev1.Container{{Name: "mysql", Resources: corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("276Mi")},
+	}}}
+	stale.Status = appsv1.DeploymentStatus{UpdatedReplicas: 1, Replicas: 1, AvailableReplicas: 1}
+	env := testReconvergeEnv(t, mfg, stale)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := waitForClusterReconvergeStable(ctx, env, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), mfg.Spec.Sites[0].Name+"=resources-not-applied") {
+		t.Fatalf("waitForClusterReconverge = %v; want a timeout naming the unapplied spec", err)
+	}
+}
+
 func TestWaitForClusterReconvergeRequiresStableHealthyWindow(t *testing.T) {
 	env := testReconvergeEnv(t, testReconvergeMFG(v1alpha1.DragonflyPhaseReady))
 
@@ -193,13 +218,14 @@ func TestWaitForClusterReconvergeRequiresStableHealthyWindow(t *testing.T) {
 	}
 }
 
-func testReconvergeEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup) *Env {
+func testReconvergeEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup, deployments ...runtime.Object) *Env {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	k := &pgkube.Client{
+		Kubernetes: fake.NewSimpleClientset(deployments...),
 		Controller: ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(mfg).Build(),
 	}
 	return &Env{
