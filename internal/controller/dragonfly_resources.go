@@ -695,141 +695,14 @@ func (r *MysqlFailoverGroupReconciler) deleteLegacyDragonflyGroupPDB(ctx context
 	return client.IgnoreNotFound(r.Delete(ctx, pdb))
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
-	const requeueAfter = 2 * time.Second
-
-	reader := client.Reader(r.Client)
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
-
-	activeSite := effectiveDragonflyMasterSite(fg)
-	var activeDrift *v1alpha1.SiteSpec
-
-	for i := range fg.Spec.Sites {
-		site := fg.Spec.Sites[i]
-		var current appsv1.StatefulSet
-		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
-		if err := reader.Get(ctx, key, &current); err != nil {
-			if apierrors.IsNotFound(err) {
-				r.noteWorkloadSelector(fg, "StatefulSet", key.Name, nil)
-				if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
-					return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
-				}
-				continue
-			}
-			return 0, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
-		}
-		// A StatefulSet whose immutable selector differs is refused: the
-		// site is skipped, not updated, and not retried in a loop.
-		mismatch := statefulSetSelectorMismatch(&current, fg, site.Name)
-		r.noteWorkloadSelector(fg, "StatefulSet", key.Name, mismatch)
-		if mismatch != nil {
-			continue
-		}
-
-		desired, err := r.desiredDragonflyStatefulSet(fg, site, &current)
-		if err != nil {
-			return 0, fmt.Errorf("build desired dragonfly statefulset %s: %w", site.Name, err)
-		}
-		if !dragonflyStatefulSetTemplateEqual(&current, desired) {
-			// A template another operator release rendered moves only once
-			// the group is admitted to the paced rollout (rollout.go).
-			if held, err := r.gateDragonflyRollout(ctx, fg, &current); err != nil {
-				return 0, fmt.Errorf("paced rollout of dragonfly statefulset %s: %w", site.Name, err)
-			} else if held {
-				continue
-			}
-			if site.Name == activeSite {
-				activeDrift = &fg.Spec.Sites[i]
-				continue
-			}
-			if requeue, err := r.rollDragonflyReplicaStatefulSet(ctx, fg, site); err != nil || requeue > 0 {
-				return requeue, err
-			}
-			return requeueAfter, nil
-		}
-		if r.RolloutPacing && renderedByOther(&current) {
-			if err := r.restampWorkload(ctx, &current); err != nil {
-				return 0, fmt.Errorf("restamp dragonfly statefulset %s: %w", site.Name, err)
-			}
-		}
-	}
-
-	if activeDrift != nil {
-		// A planned failover that owns the group's Dragonfly owns its active
-		// site too (plannedOwnsDragonfly): with the topology manager
-		// registered, the claim slot decides (a run, its provisional grant,
-		// or a hold; a run that released its claim after recording its
-		// promotion owns nothing, whatever status says); before that, the
-		// status form does (a run that still needs the claim, or a durable
-		// hold). A request that is only waiting owns nothing.
-		if r.plannedOwnsDragonfly(fg) {
-			return requeueAfter, nil
-		}
-		promotionTarget := ""
-		for _, site := range fg.Spec.Sites {
-			if site.Name == activeSite {
-				continue
-			}
-			var current appsv1.StatefulSet
-			key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
-			if err := reader.Get(ctx, key, &current); err != nil {
-				return 0, fmt.Errorf("get dragonfly statefulset %s before active rollout: %w", site.Name, err)
-			}
-			if !dragonflyStatefulSetRolloutComplete(&current) {
-				return requeueAfter, nil
-			}
-			if promotionTarget == "" {
-				promotionTarget = site.Name
-			}
-		}
-		if promotionTarget != "" {
-			check := r.dragonflyRolloutCandidateSyncReady(ctx, fg, promotionTarget, activeSite)
-			r.noteDragonflyRolloutReadiness(ctx, fg, promotionTarget, activeSite, check)
-			if !check.Ready {
-				return requeueAfter, nil
-			}
-			if wait := r.dragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite); wait > 0 {
-				return wait, nil
-			}
-			if promoted, deferred := r.promoteDragonflyForRollout(ctx, fg, promotionTarget, activeSite); deferred {
-				return dragonflyGateRetry, nil
-			} else if promoted {
-				r.clearDragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite)
-			} else if r.recordDragonflyRolloutPromotionFailure(fg, promotionTarget, activeSite) >= 3 {
-				// The last resort: the takeover to a target that was
-				// found ready failed three times, so the active site's pod
-				// is restarted where it is. No REPLICAOF NO ONE is sent
-				// over the live master for this (promoteLocked); the
-				// Dragonfly manager then handles the restarted master as
-				// it handles any other (a replica that holds the cache
-				// the restarted instance lost is promoted, one known to be
-				// stale is not).
-				log.FromContext(ctx).Info("dragonfly rollout: promotion failed repeatedly; applying active StatefulSet update", "target", promotionTarget, "source", activeSite)
-				if err := r.reconcileDragonflyStatefulSet(ctx, fg, *activeDrift); err != nil {
-					return 0, fmt.Errorf("reconcile active dragonfly statefulset %s after promotion failures: %w", activeDrift.Name, err)
-				}
-				r.clearDragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite)
-			}
-			return requeueAfter, nil
-		}
-		if err := r.reconcileDragonflyStatefulSet(ctx, fg, *activeDrift); err != nil {
-			return 0, fmt.Errorf("reconcile active dragonfly statefulset %s: %w", activeDrift.Name, err)
-		}
-		return requeueAfter, nil
-	}
-
-	return 0, nil
-}
-
 // rollDragonflyReplicaStatefulSet applies the template change, and so the
-// pod restart, of a site chosen as a replica from the reconcile's earlier
-// read. It does so under the group's Dragonfly gate after re-reading the
-// group uncached: a promotion that has just made this site the Dragonfly
-// master finishes first and the restart is held back (the next reconcile
-// treats the site as the active one). requeue > 0 means it was held back.
-func (r *MysqlFailoverGroupReconciler) rollDragonflyReplicaStatefulSet(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (requeue time.Duration, err error) {
+// pod restart, of a site the rollout found to be a replica of master
+// (dragonflyRolloutAuthority). It does so under the group's Dragonfly gate
+// after re-reading the group uncached: a promotion that has just moved the
+// Dragonfly master finishes first and the restart is held back (the next
+// reconcile establishes the master again). requeue > 0 means it was held
+// back.
+func (r *MysqlFailoverGroupReconciler) rollDragonflyReplicaStatefulSet(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, master string) (requeue time.Duration, err error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	release, ok := r.acquireDragonflyGate(ctx, nn)
 	if !ok {
@@ -840,8 +713,13 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyReplicaStatefulSet(ctx conte
 	if err != nil {
 		return 0, fmt.Errorf("re-read failover group before dragonfly rollout of %s: %w", site.Name, err)
 	}
-	if master := effectiveDragonflyMasterSite(fresh); master == site.Name {
+	switch now := effectiveDragonflyMasterSite(fresh); {
+	case now == site.Name:
 		log.FromContext(ctx).Info("dragonfly rollout: site became the active Dragonfly master; holding its restart", "site", site.Name, "fg", nn)
+		return dragonflyGateRetry, nil
+	case now != master:
+		log.FromContext(ctx).Info("dragonfly rollout: the Dragonfly master moved; holding the restart", "site", site.Name,
+			"master", now, "was", master, "fg", nn)
 		return dragonflyGateRetry, nil
 	}
 	if pf := fresh.Status.PlannedFailover; pf != nil && pf.TargetSite == site.Name && r.plannedOwnsDragonfly(fresh) {
@@ -852,7 +730,8 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyReplicaStatefulSet(ctx conte
 		log.FromContext(ctx).Info("dragonfly rollout: site is the planned failover's Dragonfly target; holding its restart", "site", site.Name, "fg", nn)
 		return dragonflyGateRetry, nil
 	}
-	if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
+	log.FromContext(ctx).Info("dragonfly rollout: applying the pod template", "site", site.Name, "master", master, "fg", nn)
+	if err := r.rollDragonflyStatefulSetTemplate(ctx, fg, site); err != nil {
 		return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
 	}
 	return 0, nil
@@ -868,7 +747,15 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyReplicaStatefulSet(ctx conte
 // uncached read, and the target's sync is proven again. deferred reports
 // that the promotion was not attempted (the gate stayed busy, or the choice
 // no longer holds); that is not a failed promotion.
-func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) (promoted, deferred bool) {
+//
+// The promotion is a REPLTAKEOVER or nothing (rolloutPromoteFG). When it
+// succeeds, the pod template of sourceSite, the site that just gave the
+// master up, is written before the promotion deletes that site's pod, still
+// under the gate: the old master's process has exited with the takeover, so
+// its pod comes back once, on the new template. This is the only place the
+// rollout writes the template of a site that held the master. A write that
+// fails is left to the next reconcile, which finds the site a replica.
+func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string, sourceSite v1alpha1.SiteSpec) (promoted, deferred bool) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	release, ok := r.acquireDragonflyGate(ctx, nn)
 	if !ok {
@@ -901,18 +788,19 @@ func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Co
 			"state", check.State, "detail", check.Detail, "fg", nn)
 		return false, true
 	}
-	// A target whose sync rests on its link alone is promoted with
-	// REPLTAKEOVER or not at all.
-	fallback := dragonflyFallbackUnlessSourceServes
-	if check.TakeoverOnly {
-		fallback = dragonflyTakeoverOnly
-	}
 	promoter := NewDragonflyManager(r.Client, r.Recorder, slog.Default().With("fg", nn.String(), "subsystem", "dragonfly-rollout"), nn, 0)
 	promoter.SetAuthorityReader(r.authorityReader())
 	if r.dragonflyConnector != nil {
 		promoter.SetConnector(r.dragonflyConnector)
 	}
-	return promoter.rolloutPromoteFG(context.WithoutCancel(ctx), fresh, target, oldSource, fallback), false
+	promoter.beforeSourceRecreate = func(hookCtx context.Context) {
+		logger.Info("dragonfly rollout: applying the pod template", "site", sourceSite.Name, "master", target, "fg", nn)
+		if err := r.rollDragonflyStatefulSetTemplate(hookCtx, fg, sourceSite); err != nil {
+			logger.Info("dragonfly rollout: pod template of the former master not written; the next reconcile retries",
+				"site", sourceSite.Name, "error", err, "fg", nn)
+		}
+	}
+	return promoter.rolloutPromoteFG(context.WithoutCancel(ctx), fresh, target, oldSource), false
 }
 
 // dragonflyRolloutSyncWait is how long one rollout readiness check waits
@@ -943,11 +831,9 @@ type dragonflyRolloutCheck = dragonflySyncCheck
 //
 // A position that can never be compared (a site refuses the position
 // command) does not hold the rollout for good: when the link checks hold,
-// the target is ready for a takeover with no fallback (TakeoverOnly).
-// Before, such a rollout never completed: the check returned "not ready"
-// on every pass, ahead of the promotion whose three failures are what end
-// a rollout that cannot promote, so a group whose Dragonfly user or image
-// refuses `DEBUG` or `DFLY` kept its old active pod indefinitely.
+// the target is ready (TakeoverOnly) and REPLTAKEOVER's own catch-up wait
+// is the proof that is left. A group whose Dragonfly user or image refuses
+// `DEBUG` or `DFLY` would otherwise keep its old active pod indefinitely.
 func (r *MysqlFailoverGroupReconciler) dragonflyRolloutCandidateSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) dragonflyRolloutCheck {
 	return dragonflyProveSync(ctx, r.dragonflySiteDialer(fg), target, source, dragonflyRolloutSyncWait, dragonflyRolloutSyncPoll)
 }
@@ -1030,19 +916,24 @@ func (r *MysqlFailoverGroupReconciler) noteDragonflyRolloutReadiness(ctx context
 	}
 }
 
-func (r *MysqlFailoverGroupReconciler) dragonflyRolloutPromotionBackoff(fg *v1alpha1.MysqlFailoverGroup, target, source string) time.Duration {
+// dragonflyRolloutPromotionBackoff returns how long the rollout still waits
+// before it tries the takeover from source to target again, and how many
+// takeovers have failed: 1, 2, 4, 8, 16 and then 32 seconds after each
+// failure. The takeover is retried for as long as the rollout is pending;
+// no number of failures makes the rollout restart the master where it is.
+func (r *MysqlFailoverGroupReconciler) dragonflyRolloutPromotionBackoff(fg *v1alpha1.MysqlFailoverGroup, target, source string) (time.Duration, int) {
 	key := dragonflyRolloutKey{fg: types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, target: target, source: source}
 	r.dragonflyRolloutMu.Lock()
 	defer r.dragonflyRolloutMu.Unlock()
 	st, ok := r.dragonflyRolloutBackoff[key]
 	if !ok || st.attempts <= 0 {
-		return 0
+		return 0, 0
 	}
 	wait := time.Duration(1<<minInt(st.attempts-1, 5)) * time.Second
 	if remaining := wait - time.Since(st.lastFailure); remaining > 0 {
-		return remaining
+		return remaining, st.attempts
 	}
-	return 0
+	return 0, st.attempts
 }
 
 func (r *MysqlFailoverGroupReconciler) recordDragonflyRolloutPromotionFailure(fg *v1alpha1.MysqlFailoverGroup, target, source string) int {

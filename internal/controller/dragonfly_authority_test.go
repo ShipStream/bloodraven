@@ -225,7 +225,7 @@ func TestPromoteDragonflyForRollout_ReadsAuthorityUncached(t *testing.T) {
 		dials.Add(1)
 		return &fakeDragonflyConn{}, nil
 	}
-	promoted, deferred := r.promoteDragonflyForRollout(context.Background(), stale, "dc2", "dc1")
+	promoted, deferred := r.promoteDragonflyForRollout(context.Background(), stale, "dc2", "dc1", v1alpha1.SiteSpec{Name: "dc1"})
 	if promoted || !deferred || dials.Load() != 0 {
 		t.Errorf("rollout ignored the live planned failover: promoted=%v deferred=%v dials=%d", promoted, deferred, dials.Load())
 	}
@@ -255,7 +255,7 @@ func TestPromoteDragonflyForRollout_RevalidatesSourceUnderGate(t *testing.T) {
 		dials.Add(1)
 		return &fakeDragonflyConn{}, nil
 	}
-	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), chosenFrom, "dc2", "dc1"); promoted || !deferred {
+	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), chosenFrom, "dc2", "dc1", v1alpha1.SiteSpec{Name: "dc1"}); promoted || !deferred {
 		t.Errorf("rollout from a superseded source = (promoted %v, deferred %v), want deferred", promoted, deferred)
 	}
 	if n := dials.Load(); n != 0 {

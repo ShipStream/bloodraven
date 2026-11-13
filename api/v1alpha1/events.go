@@ -482,12 +482,23 @@ const (
 	// probe changes to unsupported; use a Dragonfly image that supports
 	// the command.
 	EventDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
-	// A rollout of the active Dragonfly site (a changed pod template) has
-	// waited two minutes for the replica it promotes first to be in sync:
-	// the replica is not linked to the master, is still behind it, or
-	// cannot be read (the message says which). The active site keeps its
-	// old pod until the replica is in sync. Emitted once per stall.
+	// A Dragonfly template rollout (a changed pod template) has waited two
+	// minutes and changes no StatefulSet until the cause is gone. The
+	// message names the state: `NotLinked`, `Behind` or `Unreadable` (the
+	// replica to promote before the active site is not in sync with it),
+	// `MasterUnknown` (the operator cannot tell which site is the master,
+	// or status and the sites disagree), `SiteInFlight` (a site the rollout
+	// restarted is not back in sync) or `TakeoverFailed` (`REPLTAKEOVER`
+	// keeps failing). The active site keeps its pod: it is restarted only
+	// after a takeover moved the master away from it, or when an
+	// administrator sets `bloodraven.shipstream.io/dragonfly-restart-in-place`.
+	// Emitted once per stall.
 	EventDragonflyRolloutStalled = "DragonflyRolloutStalled"
+	// An administrator set `bloodraven.shipstream.io/dragonfly-restart-in-place`
+	// and the rollout applied the named site's pod template without first
+	// moving the Dragonfly master away from it. If the site held the
+	// master, its cache is lost.
+	EventDragonflyRestartedInPlace = "DragonflyRestartedInPlace"
 	// A snapshot-restore upgrade run started: `spec.dragonfly.upgradeStrategy`
 	// is `SnapshotRestore` and a site's live StatefulSet runs an image other
 	// than `spec.dragonfly.image`. `status.dragonfly.upgrade` records it;

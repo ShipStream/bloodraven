@@ -24,13 +24,18 @@ import (
 //   - the Dragonfly manager's Run goroutine, for each Tick (observation,
 //     status publication, replica repair) and each promotion it executes;
 //   - the planned-failover Dragonfly phase;
-//   - the Dragonfly rollout promotion and the replica StatefulSet rollout;
+//   - every template write of the Dragonfly rollout (dragonfly_rollout.go):
+//     a replica's StatefulSet, the rollout promotion together with the
+//     write of the former master's StatefulSet that follows it, and the
+//     in-place restart an administrator asks for
+//     (DragonflyRestartInPlaceAnnotation);
 //   - each Dragonfly snapshot-upgrade step;
 //   - the reconciler's Dragonfly label sweep.
 //
-// Not covered: applying the active site's own StatefulSet template change
-// when no replica can be promoted first (a deliberate restart of the
-// master, decided from the reconcile's read).
+// The rollout has no template write outside the gate. (Until #217 it
+// restarted the active site's pod outside it when no replica could be
+// promoted first.) Creating a StatefulSet that does not exist, and the
+// patch of the in-flight annotation, restart no pod and take no gate.
 //
 // The runner owns one gate per group and keeps it across manager
 // replacement, so an old manager's last unit of work and its replacement,
