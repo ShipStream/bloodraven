@@ -225,10 +225,18 @@ func TestPlanRollout_DefersAdmissionThatDoesNotStart(t *testing.T) {
 		t.Fatalf("deferred before the grace: %+v", actions)
 	}
 	actions, _ := planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, cfg, views)
-	if got := eventReasons(actions); got["lion"] != v1alpha1.EventRolloutDeferred || got["puma"] != v1alpha1.EventRolloutAdmitted {
-		t.Fatalf("events = %v, want lion deferred and puma admitted", got)
+	// The slot a withdrawal gives back is given out by the next pass: the
+	// withdrawal is a conditional write that can lose to lion's start
+	// latch, and puma must not be admitted beside a lion that is rolling.
+	if got := eventReasons(actions); got["lion"] != v1alpha1.EventRolloutDeferred || got["puma"] != "" {
+		t.Fatalf("events = %v, want lion deferred and nobody admitted in the same pass", got)
 	}
+	requirePhase(t, views, "puma", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
 	requirePhase(t, views, "lion", v1alpha1.RolloutPhasePending, rolloutReasonNotStarted)
+	actions, _ = planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, cfg, views)
+	if got := eventReasons(actions); got["puma"] != v1alpha1.EventRolloutAdmitted {
+		t.Fatalf("events = %v, want puma admitted by the pass after the deferral", got)
+	}
 	requirePhase(t, views, "puma", v1alpha1.RolloutPhaseAdmitted, "")
 
 	// puma completes: tiger goes before the deferred lion.
@@ -346,9 +354,43 @@ func TestPlanRollout_UnreadableGroup(t *testing.T) {
 	}
 	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, "")
 	views[1].StateErr = "list deployments: timeout"
-	if actions, _ := planOnce(t, rolloutT0.Add(time.Hour), testRenderer, RolloutPacerConfig{}, views); len(actions) != 0 {
+	if actions, _ := planOnce(t, rolloutT0.Add(4*time.Minute), testRenderer, RolloutPacerConfig{}, views); len(actions) != 0 {
 		t.Fatalf("an unreadable holder was changed: %+v", actions)
 	}
+	// It does not hold the slot for ever without a signal: an unstarted
+	// admission is withdrawn after the grace, a started one is recorded as
+	// stalled after the stall timeout. Neither is ever completed unread.
+	planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, RolloutPacerConfig{}, views)
+	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonNotStarted)
+
+	started := []rolloutGroupView{pendingView("puma")}
+	planOnce(t, rolloutT0, testRenderer, RolloutPacerConfig{}, started)
+	markStarted(started, "puma", rolloutT0)
+	started[0].State, started[0].StateErr = rolloutGroupState{}, "list deployments: timeout"
+	if actions, _ := planOnce(t, rolloutT0.Add(29*time.Minute), testRenderer, RolloutPacerConfig{}, started); len(actions) != 0 {
+		t.Fatalf("an unreadable started group was changed before the stall timeout: %+v", actions)
+	}
+	planOnce(t, rolloutT0.Add(30*time.Minute), testRenderer, RolloutPacerConfig{}, started)
+	requirePhase(t, started, "puma", v1alpha1.RolloutPhaseStalled, rolloutReasonStallTimeout)
+	planOnce(t, rolloutT0.Add(time.Hour), testRenderer, RolloutPacerConfig{}, started)
+	requirePhase(t, started, "puma", v1alpha1.RolloutPhaseStalled, rolloutReasonStallTimeout)
+}
+
+// A group admitted by the annotation is never deferred; when it does not
+// start within the grace it stops holding the slot, so the queue does not
+// wait behind it without a halt.
+func TestPlanRollout_IdleAnnotatedGroupDoesNotHoldTheSlot(t *testing.T) {
+	cfg := RolloutPacerConfig{StartGrace: 5 * time.Minute, Soak: -1}
+	views := []rolloutGroupView{pendingView("lion"), pendingView("tiger")}
+	views[0].Admit = true
+	planOnce(t, rolloutT0, testRenderer, cfg, views)
+	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
+	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	planOnce(t, rolloutT0.Add(4*time.Minute), testRenderer, cfg, views)
+	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, cfg, views)
+	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
+	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
 }
 
 func TestRolloutPacerConfigDefaults(t *testing.T) {

@@ -181,3 +181,53 @@ func TestRunnerStatusPreservesPITRBindings(t *testing.T) {
 		t.Fatalf("binding condition after the runner's write = %+v", c)
 	}
 }
+
+// The runner's status write replaces the status with the copy it read first.
+// status.rollout is not the runner's: the copy can be from before the write
+// path latched the start of the roll, and writing it back would let the
+// pacer withdraw an admission that has changed a workload, and hand the slot
+// to another group.
+func TestUpdateCRStatusKeepsTheLiveRolloutRecord(t *testing.T) {
+	ctx := context.Background()
+	fg := pitrRolloutFG(false)
+	fg.Status.ActiveSite = "dc1"
+	started := metav1.Now()
+	fg.Status.Rollout = &v1alpha1.RolloutStatus{
+		Renderer: rendererIdentity(), Phase: v1alpha1.RolloutPhaseRolling, Reason: rolloutReasonStarted,
+		AdmittedTime: &started, StartedTime: &started,
+	}
+	gets := 0
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg.DeepCopy()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := c.Get(ctx, key, obj, opts...); err != nil {
+					return err
+				}
+				if g, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+					gets++
+					if gets == 1 {
+						// The first read is the stale copy: admitted, not latched.
+						g.Status.Rollout.StartedTime = nil
+						g.Status.Rollout.Phase = v1alpha1.RolloutPhaseAdmitted
+					}
+				}
+				return nil
+			},
+		}).Build()
+	r := &TopologyManagerRunner{client: c, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	snap := TopologySnapshot{Sites: []SiteSnapshot{{Name: "dc1", State: state.StateWritable}, {Name: "dc2", State: state.StateReadOnly}}, ActiveSite: "dc1"}
+	if err := r.updateCRStatus(ctx, nn, snap); err != nil {
+		t.Fatal(err)
+	}
+	if gets < 2 {
+		t.Fatalf("the stale read was not staged (%d reads)", gets)
+	}
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Rollout == nil || got.Status.Rollout.StartedTime == nil || got.Status.Rollout.Phase != v1alpha1.RolloutPhaseRolling {
+		t.Fatalf("status.rollout = %+v, want the live record with its start latch", got.Status.Rollout)
+	}
+}

@@ -24,6 +24,10 @@ var (
 
 // rolloutSweep runs rollout seeds 1..rolloutSweepSeeds once per test
 // binary, in parallel.
+// rolloutDeferSeed is a trial in which an admission is withdrawn because the
+// group did not start (TestRolloutSweep_ReachesTheMidRollStates).
+const rolloutDeferSeed = 101
+
 func rolloutSweep() []TrialResult {
 	rolloutSweepOnce.Do(func() {
 		rolloutSweepResults = runBatch(1, rolloutSweepSeeds, runtime.GOMAXPROCS(0), GenerateRolloutTrial)
@@ -137,7 +141,17 @@ func TestDST_RolloutQuick(t *testing.T) {
 // reaching what the rollout trials exist for. A generator change that
 // stops producing one of these leaves the sweep green and blind.
 func TestRolloutSweep_ReachesTheMidRollStates(t *testing.T) {
-	c := coverRollout(rolloutSweep())
+	// A deferral needs an admitted group kept from starting for the whole
+	// grace, which a few trials in a thousand produce; rolloutDeferSeed is
+	// one of them, run next to the quick range.
+	results := append([]TrialResult{}, rolloutSweep()...)
+	results = append(results, runBatch(rolloutDeferSeed, 1, 1, GenerateRolloutTrial)...)
+	for _, r := range results[len(results)-1:] {
+		if r.Failed() {
+			t.Fatalf("seed %d: %v\ntrial:\n%s", r.Trial.Seed, r.Violations, r.Trial)
+		}
+	}
+	c := coverRollout(results)
 	for _, want := range []string{
 		"admit", "start", "complete", // a roll from admission to completion
 		"stall:OrderedUpdateStalled", // the ordered updater stopped on a pod that is not Ready
@@ -146,7 +160,7 @@ func TestRolloutSweep_ReachesTheMidRollStates(t *testing.T) {
 		"defer",                      // an admission that could not start was withdrawn
 	} {
 		if c.transitions[want] == 0 {
-			t.Errorf("no trial in seeds 1..%d made the record transition %q", rolloutSweepSeeds, want)
+			t.Errorf("no trial in seeds 1..%d and %d made the record transition %q", rolloutSweepSeeds, rolloutDeferSeed, want)
 		}
 	}
 	if c.midRoll == 0 {

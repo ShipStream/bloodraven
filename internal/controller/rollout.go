@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -56,7 +58,11 @@ var (
 // bloodraven:playground) differ only by the render versions and the
 // launcher.
 func rendererIdentity() string {
-	key := operatorImageFromEnv + "\n" + sidecarImageFromEnv
+	// Operator-wide defaults that reach every group's pod template: a chart
+	// change to one of them is a release-driven change like a new image.
+	escrowDefault := strings.TrimSpace(os.Getenv("BLOODRAVEN_DEFAULT_ESCROW_URL"))
+	endpointDefault := strings.TrimSpace(os.Getenv("BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT"))
+	key := operatorImageFromEnv + "\n" + sidecarImageFromEnv + "\n" + escrowDefault + "\n" + endpointDefault
 	rendererIdentityMu.Lock()
 	defer rendererIdentityMu.Unlock()
 	if rendererIdentityValue != "" && rendererIdentityKey == key {
@@ -66,6 +72,12 @@ func rendererIdentity() string {
 	fmt.Fprintf(h, "operatorImage=%s\n", operatorImageFromEnv)
 	fmt.Fprintf(h, "sidecarDefault=%s\n", sidecarImageFromEnv)
 	fmt.Fprintf(h, "mysqlDefault=%s\n", defaultMySQLImage)
+	if escrowDefault != "" {
+		fmt.Fprintf(h, "escrowDefault=%s\n", escrowDefault)
+	}
+	if endpointDefault != "" {
+		fmt.Fprintf(h, "operatorEndpointDefault=%s\n", endpointDefault)
+	}
 	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "configMapRenderVersion=%s\n", configMapRenderVersion)
 	fmt.Fprintf(h, "pitrPodRenderVersion=%s\n", pitrPodRenderVersion)
@@ -260,27 +272,27 @@ func (r *MysqlFailoverGroupReconciler) deploymentTemplateWouldChange(ctx context
 	return !equality.Semantic.DeepEqual(live.Spec.Template, candidate.Spec.Template)
 }
 
-// noteRolloutTemplatePending records that a Recreate site's template would
-// change although its hash does not, which only the reconciler's dry run
-// can tell; the pacer reads it to count the site as pending.
+// noteRolloutTemplatePending records the reconciler's verdict on a Recreate
+// site whose hash matches: whether its template would still change, which
+// only the reconciler's dry run can tell. The pacer reads it to count the
+// site as pending. The verdict lives in this process only, so the pacer
+// treats a site without one as not classified yet (rolloutTemplateVerdict).
 func (r *MysqlFailoverGroupReconciler) noteRolloutTemplatePending(nn types.NamespacedName, site string, pending bool) {
-	key := nn.String() + "/" + site
 	r.rolloutTemplatePendingMu.Lock()
 	defer r.rolloutTemplatePendingMu.Unlock()
-	if !pending {
-		delete(r.rolloutTemplatePending, key)
-		return
-	}
 	if r.rolloutTemplatePending == nil {
 		r.rolloutTemplatePending = make(map[string]bool)
 	}
-	r.rolloutTemplatePending[key] = true
+	r.rolloutTemplatePending[nn.String()+"/"+site] = pending
 }
 
-func (r *MysqlFailoverGroupReconciler) rolloutTemplatePendingNoted(nn types.NamespacedName, site string) bool {
+// rolloutTemplateVerdict returns the verdict noteRolloutTemplatePending
+// recorded for site, and whether this process has recorded one.
+func (r *MysqlFailoverGroupReconciler) rolloutTemplateVerdict(nn types.NamespacedName, site string) (pending, known bool) {
 	r.rolloutTemplatePendingMu.Lock()
 	defer r.rolloutTemplatePendingMu.Unlock()
-	return r.rolloutTemplatePending[nn.String()+"/"+site]
+	pending, known = r.rolloutTemplatePending[nn.String()+"/"+site]
+	return pending, known
 }
 
 // siteSpecHash is the spec hash reconcileDeployment would stamp on site's
@@ -396,8 +408,22 @@ func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, re
 			continue
 		}
 		if deploy.Annotations[v1alpha1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
-			deploy.Annotations[v1alpha1.PITRRenderAnnotation] != pitr.Canonical() ||
-			r.rolloutTemplatePendingNoted(nn, site.Name) {
+			deploy.Annotations[v1alpha1.PITRRenderAnnotation] != pitr.Canonical() {
+			st.Pending = append(st.Pending, rolloutMySQLWorkload(site.Name))
+			continue
+		}
+		if fg.Spec.UpdateStrategy.EffectiveType() != v1alpha1.UpdateStrategyRecreate {
+			continue
+		}
+		// Another renderer wrote it and the hash matches: under Recreate
+		// only the reconciler's dry run says whether the template would
+		// change. Until this process has run it (an operator restart loses
+		// the verdict) the site is neither pending nor done.
+		templatePending, known := r.rolloutTemplateVerdict(nn, site.Name)
+		if !known {
+			return st, fmt.Errorf("site %s: the reconciler has not yet compared its pod template with the running render", site.Name)
+		}
+		if templatePending {
 			st.Pending = append(st.Pending, rolloutMySQLWorkload(site.Name))
 		}
 	}

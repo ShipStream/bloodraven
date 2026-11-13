@@ -2311,6 +2311,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		reclones := fresh.Status.RestoreReclones
 		offlineFence := fresh.Status.RestoreOfflineFence
 		pitr := fresh.Status.PITR
+		// status.rollout belongs to the rollout pacer and the write path's
+		// start latch: freshFG's copy can be from before the latch.
+		rollout := fresh.Status.Rollout
 		// Only an administrator removes DivergentPromotion; unless this
 		// write records a new note, keep whatever is live so a removal
 		// that raced this write is not undone.
@@ -2346,6 +2349,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		fresh.Status.EncryptionAtRest = encryption
 		fresh.Status.PITRArchiveBindings = pitrBindings
 		fresh.Status.Dragonfly = dragonfly
+		fresh.Status.Rollout = rollout
 		for i, c := range reconcilerConds {
 			if c != nil {
 				setCondition(&fresh.Status.Conditions, *c)

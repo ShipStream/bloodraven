@@ -725,3 +725,36 @@ func TestRolloutPacer_AnnotationValueMustBeTrue(t *testing.T) {
 		t.Fatalf("tiger with rollout-admit=true: %+v, want AdmittedByAnnotation", rec)
 	}
 }
+
+// Under Recreate, whether a site whose hash matches would still change is
+// known only from the reconciler's dry run, and that verdict lives in the
+// operator process. After a restart the pacer must not read "no verdict" as
+// "nothing to roll": the group would be completed, or its admission dropped,
+// while its sites still run the old template.
+func TestRolloutGroupState_RecreateSiteWithoutAVerdictIsNotDone(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	r, c := newReconciler(fg)
+	rolloutReconcile(t, r, fg)
+	r.RolloutPacing = true
+	for _, site := range fg.Spec.Sites {
+		d := siteDeployment(t, c, fg, site.Name)
+		delete(d.Annotations, v1alpha1.RenderedByAnnotation)
+		if err := c.Update(context.Background(), d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A new operator process: no verdict yet.
+	r.rolloutTemplatePendingMu.Lock()
+	r.rolloutTemplatePending = nil
+	r.rolloutTemplatePendingMu.Unlock()
+	if st, err := r.RolloutGroupState(context.Background(), c, freshGroup(t, c, fg)); err == nil {
+		t.Fatalf("state = %+v with no verdict, want an error (not classified yet)", st)
+	}
+	// The reconciler compares and, the template being equal, restamps.
+	rolloutReconcile(t, r, fg)
+	st, err := r.RolloutGroupState(context.Background(), c, freshGroup(t, c, fg))
+	if err != nil || len(st.Pending) != 0 {
+		t.Fatalf("state after the reconcile = %+v, %v; want nothing pending", st, err)
+	}
+}

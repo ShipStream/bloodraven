@@ -24,7 +24,8 @@ cross-group queue three times and each review found a Major problem in it, so it
 Every workload the operator renders (site Deployment, Dragonfly StatefulSet) carries
 `bloodraven.shipstream.io/rendered-by`: the **renderer identity** of the operator that last wrote its pod
 template. The identity is a digest of the operator image, the default sidecar image, the default MySQL image,
-the four render versions and the launcher text (`rendererIdentity`).
+the four render versions, the launcher text and the two operator-wide defaults that reach every pod template
+(`BLOODRAVEN_DEFAULT_ESCROW_URL`, `BLOODRAVEN_DEFAULT_OPERATOR_ENDPOINT`) when set (`rendererIdentity`).
 
 A change to a workload is **release-driven** when another renderer wrote the workload (the annotation differs or
 is missing, as on everything v1.7.0 rendered) and the running operator would change its template. Only those
@@ -36,7 +37,7 @@ itself (its spec, its Secrets, its keyring or PITR state) and rolls as before.
 | Workload | Test |
 |---|---|
 | Site Deployment, any strategy | The spec hash or the PITR render annotation differs. |
-| Site Deployment, `Recreate` | Also any difference in the pod template that a server-side dry run of the write shows. The `Recreate` reconciler writes the whole template on every pass, so an unhashed template change would otherwise restart those groups at once. |
+| Site Deployment, `Recreate` | Also any difference in the pod template that a server-side dry run of the write shows. The `Recreate` reconciler writes the whole template on every pass, so an unhashed template change would otherwise restart those groups at once. The verdict lives in the operator process; after a restart the pacer treats such a site as not classified (neither pending nor done) until the reconciler has compared it again. |
 | Dragonfly StatefulSet | The template comparison the serial rollout already uses (`dragonflyStatefulSetTemplateEqual`). |
 
 A workload another renderer wrote that would not change is **restamped**: a patch of the one annotation, never
@@ -83,6 +84,9 @@ workloads (`RolloutGroupState`: pending, rollout incomplete) and runs one pure f
 output is status writes. Each write is conditional on the record the decision was taken on.
 
 - **One slot.** A group with an unfinished admission, for any renderer, holds the slot. Nothing else is admitted.
+  A slot that a pass gives back (a withdrawal, a completion) is given out by the next pass at the earliest, on
+  the stored result: the write that frees it is conditional and can lose to the group's start latch, and an
+  admission planned beside it would then stand next to a group that is rolling.
 - **Queue.** With the slot free and the soak elapsed (default 1m after the last completed roll), the first
   *stable* group with something pending is admitted: by namespace and name, deferred groups last. Stable is the
   deployment API's `unstableReason` being empty, which covers a restore, a group that is not `Ready`, a planned
@@ -102,6 +106,10 @@ write of an admitted group. It stays set until the roll completes.
 - An admission that has **not** started can be withdrawn: when the group has nothing left to roll, or after
   `startGrace` (default 5m) when something else keeps it from starting (a migration lease, a hold that arrived
   after admission). The group goes to the back of the queue (`RolloutDeferred`).
+- A group whose workloads cannot be read is not "done", and is not exempt: its unstarted admission is withdrawn
+  after `startGrace`, its started roll is recorded as stalled after `stallAfter`.
+- An admission by the `rollout-admit` annotation is never withdrawn; one that has not started within
+  `startGrace` stops holding the slot instead, so the queue does not wait behind it without a halt.
 - An admission that **has** started is never withdrawn. The group keeps the slot until it completes. The
   withdrawal and the latch are both conditional on the resource version, so one of them loses.
 - A started roll is recorded as **stalled** (`stalledTime`, `RolloutStalled` Event) when the ordered updater
@@ -125,7 +133,10 @@ admitted, so nothing rolls; the operator emits `RolloutRecordNotStored` once per
 ### 2.6 Dragonfly (#217)
 
 Dragonfly StatefulSets are workloads of the group: a release-driven template change waits for the same
-admission, latches the same start, and counts toward the same completion. The gate comes first: a StatefulSet
+admission, latches the same start, and counts toward the same completion. The start is latched at the rollout's
+first action (a template write, or the takeover that precedes the master's), not when the gate is consulted: a
+rollout that is admitted and waits (a master it cannot name, no replica in sync) has not started and its
+admission can be withdrawn. The gate comes first: a StatefulSet
 the group is not admitted to roll is not part of the group's serial rollout, and no takeover is sent for it.
 
 The serial rollout inside a group is made strict in the same change (`dragonfly_rollout.go`):
@@ -136,9 +147,9 @@ The serial rollout inside a group is made strict in the same change (`dragonfly_
   (`bloodraven.shipstream.io/dragonfly-rollout-in-flight`) in the same update; the mark is removed when the pod
   is Ready on the new template and the site is back in sync with the master (per-flow positions, `DFLY
   REPLICAOFFSET` against `DEBUG REPLICA OFFSET`). No other site is written meanwhile. The mark lives on the
-  StatefulSet, so it survives an operator restart. The pacer's completion (2.3) does not read it: the group's roll
-  counts as complete when every StatefulSet's own rollout status is, which can be before the last restarted site
-  has finished its full sync.
+  StatefulSet, so it survives an operator restart. The pacer's completion (2.3) reads it: a group with a marked
+  StatefulSet has an unfinished workload, so the slot is not given to the next group before the last restarted
+  site is back in sync.
 - The master's site is last. A replica proven in sync takes the master over with `REPLTAKEOVER`; the takeover
   writes the former master's template before that pod is deleted. A takeover that fails is retried with a
   backoff, indefinitely. The rollout sends no `REPLICAOF NO ONE` and never restarts the master where it is.
@@ -173,7 +184,11 @@ Metrics: `bloodraven_rollout_groups{phase}`, `bloodraven_rollout_group_phase{nam
   long time; `rollout-admit` is the way out for one group.
 - A group that is never stable is never admitted automatically and stays on the old pods until an administrator
   admits it. The `BloodravenRolloutPendingTooLong` alert covers it.
-- New stored state: `status.rollout`, which needs the release's CRDs (2.5).
+- New stored state: `status.rollout`, which needs the release's CRDs (2.5). The topology runner's status write
+  replaces most of the status with an earlier copy; `status.rollout` is kept from the live object there
+  (`TestUpdateCRStatusKeepsTheLiveRolloutRecord`). Any new whole-status writer must do the same.
+- Not gated: the Dragonfly `SnapshotRestore` upgrade path writes a StatefulSet's image from `spec.dragonfly.image`
+  without admission. It is started by a spec edit, not by a release, and does not apply the release's template.
 - One slot means a fleet of N groups takes N ordered updates plus N soaks. There is no parallelism setting yet.
 
 ## 4. Rejected alternatives

@@ -168,6 +168,7 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 	var waiting []rolloutGroupView
 
 	// Pass 1: the groups that hold an admission.
+	released := false
 	for i := range sorted {
 		v := sorted[i]
 		if !v.Record.InFlight() {
@@ -180,16 +181,25 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 		rec := v.Record.DeepCopy()
 		rec.Renderer = identity
 		eventType, eventReason, eventMsg := "", "", ""
+		// A group whose workloads cannot be read is not "done", but it
+		// does not hold the slot silently for ever either: the grace and
+		// the stall timeout apply to it like to any other.
+		unstartedTooLong := rec.StartedTime == nil && !v.Admit && now.Sub(rec.AdmittedTime.Time) >= cfg.StartGrace
+		stallTimeout := rec.StartedTime != nil && rec.StalledTime == nil && now.Sub(rec.StartedTime.Time) >= cfg.StallAfter
 		switch {
-		case v.StateErr != "":
+		case v.StateErr != "" && !unstartedTooLong && !stallTimeout:
 			// Unknown is not "done": the admission stands.
-		case rec.StartedTime == nil && len(v.State.Pending) == 0:
+		case v.StateErr == "" && rec.StartedTime == nil && len(v.State.Pending) == 0:
 			// Nothing to roll any more (the release was rolled back, or
 			// the spec moved): the slot was not used.
 			emit(v, nil, "", "", "")
+			released = true
 			continue
-		case rec.StartedTime == nil && !v.Admit && now.Sub(rec.AdmittedTime.Time) >= cfg.StartGrace:
+		case unstartedTooLong:
 			why := v.Unstable
+			if v.StateErr != "" {
+				why = "the group's workloads could not be read: " + v.StateErr
+			}
 			if why == "" {
 				why = "no workload was changed"
 			}
@@ -202,8 +212,9 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 			}
 			emit(v, deferred, corev1.EventTypeWarning, v1alpha1.EventRolloutDeferred, deferred.Message)
 			count(v.Key, deferred)
+			released = true
 			continue
-		case rec.StartedTime != nil && len(v.State.Pending) == 0 && len(v.State.Incomplete) == 0 && v.Unstable == "":
+		case v.StateErr == "" && rec.StartedTime != nil && len(v.State.Pending) == 0 && len(v.State.Incomplete) == 0 && v.Unstable == "":
 			rec.CompletedTime = rolloutTime(now)
 			rec.StalledTime = nil
 			rec.Phase = v1alpha1.RolloutPhaseComplete
@@ -212,8 +223,9 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 				fmt.Sprintf("every workload runs the pod template of renderer %s and the group is stable", identity))
 			lastCompleted = now
 			count(v.Key, rec)
+			released = true
 			continue
-		case rec.StartedTime != nil && rec.StalledTime == nil && (v.UpdateStalled != "" || now.Sub(rec.StartedTime.Time) >= cfg.StallAfter):
+		case rec.StartedTime != nil && rec.StalledTime == nil && (v.UpdateStalled != "" || stallTimeout):
 			rec.StalledTime = rolloutTime(now)
 			rec.Phase = v1alpha1.RolloutPhaseStalled
 			if v.UpdateStalled != "" {
@@ -228,7 +240,12 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 		}
 		emit(v, rec, eventType, eventReason, eventMsg)
 		count(v.Key, rec)
-		if !v.ReleaseSlot && holder == nil {
+		// An annotation's admission is never withdrawn, so one that has
+		// not started within the grace stops holding the slot instead:
+		// the queue must not wait, without a halt, behind a group that
+		// may never start.
+		idleAnnotated := v.Admit && rec.StartedTime == nil && now.Sub(rec.AdmittedTime.Time) >= cfg.StartGrace
+		if !v.ReleaseSlot && !idleAnnotated && holder == nil {
 			holder = &sorted[i]
 			holderStalled = rec.StalledTime != nil
 		}
@@ -287,7 +304,12 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 	if cfg.Soak > 0 {
 		soakUntil = lastCompleted.Add(cfg.Soak)
 	}
-	slotFree := holder == nil && !now.Before(soakUntil)
+	// A slot this pass gives back (a withdrawal, a completion) is given out
+	// by the next pass at the earliest, which plans on the stored result:
+	// the write that frees it is conditional and can lose to the group's
+	// start latch, and an admission planned next to it would then stand
+	// beside a group that is rolling.
+	slotFree := holder == nil && !released && !now.Before(soakUntil)
 	for _, c := range candidates {
 		v := c.view
 		if slotFree && c.eligible {
@@ -323,6 +345,9 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 		case holder != nil:
 			rec.Reason = rolloutReasonWaitingForSlot
 			rec.Message = fmt.Sprintf("%s holds the rollout slot", holder.Key)
+		case released && !now.Before(soakUntil):
+			rec.Reason = rolloutReasonWaitingForSlot
+			rec.Message = "the slot was given back in this pass; the next pass gives it out"
 		default:
 			rec.Reason = rolloutReasonWaitingForSlot
 			rec.Message = fmt.Sprintf("the slot is free again at %s (soak after the last completed roll)", soakUntil.UTC().Format(time.RFC3339))
