@@ -38,13 +38,13 @@ func TestHandoffPromotion_UnreadableFencedSourceIsNotWritable(t *testing.T) {
 		t.Fatalf("DNS = %q after the poll that followed the handoff, want the promoted dc2 (2.2.2.2)", got)
 	}
 	tm.mu.RLock()
-	promoted, dc1State := tm.promotedSite, tm.sites[0].state
+	dc1State, dc2State := tm.sites[0].state, tm.sites[1].state
 	tm.mu.RUnlock()
 	if dc1State == state.StateWritable {
 		t.Fatal("the fenced, unreadable source is still Writable")
 	}
-	if promoted != "dc2" {
-		t.Fatalf("pending promotion = %q, want dc2 kept until dc2 is confirmed writable", promoted)
+	if dc2State != state.StateWritable {
+		t.Fatalf("promoted dc2 state = %s after a poll that read it writable, want Writable", dc2State)
 	}
 	if active := tm.Status().ActiveSite; active != "dc2" {
 		t.Fatalf("status active site = %q, want dc2", active)
@@ -81,5 +81,46 @@ func TestHandoffPromotion_AnsweringSourceKeepsItsAnswer(t *testing.T) {
 	tm.mu.RUnlock()
 	if dc1State != state.StateWritable {
 		t.Fatalf("dc1 state = %s, want Writable: it answered writable after the handoff", dc1State)
+	}
+}
+
+// A promotion this process made and confirmed is not debounced again: the
+// first poll that reads the target writable takes it as Writable, so status
+// does not read "No site is writable" (NoPrimary) for recoveryThreshold
+// polls after every promotion (#236, scenario 49 after a planned
+// switchover). Another site answering writable is still debounced.
+func TestRecordedPromotion_FirstWritablePollIsNotDebounced(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false}
+	dc2 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(dc1, dc2)
+	setRecoveredTopology(tm)
+	ctx := context.Background()
+
+	// A planned failover fenced dc1 and promoted dc2.
+	dc1.mu.Lock()
+	dc1.readOnly = true
+	dc1.mu.Unlock()
+	dc2.mu.Lock()
+	dc2.readOnly = false
+	dc2.mu.Unlock()
+	tm.recordFailover(ctx, tm.clock.Now(), "dc2", "")
+	tm.Poll(ctx)
+	tm.mu.RLock()
+	dc1State, dc2State := tm.sites[0].state, tm.sites[1].state
+	tm.mu.RUnlock()
+	if dc1State != state.StateReadOnly || dc2State != state.StateWritable {
+		t.Fatalf("states dc1=%s dc2=%s after the first poll, want ReadOnly and Writable", dc1State, dc2State)
+	}
+
+	// Later, dc1 answers writable without a promotion: debounced as before.
+	dc1.mu.Lock()
+	dc1.readOnly = false
+	dc1.mu.Unlock()
+	tm.Poll(ctx)
+	tm.mu.RLock()
+	dc1State = tm.sites[0].state
+	tm.mu.RUnlock()
+	if dc1State == state.StateWritable {
+		t.Fatal("a writable answer nobody here caused skipped the recoveryThreshold debounce")
 	}
 }

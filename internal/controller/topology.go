@@ -835,6 +835,10 @@ type TopologyManager struct {
 	// the first poll that started after it consumes it
 	// (recordHandoffPromotion).
 	handoffFencedSource string
+	// promotionAwaitingPoll names the target of a promotion this process
+	// recorded (recordFailover) until the first poll that started after
+	// it consumes it.
+	promotionAwaitingPoll string
 
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
@@ -1140,6 +1144,7 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	}
 	tm.promotedSite = target
 	tm.promotedAt = now
+	tm.promotionAwaitingPoll = target
 	// A promotion observed by this process supersedes restored state even if
 	// the wall clock moved backward. Thereafter, only advance the anti-flap
 	// pair: the ordered-update and poll goroutines sample `now` before this
@@ -1650,6 +1655,20 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		for i := range tm.sites {
 			if tm.sites[i].name == fenced && results[i].err != nil && newStates[i] == state.StateWritable {
 				newStates[i] = state.StateReadOnly
+			}
+		}
+	}
+	// The target of a promotion this process made was read writable when
+	// the promotion was confirmed. The first poll after it that reads the
+	// target writable takes it as Writable without the recoveryThreshold
+	// debounce, which is for answers nobody here caused: otherwise status
+	// reads "No site is writable" (NoPrimary, a NoPrimaryDetected Warning)
+	// for recoveryThreshold polls after every promotion.
+	if promoted := tm.promotionAwaitingPoll; promoted != "" {
+		tm.promotionAwaitingPoll = ""
+		for i := range tm.sites {
+			if tm.sites[i].name == promoted && results[i].err == nil && !results[i].readOnly {
+				newStates[i] = state.StateWritable
 			}
 		}
 	}
