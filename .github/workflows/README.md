@@ -153,7 +153,12 @@ The chart repo is served directly off the `gh-pages` branch via `raw.githubuserc
 
 The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI and deploys the playground. Normal jobs run `playground-chaos run-all` with the selected profile. The dedicated encryption job creates the group with MySQL and escrow TLS from its first generation, adopts encryption with `playground/enable-encryption.sh`, and runs `48-keyring-seal-and-rotation` explicitly. This covers adoption, sealing, key placement, replica rotation, pod replacement, and post-rotation reads against real MySQL without overlapping a separate live TLS rollout. Jobs upload JUnit results where available, chaos forensics, setup logs, and kind logs as artifacts.
 
-The reusable image producer (`_e2e-images.yml`) builds the five playground images once per workflow run and shares an `e2e-images` artifact retained for seven days. Both E2E jobs and all three release E2E jobs load that artifact. If it is unavailable or cannot be loaded, each consumer warns and rebuilds locally with `make e2e-images`; callers that omit `images-artifact` also build locally.
+Two more targeted jobs cover paced rollouts (#244), on the same triggers:
+
+- `paced-rollout` runs `73-paced-rollout-bad-build-halt` on the normal playground. The scenario is also in the release profile; this job is what runs it on a labelled PR, where the profile job is smoke.
+- `upgrade` is the upgrade E2E. `_e2e.yml` takes `upgrade-from: "1.7.0"` and then installs the published v1.7.0 chart and images with `./playground/upgrade-e2e.sh install` instead of the build under test, on a kind cluster with a fourth worker (`kind-config: .github/kind/e2e-upgrade.yaml`). `74-upgrade-paced-rollout` creates two more groups, upgrades to the build (its CRDs first, then `helm upgrade --reuse-values` with the operator and sidecar images set to the build) and checks that every MySQL pod rolls, one group at a time; `01-clean-primary-kill` then runs one failover on the upgraded build. The chart and the images are public, so the job needs no registry login.
+
+The reusable image producer (`_e2e-images.yml`) builds the five playground images once per workflow run (and tags the sidecar a second time, `bloodraven-sidecar:playground-next`, which scenario 73 uses as a new release's default sidecar image) and shares an `e2e-images` artifact retained for seven days. Both E2E jobs and all three release E2E jobs load that artifact. If it is unavailable or cannot be loaded, each consumer warns and rebuilds locally with `make e2e-images`; callers that omit `images-artifact` also build locally.
 
 Profiles:
 | Profile | Scenarios | Use case |

@@ -122,7 +122,7 @@ It is a fail-fast abort, not a timeout — the outer deadline is five minutes an
 
 Which upgrade order is correct, and why?
 
-- CRDs by `kubectl apply --server-side` first, then `helm upgrade` the operator, whose sidecar image then rolls every group without a `spec.sidecar.image` pin — because Helm never upgrades CRDs from `crds/`, and a new operator against an old schema has its new fields silently pruned
+- CRDs by `kubectl apply --server-side` first, then `helm upgrade` the operator, whose sidecar image then rolls every group without a `spec.sidecar.image` pin, one group at a time — because Helm never upgrades CRDs from `crds/`, and a new operator against an old schema has its new fields silently pruned
 - `helm upgrade` first, then CRDs — the chart's post-upgrade hook applies them once the new operator is running
 - `helm upgrade` alone; the chart's `crds/` directory is applied on every upgrade, which is why it exists as a separate directory
 - Pin `spec.sidecar.image` to the new release first so the sidecars are ready for the new operator, then CRDs, then the chart

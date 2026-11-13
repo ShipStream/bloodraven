@@ -20,6 +20,8 @@ DST_SEED=61 DST_SKIP=2 DST_ACTOR_SKIP=0,4 go test ./internal/dst -run PlannedRep
 DST_SEED=61 DST_LOG=1 go test ./internal/dst -run PlannedRepro -v  # with topology-manager and engine logs
 DST_PLANNED=1 make dst                  # saturation campaign over actors-on trials, shrunk over both schedules
 DST_PLANNED_START=16001 DST_PLANNED_TRIALS=16000 go test ./internal/dst -run 'TestDST_PlannedQuick$' -v  # a wider planned sweep, one range per process
+DST_ROLLOUT=1 make dst                  # saturation campaign over paced-rollout trials (a fleet of groups; see "Paced rollouts")
+DST_SEED=77 go test ./internal/dst -run RolloutRepro -v  # replay one paced-rollout seed with its step log
 ```
 
 `make test` also runs `TestDST_PlannedQuick`: 300 seeds with the
@@ -31,6 +33,12 @@ shared range misses: `PromotedUnconfirmed` and `ManualRecoveryRequired` need
 a fault inside the few polls between a target's `read_only=OFF` and its
 confirmation, so an engine change that moves a run's timing by one poll
 moves them to other seeds.
+
+`make test` also runs `TestDST_RolloutQuick`: 64 seeds of the paced-rollout
+trials (a fleet of failover groups, an operator release, operator restarts
+mid-rollout; see "Paced rollouts"), in parallel, with
+`TestRolloutSweep_ReachesTheMidRollStates` on the same results.
+`DST_ROLLOUT_START` and `DST_ROLLOUT_TRIALS` run another range.
 
 Campaign knobs (env): `DST_BATCH` (default 1000), `DST_DRY_BATCHES` (default
 3), `DST_MAX_TRIALS` (500000), `DST_WALL_SECONDS` (1800), `DST_REPORT`.
@@ -661,6 +669,190 @@ clone of the site has superseded, whether the site may be made writable
   operator, which stores a report without its set
   (`TestStartManager_RestoresAnOwnLossReportDegradedForAnOlderCRD`,
   `test/envtest/status_older_crd_test.go`).
+
+## Paced rollouts (#244)
+
+`GenerateRolloutTrial(seed)` is a trial family of its own
+(`Trial.Rollout`, drawn from the PRNG stream `rolloutStream`): a fleet of
+two to four failover groups under one operator process, an operator
+release that makes every group's workloads release-pending
+(`proposals/23-paced-rollouts.md`), and a schedule of operator restarts,
+pods that do not become Ready and administrator annotations. `RunTrial`
+runs it like any other trial; `GenerateTrial` and `GeneratePlannedTrial`
+do not know it (`TestGenerateTrial_UnchangedByRollout`), so no failover
+seed moved.
+
+It is not a fault kind of the failover trials for two reasons. What is
+judged is the fleet (one slot, who waits behind whom), and a failover
+trial is one group. And the ordered updater runs here as the production
+code, on its own goroutine, which the harness joins after every attempt
+(below); the failover trials wire no updater at all, because their faults
+land between the statements of one actor and an updater that runs beside
+`Poll` cannot be replayed.
+
+**Real code.** The `RolloutPacer` (`planRollout` and its conditional
+writes); the group reconciler with the gate on the Deployment write path
+(`gateDeploymentRollout`, `admitRolloutWrite`, the restamp), for
+`Recreate` groups as their roller; the runner's drift check
+(`rolloutHoldsSite`, through `CheckSpecDriftForSim`) and its status write
+(`updateCRStatus`); one `TopologyManager` per group with the production
+`FailoverController` and `UpdateController`, so an admitted group is
+rolled by `ExecuteTargets`, handoff included, through
+`ReconcileSiteDeployment`; and `DeploymentUnstableReason` on the status
+those managers wrote, which is what the pacer calls stable.
+
+**Modelled.**
+
+- *The API server* is controller-runtime's fake client behind an
+  interceptor (`rolloutSim.write`). Every write the operator sends is
+  counted (a death can be armed on the n-th), observed with the stored
+  object before and after it (the invariants), and dropped once the
+  process is dead. Reads are served from decoded copies until something in
+  their namespace is written (`readCache`): the fake client encodes and
+  decodes on every read, and a trial spent most of its time there.
+- *The Deployment controller and the kubelet* are `simPod`: a pod is
+  replaced when its Deployment's pod template is written, and the new one
+  is Ready at once, some steps later, or not until it is fixed. The
+  Deployment's status says "rolled out" exactly when the pod is Ready. A
+  replaced pod restarts the site's MySQL, which boots `read_only=ON`; a
+  pod that is not Ready has a MySQL that answers all the same (#209).
+- *Each group's MySQL* is a `Cluster` of its own.
+- *An operator release* (`rolloutSim.release`). The running renderer's
+  name is fixed by the binary under test, so the model renames every
+  stored trace of it instead: the Deployments it wrote get the name and
+  the spec hash of an earlier release, and so do the rollout records
+  written for it. The renderer compares names and hashes for equality
+  only, so this is the state a new release finds, a second one mid-rollout
+  included (the retarget of an unfinished admission). The release
+  restarts the operator.
+- *An operator restart* builds a new reconciler, runner, pacer and
+  topology managers over the same API objects, pods and MySQL. A death at
+  an API write (`crashOperatorAtWrite`) also cancels the process's
+  context and fails every later call it makes, to the API server and to
+  MySQL, so the rest of the pass it died in changes nothing; the
+  replacement starts up to two steps later.
+
+**A step** is five seconds of fake time: due ops, pods whose time has
+come, one tick of every group's data plane, then the pacer's pass and
+each group's pass (the reconcile its last change woke, the manager's
+`Poll`, the drift check, the ordered update attempt), in the trial's
+order of pacer and groups. A trial ends six quiet steps after the fleet
+has converged past the heal, or at the end of its settle window.
+
+**One actor at a time.** `Poll` starts an update attempt on a goroutine
+and goes on to write status, so the two would race for the same object.
+The harness polls with `ApplyUpdate` unset (no attempt starts), then sets
+it, calls `CheckUpdateForSim` (Poll's update step by itself) and waits
+with `WaitOrderedUpdateIdleForSim`. A stall recheck that `Poll` starts
+waits at its pod probe until `Poll` returned (`pollGate`). The wall-clock
+waits of the write path and the updater are bounded
+(`SetRolloutWaitForSim`, `SetRolledSiteTimeoutForTest`): a pod that is not
+Ready when its Deployment is written is not Ready for the rest of the
+step, so one read decides. `TestRolloutDeterminism` replays seeds
+byte for byte, step log included.
+
+**Ops** (`rollout_schedule.go`): `release` (the first at the end of the
+warm-up; a second in four trials out of ten, a third now and then),
+`badBuild` (no pod of the fleet becomes Ready after its next roll; one
+trial in four) or single `podNotReadyAfterRoll` (for some steps, or until
+a `podReady`), `restartOperator`, `crashOperatorAtWrite`, `siteDown` /
+`siteUp` (the MySQL of a read-only site: a group that is not `Ready`),
+`rolloutAdmit` and `rolloutReleaseSlot` (the annotations, for some steps).
+At `HealAt` every pod is Ready, every site runs, the annotations are gone
+and a dead operator starts.
+
+**Invariants.** Judged where the fact is made: on every committed write of
+a rollout record or a Deployment, on every `ApplyUpdate`, after every
+step, and at the end.
+
+1. *One slot.* `TwoSlotHolders` (after every step: at most one group
+   holds an unfinished admission that the annotations neither made nor
+   released), `SecondAdmission` (an admission from the queue while another
+   group's unfinished admission is not released), `AdmittedDuringSoak`,
+   `AdmittedByAnnotationWithoutIt`.
+2. *A group outside its slot is not touched.* `TemplateWrittenOutsideSlot`
+   and `TemplateWrittenBeforeLatch` (a pod template another renderer wrote
+   is changed only for an admitted group whose `startedTime` is already
+   stored), `RestampedPendingWorkload`, `TemplateRewritten`,
+   `DriftOutsideSlot` (the drift check reports nothing for a group that is
+   not admitted), `UpdaterRanOutsideSlot` (no `ApplyUpdate` for one),
+   `UpdaterTouchedMySQLOutsideSlot` (the update's statements, told apart
+   from the manager's by the actor tag, only for a group whose roll has
+   started).
+3. *A started roll keeps the slot.* `StartedAdmissionWithdrawn`,
+   `StartLatchLost`, `StallCleared`, `AdmissionRewritten`, across restarts
+   and retargets (`RetargetedAway`, `StartedForAnotherRenderer`); with
+   invariant 1 no other group is admitted meanwhile.
+4. *Completion is real, and once.* `CompletedNotRolled` (at the write of
+   `Complete` every workload carries the running renderer's name and a
+   current spec hash, and every pod is Ready), `CompletedWithoutStart`,
+   `AdmittedTwice` and `RolledTwice` (one roll per group and per pod
+   template for one release).
+5. *Liveness.* `RolloutNotConverged` and `GroupWithoutOnePrimary`: after
+   the heal and the settle window every group has one writable site and a
+   completed roll.
+
+Each has been seen to fire: nine one-line mutations of `rollout.go` and
+`rollout_pacer.go` (the drift check or the write path not holding, the
+slot or the soak ignored, the latch skipped, completion not waiting for
+the pods, a started admission withdrawn after the grace, a retarget that
+forgets the stall or drops the admission) fail the quick range, each with
+the invariant written for it.
+
+**Inherent: a group left for a human** (`RolloutResult.NeedsHuman`, not a
+violation). A `Recreate` roll replaces the primary's pod, mysqld boots
+`read_only=ON`, and the group's status names no active site until the
+operator that rolled it has made the primary writable again from memory
+(`lastActiveSite`). An operator that restarts in between has only the
+status to go by, and a group that never failed over has no failover
+record: it finds read-only sites and no authority on record and elects
+nobody, as the failover trials' `checkWedge` documents (no history, no
+writable, no priorities). The roll has started and cannot complete, so
+the group holds the slot and the rest of the fleet waits behind it; that
+is excused too. First seen as seed 77 (`DST_ROLLOUT_SKIP=1,2,3`); the
+minimal schedule is two releases one step apart on a `Recreate` group
+(`TestRollout_OperatorRestartDuringRecreateRollNeedsAHuman`, hand-built,
+with its control: one release converges). The model needs the second
+release to restart the primary under the new process, because its pods
+are away for no time at all; in a cluster they are away for a minute and
+any operator restart in that minute does it. About three trials in a
+hundred end this way. Pinned as
+`TestKnownLimitationOperatorRestartDuringRecreateRollLeavesNoPrimary` in
+`test/component/paced_rollout_test.go`, next to
+`TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart`, which is
+the fleet test through the controller package's exported API.
+
+**Not modelled.** An update attempt runs to its end inside one step, so
+`status.updatePhase` is never stored mid-update and a restart lands
+between attempts or at an API write, not between two MySQL statements of
+a handoff (the failover trials' `crashOperatorMid` covers deaths inside
+`Execute`, with the step model of the update). No spec edit while a group
+waits, no site added to a waiting group, no Dragonfly StatefulSet, no
+encryption at rest (the clone recipient's exemption), no CRD older than
+the operator (`RolloutRecordNotStored`), no second operator process (the
+pacer runs under leader election). MySQL faults are one stopped
+read-only site.
+
+```sh
+go test ./internal/dst -run 'TestDST_RolloutQuick$' -v            # the quick range, with what it reached
+DST_ROLLOUT_START=65 DST_ROLLOUT_TRIALS=5000 go test ./internal/dst -run 'TestDST_RolloutQuick$' -v   # another range
+DST_SEED=77 DST_ROLLOUT_SKIP=1,2,3 go test ./internal/dst -run RolloutRepro -v   # replay one seed with its step log, ops masked by their r-index
+DST_ROLLOUT=1 make dst                                            # saturation campaign over rollout trials, shrunk over their ops
+```
+
+Measured on 2026-11-12, on the tree that introduced this section, on a
+16-thread machine that was busy with other work (a later change to the
+generator, the model or the rollout code makes these numbers history):
+
+| Sweep | Seeds | Trials | Failing | Notes |
+|---|---|---|---|---|
+| `TestDST_RolloutQuick` (`make test`) | 1–64 | 64 | 0 | 174 groups, 168 completed, 2 left for a human, 4 behind them; 98 releases, 230 operator restarts (101 mid-roll, 57 after a death at an API write, 3 of those at the start latch), 38 stalls, 25 retargets, 167 handoffs. About 26 s under `-race`. |
+| `TestDST_RolloutQuick` | 1–1,000 | 1,000 | 0 | 31 groups left for a human |
+| `DST_ROLLOUT=1 make dst` | 1–7,000 | 7,000 | 0 | Stopped at a 15-minute wall-clock cap, not saturated; 221 behavior signatures, new per batch of 1,000: 105, 37, 17, 21, 15, 14, 12 (dry is under 10) |
+
+A rollout trial costs some 0.7 CPU-seconds, far more than a failover
+trial: most of it is the fake API server's codec on writes and the group
+reconciler, which is why the quick range is 64 seeds.
 
 ## Invariants
 

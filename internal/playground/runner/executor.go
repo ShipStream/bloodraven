@@ -354,6 +354,20 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 			if mfg.Status.UpdatePhase != "" {
 				bad = append(bad, fmt.Sprintf("updatePhase=%s", mfg.Status.UpdatePhase))
 			}
+			// The shared precheck requires a status entry for every site
+			// of the spec and no unfinished paced rollout (#262).
+			for _, s := range mfg.Spec.Sites {
+				reported := false
+				for _, st := range mfg.Status.Sites {
+					reported = reported || st.Name == s.Name
+				}
+				if !reported {
+					bad = append(bad, fmt.Sprintf("%s=no-status", s.Name))
+				}
+			}
+			if r := mfg.Status.Rollout; r != nil && r.Phase != "" && r.Phase != v1alpha1.RolloutPhaseComplete {
+				bad = append(bad, fmt.Sprintf("rollout=%s", r.Phase))
+			}
 			for _, s := range mfg.Status.Sites {
 				if s.State != v1alpha1.SiteStateWritable && s.State != v1alpha1.SiteStateReadOnly {
 					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))

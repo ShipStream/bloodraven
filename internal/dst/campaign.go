@@ -39,6 +39,9 @@ type CampaignConfig struct {
 	// Planned runs the actors-on trials (GeneratePlannedTrial), and shrinks
 	// over both the fault ops and the actor ops (K090).
 	Planned bool
+	// Rollout runs the paced-rollout trials (GenerateRolloutTrial) and
+	// shrinks over their ops. It takes precedence over Planned.
+	Rollout bool
 }
 
 // Failure is one distinct failure fingerprint with a shrunk reproduction.
@@ -236,6 +239,9 @@ func RunCampaign(cfg CampaignConfig, progress func(string)) CampaignResult {
 
 // generate is the campaign's trial generator.
 func (cfg CampaignConfig) generate() func(uint64) Trial {
+	if cfg.Rollout {
+		return GenerateRolloutTrial
+	}
 	if cfg.Planned {
 		return GeneratePlannedTrial
 	}
@@ -268,11 +274,15 @@ func Shrink(seed uint64, wantFingerprint string) (Trial, []Violation) {
 }
 
 // ShrinkTrial is Shrink for any generated trial: with actors on it masks
-// the actor ops (Actors.Skip) as well as the fault ops (K090).
+// the actor ops (Actors.Skip) as well as the fault ops (K090), and a
+// rollout trial's ops are masked through Rollout.Skip.
 func ShrinkTrial(trial Trial, wantFingerprint string) (Trial, []Violation) {
 	trial.Skip = make([]bool, len(trial.Ops))
 	if trial.Actors.Enabled {
 		trial.Actors.Skip = make([]bool, len(trial.Actors.Ops))
+	}
+	if trial.Rollout.Enabled {
+		trial.Rollout.Skip = make([]bool, len(trial.Rollout.Ops))
 	}
 
 	still := func(t Trial) ([]Violation, bool) {
@@ -291,7 +301,7 @@ func ShrinkTrial(trial Trial, wantFingerprint string) (Trial, []Violation) {
 	// pass removes none.
 	for changed := true; changed; {
 		changed = false
-		for _, mask := range [][]bool{trial.Skip, trial.Actors.Skip} {
+		for _, mask := range [][]bool{trial.Skip, trial.Actors.Skip, trial.Rollout.Skip} {
 			for i := range mask {
 				if mask[i] {
 					continue

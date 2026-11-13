@@ -10,7 +10,7 @@ import (
 
 func TestWaitForBaseline_HealthyImmediately(t *testing.T) {
 	progressCalls := 0
-	err := waitForBaseline(context.Background(), time.Second, time.Millisecond,
+	err := waitForBaseline(context.Background(), baselineWaitConfig{Timeout: time.Second, Interval: time.Millisecond},
 		func(context.Context) error { return nil },
 		func(error, time.Duration) { progressCalls++ },
 	)
@@ -25,7 +25,7 @@ func TestWaitForBaseline_HealthyImmediately(t *testing.T) {
 func TestWaitForBaseline_ConvergesAfterRetries(t *testing.T) {
 	checks := 0
 	progressCalls := 0
-	err := waitForBaseline(context.Background(), time.Second, time.Millisecond,
+	err := waitForBaseline(context.Background(), baselineWaitConfig{Timeout: time.Second, Interval: time.Millisecond},
 		func(context.Context) error {
 			checks++
 			if checks < 3 {
@@ -48,7 +48,7 @@ func TestWaitForBaseline_ConvergesAfterRetries(t *testing.T) {
 
 func TestWaitForBaseline_TimeoutReturnsLastError(t *testing.T) {
 	sentinel := errors.New("baseline unhealthy: never converges")
-	err := waitForBaseline(context.Background(), 10*time.Millisecond, time.Millisecond,
+	err := waitForBaseline(context.Background(), baselineWaitConfig{Timeout: 10 * time.Millisecond, Interval: time.Millisecond},
 		func(context.Context) error { return sentinel },
 		func(error, time.Duration) {},
 	)
@@ -62,7 +62,7 @@ func TestWaitForBaseline_ContextCancelledReturnsPromptly(t *testing.T) {
 	sentinel := errors.New("baseline unhealthy: still converging")
 	done := make(chan error, 1)
 	go func() {
-		done <- waitForBaseline(ctx, time.Hour, time.Hour,
+		done <- waitForBaseline(ctx, baselineWaitConfig{Timeout: time.Hour, Interval: time.Hour},
 			func(context.Context) error { return sentinel },
 			func(error, time.Duration) {},
 		)
@@ -75,6 +75,76 @@ func TestWaitForBaseline_ContextCancelledReturnsPromptly(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("waitForBaseline did not return promptly after context cancellation")
+	}
+}
+
+// A baseline that reads healthy once and unhealthy on the next check is not
+// reported healthy: the stable window starts again (#262, where the wait
+// passed 39ms before the first precheck saw an unreachable site).
+func TestWaitForBaseline_HealthyOnceIsNotStable(t *testing.T) {
+	checks := 0
+	flap := errors.New(`baseline unhealthy: site reader state="unreachable"`)
+	err := waitForBaseline(context.Background(),
+		baselineWaitConfig{Timeout: 5 * time.Second, Interval: time.Millisecond, StableFor: 30 * time.Millisecond, StableInterval: time.Millisecond},
+		func(context.Context) error {
+			checks++
+			// Healthy on the first check, unreachable on the second,
+			// healthy from the third on.
+			if checks == 2 {
+				return flap
+			}
+			return nil
+		},
+		func(error, time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("expected nil once the baseline held for the window, got %v", err)
+	}
+	if checks < 4 {
+		t.Fatalf("baseline reported healthy after %d checks; the flap on check 2 must restart the stable window", checks)
+	}
+}
+
+// The stable window is sampled more than once, and the wait takes at least
+// the window.
+func TestWaitForBaseline_HoldsForStableWindow(t *testing.T) {
+	checks := 0
+	start := time.Now()
+	const window = 40 * time.Millisecond
+	err := waitForBaseline(context.Background(),
+		baselineWaitConfig{Timeout: time.Second, Interval: time.Hour, StableFor: window, StableInterval: 5 * time.Millisecond},
+		func(context.Context) error { checks++; return nil },
+		func(error, time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < window {
+		t.Errorf("returned after %s, before the %s stable window", elapsed, window)
+	}
+	if checks < 3 {
+		t.Errorf("stable window sampled %d times, want several", checks)
+	}
+}
+
+// A baseline that never holds for the window is reported unhealthy at the
+// deadline, with the error that last broke it.
+func TestWaitForBaseline_NeverStableTimesOut(t *testing.T) {
+	checks := 0
+	flap := errors.New(`baseline unhealthy: site reader state="unreachable"`)
+	err := waitForBaseline(context.Background(),
+		baselineWaitConfig{Timeout: 30 * time.Millisecond, Interval: time.Millisecond, StableFor: time.Hour, StableInterval: time.Millisecond},
+		func(context.Context) error {
+			checks++
+			if checks%2 == 0 {
+				return flap
+			}
+			return nil
+		},
+		func(error, time.Duration) {},
+	)
+	if !errors.Is(err, flap) {
+		t.Fatalf("expected the flapping check's error at the deadline, got %v", err)
 	}
 }
 

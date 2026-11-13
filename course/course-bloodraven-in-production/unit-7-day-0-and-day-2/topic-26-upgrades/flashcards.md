@@ -65,10 +65,28 @@
 
 **Front:** `spec.sidecar.image`
 
-**Back:** Optional, with no stored default. Unset, the group runs the sidecar its operator release ships with (the chart's `sidecar.image.repository` and `sidecar.image.tag`), so a `helm upgrade` that ships a new sidecar changes the group's pod spec and runs an ordered update — with the same failover. Set it only to pin a build: a pin stays put, and a pin from another release gets a `SidecarVersionSkew` Warning. Bloodraven tolerates one minor of operator/sidecar skew in either direction while pods roll.
+**Back:** Optional, with no stored default. Unset, the group runs the sidecar its operator release ships with (the chart's `sidecar.image.repository` and `sidecar.image.tag`), so a `helm upgrade` that ships a new sidecar changes the group's pod spec and runs an ordered update — with the same failover — when the group has its turn in the paced rollout. Set it only to pin a build: a pin stays put, and a pin from another release gets a `SidecarVersionSkew` Warning. A pin holds the sidecar image only; a release that changes the pod in another way rolls pinned groups too. Bloodraven tolerates one minor of operator/sidecar skew in either direction while pods roll.
 
 ---
 
 **Front:** The three one-way doors of upgrading
 
 **Back:** MySQL does not support data downgrade (`MysqlBackup.status.mysqlImage` records what produced each dump); a steady-state per-site version split is not supported, because `spec.image` is one field per group with no `SiteSpec` override; and there is no version admission check at all.
+
+---
+
+**Front:** Paced rollout
+
+**Back:** A pod change that an operator release causes (a new launcher, a pod render change, a new default sidecar image) is rolled **one failover group at a time**. A group that is not admitted keeps its pods; a group whose roll started and cannot finish keeps the only slot, so a bad release stops at the first group. `status.rollout.phase` is `Pending`, `Admitted`, `Rolling`, `Stalled` or `Complete`. On by default; `rollout.pacing=false` rolls every group at once.
+
+---
+
+**Front:** What waits with a group that is `Pending` in the paced rollout
+
+**Back:** Its pods stay on the previous release, **and so do spec changes that restart its pods**: an edit to `spec.image` is accepted and waits until the group is admitted. `bloodraven.shipstream.io/rollout-admit=true` admits one group out of turn; remove it afterwards, because the operator reads the key, not the value, and every later release would roll that group without waiting.
+
+---
+
+**Front:** An operator upgrade against an old CRD, with paced rollouts
+
+**Back:** The API server drops `status.rollout`, no admission can be stored, and **no group is rolled at all**. Nothing restarts. The signs are a `RolloutRecordNotStored` Warning Event and `bloodraven_rollout_record_not_stored` above zero. Apply the release's CRDs; the rollout starts within seconds.

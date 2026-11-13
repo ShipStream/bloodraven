@@ -147,6 +147,10 @@ type DragonflyManager struct {
 	emergencySettle             func(takeover time.Duration) time.Duration
 	emergencyStepTimeout        time.Duration
 	emergencySourceProbeTimeout time.Duration
+	// beforeSourceRecreate, when set, runs after a promotion demoted the
+	// old source and before its pod is deleted. The rollout's temporary
+	// promoter sets it; the group's manager never does.
+	beforeSourceRecreate func(ctx context.Context)
 	// driftSyncWait is how long the take-back's sync check waits for a
 	// target that is linked and behind (dragonflyProveSync). A field so
 	// tests can shrink it.
@@ -2406,15 +2410,19 @@ func (m *DragonflyManager) rolloutPromoteLocked(work context.Context, target, ol
 		m.logger.Info("dragonfly rollout: promotion no longer valid; skipping", "site", target, "reason", why, "fg", m.fgKey.String())
 		return false
 	}
-	return m.rolloutPromoteFG(work, &fg, target, oldSource, dragonflyFallbackUnlessSourceServes)
+	return m.rolloutPromoteFG(work, &fg, target, oldSource)
 }
 
 // rolloutPromoteFG promotes target for a rollout from fg, a read of the
 // group the caller made under the gate and validated with
-// rolloutPromotionBlocked. fallback is dragonflyTakeoverOnly when the
-// target's sync was proven by its link alone (dragonflySyncCheck).
-func (m *DragonflyManager) rolloutPromoteFG(work context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string, fallback dragonflyFallback) bool {
-	return m.promoteLocked(work, fg, target, oldSource, effectiveDragonflyMaxSyncWait(fg)/2, fallback)
+// rolloutPromotionBlocked. A rollout is maintenance of a master that
+// serves: the promotion is a REPLTAKEOVER or nothing
+// (dragonflyTakeoverOnlyRollout). REPLICAOF NO ONE is never sent for it,
+// whatever the old master does after a takeover that failed, because the
+// rollout can wait and a promotion that gives up what the target had not
+// received cannot be undone.
+func (m *DragonflyManager) rolloutPromoteFG(work context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) bool {
+	return m.promoteLocked(work, fg, target, oldSource, effectiveDragonflyMaxSyncWait(fg)/2, dragonflyTakeoverOnlyRollout)
 }
 
 // rolloutPromotionBlocked returns why a rollout promotion of target, taking
@@ -2571,7 +2579,9 @@ const (
 // nothing else could ever move the master on such a server. With fallback
 // == dragonflyTakeoverOnly step 4 is never taken, whatever the old master
 // does: the caller could not prove the target's sync by position, and
-// REPLTAKEOVER's own catch-up wait is the only proof there is.
+// REPLTAKEOVER's own catch-up wait is the only proof there is. The same
+// holds with dragonflyTakeoverOnlyRollout: a rollout waits for a takeover
+// that succeeds.
 //
 // The manager yields (stopping, or a planned failover or rollout waiting
 // for the gate) only before step 1 and before step 3, never after a
@@ -2669,11 +2679,11 @@ func (m *DragonflyManager) promoteLocked(ctx context.Context, fg *v1alpha1.Mysql
 		// after the reply was lost): it sends REPLICAOF NO ONE, which
 		// makes the target a master holding its keys if it is not one
 		// already.
-	} else if fallback == dragonflyTakeoverOnly {
+	} else if why := fallback.takeoverOnlyReason(); why != "" {
 		_ = conn.Close()
 		m.logger.Warn("dragonfly emergency: old master unreachable; skipping REPLTAKEOVER", "site", target, "oldSource", oldSource, "fg", fgKey)
 		return m.failPromotion(ctx, fg, target, oldSource, "unchanged",
-			"REPLTAKEOVER skipped: old master unreachable; REPLICAOF NO ONE not sent: the target's sync was not proven by position")
+			"REPLTAKEOVER skipped: old master unreachable; REPLICAOF NO ONE not sent: "+why)
 	} else {
 		takeoverFailure = "REPLTAKEOVER skipped: old master unreachable"
 		m.logger.Warn("dragonfly emergency: old master unreachable; skipping REPLTAKEOVER", "site", target, "oldSource", oldSource, "fg", fgKey)
@@ -2766,16 +2776,33 @@ const (
 	// dragonflyFallbackUnlessSourceServes: REPLICAOF NO ONE, unless the
 	// old master still answers as a master (see promoteLocked).
 	dragonflyFallbackUnlessSourceServes dragonflyFallback = iota
-	// dragonflyTakeoverOnly: never REPLICAOF NO ONE.
+	// dragonflyTakeoverOnly: never REPLICAOF NO ONE, because the target's
+	// sync was not proven by position.
 	dragonflyTakeoverOnly
+	// dragonflyTakeoverOnlyRollout: never REPLICAOF NO ONE, because the
+	// promotion is a rollout's, which waits for a takeover that succeeds.
+	dragonflyTakeoverOnlyRollout
 )
+
+// takeoverOnlyReason is why a takeover-only promotion sends no REPLICAOF NO
+// ONE, in its log line and its DragonflyPromotionFailed Event; "" for a
+// promotion that may fall back.
+func (f dragonflyFallback) takeoverOnlyReason() string {
+	switch f {
+	case dragonflyTakeoverOnly:
+		return "the target's sync was not proven by position"
+	case dragonflyTakeoverOnlyRollout:
+		return "a rollout promotes with REPLTAKEOVER only and retries"
+	}
+	return ""
+}
 
 // noFallbackAfterTakeover returns why REPLICAOF NO ONE must not follow a
 // REPLTAKEOVER that failed with takeoverErr, or "" when it may: see
 // promoteLocked.
 func (m *DragonflyManager) noFallbackAfterTakeover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource, password string, takeoverErr error, fallback dragonflyFallback) string {
-	if fallback == dragonflyTakeoverOnly {
-		return "the target's sync was not proven by position"
+	if why := fallback.takeoverOnlyReason(); why != "" {
+		return why
 	}
 	if oldSource == "" {
 		return ""
@@ -2880,6 +2907,12 @@ func (m *DragonflyManager) finishDragonflyPromotion(ctx context.Context, fg *v1a
 	sourceDemoted := m.applyEmergencyPromotionLabels(postCtx, fg, target, oldSource)
 	m.bestEffortEmergencyClientKill(postCtx, fg, oldSource, password)
 	if sourceDemoted {
+		// The rollout writes the demoted source's pod template here, before
+		// its pod is deleted, so that the pod comes back once, on the new
+		// template (promoteDragonflyForRollout).
+		if m.beforeSourceRecreate != nil {
+			m.beforeSourceRecreate(postCtx)
+		}
 		m.bestEffortRecreateTakeoverSource(postCtx, fg, oldSource)
 	}
 	cancel()

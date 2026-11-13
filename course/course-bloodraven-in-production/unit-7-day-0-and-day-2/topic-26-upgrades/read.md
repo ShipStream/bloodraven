@@ -164,10 +164,10 @@ the same thing is its `ServerSideApply=true` sync option.
   "type": "order",
   "title": "Upgrading Bloodraven, in order",
   "items": [
-    "1. Read the release notes for CRD changes and for the sidecar image tag. These are the only two things that can require action.",
+    "1. Read the release notes for CRD changes and for what the release rolls: a new sidecar image tag, or a change to the MySQL pod itself. These are the only things that can require action.",
     "2. kubectl apply --server-side --force-conflicts -f the CRDs from config/crd/bases/ (or the chart's crds/ directory) — Helm will not do this for you, on upgrade or on rollback, and client-side apply cannot carry a CRD this large.",
     "3. helm upgrade the operator chart. One Deployment, one replica; leader election means the new pod takes the lease when the old one releases it.",
-    "4. Let the sidecars follow. A group that leaves spec.sidecar.image unset runs the sidecar the new operator release ships with, so step 3 already changed its pod spec. This is an ordered update: it restarts pods, moves your primary, and increments the failover counter.",
+    "4. Let the pods follow, one group at a time. A group that leaves spec.sidecar.image unset runs the sidecar the new operator release ships with, so step 3 already changed its pod spec. Each group runs an ordered update when the operator admits it: it restarts pods, moves your primary, and increments the failover counter. Watch status.rollout.",
     "5. Run a backup verification against the new version, because a restore path you have not exercised since the upgrade is an assumption again."
   ]
 }
@@ -179,13 +179,57 @@ runs the one the operator release ships with, which the chart hands the operator
 `sidecar.image.repository` and `sidecar.image.tag` values. So the `helm upgrade` that moves the
 operator also changes every such group's pod spec, and moving the sidecar is a pod restart on every
 site — the same ordered update as an image bump, with the same failover. Plan the chart upgrade as you
-would plan that rollout. A group that pins `spec.sidecar.image` moves only when you change the pin, and
-a pin from another release gets a `SidecarVersionSkew` Warning. Bloodraven tolerates a **one-minor**
+would plan that rollout, once for every group. A group that pins `spec.sidecar.image` keeps its sidecar
+image until you change the pin, and a pin from another release gets a `SidecarVersionSkew` Warning. A
+pin does not keep the pods still: a release that changes the MySQL pod in another way rolls pinned
+groups too. v1.8.0 is one, because it starts `mysqld` through a new launcher, so every MySQL pod of
+every group rolls once. Bloodraven tolerates a **one-minor**
 skew between operator and sidecar in either direction while pods roll, because both sides of the HTTP
 surface between them are additive-only. Beyond one minor is untested.
 
 The sidecar and MySQL share a pod, so a sidecar move and a `spec.image` bump go through the same
 ordered update; there is no separate sidecar sequencing to arrange.
+
+## One group at a time
+
+If every group started that ordered update the moment the new operator came up, a bad release would
+reach all of them together. It does not. The operator **paces** a pod change that its own release
+causes: one group holds the rollout slot, rolls, and only when it is done — every pod on the new
+template, the group stable again, a one-minute soak — is the next group admitted, in namespace and name
+order. Each group's place is in `status.rollout`:
+
+```bash
+kubectl get mysqlfailovergroup -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}{.status.rollout.phase}{"\t"}{.status.rollout.reason}{"\n"}{end}'
+```
+
+`Pending` is waiting, `Admitted` and `Rolling` hold the slot, `Complete` is done. The one to know by
+sight is `Stalled`: the group started its roll and cannot finish it — a pod that never turns `Ready`,
+typically. It **keeps the slot**, so every other group reports `Pending` with reason `RolloutHalted`
+and stays on the pods it had. That is the feature working. A release that breaks the first group it
+touches has broken one group, and the fix is one of three things: repair that group, roll the operator
+back, or — when the fault is that group's alone — annotate it with
+`bloodraven.shipstream.io/rollout-release-slot=true` so the others stop waiting for it.
+
+Three consequences are worth knowing before the day you need them.
+
+**A waiting group does not apply spec changes that restart its pods.** While it is `Pending`, an edit
+to `spec.image` is accepted and then waits with the roll. `bloodraven.shipstream.io/rollout-admit=true`
+admits one group out of turn; remove it afterwards, because while it is set every later release rolls
+that group without waiting.
+
+**A group that is never stable is never admitted on its own.** A group that is not `Ready`, or is mid
+restore, is passed over so that it cannot block the rest — and it stays on the old pods until it is
+stable or you admit it.
+
+**The CRD trap now has a second symptom.** `status.rollout` is a new field. Against an old CRD the API
+server prunes it, no admission can be stored, and *no group rolls at all*. Nothing breaks, nothing
+restarts, and the upgrade you thought you did has changed no pod. The operator says so with a
+`RolloutRecordNotStored` Warning Event, which is more than silent pruning usually gives you.
+
+Three alerts cover this: `BloodravenRolloutStalled` (a group stalled — the halt),
+`BloodravenRolloutPendingTooLong` (groups wait and nothing rolls) and
+`BloodravenRolloutRecordNotStored` (the CRD). `rollout.pacing=false` in the chart turns pacing off and
+rolls every group at once; leave it on.
 
 ## The one-way doors
 
@@ -211,6 +255,7 @@ find out. The supported baseline, and what to run to re-check it, is in the
 You can roll a MySQL image change and name the phase you are in from `status.updatePhase`. You can say
 why the standby goes first, what the updater refuses to start on, and which mid-rollout shape makes it
 abort early rather than wait. You can predict the alert your dashboards will show and tell it apart
-from a real failover. And you can upgrade the operator without letting Helm leave your CRDs behind.
+from a real failover. You can upgrade the operator without letting Helm leave your CRDs behind, and
+read from `status.rollout` which group the operator is rolling and why the others are waiting.
 
 That is day 2 complete. What is left is the part you take away from the screen.

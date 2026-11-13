@@ -838,6 +838,10 @@ type TopologyManager struct {
 	// specRefusedSites lists the sites whose Deployment is refused for its
 	// selector (workload_selector.go), as the runner last computed them.
 	specRefusedSites []string
+	// specHeldSites lists the sites whose Deployment differs from the
+	// desired render but waits for the paced rollout (rollout.go): no
+	// ordered update starts for them. Protected by mu.
+	specHeldSites []string
 	// specDriftKnown is set once the runner has computed specDriftSites.
 	specDriftKnown bool
 
@@ -4352,6 +4356,29 @@ func (tm *TopologyManager) SetSpecRefusedSites(sites []string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.specRefusedSites = sites
+}
+
+// SetSpecHeldSites records which sites differ from the desired render but
+// wait for the group's admission to the paced rollout.
+func (tm *TopologyManager) SetSpecHeldSites(sites []string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.specHeldSites = sites
+}
+
+// SitesAwaitingRollout returns the sites whose pods do not run the desired
+// render yet: those an ordered update is still to process, and those held
+// for the paced rollout.
+func (tm *TopologyManager) SitesAwaitingRollout() []string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	sites := append([]string(nil), tm.specDriftSites...)
+	for _, name := range tm.specHeldSites {
+		if !slices.Contains(sites, name) {
+			sites = append(sites, name)
+		}
+	}
+	return sites
 }
 
 // SetSpecDriftSites records which sites have spec drift (Deployment hash != desired hash).

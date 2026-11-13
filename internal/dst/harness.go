@@ -44,6 +44,9 @@ type TrialResult struct {
 	// Planned is the planned-failover actors' report; nil when the trial's
 	// actors are disabled.
 	Planned *PlannedResult
+	// Rollout is the paced-rollout fleet's report; nil unless the trial is
+	// a rollout trial.
+	Rollout *RolloutResult
 }
 
 // Failed reports whether any invariant was violated.
@@ -228,6 +231,9 @@ func (s *simFailoverStore) RecordFailoverState(ctx context.Context, rec controll
 // RunTrial executes one trial. When capture is true the full event log is
 // retained and handler (if non-nil) receives operator logs.
 func RunTrial(trial Trial, capture bool, handler slog.Handler) (result TrialResult) {
+	if trial.Rollout.Enabled {
+		return runRolloutTrial(trial, capture, handler)
+	}
 	if handler == nil {
 		handler = slog.DiscardHandler
 	}

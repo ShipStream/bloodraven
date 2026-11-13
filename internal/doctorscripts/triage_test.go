@@ -228,3 +228,74 @@ func TestTriageReportsAppliedGeneration(t *testing.T) {
 		})
 	}
 }
+
+// TestTriageReportsPacedRollout pins that triage.sh prints the group's
+// status.rollout record and says what each phase means for its pods, and
+// prints nothing for a group without a record.
+func TestTriageReportsPacedRollout(t *testing.T) {
+	const rule = "get mysqlfailovergroups.shipstream.io lion -n orders -o jsonpath={.status.rollout.phase}*"
+	for _, c := range []struct {
+		name, answer string
+		want         []string
+		absent       []string
+	}{
+		{
+			name:   "stalled",
+			answer: "Stalled reason=OrderedUpdateStalled renderer=0123456789abcdef message=Ordered update stalled: site dc2 was updated but its pod is not Ready",
+			want: []string{
+				"Paced rollout:       Stalled reason=OrderedUpdateStalled renderer=0123456789abcdef message=Ordered update stalled",
+				"It keeps the rollout slot, so no other group is rolled: see playbook 50.",
+			},
+		},
+		{
+			name:   "halted behind another group",
+			answer: "Pending reason=RolloutHalted renderer=0123456789abcdef message=the rollout is halted: the roll of orders/tiger stalled; this group keeps its pods",
+			want: []string{
+				"Paced rollout:       Pending reason=RolloutHalted",
+				"The rollout is halted at the group named in the message.",
+			},
+		},
+		{
+			name:   "not stable",
+			answer: "Pending reason=GroupNotStable renderer=0123456789abcdef message=the group is not stable (Restore); it is admitted once it is, and does not hold up other groups",
+			want:   []string{"The group is passed over until it is stable"},
+		},
+		{
+			name:   "waiting",
+			answer: "Pending reason=WaitingForSlot renderer=0123456789abcdef message=orders/tiger holds the rollout slot",
+			want:   []string{"The group waits for the rollout slot and keeps its old pods"},
+		},
+		{
+			name:   "complete",
+			answer: "Complete reason= renderer=0123456789abcdef message=",
+			want:   []string{"Paced rollout:       Complete"},
+			absent: []string{"playbook 50"},
+		},
+		{
+			// kubectl prints the literals of the template for a missing field.
+			name:   "no record",
+			answer: " reason= renderer= message=",
+			absent: []string{"Paced rollout:"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newRuleEnv(t)
+			e.rule(t, "get mysqlfailovergroups.shipstream.io lion -n orders -o json", "{}", false)
+			e.rule(t, rule, c.answer, false)
+			out, err := e.run(t, scriptPath("triage.sh"), "-n", "orders", "lion")
+			if err != nil {
+				t.Fatalf("triage.sh failed: %v\n%s", err, out)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("triage output lacks %q:\n%s", w, out)
+				}
+			}
+			for _, w := range c.absent {
+				if strings.Contains(out, w) {
+					t.Errorf("triage output contains %q:\n%s", w, out)
+				}
+			}
+		})
+	}
+}

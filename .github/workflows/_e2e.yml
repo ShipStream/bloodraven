@@ -59,6 +59,20 @@ on:
         required: false
         default: ""
         type: string
+      upgrade-from:
+        description: >-
+          Published release (for example "1.7.0") to install instead of the
+          build under test, with ./playground/upgrade-e2e.sh install. The
+          scenario list then starts with 74-upgrade-paced-rollout, which
+          upgrades to the build under test and checks the paced rollout.
+        required: false
+        default: ""
+        type: string
+      kind-config:
+        description: "kind cluster configuration (the upgrade E2E needs a fourth worker)"
+        required: false
+        default: ".github/kind/e2e-calico.yaml"
+        type: string
 
 permissions:
   contents: read
@@ -130,7 +144,7 @@ jobs:
           node_image: kindest/node:v1.35.0
           kubectl_version: v1.35.0
           cluster_name: bloodraven-e2e
-          config: .github/kind/e2e-calico.yaml
+          config: ${{ inputs.kind-config }}
           # CNI is disabled in this kind config, so nodes cannot become
           # Ready until Calico is installed in the next step.
           wait: 0s
@@ -147,9 +161,16 @@ jobs:
 
       - name: Load images into kind
         run: |
-          kind load docker-image bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground --name bloodraven-e2e
+          # bloodraven-sidecar:playground-next is the same sidecar build under
+          # a second tag (make e2e-images); scenario 73 uses it as the default
+          # sidecar image of a "new release". An artifact from before that
+          # tag existed does not carry it.
+          docker image inspect bloodraven-sidecar:playground-next >/dev/null 2>&1 \
+            || docker tag bloodraven-sidecar:playground bloodraven-sidecar:playground-next
+          kind load docker-image bloodraven:playground bloodraven-sidecar:playground bloodraven-sidecar:playground-next bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground --name bloodraven-e2e
 
       - name: Deploy playground
+        if: inputs.upgrade-from == ''
         env:
           # Encryption adoption must start from a TLS-consistent group.
           # A live TLS conversion would introduce a second ordered
@@ -159,6 +180,18 @@ jobs:
           set -o pipefail
           ./playground/setup.sh 2>&1 | tee playground/setup.log
         timeout-minutes: 10
+
+      - name: Deploy playground at the published v${{ inputs.upgrade-from }}
+        # The upgrade E2E (#244, C-8): the previous release's chart and
+        # images as published, pulled from the chart repository and ghcr.io
+        # (both public). Scenario 74 then upgrades to the build under test.
+        if: inputs.upgrade-from != ''
+        env:
+          BLOODRAVEN_UPGRADE_FROM: ${{ inputs.upgrade-from }}
+        run: |
+          set -o pipefail
+          ./playground/upgrade-e2e.sh install 2>&1 | tee playground/setup.log
+        timeout-minutes: 15
 
       - name: Enable encryption on existing group
         if: inputs.enable-encryption
