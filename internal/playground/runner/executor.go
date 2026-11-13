@@ -552,7 +552,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 			return t, nil
 		}
 		mu.Unlock()
-		var pod, container string
+		var pod, container, selector string
 		switch {
 		case component == "operator":
 			p, err := e.K.FindPodWithLabel(ctx, e.Cfg.Namespace, pgmetrics.OperatorPodSelector)
@@ -561,6 +561,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 			}
 			pod = p.Name
 			container = "operator"
+			selector = pgmetrics.OperatorPodSelector
 		case strings.HasPrefix(component, "sidecar:"):
 			site := strings.TrimPrefix(component, "sidecar:")
 			p, err := e.K.GetSiteMysqlPod(ctx, e.Cfg.Namespace, e.Cfg.FG, site)
@@ -569,6 +570,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 			}
 			pod = p.Name
 			container = "sidecar"
+			selector = pgkube.MysqlPodSelector(e.Cfg.FG, site)
 		case strings.HasPrefix(component, "mysql:"):
 			site := strings.TrimPrefix(component, "mysql:")
 			p, err := e.K.GetSiteMysqlPod(ctx, e.Cfg.Namespace, e.Cfg.FG, site)
@@ -577,14 +579,21 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 			}
 			pod = p.Name
 			container = "mysql"
+			selector = pgkube.MysqlPodSelector(e.Cfg.FG, site)
 		default:
 			return nil, fmt.Errorf("unknown log component %q", component)
 		}
+		// The tailer follows the component, not the pod it found first:
+		// after an operator kill or a site roll the assertions on its log
+		// (no TOTAL LOSS, a documented line) must read the replacement.
 		t := pglogs.New(pglogs.Source{
 			Namespace: e.Cfg.Namespace,
 			Pod:       pod,
 			Container: container,
 			SinceTime: startTime,
+			Resolve: func(ctx context.Context) (string, error) {
+				return e.K.NewestLivePod(ctx, e.Cfg.Namespace, selector)
+			},
 		}, 4096)
 		t.Start(tailerCtx, e.K)
 		mu.Lock()
