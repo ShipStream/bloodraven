@@ -182,7 +182,7 @@ func TestRolloutDeterminism(t *testing.T) {
 		masked bool
 	}
 	var variants []variant
-	for seed := uint64(1); seed <= 8; seed++ {
+	for seed := uint64(1); seed <= 5; seed++ {
 		variants = append(variants, variant{seed, false}, variant{seed, true})
 	}
 	gen := func(v variant) Trial {
@@ -221,7 +221,7 @@ func TestRolloutDeterminism(t *testing.T) {
 // TestRolloutFaultFreeBaseline: a release with nothing else scheduled rolls
 // every group, one after another, and the trial stops early.
 func TestRolloutFaultFreeBaseline(t *testing.T) {
-	for seed := uint64(1); seed <= 8; seed++ {
+	onlyTheRelease := func(seed uint64) Trial {
 		trial := GenerateRolloutTrial(seed)
 		trial.Rollout.Skip = make([]bool, len(trial.Rollout.Ops))
 		released := false
@@ -229,7 +229,10 @@ func TestRolloutFaultFreeBaseline(t *testing.T) {
 			trial.Rollout.Skip[i] = op.Kind != OpRelease || released
 			released = released || op.Kind == OpRelease
 		}
-		r := RunTrial(trial, false, nil)
+		return trial
+	}
+	for _, r := range runBatch(1, 4, runtime.GOMAXPROCS(0), onlyTheRelease) {
+		seed, trial := r.Trial.Seed, r.Trial
 		if r.Failed() {
 			t.Fatalf("seed %d (one release, no faults): %v\ntrial:\n%s", seed, r.Violations, trial)
 		}

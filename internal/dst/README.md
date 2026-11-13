@@ -840,6 +840,20 @@ DST_SEED=77 DST_ROLLOUT_SKIP=1,2,3 go test ./internal/dst -run RolloutRepro -v  
 DST_ROLLOUT=1 make dst                                            # saturation campaign over rollout trials, shrunk over their ops
 ```
 
+Measured on 2026-11-12, on the tree that introduced this section, on a
+16-thread machine that was busy with other work (a later change to the
+generator, the model or the rollout code makes these numbers history):
+
+| Sweep | Seeds | Trials | Failing | Notes |
+|---|---|---|---|---|
+| `TestDST_RolloutQuick` (`make test`) | 1–64 | 64 | 0 | 174 groups, 168 completed, 2 left for a human, 4 behind them; 98 releases, 230 operator restarts (101 mid-roll, 57 after a death at an API write, 3 of those at the start latch), 38 stalls, 25 retargets, 167 handoffs. About 26 s under `-race`. |
+| `TestDST_RolloutQuick` | 1–1,000 | 1,000 | 0 | 31 groups left for a human |
+| `DST_ROLLOUT=1 make dst` | 1–7,000 | 7,000 | 0 | Stopped at a 15-minute wall-clock cap, not saturated; 221 behavior signatures, new per batch of 1,000: 105, 37, 17, 21, 15, 14, 12 (dry is under 10) |
+
+A rollout trial costs some 0.7 CPU-seconds, far more than a failover
+trial: most of it is the fake API server's codec on writes and the group
+reconciler, which is why the quick range is 64 seeds.
+
 ## Invariants
 
 Per poll:
