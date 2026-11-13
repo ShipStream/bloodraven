@@ -390,7 +390,9 @@ func s73HaltProblemsIn(run *s73Run, mainGroup string, now pacedSample) []string 
 		bad = append(bad, fmt.Sprintf("%s: startedTime moved from %s to %s", run.first, run.started.StartedTime.UTC().Format(time.RFC3339), r.StartedTime.UTC().Format(time.RFC3339)))
 	}
 	primary := baseFirst.ActiveSite
-	if first.ActiveSite != primary {
+	// A restarted operator publishes an empty active site for a moment,
+	// until its first poll: that is not a handover. Only another site is.
+	if first.ActiveSite != "" && first.ActiveSite != primary {
 		bad = append(bad, fmt.Sprintf("%s was handed over: active site %s, was %s", run.first, first.ActiveSite, primary))
 	}
 	if diff := pacedPodsUnchanged(map[string][]pacedPod{primary: baseFirst.Pods[primary]}, first.Pods); diff != "" {
@@ -426,7 +428,7 @@ func s73HaltProblemsIn(run *s73Run, mainGroup string, now pacedSample) []string 
 	if diff := pacedWorkloadsUnchanged(baseSecond.Workloads, second.Workloads); diff != "" {
 		bad = append(bad, fmt.Sprintf("%s: %s", run.second, diff))
 	}
-	if second.ActiveSite != baseSecond.ActiveSite {
+	if second.ActiveSite != "" && second.ActiveSite != baseSecond.ActiveSite {
 		bad = append(bad, fmt.Sprintf("%s active site moved from %s to %s", run.second, baseSecond.ActiveSite, second.ActiveSite))
 	}
 
