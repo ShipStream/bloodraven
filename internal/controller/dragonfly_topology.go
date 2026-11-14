@@ -362,6 +362,14 @@ func (m *DragonflyManager) Run(ctx context.Context) {
 		case <-m.wake:
 			m.runPending(loopCtx)
 		case <-ticker.C:
+			// A request queued while the last Tick ran goes first: when a
+			// Tick outlasts the poll interval (a master that does not
+			// answer) both are ready, and select picks either.
+			select {
+			case <-m.wake:
+				m.runPending(loopCtx)
+			default:
+			}
 			m.safeTick(loopCtx)
 		}
 	}
@@ -2093,6 +2101,25 @@ func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFai
 	if !activeObserved || activeHealthyMaster || len(candidates) == 0 {
 		return "", "", false
 	}
+	// MySQL has moved (status.activeSite names another site, or a
+	// MySQL-follow promotion is queued): the cache belongs on MySQL's site,
+	// and the MySQL-follow promotion moves it there. Promoting any other
+	// replica made a second master on the next cycle, whose writes were
+	// discarded when it was attached to the MySQL site's (scenario 76: the
+	// MySQL site's Dragonfly missed one observation and the reader was
+	// promoted). Only the MySQL site's replica is a candidate then.
+	if follow := m.mysqlFollowTarget(fg, active); follow != "" {
+		var only []int
+		for _, i := range candidates {
+			if snaps[i].Name == follow {
+				only = append(only, i)
+			}
+		}
+		if len(only) == 0 {
+			return "", "", false
+		}
+		candidates = only
+	}
 	best, comparable := dragonflyMostAdvancedReplica(snaps, candidates)
 	if !comparable {
 		m.mu.Lock()
@@ -2158,6 +2185,20 @@ func dragonflyMostAdvancedReplica(snaps []DragonflySiteSnapshot, candidates []in
 		}
 	}
 	return best, best >= 0
+}
+
+// mysqlFollowTarget is the site the cache must follow MySQL to instead of
+// the Dragonfly active site active: the target of a queued MySQL-follow
+// promotion, else status.activeSite when it names another site. "" when
+// MySQL is where Dragonfly is.
+func (m *DragonflyManager) mysqlFollowTarget(fg *v1alpha1.MysqlFailoverGroup, active string) string {
+	if req := m.peekPending(); req != nil && req.target != "" && req.target != active {
+		return req.target
+	}
+	if mysqlActive := fg.Status.ActiveSite; mysqlActive != "" && mysqlActive != active {
+		return mysqlActive
+	}
+	return ""
 }
 
 func dragonflyOnlyPromotionReady(s DragonflySiteSnapshot, role dragonfly.SiteRole) bool {
