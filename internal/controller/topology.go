@@ -5860,8 +5860,20 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		return true
 	}
 	metrics.PrimaryReassertTotal.WithLabelValues(target).Inc()
+	// Name the target. A boot read-only target that is not named is
+	// re-asserted only while super_read_only is off, and after a total
+	// loss every pod's sidecar runs its startup safety net, which fences
+	// a site /active-site does not name; it answers "" until
+	// RecoveryThreshold polls read the target writable. That fence used
+	// to wedge the group with no writable site (scenario 11, #236). Named,
+	// the next re-assert lifts it. The first poll that reads the target
+	// writable takes it as Writable (promotionAwaitingPoll), which
+	// shortens the window. No pending promotion is recorded: it would
+	// hold off an emergency failover if the target dies again.
 	tm.mu.Lock()
 	tm.authorityChanges++
+	tm.nameActiveSiteLocked(target, true)
+	tm.promotionAwaitingPoll = target
 	tm.mu.Unlock()
 
 	// Best-effort DNS flip: idempotent when DNS already points at the
