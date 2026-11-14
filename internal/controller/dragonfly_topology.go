@@ -2426,7 +2426,22 @@ func (m *DragonflyManager) executeRequest(ctx context.Context, req *dragonflyPro
 			return true
 		}
 	}
-	return m.promoteLocked(ctx, &fg, req.target, req.oldSource, m.emergencyTakeoverTimeout, dragonflyFallbackUnlessSourceServes)
+	source := req.oldSource
+	if df := fg.Status.Dragonfly; df != nil && df.ActiveSite != "" && df.ActiveSite != req.target && df.ActiveSite != req.oldSource &&
+		df.LastPromotionTarget == df.ActiveSite && df.LastPromotionTime != nil &&
+		!df.LastPromotionTime.Time.Before(req.issued.Truncate(time.Second)) {
+		// A promotion made since the request (a Dragonfly-only one whose
+		// cycle selected its target before the request was queued) moved
+		// the cache to a third site. Taking over from the old master would
+		// leave that site master beside the target, and the writes it took
+		// would be discarded when it is re-attached (scenario 76). The
+		// cache is taken over from where it is now: REPLTAKEOVER from that
+		// site, and no REPLICAOF NO ONE while it still serves.
+		m.logger.Info("dragonfly promotion: the cache moved since the request; taking over from its current master",
+			"site", req.target, "requestSource", req.oldSource, "source", df.ActiveSite, "fg", m.fgKey.String())
+		source = df.ActiveSite
+	}
+	return m.promoteLocked(ctx, &fg, req.target, source, m.emergencyTakeoverTimeout, dragonflyFallbackUnlessSourceServes)
 }
 
 // TryRolloutPromote promotes target for a Dragonfly rollout whose target

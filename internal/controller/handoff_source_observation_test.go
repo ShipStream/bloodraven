@@ -147,7 +147,10 @@ func (f *firstProbeBlocks) CheckReadOnly(ctx context.Context) (bool, error) {
 // A poll that read the source writable before the fence and finishes after
 // the handoff was recorded must not consume the fenced-source marker: its
 // results are discarded at the epoch check, and the next poll, which
-// cannot read the source, takes it as read-only.
+// cannot read the source, takes it as read-only. This states the property;
+// the ordering that broke it (a poll reaching its epoch check between the
+// marker and the epoch move) is closed by construction, both being written
+// in one critical section of recordPromotion.
 func TestHandoffPromotion_PollFromBeforeTheFenceDoesNotConsumeTheMarker(t *testing.T) {
 	dc1 := &mockMySQL{readOnly: false}
 	dc2 := &mockMySQL{readOnly: true}

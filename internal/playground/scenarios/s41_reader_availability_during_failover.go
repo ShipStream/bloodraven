@@ -172,6 +172,8 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 				}
 				select {
 				case <-ctx.Done():
+					_ = stopAndCheck()
+					return ctx.Err()
 				case <-time.After(500 * time.Millisecond):
 				}
 			}

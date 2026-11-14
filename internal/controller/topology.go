@@ -1147,9 +1147,9 @@ func (tm *TopologyManager) recordPromotion(ctx context.Context, now time.Time, t
 	tm.mu.Lock()
 	tm.authorityEpoch++
 	tm.authorityChanges++
-	if fencedSource != "" {
-		tm.handoffFencedSource = fencedSource
-	}
+	// Each promotion replaces the previous one's marker; one that fenced
+	// nothing leaves none.
+	tm.handoffFencedSource = fencedSource
 	tm.nameActiveSiteLocked(target, true)
 	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
