@@ -2027,8 +2027,14 @@ func (m *DragonflyManager) restartedMasterPromotionCandidate(fg *v1alpha1.MysqlF
 		return "", "", false
 	}
 	master := dragonflySnapshotOf(snaps, active)
+	// As for a Dragonfly-only promotion: once MySQL has moved, only the
+	// MySQL site's replica may take the restarted master's place.
+	follow := m.mysqlFollowTarget(fg, active)
 	best := -1
 	for i := range snaps {
+		if follow != "" && snaps[i].Name != follow {
+			continue
+		}
 		if verdict, _ := m.restartedMasterVerdict(fg, active, snaps, master, &snaps[i]); verdict != dragonflyRestartKeep {
 			continue
 		}

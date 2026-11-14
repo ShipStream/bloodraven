@@ -435,8 +435,9 @@ type TopologyManager struct {
 	// site read-only and nothing to resolve it.
 	//
 	// lastActiveSiteNamed records whether the operator made that site
-	// primary itself (a fresh-deploy seed or a promotion) rather than only
-	// observing it. A named site is re-asserted from any fence, as
+	// primary itself (a fresh-deploy seed, a promotion or a re-assert)
+	// rather than only observing it. It is not persisted: a restart
+	// restores the site as observed. A named site is re-asserted from any fence, as
 	// lastFailoverTarget is: a seed's sidecar can fence it before the
 	// operator reports it active. An observed site is only lifted from the
 	// read_only=ON every mysqld boots with (a primary whose MySQL

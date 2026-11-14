@@ -1169,7 +1169,12 @@ func (tm *TopologyManager) recordPlannedPromotion(ctx context.Context, ref Plann
 	if done {
 		return
 	}
-	tm.recordFailover(ctx, confirmedAt, ref.Target, watermark)
+	// The run fenced its source before it promoted: the first poll after
+	// the promotion takes a source it cannot read as read-only, as after a
+	// maintenance handoff. With the target no longer debounced
+	// (promotionAwaitingPoll), a stale Writable source would otherwise read
+	// as a split brain for FailureThreshold polls.
+	tm.recordPromotion(ctx, confirmedAt, ref.Target, watermark, ref.Source)
 }
 
 // ApplyDNS points DNS at the confirmed target while the claim is held.

@@ -131,6 +131,13 @@ func (s *Scraper) Scrape(ctx context.Context) (*Snapshot, error) {
 		if !transport || time.Now().After(deadline) || ctx.Err() != nil {
 			return nil, err
 		}
+		// An operator pod that is Running but not serving /metrics yet
+		// fails at once; do not open a tunnel per attempt in a tight loop.
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(500 * time.Millisecond):
+		}
 		if derr := s.dial(ctx, time.Until(deadline)); derr != nil {
 			return nil, fmt.Errorf("%w (re-opening the tunnel: %v)", err, derr)
 		}

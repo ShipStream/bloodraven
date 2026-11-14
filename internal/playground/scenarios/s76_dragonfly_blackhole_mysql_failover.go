@@ -63,41 +63,30 @@ const (
 
 // s76PromotionBound is how long after the MySQL promotion ("failover
 // complete") the Dragonfly target may be stamped master, for a group with
-// spec.failureThreshold failureThreshold. Two promotions race for the
+// any spec.failureThreshold. Two promotions race for the
 // group's Dragonfly gate, and the first one to hold it does the work:
 //
 //   - The follow-up the MySQL failover queues. The manager's Run goroutine
-//     takes it after the Tick in flight, which observes the blackholed
-//     master within DefaultDialTimeout+DefaultIOTimeout (observe); the
-//     other sites answer, and a replica that holds keys is not re-pointed
-//     at a master that was not observed. Run then picks at random between
-//     the queued request and the next tick when both are ready, so the
-//     follow-up can lose to further Ticks.
+//     takes it right after the Tick in flight (a queued request goes before
+//     a Tick that came due meanwhile), which observes the blackholed master
+//     within DefaultDialTimeout+DefaultIOTimeout (observe); the other sites
+//     answer, and a replica that holds keys is not re-pointed at a master
+//     that was not observed.
 //   - The manager's own promotion, made by the Tick that counts the
-//     failureThreshold-th consecutive miss of the master. A blackhole drops
-//     the dial, so each miss costs DefaultDialTimeout; the first one after
-//     the policy may cost DefaultIOTimeout more (a connection made just
-//     before the policy took effect, then a reply that never comes). The
-//     misses start at the blackhole, before the MySQL promotion.
+//     failureThreshold-th consecutive miss of the master. The misses start
+//     at the blackhole, before the MySQL promotion, so when it wins it is
+//     the Tick in flight and finishes no later than the follow-up would.
 //
 // Either way promoteLocked then probes the old master (source probe),
 // skips the takeover, sends REPLICAOF NO ONE, dials the old master for
 // CLIENT KILL and stamps the status; s76Allowance covers the calls that
-// answer in milliseconds. With the playground's failureThreshold of 3 the
-// own promotion bounds it: 3x3s+5s+1s+2s+3s = 20s, the "about 20s" PR #199
-// estimated (the follow-up alone: 3s+5s+1s+2s+3s = 14s).
-func s76PromotionBound(failureThreshold int) time.Duration {
+// answer in milliseconds: 3s+5s+1s+2s+3s = 14s. Before the queued request
+// had priority, Run picked at random between it and the next Tick, and the
+// bound was the own promotion's (3x3s+5s+1s+2s+3s = 20s with the
+// playground's failureThreshold of 3, the "about 20s" PR #199 estimated).
+func s76PromotionBound() time.Duration {
 	followUp := dragonfly.DefaultDialTimeout + dragonfly.DefaultIOTimeout
-	own := time.Duration(failureThreshold)*dragonfly.DefaultDialTimeout + dragonfly.DefaultIOTimeout
-	return max(followUp, own) + s76EmergencySourceProbeTimeout + s76EmergencyClientKillTimeout + s76Allowance
-}
-
-// s76FailureThreshold is spec.failureThreshold with the operator's default.
-func s76FailureThreshold(mfg *v1alpha1.MysqlFailoverGroup) int {
-	if mfg.Spec.FailureThreshold > 0 {
-		return int(mfg.Spec.FailureThreshold)
-	}
-	return 3
+	return followUp + s76EmergencySourceProbeTimeout + s76EmergencyClientKillTimeout + s76Allowance
 }
 
 // The operator's log messages the scenario reads (log schema,
@@ -127,11 +116,11 @@ const (
 // MySQL failover (failureThreshold polls of a dead mysqld) queues a
 // Dragonfly follow-up about 5s later, before the Dragonfly manager's own
 // promotion (failureThreshold observations of the blackholed master at a
-// dial timeout each) is due. Which of the two then moves Dragonfly depends
-// on whether the manager's Run loop takes the queued request or the next
-// tick first (s76PromotionBound). Both are correct operator behaviour and
-// both skip REPLTAKEOVER; the scenario reports which one ran and holds
-// either to the bound.
+// dial timeout each) is due. The queued request runs right after the Tick
+// in flight, unless that Tick made the manager's own promotion
+// (s76PromotionBound). Both are correct operator behaviour and both skip
+// REPLTAKEOVER; the scenario reports which one ran and holds either to the
+// bound.
 func scenario76DragonflyBlackholeMySQLFailover() runner.Scenario {
 	return runner.Scenario{
 		ID:    s76ID,
@@ -139,7 +128,7 @@ func scenario76DragonflyBlackholeMySQLFailover() runner.Scenario {
 		Hypothesis: "With a tagged-GTID transaction on both sites, scaling the MySQL primary to 0 and blackholing its " +
 			"Dragonfly master (deny-all NetworkPolicy on only that pod) makes the operator fail MySQL over to the peer, " +
 			"and the Dragonfly target is stamped master within the bound derived from the operator's budgets (" +
-			s76PromotionBound(3).String() + " at failureThreshold 3) of the MySQL promotion (REPLTAKEOVER skipped, " +
+			s76PromotionBound().String() + ") of the MySQL promotion (REPLTAKEOVER skipped, " +
 			"REPLICAOF NO ONE): status.dragonfly.activeSite equals the new MySQL active site, the " +
 			"seeded key reads back from it and the active Dragonfly Service selects only its pod. The new primary holds the " +
 			"tagged transaction and its marker row. After the blackhole is removed and MySQL is scaled back, the old MySQL " +
@@ -586,7 +575,7 @@ func s76MeasurePromotionDelay() runner.Step {
 			}
 			stamp := df.LastPromotionTime.Time
 			delay := s76PromotionDelay(tl.FailoverComplete, stamp)
-			bound := s76PromotionBound(s76FailureThreshold(mfg))
+			bound := s76PromotionBound()
 			env.Capture.Measure(fmt.Sprintf("MySQL promotion (%q) at %s; Dragonfly target %s became master %s later (%q) and was stamped at %s: "+
 				"delay %s (stamp + 1s resolution) against the %s bound; path: %s; REPLTAKEOVER skipped: %v",
 				logS76FailoverComplete, tl.FailoverComplete.Format(time.RFC3339Nano), peer,

@@ -152,13 +152,10 @@ func TestS76PromotionDelay(t *testing.T) {
 	if got := s76PromotionDelay(failover, stamp); got != 7400*time.Millisecond {
 		t.Fatalf("delay=%s", got)
 	}
-	// The playground's failureThreshold is 3: the manager's own promotion
-	// bounds it. A lower threshold leaves the follow-up's budget.
-	if got := s76PromotionBound(3); got != 20*time.Second {
-		t.Fatalf("s76PromotionBound(3)=%s; update the docs (§76) if the budgets moved", got)
-	}
-	if got := s76PromotionBound(1); got != 14*time.Second {
-		t.Fatalf("s76PromotionBound(1)=%s, want the follow-up's 14s", got)
+	// The queued follow-up runs right after the Tick in flight: its budget
+	// bounds either promotion.
+	if got := s76PromotionBound(); got != 14*time.Second {
+		t.Fatalf("s76PromotionBound()=%s; update the docs (§76) if the budgets moved", got)
 	}
 }
 
