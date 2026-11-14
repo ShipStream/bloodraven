@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/shipstream/bloodraven/internal/state"
@@ -122,5 +123,62 @@ func TestRecordedPromotion_FirstWritablePollIsNotDebounced(t *testing.T) {
 	tm.mu.RUnlock()
 	if dc1State == state.StateWritable {
 		t.Fatal("a writable answer nobody here caused skipped the recoveryThreshold debounce")
+	}
+}
+
+// firstProbeBlocks blocks the first CheckReadOnly until release is closed,
+// after the read it returns was taken.
+type firstProbeBlocks struct {
+	*mockMySQL
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *firstProbeBlocks) CheckReadOnly(ctx context.Context) (bool, error) {
+	ro, err := f.mockMySQL.CheckReadOnly(ctx)
+	f.once.Do(func() {
+		close(f.entered)
+		<-f.release
+	})
+	return ro, err
+}
+
+// A poll that read the source writable before the fence and finishes after
+// the handoff was recorded must not consume the fenced-source marker: its
+// results are discarded at the epoch check, and the next poll, which
+// cannot read the source, takes it as read-only.
+func TestHandoffPromotion_PollFromBeforeTheFenceDoesNotConsumeTheMarker(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false}
+	dc2 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(dc1, dc2)
+	setRecoveredTopology(tm)
+	blocking := &firstProbeBlocks{mockMySQL: dc1, entered: make(chan struct{}), release: make(chan struct{})}
+	tm.sites[0].mysql = blocking
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tm.Poll(ctx) // reads dc1 writable, then waits
+	}()
+	<-blocking.entered
+
+	dc1.mu.Lock()
+	dc1.readOnly, dc1.superReadOnly, dc1.err = true, true, errors.New("dial tcp: connection refused")
+	dc1.mu.Unlock()
+	dc2.mu.Lock()
+	dc2.readOnly = false
+	dc2.mu.Unlock()
+	tm.recordHandoffPromotion(ctx, "dc1", "dc2", "")
+	close(blocking.release)
+	<-done
+
+	tm.Poll(ctx)
+	tm.mu.RLock()
+	dc1State := tm.sites[0].state
+	tm.mu.RUnlock()
+	if dc1State == state.StateWritable {
+		t.Fatal("the fenced, unreadable source is Writable: a poll from before the fence consumed the marker")
 	}
 }

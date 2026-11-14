@@ -1588,6 +1588,14 @@ func s75Cleanup(ctx context.Context, env *runner.Env) error {
 			errs = append(errs, fmt.Errorf("delete %s: %w", pod, err))
 		}
 	}
+	// Restore state is the scenario's to undo only once it requested its
+	// restore (the confirm is stashed before the spec is patched). Cleanup
+	// also runs after a failed precheck, which refuses a group that already
+	// has a restore or a reclone queue: those are not the scenario's.
+	confirm := ctxFetch(env, "s75Confirm")
+	if confirm == "" {
+		return s75CleanupBackupArtifacts(ctx, env, errs)
+	}
 	if err := removeRestoreInPlaceSpec(ctx, env); err != nil {
 		errs = append(errs, fmt.Errorf("remove restoreInPlace spec: %w", err))
 	}
@@ -1624,7 +1632,7 @@ func s75Cleanup(ctx context.Context, env *runner.Env) error {
 	if err != nil {
 		errs = append(errs, err)
 	} else {
-		if q := mfg.Status.RestoreReclones; q != nil && (q.Phase == v1alpha1.RestoreReclonesHeld || werr != nil) {
+		if q := mfg.Status.RestoreReclones; q != nil && q.ConfirmToken == confirm && (q.Phase == v1alpha1.RestoreReclonesHeld || werr != nil) {
 			// A failed run held the peers. run-all resets before the next
 			// destructive scenario; release the hold so a single run
 			// leaves a replicating group behind.
@@ -1658,6 +1666,13 @@ func s75Cleanup(ctx context.Context, env *runner.Env) error {
 			}
 		}
 	}
+	return s75CleanupBackupArtifacts(ctx, env, errs)
+}
+
+// s75CleanupBackupArtifacts deletes what the scenario created for its
+// backup (the backup CRs, its passphrase Secret and claim) and restores the
+// original spec.backup, then reports every error collected.
+func s75CleanupBackupArtifacts(ctx context.Context, env *runner.Env, errs []error) error {
 	if err := deleteBackupCRs(ctx, env, ctxFetch(env, "backupName"), ""); err != nil {
 		errs = append(errs, err)
 	}

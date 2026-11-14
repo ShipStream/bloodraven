@@ -1127,6 +1127,16 @@ func (tm *TopologyManager) SetFailoverStateRecorder(rec FailoverStateRecorder) {
 // ordered-update handoff — goes through here, so the durable record can
 // never be written by one and skipped by another.
 func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, target, promotionGtid string) {
+	tm.recordPromotion(ctx, now, target, promotionGtid, "")
+}
+
+// recordPromotion is recordFailover for a promotion that fenced
+// fencedSource (a maintenance handoff), or "" for one that did not. The
+// source is published to the poll (handoffFencedSource) in the critical
+// section that moves the authority epoch: a poll that started before the
+// promotion is discarded at its epoch check and cannot consume it with a
+// read from before the fence.
+func (tm *TopologyManager) recordPromotion(ctx context.Context, now time.Time, target, promotionGtid, fencedSource string) {
 	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target, PromotionGtidExecuted: promotionGtid}
 	if len(promotionGtid) > maxPromotionGtidAnnotationBytes {
 		tm.logger.Error("promotion watermark too large for the out-of-band failover record; only the status copy carries it",
@@ -1136,6 +1146,9 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	tm.mu.Lock()
 	tm.authorityEpoch++
 	tm.authorityChanges++
+	if fencedSource != "" {
+		tm.handoffFencedSource = fencedSource
+	}
 	tm.nameActiveSiteLocked(target, true)
 	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
@@ -3984,11 +3997,8 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 // poll after the handoff therefore takes a source it cannot read as read
 // only (handoffFencedSource); one that answers keeps its answer.
 func (tm *TopologyManager) recordHandoffPromotion(ctx context.Context, source, target, promotionGTID string) {
-	tm.mu.Lock()
-	tm.handoffFencedSource = source
-	tm.mu.Unlock()
 	targetSite := tm.getSite(target)
-	tm.recordFailover(ctx, tm.clock.Now(), target, promotionGTID)
+	tm.recordPromotion(ctx, tm.clock.Now(), target, promotionGTID, source)
 	metrics.FailoversTotal.WithLabelValues(target).Inc()
 	if targetSite != nil {
 		if dnsErr := tm.applyDNS(ctx, target, targetSite.lbIP); dnsErr != nil {
