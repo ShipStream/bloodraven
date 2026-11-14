@@ -87,6 +87,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `69-pitr-encryption-binding-refusal` ([§69](#69-pitr-encryption-binding-refusal); full profile and the e2e `pitr` job, `ResetBeforeRunAll`; the encrypted archive binds to an immutable, ownerless key snapshot; refused rotations, encryption edits and aliases do not roll, restarted writers keep the accepted key, bindings survive a status wipe, and the new-prefix procedure and release work, issue #203)
 - `70-pitr-lossy-failover` ([§70](#70-pitr-lossy-failover); release profile, `ResetBeforeRunAll`; lost archived set, `excludeGtids`, a backup after the loss, the returning old primary archiving the lost transactions it had not archived (#264), and a reclone and failback that leave the archive usable (#265): the recloned old primary has a new `server_uuid`, its lost rows are divergent evidence, no `PITRArchiveReissueRiskDetected`, no `PITRArchiveHistoryReset`)
 - `73-paced-rollout-bad-build-halt` ([§73](#73-paced-rollout-bad-build-halt); release profile and the e2e `paced-rollout` job; a release-driven pod change across two auxiliary groups: one is admitted, a release whose pods cannot become Ready stalls it before its primary is touched and the other group keeps its pods, across an operator restart too; a release that works then completes the first group before the second is admitted; the playground group, pinned to its sidecar image, is never rolled)
+- `76-dragonfly-blackhole-mysql-failover` ([§76](#76-blackholed-dragonfly-master-during-a-mysql-failover); full profile; the Dragonfly master's pod is blackholed and the MySQL primary on its site scaled to 0, with one tagged-GTID transaction on both sites: MySQL fails over, the Dragonfly target is stamped master within the bound derived from the emergency budgets (20s) of the MySQL promotion with REPLTAKEOVER skipped, the new primary holds the tagged transaction, and both old masters rejoin as replicas, #199)
 - `74-upgrade-paced-rollout` ([§74](#74-upgrade-paced-rollout); quarantined: needs a cluster installed at the published v1.7.0 with a spare node, run by the e2e `upgrade` job after `./playground/upgrade-e2e.sh install`; the upgrade to the build under test rolls every MySQL pod of three groups, one group at a time)
 - `77-pitr-archive-store-init-failure` ([§77](#77-pitr-archive-store-init-failure); full profile; encrypted PITR enabled while RustFS is scaled to 0: the ordered update finishes, every pod stays Ready, nothing fails over, and the group reports `PITRArchiveReady=False/ArchiveStoreInitFailed`; once RustFS is back the same pods create the archive and archive a sealed binlog as BRV1, issue #214 item 5)
 
@@ -1778,6 +1779,64 @@ Before the archiver could decrypt, this stopped at the archiver's readiness: not
 **Cleanup**: Commits the lock holder if it is still open, deletes the pods, removes the spec, waits for the run to end and the queue to drain (removes a `Held` queue), drops the marker schema and the account, deletes the backup, restores `spec.backup`, deletes the passphrase Secret and, if the run created it, the claim.
 
 **Status**: passed twice in a row on a kind cluster with Calico on 2026-11-13 (`run-all`, each after a reset): 3m09s with `pdx` active and 2m23s with `iad` active. The DROP was held for about 55 seconds each time, and the queue recloned both peers in under 20 seconds. An earlier run failed on the scenario's own assertion: it expected the terminal status to keep `runID`, which the API clears once the run is terminal.
+
+### 76. Blackholed Dragonfly Master During a MySQL Failover {#76-blackholed-dragonfly-master-during-a-mysql-failover}
+**Category**: Dragonfly HA, emergency failover (#199, #214) | **Risk**: Medium | **Automated**: `76-dragonfly-blackhole-mysql-failover` (full profile)
+
+**Hypothesis**: With one tagged-GTID transaction on both sites, blackholing the Dragonfly master's pod and scaling the MySQL primary on the same site to 0 makes the operator fail MySQL over to the peer, and the Dragonfly target is stamped master within 20s of the MySQL promotion, with REPLTAKEOVER skipped and REPLICAOF NO ONE sent. The new primary holds the tagged transaction. Both old masters rejoin as replicas once the faults are removed.
+
+It covers two #199 fixes. Before #199, a takeover against a dead Dragonfly master used up the promotion's single context, and the REPLICAOF NO ONE fallback then ran on an expired context. And MySQL 8.4+ prints a GTID set with tagged transactions in a compact form (`uuid:1-15:chaos76:1`) that the failover picker could not parse, so no candidate could be chosen.
+
+**Injection**:
+
+1. Seed a key on the Dragonfly master and wait for it on the peer.
+2. On the MySQL primary, commit one row under `SET gtid_next='AUTOMATIC:chaos76'` (root has `TRANSACTION_GTID_TAG`). Find its GTID by subtracting the `gtid_executed` read before it from the one read after it, using the operator's parser, and wait until the peer has executed it.
+3. Apply a deny-all NetworkPolicy (ingress and egress) to only the master site's Dragonfly pod, then scale that site's MySQL Deployment to 0.
+
+**Verify**:
+
+- MySQL fails over to the peer. The operator logs `failover complete` for the peer about 5s after the fault.
+- `status.dragonfly.activeSite` and `lastPromotionTarget` name the peer. `lastPromotionTime`, plus one second for its resolution, is within the bound of the `failover complete` line.
+- The operator logged `dragonfly emergency: old master unreachable; skipping REPLTAKEOVER` and `... promoted via REPLICAOF NO ONE (sessions lost)`. A `REPLTAKEOVER succeeded` fails the run, because it means the blackhole was not in effect. `dragonfly_promotions_total{result="sessions_lost"}` and `failovers_total` for the peer increment, and `{result="success"}` does not.
+- After `failover complete`, the operator promotes Dragonfly on no site other than the peer (see the second finding).
+- The seeded key reads back on the new master, and the active Dragonfly Service selects only its pod.
+- On the new primary, `GTID_SUBSET(<tagged GTID>, @@gtid_executed)` is 1, the operator's parser reads its `gtid_executed` and finds the tagged GTID in it, and the marker row is present.
+- After the NetworkPolicy is removed and MySQL is scaled back, the old Dragonfly master rejoins as a replica with its link up. If it does not, its pod is force-deleted once, as in §39. The old MySQL primary then returns `ReadOnly` with replication running and no recovery state, while the active site stays on the peer.
+
+**The bound**: The MySQL failover only queues the Dragonfly follow-up. Two promotions then race for the group's Dragonfly gate:
+
+- **The queued follow-up.** It runs after the Tick in flight, whose observation of the blackholed master is bounded by the dial and I/O timeouts (3s + 5s).
+- **The manager's own promotion.** It runs when the master has been missed `failureThreshold` times. Each miss costs a 3s dial timeout. The first may cost the 5s I/O timeout more, when a connection made just before the policy took effect waits for a reply. These misses start at the blackhole, before the MySQL promotion.
+
+Either promotion then:
+
+1. Probes the old master (1s).
+2. Sends REPLICAOF NO ONE.
+3. Dials the old master for CLIENT KILL (2s).
+4. Stamps the status.
+
+Allowing 3s for the calls that answer in milliseconds, the bound is 3×3s + 5s + 1s + 2s + 3s = 20s at the playground's `failureThreshold` of 3. The follow-up alone needs at most 14s. The scenario computes the bound from the group's `failureThreshold`. `TestS76OperatorMirrors` pins the budgets and log messages it mirrors to the controller's source.
+
+**Finding 1**: The follow-up is not always the promotion that runs. The Dragonfly manager's `Run` loop selects between its wake channel and its ticker. While the master is blackholed, every Tick lasts longer than the 2s poll interval, so both channels are ready when a Tick ends, and Go picks one at random. The queued request can lose to the Ticks until the failure threshold promotes the target, after which the request finds it promoted (`dragonfly promotion: target already promoted since the request; skipping`). The 20s bound holds either way, and the scenario reports which promotion ran. Giving the queued request priority over the ticker would make the follow-up take at most one Tick (the 14s bound).
+
+**Finding 2 (operator defect, open)**: In 1 of 11 runs, the manager's own promotion moved the Dragonfly master to the reader site, after MySQL had already failed over to pdx. In that run:
+
+1. One observation of pdx's Dragonfly failed with a DNS lookup timeout (`lookup playground-dragonfly-pdx…: i/o timeout`). The master's third miss came in that same Tick.
+2. `dragonflyOnlyPromotionCandidate` chose among the replicas it had observed, which was only the reader. It did not consider the MySQL active site or the follow-up already queued for pdx. It promoted the reader with REPLICAOF NO ONE and gave it the master and traffic labels.
+3. The queued follow-up ran 3s later and promoted pdx in the same way. It demoted only its `oldSource` (iad), so the reader and pdx both carried `role=master` and traffic for about 1s, until the next Tick found the reader to be a stale master and re-attached it to pdx. Anything written to the reader in those 4s was discarded.
+
+The scenario now fails on any promotion of another site after `failover complete`. Evidence is in the run's operator log, saved locally under `playground/chaos-results/s76-run6-reader-promotion/`.
+
+**Timing**: 6-minute timeout. A run takes 25–45s, plus about 15s of cleanup. **Cleanup**: The settle step removes the NetworkPolicy and scales MySQL back. Cleanup then reclones any site left `RecoveryBlocked` and drops `chaos_s76`. The tagged GTIDs stay in `gtid_executed`; a rerun commits the next one (`chaos76:2`).
+
+**Status**: Run 11 times on a four-node kind cluster with Calico (2026-11-13). All 11 runs met the hypothesis's checks. One run (the reader promotion of Finding 2) would fail the check that was added after it; the last six runs, on the final code, all passed.
+
+| Promotion that ran | Runs | Stamp delays after `failover complete` |
+| --- | --- | --- |
+| Queued follow-up | 6 | 4.6–6.3s; 13.6s in the reader run |
+| Manager's own promotion | 5 | 7.7–9.5s |
+
+Every run skipped REPLTAKEOVER. The picker's log line showed the tagged set parsed (`…:1-15,…:chaos76:1`).
 
 ### 77. PITR Archive Storage Down at Sidecar Start {#77-pitr-archive-store-init-failure}
 **Category**: PITR, degraded start (#214 item 5, PR #200) | **Risk**: Medium | **Automated**: `77-pitr-archive-store-init-failure` (full profile)
