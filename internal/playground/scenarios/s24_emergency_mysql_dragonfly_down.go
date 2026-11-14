@@ -17,7 +17,7 @@ func init() {
 // safety test for the slice-1/2 emergency-failover claim:
 // "Dragonfly never blocks emergency MySQL recovery indefinitely."
 // All Dragonfly sites are scaled to zero before the active MySQL
-// primary is force-killed; the operator must still complete a MySQL
+// primary is taken down; the operator must still complete a MySQL
 // failover within the standard timing envelope.
 //
 // Asserts:
@@ -35,8 +35,8 @@ func scenario24EmergencyMysqlDragonflyDown() runner.Scenario {
 	return runner.Scenario{
 		ID:    "24-emergency-mysql-dragonfly-down",
 		Title: "Emergency MySQL failover succeeds with all Dragonfly scaled to 0",
-		Hypothesis: "With every Dragonfly StatefulSet scaled to 0, an emergency MySQL failover (force-kill of " +
-			"the active primary pod) still completes within the normal failover SLA. Dragonfly availability " +
+		Hypothesis: "With every Dragonfly StatefulSet scaled to 0, an emergency MySQL failover (the active " +
+			"primary scaled to 0) still completes within the normal failover SLA. Dragonfly availability " +
 			"is never on the MySQL critical path; status.dragonfly enters Degraded but does not block MySQL.",
 		Risk:     "high",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D5)",
@@ -116,19 +116,19 @@ func observeDragonflyDegraded() runner.Step {
 	}
 }
 
-// killActiveMysqlPrimaryForD5 force-deletes the MySQL primary pod.
-// This is the same primitive used by scenario 01 — we don't reuse the
-// helper directly because it stashes under different keys ("originalPrimary"
-// matches but the s01 helper computes peer freshly). Inlined here to
-// keep the s24 stash key surface small.
+// killActiveMysqlPrimaryForD5 takes the MySQL primary down for good by
+// scaling its Deployment to 0, as scenario 01 does. A deleted pod is back
+// within seconds, often before the operator's failure threshold, and then
+// the primary is re-asserted and nothing fails over: the scenario failed
+// that way on main (#236). The reverter scales it back to 1.
 func killActiveMysqlPrimaryForD5() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "force-delete active MySQL primary pod",
+		Name:  "scale the active MySQL primary to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			primary := ctxFetch(env, "originalPrimary")
-			env.Capture.Note(fmt.Sprintf("force-delete mysql primary on %s", primary))
-			return env.Chaos.DeleteSitePod(ctx, primary)
+			env.Capture.Note(fmt.Sprintf("scale mysql primary %s to 0", primary))
+			return env.Chaos.ScaleSiteToZero(ctx, primary)
 		},
 	}
 }

@@ -26,7 +26,7 @@ var (
 // binary, in parallel.
 // rolloutDeferSeed is a trial in which an admission is withdrawn because the
 // group did not start (TestRolloutSweep_ReachesTheMidRollStates).
-const rolloutDeferSeed = 101
+const rolloutDeferSeed = 219
 
 func rolloutSweep() []TrialResult {
 	rolloutSweepOnce.Do(func() {

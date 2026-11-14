@@ -435,8 +435,9 @@ type TopologyManager struct {
 	// site read-only and nothing to resolve it.
 	//
 	// lastActiveSiteNamed records whether the operator made that site
-	// primary itself (a fresh-deploy seed or a promotion) rather than only
-	// observing it. A named site is re-asserted from any fence, as
+	// primary itself (a fresh-deploy seed, a promotion or a re-assert)
+	// rather than only observing it. It is not persisted: a restart
+	// restores the site as observed. A named site is re-asserted from any fence, as
 	// lastFailoverTarget is: a seed's sidecar can fence it before the
 	// operator reports it active. An observed site is only lifted from the
 	// read_only=ON every mysqld boots with (a primary whose MySQL
@@ -831,6 +832,15 @@ type TopologyManager struct {
 	keyringPromotionSkipped []string
 	keyringPromotionRefused []string
 
+	// handoffFencedSource names the source of a maintenance handoff until
+	// the first poll that started after it consumes it
+	// (recordHandoffPromotion).
+	handoffFencedSource string
+	// promotionAwaitingPoll names the target of a promotion this process
+	// recorded (recordFailover) until the first poll that started after
+	// it consumes it.
+	promotionAwaitingPoll string
+
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
 	// Protected by mu.
@@ -1118,6 +1128,16 @@ func (tm *TopologyManager) SetFailoverStateRecorder(rec FailoverStateRecorder) {
 // ordered-update handoff — goes through here, so the durable record can
 // never be written by one and skipped by another.
 func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, target, promotionGtid string) {
+	tm.recordPromotion(ctx, now, target, promotionGtid, "")
+}
+
+// recordPromotion is recordFailover for a promotion that fenced
+// fencedSource (a maintenance handoff), or "" for one that did not. The
+// source is published to the poll (handoffFencedSource) in the critical
+// section that moves the authority epoch: a poll that started before the
+// promotion is discarded at its epoch check and cannot consume it with a
+// read from before the fence.
+func (tm *TopologyManager) recordPromotion(ctx context.Context, now time.Time, target, promotionGtid, fencedSource string) {
 	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target, PromotionGtidExecuted: promotionGtid}
 	if len(promotionGtid) > maxPromotionGtidAnnotationBytes {
 		tm.logger.Error("promotion watermark too large for the out-of-band failover record; only the status copy carries it",
@@ -1127,6 +1147,9 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	tm.mu.Lock()
 	tm.authorityEpoch++
 	tm.authorityChanges++
+	// Each promotion replaces the previous one's marker; one that fenced
+	// nothing leaves none.
+	tm.handoffFencedSource = fencedSource
 	tm.nameActiveSiteLocked(target, true)
 	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
@@ -1135,6 +1158,7 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	}
 	tm.promotedSite = target
 	tm.promotedAt = now
+	tm.promotionAwaitingPoll = target
 	// A promotion observed by this process supersedes restored state even if
 	// the wall clock moved backward. Thereafter, only advance the anti-flap
 	// pair: the ordered-update and poll goroutines sample `now` before this
@@ -1637,6 +1661,30 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	}
 	if tm.deploymentChanging == 0 {
 		tm.deploymentAwaitingObservation = false
+	}
+	// The first poll after a maintenance handoff takes the fenced source as
+	// read-only when it did not answer (recordHandoffPromotion).
+	if fenced := tm.handoffFencedSource; fenced != "" {
+		tm.handoffFencedSource = ""
+		for i := range tm.sites {
+			if tm.sites[i].name == fenced && results[i].err != nil && newStates[i] == state.StateWritable {
+				newStates[i] = state.StateReadOnly
+			}
+		}
+	}
+	// The target of a promotion this process made was read writable when
+	// the promotion was confirmed. The first poll after it that reads the
+	// target writable takes it as Writable without the recoveryThreshold
+	// debounce, which is for answers nobody here caused: otherwise status
+	// reads "No site is writable" (NoPrimary, a NoPrimaryDetected Warning)
+	// for recoveryThreshold polls after every promotion.
+	if promoted := tm.promotionAwaitingPoll; promoted != "" {
+		tm.promotionAwaitingPoll = ""
+		for i := range tm.sites {
+			if tm.sites[i].name == promoted && results[i].err == nil && !results[i].readOnly {
+				newStates[i] = state.StateWritable
+			}
+		}
 	}
 	prevStates := make([]state.SiteState, len(tm.sites))
 	// classificationLapsed records that a site ran out of its probe budget
@@ -3937,6 +3985,29 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 	return false
 }
 
+// recordHandoffPromotion records a maintenance handoff of the primary role
+// from source to target: the failover record, the metric and DNS.
+//
+// The handoff set super_read_only=ON on the source and read its GTID set
+// under the fence before it promoted target, and the ordered update
+// replaces the source's pod right after, so the polls that follow often
+// cannot read it. A Writable state from the last poll before the handoff
+// would then stand until FailureThreshold probes failed: two writable sites
+// in status and a SPLIT BRAIN alert, and the pending promotion cleared as
+// superseded by the fenced source, with DNS pointed back at it. The first
+// poll after the handoff therefore takes a source it cannot read as read
+// only (handoffFencedSource); one that answers keeps its answer.
+func (tm *TopologyManager) recordHandoffPromotion(ctx context.Context, source, target, promotionGTID string) {
+	targetSite := tm.getSite(target)
+	tm.recordPromotion(ctx, tm.clock.Now(), target, promotionGTID, source)
+	metrics.FailoversTotal.WithLabelValues(target).Inc()
+	if targetSite != nil {
+		if dnsErr := tm.applyDNS(ctx, target, targetSite.lbIP); dnsErr != nil {
+			tm.logger.Error("ordered update: DNS flip failed after handoff", "site", target, "error", dnsErr)
+		}
+	}
+}
+
 func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	if tm.updater == nil || tm.ApplyUpdate == nil {
 		return false
@@ -4097,14 +4168,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			tm.mu.Unlock()
 		}()
 		processed, err := tm.updater.ExecuteTargets(ctx, active, followers, applyUpdate, func(target, promotionGTID string) {
-			targetSite := tm.getSite(target)
-			tm.recordFailover(ctx, tm.clock.Now(), target, promotionGTID)
-			metrics.FailoversTotal.WithLabelValues(target).Inc()
-			if targetSite != nil {
-				if dnsErr := tm.applyDNS(ctx, target, targetSite.lbIP); dnsErr != nil {
-					tm.logger.Error("ordered update: DNS flip failed after handoff", "site", target, "error", dnsErr)
-				}
-			}
+			tm.recordHandoffPromotion(ctx, activeName, target, promotionGTID)
 		})
 		if err != nil {
 			tm.logger.Error("ordered update failed", "error", err)
@@ -5807,8 +5871,20 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		return true
 	}
 	metrics.PrimaryReassertTotal.WithLabelValues(target).Inc()
+	// Name the target. A boot read-only target that is not named is
+	// re-asserted only while super_read_only is off, and after a total
+	// loss every pod's sidecar runs its startup safety net, which fences
+	// a site /active-site does not name; it answers "" until
+	// RecoveryThreshold polls read the target writable. That fence used
+	// to wedge the group with no writable site (scenario 11, #236). Named,
+	// the next re-assert lifts it. The first poll that reads the target
+	// writable takes it as Writable (promotionAwaitingPoll), which
+	// shortens the window. No pending promotion is recorded: it would
+	// hold off an emergency failover if the target dies again.
 	tm.mu.Lock()
 	tm.authorityChanges++
+	tm.nameActiveSiteLocked(target, true)
+	tm.promotionAwaitingPoll = target
 	tm.mu.Unlock()
 
 	// Best-effort DNS flip: idempotent when DNS already points at the

@@ -20,7 +20,7 @@ func init() {
 //   - leave MySQL untouched (status.activeSite unchanged)
 //   - cause Bloodraven to autonomously promote the surviving replica
 //     and emit DragonflyPromotionStarted/Completed events
-//   - flip status.dragonfly.activeSite to the peer site
+//   - flip status.dragonfly.activeSite to a surviving replica's site
 //   - increment bloodraven_dragonfly_promotions_total{result="success|sessions_lost"}
 //   - re-attach the respawned old master as a replica with link=up
 //
@@ -40,7 +40,7 @@ func scenario23DragonflyMasterKill() runner.Scenario {
 		Title: "Dragonfly master kill — replica promoted, MySQL untouched",
 		Hypothesis: "Force-deleting the active Dragonfly pod causes Bloodraven to autonomously promote the surviving " +
 			"replica, after the failure threshold or when the replacement pod answers as a new empty master, whichever " +
-			"is first: status.dragonfly.activeSite flips to the peer with the cache kept, MySQL status.activeSite " +
+			"is first: status.dragonfly.activeSite flips to a surviving replica with the cache kept, MySQL status.activeSite " +
 			"is unchanged, and once the StatefulSet respawns the old pod it re-attaches as a healthy replica.",
 		Risk:     "low",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D7)",
@@ -75,14 +75,7 @@ func seedDragonflyCounterForMasterKill() runner.Step {
 			if err != nil {
 				return err
 			}
-			peer, err := PeerOf(mfg, active)
-			if err != nil {
-				return err
-			}
 			if err := ctxStash(ctx, env, "originalMaster", active); err != nil {
-				return err
-			}
-			if err := ctxStash(ctx, env, "promotionTarget", peer); err != nil {
 				return err
 			}
 			if err := ctxStash(ctx, env, "mysqlActiveBefore", mfg.Status.ActiveSite); err != nil {
@@ -116,23 +109,36 @@ func injectDragonflyMasterKill() runner.Step {
 func observeDragonflyActiveSiteFlipped() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "status.dragonfly.activeSite flips to peer",
+		Name:  "status.dragonfly.activeSite flips to a surviving replica",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			target := ctxFetch(env, "promotionTarget")
+			original := ctxFetch(env, "originalMaster")
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
+			// Any surviving replica may be promoted: with three sites the
+			// one that executed the most of the master's journal wins
+			// (dragonflyMostAdvancedReplica), and that can be the reader's.
+			// The scenario then reads the seed and the metric on the site
+			// that was promoted (#236: it waited for the MySQL peer only).
+			var promoted string
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				fmt.Sprintf("status.dragonfly.activeSite==%s after master kill", target),
+				fmt.Sprintf("status.dragonfly.activeSite moves off %s after master kill", original),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil {
 						return false, "no status.dragonfly", nil
 					}
-					return mfg.Status.Dragonfly.ActiveSite == target,
-						fmt.Sprintf("dfActive=%q phase=%q", mfg.Status.Dragonfly.ActiveSite, mfg.Status.Dragonfly.Phase),
-						nil
+					active := mfg.Status.Dragonfly.ActiveSite
+					if active != "" && active != original {
+						promoted = active
+						return true, fmt.Sprintf("dfActive=%q", active), nil
+					}
+					return false, fmt.Sprintf("dfActive=%q phase=%q", active, mfg.Status.Dragonfly.Phase), nil
 				},
 			)
-			return err
+			if err != nil {
+				return err
+			}
+			env.Capture.Note(fmt.Sprintf("dragonfly promoted %s", promoted))
+			return ctxStash(ctx, env, "promotionTarget", promoted)
 		},
 	}
 }

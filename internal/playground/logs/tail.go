@@ -29,6 +29,12 @@ type Source struct {
 	// scenario's tailer to its own start time, preventing log lines
 	// from prior scenarios from contaminating the ring buffer.
 	SinceTime time.Time
+	// Resolve, when set, names the pod to follow and is called before
+	// every (re)connect, so the tailer follows its component to a
+	// replacement pod (an operator kill, a rolled site pod) instead of
+	// retrying the deleted one. Pod is then only the fallback while
+	// Resolve fails before any pod was followed.
+	Resolve func(ctx context.Context) (string, error)
 }
 
 // Match is one line that satisfied a pattern, with the time the line
@@ -50,6 +56,14 @@ type Tailer struct {
 	cap  int
 	done bool
 	err  error
+
+	// Owned by the run goroutine: the pod being followed, the newest
+	// line timestamp read from it and how many lines carried exactly that
+	// timestamp. A reconnect to the same pod replays from lastTS, and
+	// those lines are skipped instead of appended twice.
+	pod    string
+	lastTS time.Time
+	atLast int
 }
 
 // New creates a Tailer with a ring buffer of capacity cap.
@@ -93,7 +107,10 @@ func (t *Tailer) run(ctx context.Context, k *pgkube.Client) {
 			t.markDone(ctx.Err())
 			return
 		}
-		err := t.readOne(ctx, k)
+		var err error
+		if pod := t.resolvePod(ctx); pod != "" {
+			err = t.readOne(ctx, k, pod)
+		}
 		if err != nil && ctx.Err() != nil {
 			t.markDone(ctx.Err())
 			return
@@ -109,6 +126,27 @@ func (t *Tailer) run(ctx context.Context, k *pgkube.Client) {
 	}
 }
 
+// resolvePod returns the pod to read next, or "" when there is none yet.
+// Switching to another pod forgets the replay position of the previous
+// one: the new pod's lines are all new.
+func (t *Tailer) resolvePod(ctx context.Context) string {
+	pod := t.pod
+	if t.Source.Resolve != nil {
+		if p, err := t.Source.Resolve(ctx); err == nil && p != "" {
+			pod = p
+		}
+	}
+	if pod == "" {
+		pod = t.Source.Pod
+	}
+	if pod != t.pod {
+		t.pod = pod
+		t.lastTS = time.Time{}
+		t.atLast = 0
+	}
+	return pod
+}
+
 func (t *Tailer) markDone(err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -117,28 +155,53 @@ func (t *Tailer) markDone(err error) {
 	t.cond.Broadcast()
 }
 
-func (t *Tailer) readOne(ctx context.Context, k *pgkube.Client) error {
-	follow := true
+func (t *Tailer) readOne(ctx context.Context, k *pgkube.Client, pod string) error {
 	opts := &corev1.PodLogOptions{
 		Container:  t.Source.Container,
-		Follow:     follow,
+		Follow:     true,
 		Timestamps: true,
 	}
-	if !t.Source.SinceTime.IsZero() {
-		opts.SinceTime = &metav1.Time{Time: t.Source.SinceTime}
+	since := t.Source.SinceTime
+	if t.lastTS.After(since) {
+		// A reconnect to the same pod (EOF, or a kubelet whose follow
+		// ends at once when it cannot watch the file) resumes at the last
+		// line read. SinceTime has second precision, so feed skips the
+		// lines it already appended.
+		since = t.lastTS
 	}
-	req := k.Kubernetes.CoreV1().Pods(t.Source.Namespace).GetLogs(t.Source.Pod, opts)
+	if !since.IsZero() {
+		opts.SinceTime = &metav1.Time{Time: since}
+	}
+	req := k.Kubernetes.CoreV1().Pods(t.Source.Namespace).GetLogs(pod, opts)
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
+	return t.feed(ctx, stream)
+}
+
+// feed appends the timestamped lines of one log stream, skipping the ones
+// an earlier stream of the same pod already appended.
+func (t *Tailer) feed(ctx context.Context, stream io.Reader) error {
+	skipAtLast := t.atLast
 	r := bufio.NewReader(stream)
 	for {
 		line, err := r.ReadString('\n')
 		if line != "" {
 			ts, body := splitTimestamp(trimNewline(line))
-			t.append(Match{Time: ts, Line: body})
+			switch {
+			case !t.lastTS.IsZero() && ts.Before(t.lastTS):
+			case ts.Equal(t.lastTS) && skipAtLast > 0:
+				skipAtLast--
+			default:
+				if ts.Equal(t.lastTS) {
+					t.atLast++
+				} else {
+					t.lastTS, t.atLast = ts, 1
+				}
+				t.append(Match{Time: ts, Line: body})
+			}
 		}
 		if err != nil {
 			if err == io.EOF || ctx.Err() != nil {

@@ -101,6 +101,67 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 	return spec
 }
 
+// pvcBackupProfileSpec is a spec.backup with one profile named profile
+// that writes to an operator-provisioned claim of storageClass
+// (mysql-<group>-backup-<profile>). With passphraseSecret set the profile
+// encrypts its backups with that Secret's passphrase, so a restore from
+// it runs the decrypt-download init container against the read-only claim.
+func pvcBackupProfileSpec(profile, storageClass, size, passphraseSecret string) v1alpha1.BackupSpec {
+	consistent := true
+	spec := v1alpha1.BackupSpec{
+		Image:                  v1alpha1.DefaultBackupImage,
+		MaxLagSecondsForSource: new(int64(60)),
+		ActiveDeadlineSeconds:  1800,
+		BackoffLimit:           new(int32(0)),
+		Profiles: []v1alpha1.BackupProfile{{
+			Name: profile,
+			Retention: v1alpha1.BackupRetention{
+				KeepLast:       2,
+				KeepWithinDays: new(int32(1)),
+				KeepFailed:     new(int32(2)),
+			},
+			Storage: v1alpha1.BackupStorage{
+				Type: v1alpha1.BackupStoragePVC,
+				PVC: &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{
+					StorageClassName: &storageClass,
+					Size:             v1alpha1.StorageQuantity(size),
+				}},
+			},
+			Dump: &v1alpha1.DumpOptions{
+				Threads:     2,
+				Compression: "zstd",
+				Consistent:  &consistent,
+			},
+		}},
+	}
+	if passphraseSecret != "" {
+		spec.Profiles[0].Encryption = backupE2EEncryption(passphraseSecret)
+	}
+	return spec
+}
+
+// waitForPVCBackupProfile is waitForBackupProfile for a profile written
+// by pvcBackupProfileSpec.
+func waitForPVCBackupProfile(ctx context.Context, env *runner.Env, profile string) error {
+	_, err := env.Wait.UntilCR(ctx, env.Namespace, "PVC backup profile observed", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		var found *v1alpha1.BackupProfile
+		if mfg.Spec.Backup != nil {
+			for i := range mfg.Spec.Backup.Profiles {
+				if mfg.Spec.Backup.Profiles[i].Name == profile {
+					found = &mfg.Spec.Backup.Profiles[i]
+				}
+			}
+		}
+		if found == nil || found.Storage.Type != v1alpha1.BackupStoragePVC || found.Storage.PVC == nil {
+			return false, profile + " PVC profile not observed", nil
+		}
+		rolloutReady := backupProfileRolloutReady(mfg)
+		return rolloutReady, fmt.Sprintf("profile %s storage=%s encrypted=%v rolloutReady=%v active=%q updatePhase=%q",
+			profile, found.Storage.Type, found.Encryption != nil, rolloutReady, mfg.Status.ActiveSite, mfg.Status.UpdatePhase), nil
+	})
+	return err
+}
+
 func backupE2EEncryption(secretName string) *v1alpha1.BackupEncryptionSpec {
 	return &v1alpha1.BackupEncryptionSpec{
 		Algorithm:              "AES-256-GCM",
@@ -196,7 +257,11 @@ func patchBackupSpec(ctx context.Context, env *runner.Env, spec v1alpha1.BackupS
 			return err
 		}
 	}
-	env.Capture.Note(fmt.Sprintf("patched spec.backup: hadOriginal=%v profile=%s bucket=%s", hadOriginal, backupE2EProfile, backupE2EBucket))
+	var profiles []string
+	for _, p := range spec.Profiles {
+		profiles = append(profiles, fmt.Sprintf("%s(%s)", p.Name, p.Storage.Type))
+	}
+	env.Capture.Note(fmt.Sprintf("patched spec.backup: hadOriginal=%v profiles=%v", hadOriginal, profiles))
 	return nil
 }
 
