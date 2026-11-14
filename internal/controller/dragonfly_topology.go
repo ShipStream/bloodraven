@@ -2027,9 +2027,9 @@ func (m *DragonflyManager) restartedMasterPromotionCandidate(fg *v1alpha1.MysqlF
 		return "", "", false
 	}
 	master := dragonflySnapshotOf(snaps, active)
-	// As for a Dragonfly-only promotion: once MySQL has moved, only the
-	// MySQL site's replica may take the restarted master's place.
-	follow := m.mysqlFollowTarget(fg, active)
+	// As for a Dragonfly-only promotion: while a MySQL-follow promotion is
+	// queued, only its target may take the restarted master's place.
+	follow := m.mysqlFollowTarget(active)
 	best := -1
 	for i := range snaps {
 		if follow != "" && snaps[i].Name != follow {
@@ -2107,15 +2107,13 @@ func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFai
 	if !activeObserved || activeHealthyMaster || len(candidates) == 0 {
 		return "", "", false
 	}
-	// MySQL has moved since the cache was placed (a MySQL-follow promotion
-	// is queued, or the recorded MySQL failover is newer than the cache's
-	// last promotion): the cache belongs on MySQL's site,
+	// A MySQL-follow promotion is queued: the cache belongs on MySQL's site,
 	// and the MySQL-follow promotion moves it there. Promoting any other
 	// replica made a second master on the next cycle, whose writes were
 	// discarded when it was attached to the MySQL site's (scenario 76: the
 	// MySQL site's Dragonfly missed one observation and the reader was
 	// promoted). Only the MySQL site's replica is a candidate then.
-	if follow := m.mysqlFollowTarget(fg, active); follow != "" {
+	if follow := m.mysqlFollowTarget(active); follow != "" {
 		var only []int
 		for _, i := range candidates {
 			if snaps[i].Name == follow {
@@ -2194,30 +2192,23 @@ func dragonflyMostAdvancedReplica(snaps []DragonflySiteSnapshot, candidates []in
 	return best, best >= 0
 }
 
-// mysqlFollowTarget is the site the cache must follow MySQL to instead of
-// the Dragonfly active site active, or "" when nothing says MySQL moved
-// after the cache was placed: the target of a queued MySQL-follow
-// promotion, else status.activeSite when it names another site and the
-// recorded MySQL failover to it is newer than the cache's last promotion.
-// A mismatch alone is not that: a Dragonfly-only failover moves the cache
-// off a healthy MySQL site, and while that site's Dragonfly stays down the
-// cache must still be able to fail over among the others.
-func (m *DragonflyManager) mysqlFollowTarget(fg *v1alpha1.MysqlFailoverGroup, active string) string {
+// mysqlFollowTarget is the target of a queued MySQL-follow promotion
+// (Enqueue) when it is another site than the Dragonfly active site active,
+// or "". The request runs once the current cycle ends; a promotion of any
+// other replica in this cycle made a second master beside the one the
+// request then made, whose writes were discarded when it was attached to
+// the request's target (scenario 76).
+//
+// MySQL's active site alone does not restrict a promotion: while the MySQL
+// site's Dragonfly is down (a planned failover that proceeded without it,
+// a Dragonfly-only failover off a healthy MySQL site) the cache must still
+// fail over among the other sites, and the take-back moves it to the MySQL
+// site once that site's replica is proven in sync.
+func (m *DragonflyManager) mysqlFollowTarget(active string) string {
 	if req := m.peekPending(); req != nil && req.target != "" && req.target != active {
 		return req.target
 	}
-	mysqlActive := fg.Status.ActiveSite
-	if mysqlActive == "" || mysqlActive == active {
-		return ""
-	}
-	lf := fg.Status.LastFailover
-	if lf == nil || lf.Target != mysqlActive || lf.Time == nil {
-		return ""
-	}
-	if df := fg.Status.Dragonfly; df != nil && df.LastPromotionTime != nil && !lf.Time.After(df.LastPromotionTime.Time) {
-		return ""
-	}
-	return mysqlActive
+	return ""
 }
 
 func dragonflyOnlyPromotionReady(s DragonflySiteSnapshot, role dragonfly.SiteRole) bool {

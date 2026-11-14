@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -296,13 +295,15 @@ func TestDragonflyOnlyPromotionCandidate_MissesOfAnotherSiteDoNotCount(t *testin
 	}
 }
 
-// Once MySQL has moved, the cache follows MySQL to its site: a Dragonfly-only
-// promotion over a missed master promotes only the MySQL site's replica, and
-// none while that replica was not observed. Before, the most advanced
-// replica the cycle observed was promoted: in scenario 76 the MySQL site's
-// Dragonfly missed one observation and the reader was promoted, a second
-// master beside the MySQL-follow promotion, whose writes were discarded
-// when the reader was attached to it.
+// While a MySQL-follow promotion is queued, a Dragonfly-only promotion
+// over a missed master promotes only the request's target, and none while
+// that target was not observed. Before, the most advanced replica the cycle
+// observed was promoted: in scenario 76 the MySQL site's Dragonfly missed
+// one observation and the reader was promoted, a second master beside the
+// one the queued request then made, whose writes were discarded when the
+// reader was attached to it. Without a queued request, MySQL's active site
+// does not restrict the promotion: while that site's Dragonfly is down
+// (scenario 26 settles that way) the cache still fails over.
 func TestDragonflyOnlyPromotionCandidate_FollowsMySQLOnceItMoved(t *testing.T) {
 	seven, nine := int64(7), int64(9)
 	replica := func(name string, keys *int64, offset int64) DragonflySiteSnapshot {
@@ -315,37 +316,25 @@ func TestDragonflyOnlyPromotionCandidate_FollowsMySQLOnceItMoved(t *testing.T) {
 		h.mgr.masterMissSite, h.mgr.masterMisses = "dc1", defaultDragonflyMasterLossThreshold+1
 		h.mgr.mu.Unlock()
 	}
-	now := time.Now()
-	earlier := metav1.NewTime(now.Add(-time.Minute))
-	later := metav1.NewTime(now)
 	for _, tc := range []struct {
 		name     string
 		mysql    string // status.activeSite
-		failover *metav1.Time
-		dfPromo  *metav1.Time // status.dragonfly.lastPromotionTime
-		queued   string       // a queued MySQL-follow promotion
+		queued   string // a queued MySQL-follow promotion
 		dc2Seen  bool
 		want     string
 		wantNone bool
 	}{
-		{name: "MySQL moved to dc2, dc2 not observed: wait", mysql: "dc2", failover: &later, dfPromo: &earlier, wantNone: true},
-		{name: "MySQL moved to dc2: dc2 although dc3 is ahead", mysql: "dc2", failover: &later, dfPromo: &earlier, dc2Seen: true, want: "dc2"},
-		{name: "a queued follow to dc2 before status says so", mysql: "dc1", queued: "dc2", wantNone: true},
+		{name: "follow to dc2 queued, dc2 not observed: wait", mysql: "dc2", queued: "dc2", wantNone: true},
+		{name: "follow to dc2 queued: dc2 although dc3 is ahead", mysql: "dc2", queued: "dc2", dc2Seen: true, want: "dc2"},
+		{name: "follow to dc2 queued before status says so", mysql: "dc1", queued: "dc2", wantNone: true},
 		{name: "MySQL still on dc1: the most advanced replica", mysql: "dc1", dc2Seen: true, want: "dc3"},
-		// The cache moved off a healthy MySQL site in a Dragonfly-only
-		// failover after MySQL's last failover; that site's Dragonfly is
-		// still down when the new master fails. The cache fails over
-		// among the others.
-		{name: "cache placed after MySQL's failover: the most advanced replica", mysql: "dc2", failover: &earlier, dfPromo: &later, want: "dc3"},
+		{name: "MySQL on dc2, no request, dc2's Dragonfly down: the most advanced replica", mysql: "dc2", want: "dc3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newThresholdHarness(t, nil)
 			fg := fgWithDragonflyEnabledAndActive()
 			fg.Status.ActiveSite = tc.mysql
-			if tc.failover != nil {
-				fg.Status.LastFailover = &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: tc.failover, Target: tc.mysql}}
-			}
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTime: tc.dfPromo}
+			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
 			snaps := []DragonflySiteSnapshot{{Name: "dc1"}, {Name: "dc2"}, replica("dc3", &nine, 20)}
 			if tc.dc2Seen {
 				snaps[1] = replica("dc2", &seven, 10)
