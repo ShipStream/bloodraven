@@ -158,6 +158,23 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 				return err
 			}
 
+			// Keep reading for a while after the repoint, so the reader is
+			// also seen answering past the failover window. A failover
+			// that confirms its promotion without the writable debounce
+			// can finish in a few seconds, which left fewer reads than
+			// result requires (#236).
+			for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
+				observation.mu.Lock()
+				enough := observation.reads >= s41MinReads
+				observation.mu.Unlock()
+				if enough {
+					break
+				}
+				select {
+				case <-ctx.Done():
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
 			if err := stopAndCheck(); err != nil {
 				return err
 			}
@@ -198,6 +215,10 @@ func s41VerifyReaderEndpointRestored(state *s41RunState) runner.Step {
 		},
 	}
 }
+
+// s41MinReads is the fewest reads that make an observation meaningful:
+// ten seconds at the observer's 500ms cadence.
+const s41MinReads = 20
 
 func s41ObserveContinuously(ctx context.Context, env *runner.Env, state *s41RunState, observation *s41Observation) {
 	var client *pgmysql.SiteClient
@@ -301,7 +322,7 @@ func (o *s41Observation) result(state *s41RunState) error {
 	if o.err != nil {
 		return o.err
 	}
-	if o.reads < 20 {
+	if o.reads < s41MinReads {
 		return fmt.Errorf("availability observer completed only %d reads; too few to cover the failover window", o.reads)
 	}
 	oldHost := canonicalMySQLHost(state.oldHost)
