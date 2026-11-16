@@ -81,6 +81,8 @@ generate: ## Regenerate deep copy code
 
 manifests: ## Generate CRD and RBAC manifests
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:dir=config/crd/bases
+	go run ./hack/crd-served-versions -dir config/crd/bases
+	cp config/crd/bases/*.yaml charts/bloodraven/crds/
 	$(CONTROLLER_GEN) rbac:roleName=bloodraven-role paths=./internal/controller/... output:rbac:dir=config/rbac
 
 events-doc: ## Regenerate the Event reason reference in site/content/docs/8.observability/2.monitoring.md from api/v1alpha1/events.go
