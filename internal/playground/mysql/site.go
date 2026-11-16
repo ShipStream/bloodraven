@@ -5,11 +5,13 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql"
+	gomysql "github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -132,10 +134,23 @@ func Open(ctx context.Context, k *pgkube.Client, namespace, fg, site string, cre
 	}, nil
 }
 
+// readRetry runs a read once more when its pooled connection turned out to
+// be dead: the server killed it (a planned failover's drain, a fence that
+// evicts sessions) and the driver reports "invalid connection" instead of
+// letting database/sql retry on a new one. Only reads are retried; a
+// statement that changes state may have run.
+func readRetry(read func() error) error {
+	err := read()
+	if errors.Is(err, gomysql.ErrInvalidConn) || errors.Is(err, driver.ErrBadConn) {
+		err = read()
+	}
+	return err
+}
+
 // SuperReadOnly returns the value of @@super_read_only.
 func (c *SiteClient) SuperReadOnly(ctx context.Context) (bool, error) {
 	var v int
-	if err := c.DB.QueryRowContext(ctx, "SELECT @@super_read_only").Scan(&v); err != nil {
+	if err := readRetry(func() error { return c.DB.QueryRowContext(ctx, "SELECT @@super_read_only").Scan(&v) }); err != nil {
 		return false, fmt.Errorf("query super_read_only: %w", err)
 	}
 	return v == 1, nil
@@ -144,7 +159,7 @@ func (c *SiteClient) SuperReadOnly(ctx context.Context) (bool, error) {
 // ReadOnly returns the value of @@read_only.
 func (c *SiteClient) ReadOnly(ctx context.Context) (bool, error) {
 	var v int
-	if err := c.DB.QueryRowContext(ctx, "SELECT @@read_only").Scan(&v); err != nil {
+	if err := readRetry(func() error { return c.DB.QueryRowContext(ctx, "SELECT @@read_only").Scan(&v) }); err != nil {
 		return false, fmt.Errorf("query read_only: %w", err)
 	}
 	return v == 1, nil
@@ -153,7 +168,7 @@ func (c *SiteClient) ReadOnly(ctx context.Context) (bool, error) {
 // GtidExecuted returns @@gtid_executed.
 func (c *SiteClient) GtidExecuted(ctx context.Context) (string, error) {
 	var v string
-	if err := c.DB.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&v); err != nil {
+	if err := readRetry(func() error { return c.DB.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&v) }); err != nil {
 		return "", fmt.Errorf("query gtid_executed: %w", err)
 	}
 	return strings.TrimSpace(v), nil
@@ -175,21 +190,26 @@ func (c *SiteClient) SetSuperReadOnly(ctx context.Context, on bool) error {
 // ReplicaStatus is the small slice of SHOW REPLICA STATUS the runner
 // needs for assertions. Empty struct means no replication configured.
 type ReplicaStatus struct {
-	Configured        bool
-	IORunning         bool
-	SQLRunning        bool
-	SourceHost        string
-	LastIOError       string
-	LastSQLError      string
-	ExecutedGtidSet   string
-	RetrievedGtidSet  string
-	SecondsBehindSrc  *int64
+	Configured       bool
+	IORunning        bool
+	SQLRunning       bool
+	SourceHost       string
+	LastIOError      string
+	LastSQLError     string
+	ExecutedGtidSet  string
+	RetrievedGtidSet string
+	SecondsBehindSrc *int64
 }
 
 // ShowReplicaStatus issues SHOW REPLICA STATUS and returns the small
 // subset the chaos runner asserts against.
 func (c *SiteClient) ShowReplicaStatus(ctx context.Context) (ReplicaStatus, error) {
-	rows, err := c.DB.QueryContext(ctx, "SHOW REPLICA STATUS")
+	var rows *sql.Rows
+	err := readRetry(func() error {
+		var qerr error
+		rows, qerr = c.DB.QueryContext(ctx, "SHOW REPLICA STATUS")
+		return qerr
+	})
 	if err != nil {
 		return ReplicaStatus{}, fmt.Errorf("show replica status: %w", err)
 	}
@@ -242,7 +262,7 @@ func (c *SiteClient) Exec(ctx context.Context, query string, args ...any) (int64
 // row as an int64.
 func (c *SiteClient) ScalarInt(ctx context.Context, query string, args ...any) (int64, error) {
 	var v int64
-	err := c.DB.QueryRowContext(ctx, query, args...).Scan(&v)
+	err := readRetry(func() error { return c.DB.QueryRowContext(ctx, query, args...).Scan(&v) })
 	return v, err
 }
 
@@ -250,7 +270,7 @@ func (c *SiteClient) ScalarInt(ctx context.Context, query string, args ...any) (
 // first row as a string.
 func (c *SiteClient) ScalarString(ctx context.Context, query string, args ...any) (string, error) {
 	var v string
-	err := c.DB.QueryRowContext(ctx, query, args...).Scan(&v)
+	err := readRetry(func() error { return c.DB.QueryRowContext(ctx, query, args...).Scan(&v) })
 	return v, err
 }
 

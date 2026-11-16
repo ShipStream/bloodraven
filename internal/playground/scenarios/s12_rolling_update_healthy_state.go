@@ -48,10 +48,13 @@ func scenario12RollingUpdateHealthyState() runner.Scenario {
 		Hypothesis: "Patching spec.sites[*].resources.requests.memory triggers the UpdateController: " +
 			"status.updatePhase visits at least one non-empty phase, returns to empty after completion, " +
 			"every deployment ends at the new memory request, and no TOTAL LOSS log fires during the roll.",
-		Risk:     "medium",
-		DocLink:  "playground/chaos-scenarios.md#12-rolling-update-during-healthy-state",
-		Timeout:  10 * time.Minute,
-		Precheck: assertReplicationRunningPrecheck,
+		Risk:    "medium",
+		DocLink: "playground/chaos-scenarios.md#12-rolling-update-during-healthy-state",
+		Timeout: 10 * time.Minute,
+		// The memory patch is reverted at cleanup; the gate after it waits
+		// for the revert roll (the active site last, after a handoff).
+		CleanupTimeout: 10 * time.Minute,
+		Precheck:       assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
 			s12InjectMemoryPatch(),
 			s12ObserveUpdateStarted(),

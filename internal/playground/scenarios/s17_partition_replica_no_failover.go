@@ -89,14 +89,36 @@ func injectPartitionReplica() runner.Step {
 func settleAfterReplicaPartition() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseSettle,
-		Name:  "wait 35s past partition (covers leaseTimeout + detection)",
+		Name:  "wait 35s past partition (covers leaseTimeout), then for the replica to be reported unreachable",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(35 * time.Second):
-				return nil
 			}
+			// The operator was restarted at the partition: its new process
+			// first waits for the leader lease and starts every site
+			// Unknown, then needs failureThreshold failed probes (each up to
+			// the probe timeout against a partitioned site) to report the
+			// replica Unreachable. In CI that took longer than the 35s
+			// soak (#236). Wait for it, failing at once on a failover.
+			original := ctxFetch(env, "originalPrimary")
+			replica := ctxFetch(env, "replicaSite")
+			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			defer cancel()
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, fmt.Sprintf("replica %s reported unreachable", replica),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					if a := mfg.Status.ActiveSite; a != "" && a != original {
+						return false, "", fmt.Errorf("active site moved to %s during the replica partition", a)
+					}
+					for _, st := range mfg.Status.Sites {
+						if st.Name == replica {
+							return st.State == v1alpha1.SiteStateUnreachable, fmt.Sprintf("replica state=%s", st.State), nil
+						}
+					}
+					return false, "replica not in status", nil
+				})
+			return err
 		},
 	}
 }

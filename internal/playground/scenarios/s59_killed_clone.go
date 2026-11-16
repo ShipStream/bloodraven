@@ -69,7 +69,8 @@ func scenario59KilledClone() runner.Scenario {
 		Hypothesis: "Killing the CLONE INSTANCE session of a candidate reclone after the recipient's data was dropped " +
 			"makes the operator log 'bootstrap failed' (not 'bootstrap completed successfully') and leaves the " +
 			"recipient super_read_only. With the primary then scaled to 0, the operator logs 'failover picker: " +
-			"refusing candidate whose data regressed' and promotes nothing; when the primary returns it is active " +
+			"refusing candidate whose data regressed' (or, for a recipient that had issued transactions, " +
+			"'promotion refused: candidate lacks transactions it issued itself') and promotes nothing; when the primary returns it is active " +
 			"again with the marker row intact, and the candidate is re-cloned. The killed clone leaves the candidate's " +
 			"server_uuid unchanged; the repair clone gives it a new one.",
 		Risk:     "high",
@@ -301,8 +302,16 @@ func s59VerifyEmptyCandidateRefused(st *s59State) runner.Step {
 				return err
 			}
 			logCtx, cancel := context.WithDeadline(ctx, st.primaryDownAt.Add(s59RefusalWindow))
-			m, err := env.Wait.UntilLog(logCtx, tail, st.primaryDownAt, "picker refuses the empty candidate",
-				pglogs.Substring("failover picker: refusing candidate whose data regressed"))
+			// Two refusals keep the emptied site from being promoted. A
+			// recipient whose server_uuid had issued transactions (it was
+			// the primary before) now lacks them, and the own-loss check
+			// refuses it before the picker ranks candidates (#285);
+			// otherwise the picker refuses its regressed data.
+			m, err := env.Wait.UntilLog(logCtx, tail, st.primaryDownAt, "operator refuses the empty candidate",
+				pglogs.Or(
+					pglogs.Substring("failover picker: refusing candidate whose data regressed"),
+					pglogs.Substring("promotion refused: candidate lacks transactions it issued itself"),
+				))
 			cancel()
 			if err != nil {
 				return fmt.Errorf("operator never refused the empty candidate: %w", err)

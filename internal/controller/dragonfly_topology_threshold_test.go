@@ -294,3 +294,67 @@ func TestDragonflyOnlyPromotionCandidate_MissesOfAnotherSiteDoNotCount(t *testin
 		t.Fatalf("candidate = %q from %q ok=%v, want dc2 from dc1", target, source, ok)
 	}
 }
+
+// While a MySQL-follow promotion is queued, a Dragonfly-only promotion
+// over a missed master promotes only the request's target, and none while
+// that target was not observed. Before, the most advanced replica the cycle
+// observed was promoted: in scenario 76 the MySQL site's Dragonfly missed
+// one observation and the reader was promoted, a second master beside the
+// one the queued request then made, whose writes were discarded when the
+// reader was attached to it. Without a queued request, MySQL's active site
+// does not restrict the promotion: while that site's Dragonfly is down
+// (scenario 26 settles that way) the cache still fails over.
+func TestDragonflyOnlyPromotionCandidate_FollowsMySQLOnceItMoved(t *testing.T) {
+	seven, nine := int64(7), int64(9)
+	replica := func(name string, keys *int64, offset int64) DragonflySiteSnapshot {
+		info := dragonflyReplicaOf("lion-dragonfly-dc1.shared-lion.svc.cluster.local")
+		info.MasterReplID, info.SlaveReplOffset, info.SlaveReplOffsetReported = "r1", offset, true
+		return DragonflySiteSnapshot{Name: name, Reachable: true, Info: info, Keys: keys}
+	}
+	missed := func(h *thresholdHarness) {
+		h.mgr.mu.Lock()
+		h.mgr.masterMissSite, h.mgr.masterMisses = "dc1", defaultDragonflyMasterLossThreshold+1
+		h.mgr.mu.Unlock()
+	}
+	for _, tc := range []struct {
+		name     string
+		mysql    string // status.activeSite
+		queued   string // a queued MySQL-follow promotion
+		dc2Seen  bool
+		want     string
+		wantNone bool
+	}{
+		{name: "follow to dc2 queued, dc2 not observed: wait", mysql: "dc2", queued: "dc2", wantNone: true},
+		{name: "follow to dc2 queued: dc2 although dc3 is ahead", mysql: "dc2", queued: "dc2", dc2Seen: true, want: "dc2"},
+		{name: "follow to dc2 queued before status says so", mysql: "dc1", queued: "dc2", wantNone: true},
+		{name: "MySQL still on dc1: the most advanced replica", mysql: "dc1", dc2Seen: true, want: "dc3"},
+		{name: "MySQL on dc2, no request, dc2's Dragonfly down: the most advanced replica", mysql: "dc2", want: "dc3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newThresholdHarness(t, nil)
+			fg := fgWithDragonflyEnabledAndActive()
+			fg.Status.ActiveSite = tc.mysql
+			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+			snaps := []DragonflySiteSnapshot{{Name: "dc1"}, {Name: "dc2"}, replica("dc3", &nine, 20)}
+			if tc.dc2Seen {
+				snaps[1] = replica("dc2", &seven, 10)
+			}
+			if tc.queued != "" {
+				h.mgr.pendingMu.Lock()
+				h.mgr.pending = &dragonflyPromotionRequest{target: tc.queued, oldSource: "dc1"}
+				h.mgr.pendingMu.Unlock()
+			}
+			missed(h)
+			target, _, ok := h.mgr.dragonflyOnlyPromotionCandidate(fg, snaps, false)
+			if tc.wantNone {
+				if ok {
+					t.Fatalf("candidate = %q, want none", target)
+				}
+				return
+			}
+			if !ok || target != tc.want {
+				t.Fatalf("candidate = %q ok=%v, want %s", target, ok, tc.want)
+			}
+		})
+	}
+}

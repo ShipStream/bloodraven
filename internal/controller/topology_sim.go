@@ -73,16 +73,11 @@ func (u *SimOrderedUpdate) HandoffRefusalForSim(site string) error {
 	return u.tm.liveHandoffRefusal(site)()
 }
 
-// RecordHandoffForSim records a completed handoff to target as the update's
-// goroutine does: recordFailover, then DNS.
+// RecordHandoffForSim records a completed handoff from the update's active
+// site to target as the update's goroutine does (recordHandoffPromotion):
+// recordFailover, DNS, and the fenced source for the next poll.
 func (u *SimOrderedUpdate) RecordHandoffForSim(ctx context.Context, target, promotionGTID string) {
-	tm := u.tm
-	tm.recordFailover(ctx, tm.clock.Now(), target, promotionGTID)
-	if site := tm.getSite(target); site != nil {
-		if err := tm.applyDNS(ctx, target, site.lbIP); err != nil {
-			tm.logger.Error("ordered update: DNS flip failed after handoff", "site", target, "error", err)
-		}
-	}
+	u.tm.recordHandoffPromotion(ctx, u.active, target, promotionGTID)
 }
 
 // RotateSourceBinlogForSim is ExecuteHandoff's best-effort rotation of the

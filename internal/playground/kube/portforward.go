@@ -123,3 +123,42 @@ func (c *Client) FindPodWithLabel(ctx context.Context, namespace, selector strin
 	}
 	return &pods.Items[0], nil
 }
+
+// NewestLivePod returns the name of the newest pod matching selector that
+// is not being deleted, preferring a Running one. During a replacement
+// (an operator kill, a rolled site pod) the old pod can still be listed,
+// and FindPodWithLabel may return it; a log tailer must follow the new one.
+func (c *Client) NewestLivePod(ctx context.Context, namespace, selector string) (string, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	pods, err := c.Kubernetes.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return "", err
+	}
+	var best *corev1.Pod
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		if best == nil {
+			best = p
+			continue
+		}
+		pRunning, bestRunning := p.Status.Phase == corev1.PodRunning, best.Status.Phase == corev1.PodRunning
+		if pRunning != bestRunning {
+			if pRunning {
+				best = p
+			}
+			continue
+		}
+		if best.CreationTimestamp.Before(&p.CreationTimestamp) {
+			best = p
+		}
+	}
+	if best == nil {
+		return "", fmt.Errorf("no live pod matches selector %q", selector)
+	}
+	return best.Name, nil
+}

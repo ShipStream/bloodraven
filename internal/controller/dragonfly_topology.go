@@ -362,6 +362,14 @@ func (m *DragonflyManager) Run(ctx context.Context) {
 		case <-m.wake:
 			m.runPending(loopCtx)
 		case <-ticker.C:
+			// A request queued while the last Tick ran goes first: when a
+			// Tick outlasts the poll interval (a master that does not
+			// answer) both are ready, and select picks either.
+			select {
+			case <-m.wake:
+				m.runPending(loopCtx)
+			default:
+			}
 			m.safeTick(loopCtx)
 		}
 	}
@@ -2019,8 +2027,14 @@ func (m *DragonflyManager) restartedMasterPromotionCandidate(fg *v1alpha1.MysqlF
 		return "", "", false
 	}
 	master := dragonflySnapshotOf(snaps, active)
+	// As for a Dragonfly-only promotion: while a MySQL-follow promotion is
+	// queued, only its target may take the restarted master's place.
+	follow := m.mysqlFollowTarget(active)
 	best := -1
 	for i := range snaps {
+		if follow != "" && snaps[i].Name != follow {
+			continue
+		}
 		if verdict, _ := m.restartedMasterVerdict(fg, active, snaps, master, &snaps[i]); verdict != dragonflyRestartKeep {
 			continue
 		}
@@ -2093,6 +2107,24 @@ func (m *DragonflyManager) dragonflyOnlyPromotionCandidate(fg *v1alpha1.MysqlFai
 	if !activeObserved || activeHealthyMaster || len(candidates) == 0 {
 		return "", "", false
 	}
+	// A MySQL-follow promotion is queued: the cache belongs on MySQL's site,
+	// and the MySQL-follow promotion moves it there. Promoting any other
+	// replica made a second master on the next cycle, whose writes were
+	// discarded when it was attached to the MySQL site's (scenario 76: the
+	// MySQL site's Dragonfly missed one observation and the reader was
+	// promoted). Only the MySQL site's replica is a candidate then.
+	if follow := m.mysqlFollowTarget(active); follow != "" {
+		var only []int
+		for _, i := range candidates {
+			if snaps[i].Name == follow {
+				only = append(only, i)
+			}
+		}
+		if len(only) == 0 {
+			return "", "", false
+		}
+		candidates = only
+	}
 	best, comparable := dragonflyMostAdvancedReplica(snaps, candidates)
 	if !comparable {
 		m.mu.Lock()
@@ -2158,6 +2190,25 @@ func dragonflyMostAdvancedReplica(snaps []DragonflySiteSnapshot, candidates []in
 		}
 	}
 	return best, best >= 0
+}
+
+// mysqlFollowTarget is the target of a queued MySQL-follow promotion
+// (Enqueue) when it is another site than the Dragonfly active site active,
+// or "". The request runs once the current cycle ends; a promotion of any
+// other replica in this cycle made a second master beside the one the
+// request then made, whose writes were discarded when it was attached to
+// the request's target (scenario 76).
+//
+// MySQL's active site alone does not restrict a promotion: while the MySQL
+// site's Dragonfly is down (a planned failover that proceeded without it,
+// a Dragonfly-only failover off a healthy MySQL site) the cache must still
+// fail over among the other sites, and the take-back moves it to the MySQL
+// site once that site's replica is proven in sync.
+func (m *DragonflyManager) mysqlFollowTarget(active string) string {
+	if req := m.peekPending(); req != nil && req.target != "" && req.target != active {
+		return req.target
+	}
+	return ""
 }
 
 func dragonflyOnlyPromotionReady(s DragonflySiteSnapshot, role dragonfly.SiteRole) bool {
@@ -2231,6 +2282,12 @@ type dragonflyPromotionRequest struct {
 	target    string
 	oldSource string
 	issued    time.Time
+}
+
+// promotedSince reports whether df's last promotion was stamped at or after
+// the request's second (status times have one-second resolution).
+func (req *dragonflyPromotionRequest) promotedSince(df *v1alpha1.DragonflyStatus) bool {
+	return df.LastPromotionTime != nil && !df.LastPromotionTime.Time.Before(req.issued.Truncate(time.Second))
 }
 
 // Enqueue asks the manager to promote target, taking over from oldSource,
@@ -2358,8 +2415,7 @@ func (m *DragonflyManager) executeRequest(ctx context.Context, req *dragonflyPro
 		m.logger.Info("dragonfly promotion: request superseded by a newer decision; skipping", "site", req.target, "reason", why, "fg", m.fgKey.String())
 		return false
 	}
-	if df := fg.Status.Dragonfly; df != nil && df.ActiveSite == req.target && df.LastPromotionTarget == req.target && df.LastPromotionTime != nil &&
-		!df.LastPromotionTime.Time.Before(req.issued.Truncate(time.Second)) {
+	if df := fg.Status.Dragonfly; df != nil && df.ActiveSite == req.target && df.LastPromotionTarget == req.target && req.promotedSince(df) {
 		// Another promotion to the same target finished after this request
 		// was made; repeating it would only duplicate events and metrics.
 		m.logger.Info("dragonfly promotion: target already promoted since the request; skipping", "site", req.target, "fg", m.fgKey.String())
@@ -2375,7 +2431,51 @@ func (m *DragonflyManager) executeRequest(ctx context.Context, req *dragonflyPro
 			return true
 		}
 	}
-	return m.promoteLocked(ctx, &fg, req.target, req.oldSource, m.emergencyTakeoverTimeout, dragonflyFallbackUnlessSourceServes)
+	source := req.oldSource
+	if df := fg.Status.Dragonfly; df != nil && df.ActiveSite != "" && df.ActiveSite != req.target && df.ActiveSite != req.oldSource &&
+		m.cacheServedFromStatusSite(ctx, &fg, df.ActiveSite, m.fetchPassword(getCtx, &fg)) {
+		// The request names the site MySQL left, and the cache is on a third
+		// site: a Dragonfly-only promotion moved it there, during this
+		// failover (its drain can run for 30s, so the manager's own cycle
+		// promotes first) or long before it. Taking over from the site the
+		// request names would leave the third site master beside the
+		// target, and the writes it took would be discarded when it is
+		// re-attached (scenario 76). The cache is taken over from where it
+		// is: REPLTAKEOVER from that site, and no REPLICAOF NO ONE while it
+		// still serves.
+		m.logger.Info("dragonfly promotion: the cache is not on the request's source; taking over from its current master",
+			"site", req.target, "requestSource", req.oldSource, "source", df.ActiveSite, "fg", m.fgKey.String())
+		source = df.ActiveSite
+	}
+	return m.promoteLocked(ctx, &fg, req.target, source, m.emergencyTakeoverTimeout, dragonflyFallbackUnlessSourceServes)
+}
+
+// cacheServedFromStatusSite reports whether site, which status names as the
+// Dragonfly master and a queued request does not name as its source, is
+// where the request must take the cache over from. It is, unless the site
+// answers and is not a master: status is then behind what the servers do,
+// and the request keeps the source it named. A site that does not answer is
+// still the one status routes the cache to; promoteLocked finds it
+// unreachable and promotes without a takeover, as it does for any dead
+// source.
+func (m *DragonflyManager) cacheServedFromStatusSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site, password string) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, m.emergencySourceProbeTimeout)
+	defer cancel()
+	conn, err := m.connector(probeCtx, dragonflyAddr(fg, site), password)
+	if err != nil {
+		return true
+	}
+	defer func() { _ = conn.Close() }()
+	info, err := conn.InfoReplication(probeCtx)
+	if err != nil {
+		return true
+	}
+	if info.Role != "master" {
+		m.logger.Info("dragonfly promotion: status names a Dragonfly master that answers as a replica; keeping the request's source",
+			"site", site, "role", info.Role, "fg", m.fgKey.String())
+		return false
+	}
+	return true
 }
 
 // TryRolloutPromote promotes target for a Dragonfly rollout whose target

@@ -850,6 +850,12 @@ generator, the model or the rollout code makes these numbers history):
 | `TestDST_RolloutQuick` | 1–1,000 | 1,000 | 0 | 31 groups left for a human |
 | `DST_ROLLOUT=1 make dst` | 1–7,000 | 7,000 | 0 | Stopped at a 15-minute wall-clock cap, not saturated; 221 behavior signatures, new per batch of 1,000: 105, 37, 17, 21, 15, 14, 12 (dry is under 10) |
 
+Measured again on 2026-11-13 on the tree of #290 (8 threads, the machine
+busy with a kind cluster): `DST_ROLLOUT=1 make dst` ran seeds 1–6,000 in a
+15-minute cap, 202 behavior signatures, one failing trial:
+`SecondAdmission` at seed 5093, which reproduces on the tree #290 started
+from and is open as #295.
+
 A rollout trial costs some 0.7 CPU-seconds, far more than a failover
 trial: most of it is the fake API server's codec on writes and the group
 reconciler, which is why the quick range is 64 seeds.
@@ -1245,6 +1251,22 @@ one more: seed 22948, `OutcomeDishonest` (the rollback finding above).
 The earlier code, replayed on these faults, fails the two constructed
 trials named above; a sweep of it over planned seeds 1–40,000 did not
 reach either history by chance, which is why they are written out.
+
+Measured on 2026-11-13 for #290 (the handoff and planned promotions mark
+their fenced source, a recorded promotion's target is not debounced, a
+re-assert names its target), 8 threads, a 30- or 15-minute cap:
+
+| Sweep | Seeds | Trials | Failing | By fingerprint |
+|---|---|---|---|---|
+| `DST_PLANNED=1 make dst`, on the tree #290 started from | 1–457,000 | 457,000 | 101 | `CooldownViolated(restart+stateLost)` 101 |
+| `DST_PLANNED=1 make dst`, #290 | 1–305,000 | 305,000 | 55 | `CooldownViolated(restart+stateLost)` 55 |
+| `make dst`, #290 | 1–217,000 | 217,000 | 6 | `CooldownViolated(restart+stateLost)` 6 |
+
+Every failing trial is the inherent class; the three planned-failover
+findings of #252 (fixed above) did not come back. None of the campaigns
+saturates within its cap: the planned trials still find about 360 new
+behavior signatures per batch of 1,000 after 300,000 trials, the plain ones
+about 35, against the dry threshold of 10.
 
 What the planned path leaves to others, by design:
 

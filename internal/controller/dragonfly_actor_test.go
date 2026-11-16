@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"slices"
@@ -1246,5 +1247,151 @@ func TestSyncDragonflyPodLabels_ReadsStatusAfterTakingGate(t *testing.T) {
 	}
 	if eps := writableEndpoints(t, c, fg); !slices.Equal(eps, []string{"dc2"}) {
 		t.Fatalf("label sweep acted on its stale copy: endpoints %v, want [dc2]", eps)
+	}
+}
+
+// A Dragonfly-only promotion whose cycle chose its target before the MySQL
+// failover queued its request moved the cache to a third site (dc3). The
+// request then took over from the old master it named and promoted dc2
+// with REPLICAOF NO ONE beside dc3, still master: two masters, and dc3's
+// writes discarded at its re-attach (scenario 76). It now takes the cache
+// over from dc3, and sends no REPLICAOF NO ONE while dc3 still serves.
+func TestDragonflyManager_RequestTakesOverFromAThirdSitePromotedSinceIt(t *testing.T) {
+	mgr, get := newEmergencyManager(t)
+	fg := get()
+	fg.Spec.Sites = append(fg.Spec.Sites, *fg.Spec.Sites[1].DeepCopy())
+	fg.Spec.Sites[2].Name, fg.Spec.Sites[2].ServerID = "dc3", 103
+	if err := mgr.client.Update(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	const dc3Addr = "lion-dragonfly-dc3.shared-lion.svc.cluster.local:6379"
+	refused := &noOneRecorder{fakeDragonflyConn: &fakeDragonflyConn{replTakeoverErr: errors.New("ERR Full sync not done")}}
+	conns := &emergencyConnector{}
+	conns.queue(emergencyTargetAddr, refused, refused, refused)
+	master := func() DragonflyConnection {
+		return &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	}
+	conns.queue(dc3Addr, master(), master(), master())
+	mgr.SetConnector(conns.connect)
+
+	mgr.Enqueue("dc2", "dc1")
+	if err := stampDragonflyPromotionStatus(context.Background(), mgr.client, mgr.client, mgr.fgKey, "dc3", metav1.Now(), true); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	fg = get()
+	fg.Status.ActiveSite = "dc2" // MySQL published its failover
+	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	mgr.runPending(context.Background())
+
+	refused.mu.Lock()
+	defer refused.mu.Unlock()
+	if refused.called {
+		t.Fatal("REPLICAOF NO ONE sent to dc2 while dc3, promoted since the request, still serves as master")
+	}
+	conns.mu.Lock()
+	dc3Dials := conns.dials[dc3Addr]
+	conns.mu.Unlock()
+	if dc3Dials == 0 {
+		t.Fatal("the request never looked at dc3, the cache's current master")
+	}
+}
+
+// threeSiteEmergencyManager is newEmergencyManager with a third site, dc3.
+func threeSiteEmergencyManager(t *testing.T) (*DragonflyManager, func() *v1alpha1.MysqlFailoverGroup) {
+	t.Helper()
+	mgr, get := newEmergencyManager(t)
+	fg := get()
+	fg.Spec.Sites = append(fg.Spec.Sites, *fg.Spec.Sites[1].DeepCopy())
+	fg.Spec.Sites[2].Name, fg.Spec.Sites[2].ServerID = "dc3", 103
+	if err := mgr.client.Update(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	return mgr, get
+}
+
+const emergencyThirdAddr = "lion-dragonfly-dc3.shared-lion.svc.cluster.local:6379"
+
+// The cache can be on a third site long before MySQL fails over: a
+// Dragonfly-only promotion moved it to dc3 and nothing moved it back, or
+// MySQL's drain ran for seconds and the manager's own cycle promoted dc3
+// before the request was queued. The request names the site MySQL left
+// (dc1), and the promotion to dc3 is stamped before it. It still takes the
+// cache over from dc3: REPLICAOF NO ONE on dc2 beside a serving dc3 is two
+// masters, whenever dc3 was promoted.
+func TestDragonflyManager_RequestTakesOverFromAThirdSitePromotedBeforeIt(t *testing.T) {
+	mgr, get := threeSiteEmergencyManager(t)
+	refused := &noOneRecorder{fakeDragonflyConn: &fakeDragonflyConn{replTakeoverErr: errors.New("ERR Full sync not done")}}
+	conns := &emergencyConnector{}
+	conns.queue(emergencyTargetAddr, refused, refused, refused)
+	for range 3 {
+		conns.queue(emergencyThirdAddr, &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}})
+	}
+	mgr.SetConnector(conns.connect)
+
+	promoted := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	if err := stampDragonflyPromotionStatus(context.Background(), mgr.client, mgr.client, mgr.fgKey, "dc3", promoted, true); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	mgr.Enqueue("dc2", "dc1")
+	fg := get()
+	fg.Status.ActiveSite = "dc2" // MySQL published its failover
+	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	mgr.runPending(context.Background())
+
+	refused.mu.Lock()
+	defer refused.mu.Unlock()
+	if refused.called {
+		t.Fatal("REPLICAOF NO ONE sent to dc2 while dc3, the cache's master since before the request, still serves")
+	}
+	conns.mu.Lock()
+	defer conns.mu.Unlock()
+	if conns.dials[emergencySourceAddr] != 0 {
+		t.Fatalf("the request dialled dc1 %d times; the cache is on dc3", conns.dials[emergencySourceAddr])
+	}
+}
+
+// Status can be behind the servers: it names dc3, and dc3 answers as a
+// replica. The request then keeps the source it named, so the takeover and
+// the rule against REPLICAOF NO ONE are decided against dc1, which serves.
+func TestDragonflyManager_RequestKeepsItsSourceWhenTheStatusSiteIsAReplica(t *testing.T) {
+	mgr, get := threeSiteEmergencyManager(t)
+	refused := &noOneRecorder{fakeDragonflyConn: &fakeDragonflyConn{replTakeoverErr: errors.New("ERR Full sync not done")}}
+	conns := &emergencyConnector{}
+	conns.queue(emergencyTargetAddr, refused, refused, refused)
+	conns.queue(emergencyThirdAddr, &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "replica"}})
+	for range 2 {
+		conns.queue(emergencySourceAddr, &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}})
+	}
+	mgr.SetConnector(conns.connect)
+
+	promoted := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	if err := stampDragonflyPromotionStatus(context.Background(), mgr.client, mgr.client, mgr.fgKey, "dc3", promoted, true); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	mgr.Enqueue("dc2", "dc1")
+	fg := get()
+	fg.Status.ActiveSite = "dc2"
+	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	mgr.runPending(context.Background())
+
+	refused.mu.Lock()
+	defer refused.mu.Unlock()
+	if refused.takeovers == 0 {
+		t.Fatal("no REPLTAKEOVER was sent")
+	}
+	if refused.called {
+		t.Fatal("REPLICAOF NO ONE sent to dc2 while dc1, the request's source, still serves as master")
+	}
+	conns.mu.Lock()
+	defer conns.mu.Unlock()
+	if conns.dials[emergencyThirdAddr] != 1 || conns.dials[emergencySourceAddr] == 0 {
+		t.Fatalf("dials dc3=%d dc1=%d, want one role read of dc3 and the promotion run against dc1",
+			conns.dials[emergencyThirdAddr], conns.dials[emergencySourceAddr])
 	}
 }

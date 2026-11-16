@@ -313,6 +313,33 @@ func TestDragonflyManager_Tick_RestartedMasterThreeSites(t *testing.T) {
 	}
 }
 
+// The restarted-master path follows MySQL too: when a MySQL failover to dc2
+// is queued, dc2's replica takes the restarted master's place although dc3
+// is ahead of it. Promoting dc3 made a second master beside the one the
+// MySQL failover then promoted (scenario 76's finding, on this path).
+func TestDragonflyManager_Tick_RestartedMasterFollowsMySQL(t *testing.T) {
+	h := newRestartHarness(t, func(fg *v1alpha1.MysqlFailoverGroup) {
+		dc3 := *fg.Spec.Sites[1].DeepCopy()
+		dc3.Name, dc3.ServerID, dc3.Zone = "dc3", 103, "lion-dc3"
+		fg.Spec.Sites = append(fg.Spec.Sites, dc3)
+	})
+	dc3 := &fakeDragonflyConn{info: dragonflyReplicaOf(restartTestDC1Host), keys: 300}
+	dc3.info.MasterReplID = restartTestOldReplID
+	dc3.info.SlaveReplOffset, h.dc2.info.SlaveReplOffset = 120, 100
+	h.conn.program(holdTestDC3, dc3)
+	h.tick(1)
+
+	h.masterRestarted(0)
+	dc3.info.MasterLinkStatus = "down"
+	h.mgr.pendingMu.Lock()
+	h.mgr.pending = &dragonflyPromotionRequest{target: "dc2", oldSource: "dc1"}
+	h.mgr.pendingMu.Unlock()
+	h.tick(1)
+	if got := h.promoted(); got != "dc2" {
+		t.Fatalf("promoted %q with a MySQL failover to dc2 queued, want dc2 (dc3 is ahead but is not where MySQL went)", got)
+	}
+}
+
 // A replica whose link to the master is down does not shorten the
 // threshold, however long it has been down: that is a state, and one
 // missed observation of a healthy master beside it is not the master's

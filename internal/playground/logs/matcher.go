@@ -37,6 +37,18 @@ func And(preds ...Predicate) Predicate {
 	}
 }
 
+// Or combines predicates with logical OR.
+func Or(preds ...Predicate) Predicate {
+	return func(line string) bool {
+		for _, p := range preds {
+			if p(line) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 // Structured matches a structured log message and exact field values in
 // either JSON or slog text output. Operator logging format differs between
 // local and CI deployments, while the public msg/field contract is stable.

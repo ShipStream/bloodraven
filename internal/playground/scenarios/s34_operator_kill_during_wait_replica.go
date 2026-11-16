@@ -45,9 +45,12 @@ func scenario34OperatorKillDuringWaitReplica() runner.Scenario {
 			"MySQL pods or cause TOTAL LOSS. The replacement operator re-derives remaining drift from Deployment " +
 			"spec-hash mismatch and completes: status.updatePhase returns to empty, every deployment runs the new " +
 			"memory request, and the cluster is one writable with all followers read-only.",
-		Risk:              "high",
-		DocLink:           "playground/chaos-scenarios.md#34-operator-kill-during-ordered-update-waitreplica",
-		Timeout:           12 * time.Minute,
+		Risk:    "high",
+		DocLink: "playground/chaos-scenarios.md#34-operator-kill-during-ordered-update-waitreplica",
+		Timeout: 12 * time.Minute,
+		// The memory patch is reverted at cleanup; the gate after it waits
+		// for the revert roll (the active site last, after a handoff).
+		CleanupTimeout:    10 * time.Minute,
 		ResetBeforeRunAll: false,
 		Precheck:          assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
@@ -163,6 +166,7 @@ func s34ObserveReplacementCompletes() runner.Step {
 			if err != nil {
 				return err
 			}
+			var zeroSince time.Time
 			_, err = env.Wait.UntilCR(doneCtx, env.Namespace, "updatePhase empty, 1 writable + 1 read-only, deployments at new memory",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other []string
@@ -183,8 +187,24 @@ func s34ObserveReplacementCompletes() runner.Step {
 						return false, "", fmt.Errorf("split-brain during update: writable=%v", writable)
 					}
 					if len(writable) == 0 {
-						return false, "", fmt.Errorf("no writable site during update: writable=%v read-only=%v other=%v", writable, readOnly, other)
+						// Status shows no writable site in three windows the
+						// operator reports that way by design; any other,
+						// or one of them for longer than a handoff can
+						// take, is the TOTAL LOSS window this scenario
+						// guards against.
+						if zeroSince.IsZero() {
+							zeroSince = time.Now()
+						}
+						why, err := s34NoWritableWindow(doneCtx, env, mfg)
+						if err == nil && time.Since(zeroSince) > s34MaxNoWritable {
+							err = fmt.Errorf("for %s, longer than a handoff takes (%s)", time.Since(zeroSince).Round(time.Second), why)
+						}
+						if err != nil {
+							return false, "", fmt.Errorf("no writable site during update: read-only=%v other=%v: %w", readOnly, other, err)
+						}
+						return false, fmt.Sprintf("updatePhase=%q no writable site in status: %s; read-only=%v other=%v", mfg.Status.UpdatePhase, why, readOnly, other), nil
 					}
+					zeroSince = time.Time{}
 					sort.Strings(writable)
 					sort.Strings(readOnly)
 					depOK, depMsg := s34DeploymentsAt(doneCtx, env, mfg, expected)
@@ -195,6 +215,91 @@ func s34ObserveReplacementCompletes() runner.Step {
 			return err
 		},
 	}
+}
+
+// s34MaxNoWritable bounds the windows s34NoWritableWindow accepts: the
+// handoff's fenced phase is bounded by 30s (defaultHandoffCatchUp), and
+// the new primary's writable confirmation and an operator start's
+// classification take a few polls.
+const s34MaxNoWritable = 60 * time.Second
+
+// s34NoWritableWindow explains a status sample that shows no writable site,
+// or returns an error when it is none of the windows the operator reports
+// that way by design:
+//
+//   - the handoff's write pause (updatePhase Failover): the source is fenced
+//     and the standby not yet promoted;
+//   - a promotion awaiting confirmation: status names the promoted site
+//     active while its tracker debounces the writable answers;
+//   - an operator start (Ready=Unknown, reason Initializing): the primary is
+//     Unknown until it was read writable recoveryThreshold times. Status
+//     cannot tell, so the servers are asked.
+func s34NoWritableWindow(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (string, error) {
+	if mfg.Status.UpdatePhase == v1alpha1.UpdatePhaseFailover {
+		return "handoff write pause", nil
+	}
+	if s34ActiveAwaitingConfirmation(mfg) {
+		return fmt.Sprintf("promoted %s awaits writable confirmation", mfg.Status.ActiveSite), nil
+	}
+	if c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady); c != nil && c.Reason == v1alpha1.ReasonInitializing {
+		msg, err := s34WritableWhileInitializing(ctx, env, mfg)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Ready=Initializing (%s): %s", c.Message, msg), nil
+	}
+	return "", fmt.Errorf("status names no promotion, handoff or operator start that explains it")
+}
+
+// s34ActiveAwaitingConfirmation reports whether status names an active site
+// that its site list does not show writable yet: the operator publishes a
+// site it just promoted (the handoff of the ordered update) as the active
+// site while its tracker still debounces the writable answers. A site the
+// operator cannot reach is not such a site.
+func s34ActiveAwaitingConfirmation(mfg *v1alpha1.MysqlFailoverGroup) bool {
+	if mfg.Status.ActiveSite == "" {
+		return false
+	}
+	for _, s := range mfg.Status.Sites {
+		if s.Name == mfg.Status.ActiveSite {
+			return s.State == v1alpha1.SiteStateReadOnly
+		}
+	}
+	return false
+}
+
+// s34WritableWhileInitializing checks the no-writable-site invariant at the
+// servers while the operator's status cannot: every promotable site the
+// status does not classify is probed. It fails when every one of them
+// answers read-only (no writable site, the TOTAL LOSS window the scenario
+// guards against) or when more than one answers writable; a site that does
+// not answer leaves the sample undecided, as does status.
+func s34WritableWhileInitializing(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (string, error) {
+	var writable, readOnly, unanswered []string
+	for _, s := range mfg.Status.Sites {
+		if s.State != v1alpha1.SiteStateUnknown || !isPromotableSite(mfg, s.Name) {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		w, err := probeSiteWritable(probeCtx, env, s.Name)
+		cancel()
+		switch {
+		case err != nil:
+			unanswered = append(unanswered, s.Name)
+		case w:
+			writable = append(writable, s.Name)
+		default:
+			readOnly = append(readOnly, s.Name)
+		}
+	}
+	msg := fmt.Sprintf("unclassified sites at the servers: writable=%v read-only=%v unanswered=%v", writable, readOnly, unanswered)
+	if len(writable) > 1 {
+		return "", fmt.Errorf("split brain at the servers while the operator initializes: %s", msg)
+	}
+	if len(writable) == 0 && len(unanswered) == 0 {
+		return "", fmt.Errorf("no writable server while the operator initializes: %s", msg)
+	}
+	return msg, nil
 }
 
 // s34DeploymentsAt reports whether every site deployment runs at the wanted
@@ -266,7 +371,7 @@ func s34RestoreMemory() runner.Step {
 			env.Capture.Note("reverted memory to originals; waiting for the revert roll to settle")
 			waitCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "revert roll settles: updatePhase empty, 1 writable + 1 read-only",
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "revert roll settles: updatePhase empty, 1 writable, every other site read-only",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					writable, readOnly := 0, 0
 					for _, s := range mfg.Status.Sites {
@@ -280,8 +385,13 @@ func s34RestoreMemory() runner.Step {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during revert roll", s.Name)
 						}
 					}
-					msg := fmt.Sprintf("updatePhase=%q writable=%d read-only=%d ready=%s", mfg.Status.UpdatePhase, writable, readOnly, readyOf(mfg))
-					return mfg.Status.UpdatePhase == "" && writable == 1 && readOnly == 1 && readyOf(mfg) == "True", msg, nil
+					// The revert is drift the operator rolls later, with
+					// updatePhase empty until it starts.
+					unapplied := env.Kube.SiteDeploymentProblems(waitCtx, env.Namespace, mfg)
+					msg := fmt.Sprintf("updatePhase=%q writable=%d read-only=%d ready=%s unapplied=%v", mfg.Status.UpdatePhase, writable, readOnly, readyOf(mfg), unapplied)
+					// Every site but the primary is read-only: the playground
+					// has a reader besides the two primary-candidates.
+					return mfg.Status.UpdatePhase == "" && writable == 1 && readOnly == len(mfg.Status.Sites)-1 && readyOf(mfg) == "True" && len(unapplied) == 0, msg, nil
 				})
 			return err
 		},

@@ -81,12 +81,15 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `56-deployment-live-renewal-fenced` ([deployment coordination](#deployment-coordination); full profile, a migration client renewing every five seconds observes `409 revoked` after a planned topology change and stops)
 - `63-planned-failover-operator-restart-mid-lag` ([§63](#63-planned-failover-operator-restart-mid-lag); release profile; the planned-failover claim survives an operator kill while the run waits in `WaitingForLag`, then the same run succeeds with one claim grant and one `RESET REPLICA ALL`)
 - `64-emergency-failover-during-planned-admission` ([§64](#64-emergency-failover-during-planned-admission); full profile; a planned request `Deferred{DeploymentHold}` does not obstruct emergency failover, and ends `NotStarted{AlreadyActive}` once its target is promoted)
-- `62-full-restore-fails-after-drop-keeps-peers` ([§62](#62-full-instance-restore-failing-after-its-drop); full profile, `ResetBeforeRunAll`; a full-instance in-place restore whose RustFS storage is scaled to 0 while it fences drops the user schemas and fails; the reclone queue is `Held` and every peer keeps its replication receiver `OFF` and its marker rows for two minutes, issue #212)
+- `62-full-restore-fails-after-drop-keeps-peers` ([§62](#62-full-instance-restore-failing-after-its-drop); full profile, `ResetBeforeRunAll`; a full-instance in-place restore requested with RustFS scaled to 0 drops the user schemas and fails; the reclone queue is `Held` and every peer keeps its replication receiver `OFF` and its marker rows for two minutes, issue #212)
+- `75-full-restore-three-site-sessions-spec-removal` ([§75](#75-full-instance-restore-sessions-spec-removal); full profile, `ResetBeforeRunAll`; a three-site full-instance restore from an encrypted backup on a provisioned PVC: the Job decrypts from a read-only claim, the fence ends application sessions held through `-primary` and the per-site Service and refuses new ones, `spec.restoreInPlace` removed while the Job is held in its DROP keeps every guard until the run ends `Succeeded`, the same confirm re-applied starts nothing, and both peers are recloned, #214)
 - `68-pitr-failback-with-reclone` ([§68](#68-pitr-failback-with-reclone); release profile, `ResetBeforeRunAll`; failback with reclone is exact in every era, including an era b never flushed, which the failback archives as b's tail (#264; it refused `PITRArchiveGap` before); each reclone starts only after the operator confirmed the recipient's binlog tail archived, with no `PITRArchiveTailNotArchived` Event, and gives the recipient a new `server_uuid` (#265))
 - `69-pitr-encryption-binding-refusal` ([§69](#69-pitr-encryption-binding-refusal); full profile and the e2e `pitr` job, `ResetBeforeRunAll`; the encrypted archive binds to an immutable, ownerless key snapshot; refused rotations, encryption edits and aliases do not roll, restarted writers keep the accepted key, bindings survive a status wipe, and the new-prefix procedure and release work, issue #203)
 - `70-pitr-lossy-failover` ([§70](#70-pitr-lossy-failover); release profile, `ResetBeforeRunAll`; lost archived set, `excludeGtids`, a backup after the loss, the returning old primary archiving the lost transactions it had not archived (#264), and a reclone and failback that leave the archive usable (#265): the recloned old primary has a new `server_uuid`, its lost rows are divergent evidence, no `PITRArchiveReissueRiskDetected`, no `PITRArchiveHistoryReset`)
 - `73-paced-rollout-bad-build-halt` ([§73](#73-paced-rollout-bad-build-halt); release profile and the e2e `paced-rollout` job; a release-driven pod change across two auxiliary groups: one is admitted, a release whose pods cannot become Ready stalls it before its primary is touched and the other group keeps its pods, across an operator restart too; a release that works then completes the first group before the second is admitted; the playground group, pinned to its sidecar image, is never rolled)
+- `76-dragonfly-blackhole-mysql-failover` ([§76](#76-blackholed-dragonfly-master-during-a-mysql-failover); full profile; the Dragonfly master's pod is blackholed and the MySQL primary on its site scaled to 0, with one tagged-GTID transaction on both sites: MySQL fails over, the Dragonfly target is stamped master within the bound derived from the emergency budgets (14s) of the MySQL promotion with REPLTAKEOVER skipped, the new primary holds the tagged transaction, and both old masters rejoin as replicas, #199)
 - `74-upgrade-paced-rollout` ([§74](#74-upgrade-paced-rollout); quarantined: needs a cluster installed at the published v1.7.0 with a spare node, run by the e2e `upgrade` job after `./playground/upgrade-e2e.sh install`; the upgrade to the build under test rolls every MySQL pod of three groups, one group at a time)
+- `77-pitr-archive-store-init-failure` ([§77](#77-pitr-archive-store-init-failure); full profile; encrypted PITR enabled while RustFS is scaled to 0: the ordered update finishes, every pod stays Ready, nothing fails over, and the group reports `PITRArchiveReady=False/ArchiveStoreInitFailed`; once RustFS is back the same pods create the archive and archive a sealed binlog as BRV1, issue #214 item 5)
 
 Scenarios `32`–`36`, `38` and `39` (seven scenarios) are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. Scenario `37` is not among them: #206 replaced it with `37-pitr-planned-failback-no-reclone`, which is in the `release` profile and has no live-pass history yet. As of 2026-07-11 the seven full-only scenarios and the retired original scenario 37 (`37-pitr-archive-handoff-across-failover`) had passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Those passes belong to the retired scenario 37, not to its replacement. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). The seven remain full-profile-only while this new, high-risk coverage matures. Scenarios `36`, `37`, `68`, `69` and `70` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
@@ -572,7 +575,7 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 
 | Sub-case | Expected outcome |
 |---|---|
-| A. bare site, then cold form, divergent | The bare `<site>`: a `RecloneRejected` Warning event saying the value must be confirmed; annotation removed. The cold form: a `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
+| A. bare site, then cold form, divergent | The bare `<site>`: a `RecloneRejected` Warning event saying the `confirm=` pair is missing (the value must be confirmed); annotation removed. The cold form: a `RecloneRejected` Warning event saying the value must include `gtidPrefix=` and printing the full form (`…:confirm=<group>:uid=<uid>:gtidPrefix=<prefix>`); annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
 | B. mismatched prefix | `RecloneRejected` Warning event with "does not match the observed divergentGtid" text; annotation removed; site still fenced; no clone executed. |
 | C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` (`True`) and returns to `False`/`NotBootstrapping`, with the recloned site replicating; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
 | D. cold form | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms the non-divergent case needs no `gtidPrefix`. |
@@ -787,7 +790,7 @@ Live k3d status from May 3, 2026: scenarios 22, 23, 24, 25, 26, 27, and 29 pass 
 
 **Injection**: `make chaos-run SCENARIO=23-dragonfly-master-kill`
 
-**Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins with `status.dragonfly.sites[].role=Replica` and `linkStatus=up`, and the Dragonfly promotion metric increments.
+**Verify**: `status.dragonfly.activeSite` flips to a surviving replica (with three sites the one ahead in the master's journal, which can be the reader's), MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins with `status.dragonfly.sites[].role=Replica` and `linkStatus=up`, and the Dragonfly promotion metric increments.
 
 The kill closes the replication connection, so the replica holds the seeded key and reports its link down. That does not shorten the wait. The replica is promoted by whichever comes first: `spec.failureThreshold` consecutive missed polls of the master (4 to 6 s with the defaults when the dial is refused, 9 to 11 s when the deleted pod's endpoint swallows the dial), or the StatefulSet's replacement pod answering as a new, empty master, which the replica is not re-attached to (`dragonfly: active master restarted without the cache; promoting the replica that holds it`). Either way the promotion is a `REPLICAOF NO ONE` (`result="sessions_lost"`) and the seeded key survives. On the second path the replacement pod is deleted once more by the promotion before it rejoins as a replica. About 30 s after the promotion Dragonfly follows MySQL back to the original site with `REPLTAKEOVER`; the rejoin assertion is made before that. A master that is only partitioned (scenario 39) is promoted after `spec.failureThreshold` missed polls, about 9 to 11 s with the defaults.
 
@@ -802,7 +805,7 @@ Not run since the single failure threshold and the restarted-master handling rep
 
 **Injection**: `make chaos-run SCENARIO=24-emergency-mysql-dragonfly-down`
 
-**Verify**: `status.dragonfly.phase` leaves `Ready`, the active MySQL pod is deleted, and MySQL `status.activeSite` flips to the peer within the normal emergency budget. Dragonfly recovery is handled by cleanup and global recovery, not by the MySQL critical path.
+**Verify**: `status.dragonfly.phase` leaves `Ready`, the active MySQL Deployment is scaled to 0 (a deleted pod returns before the failure threshold), and MySQL `status.activeSite` flips to the peer within the normal emergency budget. Dragonfly recovery is handled by cleanup and global recovery, not by the MySQL critical path.
 
 ---
 
@@ -1537,7 +1540,7 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 ### 59. Killed Clone {#59-killed-clone}
 **Category**: Data safety | **Risk**: High | **Automated**: `59-killed-clone-never-promoted`
 
-**Hypothesis**: Killing a candidate reclone's CLONE INSTANCE session after it has dropped the recipient's data fails the bootstrap: the operator logs `bootstrap failed`, never `bootstrap completed successfully`, and the recipient stays `super_read_only`. With the primary then scaled to 0, the operator logs `failover picker: refusing candidate whose data regressed` and promotes nothing for 45s. When the primary returns it is active again with its data, and the candidate is recloned. The killed clone leaves the candidate's `server_uuid` unchanged (it was rolled back inside the running mysqld and installed nothing); the repair clone that completes gives the candidate a new one, with no `CloneServerUUIDNotRotated` Event (#265).
+**Hypothesis**: Killing a candidate reclone's CLONE INSTANCE session after it has dropped the recipient's data fails the bootstrap: the operator logs `bootstrap failed`, never `bootstrap completed successfully`, and the recipient stays `super_read_only`. With the primary then scaled to 0, the operator refuses the candidate and promotes nothing for 45s: it logs `failover picker: refusing candidate whose data regressed`, or, when the recipient's `server_uuid` had issued transactions (it was the primary earlier), `promotion refused: candidate lacks transactions it issued itself`, which the own-loss check logs before the picker ranks candidates (#285). When the primary returns it is active again with its data, and the candidate is recloned. The killed clone leaves the candidate's `server_uuid` unchanged (it was rolled back inside the running mysqld and installed nothing); the repair clone that completes gives the candidate a new one, with no `CloneServerUUIDNotRotated` Event (#265).
 
 **Injection**: 120 MiB of incompressible filler, `clone_max_data_bandwidth=1` on the recipient, a `reclone-site=<candidate>:confirm=<fg>:uid=<uid>` request, then `KILL` of the CLONE session once `performance_schema.clone_progress` shows FILE COPY in progress. The session is found through `performance_schema.clone_status.PID`. Its processlist `info` is NULL, because MySQL hides statements that carry a password.
 
@@ -1566,7 +1569,7 @@ Found on a k3d playground with the `playground/ledger` workload, which records e
 
 **Hypothesis**: A full-instance in-place restore stops every peer's replication receiver before its Job runs (#212). When the Job drops the user schemas and then fails, `status.restoreReclones` is `Held`, every peer's receiver stays `OFF` across a two-minute window with the topology unfrozen, and every peer still holds the marker rows written before the restore (one in the backup, one after it).
 
-**Injection**: Seed `chaos_s62_marker`, take a backup, write a second marker row, start a full-instance restore, and scale RustFS to 0 once the restore reaches `Fencing`, so the Job passes its `offline_mode` check, logs `BLOODRAVEN_DROP_ALL_USER_SCHEMAS_DONE`, and fails reading the dump. The scenario fails if the Job did not reach its DROP step.
+**Injection**: Seed `chaos_s62_marker`, take a backup, write a second marker row, scale RustFS to 0, then start a full-instance restore (nothing before the Job reads object storage; cutting it once the status read `Fencing` raced a restore that finished in seconds), so the Job passes its `offline_mode` check, logs `BLOODRAVEN_DROP_ALL_USER_SCHEMAS_DONE`, and fails reading the dump. The scenario fails if the Job did not reach its DROP step.
 
 **Cleanup**: removes the spec and Job, and removes `status.restoreReclones`, which resumes the peers' replication from the damaged primary; run-all resets before the next destructive scenario.
 
@@ -1755,6 +1758,106 @@ Before the archiver could decrypt, this stopped at the archiver's readiness: not
 **Scope**: v1.7.0 is the last release without paced rollouts, and the precheck requires workloads without `rendered-by`. This is the gate for the release that introduces pacing, not a rolling check of "the previous release": an upgrade between two releases that both pace may change no pod template at all.
 
 **Status**: not run on a cluster yet (written 2026-11-12). Checked without a cluster: the v1.7.0 chart and both images pull anonymously, the v1.7.0 chart renders with the values `setup.sh` passes, the checkout's chart renders over v1.7.0's values (`TestRolloutValuesChart`), and the auxiliary groups are admitted by the published v1.7.0 CRD and survive this build's CRD being applied over it, after which `status.rollout` is stored (`TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170`, envtest). The e2e `upgrade` job is its first run.
+
+### 75. Full-Instance Restore: Sessions, Spec Removal, Reclones {#75-full-instance-restore-sessions-spec-removal}
+**Category**: Backup/restore | **Risk**: High | **Automated**: `75-full-restore-three-site-sessions-spec-removal` (full profile, `ResetBeforeRunAll`)
+
+**Hypothesis**: The three-site full-instance in-place restore PR #197 left without live coverage (#214). A restore from an encrypted backup on a PVC profile decrypts from the read-only claim and loads a read-only staging directory without a progress file. Its Fencing step ends application sessions held through the `-primary` Service and through the primary's per-site Service and refuses new ones while the restore runs. Removing `spec.restoreInPlace` while the Job runs keeps every guard until the Job finishes, and the run then ends `Succeeded`. Re-applying the same confirm starts nothing. Every peer is recloned and holds the backup's data.
+
+**Setup**: An encrypted profile (`AES-256-GCM`, a passphrase Secret of the run) on an operator-provisioned claim of `playground-fast`. The claim is bound on the primary's node by a short-lived pod first: the local-path helper pod does not tolerate the operator's `db-readonly` taint, so a claim first consumed on a read-only site's node is never provisioned. Marker row 1 is in the backup, row 2 is written after it and reaches both peers. An application account `s75app` with table grants only (no `CONNECTION_ADMIN`/`SUPER`, checked) holds `SELECT SLEEP(86400)` sessions from a pod in the cluster through `mysql-playground-primary` and `mysql-playground-<primary>`, and probes a new connection through each every two seconds.
+
+**Injection**: An operator-account session (the fence keeps the operator's own sessions, by contract) opens a transaction that reads the marker table, then the restore is requested. The Job blocks in `DROP DATABASE chaos_s75_marker` on that metadata lock, which makes the window for removing the spec deterministic. With the Job held there, `spec.restoreInPlace` is removed; after the guard window the transaction is committed.
+
+**Verify**:
+
+- While the Job is held: `status.restoreOfflineFence` names the primary and the run, records `priorOfflineMode=false` and `sessionsEvicted`; `RestoreOfflineFenceApplied`; `offline_mode=ON`; no `s75app` session on the primary and both held sessions ended with an error after the request; new connections fail through `-primary` (no endpoint) and with error 3032 through the per-site Service; `status.restoreReclones` is `Armed` with both peers (the reader last) and both peers' receivers are `OFF`. The Job's claim volume and every mount of it are read-only, `decrypt-download` reads it, the loader reads `/restore-decrypted` read-only and `BLOODRAVEN_LOAD_PROGRESS_FILE` is set and empty.
+- After the spec removal: `RestoreInPlaceSpecRemoved`, and for 40 seconds the run stays `Restoring` on the same Job and `runID` with the removal in its message, the fence record, `offline_mode=ON`, the empty `-primary` Service, the armed queue and stopped receivers stay, `activeSite` does not move, `bloodraven_failovers_total` to the other candidate does not grow, new connections are still refused, and no `RestoreInPlaceCanceled`, `RestoreInPlaceJobLost` or `RestoreOfflineFenceReleased` is emitted.
+- After the commit: `Succeeded` with `confirmTokenUsed` the run's confirm, the same Job succeeded, `RestoreOfflineFenceReleased` (`OFF`), `offline_mode=OFF`, the primary holds row 1 only, and new connections succeed through both Services.
+- The same confirm re-applied: for 45 seconds the terminal status is unchanged (same `startTime` and `completionTime`, no `runID` or `runConfirm`), no fence, queue or Job appears, and no `RestoreInPlaceStarted` is emitted.
+- The queue drains: `RestoreRecloneSucceeded` for both peers and `RestoreReclonesDrained`; the group is `Ready` with one writable site, both peers replicate and hold row 1 only.
+
+**Cleanup**: Commits the lock holder if it is still open, deletes the pods, removes the spec, waits for the run to end and the queue to drain (removes a `Held` queue), drops the marker schema and the account, deletes the backup, restores `spec.backup`, deletes the passphrase Secret and, if the run created it, the claim.
+
+**Status**: passed twice in a row on a kind cluster with Calico on 2026-11-13 (`run-all`, each after a reset): 3m09s with `pdx` active and 2m23s with `iad` active. The DROP was held for about 55 seconds each time, and the queue recloned both peers in under 20 seconds. An earlier run failed on the scenario's own assertion: it expected the terminal status to keep `runID`, which the API clears once the run is terminal.
+
+### 76. Blackholed Dragonfly Master During a MySQL Failover {#76-blackholed-dragonfly-master-during-a-mysql-failover}
+**Category**: Dragonfly HA, emergency failover (#199, #214) | **Risk**: Medium | **Automated**: `76-dragonfly-blackhole-mysql-failover` (full profile)
+
+**Hypothesis**: With one tagged-GTID transaction on both sites, blackholing the Dragonfly master's pod and scaling the MySQL primary on the same site to 0 makes the operator fail MySQL over to the peer, and the Dragonfly target is stamped master within 14s of the MySQL promotion, with REPLTAKEOVER skipped and REPLICAOF NO ONE sent. The new primary holds the tagged transaction. Both old masters rejoin as replicas once the faults are removed.
+
+It covers two #199 fixes. Before #199, a takeover against a dead Dragonfly master used up the promotion's single context, and the REPLICAOF NO ONE fallback then ran on an expired context. And MySQL 8.4+ prints a GTID set with tagged transactions in a compact form (`uuid:1-15:chaos76:1`) that the failover picker could not parse, so no candidate could be chosen.
+
+**Injection**:
+
+1. Seed a key on the Dragonfly master and wait for it on the peer.
+2. On the MySQL primary, commit one row under `SET gtid_next='AUTOMATIC:chaos76'` (root has `TRANSACTION_GTID_TAG`). Find its GTID by subtracting the `gtid_executed` read before it from the one read after it, using the operator's parser, and wait until the peer has executed it.
+3. Apply a deny-all NetworkPolicy (ingress and egress) to only the master site's Dragonfly pod, then scale that site's MySQL Deployment to 0.
+
+**Verify**:
+
+- MySQL fails over to the peer. The operator logs `failover complete` for the peer about 5s after the fault.
+- `status.dragonfly.activeSite` and `lastPromotionTarget` name the peer. `lastPromotionTime`, plus one second for its resolution, is within the bound of the `failover complete` line.
+- The operator logged `dragonfly emergency: old master unreachable; skipping REPLTAKEOVER` and `... promoted via REPLICAOF NO ONE (sessions lost)`. A `REPLTAKEOVER succeeded` fails the run, because it means the blackhole was not in effect. `dragonfly_promotions_total{result="sessions_lost"}` and `failovers_total` for the peer increment, and `{result="success"}` does not.
+- After `failover complete`, the operator promotes Dragonfly on no site other than the peer (see the second finding).
+- The seeded key reads back on the new master, and the active Dragonfly Service selects only its pod.
+- On the new primary, `GTID_SUBSET(<tagged GTID>, @@gtid_executed)` is 1, the operator's parser reads its `gtid_executed` and finds the tagged GTID in it, and the marker row is present.
+- After the NetworkPolicy is removed and MySQL is scaled back, the old Dragonfly master rejoins as a replica with its link up. If it does not, its pod is force-deleted once, as in §39. The old MySQL primary then returns `ReadOnly` with replication running and no recovery state, while the active site stays on the peer.
+
+**The bound**: The MySQL failover only queues the Dragonfly follow-up. Two promotions then race for the group's Dragonfly gate:
+
+- **The queued follow-up.** It runs after the Tick in flight, whose observation of the blackholed master is bounded by the dial and I/O timeouts (3s + 5s).
+- **The manager's own promotion.** It runs when the master has been missed `failureThreshold` times. Each miss costs a 3s dial timeout. The first may cost the 5s I/O timeout more, when a connection made just before the policy took effect waits for a reply. These misses start at the blackhole, before the MySQL promotion.
+
+Either promotion then:
+
+1. Probes the old master (1s).
+2. Sends REPLICAOF NO ONE.
+3. Dials the old master for CLIENT KILL (2s).
+4. Stamps the status.
+
+Allowing 3s for the calls that answer in milliseconds, the bound is 3s + 5s + 1s + 2s + 3s = 14s: the queued follow-up runs right after the Tick in flight, and when that Tick makes the manager's own promotion instead, it finishes no later. Before the queued request had priority (Finding 1) the bound was the own promotion's, 3×3s + 5s + 1s + 2s + 3s = 20s at the playground's `failureThreshold` of 3. `TestS76OperatorMirrors` pins the budgets and log messages it mirrors to the controller's source.
+
+**Finding 1**: The follow-up is not always the promotion that runs. The Dragonfly manager's `Run` loop selects between its wake channel and its ticker. While the master is blackholed, every Tick lasts longer than the 2s poll interval, so both channels are ready when a Tick ends, and Go picks one at random. The queued request can lose to the Ticks until the failure threshold promotes the target, after which the request finds it promoted (`dragonfly promotion: target already promoted since the request; skipping`). The 20s bound held either way. Fixed with Finding 2: a request queued while a Tick ran now runs before the next Tick, so the follow-up takes at most one Tick, and the scenario holds it to 14s.
+
+**Finding 2 (operator defect, fixed)**: In 1 of 11 runs, the manager's own promotion moved the Dragonfly master to the reader site, after MySQL had already failed over to pdx. In that run:
+
+1. One observation of pdx's Dragonfly failed with a DNS lookup timeout (`lookup playground-dragonfly-pdx…: i/o timeout`). The master's third miss came in that same Tick.
+2. `dragonflyOnlyPromotionCandidate` chose among the replicas it had observed, which was only the reader. It did not consider the MySQL active site or the follow-up already queued for pdx. It promoted the reader with REPLICAOF NO ONE and gave it the master and traffic labels.
+3. The queued follow-up ran 3s later and promoted pdx in the same way. It demoted only its `oldSource` (iad), so the reader and pdx both carried `role=master` and traffic for about 1s, until the next Tick found the reader to be a stale master and re-attached it to pdx. Anything written to the reader in those 4s was discarded.
+
+The scenario fails on any promotion of another site after `failover complete`. Fixed in the same change as the scenario: while a MySQL-follow promotion is queued, a Dragonfly-only promotion (or the restarted-master path) promotes only the request's target, and none while it was not observed (`TestDragonflyOnlyPromotionCandidate_FollowsMySQLOnceItMoved`).
+
+**Timing**: 6-minute timeout. A run takes 25–45s, plus about 15s of cleanup. **Cleanup**: The settle step removes the NetworkPolicy and scales MySQL back. Cleanup then reclones any site left `RecoveryBlocked` and drops `chaos_s76`. The tagged GTIDs stay in `gtid_executed`; a rerun commits the next one (`chaos76:2`).
+
+**Status**: Run 11 times on a four-node kind cluster with Calico (2026-11-13). All 11 runs met the hypothesis's checks. One run (the reader promotion of Finding 2) would fail the check that was added after it; the last six runs, on the final code, all passed.
+
+| Promotion that ran | Runs | Stamp delays after `failover complete` |
+| --- | --- | --- |
+| Queued follow-up | 6 | 4.6–6.3s; 13.6s in the reader run |
+| Manager's own promotion | 5 | 7.7–9.5s |
+
+Every run skipped REPLTAKEOVER. The picker's log line showed the tagged set parsed (`…:1-15,…:chaos76:1`).
+
+### 77. PITR Archive Storage Down at Sidecar Start {#77-pitr-archive-store-init-failure}
+**Category**: PITR, degraded start (#214 item 5, PR #200) | **Risk**: Medium | **Automated**: `77-pitr-archive-store-init-failure` (full profile)
+
+**Hypothesis**: Since v1.6.0 a sidecar whose PITR archive store cannot be reached keeps serving readiness, the startup safety net and self-fencing, and retries; it no longer exits. Enabling PITR while the storage is down therefore costs archiving only: the ordered update finishes, every pod stays Ready, nothing fails over, and the operator reports `PITRArchiveReady=False/ArchiveStoreInitFailed`. When the storage returns, the running sidecars create the archive without a pod restart.
+
+**Injection**: Create the RustFS bucket and a passphrase Secret for this run (its bytes are stashed). Scale RustFS to 0 and wait until no RustFS pod exists. Enable PITR with an encrypted profile (`AES-256-GCM`) on a new prefix `e2e/77-…/<run-stamp>`. With PITR off before, no writer runs, so the operator renders the profile without a check Job and rolls every site onto sidecars that start against dead storage.
+
+**Verify**:
+
+1. The ordered update finishes with RustFS still at 0: `Ready=True` and `Updating=False/NotUpdating` at the patched generation, every site Deployment renders PITR on this destination and has rolled out, and every MySQL pod (reader included) is Running and Ready with its `mysql` and `sidecar` containers ready.
+2. Every site's `/archiver/status` (reader sites archive too) reports `enabled: true`, `storeReady: false`, `lastError` starting with `archive store init: `, the S3 store, this prefix's `binlogs`, `primary` true on the active site only, `uploadFailures` > 0, and an `archive` block with `encryptionMode: Passphrase`, `state: AwaitingDescriptor` and no archive ID. `PITRArchiveReady` is `False/ArchiveStoreInitFailed`, and both its message and `status.pitr.message` hold `<site>: archive store init: ` for every site. A Warning `PITRArchiveNotReady` with `(ArchiveStoreInitFailed)` exists since the patch. Each sidecar's `uploadFailures` rises again: it retries.
+3. For 75 seconds (two operator polls, a dozen archiver scans), checked every 5 seconds: the active site and `status.lastFailover` do not change, the group stays `Ready`, the condition stays `False/ArchiveStoreInitFailed`, no pod is replaced and no container restarts, and every sidecar answers `/health` 200 and `/status` with `self_fenced: false`. Then the primary is writable (`read_only` and `super_read_only` off) and takes a marker row. The operator never logged `initiating failover` (the emergency path; the ordered update's handoff does not log it).
+4. Scale RustFS back to 1. Without a pod restart (the pods and restart counts from step 3 are unchanged): the binding of the prefix becomes `Bound` with a Passphrase key snapshot, `status.pitr.archive` verifies the same archive, every site's archiver reports a ready store, no error, and the archive `Verified` with that archive ID and the snapshot as `keyRevision`. `PITRArchiveReady` returns to `True/Archiving` and a Normal `PITRArchiveRecovered` Event is recorded.
+5. Insert a second marker, `FLUSH BINARY LOGS` on the primary, and wait for a new row of the sealed file in its manifest (no backlog, no error). The archived object starts with the `BRV1` magic, decrypts with the stashed passphrase bytes, and the plaintext starts with the binary log magic `\xfebin`. Still no emergency failover and no pod restart.
+
+**Not covered here**: the store construction failures of the same contract (an unreadable passphrase or credentials file, an invalid endpoint, a PVC mount path that is not a mount point or not writable). They report the same reason through the sidecar's construction retry (log `failed to init archive store`, then `archive store initialized after retries`); unreachable S3 storage instead fails the archive session that the archiver opens on every scan, which logs only at debug level, so neither line appears here.
+
+**Timing**: 30-minute timeout; the bounded waits add up to more than a run takes. **Cleanup** (32-minute budget): the revert scales RustFS back to 1 if a step failed first; then as §37 (restores the original `spec.backup`, which rolls every site again, deletes the passphrase Secret, releases the run's binding and deletes its prefix).
+
+**Status**: passed twice in a row on a four-node kind cluster (2026-11-13): the steps took 5m05s and 4m49s, about 8 minutes each with the cleanup; the rollout with RustFS down took about 2.5 minutes. Observed during the rollout, not asserted: once the first site had rolled, sites whose ordered update was still pending (the old primary; in one run the reader too) were listed in the condition message and the `PITRArchiveNotReady` Event as "sidecar reports PITR archiving disabled ... check that spec.backup.pitr.profileName names an existing profile" (`ArchiverDisabled` detail) for about a minute, until they rolled. The documented state for a site whose update is pending is `AwaitingRollout`. The reason stayed `ArchiveStoreInitFailed`, which outranks it.
 
 ### Recorded, not automated
 

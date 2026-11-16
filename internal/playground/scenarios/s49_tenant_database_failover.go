@@ -296,16 +296,22 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 	}
 
 	// The privilege this CRD must never confer. Grant_priv on a schema-level
-	// row is how WITH GRANT OPTION would show up.
-	for _, user := range []string{s49OwnerUser, s49GrantUser, s49SupportUser} {
+	// row is how WITH GRANT OPTION would show up. The users[] principal has
+	// one account per declared host and none at '%'.
+	type account struct{ user, host string }
+	accounts := []account{{s49OwnerUser, "%"}, {s49GrantUser, "%"}}
+	for _, host := range s49SupportHosts {
+		accounts = append(accounts, account{s49SupportUser, host})
+	}
+	for _, a := range accounts {
 		granted, err := client.ScalarString(ctx,
-			"SELECT Grant_priv FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", grantDB, user)
+			"SELECT Grant_priv FROM mysql.db WHERE db = ? AND user = ? AND host = ?", grantDB, a.user, a.host)
 		if err != nil {
-			return fmt.Errorf("query Grant_priv on %s: %w", site, err)
+			return fmt.Errorf("query Grant_priv for %s@%s on %s: %w", a.user, a.host, site, err)
 		}
 		if granted != "N" {
-			return fmt.Errorf("user %q has Grant_priv=%q on %q at %s; a MysqlDatabase must never confer GRANT OPTION",
-				user, granted, s49DatabaseName, site)
+			return fmt.Errorf("user %q@%s has Grant_priv=%q on %q at %s; a MysqlDatabase must never confer GRANT OPTION",
+				a.user, a.host, granted, s49DatabaseName, site)
 		}
 	}
 	return nil

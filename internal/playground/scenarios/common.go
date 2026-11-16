@@ -157,6 +157,13 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 			r.Phase, emptyAsNone(r.Reason), namespace, fg)
 	}
 
+	// A spec change the operator has not rolled yet (it defers an ordered
+	// update, for example, until a standby is healthy) rolls pods under
+	// whatever the scenario does next, with updatePhase still empty.
+	if problems := k.SiteDeploymentProblems(ctx, namespace, mfg); len(problems) > 0 {
+		return fmt.Errorf("baseline unhealthy: site Deployments do not run the group's spec yet %v — wait for the ordered update to finish", problems)
+	}
+
 	// Replication off on a non-active site. The active site is the
 	// primary so it does not replicate; every other primary-candidate
 	// site should be replicating. We tolerate sites that are not
