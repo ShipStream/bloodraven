@@ -861,7 +861,16 @@ Measured again on 2026-11-13 on the tree of #290 (8 threads, the machine
 busy with a kind cluster): `DST_ROLLOUT=1 make dst` ran seeds 1–6,000 in a
 15-minute cap, 202 behavior signatures, one failing trial:
 `SecondAdmission` at seed 5093, which reproduces on the tree #290 started
-from and is open as #295.
+from (#295).
+
+Seed 5093 was a defect of the invariant, not of the pacer: an admission
+from the queue beside an annotation's admission that had not started
+within the start grace, which is the documented rule (invariant 1). With
+the invariant modelling it, the same campaign on 2026-11-16 (8 threads,
+15-minute cap) ran seeds 1–6,000 with 202 behavior signatures and no
+failing trial. The mutation that makes an annotated admission never hold
+the slot still fails seed 5093 with `SecondAdmission`; it is too rare a
+schedule for the quick range to reach.
 
 A rollout trial costs some 0.7 CPU-seconds, far more than a failover
 trial: most of it is the fake API server's codec on writes and the group
