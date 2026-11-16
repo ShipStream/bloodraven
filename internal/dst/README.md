@@ -768,8 +768,15 @@ step, and at the end.
 1. *One slot.* `TwoSlotHolders` (after every step: at most one group
    holds an unfinished admission that the annotations neither made nor
    released), `SecondAdmission` (an admission from the queue while another
-   group's unfinished admission is not released), `AdmittedDuringSoak`,
-   `AdmittedByAnnotationWithoutIt`.
+   group's unfinished admission holds the slot), `AdmittedDuringSoak`,
+   `AdmittedByAnnotationWithoutIt`. An unfinished admission holds the slot
+   unless the group carries `rollout-release-slot`, or carries
+   `rollout-admit` and has not started within the start grace
+   (`slotHeld`). The second case is the documented rule for an admission
+   by hand that cannot start: it is never withdrawn while the annotation
+   stands, so it stops holding the slot and the queue does not wait behind
+   it without a halt. Removing the annotation withdraws it in the same
+   pass.
 2. *A group outside its slot is not touched.* `TemplateWrittenOutsideSlot`
    and `TemplateWrittenBeforeLatch` (a pod template another renderer wrote
    is changed only for an admitted group whose `startedTime` is already
