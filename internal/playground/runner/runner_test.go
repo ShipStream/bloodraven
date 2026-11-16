@@ -10,6 +10,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
+	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgwait "github.com/shipstream/bloodraven/internal/playground/wait"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -285,5 +286,29 @@ func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverG
 				},
 			},
 		},
+	}
+}
+
+// A log component names a container and the pods that run it, not one pod:
+// the tailer finds the pod itself, so a site scaled to 0 or mid-roll can be
+// opened before its replacement exists.
+func TestLogComponent(t *testing.T) {
+	for _, tc := range []struct {
+		component, container, selector, site string
+	}{
+		{"operator", "operator", pgmetrics.OperatorPodSelector, ""},
+		{"sidecar:iad", "sidecar", pgkube.MysqlPodSelector("playground", "iad"), "iad"},
+		{"mysql:pdx", "mysql", pgkube.MysqlPodSelector("playground", "pdx"), "pdx"},
+	} {
+		container, selector, site, err := logComponent(tc.component, "playground")
+		if err != nil || container != tc.container || selector != tc.selector || site != tc.site {
+			t.Errorf("logComponent(%q) = %q, %q, %q, %v; want %q, %q, %q", tc.component,
+				container, selector, site, err, tc.container, tc.selector, tc.site)
+		}
+	}
+	for _, bad := range []string{"", "sidecar", "sidecar:", "mysql:", "dragonfly:iad"} {
+		if _, _, _, err := logComponent(bad, "playground"); err == nil {
+			t.Errorf("logComponent(%q) returned no error", bad)
+		}
 	}
 }

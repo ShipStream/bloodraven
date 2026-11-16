@@ -189,8 +189,15 @@ func (t *Tailer) feed(ctx context.Context, stream io.Reader) error {
 	for {
 		line, err := r.ReadString('\n')
 		if line != "" {
-			ts, body := splitTimestamp(trimNewline(line))
+			ts, body, stamped := splitTimestamp(trimNewline(line))
 			switch {
+			case !stamped:
+				// time.Now() stands in for a prefix that did not parse. It
+				// is not a position in the pod's log: taken as one it runs
+				// ahead of the kubelet's clock, and the lines that follow
+				// would be skipped as already read. Such a line is kept
+				// (a replay appends it again) and moves nothing.
+				t.append(Match{Time: ts, Line: body})
 			case !t.lastTS.IsZero() && ts.Before(t.lastTS):
 			case ts.Equal(t.lastTS) && skipAtLast > 0:
 				skipAtLast--
@@ -223,17 +230,17 @@ func trimNewline(s string) string {
 // from `<ts> <body>`. Falls back to time.Now() and the unmodified
 // line if the prefix is malformed (defensive: the kubelet's format
 // is documented but a future server quirk shouldn't drop log lines
-// on the floor).
-func splitTimestamp(s string) (time.Time, string) {
+// on the floor). stamped reports whether the prefix parsed.
+func splitTimestamp(s string) (ts time.Time, body string, stamped bool) {
 	sp := strings.IndexByte(s, ' ')
 	if sp <= 0 {
-		return time.Now(), s
+		return time.Now(), s, false
 	}
 	ts, err := time.Parse(time.RFC3339Nano, s[:sp])
 	if err != nil {
-		return time.Now(), s
+		return time.Now(), s, false
 	}
-	return ts, s[sp+1:]
+	return ts, s[sp+1:], true
 }
 
 func (t *Tailer) append(m Match) {

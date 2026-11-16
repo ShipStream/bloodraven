@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -493,6 +494,21 @@ func isPromotableStatusSite(mfg *v1alpha1.MysqlFailoverGroup, siteName string) b
 	return false
 }
 
+// logComponent maps an Env.Logs component ("operator", "sidecar:<site>",
+// "mysql:<site>") to the container to tail and the selector of the pods
+// that run it; site is "" for the operator.
+func logComponent(component, fg string) (container, selector, site string, err error) {
+	if component == "operator" {
+		return "operator", pgmetrics.OperatorPodSelector, "", nil
+	}
+	for _, c := range []string{"sidecar", "mysql"} {
+		if site, ok := strings.CutPrefix(component, c+":"); ok && site != "" {
+			return c, pgkube.MysqlPodSelector(fg, site), site, nil
+		}
+	}
+	return "", "", "", fmt.Errorf("unknown log component %q", component)
+}
+
 func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Capture, startTime time.Time) (*Env, func(), error) {
 	creds, err := pgmysql.LoadCredentials(ctx, e.K, e.Cfg.Namespace)
 	if err != nil {
@@ -556,43 +572,29 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 			return t, nil
 		}
 		mu.Unlock()
-		var pod, container, selector string
-		switch {
-		case component == "operator":
-			p, err := e.K.FindPodWithLabel(ctx, e.Cfg.Namespace, pgmetrics.OperatorPodSelector)
-			if err != nil {
-				return nil, err
-			}
-			pod = p.Name
-			container = "operator"
-			selector = pgmetrics.OperatorPodSelector
-		case strings.HasPrefix(component, "sidecar:"):
-			site := strings.TrimPrefix(component, "sidecar:")
-			p, err := e.K.GetSiteMysqlPod(ctx, e.Cfg.Namespace, e.Cfg.FG, site)
-			if err != nil {
-				return nil, err
-			}
-			pod = p.Name
-			container = "sidecar"
-			selector = pgkube.MysqlPodSelector(e.Cfg.FG, site)
-		case strings.HasPrefix(component, "mysql:"):
-			site := strings.TrimPrefix(component, "mysql:")
-			p, err := e.K.GetSiteMysqlPod(ctx, e.Cfg.Namespace, e.Cfg.FG, site)
-			if err != nil {
-				return nil, err
-			}
-			pod = p.Name
-			container = "mysql"
-			selector = pgkube.MysqlPodSelector(e.Cfg.FG, site)
-		default:
-			return nil, fmt.Errorf("unknown log component %q", component)
+		container, selector, site, err := logComponent(component, e.Cfg.FG)
+		if err != nil {
+			return nil, err
 		}
-		// The tailer follows the component, not the pod it found first:
-		// after an operator kill or a site roll the assertions on its log
-		// (no TOTAL LOSS, a documented line) must read the replacement.
+		if site != "" {
+			// The pod is not looked up here: the tailer finds it, also one
+			// that does not exist yet (a site scaled to 0) or is being
+			// replaced (two pods listed mid-roll). What a missing pod used
+			// to report, a site the group does not have, is checked against
+			// the spec instead.
+			mfg, err := e.K.GetMFGNamed(ctx, e.Cfg.Namespace, e.Cfg.FG)
+			if err != nil {
+				return nil, err
+			}
+			if !slices.ContainsFunc(mfg.Spec.Sites, func(s v1alpha1.SiteSpec) bool { return s.Name == site }) {
+				return nil, fmt.Errorf("log component %q: the group has no site %q", component, site)
+			}
+		}
+		// The tailer follows the component, not a pod: after an operator
+		// kill or a site roll the assertions on its log (no TOTAL LOSS, a
+		// documented line) must read the replacement.
 		t := pglogs.New(pglogs.Source{
 			Namespace: e.Cfg.Namespace,
-			Pod:       pod,
 			Container: container,
 			SinceTime: startTime,
 			Resolve: func(ctx context.Context) (string, error) {

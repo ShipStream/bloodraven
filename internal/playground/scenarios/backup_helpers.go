@@ -848,18 +848,29 @@ func pitrBaselineRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[stri
 // Deployments read from the cluster. A failed read is a wait, not an
 // error: the cleanup retries it.
 func pitrBaselineRestoredLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+	deployments, err := pitrSiteDeploymentsLive(ctx, env, mfg)
+	if err != nil {
+		return false, err.Error()
+	}
+	return pitrBaselineRestored(mfg, deployments, wantPITR, wantProfile)
+}
+
+// pitrSiteDeploymentsLive reads every spec.sites MySQL Deployment from the
+// cluster, as pitrBaselineRestored and pitrRolloutRestored take them: nil
+// for a site whose Deployment does not exist.
+func pitrSiteDeploymentsLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (map[string]*appsv1.Deployment, error) {
 	deployments := make(map[string]*appsv1.Deployment, len(mfg.Spec.Sites))
 	for _, site := range mfg.Spec.Sites {
-		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, fmt.Sprintf("mysql-%s-%s", mfg.Name, site.Name))
+		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, pgkube.MysqlDeploymentName(mfg.Name, site.Name))
 		if err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Sprintf("read Deployment of site %s: %v", site.Name, err)
+			return nil, fmt.Errorf("read Deployment of site %s: %v", site.Name, err)
 		}
 		if err != nil {
 			dep = nil
 		}
 		deployments[site.Name] = dep
 	}
-	return pitrBaselineRestored(mfg, deployments, wantPITR, wantProfile)
+	return deployments, nil
 }
 
 // orderedUpdateIdleAtGeneration reports Updating=False/NotUpdating for the

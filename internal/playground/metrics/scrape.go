@@ -6,6 +6,7 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +23,15 @@ import (
 
 // OperatorPodSelector is the deployment label used by the Helm chart.
 const OperatorPodSelector = "app.kubernetes.io/name=bloodraven"
+
+// OperatorDeployment is the name of the operator's Deployment in the
+// playground.
+const OperatorDeployment = "bloodraven"
+
+// ErrOperatorScaledDown is returned (wrapped) when there is no operator pod
+// to scrape and its Deployment asks for none: no pod is coming, so the
+// scraper does not wait for one.
+var ErrOperatorScaledDown = errors.New("operator Deployment is scaled to 0")
 
 // Scraper port-forwards the operator pod's :8080 and reuses the tunnel for
 // every Scrape. A scrape whose tunnel fails (the operator pod was replaced,
@@ -40,7 +50,8 @@ type Scraper struct {
 
 // scrapeRedialBudget bounds how long Scrape re-opens the tunnel after a
 // transport error: an operator pod that was just replaced needs a few
-// seconds to serve /metrics.
+// seconds to serve /metrics. It is not spent on an operator that is scaled
+// to 0 (ErrOperatorScaledDown).
 const scrapeRedialBudget = 30 * time.Second
 
 // NewScraper opens a port-forward to the operator pod (port 8080,
@@ -64,6 +75,9 @@ func (s *Scraper) dial(ctx context.Context, budget time.Duration) error {
 		pod, err := s.k.NewestLivePod(ctx, s.namespace, OperatorPodSelector)
 		if err != nil {
 			last = fmt.Errorf("find operator pod: %w", err)
+			if s.operatorScaledDown(ctx) {
+				return fmt.Errorf("%w (%v)", ErrOperatorScaledDown, last)
+			}
 		} else {
 			pf, err := s.k.PortForwardPod(ctx, s.namespace, pod, 8080)
 			if err == nil {
@@ -91,6 +105,18 @@ func (s *Scraper) dial(ctx context.Context, budget time.Duration) error {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// operatorScaledDown reports whether the operator's Deployment was read and
+// asks for no replicas. A Deployment that cannot be read (or has another
+// name, outside the playground) answers false: the caller keeps waiting
+// for a pod, as it did before.
+func (s *Scraper) operatorScaledDown(ctx context.Context) bool {
+	dep, err := s.k.GetDeployment(ctx, s.namespace, OperatorDeployment)
+	if err != nil {
+		return false
+	}
+	return dep.Spec.Replicas != nil && *dep.Spec.Replicas == 0
 }
 
 func retryablePortForwardError(err error) bool {
@@ -139,7 +165,7 @@ func (s *Scraper) Scrape(ctx context.Context) (*Snapshot, error) {
 		case <-time.After(500 * time.Millisecond):
 		}
 		if derr := s.dial(ctx, time.Until(deadline)); derr != nil {
-			return nil, fmt.Errorf("%w (re-opening the tunnel: %v)", err, derr)
+			return nil, fmt.Errorf("%w (re-opening the tunnel: %w)", err, derr)
 		}
 	}
 }

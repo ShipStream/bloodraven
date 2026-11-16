@@ -43,6 +43,24 @@ func TestFeed_ReconnectSkipsLinesAlreadyRead(t *testing.T) {
 	}
 }
 
+// A line whose timestamp prefix does not parse is stamped with the
+// reader's clock, which runs ahead of the kubelet's timestamps. It must not
+// become the replay position: the lines after it were skipped as already
+// read.
+func TestFeed_UnstampedLineDoesNotHideLaterLines(t *testing.T) {
+	tail := New(Source{Pod: "p"}, 16)
+	tail.pod = "p"
+	stream := "2026-11-12T21:41:01.100000000Z a\n" +
+		"no-timestamp-prefix\n" +
+		"2026-11-12T21:41:01.200000000Z b\n"
+	if err := tail.feed(context.Background(), strings.NewReader(stream)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(lines(t, tail), ","), "a,no-timestamp-prefix,b"; got != want {
+		t.Fatalf("lines = %s, want %s", got, want)
+	}
+}
+
 // A tailer with a resolver follows the component to its replacement pod,
 // and the new pod's lines are all read, also ones older than the last
 // line of the previous pod.

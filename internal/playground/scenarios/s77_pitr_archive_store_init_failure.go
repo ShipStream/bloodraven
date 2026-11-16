@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -489,13 +488,9 @@ func s77AssertWritable(ctx context.Context, env *runner.Env, site string) error 
 // s77RolloutLive is pitrRolloutRestored for the run's
 // profile, with the site Deployments read from the cluster.
 func s77RolloutLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (bool, string) {
-	deployments := map[string]*appsv1.Deployment{}
-	for _, site := range mfg.Spec.Sites {
-		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, fmt.Sprintf("mysql-%s-%s", mfg.Name, site.Name))
-		if err != nil {
-			return false, fmt.Sprintf("read Deployment of site %s: %v", site.Name, err)
-		}
-		deployments[site.Name] = dep
+	deployments, err := pitrSiteDeploymentsLive(ctx, env, mfg)
+	if err != nil {
+		return false, err.Error()
 	}
 	return pitrRolloutRestored(mfg, deployments, true, backupE2EProfile)
 }
