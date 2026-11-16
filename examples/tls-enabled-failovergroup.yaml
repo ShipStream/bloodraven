@@ -14,7 +14,7 @@ spec:
     - mysql-orders-primary.orders.svc.cluster.local
     - mysql-orders-replicas.orders.svc.cluster.local
 ---
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlFailoverGroup
 metadata:
   name: orders

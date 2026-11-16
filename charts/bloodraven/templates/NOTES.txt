@@ -87,7 +87,7 @@ Next steps:
   3. Create a MysqlFailoverGroup custom resource:
 
      kubectl apply -f - <<EOF
-     apiVersion: shipstream.io/v1alpha1
+     apiVersion: shipstream.io/v1beta1
      kind: MysqlFailoverGroup
      metadata:
        name: orders

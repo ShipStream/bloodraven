@@ -9,7 +9,7 @@
 #   BLOODRAVEN_SETUP_TOPOLOGY=3site ./playground/setup.sh
 # It cannot be applied over a group created from failovergroup.yaml: sites
 # cannot be removed or renamed, so admission refuses dropping `reader`.
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlFailoverGroup
 metadata:
   name: playground

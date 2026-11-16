@@ -9,7 +9,7 @@ stringData:
   AWS_SECRET_ACCESS_KEY: replace-with-secret-key
   AWS_REGION: us-east-1
 ---
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlFailoverGroup
 metadata:
   name: orders

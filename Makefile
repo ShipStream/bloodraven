@@ -85,10 +85,10 @@ manifests: ## Generate CRD and RBAC manifests
 	cp config/crd/bases/*.yaml charts/bloodraven/crds/
 	$(CONTROLLER_GEN) rbac:roleName=bloodraven-role paths=./internal/controller/... output:rbac:dir=config/rbac
 
-events-doc: ## Regenerate the Event reason reference in site/content/docs/8.observability/2.monitoring.md from api/v1alpha1/events.go
+events-doc: ## Regenerate the Event reason reference in site/content/docs/8.observability/2.monitoring.md from api/v1beta1/events.go
 	go test ./internal/apiregistry -run '^TestEventReasonDocTable$$' -count=1 -args -update
 
-well-known-doc: ## Regenerate site/content/docs/4.configuration/12.well-known-metadata.md from api/v1alpha1/well_known.go
+well-known-doc: ## Regenerate site/content/docs/4.configuration/12.well-known-metadata.md from api/v1beta1/well_known.go
 	go test ./internal/apiregistry -run '^TestWellKnownMetadataDoc$$' -count=1 -args -update
 
 ##@ Testing

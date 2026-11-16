@@ -18,7 +18,7 @@
 # `:latest` is discouraged because mysqlsh dump/load compatibility across
 # versions is not guaranteed. The image below bundles mysqlsh with the
 # community-server 9.7 release.
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlFailoverGroup
 metadata:
   name: playground

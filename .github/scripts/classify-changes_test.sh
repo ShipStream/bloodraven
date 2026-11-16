@@ -80,7 +80,7 @@ check dragonfly-flags 'internal/controller/dragonfly_resources.go' true false fa
 check dragonfly-planned-phase 'internal/controller/planned_failover_df.go' true false false false true
 check dragonfly-planned-phase-test 'internal/controller/planned_failover_df_test.go' true false false false true
 check dragonfly-image-playground 'playground/manifests/failovergroup.yaml' true false false false true
-check dragonfly-image-api 'api/v1alpha1/dragonfly_types.go' true false false false true
+check dragonfly-image-api 'api/v1beta1/dragonfly_types.go' true false false false true
 check planned-failover-mysql 'internal/controller/planned_failover_ops.go' true false false false false
 check playground-other-manifest 'playground/manifests/counter.yaml' true false false false false
 check dragonfly-and-pitr $'internal/dragonfly/client.go\ninternal/pitrplan/plan.go\n' true false false true true
