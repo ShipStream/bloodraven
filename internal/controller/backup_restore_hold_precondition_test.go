@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // The restore hold's four conditional writes (#275). Each test lets another
@@ -40,12 +40,12 @@ func onceBefore(t *testing.T, match func(client.Object) bool, fn func(ctx contex
 }
 
 func isBackup(obj client.Object) bool {
-	_, ok := obj.(*v1alpha1.MysqlBackup)
+	_, ok := obj.(*v1beta1.MysqlBackup)
 	return ok
 }
 
 func isGroup(obj client.Object) bool {
-	_, ok := obj.(*v1alpha1.MysqlFailoverGroup)
+	_, ok := obj.(*v1beta1.MysqlFailoverGroup)
 	return ok
 }
 
@@ -70,7 +70,7 @@ func beforeBackupPatch(t *testing.T, c client.Client, fn func(ctx context.Contex
 func TestRestoreHold_StampLosesToADeleteSinceItsRead(t *testing.T) {
 	ctx := context.Background()
 	seed := restoreHoldSeed()
-	seed.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	seed.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
 	r, c, jobName := initRestoreFixture(t, seed)
 	var deleted *bool
 	r.Client, deleted = beforeBackupPatch(t, c, func(ctx context.Context, c client.Client) {
@@ -92,7 +92,7 @@ func TestRestoreHold_StampLosesToADeleteSinceItsRead(t *testing.T) {
 	if _, err := r.reconcileRestoreJob(ctx, fetchGroup(t, c, "lion")); err != nil {
 		t.Fatal(err)
 	}
-	if st := fetchGroup(t, c, "lion").Status.Restore; st.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(st.Message, "the backup is being deleted") {
+	if st := fetchGroup(t, c, "lion").Status.Restore; st.Phase != v1beta1.BackupPhaseFailed || !strings.Contains(st.Message, "the backup is being deleted") {
 		t.Fatalf("status.restore = %+v, want Failed (being deleted)", st)
 	}
 	if _, ok := restoreJobExists(t, c, jobName); ok {
@@ -108,8 +108,8 @@ func TestRestoreHold_StampLosesToADeleteSinceItsRead(t *testing.T) {
 func TestRestoreHold_PinLosesToAStatusWriteSinceItsRead(t *testing.T) {
 	ctx := context.Background()
 	r, c, jobName := initRestoreFixture(t, restoreHoldSeed())
-	other := &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, JobName: "an-earlier-job", Message: "an attempt this pass did not see",
-		BackupRef: &v1alpha1.RestoreBackupRef{Name: "seed", UID: "uid-seed", HoldID: "other-attempt"}}
+	other := &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, JobName: "an-earlier-job", Message: "an attempt this pass did not see",
+		BackupRef: &v1beta1.RestoreBackupRef{Name: "seed", UID: "uid-seed", HoldID: "other-attempt"}}
 	hook, wrote := onceBefore(t, isGroup, func(ctx context.Context, c client.Client) {
 		fg := fetchGroup(t, c, "lion")
 		fg.Status.Restore = other.DeepCopy()
@@ -159,7 +159,7 @@ func TestRestoreHold_ReleaseKeepsAHoldStampedSinceItsRead(t *testing.T) {
 	if seed := fetchBackup(t, c, "seed"); len(seed.Annotations) != 1 || seed.Annotations[own] != "lion" {
 		t.Fatalf("annotations before the release = %v, want this restore's hold alone", seed.Annotations)
 	}
-	const verification = v1alpha1.VerificationHoldAnnotationPrefix + "uid-v"
+	const verification = v1beta1.VerificationHoldAnnotationPrefix + "uid-v"
 	var stamped *bool
 	r.Client, stamped = beforeBackupPatch(t, c, func(ctx context.Context, c client.Client) {
 		seed := fetchBackup(t, c, "seed")
@@ -189,11 +189,11 @@ func TestRestoreHold_ReleaseKeepsAHoldStampedSinceItsRead(t *testing.T) {
 func TestBackupReconcile_StripKeepsAHoldStampedSinceItsRead(t *testing.T) {
 	ctx := context.Background()
 	backup := heldBackup()
-	backup.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	backup.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
 	dead := restoreHoldKey("dead")
 	backup.Annotations = map[string]string{dead: "deleted-group"}
 	// The live restore pinned before it stamps, as the protocol has it.
-	r, c := newBackupReconciler(t, fgWithBackup(), backup, restoringGroup(v1alpha1.BackupPhaseRunning, holdBackupUID))
+	r, c := newBackupReconciler(t, fgWithBackup(), backup, restoringGroup(v1beta1.BackupPhaseRunning, holdBackupUID))
 	live := restoreHoldKey(restoreHoldTestID)
 	var stamped *bool
 	r.Client, stamped = beforeBackupPatch(t, c, func(ctx context.Context, c client.Client) {
@@ -249,8 +249,8 @@ func deleteHeldSeed(t *testing.T, c client.Client) {
 	}
 	// (The group fixture's API does not serve MysqlBackup status as a
 	// subresource, so the condition is read off the reconciled object.)
-	cond := apiMeta.FindStatusCondition(seed.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
-	if cond == nil || cond.Reason != v1alpha1.ReasonHeldByRestore || !strings.Contains(cond.Message, "the restore of group lion") {
+	cond := apiMeta.FindStatusCondition(seed.Status.Conditions, v1beta1.ConditionArtifactCleanup)
+	if cond == nil || cond.Reason != v1beta1.ReasonHeldByRestore || !strings.Contains(cond.Message, "the restore of group lion") {
 		t.Fatalf("ArtifactCleanup condition = %+v, want HeldByRestore naming the restoring group", cond)
 	}
 }
@@ -262,7 +262,7 @@ func deleteHeldSeed(t *testing.T, c client.Client) {
 func TestRestoreHold_InPlace_BackupDeletedAfterPreflightIsStillRead(t *testing.T) {
 	ctx := context.Background()
 	seed := restoreHoldSeed()
-	seed.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	seed.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
 	r, c, jobName := inPlaceHoldFixture(t, seed)
 	if _, err := r.reconcileInPlaceRestore(ctx, fetchGroup(t, c, "lion")); err != nil {
 		t.Fatal(err)
@@ -273,12 +273,12 @@ func TestRestoreHold_InPlace_BackupDeletedAfterPreflightIsStillRead(t *testing.T
 	}
 	deleteHeldSeed(t, c)
 
-	fg := driveInPlace(t, r, c, func(s *v1alpha1.RestoreInPlaceStatus) bool { return s.JobName != "" || inPlaceRestoreTerminal(s) })
+	fg := driveInPlace(t, r, c, func(s *v1beta1.RestoreInPlaceStatus) bool { return s.JobName != "" || inPlaceRestoreTerminal(s) })
 	if st := fg.Status.RestoreInPlace; inPlaceRestoreTerminal(st) {
 		t.Fatalf("status.restoreInPlace = %+v: the run ended over a backup its own hold protects", st)
 	}
 	job, ok := restoreJobExists(t, c, jobName)
-	if !ok || job.Annotations[v1alpha1.RestoreBackupUIDAnnotation] != "uid-seed" {
+	if !ok || job.Annotations[v1beta1.RestoreBackupUIDAnnotation] != "uid-seed" {
 		t.Fatalf("restore Job missing or not built from the held backup: %+v", job)
 	}
 	if names, err := artifactReaders(ctx, c, fetchBackup(t, c, "seed")); err != nil || len(names) != 1 || names[0] != "lion" {
@@ -306,13 +306,13 @@ func TestRestoreHold_InPlace_UnheldBackupBeingDeletedIsRefusedInRestoring(t *tes
 	ctx := context.Background()
 	r, c, jobName := inPlaceHoldFixture(t, terminatingBackup(restoreHoldSeed()))
 	fg := fetchGroup(t, c, "lion")
-	fg.Status.RestoreInPlace.Phase = v1alpha1.RestoreInPlaceRestoring
+	fg.Status.RestoreInPlace.Phase = v1beta1.RestoreInPlaceRestoring
 	fg.Status.RestoreInPlace.TargetSite = fg.Spec.Sites[0].Name
 	if err := c.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	fg = driveInPlace(t, r, c, inPlaceRestoreTerminal)
-	if st := fg.Status.RestoreInPlace; st.Phase != v1alpha1.RestoreInPlaceFailed || !strings.Contains(st.Message, "the backup is being deleted") {
+	if st := fg.Status.RestoreInPlace; st.Phase != v1beta1.RestoreInPlaceFailed || !strings.Contains(st.Message, "the backup is being deleted") {
 		t.Fatalf("status.restoreInPlace = %+v, want Failed (being deleted)", st)
 	}
 	if _, ok := restoreJobExists(t, c, jobName); ok {
@@ -328,7 +328,7 @@ func TestRestoreHold_InPlace_UnheldBackupBeingDeletedIsRefusedInRestoring(t *tes
 func TestRestoreHold_InitFromBackup_WaitingHolderOfADeletedBackup(t *testing.T) {
 	ctx := context.Background()
 	seed := restoreHoldSeed()
-	seed.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	seed.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
 	r, c, jobName := initRestoreFixture(t, seed)
 	failCreate := true
 	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
@@ -343,7 +343,7 @@ func TestRestoreHold_InitFromBackup_WaitingHolderOfADeletedBackup(t *testing.T) 
 		t.Fatal("want the create error")
 	}
 	st := fetchGroup(t, c, "lion").Status.Restore
-	if st.Phase != v1alpha1.BackupPhasePending || st.BackupRef == nil || !strings.Contains(st.Message, "creating the restore Job failed") ||
+	if st.Phase != v1beta1.BackupPhasePending || st.BackupRef == nil || !strings.Contains(st.Message, "creating the restore Job failed") ||
 		!strings.Contains(st.Message, "exceeded quota") || strings.Contains(st.Message, "is being deleted") {
 		t.Fatalf("status.restore = %+v, want Pending, pinned, naming the failed create", st)
 	}
@@ -373,7 +373,7 @@ func TestRestoreHold_InitFromBackup_WaitingHolderOfADeletedBackup(t *testing.T) 
 	if _, err := r.reconcileRestoreJob(ctx, fetchGroup(t, c, "lion")); err != nil {
 		t.Fatal(err)
 	}
-	if st = fetchGroup(t, c, "lion").Status.Restore; st.Phase != v1alpha1.BackupPhasePending || st.BackupRef == nil || *st.BackupRef != ref ||
+	if st = fetchGroup(t, c, "lion").Status.Restore; st.Phase != v1beta1.BackupPhasePending || st.BackupRef == nil || *st.BackupRef != ref ||
 		!strings.Contains(st.Message, "waiting for target MySQL Deployment") || !strings.Contains(st.Message, note) {
 		t.Fatalf("waiting status.restore = %+v, want the pin kept and both reasons named", st)
 	}
@@ -393,10 +393,10 @@ func TestRestoreHold_InitFromBackup_WaitingHolderOfADeletedBackup(t *testing.T) 
 		t.Fatal(err)
 	}
 	job, ok := restoreJobExists(t, c, jobName)
-	if !ok || job.Annotations[v1alpha1.RestoreBackupUIDAnnotation] != "uid-seed" {
+	if !ok || job.Annotations[v1beta1.RestoreBackupUIDAnnotation] != "uid-seed" {
 		t.Fatalf("restore Job missing or not built from the held backup: %+v", job)
 	}
-	if st = fetchGroup(t, c, "lion").Status.Restore; st.Phase != v1alpha1.BackupPhaseRunning || st.BackupRef == nil || *st.BackupRef != ref {
+	if st = fetchGroup(t, c, "lion").Status.Restore; st.Phase != v1beta1.BackupPhaseRunning || st.BackupRef == nil || *st.BackupRef != ref {
 		t.Fatalf("status.restore = %+v, want Running under the same pin", st)
 	}
 }
@@ -405,39 +405,39 @@ func TestRestoreHold_InitFromBackup_WaitingHolderOfADeletedBackup(t *testing.T) 
 
 // A pass whose cached group is one write behind must not decide the pin.
 func TestSetRestoreStatus_PinIsCarriedFromTheStoredStatus(t *testing.T) {
-	pin := func(holdID string) *v1alpha1.RestoreBackupRef {
-		return &v1alpha1.RestoreBackupRef{Name: "seed", UID: "uid-seed", HoldID: holdID}
+	pin := func(holdID string) *v1beta1.RestoreBackupRef {
+		return &v1beta1.RestoreBackupRef{Name: "seed", UID: "uid-seed", HoldID: holdID}
 	}
 	for _, tc := range []struct {
 		name    string
-		cached  *v1alpha1.RestoreStatus
-		stored  *v1alpha1.RestoreStatus
-		write   *v1alpha1.RestoreStatus
-		wantPin *v1alpha1.RestoreBackupRef
+		cached  *v1beta1.RestoreStatus
+		stored  *v1beta1.RestoreStatus
+		write   *v1beta1.RestoreStatus
+		wantPin *v1beta1.RestoreBackupRef
 	}{
 		{
 			// The attempt ended (Failed) and its Job was deleted; the cache
 			// still shows it Running. Its hold has been seen dead: the
 			// Pending status of the retry must not carry it.
 			name:   "an ended attempt's pin is not revived",
-			cached: &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "job", BackupRef: pin("ended")},
-			stored: &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, JobName: "job", BackupRef: pin("ended")},
-			write:  &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhasePending, Message: "waiting"},
+			cached: &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning, JobName: "job", BackupRef: pin("ended")},
+			stored: &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, JobName: "job", BackupRef: pin("ended")},
+			write:  &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhasePending, Message: "waiting"},
 		},
 		{
 			// A new attempt pinned; the cache still shows the Failed one
 			// before it. The waiting status must keep the new pin.
 			name:    "a newer attempt's pin is not erased",
-			cached:  &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, BackupRef: pin("ended")},
-			stored:  &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhasePending, BackupRef: pin("current")},
-			write:   &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhasePending, Message: "waiting"},
+			cached:  &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, BackupRef: pin("ended")},
+			stored:  &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhasePending, BackupRef: pin("current")},
+			write:   &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhasePending, Message: "waiting"},
 			wantPin: pin("current"),
 		},
 		{
 			name:    "the terminal status keeps the stored attempt's pin",
-			cached:  &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhasePending},
-			stored:  &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "job", BackupRef: pin("current")},
-			write:   &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, JobName: "job"},
+			cached:  &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhasePending},
+			stored:  &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning, JobName: "job", BackupRef: pin("current")},
+			write:   &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, JobName: "job"},
 			wantPin: pin("current"),
 		},
 	} {
@@ -485,15 +485,15 @@ func TestSetRestoreStatus_PinIsCarriedFromTheStoredStatus(t *testing.T) {
 func TestSetRestoreStatus_DecidesAgainAfterAConflict(t *testing.T) {
 	ctx := context.Background()
 	r, c, _ := initRestoreFixture(t, restoreHoldSeed())
-	ended := &v1alpha1.RestoreBackupRef{Name: "seed", UID: "uid-seed", HoldID: "ended"}
+	ended := &v1beta1.RestoreBackupRef{Name: "seed", UID: "uid-seed", HoldID: "ended"}
 	fg := fetchGroup(t, c, "lion")
-	fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "job", BackupRef: ended.DeepCopy()}
+	fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning, JobName: "job", BackupRef: ended.DeepCopy()}
 	if err := c.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	hook, wrote := onceBefore(t, isGroup, func(ctx context.Context, c client.Client) {
 		fg := fetchGroup(t, c, "lion")
-		fg.Status.Restore.Phase = v1alpha1.BackupPhaseFailed
+		fg.Status.Restore.Phase = v1beta1.BackupPhaseFailed
 		if err := c.Status().Update(ctx, fg); err != nil {
 			t.Fatal(err)
 		}
@@ -505,11 +505,11 @@ func TestSetRestoreStatus_DecidesAgainAfterAConflict(t *testing.T) {
 		},
 	})
 	r.APIReader = c
-	if !r.setRestoreStatus(ctx, fetchGroup(t, c, "lion"), &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhasePending, Message: "waiting"}) {
+	if !r.setRestoreStatus(ctx, fetchGroup(t, c, "lion"), &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhasePending, Message: "waiting"}) {
 		t.Fatal("setRestoreStatus reported no write")
 	}
 	got := fetchGroup(t, c, "lion").Status.Restore
-	if !*wrote || got == nil || got.Phase != v1alpha1.BackupPhasePending || got.Message != "waiting" || got.BackupRef != nil {
+	if !*wrote || got == nil || got.Phase != v1beta1.BackupPhasePending || got.Message != "waiting" || got.BackupRef != nil {
 		t.Fatalf("wrote = %v, status.restore = %+v, want a Pending status without the pin of the attempt that ended meanwhile", *wrote, got)
 	}
 }
@@ -568,10 +568,10 @@ func TestFinalize_SkippedCleanupWaitsForReaders(t *testing.T) {
 				f := newCleanupFixture(t)
 				tc.break_(t, f)
 				var end func()
-				wantReason, wantReader := v1alpha1.ReasonHeldByRestore, "the restore of group restorer"
+				wantReason, wantReader := v1beta1.ReasonHeldByRestore, "the restore of group restorer"
 				if reader == "restore" {
 					// Another group replays from this backup.
-					group := restoringGroup(v1alpha1.BackupPhaseRunning, string(f.mb.UID))
+					group := restoringGroup(v1beta1.BackupPhaseRunning, string(f.mb.UID))
 					group.Spec.InitFromBackup.Source.BackupRef.Name = f.mb.Name
 					group.Status.Restore.BackupRef.Name = f.mb.Name
 					status := group.Status.DeepCopy()
@@ -583,14 +583,14 @@ func TestFinalize_SkippedCleanupWaitsForReaders(t *testing.T) {
 						t.Fatal(err)
 					}
 					end = func() {
-						group.Status.Restore.Phase = v1alpha1.BackupPhaseSucceeded
+						group.Status.Restore.Phase = v1beta1.BackupPhaseSucceeded
 						if err := f.c.Status().Update(ctx, group); err != nil {
 							t.Fatal(err)
 						}
 					}
 				} else {
-					wantReason, wantReader = v1alpha1.ReasonHeldByVerification, "verification v"
-					v := holdVerification("v", v1alpha1.VerificationPhaseRestoring, string(f.mb.UID))
+					wantReason, wantReader = v1beta1.ReasonHeldByVerification, "verification v"
+					v := holdVerification("v", v1beta1.VerificationPhaseRestoring, string(f.mb.UID))
 					v.Status.BackupRef.Name = f.mb.Name
 					if err := f.c.Create(ctx, v); err != nil {
 						t.Fatal(err)
@@ -614,10 +614,10 @@ func TestFinalize_SkippedCleanupWaitsForReaders(t *testing.T) {
 				events := drainEvents(f.rec)
 				deferred, skipped := 0, 0
 				for _, e := range events {
-					if strings.Contains(e, v1alpha1.EventArtifactCleanupDeferred) {
+					if strings.Contains(e, v1beta1.EventArtifactCleanupDeferred) {
 						deferred++
 					}
-					if strings.Contains(e, v1alpha1.EventArtifactCleanupSkipped) {
+					if strings.Contains(e, v1beta1.EventArtifactCleanupSkipped) {
 						skipped++
 					}
 				}
@@ -629,7 +629,7 @@ func TestFinalize_SkippedCleanupWaitsForReaders(t *testing.T) {
 				if done, _ := f.finalize(t); !done {
 					t.Fatal("backup not released once nothing reads it")
 				}
-				if events = drainEvents(f.rec); len(events) != 1 || !strings.Contains(events[0], v1alpha1.EventArtifactCleanupSkipped) || !strings.Contains(events[0], tc.skip) {
+				if events = drainEvents(f.rec); len(events) != 1 || !strings.Contains(events[0], v1beta1.EventArtifactCleanupSkipped) || !strings.Contains(events[0], tc.skip) {
 					t.Fatalf("events at the release = %q, want one ArtifactCleanupSkipped (%s)", events, tc.skip)
 				}
 				if _, ok := f.cleanupJob(t); ok {

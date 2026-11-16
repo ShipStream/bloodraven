@@ -6,7 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -14,10 +14,10 @@ import (
 // operator's interlock accepts (F-35), for a cold and a divergent site and
 // with an explicit --gtid-prefix.
 func TestRecloneValues(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", UID: "6f1c2d3e-0000-4000-8000-000000000001"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{
+		Spec:       v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+		Status: v1beta1.MysqlFailoverGroupStatus{Sites: []v1beta1.SiteStatus{
 			{Name: "iad", DivergentGtid: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5,\n4f22ab58-71ca-11e1-9e33-c80aa9429562:7"},
 			{Name: "pdx"},
 		}},

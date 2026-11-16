@@ -38,7 +38,7 @@ const (
 )
 
 // Outcome is the plan's outcome. The API mirrors it as
-// v1alpha1.PointInTimeOutcome.
+// v1beta1.PointInTimeOutcome.
 type Outcome string
 
 const (

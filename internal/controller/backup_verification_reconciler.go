@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
@@ -78,7 +78,7 @@ type MysqlBackupVerificationReconciler struct {
 func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("mysqlbackupverification", req.NamespacedName)
 
-	var v v1alpha1.MysqlBackupVerification
+	var v v1beta1.MysqlBackupVerification
 	if err := r.Get(ctx, req.NamespacedName, &v); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -91,7 +91,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// finalizer. Releasing earlier would let retention or artifact
 	// cleanup delete the backup under a still-running pod.
 	if !v.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer) {
+		if controllerutil.ContainsFinalizer(&v, v1beta1.MysqlBackupVerificationFinalizer) {
 			if _, err := r.cleanupEphemeral(ctx, &v, true); err != nil {
 				return ctrl.Result{RequeueAfter: 15 * time.Second}, fmt.Errorf("cleanup on delete: %w", err)
 			}
@@ -105,7 +105,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			base := v.DeepCopy()
-			controllerutil.RemoveFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer)
+			controllerutil.RemoveFinalizer(&v, v1beta1.MysqlBackupVerificationFinalizer)
 			if err := r.Patch(ctx, &v, metadataPatch(base)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 			}
@@ -114,9 +114,9 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	// Stamp finalizer + labels on first encounter.
-	if !controllerutil.ContainsFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer) {
+	if !controllerutil.ContainsFinalizer(&v, v1beta1.MysqlBackupVerificationFinalizer) {
 		base := v.DeepCopy()
-		controllerutil.AddFinalizer(&v, v1alpha1.MysqlBackupVerificationFinalizer)
+		controllerutil.AddFinalizer(&v, v1beta1.MysqlBackupVerificationFinalizer)
 		_ = ensureVerificationLabels(&v)
 		if err := r.Patch(ctx, &v, metadataPatch(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
@@ -126,7 +126,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 
 	// Terminal: retention GC then stop reconciling (aside from TTL
 	// cleanup of any lingering ephemeral resources on success).
-	if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded || v.Status.Phase == v1alpha1.VerificationPhaseFailed {
+	if v.Status.Phase == v1beta1.VerificationPhaseSucceeded || v.Status.Phase == v1beta1.VerificationPhaseFailed {
 		requeue, err := r.maybeCleanupAfterTerminal(ctx, &v)
 		if err != nil {
 			logger.Error(err, "post-terminal cleanup")
@@ -153,13 +153,13 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	return r.observeVerificationJob(ctx, &v, &job)
 }
 
-func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (ctrl.Result, error) {
+func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Context, v *v1beta1.MysqlBackupVerification) (ctrl.Result, error) {
 	// Resolve the referenced failover group.
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	fgKey := types.NamespacedName{Namespace: v.Namespace, Name: v.Spec.FailoverGroupRef.Name}
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.failVerification(ctx, v, v1alpha1.ReasonGroupNotFound,
+			return r.failVerification(ctx, v, v1beta1.ReasonGroupNotFound,
 				fmt.Sprintf("MysqlFailoverGroup %q not found", fgKey.Name))
 		}
 		return ctrl.Result{}, fmt.Errorf("get failover group: %w", err)
@@ -187,7 +187,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	// Resolve the named profile.
 	profile := findProfile(&fg, v.Spec.ProfileName)
 	if profile == nil {
-		return r.failVerification(ctx, v, v1alpha1.ReasonProfileNotFound,
+		return r.failVerification(ctx, v, v1beta1.ReasonProfileNotFound,
 			fmt.Sprintf("profile %q not found on MysqlFailoverGroup %q", v.Spec.ProfileName, fg.Name))
 	}
 
@@ -197,14 +197,14 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if blocked, err := r.findBlockingVerification(ctx, v); err != nil {
 		return ctrl.Result{}, fmt.Errorf("check concurrent verifications: %w", err)
 	} else if blocked != "" {
-		return r.failVerification(ctx, v, v1alpha1.ReasonBlockedByActiveVerification,
+		return r.failVerification(ctx, v, v1beta1.ReasonBlockedByActiveVerification,
 			fmt.Sprintf("another verification %q for (group=%s, profile=%s) is still running",
 				blocked, v.Spec.FailoverGroupRef.Name, v.Spec.ProfileName))
 	}
 
 	backup, err := r.resolvePinnedVerificationBackup(ctx, v)
 	if err != nil {
-		return r.failVerification(ctx, v, v1alpha1.ReasonBackupNotAvailable, err.Error())
+		return r.failVerification(ctx, v, v1beta1.ReasonBackupNotAvailable, err.Error())
 	}
 	if v.Status.BackupRef == nil {
 		patch := client.MergeFrom(v.DeepCopy())
@@ -220,7 +220,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if err := r.stampVerificationHold(ctx, v, false); err != nil {
 		switch {
 		case errors.Is(err, errHoldBackupGone), errors.Is(err, errHoldBackupReplaced), errors.Is(err, errHoldBackupTerminating):
-			return r.failVerification(ctx, v, v1alpha1.ReasonBackupNotAvailable,
+			return r.failVerification(ctx, v, v1beta1.ReasonBackupNotAvailable,
 				fmt.Sprintf("pinned backup %q: %v", v.Status.BackupRef.Name, err))
 		case apierrors.IsConflict(err):
 			return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -241,10 +241,10 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	// PVC to provision here.
 
 	// Phase transition: Pending → Provisioning on first pass.
-	if v.Status.Phase == "" || v.Status.Phase == v1alpha1.VerificationPhasePending {
+	if v.Status.Phase == "" || v.Status.Phase == v1beta1.VerificationPhasePending {
 		now := metav1.Now()
 		patch := client.MergeFrom(v.DeepCopy())
-		v.Status.Phase = v1alpha1.VerificationPhaseProvisioning
+		v.Status.Phase = v1beta1.VerificationPhaseProvisioning
 		v.Status.StartTime = &now
 		v.Status.Message = "ephemeral resources provisioned"
 		v.Status.ObservedGeneration = v.Generation
@@ -268,8 +268,8 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	// or a binding the group has no room for, fails the verification.
 	var notReady *errPITRBindingNotReady
 	if errors.As(err, &notReady) {
-		if notReady.terminal || notReady.reason == v1alpha1.ReasonBindingLimitReached {
-			return r.failVerification(ctx, v, string(v1alpha1.PITRTokenArchiveBindingNotReady), notReady.Error())
+		if notReady.terminal || notReady.reason == v1beta1.ReasonBindingLimitReached {
+			return r.failVerification(ctx, v, string(v1beta1.PITRTokenArchiveBindingNotReady), notReady.Error())
 		}
 		return r.waitVerification(ctx, v, notReady.Error())
 	}
@@ -278,7 +278,7 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 		// ...) is recorded by its catalog token, as the restore build
 		// path and Job-time refusals are (F028); anything else is an
 		// operator-side build failure.
-		reason, message := v1alpha1.ReasonBuildJobFailed, err.Error()
+		reason, message := v1beta1.ReasonBuildJobFailed, err.Error()
 		if tok := pitrFailureReason(message); tok != "" {
 			reason, message = string(tok), tokenFirstMessage(string(tok), message)
 		}
@@ -299,13 +299,13 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	// backup (K9): a binding release refuses while the hold is live, and a
 	// release that won the race leaves the stamp failing NotFound, so the
 	// verification waits for the binding instead of mounting nothing.
-	keySnapshot := built.Labels[v1alpha1.PITRKeySecretLabel]
+	keySnapshot := built.Labels[v1beta1.PITRKeySecretLabel]
 	if keySnapshot != "" {
 		if err := r.stampPITRKeySnapshotHold(ctx, v, &fg, keySnapshot); err != nil {
 			switch {
 			case errors.Is(err, errHoldKeySnapshotGone):
 				return r.waitVerification(ctx, v, fmt.Sprintf("%s: archive key snapshot %q is gone; waiting for the archive binding",
-					string(v1alpha1.PITRTokenArchiveBindingNotReady), keySnapshot))
+					string(v1beta1.PITRTokenArchiveBindingNotReady), keySnapshot))
 			case apierrors.IsConflict(err):
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			default:
@@ -319,23 +319,23 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	if refusal, err := r.launchHoldConfirmed(ctx, v); err != nil {
 		return ctrl.Result{}, err
 	} else if refusal != "" {
-		return r.failVerification(ctx, v, v1alpha1.ReasonBackupNotAvailable, refusal)
+		return r.failVerification(ctx, v, v1beta1.ReasonBackupNotAvailable, refusal)
 	}
 	if keySnapshot != "" {
 		if wait, err := r.pitrKeySnapshotHoldConfirmed(ctx, v, keySnapshot); err != nil {
 			return ctrl.Result{}, err
 		} else if wait != "" {
-			return r.waitVerification(ctx, v, string(v1alpha1.PITRTokenArchiveBindingNotReady)+": "+wait)
+			return r.waitVerification(ctx, v, string(v1beta1.PITRTokenArchiveBindingNotReady)+": "+wait)
 		}
 	}
 	if err := r.Create(ctx, built); err != nil {
 		return ctrl.Result{}, fmt.Errorf("create verification job: %w", err)
 	}
-	r.Recorder.Eventf(v, corev1.EventTypeNormal, v1alpha1.EventVerificationStarted,
+	r.Recorder.Eventf(v, corev1.EventTypeNormal, v1beta1.EventVerificationStarted,
 		"created verification Job %s (backup=%s, profile=%s)", built.Name, backup.Name, profile.Name)
 
 	patch := client.MergeFrom(v.DeepCopy())
-	v.Status.Phase = v1alpha1.VerificationPhaseRestoring
+	v.Status.Phase = v1beta1.VerificationPhaseRestoring
 	v.Status.JobName = built.Name
 	v.Status.Message = "running restore Job against ephemeral mysqld"
 	v.Status.ObservedGeneration = v.Generation
@@ -346,15 +346,15 @@ func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Conte
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
-func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) (ctrl.Result, error) {
+func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.Context, v *v1beta1.MysqlBackupVerification, job *batchv1.Job) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	ref, err := verificationJobSource(v, job)
 	var versionErr errVerificationSourceVersion
 	if errors.As(err, &versionErr) {
-		return r.failVerification(ctx, v, v1alpha1.ReasonMetadataVersionUnsupported, err.Error())
+		return r.failVerification(ctx, v, v1beta1.ReasonMetadataVersionUnsupported, err.Error())
 	}
 	if err != nil {
-		return r.failVerification(ctx, v, v1alpha1.ReasonBackupIdentityMismatch, err.Error())
+		return r.failVerification(ctx, v, v1beta1.ReasonBackupIdentityMismatch, err.Error())
 	}
 	if err := r.pinVerificationJobSource(ctx, v, job, ref); err != nil {
 		return ctrl.Result{}, err
@@ -375,7 +375,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	}
 	// Observe the Job. Status translation reuses the backup helper.
 	phase, message := jobPhase(job, "verification")
-	jobFailed := phase == v1alpha1.BackupPhaseFailed
+	jobFailed := phase == v1beta1.BackupPhaseFailed
 	if phase == "" {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
@@ -410,14 +410,14 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		// The pod proves the Job failed before the sanity phase (load or
 		// replay). Without that proof sanityCheck stays unset: an absent
 		// completion sentinel alone may be a query interrupted mid-run.
-		next.SanityCheck = &v1alpha1.SanityCheckResult{Outcome: v1alpha1.SanityCheckOutcomeSkipped}
+		next.SanityCheck = &v1beta1.SanityCheckResult{Outcome: v1beta1.SanityCheckOutcomeSkipped}
 	}
 	// A terminal observation always recomputes the certified result.
 	next.PointInTime = nil
-	if pitr && phase == v1alpha1.BackupPhaseSucceeded {
+	if pitr && phase == v1beta1.BackupPhaseSucceeded {
 		result, err := pitrJobVerdict(pod, job)
 		if err != nil {
-			phase = v1alpha1.BackupPhaseFailed
+			phase = v1beta1.BackupPhaseFailed
 			message = "PITRCoverageInvalid: " + err.Error()
 		} else {
 			next.PointInTime = result
@@ -428,12 +428,12 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 			message = detail
 		}
 	}
-	reason := v1alpha1.ReasonSucceeded
-	if phase == v1alpha1.BackupPhaseSucceeded {
-		next.Phase = v1alpha1.VerificationPhaseSucceeded
+	reason := v1beta1.ReasonSucceeded
+	if phase == v1beta1.BackupPhaseSucceeded {
+		next.Phase = v1beta1.VerificationPhaseSucceeded
 	} else {
-		next.Phase = v1alpha1.VerificationPhaseFailed
-		reason = v1alpha1.ReasonFailed
+		next.Phase = v1beta1.VerificationPhaseFailed
+		reason = v1beta1.ReasonFailed
 		// Attribute the failure to the sanity-check phase when verify.sh
 		// says that's where it stopped. Operators get a distinct reason they
 		// can filter on (SanityCheckFailed vs the generic RestoreFailed)
@@ -441,18 +441,18 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		switch {
 		case pitrFailureReason(message) != "":
 			reason = string(pitrFailureReason(message))
-		case strings.HasPrefix(message, "SanityCheckTimeout"), sentinels.Sanity != nil && sentinels.Sanity.Outcome == v1alpha1.SanityCheckOutcomeTimedOut:
-			reason = v1alpha1.ReasonSanityCheckTimeout
-		case strings.HasPrefix(message, "SanityCheckFailed"), sentinels.Sanity != nil && sentinels.Sanity.Outcome == v1alpha1.SanityCheckOutcomeFailed:
-			reason = v1alpha1.ReasonSanityCheckFailed
+		case strings.HasPrefix(message, "SanityCheckTimeout"), sentinels.Sanity != nil && sentinels.Sanity.Outcome == v1beta1.SanityCheckOutcomeTimedOut:
+			reason = v1beta1.ReasonSanityCheckTimeout
+		case strings.HasPrefix(message, "SanityCheckFailed"), sentinels.Sanity != nil && sentinels.Sanity.Outcome == v1beta1.SanityCheckOutcomeFailed:
+			reason = v1beta1.ReasonSanityCheckFailed
 		}
 	}
 	conditionStatus := metav1.ConditionTrue
-	if phase != v1alpha1.BackupPhaseSucceeded {
+	if phase != v1beta1.BackupPhaseSucceeded {
 		conditionStatus = metav1.ConditionFalse
 	}
 	setCondition(&next.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionVerified,
+		Type:               v1beta1.ConditionVerified,
 		Status:             conditionStatus,
 		ObservedGeneration: v.Generation,
 		LastTransitionTime: completion,
@@ -498,12 +498,12 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	// spec names the group and profile the Job ran for.
 	r.emitTerminalMetrics(v, verificationJobPITRMode(job))
 
-	if next.Phase == v1alpha1.VerificationPhaseSucceeded {
+	if next.Phase == v1beta1.VerificationPhaseSucceeded {
 		emitPointInTimeEvents(r.Recorder, v, next.PointInTime)
-		r.Recorder.Eventf(v, corev1.EventTypeNormal, v1alpha1.EventVerificationSucceeded,
+		r.Recorder.Eventf(v, corev1.EventTypeNormal, v1beta1.EventVerificationSucceeded,
 			"verification %s succeeded: %s", v.Name, message)
 	} else {
-		r.Recorder.Eventf(v, corev1.EventTypeWarning, v1alpha1.EventVerificationFailed,
+		r.Recorder.Eventf(v, corev1.EventTypeWarning, v1beta1.EventVerificationFailed,
 			"verification %s failed: %s", v.Name, message)
 	}
 
@@ -529,7 +529,7 @@ func (r *MysqlBackupVerificationReconciler) SetupWithManager(mgr ctrl.Manager) e
 	}
 	r.graceClock.countFromFirstUse()
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.MysqlBackupVerification{}).
+		For(&v1beta1.MysqlBackupVerification{}).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.Secret{}).
 		Complete(r)
@@ -538,16 +538,16 @@ func (r *MysqlBackupVerificationReconciler) SetupWithManager(mgr ctrl.Manager) e
 // resolveBackup returns the MysqlBackup targeted by this verification.
 // If spec.backupRef is set, looks it up; otherwise picks the latest
 // Succeeded MysqlBackup for the (group, profile) pair.
-func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (*v1alpha1.MysqlBackup, error) {
+func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v *v1beta1.MysqlBackupVerification) (*v1beta1.MysqlBackup, error) {
 	if v.Spec.BackupRef != nil && v.Spec.BackupRef.Name != "" {
-		var backup v1alpha1.MysqlBackup
+		var backup v1beta1.MysqlBackup
 		if err := r.Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: v.Spec.BackupRef.Name}, &backup); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil, fmt.Errorf("referenced MysqlBackup %q not found", v.Spec.BackupRef.Name)
 			}
 			return nil, fmt.Errorf("get referenced backup: %w", err)
 		}
-		if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+		if backup.Status.Phase != v1beta1.BackupPhaseSucceeded {
 			return nil, fmt.Errorf("referenced MysqlBackup %q is not Succeeded (phase=%q)", backup.Name, backup.Status.Phase)
 		}
 		if !backup.DeletionTimestamp.IsZero() {
@@ -562,20 +562,20 @@ func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v
 	}
 
 	// Latest Succeeded for (group, profile).
-	var list v1alpha1.MysqlBackupList
+	var list v1beta1.MysqlBackupList
 	if err := r.List(ctx, &list,
 		client.InNamespace(v.Namespace),
 		client.MatchingLabels{
-			v1alpha1.FailoverGroupLabel: v.Spec.FailoverGroupRef.Name,
-			v1alpha1.BackupProfileLabel: v.Spec.ProfileName,
+			v1beta1.FailoverGroupLabel: v.Spec.FailoverGroupRef.Name,
+			v1beta1.BackupProfileLabel: v.Spec.ProfileName,
 		},
 	); err != nil {
 		return nil, fmt.Errorf("list backups: %w", err)
 	}
-	var best *v1alpha1.MysqlBackup
+	var best *v1beta1.MysqlBackup
 	for i := range list.Items {
 		b := &list.Items[i]
-		if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || !b.DeletionTimestamp.IsZero() {
+		if b.Status.Phase != v1beta1.BackupPhaseSucceeded || !b.DeletionTimestamp.IsZero() {
 			continue
 		}
 		if b.Status.CompletionTime == nil {
@@ -596,12 +596,12 @@ func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v
 // MysqlBackupVerification for the same (group, profile) pair that was
 // created strictly earlier than v. Empty result means nothing is
 // blocking us.
-func (r *MysqlBackupVerificationReconciler) findBlockingVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (string, error) {
+func (r *MysqlBackupVerificationReconciler) findBlockingVerification(ctx context.Context, v *v1beta1.MysqlBackupVerification) (string, error) {
 	// List in-namespace and filter by spec rather than matching on
 	// labels — ad-hoc CRs created via `kubectl create -f` without
 	// labels, and the narrow window before a brand-new CR has been
 	// label-stamped, would otherwise bypass single-flight entirely.
-	var list v1alpha1.MysqlBackupVerificationList
+	var list v1beta1.MysqlBackupVerificationList
 	if err := r.List(ctx, &list, client.InNamespace(v.Namespace)); err != nil {
 		return "", err
 	}
@@ -629,7 +629,7 @@ func (r *MysqlBackupVerificationReconciler) findBlockingVerification(ctx context
 
 // maybeReleaseHold releases a terminal verification's hold once its pods
 // have stopped, and returns how soon to look again while they have not.
-func (r *MysqlBackupVerificationReconciler) maybeReleaseHold(ctx context.Context, v *v1alpha1.MysqlBackupVerification) time.Duration {
+func (r *MysqlBackupVerificationReconciler) maybeReleaseHold(ctx context.Context, v *v1beta1.MysqlBackupVerification) time.Duration {
 	done, err := r.releaseVerificationHold(ctx, v)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "release verification hold")
@@ -649,8 +649,8 @@ func shorterRequeue(a, b time.Duration) time.Duration {
 	return a
 }
 
-func verificationTerminal(p v1alpha1.VerificationPhase) bool {
-	return p == v1alpha1.VerificationPhaseSucceeded || p == v1alpha1.VerificationPhaseFailed
+func verificationTerminal(p v1beta1.VerificationPhase) bool {
+	return p == v1beta1.VerificationPhaseSucceeded || p == v1beta1.VerificationPhaseFailed
 }
 
 // ensureVerificationCredsSecret creates the derived Secret used by the
@@ -662,7 +662,7 @@ func verificationTerminal(p v1alpha1.VerificationPhase) bool {
 // for cloud-storage credential flow-through in later phases. We
 // provision it here for parity with backup/restore so future phases
 // don't reintroduce the plumbing.
-func (r *MysqlBackupVerificationReconciler) ensureVerificationCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, v *v1alpha1.MysqlBackupVerification, secretName string) error {
+func (r *MysqlBackupVerificationReconciler) ensureVerificationCredsSecret(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, v *v1beta1.MysqlBackupVerification, secretName string) error {
 	var user, password string
 
 	backupSecretName := fg.Spec.EffectiveBackupSecretName()
@@ -686,8 +686,8 @@ func (r *MysqlBackupVerificationReconciler) ensureVerificationCredsSecret(ctx co
 		if derived.Labels == nil {
 			derived.Labels = map[string]string{}
 		}
-		derived.Labels[v1alpha1.FailoverGroupLabel] = fg.Name
-		derived.Labels[v1alpha1.MysqlBackupVerificationLabel] = v.Name
+		derived.Labels[v1beta1.FailoverGroupLabel] = fg.Name
+		derived.Labels[v1beta1.MysqlBackupVerificationLabel] = v.Name
 		derived.Labels[labelManagedBy] = managerName
 		derived.Type = corev1.SecretTypeOpaque
 		derived.Data = map[string][]byte{
@@ -701,16 +701,16 @@ func (r *MysqlBackupVerificationReconciler) ensureVerificationCredsSecret(ctx co
 
 // setVerificationReady sets Ready from Verified: a copy of it once the
 // verification has a verdict, False/InProgress before.
-func setVerificationReady(st *v1alpha1.MysqlBackupVerificationStatus, generation int64) {
+func setVerificationReady(st *v1beta1.MysqlBackupVerificationStatus, generation int64) {
 	c := metav1.Condition{
-		Type:               v1alpha1.ConditionReady,
+		Type:               v1beta1.ConditionReady,
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: generation,
 		LastTransitionTime: metav1.Now(),
-		Reason:             v1alpha1.ReasonInProgress,
+		Reason:             v1beta1.ReasonInProgress,
 		Message:            "the verification has not finished",
 	}
-	if verified := apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionVerified); verified != nil {
+	if verified := apimeta.FindStatusCondition(st.Conditions, v1beta1.ConditionVerified); verified != nil {
 		c.Status, c.Reason, c.Message, c.LastTransitionTime = verified.Status, verified.Reason, verified.Message, verified.LastTransitionTime
 	}
 	setCondition(&st.Conditions, c)
@@ -718,10 +718,10 @@ func setVerificationReady(st *v1alpha1.MysqlBackupVerificationStatus, generation
 
 // failVerification transitions a verification to Failed with the given
 // reason. Mirrors MysqlBackupReconciler.failBackup.
-func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification, reason, message string) (ctrl.Result, error) {
+func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context, v *v1beta1.MysqlBackupVerification, reason, message string) (ctrl.Result, error) {
 	now := metav1.Now()
 	patch := client.MergeFrom(v.DeepCopy())
-	v.Status.Phase = v1alpha1.VerificationPhaseFailed
+	v.Status.Phase = v1beta1.VerificationPhaseFailed
 	v.Status.CompletionTime = &now
 	if v.Status.StartTime != nil {
 		v.Status.DurationSeconds = int64(now.Sub(v.Status.StartTime.Time).Seconds())
@@ -729,7 +729,7 @@ func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context
 	v.Status.Message = message
 	v.Status.ObservedGeneration = v.Generation
 	setCondition(&v.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionVerified,
+		Type:               v1beta1.ConditionVerified,
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: v.Generation,
 		LastTransitionTime: now,
@@ -761,18 +761,18 @@ func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context
 // ctrl.Result{RequeueAfter}, otherwise a successful verification with
 // a non-zero TTL would never fire cleanup after the controller cache
 // quiesces.
-func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (time.Duration, error) {
+func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx context.Context, v *v1beta1.MysqlBackupVerification) (time.Duration, error) {
 	keepOnFailure := true
 	if v.Spec.KeepOnFailure != nil {
 		keepOnFailure = *v.Spec.KeepOnFailure
 	}
 	switch v.Status.Phase {
-	case v1alpha1.VerificationPhaseSucceeded:
+	case v1beta1.VerificationPhaseSucceeded:
 		if v.Spec.TTLSecondsAfterFinished == nil {
 			return 0, nil
 		}
 		return r.cleanupEphemeral(ctx, v, false)
-	case v1alpha1.VerificationPhaseFailed:
+	case v1beta1.VerificationPhaseFailed:
 		if keepOnFailure {
 			return 0, nil
 		}
@@ -786,7 +786,7 @@ func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx contex
 // TTL gate. Returns (remainingTTL, nil) when the TTL has not elapsed
 // and cleanup is deferred; (0, nil) after a successful pass; and
 // (0, err) on hard failure.
-func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context, v *v1alpha1.MysqlBackupVerification, force bool) (time.Duration, error) {
+func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context, v *v1beta1.MysqlBackupVerification, force bool) (time.Duration, error) {
 	if !force {
 		var ttl time.Duration
 		if v.Spec.TTLSecondsAfterFinished != nil {
@@ -830,15 +830,15 @@ func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context
 	// Best-effort status patch recording cleanup. Separate from the
 	// main terminal status so an error here doesn't undo the
 	// Succeeded/Failed transition.
-	if !hasCondition(v.Status.Conditions, v1alpha1.ConditionResourcesCleanedUp) {
+	if !hasCondition(v.Status.Conditions, v1beta1.ConditionResourcesCleanedUp) {
 		now := metav1.Now()
 		patch := client.MergeFrom(v.DeepCopy())
 		setCondition(&v.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionResourcesCleanedUp,
+			Type:               v1beta1.ConditionResourcesCleanedUp,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: v.Generation,
 			LastTransitionTime: now,
-			Reason:             v1alpha1.ReasonCleanedUp,
+			Reason:             v1beta1.ReasonCleanedUp,
 			Message:            "ephemeral resources deleted",
 		})
 		if err := r.Status().Patch(ctx, v, patch); err != nil && !apierrors.IsNotFound(err) {
@@ -878,11 +878,11 @@ func verificationJobPITRMode(job *batchv1.Job) string {
 	return ""
 }
 
-func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.MysqlBackupVerification, pitrMode string) {
+func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1beta1.MysqlBackupVerification, pitrMode string) {
 	group := v.Spec.FailoverGroupRef.Name
 	profile := v.Spec.ProfileName
 	result := "failure"
-	if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded {
+	if v.Status.Phase == v1beta1.VerificationPhaseSucceeded {
 		result = "success"
 	}
 	bmetrics.BackupVerificationRunsTotal.WithLabelValues(group, profile, result).Inc()
@@ -895,7 +895,7 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 		bmetrics.BackupVerificationLastAttemptTimestamp.WithLabelValues(group, profile).
 			Set(float64(end.Unix()))
 	}
-	if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded && !end.IsZero() {
+	if v.Status.Phase == v1beta1.VerificationPhaseSucceeded && !end.IsZero() {
 		bmetrics.BackupVerifiedTimestamp.WithLabelValues(group, profile).
 			Set(float64(end.Unix()))
 	}
@@ -905,7 +905,7 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 	}
 	// Replay lag measures archive freshness, so only a latest drill sets
 	// it; a timestamp drill's newest event is its historical target.
-	if pitrMode == "latest" && v.Status.Phase == v1alpha1.VerificationPhaseSucceeded &&
+	if pitrMode == "latest" && v.Status.Phase == v1beta1.VerificationPhaseSucceeded &&
 		v.Status.PointInTime != nil &&
 		v.Status.PointInTime.NewestReplayedCommitTime != nil &&
 		!end.IsZero() {
@@ -961,7 +961,7 @@ func sanityPhaseNotReached(pod *corev1.Pod) bool {
 // the outcome, and a nil Sanity alone never proves the query did not run
 // (see sanityPhaseNotReached).
 type verifySentinels struct {
-	Sanity *v1alpha1.SanityCheckResult
+	Sanity *v1beta1.SanityCheckResult
 }
 
 // tailVerificationSentinels reads the verification Job pod's logs and
@@ -969,7 +969,7 @@ type verifySentinels struct {
 // structured status fragment. (verify.sh no longer prints
 // BLOODRAVEN_VERIFY_REPLAY_COMPLETE; replay detail comes from the PITR
 // termination verdict.) A read failure leaves Sanity nil.
-func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) verifySentinels {
+func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx context.Context, v *v1beta1.MysqlBackupVerification, job *batchv1.Job) verifySentinels {
 	out := verifySentinels{}
 	if r.Clientset == nil {
 		return out
@@ -977,7 +977,7 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
-		client.MatchingLabels{v1alpha1.MysqlBackupVerificationLabel: v.Name},
+		client.MatchingLabels{v1beta1.MysqlBackupVerificationLabel: v.Name},
 	); err != nil {
 		return out
 	}
@@ -1013,7 +1013,7 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 	// TailLines bounds the read; long GTID lines need a larger buffer.
 	sc := bufio.NewScanner(stream)
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	var sanity *v1alpha1.SanityCheckResult
+	var sanity *v1beta1.SanityCheckResult
 	for sc.Scan() {
 		if parsed, ok := parseSanitySentinel(sc.Text()); ok {
 			sanity = parsed
@@ -1031,12 +1031,12 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 // parseSanitySentinel decodes version-2 sanity values and legacy errors.
 // verify.sh prints the sentinel only after the query ran: error=timeout is
 // a timeout, any other error a failed query or a result below minResult.
-func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
+func parseSanitySentinel(line string) (*v1beta1.SanityCheckResult, bool) {
 	tokens, ok := backupmeta.ParseTokens(line, "BLOODRAVEN_VERIFY_SANITY_COMPLETE")
 	if !ok {
 		return nil, false
 	}
-	res := &v1alpha1.SanityCheckResult{Outcome: v1alpha1.SanityCheckOutcomePassed}
+	res := &v1beta1.SanityCheckResult{Outcome: v1beta1.SanityCheckOutcomePassed}
 	if n, err := strconv.ParseInt(tokens["durationMs"], 10, 64); err == nil {
 		res.DurationMilliseconds = &n
 	}
@@ -1049,9 +1049,9 @@ func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
 	}
 	switch {
 	case strings.EqualFold(res.Error, "timeout"):
-		res.Outcome = v1alpha1.SanityCheckOutcomeTimedOut
+		res.Outcome = v1beta1.SanityCheckOutcomeTimedOut
 	case res.Error != "":
-		res.Outcome = v1alpha1.SanityCheckOutcomeFailed
+		res.Outcome = v1beta1.SanityCheckOutcomeFailed
 	}
 	return res, true
 }
@@ -1062,8 +1062,8 @@ func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
 // find the last few failures to debug. A verification still inside its
 // terminalRetentionGrace is kept whatever the counts say, and the
 // returned duration says when the first such grace ends (0 when none).
-func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackupVerification) (time.Duration, error) {
-	var list v1alpha1.MysqlBackupVerificationList
+func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, trigger *v1beta1.MysqlBackupVerification) (time.Duration, error) {
+	var list v1beta1.MysqlBackupVerificationList
 	if err := r.List(ctx, &list, client.InNamespace(trigger.Namespace)); err != nil {
 		return 0, err
 	}
@@ -1082,19 +1082,19 @@ func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, 
 		filtered = append(filtered, it)
 	}
 
-	var profile *v1alpha1.BackupProfile
-	var fg v1alpha1.MysqlFailoverGroup
+	var profile *v1beta1.BackupProfile
+	var fg v1beta1.MysqlFailoverGroup
 	if err := r.Get(ctx, types.NamespacedName{Namespace: trigger.Namespace, Name: trigger.Spec.FailoverGroupRef.Name}, &fg); err == nil {
 		profile = findProfile(&fg, trigger.Spec.ProfileName)
 	}
 	keepLast, keepFailed := resolveVerificationRetention(profile)
 
 	now := time.Now()
-	succeededRequeue, err := r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseSucceeded, int(keepLast), now)
+	succeededRequeue, err := r.pruneVerificationsByPhase(ctx, filtered, v1beta1.VerificationPhaseSucceeded, int(keepLast), now)
 	if err != nil {
 		return 0, err
 	}
-	failedRequeue, err := r.pruneVerificationsByPhase(ctx, filtered, v1alpha1.VerificationPhaseFailed, int(keepFailed), now)
+	failedRequeue, err := r.pruneVerificationsByPhase(ctx, filtered, v1beta1.VerificationPhaseFailed, int(keepFailed), now)
 	return shorterRequeue(succeededRequeue, failedRequeue), err
 }
 
@@ -1102,7 +1102,7 @@ func (r *MysqlBackupVerificationReconciler) pruneRetention(ctx context.Context, 
 // keepFailed) counts for the verifications of profile: the profile's
 // verification.retention, with the defaults for a missing profile,
 // verification block or field. An explicit 0 is kept: it means keep none.
-func resolveVerificationRetention(profile *v1alpha1.BackupProfile) (keepLast, keepFailed int32) {
+func resolveVerificationRetention(profile *v1beta1.BackupProfile) (keepLast, keepFailed int32) {
 	keepLast, keepFailed = defaultVerificationKeepLast, defaultVerificationKeepFailed
 	if profile == nil || profile.Verification == nil {
 		return keepLast, keepFailed
@@ -1122,9 +1122,9 @@ func resolveVerificationRetention(profile *v1alpha1.BackupProfile) (keepLast, ke
 // are passed, so an in-flight CR is never swept; entries without a
 // CompletionTime sort last. An entry still within terminalRetentionGrace
 // is kept, and the returned duration says when the first such grace ends.
-func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx context.Context, all []v1alpha1.MysqlBackupVerification, phase v1alpha1.VerificationPhase, keep int, now time.Time) (time.Duration, error) {
+func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx context.Context, all []v1beta1.MysqlBackupVerification, phase v1beta1.VerificationPhase, keep int, now time.Time) (time.Duration, error) {
 	keep = max(keep, 0)
-	bucket := make([]v1alpha1.MysqlBackupVerification, 0, len(all))
+	bucket := make([]v1beta1.MysqlBackupVerification, 0, len(all))
 	for _, it := range all {
 		if it.Status.Phase == phase {
 			bucket = append(bucket, it)
@@ -1155,7 +1155,7 @@ func (r *MysqlBackupVerificationReconciler) pruneVerificationsByPhase(ctx contex
 // waitVerification records why a verification has not launched yet and
 // requeues after pitrReadBindingRequeue (the read binding is not
 // ready, Δ22). The status write is skipped when the message is unchanged.
-func (r *MysqlBackupVerificationReconciler) waitVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification, message string) (ctrl.Result, error) {
+func (r *MysqlBackupVerificationReconciler) waitVerification(ctx context.Context, v *v1beta1.MysqlBackupVerification, message string) (ctrl.Result, error) {
 	if v.Status.Message != message {
 		patch := client.MergeFrom(v.DeepCopy())
 		v.Status.Message = message
@@ -1171,7 +1171,7 @@ func (r *MysqlBackupVerificationReconciler) waitVerification(ctx context.Context
 // verificationDumpKeyMissing explains why the dump-key Secret an encrypted
 // backup recorded (verificationDumpKey) cannot be mounted, or "" (also for
 // a plaintext backup). The read is uncached.
-func (r *MysqlBackupVerificationReconciler) verificationDumpKeyMissing(ctx context.Context, backup *v1alpha1.MysqlBackup) (string, error) {
+func (r *MysqlBackupVerificationReconciler) verificationDumpKeyMissing(ctx context.Context, backup *v1beta1.MysqlBackup) (string, error) {
 	ref, err := verificationDumpKey(backup)
 	if err != nil || ref == nil {
 		return "", nil // buildVerificationJob already refused a missing record

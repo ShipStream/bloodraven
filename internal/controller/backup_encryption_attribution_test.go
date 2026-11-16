@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,7 +44,7 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 				fg = fgWithEncryptedBackup()
 			}
 			fg.Status.ActiveSite = "iad"
-			fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
+			fg.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateWritable}}
 			mb := backupCR("attribution", fg.Name, "nightly-s3")
 			mb.UID = types.UID("backup-attribution")
 			r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
@@ -54,7 +54,7 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 					SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 						// The initial Ready=False/Pending write lands; the
 						// status write after the Job's create is lost.
-						if b, ok := obj.(*v1alpha1.MysqlBackup); ok && sub == "status" && b.Status.JobName != "" {
+						if b, ok := obj.(*v1beta1.MysqlBackup); ok && sub == "status" && b.Status.JobName != "" {
 							return fmt.Errorf("injected launch status failure")
 						}
 						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
@@ -113,7 +113,7 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 				t.Fatal(err)
 			}
 			reconcileUntilStable(t, r, mb.Name)
-			var got v1alpha1.MysqlBackup
+			var got v1beta1.MysqlBackup
 			if err := c.Get(ctx, key, &got); err != nil {
 				t.Fatal(err)
 			}
@@ -121,11 +121,11 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 			if tc.encrypted {
 				wantAlgorithm = "AES-256-GCM"
 			}
-			wantMode := v1alpha1.EncryptionModeNone
+			wantMode := v1beta1.EncryptionModeNone
 			if tc.encrypted {
-				wantMode = v1alpha1.EncryptionModePassphrase
+				wantMode = v1beta1.EncryptionModePassphrase
 			}
-			if got.Status.Phase != v1alpha1.BackupPhaseSucceeded || got.Status.Encryption == nil ||
+			if got.Status.Phase != v1beta1.BackupPhaseSucceeded || got.Status.Encryption == nil ||
 				got.Status.Encryption.Mode != wantMode || string(got.Status.Encryption.Algorithm) != wantAlgorithm {
 				t.Fatalf("phase=%s encryption=%+v; want Succeeded/%s/%q", got.Status.Phase, got.Status.Encryption, wantMode, wantAlgorithm)
 			}
@@ -144,7 +144,7 @@ func TestMysqlBackupReconciler_EncryptionFollowsLaunchedJob(t *testing.T) {
 				if err := c.Status().Update(ctx, &got); err != nil {
 					t.Fatal(err)
 				}
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: mb.Name}}}
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: mb.Name}}}
 				rr, _ := newReconciler(fg, &got)
 				restore, err := rr.buildRestoreJob(ctx, fg, "iad", "creds")
 				if err != nil {
@@ -166,14 +166,14 @@ func TestMysqlBackupReconciler_RepairsTerminalEncryptionAttribution(t *testing.T
 	mb := backupCR("misattributed", fg.Name, "nightly-s3")
 	mb.UID = types.UID("misattributed-uid")
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateWritable}}
 	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, mb.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
 		t.Fatal(err)
 	}
-	mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
-	mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	mb.Status.Phase = v1beta1.BackupPhaseSucceeded
+	mb.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
 	setTestArtifactLocation(mb, "lion/misattributed")
 	if err := c.Status().Update(ctx, mb); err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestMysqlBackupReconciler_RepairsTerminalEncryptionAttribution(t *testing.T
 	if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
 		t.Fatal(err)
 	}
-	original.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModeNone}
+	original.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModeNone}
 	if !reflect.DeepEqual(original, &mb.Status) {
 		t.Fatalf("unexpected repaired status: got %+v want %+v", mb.Status, *original)
 	}
@@ -217,12 +217,12 @@ func TestBackupJobEncryption(t *testing.T) {
 		{name: "unrelated-container", container: backupJobContainerName, algorithm: "AES-256-GCM"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{v1alpha1.BackupEncryptedLabel: tc.label}}}
+			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{v1beta1.BackupEncryptedLabel: tc.label}}}
 			job.Spec.Template.Spec.Containers = []corev1.Container{{Name: tc.container, Env: []corev1.EnvVar{{Name: "BLOODRAVEN_ENCRYPTION_ALGORITHM", Value: tc.algorithm}}}}
 			got := backupJobEncryption(job)
-			wantMode := v1alpha1.EncryptionModeNone
+			wantMode := v1beta1.EncryptionModeNone
 			if tc.wantEncrypted {
-				wantMode = v1alpha1.EncryptionModePassphrase
+				wantMode = v1beta1.EncryptionModePassphrase
 			}
 			if got == nil || got.Mode != wantMode || string(got.Algorithm) != tc.wantAlgorithm {
 				t.Fatalf("got %+v, want %s/%q", got, wantMode, tc.wantAlgorithm)
@@ -236,19 +236,19 @@ func TestMysqlBackupReconciler_PreservesAttributionWithoutOwnedJob(t *testing.T)
 		t.Run(fmt.Sprintf("foreign-job-%v", foreignJob), func(t *testing.T) {
 			mb := backupCR("retained", "lion", "nightly-s3")
 			mb.UID = types.UID("retained-uid")
-			mb.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
-			mb.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, Encryption: &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}}
+			mb.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
+			mb.Status = v1beta1.MysqlBackupStatus{Phase: v1beta1.BackupPhaseSucceeded, Encryption: &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}}
 			objects := []client.Object{mb}
 			if foreignJob {
 				controlled := true
 				objects = append(objects, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 					Name: backupJobName(mb.Name), Namespace: mb.Namespace,
-					OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "MysqlBackup", Name: mb.Name, UID: types.UID("old-backup-uid"), Controller: &controlled}},
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: v1beta1.GroupVersion.String(), Kind: "MysqlBackup", Name: mb.Name, UID: types.UID("old-backup-uid"), Controller: &controlled}},
 				}})
 			}
 			r, c := newBackupReconciler(t, objects...)
 			reconcileUntilStable(t, r, mb.Name)
-			var got v1alpha1.MysqlBackup
+			var got v1beta1.MysqlBackup
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), &got); err != nil {
 				t.Fatal(err)
 			}

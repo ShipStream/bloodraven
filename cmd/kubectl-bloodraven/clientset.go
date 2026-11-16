@@ -13,7 +13,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // commonFlags is the bag of kubeconfig/namespace/output flags shared by
@@ -94,7 +94,7 @@ func (cf *commonFlags) newClient() (client.Client, string, error) {
 	}
 	scheme := k8sruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(v1beta1.AddToScheme(scheme))
 	cl, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, "", fmt.Errorf("build client: %w", err)

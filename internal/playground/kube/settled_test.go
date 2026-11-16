@@ -7,14 +7,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestSiteDeploymentProblem(t *testing.T) {
 	mem := func(v string) corev1.ResourceRequirements {
 		return corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(v)}}
 	}
-	site := &v1alpha1.SiteSpec{Name: "iad", Resources: mem("384Mi")}
+	site := &v1beta1.SiteSpec{Name: "iad", Resources: mem("384Mi")}
 	deployment := func(res corev1.ResourceRequirements, gen, observed int64, updated, replicas, available int32) *appsv1.Deployment {
 		d := &appsv1.Deployment{}
 		d.Generation = gen

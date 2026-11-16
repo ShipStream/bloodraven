@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -28,13 +28,13 @@ const (
 // s20PlaygroundReadOnly is the read-only taint key of the group under
 // test, scoped to the run's namespace and group (--namespace, --fg).
 func s20PlaygroundReadOnly(env *runner.Env) string {
-	return v1alpha1.ReadOnlyTaintKey(env.Namespace, env.FG)
+	return v1beta1.ReadOnlyTaintKey(env.Namespace, env.FG)
 }
 
 // s20InventoryReadOnly is the key the operator would use for the
 // unrelated inventory group in the same namespace.
 func s20InventoryReadOnly(env *runner.Env) string {
-	return v1alpha1.ReadOnlyTaintKey(env.Namespace, s20InventoryGroup)
+	return v1beta1.ReadOnlyTaintKey(env.Namespace, s20InventoryGroup)
 }
 
 // scenario20SharedNodeSelectorIsolation locks down the per-failover-
@@ -164,7 +164,7 @@ func s20ObserveActiveSiteFlip() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite changes from %s", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite)
 					return mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original, msg, nil
 				},

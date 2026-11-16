@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 )
@@ -26,8 +26,8 @@ func TestPITRArchiveCheckLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := PITRArchiveCheckDestinationDigest(odd.String())
-	src := v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "orders", UID: pbtUID}
-	oddSrc := v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "orders", UID: "a b%=c"}
+	src := v1beta1.PITRArchiveSource{Namespace: "ns", Name: "orders", UID: pbtUID}
+	oddSrc := v1beta1.PITRArchiveSource{Namespace: "ns", Name: "orders", UID: "a b%=c"}
 	id := pitrarchive.CreateArchiveID(pbtUID, odd)
 	for _, r := range []PITRArchiveCheckResult{
 		{State: PITRArchiveCheckStateAbsent, DestinationDigest: digest},
@@ -89,7 +89,7 @@ func TestPITRArchiveCheckLineMaximumSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := v1alpha1.PITRArchiveSource{
+	src := v1beta1.PITRArchiveSource{
 		Namespace: strings.Repeat("n", 63),
 		Name:      strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61),
 		UID:       types.UID(strings.Repeat("%", pitrarchive.MaxSourceUIDLength)),
@@ -125,7 +125,7 @@ func TestPITRCheckJobDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := &v1alpha1.PITRArchiveBinding{ID: pitrBindingID(d), Destination: d.String(), Encryption: noneEnc}
+	entry := &v1beta1.PITRArchiveBinding{ID: pitrBindingID(d), Destination: d.String(), Encryption: noneEnc}
 	job, err := buildPITRArchiveCheckJob(fg, entry, &pitrBindingTarget{dest: d, write: true, profile: &p}, "")
 	if err != nil {
 		t.Fatal(err)
@@ -150,13 +150,13 @@ func TestBuildPITRArchiveCheckJob(t *testing.T) {
 	defer func() { operatorImageFromEnv = prev }()
 
 	s3 := pbtProfile("a", "p1", "pass-a")
-	pvc := v1alpha1.BackupProfile{Name: "pv", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "archive", SubPath: "orders"}}}
+	pvc := v1beta1.BackupProfile{Name: "pv", Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{ClaimName: "archive", SubPath: "orders"}}}
 	fg := pbtGroup(s3, pvc)
 	fg.Spec.Backup.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "pull"}}
 	for _, tc := range []struct {
-		profile v1alpha1.BackupProfile
+		profile v1beta1.BackupProfile
 		write   bool
-		enc     v1alpha1.PITRArchiveBindingEncryption
+		enc     v1beta1.PITRArchiveBindingEncryption
 	}{
 		{profile: s3, write: true, enc: passEnc("mysql-orders-pitr-key-0123456789")},
 		{profile: pvc, write: false, enc: noneEnc},
@@ -166,7 +166,7 @@ func TestBuildPITRArchiveCheckJob(t *testing.T) {
 			t.Fatal(err)
 		}
 		target := &pitrBindingTarget{dest: d, write: tc.write, profile: &tc.profile}
-		entry := &v1alpha1.PITRArchiveBinding{ID: pitrBindingID(d), Destination: d.String(), Encryption: tc.enc}
+		entry := &v1beta1.PITRArchiveBinding{ID: pitrBindingID(d), Destination: d.String(), Encryption: tc.enc}
 		job, err := buildPITRArchiveCheckJob(fg, entry, target, tc.enc.KeySecretName)
 		if err != nil {
 			t.Fatal(err)
@@ -179,8 +179,8 @@ func TestBuildPITRArchiveCheckJob(t *testing.T) {
 			t.Fatal("check Job is not controlled by the group")
 		}
 		l := job.Labels
-		if l[labelAppName] != appNameBackupJob || l[v1alpha1.ResourceLabel] != resourcePITRArchiveCheck || l[v1alpha1.PITRBindingIDLabel] != entry.ID ||
-			l[v1alpha1.FailoverGroupLabel] != pbtName || l[v1alpha1.PITRKeySecretLabel] != tc.enc.KeySecretName {
+		if l[labelAppName] != appNameBackupJob || l[v1beta1.ResourceLabel] != resourcePITRArchiveCheck || l[v1beta1.PITRBindingIDLabel] != entry.ID ||
+			l[v1beta1.FailoverGroupLabel] != pbtName || l[v1beta1.PITRKeySecretLabel] != tc.enc.KeySecretName {
 			t.Fatalf("labels %v", l)
 		}
 		spec := job.Spec
@@ -237,7 +237,7 @@ func TestBuildPITRArchiveCheckJob(t *testing.T) {
 	// A candidate that disagrees with the identity under test is a bug.
 	d, _ := pitrprofile.DestinationFor(fg, &s3)
 	target := &pitrBindingTarget{dest: d, write: true, profile: &s3}
-	entry := &v1alpha1.PITRArchiveBinding{ID: pitrBindingID(d), Destination: d.String(), Encryption: passEnc("x")}
+	entry := &v1beta1.PITRArchiveBinding{ID: pitrBindingID(d), Destination: d.String(), Encryption: passEnc("x")}
 	if _, err := buildPITRArchiveCheckJob(fg, entry, target, ""); err == nil {
 		t.Fatal("built a plaintext check for a Passphrase identity")
 	}
@@ -262,7 +262,7 @@ func TestObservePITRArchiveCheck(t *testing.T) {
 		return j
 	}
 	observe := func(j *batchv1.Job, uid string) pitrCheckOutcome {
-		entry := &v1alpha1.PITRArchiveBinding{Check: &v1alpha1.PITRArchiveBindingCheck{JobName: j.Name, JobUID: j.UID}}
+		entry := &v1beta1.PITRArchiveBinding{Check: &v1beta1.PITRArchiveBindingCheck{JobName: j.Name, JobUID: j.UID}}
 		if uid != "" {
 			entry.Check.JobUID = "other"
 		}

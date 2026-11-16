@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // holdPass keeps a standing hold in force: the slot in hold mode, new
@@ -34,7 +34,7 @@ import (
 // run of another request beside the hold is ended NotStarted here; a run
 // of another request that owns sites (not produced by this engine) is
 // driven through claimPass, whose facade calls the hold refuses.
-func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	hold *PlannedHold) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if hold.RunID != "" {
@@ -51,22 +51,22 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 	msg := plannedHoldRefusal(hold)
 	var retryConsume time.Duration
 	if pf != nil && pf.RunID != hold.RunID && plannedFailoverPendingPhase(pf.Phase) && !plannedFailoverTerminal(pf) {
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonManualRecoveryPending, msg, ReleaseTerminal,
-			pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred)
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonManualRecoveryPending, msg, ReleaseTerminal,
+			pf.Phase == v1beta1.PlannedFailoverPhaseDeferred)
 	}
-	if raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if raw, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; ok {
 		_, keepBlock := plannedFencedSourceAwaitingHeal(fg, e.clk.Now())
 		if pf == nil || (plannedFailoverTerminal(pf) && pf.RunID != hold.RunID && !keepBlock) {
 			req, perr := parsePlannedFailoverAnnotation(raw)
 			if perr == nil && req.Site != "" {
-				next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseFailed, msg)
-				next.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted,
-					Reason: v1alpha1.PlannedFailoverReasonManualRecoveryPending, CompletionTime: metav1.NewTime(e.clk.Now())}
+				next := e.newRunBlock(fg, req, v1beta1.PlannedFailoverPhaseFailed, msg)
+				next.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeNotStarted,
+					Reason: v1beta1.PlannedFailoverReasonManualRecoveryPending, CompletionTime: metav1.NewTime(e.clk.Now())}
 				out, _, _ := e.commit(ctx, fg, false, freshRunBuild(next))
 				if out != WriteCommitted {
 					return requeueFor(out), nil
 				}
-				e.reportTerminal(nn, fg, next, v1alpha1.EventPlannedFailoverRejected)
+				e.reportTerminal(nn, fg, next, v1beta1.EventPlannedFailoverRejected)
 				e.consumeRequest(ctx, fg, "held")
 				return plannedRequeueNext, nil
 			}
@@ -91,9 +91,9 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 		g.holdPendingAt = now
 	} else if now.Sub(g.holdPendingAt) >= plannedFailoverHoldPendingInterval {
 		g.holdPendingAt = now
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldPersisted,
+		e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverHoldPersisted,
 			fmt.Sprintf("automatic failover is still held by planned failover %s (%s); resolve the split brain by hand, then annotate %s=%s",
-				hold.RunID, hold.Reason, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, hold.RunID))
+				hold.RunID, hold.Reason, v1beta1.AcknowledgePlannedFailoverHoldAnnotation, hold.RunID))
 	}
 	next := max(time.Second, plannedFailoverHoldPendingInterval-now.Sub(g.holdPendingAt))
 	if retryConsume > 0 {
@@ -105,14 +105,14 @@ func (e *PlannedFailoverEngine) holdPass(ctx context.Context, fg *v1alpha1.Mysql
 // plannedHoldRefusal is the message a request gets while hold stands.
 func plannedHoldRefusal(hold *PlannedHold) string {
 	return fmt.Sprintf("planned failover refused: automation is held by planned failover %s (%s); resolve it, then annotate %s=%s",
-		hold.RunID, hold.Reason, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, hold.RunID)
+		hold.RunID, hold.Reason, v1beta1.AcknowledgePlannedFailoverHoldAnnotation, hold.RunID)
 }
 
 // refuseHeldRequest refuses the request annotation with an Event only,
 // keeping the hold run's record, and consumes it. It returns
 // consumeRequest's requeue (non-zero while the annotation is still there).
-func (e *PlannedFailoverEngine) refuseHeldRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, hold *PlannedHold) time.Duration {
-	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+func (e *PlannedFailoverEngine) refuseHeldRequest(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, hold *PlannedHold) time.Duration {
+	raw, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
 	if !ok {
 		return 0
 	}
@@ -121,20 +121,20 @@ func (e *PlannedFailoverEngine) refuseHeldRequest(ctx context.Context, fg *v1alp
 	if req, err := parsePlannedFailoverAnnotation(raw); err == nil {
 		target = req.Site
 	}
-	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, plannedHoldRefusal(hold))
-	e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{TargetSite: target, Result: &v1alpha1.PlannedFailoverResult{
-		Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonManualRecoveryPending}})
+	e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverRejected, plannedHoldRefusal(hold))
+	e.sink.RunTerminal(nn, &v1beta1.PlannedFailoverStatus{TargetSite: target, Result: &v1beta1.PlannedFailoverResult{
+		Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonManualRecoveryPending}})
 	return e.consumeRequest(ctx, fg, "held")
 }
 
 // plannedFailoverPendingPhase: Admitting or Deferred.
-func plannedFailoverPendingPhase(p v1alpha1.PlannedFailoverPhase) bool {
-	return p == v1alpha1.PlannedFailoverPhaseAdmitting || p == v1alpha1.PlannedFailoverPhaseDeferred
+func plannedFailoverPendingPhase(p v1beta1.PlannedFailoverPhase) bool {
+	return p == v1beta1.PlannedFailoverPhaseAdmitting || p == v1beta1.PlannedFailoverPhaseDeferred
 }
 
 // ackPass runs one step of the acknowledgement order (§10.5). done=false:
 // the acknowledgement names another run and is ignored.
-func (e *PlannedFailoverEngine) ackPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, hold *PlannedHold, ack string) (time.Duration, bool) {
+func (e *PlannedFailoverEngine) ackPass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, hold *PlannedHold, ack string) (time.Duration, bool) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if hold == nil {
 		// Steps 4-6: both durable hold records are gone. Release the slot,
@@ -155,24 +155,24 @@ func (e *PlannedFailoverEngine) ackPass(ctx context.Context, fg *v1alpha1.MysqlF
 		}
 		if !acked {
 			msg := fmt.Sprintf("%s=%s ignored: no automation hold is standing for planned failover %q; nothing was resumed",
-				v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, ack, ack)
+				v1beta1.AcknowledgePlannedFailoverHoldAnnotation, ack, ack)
 			if e.topo.PlannedClaimHeld(nn) {
 				msg = fmt.Sprintf("%s=%s ignored: the planned-failover claim is held for another run, which this acknowledgement does not release",
-					v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, ack)
+					v1beta1.AcknowledgePlannedFailoverHoldAnnotation, ack)
 			}
-			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldAcknowledgmentIgnored, msg)
+			e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverHoldAcknowledgmentIgnored, msg)
 			return plannedRequeueNext, true
 		}
 		e.groupMemo(nn).holdPendingAt = time.Time{}
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverHoldAcknowledged,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverHoldAcknowledged,
 			fmt.Sprintf("the automation hold of planned failover %s was acknowledged and cleared; automatic failover resumes", ack))
 		return plannedRequeueNext, true
 	}
 	if ack != hold.RunID {
 		if g := e.groupMemo(nn); g.ackWarned != ack {
 			g.ackWarned = ack
-			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverHoldAcknowledgmentIgnored,
-				fmt.Sprintf("%s=%s ignored: the automation hold is for planned failover %q", v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, ack, hold.RunID))
+			e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverHoldAcknowledgmentIgnored,
+				fmt.Sprintf("%s=%s ignored: the automation hold is for planned failover %q", v1beta1.AcknowledgePlannedFailoverHoldAnnotation, ack, hold.RunID))
 		}
 		return 0, false
 	}
@@ -185,12 +185,12 @@ func (e *PlannedFailoverEngine) ackPass(ctx context.Context, fg *v1alpha1.MysqlF
 	// Step 2: the terminal record (when only the marker carries the hold)
 	// and the condition removal, in one conditioned status write.
 	pf := fg.Status.PlannedFailover
-	var final *v1alpha1.PlannedFailoverStatus
+	var final *v1beta1.PlannedFailoverStatus
 	if pf != nil && pf.RunID == hold.RunID && !plannedFailoverTerminal(pf) {
 		final = m.pendingTerminal
 		if final == nil || final.RunID != pf.RunID {
-			final = e.terminalRecord(pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, reason: hold.Reason,
-				warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningStatusStalled},
+			final = e.terminalRecord(pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, reason: hold.Reason,
+				warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningStatusStalled},
 				msg:      fmt.Sprintf("ended ManualRecoveryRequired (%s) by the terminal marker; the hold was acknowledged", hold.Reason)})
 		} else {
 			final = final.DeepCopy()

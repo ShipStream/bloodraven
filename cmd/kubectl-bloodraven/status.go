@@ -15,7 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -65,7 +65,7 @@ func runStatus(args []string, stdout, stderr *os.File) error {
 	defer cancel()
 
 	if len(positional) == 1 {
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		key := client.ObjectKey{Namespace: ns, Name: positional[0]}
 		if err := cl.Get(ctx, key, &fg); err != nil {
 			return fmt.Errorf("get failover group %s/%s: %w", ns, positional[0], err)
@@ -73,7 +73,7 @@ func runStatus(args []string, stdout, stderr *os.File) error {
 		return printGroupStatus(stdout, &fg, cf.output)
 	}
 
-	var list v1alpha1.MysqlFailoverGroupList
+	var list v1beta1.MysqlFailoverGroupList
 	var listOpts []client.ListOption
 	if !allNamespaces {
 		listOpts = append(listOpts, client.InNamespace(ns))
@@ -92,7 +92,7 @@ func runStatus(args []string, stdout, stderr *os.File) error {
 
 // printGroupList renders the per-group summary table. Wide output adds
 // columns for planned-failover state and last-failover age.
-func printGroupList(out io.Writer, items []v1alpha1.MysqlFailoverGroup, format string, allNamespaces bool) error {
+func printGroupList(out io.Writer, items []v1beta1.MysqlFailoverGroup, format string, allNamespaces bool) error {
 	switch format {
 	case "json":
 		return encodeJSON(out, items)
@@ -143,7 +143,7 @@ func printGroupList(out io.Writer, items []v1alpha1.MysqlFailoverGroup, format s
 
 // printGroupStatus renders the rich per-group report. JSON/YAML simply
 // emit the CR.
-func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format string) error {
+func printGroupStatus(out io.Writer, fg *v1beta1.MysqlFailoverGroup, format string) error {
 	switch format {
 	case "json":
 		return encodeJSON(out, fg)
@@ -167,7 +167,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	if fg.Status.UpdatePhase != "" {
 		fmt.Fprintf(out, "  Update phase: %s\n", fg.Status.UpdatePhase)
 	}
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating); c != nil && c.Reason == v1alpha1.ReasonOrderedUpdateStalled {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionUpdating); c != nil && c.Reason == v1beta1.ReasonOrderedUpdateStalled {
 		fmt.Fprintf(out, "  Update stalled: %s\n", c.Message)
 	}
 	if s := rolloutSummary(fg.Status.Rollout); s != "" {
@@ -178,7 +178,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	fmt.Fprintln(out, "Sites:")
 	siteTw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(siteTw, "  NAME\tROLE\tZONE\tSTATE\tREPL\tLAG\tRECOVERY\tLAST-SEEN")
-	statusByName := map[string]v1alpha1.SiteStatus{}
+	statusByName := map[string]v1beta1.SiteStatus{}
 	for i := range fg.Status.Sites {
 		statusByName[fg.Status.Sites[i].Name] = fg.Status.Sites[i]
 	}
@@ -238,7 +238,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 // and, if not, what the automatic reclone waits for: that is the message
 // of the condition whose reason is OwnTransactionsLost, printed whole
 // (the conditions table truncates it).
-func printSiteReports(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
+func printSiteReports(out io.Writer, fg *v1beta1.MysqlFailoverGroup) {
 	var lines []string
 	lost := false
 	for _, s := range fg.Status.Sites {
@@ -275,9 +275,9 @@ func printSiteReports(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
 	if !lost {
 		return
 	}
-	for _, ty := range []string{v1alpha1.ConditionRecoveryPending, v1alpha1.ConditionDegraded} {
+	for _, ty := range []string{v1beta1.ConditionRecoveryPending, v1beta1.ConditionDegraded} {
 		if c := apimeta.FindStatusCondition(fg.Status.Conditions, ty); c != nil && c.Status == metav1.ConditionTrue &&
-			c.Reason == v1alpha1.ReasonOwnTransactionsLost && c.Message != "" {
+			c.Reason == v1beta1.ReasonOwnTransactionsLost && c.Message != "" {
 			fmt.Fprintf(out, "  Own transactions lost: %s\n", c.Message)
 			return
 		}
@@ -295,7 +295,7 @@ func transactionCount(n *int64) string {
 	return fmt.Sprintf("%d transactions", *n)
 }
 
-func printPlannedFailover(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
+func printPlannedFailover(out io.Writer, fg *v1beta1.MysqlFailoverGroup) {
 	pf := fg.Status.PlannedFailover
 	fmt.Fprintln(out, "Planned failover:")
 	fmt.Fprintf(out, "  Phase: %s\n", emptyDash(string(pf.Phase)))
@@ -348,7 +348,7 @@ func printPlannedFailover(out io.Writer, fg *v1alpha1.MysqlFailoverGroup) {
 	}
 }
 
-func printRestore(out io.Writer, r *v1alpha1.RestoreStatus) {
+func printRestore(out io.Writer, r *v1beta1.RestoreStatus) {
 	fmt.Fprintln(out, "Initial restore (initFromBackup):")
 	fmt.Fprintf(out, "  Phase: %s\n", emptyDash(string(r.Phase)))
 	if r.TargetSite != "" {
@@ -368,7 +368,7 @@ func printRestore(out io.Writer, r *v1alpha1.RestoreStatus) {
 	}
 }
 
-func printRestoreInPlace(out io.Writer, r *v1alpha1.RestoreInPlaceStatus) {
+func printRestoreInPlace(out io.Writer, r *v1beta1.RestoreInPlaceStatus) {
 	fmt.Fprintln(out, "In-place restore:")
 	fmt.Fprintf(out, "  Phase: %s\n", emptyDash(string(r.Phase)))
 	if r.Scope != nil {
@@ -392,7 +392,7 @@ func printRestoreInPlace(out io.Writer, r *v1alpha1.RestoreInPlaceStatus) {
 	}
 }
 
-func printBackupSchedules(out io.Writer, ss []v1alpha1.BackupScheduleStatus) {
+func printBackupSchedules(out io.Writer, ss []v1beta1.BackupScheduleStatus) {
 	fmt.Fprintln(out, "Backup schedules:")
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "  NAME\tLAST-RUN\tLAST-OK\tLAST-PHASE\tLAST-BACKUP\tATTEMPT")
@@ -409,7 +409,7 @@ func printBackupSchedules(out io.Writer, ss []v1alpha1.BackupScheduleStatus) {
 	_ = tw.Flush()
 }
 
-func printPITRStatus(out io.Writer, profileName string, p *v1alpha1.PITRStatus) {
+func printPITRStatus(out io.Writer, profileName string, p *v1beta1.PITRStatus) {
 	fmt.Fprintln(out, "PITR archive:")
 	fmt.Fprintf(out, "  Profile: %s\n", profileName)
 	if p.OldestArchivedTime != nil && p.NewestArchivedTime != nil {

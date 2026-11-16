@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -212,9 +212,9 @@ func s37VerifyBetweenEras() runner.Step {
 				return err
 			}
 			if _, err := pitrVerifyRefused(ctx, env, s37ID, s37DBName, "t2-early", pitrExpectation{
-				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2,
+				Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f2,
 				Markers: []string{"baseline", "M1", "M1b", "M2"},
-			}, string(v1alpha1.PITRTokenTargetNotCovered)); err != nil {
+			}, string(v1beta1.PITRTokenTargetNotCovered)); err != nil {
 				return err
 			}
 			flushed, err := pitrFetchFence(env, "A-flush")
@@ -222,7 +222,7 @@ func s37VerifyBetweenEras() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s37ID, s37DBName, "latest-early", pitrExpectation{
-				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: flushed, Outcome: v1alpha1.PointInTimeArchiveHead,
+				Backup: "b1", Mode: v1beta1.PointInTimeModeLatest, Fence: flushed, Outcome: v1beta1.PointInTimeArchiveHead,
 				Markers: []string{"baseline", "M1", "M1b"},
 			})
 		},
@@ -267,7 +267,7 @@ func s37VerifyTailAfterFailback() runner.Step {
 				return err
 			}
 			if err := pitrVerify(ctx, env, s37ID, s37DBName, "t2-tail", pitrExpectation{
-				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f2, Outcome: v1beta1.PointInTimeTargetCovered,
 				Markers: []string{"baseline", "M1", "M1b", "M2"},
 			}); err != nil {
 				return err
@@ -279,7 +279,7 @@ func s37VerifyTailAfterFailback() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s37ID, s37DBName, "latest-tail", pitrExpectation{
-				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: tail, Outcome: v1alpha1.PointInTimeArchiveHead,
+				Backup: "b1", Mode: v1beta1.PointInTimeModeLatest, Fence: tail, Outcome: v1beta1.PointInTimeArchiveHead,
 				Markers: []string{"baseline", "M1", "M1b", "M2", "M2b"},
 			})
 		},
@@ -316,14 +316,14 @@ func s37VerifyEveryEra() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			cases := []struct {
 				label, fence string
-				mode         v1alpha1.PointInTimeMode
-				outcome      v1alpha1.PointInTimeOutcome
+				mode         v1beta1.PointInTimeMode
+				outcome      v1beta1.PointInTimeOutcome
 				markers      []string
 			}{
-				{"t1", "T1", v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1"}},
-				{"t2", "T2", v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2"}},
-				{"t3", "T3", v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3"}},
-				{"latest", "A2-flush", v1alpha1.PointInTimeModeLatest, v1alpha1.PointInTimeArchiveHead, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b"}},
+				{"t1", "T1", v1beta1.PointInTimeModeTimestamp, v1beta1.PointInTimeTargetCovered, []string{"baseline", "M1"}},
+				{"t2", "T2", v1beta1.PointInTimeModeTimestamp, v1beta1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2"}},
+				{"t3", "T3", v1beta1.PointInTimeModeTimestamp, v1beta1.PointInTimeTargetCovered, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3"}},
+				{"latest", "A2-flush", v1beta1.PointInTimeModeLatest, v1beta1.PointInTimeArchiveHead, []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b"}},
 			}
 			for _, c := range cases {
 				f, err := pitrFetchFence(env, c.fence)
@@ -350,7 +350,7 @@ func s37RestoreInsideBEra() runner.Step {
 			if err != nil {
 				return err
 			}
-			if err := pitrCheckTargetAfterBackup(env, pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2}); err != nil {
+			if err := pitrCheckTargetAfterBackup(env, pitrExpectation{Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f2}); err != nil {
 				return err
 			}
 			src, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
@@ -381,7 +381,7 @@ func s37RestoreInsideBEra() runner.Step {
 				return err
 			}
 			if err := assertPITRResult(env, "restore "+s37Restored, restorePointInTime(rs), pitrExpectation{
-				Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f2, Outcome: v1alpha1.PointInTimeTargetCovered, TargetLocal: true,
+				Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f2, Outcome: v1beta1.PointInTimeTargetCovered, TargetLocal: true,
 			}); err != nil {
 				return err
 			}
@@ -404,7 +404,7 @@ func s37RestoreInsideBEra() runner.Step {
 	}
 }
 
-func s37WaitRestore(ctx context.Context, env *runner.Env) (*v1alpha1.RestoreStatus, error) {
+func s37WaitRestore(ctx context.Context, env *runner.Env) (*v1beta1.RestoreStatus, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 	tick := time.NewTicker(2 * time.Second)
@@ -419,9 +419,9 @@ func s37WaitRestore(ctx context.Context, env *runner.Env) (*v1alpha1.RestoreStat
 		} else {
 			last = fmt.Sprintf("phase=%s reason=%s target=%s message=%q", rs.Phase, rs.Reason, rs.TargetSite, rs.Message)
 			switch rs.Phase {
-			case v1alpha1.BackupPhaseSucceeded:
+			case v1beta1.BackupPhaseSucceeded:
 				return rs, nil
-			case v1alpha1.BackupPhaseFailed:
+			case v1beta1.BackupPhaseFailed:
 				if rs.JobName != "" {
 					captureJobPodLogs(ctx, env, rs.JobName, "s37-restore")
 				}
@@ -466,7 +466,7 @@ func pitrCleanupBudget(extra time.Duration) time.Duration {
 // label. A group of the same name without this run's annotation is left in
 // place (F190).
 func pitrDeleteOwnedGroup(ctx context.Context, env *runner.Env, name string) error {
-	var mfg v1alpha1.MysqlFailoverGroup
+	var mfg v1beta1.MysqlFailoverGroup
 	if err := env.Kube.Controller.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &mfg); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
@@ -484,7 +484,7 @@ func pitrDeleteOwnedGroup(ctx context.Context, env *runner.Env, name string) err
 	waitCtx, cancel := context.WithTimeout(ctx, pitrDeleteGroupTimeout)
 	defer cancel()
 	for {
-		err := env.Kube.Controller.Get(waitCtx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &v1alpha1.MysqlFailoverGroup{})
+		err := env.Kube.Controller.Get(waitCtx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &v1beta1.MysqlFailoverGroup{})
 		if apierrors.IsNotFound(err) {
 			env.Capture.Note("deleted failover group " + name)
 			// Its key snapshots have no owner and survive it (#203).
@@ -499,7 +499,7 @@ func pitrDeleteOwnedGroup(ctx context.Context, env *runner.Env, name string) err
 }
 
 // pitrOwnedByRun reports whether a group carries runStem's annotation.
-func pitrOwnedByRun(mfg *v1alpha1.MysqlFailoverGroup, runStem string) bool {
+func pitrOwnedByRun(mfg *v1beta1.MysqlFailoverGroup, runStem string) bool {
 	return runStem != "" && mfg.Annotations[pitrRunAnnotation] == runStem
 }
 
@@ -578,7 +578,7 @@ func pitrCleanup(ctx context.Context, env *runner.Env, db string, groups ...stri
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
-	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR scenario cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR scenario cleanup healthy baseline", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		wantPITR, wantProfile, err := originalPITRExpected(env)
 		if err != nil {
 			return false, "", err

@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const promoteUsage = `Trigger a planned (graceful) failover via annotation.
@@ -108,7 +108,7 @@ func runPromote(args []string, stdout, stderr *os.File) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1alpha1.PlannedFailoverAnnotation, value)
+	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1beta1.PlannedFailoverAnnotation, value)
 
 	if !wait {
 		fmt.Fprintln(stdout, "Watch progress with: kubectl bloodraven status", group, "-n", ns)
@@ -129,7 +129,7 @@ const promoteConflictRetries = 5
 // request was written over.
 func annotatePlannedFailover(ctx context.Context, cl client.Client, ns, group, site, value string, wait bool) (plannedWaitBaseline, error) {
 	for attempt := 1; ; attempt++ {
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: group}, &fg); err != nil {
 			if apierrors.IsNotFound(err) {
 				return plannedWaitBaseline{}, fmt.Errorf("MysqlFailoverGroup %s/%s not found", ns, group)
@@ -149,7 +149,7 @@ func annotatePlannedFailover(ctx context.Context, cl client.Client, ns, group, s
 		if patched.Annotations == nil {
 			patched.Annotations = map[string]string{}
 		}
-		patched.Annotations[v1alpha1.PlannedFailoverAnnotation] = value
+		patched.Annotations[v1beta1.PlannedFailoverAnnotation] = value
 		err := cl.Patch(ctx, patched, client.MergeFromWithOptions(&fg, client.MergeFromWithOptimisticLock{}))
 		switch {
 		case err == nil:
@@ -191,17 +191,17 @@ type plannedWaitBaseline struct {
 	eventsErr error
 }
 
-func newPlannedWaitBaseline(ctx context.Context, cl client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) plannedWaitBaseline {
+func newPlannedWaitBaseline(ctx context.Context, cl client.Client, fg *v1beta1.MysqlFailoverGroup, site string) plannedWaitBaseline {
 	b := plannedWaitBaseline{site: site}
 	if pf := fg.Status.PlannedFailover; pf != nil {
 		b.runID, b.hadBlock, b.startTime = pf.RunID, true, pf.StartTime
 		_, _, marked := plannedTerminalMarker(fg)
 		switch {
 		case pf.RunID == "" || marked:
-		case pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting:
+		case pf.Phase == v1beta1.PlannedFailoverPhaseAdmitting:
 			// Another site's request is refused beside an Admitting run.
 			b.follow = pf.TargetSite == site
-		case pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred:
+		case pf.Phase == v1beta1.PlannedFailoverPhaseDeferred:
 			b.follow = true
 			if pf.TargetSite != site {
 				b.deferredFor = pf.TargetSite
@@ -222,7 +222,7 @@ func newPlannedWaitBaseline(ctx context.Context, cl client.Client, fg *v1alpha1.
 
 // ours reports whether pf is the block of the run this request started
 // (or joined).
-func (b plannedWaitBaseline) ours(pf *v1alpha1.PlannedFailoverStatus) bool {
+func (b plannedWaitBaseline) ours(pf *v1beta1.PlannedFailoverStatus) bool {
 	switch {
 	case pf == nil || pf.RunID == "":
 		return false
@@ -234,7 +234,7 @@ func (b plannedWaitBaseline) ours(pf *v1alpha1.PlannedFailoverStatus) bool {
 
 // legacyRun reports a run written by an operator older than this plugin:
 // a block without a runID whose startTime is not the baseline's.
-func (b plannedWaitBaseline) legacyRun(pf *v1alpha1.PlannedFailoverStatus) bool {
+func (b plannedWaitBaseline) legacyRun(pf *v1beta1.PlannedFailoverStatus) bool {
 	return pf != nil && pf.RunID == "" && !pf.StartTime.IsZero() && (!b.hadBlock || !pf.StartTime.Equal(&b.startTime))
 }
 
@@ -252,7 +252,7 @@ func plannedRefusalEvents(ctx context.Context, cl client.Client, ns, group strin
 		if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != group {
 			continue
 		}
-		if ev.Reason == v1alpha1.EventPlannedFailoverRejected || ev.Reason == v1alpha1.EventPlannedFailoverSkipped {
+		if ev.Reason == v1beta1.EventPlannedFailoverRejected || ev.Reason == v1beta1.EventPlannedFailoverSkipped {
 			out = append(out, ev)
 		}
 	}
@@ -308,7 +308,7 @@ var (
 // the site. The operator recognises only the "maxLagWait" key (see
 // internal/controller/planned_failover.go). maxLagWait is nil when no
 // override was given; a given one must lie within
-// v1alpha1.PlannedFailoverMaxLagWait{Min,Max}, which the operator
+// v1beta1.PlannedFailoverMaxLagWait{Min,Max}, which the operator
 // enforces too.
 func buildPlannedFailoverValue(site string, maxLagWait *time.Duration) (string, error) {
 	if site == "" {
@@ -318,16 +318,16 @@ func buildPlannedFailoverValue(site string, maxLagWait *time.Duration) (string, 
 		return site, nil
 	}
 	d := *maxLagWait
-	if d < v1alpha1.PlannedFailoverMaxLagWaitMin || d > v1alpha1.PlannedFailoverMaxLagWaitMax {
+	if d < v1beta1.PlannedFailoverMaxLagWaitMin || d > v1beta1.PlannedFailoverMaxLagWaitMax {
 		return "", fmt.Errorf("--max-lag-wait must be between %s and %s (got %s)",
-			v1alpha1.PlannedFailoverMaxLagWaitMin, v1alpha1.PlannedFailoverMaxLagWaitMax, d)
+			v1beta1.PlannedFailoverMaxLagWaitMin, v1beta1.PlannedFailoverMaxLagWaitMax, d)
 	}
 	// At least a second, time.Duration's spelling stays within the
 	// annotation value charset [A-Za-z0-9._/+-] and parses back exactly.
 	return site + ":" + joinKVs([]kv{{"maxLagWait", d.String()}}), nil
 }
 
-func groupHasSite(fg *v1alpha1.MysqlFailoverGroup, site string) bool {
+func groupHasSite(fg *v1beta1.MysqlFailoverGroup, site string) bool {
 	for _, s := range fg.Spec.Sites {
 		if s.Name == site {
 			return true
@@ -361,7 +361,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	lastPhase := v1alpha1.PlannedFailoverPhase("")
+	lastPhase := v1beta1.PlannedFailoverPhase("")
 	tick := time.NewTicker(plannedWaitPoll)
 	defer tick.Stop()
 	startedAt := time.Now()
@@ -377,7 +377,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 	}
 
 	for {
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		getCtx, getCancel := context.WithTimeout(ctx, 10*time.Second)
 		err := cl.Get(getCtx, client.ObjectKey{Namespace: ns, Name: group}, &fg)
 		getCancel()
@@ -402,7 +402,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 		}
 		consecutiveErrors = 0
 		pf := fg.Status.PlannedFailover
-		_, pending := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]
+		_, pending := fg.Annotations[v1beta1.PlannedFailoverAnnotation]
 		_, _, marked := plannedTerminalMarker(&fg)
 		switch {
 		case legacy:
@@ -473,7 +473,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 			// The terminal marker ended the run while status writes were
 			// failing: status may still show a non-terminal phase.
 			switch {
-			case outcome == v1alpha1.PlannedFailoverOutcomeSucceeded:
+			case outcome == v1beta1.PlannedFailoverOutcomeSucceeded:
 				fmt.Fprintln(stdout, "Planned failover succeeded (ended by the terminal marker after status writes stalled; warnings: StatusStalled).")
 				return nil
 			case plannedAlreadyActive(outcome, reason):
@@ -484,7 +484,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 			return fmt.Errorf("planned failover failed: %s", plannedOutcomeReason(outcome, reason))
 		}
 		switch phase {
-		case v1alpha1.PlannedFailoverPhaseSucceeded:
+		case v1beta1.PlannedFailoverPhaseSucceeded:
 			if pf.Result != nil && len(pf.Result.Warnings) > 0 {
 				ws := make([]string, len(pf.Result.Warnings))
 				for i, w := range pf.Result.Warnings {
@@ -495,7 +495,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 			}
 			fmt.Fprintln(stdout, "Planned failover succeeded.")
 			return nil
-		case v1alpha1.PlannedFailoverPhaseFailed:
+		case v1beta1.PlannedFailoverPhaseFailed:
 			outcome, reason := "", ""
 			if pf.Result != nil {
 				outcome, reason = string(pf.Result.Outcome), string(pf.Result.Reason)
@@ -509,7 +509,7 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 				return fmt.Errorf("planned failover failed: %s", pf.Message)
 			}
 			return fmt.Errorf("planned failover failed: %s", reason)
-		case v1alpha1.PlannedFailoverPhaseDeferred:
+		case v1beta1.PlannedFailoverPhaseDeferred:
 			retry := "(unset)"
 			if pf.Admission != nil && pf.Admission.RetryTime != nil {
 				retry = pf.Admission.RetryTime.Time.UTC().Format(time.RFC3339)
@@ -525,16 +525,16 @@ func waitForPlannedFailover(stdout, stderr io.Writer, cl client.Client, ns, grou
 	}
 }
 
-func plannedPhaseTerminal(p v1alpha1.PlannedFailoverPhase) bool {
-	return p == v1alpha1.PlannedFailoverPhaseSucceeded || p == v1alpha1.PlannedFailoverPhaseFailed
+func plannedPhaseTerminal(p v1beta1.PlannedFailoverPhase) bool {
+	return p == v1beta1.PlannedFailoverPhaseSucceeded || p == v1beta1.PlannedFailoverPhaseFailed
 }
 
 // plannedAlreadyActive: the run never started because its target already
 // was the active primary. A request refused for that reason before a run
 // was written is Skipped (exit 0); a run that learns it after being stamped
 // ends this way, and --wait reports both alike.
-func plannedAlreadyActive(outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) bool {
-	return outcome == v1alpha1.PlannedFailoverOutcomeNotStarted && reason == v1alpha1.PlannedFailoverReasonAlreadyActive
+func plannedAlreadyActive(outcome v1beta1.PlannedFailoverOutcome, reason v1beta1.PlannedFailoverReason) bool {
+	return outcome == v1beta1.PlannedFailoverOutcomeNotStarted && reason == v1beta1.PlannedFailoverReasonAlreadyActive
 }
 
 // reportPlannedRefusal reports a request the operator consumed without
@@ -542,12 +542,12 @@ func plannedAlreadyActive(outcome v1alpha1.PlannedFailoverOutcome, reason v1alph
 // arrived and giveUp is false; the caller then polls again. cur is the block
 // in status, named when a run for another site took the request's place.
 func reportPlannedRefusal(ctx context.Context, stdout, stderr io.Writer, cl client.Client, ns, group string,
-	baseline plannedWaitBaseline, cur *v1alpha1.PlannedFailoverStatus, giveUp bool) (bool, error) {
+	baseline plannedWaitBaseline, cur *v1beta1.PlannedFailoverStatus, giveUp bool) (bool, error) {
 	getCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	ev, listErr := baseline.newRefusalEvent(getCtx, cl, ns, group)
 	cancel()
 	switch {
-	case ev != nil && ev.Reason == v1alpha1.EventPlannedFailoverSkipped:
+	case ev != nil && ev.Reason == v1beta1.EventPlannedFailoverSkipped:
 		fmt.Fprintf(stdout, "Planned failover skipped: %s\n", ev.Message)
 		return true, nil
 	case ev != nil:
@@ -565,7 +565,7 @@ func reportPlannedRefusal(ctx context.Context, stdout, stderr io.Writer, cl clie
 			other, listErr, group, ns)
 	}
 	return true, fmt.Errorf("the operator removed the request without starting a run%s, and no %s Event was found; see kubectl describe mysqlfailovergroup %s -n %s",
-		other, v1alpha1.EventPlannedFailoverRejected, group, ns)
+		other, v1beta1.EventPlannedFailoverRejected, group, ns)
 }
 
 // maxWaitGetFailures bounds how many consecutive cl.Get failures a

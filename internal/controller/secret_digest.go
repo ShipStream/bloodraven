@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Secret contents feed two published fingerprints: the spec-hash
@@ -45,7 +45,7 @@ func digestKeySecretName(fgName string) string {
 // ensureDigestKey returns the group's digest key, creating it when absent
 // or malformed. Replacing the key changes every published fingerprint, so
 // each site rolls once through the normal update path.
-func ensureDigestKey(ctx context.Context, c client.Client, reader client.Reader, scheme *runtime.Scheme, fg *v1alpha1.MysqlFailoverGroup) ([]byte, error) {
+func ensureDigestKey(ctx context.Context, c client.Client, reader client.Reader, scheme *runtime.Scheme, fg *v1beta1.MysqlFailoverGroup) ([]byte, error) {
 	key, err := readDigestKey(ctx, c, fg)
 	if err == nil {
 		return key, nil
@@ -76,10 +76,10 @@ func ensureDigestKey(ctx context.Context, c client.Client, reader client.Reader,
 			Name:      name,
 			Namespace: fg.Namespace,
 			Labels: map[string]string{
-				labelAppName:                "mysql-digest-key",
-				labelInstance:               fg.Name,
-				v1alpha1.FailoverGroupLabel: fg.Name,
-				labelManagedBy:              managerName,
+				labelAppName:               "mysql-digest-key",
+				labelInstance:              fg.Name,
+				v1beta1.FailoverGroupLabel: fg.Name,
+				labelManagedBy:             managerName,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -103,7 +103,7 @@ func ensureDigestKey(ctx context.Context, c client.Client, reader client.Reader,
 }
 
 // readDigestKey returns the group's digest key without creating it.
-func readDigestKey(ctx context.Context, r client.Reader, fg *v1alpha1.MysqlFailoverGroup) ([]byte, error) {
+func readDigestKey(ctx context.Context, r client.Reader, fg *v1beta1.MysqlFailoverGroup) ([]byte, error) {
 	name := digestKeySecretName(fg.Name)
 	var sec corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &sec); err != nil {
@@ -156,7 +156,7 @@ func secretContentDigest(key []byte, secrets map[string]map[string][]byte) strin
 // TLS or credentials Secret does not roll the pods; the PITR archive key
 // is a content-addressed snapshot named in the render instead (#203). A
 // Secret that does not exist yet is skipped.
-func specSecretInputs(ctx context.Context, r client.Reader, fg *v1alpha1.MysqlFailoverGroup) (map[string]map[string][]byte, error) {
+func specSecretInputs(ctx context.Context, r client.Reader, fg *v1beta1.MysqlFailoverGroup) (map[string]map[string][]byte, error) {
 	secrets := make(map[string]map[string][]byte)
 	if fg.Spec.TLS != nil {
 		var s corev1.Secret

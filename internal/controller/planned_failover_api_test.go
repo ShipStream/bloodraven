@@ -11,7 +11,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // pfRemovedStatusFields are the status.plannedFailover fields the durable
@@ -41,8 +41,8 @@ func pfJSONNames(t reflect.Type) []string {
 // from the Go types, the generated CRD (and its chart copy), and every
 // non-test Go source outside the API package.
 func TestPlannedFailoverOldFieldsGone(t *testing.T) {
-	status := pfJSONNames(reflect.TypeFor[v1alpha1.PlannedFailoverStatus]())
-	dragonfly := pfJSONNames(reflect.TypeFor[v1alpha1.PlannedFailoverDragonflyStatus]())
+	status := pfJSONNames(reflect.TypeFor[v1beta1.PlannedFailoverStatus]())
+	dragonfly := pfJSONNames(reflect.TypeFor[v1beta1.PlannedFailoverDragonflyStatus]())
 	for _, f := range pfRemovedStatusFields {
 		if slices.Contains(status, f) {
 			t.Errorf("PlannedFailoverStatus still has %q", f)

@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// The well-known metadata registry (A-79). api/v1alpha1/well_known.go
+// The well-known metadata registry (A-79). api/v1beta1/well_known.go
 // declares every label, annotation and finalizer key, and the read-only
 // taint, in const blocks whose doc comment starts with
 //
@@ -27,7 +27,7 @@ import (
 // well_known.go.
 
 const (
-	wellKnownSource = "../../api/v1alpha1/well_known.go"
+	wellKnownSource = "../../api/v1beta1/well_known.go"
 	wellKnownDoc    = "../../site/content/docs/4.configuration/12.well-known-metadata.md"
 )
 
@@ -307,7 +307,7 @@ title: Well-known metadata
 description: Every label, annotation, finalizer and node taint Bloodraven reads or writes, with its writer, value grammar and stability level.
 ---
 
-<!-- Generated from api/v1alpha1/well_known.go by ` + "`make well-known-doc`" + `. Do not edit. -->
+<!-- Generated from api/v1beta1/well_known.go by ` + "`make well-known-doc`" + `. Do not edit. -->
 
 This page lists every label, annotation and finalizer key Bloodraven reads or writes, and its node taint, with the objects that carry each one, who writes it, the grammar of its value, and how stable it is:
 

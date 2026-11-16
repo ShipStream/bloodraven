@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/metrics/labels"
@@ -288,7 +288,7 @@ func (tm *TopologyManager) logSourceFailure(follower, active *siteTracker, stage
 		"site", follower.name, "activeSite", active.name, "stage", stage, "error", err, "fg", tm.cfg.Name)
 }
 
-func (tm *TopologyManager) setSourceConvergence(site *siteTracker, repl *mysql.ReplicaStatus, convergence SourceConvergenceState, reason v1alpha1.SourceConvergenceReason, expectedHost string) bool {
+func (tm *TopologyManager) setSourceConvergence(site *siteTracker, repl *mysql.ReplicaStatus, convergence SourceConvergenceState, reason v1beta1.SourceConvergenceReason, expectedHost string) bool {
 	host := ""
 	if repl != nil {
 		host = repl.SourceHost

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -135,7 +135,7 @@ func s51SeedDonorData(state *s51RunState) runner.Step {
 				return err
 			}
 			before := mfg.Status.EncryptionAtRest.SiteEncryptionStatusByName(state.replicaSite)
-			if before == nil || before.Phase != v1alpha1.KeyringPhaseSealed {
+			if before == nil || before.Phase != v1beta1.KeyringPhaseSealed {
 				return fmt.Errorf("replica %s is not sealed before the reclone: %+v", state.replicaSite, before)
 			}
 			state.escrowBefore = before.KeyringVersion
@@ -184,7 +184,7 @@ func s51RequestReclone(state *s51RunState) runner.Step {
 				return err
 			}
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				v1alpha1.RecloneAnnotation, value); err != nil {
+				v1beta1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("set reclone annotation: %w", err)
 			}
 			state.annotated = true
@@ -208,7 +208,7 @@ func s51ObserveUnsealBeforeClone(state *s51RunState) runner.Step {
 
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s observed Unsealed/Clone", state.replicaSite),
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
 					}
@@ -216,12 +216,12 @@ func s51ObserveUnsealBeforeClone(state *s51RunState) runner.Step {
 					if s == nil {
 						return false, "no status entry for " + state.replicaSite, nil
 					}
-					if s.UnsealReason == v1alpha1.UnsealReasonClone &&
-						(s.Phase == v1alpha1.KeyringPhaseEscrowed || s.Phase == v1alpha1.KeyringPhaseSealed) {
+					if s.UnsealReason == v1beta1.UnsealReasonClone &&
+						(s.Phase == v1beta1.KeyringPhaseEscrowed || s.Phase == v1beta1.KeyringPhaseSealed) {
 						return false, fmt.Sprintf("phase=%s reason=Clone — the #144 livelock", s.Phase),
 							fmt.Errorf("site %s advanced to %s while still held for clone", state.replicaSite, s.Phase)
 					}
-					if s.UnsealReason == v1alpha1.UnsealReasonClone && s.Phase == v1alpha1.KeyringPhaseUnsealed {
+					if s.UnsealReason == v1beta1.UnsealReasonClone && s.Phase == v1beta1.KeyringPhaseUnsealed {
 						return true, "", nil
 					}
 					return false, fmt.Sprintf("phase=%s reason=%s v%d (%s)",
@@ -292,7 +292,7 @@ func s51VerifyResealedAfterClone(state *s51RunState) runner.Step {
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s re-sealed after the clone (was v%d) and the operator consumed the annotation",
 					state.replicaSite, state.escrowBefore),
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
 					}
@@ -300,11 +300,11 @@ func s51VerifyResealedAfterClone(state *s51RunState) runner.Step {
 					if s == nil {
 						return false, "no status entry for " + state.replicaSite, nil
 					}
-					if s.Phase == v1alpha1.KeyringPhaseFailed {
+					if s.Phase == v1beta1.KeyringPhaseFailed {
 						return false, fmt.Sprintf("phase=Failed (%s)", s.Message),
 							fmt.Errorf("recipient %s failed during the encrypted reclone: %s", state.replicaSite, s.Message)
 					}
-					if s.Phase != v1alpha1.KeyringPhaseSealed {
+					if s.Phase != v1beta1.KeyringPhaseSealed {
 						return false, fmt.Sprintf("phase=%s reason=%s (%s)", s.Phase, s.UnsealReason, s.Message), nil
 					}
 					// The operator clears the annotation only after the
@@ -312,7 +312,7 @@ func s51VerifyResealedAfterClone(state *s51RunState) runner.Step {
 					// the replica starts sealed, so a never-consumed
 					// annotation plus rows arriving via replication would
 					// otherwise false-pass.
-					if _, present := m.GetAnnotations()[v1alpha1.RecloneAnnotation]; present {
+					if _, present := m.GetAnnotations()[v1beta1.RecloneAnnotation]; present {
 						return false, "reclone annotation still present (clone not completed)", nil
 					}
 					return true, "", nil
@@ -420,12 +420,12 @@ func s51Cleanup(state *s51RunState) func(context.Context, *runner.Env) error {
 		if err != nil {
 			return fmt.Errorf("read MFG to clear leftover reclone annotation: %w", err)
 		}
-		if _, present := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]; !present {
+		if _, present := mfg.GetAnnotations()[v1beta1.RecloneAnnotation]; !present {
 			state.annotated = false
 			return nil
 		}
 		if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-			v1alpha1.RecloneAnnotation, ""); err != nil {
+			v1beta1.RecloneAnnotation, ""); err != nil {
 			return fmt.Errorf("clear reclone annotation: %w", err)
 		}
 		state.annotated = false

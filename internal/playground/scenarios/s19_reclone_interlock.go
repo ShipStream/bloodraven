@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/actionvalue"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -111,7 +111,7 @@ func injectDivergenceViaFailover() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite flips away from %s", active),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite)
 					return mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != active, msg, nil
 				},
@@ -127,9 +127,9 @@ func injectDivergenceViaFailover() runner.Step {
 			waitCtx, cancel = context.WithTimeout(ctx, 90*time.Second)
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("new primary %s stable and cooldown clear before reintroducing old primary %s", peer, active),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					peerState := v1alpha1.SiteState("<missing>")
-					activeState := v1alpha1.SiteState("<missing>")
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+					peerState := v1beta1.SiteState("<missing>")
+					activeState := v1beta1.SiteState("<missing>")
 					for _, s := range mfg.Status.Sites {
 						switch s.Name {
 						case peer:
@@ -149,8 +149,8 @@ func injectDivergenceViaFailover() runner.Step {
 						mfg.Status.ActiveSite, peerState, activeState, mfg.Status.LastFailoverTarget(), cooldownRemaining.Round(time.Second))
 					done := mfg.Status.ActiveSite == peer &&
 						mfg.Status.LastFailoverTarget() == peer &&
-						peerState == v1alpha1.SiteStateWritable &&
-						activeState != v1alpha1.SiteStateWritable &&
+						peerState == v1beta1.SiteStateWritable &&
+						activeState != v1beta1.SiteStateWritable &&
 						cooldownRemaining == 0
 					return done, msg, nil
 				},
@@ -236,8 +236,8 @@ func observeDivergenceRecorded() runner.Step {
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s has non-empty divergentGtid", site),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					var observed *v1alpha1.SiteStatus
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+					var observed *v1beta1.SiteStatus
 					for _, s := range mfg.Status.Sites {
 						if s.DivergentGtid == "" {
 							continue
@@ -366,13 +366,13 @@ func verifyRecloneAcceptedMatching() runner.Step {
 			value := controller.RecloneAnnotationValueWithPrefix(mfg, site, prefix)
 			env.Capture.Note(fmt.Sprintf("submitting reclone-site=%s (gtid prefix from %q)", value, gtid))
 			before := time.Now()
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1beta1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("set reclone annotation: %w", err)
 			}
 			// Expect a RecloneRequested event within the operator's
 			// sync interval (~30s, plus some slack).
 			eventCtx, eventCancel := context.WithTimeout(ctx, 60*time.Second)
-			ev, err := waitForMFGEvent(eventCtx, env, before, v1alpha1.EventRecloneRequested, "")
+			ev, err := waitForMFGEvent(eventCtx, env, before, v1beta1.EventRecloneRequested, "")
 			eventCancel()
 			if err != nil {
 				return fmt.Errorf("waiting for RecloneRequested event: %w", err)
@@ -387,23 +387,23 @@ func verifyRecloneAcceptedMatching() runner.Step {
 			const stableWindow = 20 * time.Second
 			_, err = env.Wait.UntilCR(doneCtx, env.Namespace,
 				"divergence cleared, cluster healthy and stable",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 						if s.DivergentGtid != "" {
 							divergent = append(divergent, s.Name)
 						}
 					}
-					boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
+					boot := findCondition(mfg.Status.Conditions, v1beta1.ConditionBootstrapping)
 					if bootstrapFailed(boot) && !boot.LastTransitionTime.Time.Before(before.Truncate(time.Second)) {
 						return false, boot.Message, fmt.Errorf("reclone bootstrap failed: %s", boot.Message)
 					}
@@ -439,12 +439,12 @@ func verifyRecloneAcceptedMatching() runner.Step {
 func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expectedSnippet string) error {
 	env.Capture.Note(fmt.Sprintf("submitting reclone-site=%q (expecting rejection: %q)", value, expectedSnippet))
 	before := time.Now()
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1beta1.RecloneAnnotation, value); err != nil {
 		return fmt.Errorf("set reclone annotation: %w", err)
 	}
 	// Operator sync ticker is 30s; allow 60s of slack.
 	evCtx, evCancel := context.WithTimeout(ctx, 60*time.Second)
-	ev, err := waitForMFGEvent(evCtx, env, before, v1alpha1.EventRecloneRejected, expectedSnippet)
+	ev, err := waitForMFGEvent(evCtx, env, before, v1beta1.EventRecloneRejected, expectedSnippet)
 	evCancel()
 	if err != nil {
 		return fmt.Errorf("waiting for RecloneRejected event with %q: %w", expectedSnippet, err)
@@ -459,7 +459,7 @@ func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expec
 	for {
 		mfg, err := env.Kube.GetMFGNamed(clearCtx, env.Namespace, env.FG)
 		if err == nil {
-			if _, present := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]; !present {
+			if _, present := mfg.GetAnnotations()[v1beta1.RecloneAnnotation]; !present {
 				return nil
 			}
 		}

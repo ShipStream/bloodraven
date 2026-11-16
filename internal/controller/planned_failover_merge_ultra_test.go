@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
@@ -28,15 +28,15 @@ func TestMergeUltra_HeldRequestConsumptionIsRetried(t *testing.T) {
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	h.setBlock(ultraAHeldTerminal(h.clk.Now()))
 	fg := h.fg()
-	setPlannedHold(&fg.Status, v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+	setPlannedHold(&fg.Status, v1beta1.PlannedFailoverHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonForeignWritable,
 		SourceSite: "iad", TargetSite: "pdx", HoldTime: metav1.NewTime(h.clk.Now())}, fg.Generation)
 	if err := h.c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	h.setAnnotation(v1alpha1.PlannedFailoverAnnotation, "pdx")
+	h.setAnnotation(v1beta1.PlannedFailoverAnnotation, "pdx")
 	h.faults.metaFaults = []pfWriteFault{pfWriteForbidden}
 	d := h.step()
-	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; !ok {
+	if _, ok := h.fg().GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; !ok {
 		t.Fatal("setup: the request's removal was meant to fail")
 	}
 	if d <= 0 || d > plannedRequeuePoll {
@@ -44,7 +44,7 @@ func TestMergeUltra_HeldRequestConsumptionIsRetried(t *testing.T) {
 	}
 	h.clk.Advance(d)
 	h.step()
-	if _, ok := h.fg().GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := h.fg().GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the refused request was not consumed on the retry")
 	}
 	if d := h.step(); d < time.Minute {
@@ -58,19 +58,19 @@ func TestMergeUltra_HeldRequestConsumptionIsRetried(t *testing.T) {
 // precondition intact.
 func TestMergeUltra_K029_FenceMustMoveTheResourceVersion(t *testing.T) {
 	fg := plannedFailoverFG("")
-	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, time.Now())
+	fg.Status.PlannedFailover = pfRunAt(v1beta1.PlannedFailoverPhaseWaitingForLag, time.Now())
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		WithInterceptorFuncs(interceptor.Funcs{
 			// Every patch "succeeds" as a server-side no-op: nothing is
 			// applied and the object keeps its resourceVersion.
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
-				var cur v1alpha1.MysqlFailoverGroup
+				var cur v1beta1.MysqlFailoverGroup
 				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &cur); err != nil {
 					return err
 				}
-				cur.DeepCopyInto(obj.(*v1alpha1.MysqlFailoverGroup))
+				cur.DeepCopyInto(obj.(*v1beta1.MysqlFailoverGroup))
 				return nil
 			},
 		}).Build()
@@ -101,18 +101,18 @@ func TestMergeUltra_K029_FenceValueAlwaysAdvances(t *testing.T) {
 	// A client that, like the API server, skips a patch that changes
 	// nothing without moving the resourceVersion.
 	fg := plannedFailoverFG("")
-	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, now)
+	fg.Status.PlannedFailover = pfRunAt(v1beta1.PlannedFailoverPhaseWaitingForLag, now)
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				var cur v1alpha1.MysqlFailoverGroup
+				var cur v1beta1.MysqlFailoverGroup
 				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &cur); err != nil {
 					return err
 				}
 				if maps.Equal(cur.GetAnnotations(), obj.GetAnnotations()) {
-					cur.DeepCopyInto(obj.(*v1alpha1.MysqlFailoverGroup))
+					cur.DeepCopyInto(obj.(*v1beta1.MysqlFailoverGroup))
 					return nil
 				}
 				return c.Patch(ctx, obj, patch, opts...)
@@ -120,7 +120,7 @@ func TestMergeUltra_K029_FenceValueAlwaysAdvances(t *testing.T) {
 		}).Build()
 	nn := fgNN(fg)
 	store := newAPIPlannedFailoverStore(c, c, clock.NewFakeClock(now))
-	load := func() *v1alpha1.MysqlFailoverGroup {
+	load := func() *v1beta1.MysqlFailoverGroup {
 		got, err := store.Load(context.Background(), nn)
 		if err != nil || got == nil {
 			t.Fatalf("load: %v %v", got, err)
@@ -143,13 +143,13 @@ func TestMergeUltra_K029_FenceValueAlwaysAdvances(t *testing.T) {
 // AuthorityUnsettled and ends NotStarted. Its message says to unfence a
 // site by hand first, never to re-annotate as an alternative.
 func TestMergeUltra_K044_NotAttributableAdvisesManualUnfence(t *testing.T) {
-	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseFencing)
+	h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseFencing)
 	h.topo.fence = func(PlannedRunRef) (FenceProof, error) {
 		return FenceProof{Kind: FenceNotAttributable}, nil
 	}
-	h.stepUntil(5, func(fg *v1alpha1.MysqlFailoverGroup) bool { return plannedFailoverTerminal(fg.Status.PlannedFailover) })
+	h.stepUntil(5, func(fg *v1beta1.MysqlFailoverGroup) bool { return plannedFailoverTerminal(fg.Status.PlannedFailover) })
 	pf := h.pf()
-	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+	if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 		t.Fatalf("block = %+v, want SourceLeftFenced", pf)
 	}
 	if !strings.Contains(pf.Message, plannedManualUnfenceAdvice) || strings.Contains(pf.Message, "unfence the source or re-annotate") {

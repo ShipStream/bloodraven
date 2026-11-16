@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -113,7 +113,7 @@ func verifyActiveSiteUnchanged() runner.Step {
 			// promotion doesn't slip past the activeSite check.
 			var writable []string
 			for _, s := range mfg.Status.Sites {
-				if s.State == v1alpha1.SiteStateWritable {
+				if s.State == v1beta1.SiteStateWritable {
 					writable = append(writable, s.Name)
 				}
 			}
@@ -147,9 +147,9 @@ func verifyNoSelfFenceAcrossSites() runner.Step {
 	}
 }
 
-func ensureMFGReady(mfg *v1alpha1.MysqlFailoverGroup) error {
+func ensureMFGReady(mfg *v1beta1.MysqlFailoverGroup) error {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == v1alpha1.ConditionReady {
+		if c.Type == v1beta1.ConditionReady {
 			if c.Status != "True" {
 				return fmt.Errorf("Ready condition is %q (reason=%s message=%q)", c.Status, c.Reason, c.Message)
 			}

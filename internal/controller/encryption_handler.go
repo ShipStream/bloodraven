@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // KeyringEscrowRequest is the body a sidecar POSTs to /keyring/escrow.
@@ -136,7 +136,7 @@ func NewKeyringEscrowHandler(c client.Client, logger *slog.Logger) http.Handler 
 			return
 		}
 
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, types.NamespacedName{
 			Namespace: req.Namespace, Name: req.Group,
 		}, &fg); err != nil {

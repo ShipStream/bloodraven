@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -149,13 +149,13 @@ func s39ObserveDragonflyFlip() runner.Step {
 			var sawUnreachable bool
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("status.dragonfly.activeSite==%s after master partition", target),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					df := mfg.Status.Dragonfly
 					if df == nil {
 						return false, "no status.dragonfly", nil
 					}
 					for _, s := range df.Sites {
-						if s.Name == oldMaster && s.Role == v1alpha1.DragonflyRoleUnreachable {
+						if s.Name == oldMaster && s.Role == v1beta1.DragonflyRoleUnreachable {
 							sawUnreachable = true
 						}
 					}
@@ -309,7 +309,7 @@ func s39WaitOldMasterHealthyReplica(ctx context.Context, env *runner.Env, oldMas
 	defer cancel()
 	_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 		fmt.Sprintf("dragonfly site %s rejoined as replica with link=up", oldMaster),
-		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 			df := mfg.Status.Dragonfly
 			if df == nil {
 				return false, "no status.dragonfly", nil
@@ -317,8 +317,8 @@ func s39WaitOldMasterHealthyReplica(ctx context.Context, env *runner.Env, oldMas
 			for _, s := range df.Sites {
 				if s.Name == oldMaster {
 					msg := fmt.Sprintf("role=%q link=%q reachable=%v sync=%s phase=%q", s.Role, s.LinkStatus, s.Reachable, optionalBoolString(s.SyncInProgress), df.Phase)
-					done := df.Phase == v1alpha1.DragonflyPhaseReady &&
-						s.Role == v1alpha1.DragonflyRoleReplica &&
+					done := df.Phase == v1beta1.DragonflyPhaseReady &&
+						s.Role == v1beta1.DragonflyRoleReplica &&
 						s.LinkStatus == "up" && s.Reachable && !dragonflySyncing(s.SyncInProgress)
 					return done, msg, nil
 				}

@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // podCommandLines joins every container's and init container's command and
@@ -35,7 +35,7 @@ func podCommandLines(spec corev1.PodSpec) string {
 // backup stamp expects. The sites are declared in reverse id order, so a
 // positional derivation (101 + index) cannot produce either value.
 func TestServerID_ExplicitIDRendersUnchanged(t *testing.T) {
-	ids := map[string]int64{"dc2": 7, "dc1": v1alpha1.MaxServerID}
+	ids := map[string]int64{"dc2": 7, "dc1": v1beta1.MaxServerID}
 
 	fg := newTestFG()
 	fg.Spec.Sites[0], fg.Spec.Sites[1] = fg.Spec.Sites[1], fg.Spec.Sites[0]
@@ -62,9 +62,9 @@ func TestServerID_ExplicitIDRendersUnchanged(t *testing.T) {
 
 	bfg := identityFG()
 	for i := range bfg.Spec.Sites {
-		bfg.Spec.Sites[i].ServerID = map[string]int64{"iad": v1alpha1.MaxServerID, "pdx": 7}[bfg.Spec.Sites[i].Name]
+		bfg.Spec.Sites[i].ServerID = map[string]int64{"iad": v1beta1.MaxServerID, "pdx": 7}[bfg.Spec.Sites[i].Name]
 	}
-	for site, id := range map[string]uint32{"iad": v1alpha1.MaxServerID, "pdx": 7} {
+	for site, id := range map[string]uint32{"iad": v1beta1.MaxServerID, "pdx": 7} {
 		stamp, err := backupStampTemplate(bfg, identityBackup(), bfg.Spec.Backup.Profiles[0], site, testPITRRender(bfg).ArchiveID)
 		if err != nil {
 			t.Fatal(err)
@@ -91,7 +91,7 @@ func TestServerID_ExplicitIDRendersUnchanged(t *testing.T) {
 // bypassed admission) stops the render and the backup stamp instead of
 // producing a wrong id.
 func TestServerID_OutOfRangeRefused(t *testing.T) {
-	for _, id := range []int64{0, -1, v1alpha1.MaxServerID + 1} {
+	for _, id := range []int64{0, -1, v1beta1.MaxServerID + 1} {
 		fg := newTestFG()
 		fg.Spec.Sites[0].ServerID = id
 		r, _ := newReconciler(fg)

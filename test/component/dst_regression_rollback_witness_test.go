@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -38,10 +38,10 @@ func TestDSTPF_RollbackLeavesASourceFencedThatLostWhatAnotherSiteHolds(t *testin
 		return slices.Contains(got, "SetSuperReadOnly:off") || slices.Contains(got, "SetReadOnly:off")
 	}
 	// rolledBack runs the trial up to the terminal record.
-	rolledBack := func(t *testing.T, witnessHolds bool) (*pfHarness, *v1alpha1.PlannedFailoverStatus) {
+	rolledBack := func(t *testing.T, witnessHolds bool) (*pfHarness, *v1beta1.PlannedFailoverStatus) {
 		h := newPFHarness(t, pfOpts{third: state.SiteRoleDROnly})
 		h.request("dc2")
-		h.runUntil(20, inPhase(v1alpha1.PlannedFailoverPhaseFencing))
+		h.runUntil(20, inPhase(v1beta1.PlannedFailoverPhaseFencing))
 		h.src.setGtidExecuted(short)
 		h.src.respawn(true)
 		h.src.setRO(true, true) // its sidecar fences it at boot
@@ -58,7 +58,7 @@ func TestDSTPF_RollbackLeavesASourceFencedThatLostWhatAnotherSiteHolds(t *testin
 	}
 	t.Run("a disaster-recovery site holds them", func(t *testing.T) {
 		h, pf := rolledBack(t, true)
-		if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+		if pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 			t.Fatalf("outcome %s (%s), want SourceLeftFenced; store log:\n%s", pf.Result.Outcome, pf.Result.Reason,
 				strings.Join(h.store.LogStrings(), "\n"))
 		}
@@ -93,7 +93,7 @@ func TestDSTPF_RollbackLeavesASourceFencedThatLostWhatAnotherSiteHolds(t *testin
 		// transactions is the target, which is out of reach. The operator
 		// has no evidence, and the rollback unfences the source as before.
 		h, pf := rolledBack(t, false)
-		if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack || !unfenced(h) {
+		if pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack || !unfenced(h) {
 			t.Fatalf("outcome %s (%s), source statements %v; want the source unfenced: nothing that answers shows a loss",
 				pf.Result.Outcome, pf.Result.Reason, h.src.statements())
 		}

@@ -19,7 +19,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar"
@@ -92,16 +92,16 @@ func newStandbyReconciler(store sidecar.ArchiveStore) *controller.MysqlStandbyCl
 }
 
 // minimalEnvtestStandby returns a MysqlStandbyCluster suitable for envtest.
-func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
-	return &v1alpha1.MysqlStandbyCluster{
+func minimalEnvtestStandby(name, ns string) *v1beta1.MysqlStandbyCluster {
+	return &v1beta1.MysqlStandbyCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 		},
-		Spec: v1alpha1.MysqlStandbyClusterSpec{
-			Transport: v1alpha1.StandbyTransportObjectStore,
-			Source: v1alpha1.StandbySource{
-				S3: v1alpha1.StandbyS3Source{
+		Spec: v1beta1.MysqlStandbyClusterSpec{
+			Transport: v1beta1.StandbyTransportObjectStore,
+			Source: v1beta1.StandbySource{
+				S3: v1beta1.StandbyS3Source{
 					Bucket: "my-bucket",
 					Prefix: "orders",
 					// CredentialsSecret is required by the CRD schema. The
@@ -143,7 +143,7 @@ func ensureEnvtestS3CredsSecret(t *testing.T, ns, name string) {
 }
 
 // envtestStandbyFindCondition finds a named condition on the CR, or nil.
-func envtestStandbyFindCondition(cr *v1alpha1.MysqlStandbyCluster, condType string) *metav1.Condition {
+func envtestStandbyFindCondition(cr *v1beta1.MysqlStandbyCluster, condType string) *metav1.Condition {
 	for i := range cr.Status.Conditions {
 		if cr.Status.Conditions[i].Type == condType {
 			return &cr.Status.Conditions[i]
@@ -188,13 +188,13 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 	}
 
 	// Fetch the updated status.
-	var updated v1alpha1.MysqlStandbyCluster
+	var updated v1beta1.MysqlStandbyCluster
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: scName, Namespace: ns}, &updated); err != nil {
 		t.Fatalf("get after reconcile: %v", err)
 	}
 
 	// BucketReadable=True.
-	brc := envtestStandbyFindCondition(&updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := envtestStandbyFindCondition(&updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
 	}
@@ -203,7 +203,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 	}
 
 	// SourceConfigKnown=True.
-	skc := envtestStandbyFindCondition(&updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := envtestStandbyFindCondition(&updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil {
 		t.Fatal("SourceConfigKnown condition missing")
 	}
@@ -230,7 +230,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 		t.Fatal("discovered.binlogArchive is nil")
 	}
 	if a.Identity.ArchiveID != "ar1-aaaaaaaaaaaaaaaaaaaaaaaaaa" ||
-		a.Identity.Source.UID != "orders-uid" || a.Identity.EncryptionMode != v1alpha1.EncryptionModeNone {
+		a.Identity.Source.UID != "orders-uid" || a.Identity.EncryptionMode != v1beta1.EncryptionModeNone {
 		t.Errorf("discovered.binlogArchive.identity: %+v", a.Identity)
 	}
 	if a.ManifestCount != 1 || a.FileCount != 1 || a.SizeBytes != 1024 ||
@@ -283,12 +283,12 @@ func TestMysqlStandbyCluster_EnvtestCreate_BucketUnreadable(t *testing.T) {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
-	var updated v1alpha1.MysqlStandbyCluster
+	var updated v1beta1.MysqlStandbyCluster
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: scName, Namespace: ns}, &updated); err != nil {
 		t.Fatalf("get after reconcile: %v", err)
 	}
 
-	brc := envtestStandbyFindCondition(&updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := envtestStandbyFindCondition(&updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
 	}
@@ -311,7 +311,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_DiscoveryIntervalOverride(t *testing.
 	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
 	cr := minimalEnvtestStandby(scName, ns)
 	customInterval := 3 * time.Minute
-	cr.Spec.Freshness = &v1alpha1.StandbyFreshnessSpec{
+	cr.Spec.Freshness = &v1beta1.StandbyFreshnessSpec{
 		DiscoveryInterval: &metav1.Duration{Duration: customInterval},
 	}
 
@@ -343,7 +343,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_PVCSourceUnrepresentable(t *testing.T
 
 	newUnstructured := func(name string, source map[string]any) *unstructured.Unstructured {
 		u := &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": v1alpha1.GroupVersion.String(),
+			"apiVersion": v1beta1.GroupVersion.String(),
 			"kind":       "MysqlStandbyCluster",
 			"metadata":   map[string]any{"name": name, "namespace": ns},
 			"spec":       map[string]any{"source": source},
@@ -371,7 +371,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_PVCSourceUnrepresentable(t *testing.T
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, withS3) })
 	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlStandbyCluster"))
+	got.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("MysqlStandbyCluster"))
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: withS3.GetName()}, got); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_RejectsNetworkTransport(t *testing.T)
 	ns := "default"
 	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
 	cr := minimalEnvtestStandby("envtest-standby-network", ns)
-	cr.Spec.Transport = v1alpha1.StandbyTransport("Network")
+	cr.Spec.Transport = v1beta1.StandbyTransport("Network")
 	err := k8sClient.Create(ctx, cr)
 	if err == nil {
 		_ = k8sClient.Delete(ctx, cr)
@@ -402,7 +402,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_RejectsNetworkTransport(t *testing.T)
 		t.Fatalf("create without transport: %v", err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, defaulted) })
-	if defaulted.Spec.Transport != v1alpha1.StandbyTransportObjectStore {
+	if defaulted.Spec.Transport != v1beta1.StandbyTransportObjectStore {
 		t.Errorf("transport: want the ObjectStore default, got %q", defaulted.Spec.Transport)
 	}
 }

@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -252,7 +252,7 @@ func TestOwnLoss_ReturningOldPrimaryIsNotRejoined(t *testing.T) {
 		t.Fatalf("recovery state = %q, want none (not RecoveryInProgress: nothing is rejoined)", got)
 	}
 	st := f.tm.Status()
-	if st.Sites[1].RecoveryState != v1alpha1.RecoveryStateRecloneRequired || st.Sites[1].LostGtid != lossLostGTID ||
+	if st.Sites[1].RecoveryState != v1beta1.RecoveryStateRecloneRequired || st.Sites[1].LostGtid != lossLostGTID ||
 		st.Sites[1].LostTransactionCount == nil || *st.Sites[1].LostTransactionCount != 10 {
 		t.Fatalf("status site = %+v, want RecloneRequired with the lost set", st.Sites[1])
 	}
@@ -307,7 +307,7 @@ func TestOwnLoss_ReturningOldPrimaryIsRecloned(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		f.tm.Poll(context.Background())
 		if gate != nil {
-			if conditions()["RecoveryPending"].Reason != v1alpha1.ReasonOwnTransactionsLost {
+			if conditions()["RecoveryPending"].Reason != v1beta1.ReasonOwnTransactionsLost {
 				continue
 			}
 			close(gate)
@@ -353,7 +353,7 @@ func TestOwnLoss_ReturningOldPrimaryIsRecloned(t *testing.T) {
 	if !strings.Contains(evs, "Normal OwnTransactionsLostResolved") {
 		t.Errorf("events = %q, want OwnTransactionsLostResolved after the reclone", evs)
 	}
-	if d := conditions()["RecoveryPending"]; d.Reason == v1alpha1.ReasonOwnTransactionsLost {
+	if d := conditions()["RecoveryPending"]; d.Reason == v1beta1.ReasonOwnTransactionsLost {
 		t.Errorf("RecoveryPending = %+v after the reclone, want the report gone", d)
 	}
 }
@@ -403,7 +403,7 @@ func TestOwnLoss_DivergenceWinsAndIsNotClonedOver(t *testing.T) {
 		t.Fatalf("replication was configured on a divergent site (CHANGE=%d START=%d)", changes, starts)
 	}
 	rec := recoveryOf(f.tm, "dc2")
-	if rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentGtid != lossUUIDOld+":101-105" {
+	if rec.state != v1beta1.RecoveryStateBlocked || rec.divergentGtid != lossUUIDOld+":101-105" {
 		t.Fatalf("recovery = %+v, want RecoveryBlocked with the extra transactions", rec)
 	}
 	loss := f.loss()
@@ -414,7 +414,7 @@ func TestOwnLoss_DivergenceWinsAndIsNotClonedOver(t *testing.T) {
 		t.Fatalf("recloneWaiting = %q, want it to say an administrator decides", loss.recloneWaiting)
 	}
 	st := f.tm.Status()
-	if st.Sites[1].RecoveryState != v1alpha1.RecoveryStateBlocked || st.Sites[1].LostGtid != lossLostGTID {
+	if st.Sites[1].RecoveryState != v1beta1.RecoveryStateBlocked || st.Sites[1].LostGtid != lossLostGTID {
 		t.Fatalf("status site = %+v, want RecoveryBlocked carrying lostGtid", st.Sites[1])
 	}
 }
@@ -704,10 +704,10 @@ func TestOwnLoss_AuditFindsAReplicatingSite(t *testing.T) {
 		if rec == nil || rec.lostGtid != lossLostGTID || rec.detectedBy != divergenceDetectedByAudit || rec.comparedTo != "primary" {
 			t.Fatalf("own-loss record = %+v, want %s by ReplicaAudit against primary", rec, lossLostGTID)
 		}
-		if st := tm.Status(); st.Sites[1].RecoveryState != v1alpha1.RecoveryStateRecloneRequired {
+		if st := tm.Status(); st.Sites[1].RecoveryState != v1beta1.RecoveryStateRecloneRequired {
 			t.Fatalf("recoveryState = %q, want RecloneRequired", st.Sites[1].RecoveryState)
 		}
-		if got := recoveryOf(tm, "follower-a").state; got == v1alpha1.RecoveryStateBlocked {
+		if got := recoveryOf(tm, "follower-a").state; got == v1beta1.RecoveryStateBlocked {
 			t.Fatal("a site that only lacks transactions was reported divergent")
 		}
 	})
@@ -931,11 +931,11 @@ func TestGroupSiteIdentityStore(t *testing.T) {
 		t.Fatalf("newest entry = %s, want the last one added", last)
 	}
 	// An undecodable value reads as empty and is replaced by the next write.
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
-	cur.Annotations[v1alpha1.ServerUUIDHistoryAnnotation] = "{not json"
+	cur.Annotations[v1beta1.ServerUUIDHistoryAnnotation] = "{not json"
 	if err := c.Update(ctx, &cur); err != nil {
 		t.Fatal(err)
 	}
@@ -1018,7 +1018,7 @@ func TestOwnLoss_ConvergenceDoesNotRestartTheChannel(t *testing.T) {
 		t.Fatalf("own-loss record = %+v, want %s", rec, lossLostGTID)
 	}
 	st := f.tm.Status()
-	if st.Sites[1].SourceConvergenceState != sourceConvergenceBlocked || st.Sites[1].SourceConvergenceReason != v1alpha1.SourceReasonOwnTransactionsLost {
+	if st.Sites[1].SourceConvergenceState != sourceConvergenceBlocked || st.Sites[1].SourceConvergenceReason != v1beta1.SourceReasonOwnTransactionsLost {
 		t.Fatalf("source convergence = %s/%s, want Blocked/OwnTransactionsLost", st.Sites[1].SourceConvergenceState, st.Sites[1].SourceConvergenceReason)
 	}
 }

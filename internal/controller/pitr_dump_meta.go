@@ -7,7 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -15,7 +15,7 @@ import (
 // what the dump-meta init container must find in its stamp (§4.2).
 type pitrDumpSource struct {
 	// StorageType is S3 or PVC.
-	StorageType v1alpha1.BackupStorageType
+	StorageType v1beta1.BackupStorageType
 	// Prefix is the dump location relative to the store: the S3 key prefix
 	// (no bucket, no trailing slash) or the path relative to the claim's
 	// root. The stamp is backupmeta.StampKey(Prefix).
@@ -31,7 +31,7 @@ type pitrDumpSource struct {
 	Recorded bool
 
 	// Passphrase is the dump key; nil for a plaintext dump.
-	Passphrase *v1alpha1.PassphraseSecretKeyRef
+	Passphrase *v1beta1.PassphraseSecretKeyRef
 
 	// Expected identity, from the referenced MysqlBackup. All empty for a
 	// direct S3 or PVC source, whose stamp is still required.
@@ -44,7 +44,7 @@ type pitrDumpSource struct {
 // the destination its status.artifactStorage records. profile supplies the
 // storage credentials and must store to the backup's backend (callers
 // check this first).
-func pitrDumpSourceForBackup(backup *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, passphrase *v1alpha1.PassphraseSecretKeyRef) (pitrDumpSource, error) {
+func pitrDumpSourceForBackup(backup *v1beta1.MysqlBackup, profile *v1beta1.BackupProfile, passphrase *v1beta1.PassphraseSecretKeyRef) (pitrDumpSource, error) {
 	// §7.1: a backup with no recorded source identity was taken by a
 	// release without dump identity (no stamp), so dump-meta would refuse
 	// it anyway after scheduling and image pulls. Refuse at reconcile.
@@ -68,7 +68,7 @@ func pitrDumpSourceForBackup(backup *v1alpha1.MysqlBackup, profile *v1alpha1.Bac
 	// The destination is the one the producing Job recorded; only the
 	// credentials come from the profile.
 	switch src.StorageType {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		if profile == nil || profile.Storage.S3 == nil {
 			return src, fmt.Errorf("backup %q is on S3 but its profile has no s3 storage", backup.Name)
 		}
@@ -76,7 +76,7 @@ func pitrDumpSourceForBackup(backup *v1alpha1.MysqlBackup, profile *v1alpha1.Bac
 		src.S3Bucket, src.S3EndpointURL, src.S3Region = storage.Bucket, storage.EndpointURL, storage.Region
 		src.AWSCredsSecret = profile.Storage.S3.CredentialsSecretName
 		src.Prefix = strings.Trim(prefix, "/")
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		src.PVCClaim = storage.ClaimName
 		// The location is the in-pod path the backup Job wrote under
 		// backupPVCMountPath; the stamp is relative to the claim's root.
@@ -102,7 +102,7 @@ var errDumpAtStoreRoot = fmt.Errorf("%s: point-in-time replay needs the dump's o
 // /pitr-dump-meta/dump.json (the pitr-dump-meta volume that
 // buildRestorePITRFragmentsFor adds). Its volumes are its own, so the
 // caller's dump-loading wiring can change without affecting it.
-func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSource) (corev1.Container, []corev1.Volume, error) {
+func buildDumpMetaInitContainer(fg *v1beta1.MysqlFailoverGroup, src pitrDumpSource) (corev1.Container, []corev1.Volume, error) {
 	if src.Prefix == "" {
 		// F037: a dump at the root of its store (a direct source with
 		// no S3 prefix or PVC subPath) has no directory a backup stamp
@@ -120,7 +120,7 @@ func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSou
 	}
 	var volumes []corev1.Volume
 	switch src.StorageType {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		if src.S3Bucket == "" {
 			return corev1.Container{}, nil, fmt.Errorf("point-in-time replay: the dump's S3 bucket is unknown")
 		}
@@ -147,7 +147,7 @@ func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSou
 			mounts = append(mounts, corev1.VolumeMount{Name: "pitr-dump-aws-creds", MountPath: backupAWSCredsMountPath, ReadOnly: true})
 			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath})
 		}
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		if src.PVCClaim == "" {
 			return corev1.Container{}, nil, fmt.Errorf("point-in-time replay: the dump's claim is unknown")
 		}
@@ -205,7 +205,7 @@ func buildDumpMetaInitContainer(fg *v1alpha1.MysqlFailoverGroup, src pitrDumpSou
 // pitrLoadFilterRefusal refuses schema-filtered loads with point-in-time
 // replay (D-45): the replay applies every archived transaction, including
 // those on the skipped schemas, and R6 could not certify the result.
-func pitrLoadFilterRefusal(fp string, opts *v1alpha1.LoadOptions) error {
+func pitrLoadFilterRefusal(fp string, opts *v1beta1.LoadOptions) error {
 	if opts == nil || (len(opts.IncludeSchemas) == 0 && len(opts.ExcludeSchemas) == 0) {
 		return nil
 	}

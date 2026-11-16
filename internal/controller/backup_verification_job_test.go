@@ -7,7 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // --- verify mysqld GTID flags (#101) -------------------------------------
@@ -124,10 +124,10 @@ func TestMarshalVerificationLoadOptions_InjectsUpdateGtidSet(t *testing.T) {
 func TestBuildVerificationJob_LoadOptionsEnvCarriesUpdateGtidSet(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("gtid-happy", "lion", "nightly-s3")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-gtid", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}

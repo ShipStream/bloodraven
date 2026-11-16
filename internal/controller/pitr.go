@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
@@ -92,7 +92,7 @@ type pitrSidecarFragments struct {
 // BLOODRAVEN_PITR_KEY_REVISION echoes the snapshot name, or "plaintext"
 // for an unencrypted archive (Δ2, K4), so a sidecar report proves which
 // key a writer verified with. No profile name is rendered (K7).
-func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup, in pitrRenderInputs) (pitrSidecarFragments, error) {
+func buildPITRSidecarFragments(fg *v1beta1.MysqlFailoverGroup, in pitrRenderInputs) (pitrSidecarFragments, error) {
 	out := pitrSidecarFragments{}
 	if !in.Enabled {
 		return out, nil
@@ -258,7 +258,7 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup, in pitrRenderInp
 // an archive has are the ones its binding accepted
 // (status.pitrArchiveBindings), never derived from the live profile
 // (U60).
-func activePITRDestination(fg *v1alpha1.MysqlFailoverGroup) (pitrarchive.Destination, bool) {
+func activePITRDestination(fg *v1beta1.MysqlFailoverGroup) (pitrarchive.Destination, bool) {
 	if !pitrEnabled(fg) || fg.Spec.Backup.PITR.ProfileName == "" {
 		return pitrarchive.Destination{}, false
 	}
@@ -344,7 +344,7 @@ func canonicalPITRTarget(t time.Time) string {
 }
 
 // pitrRequestFromSpec normalizes a restore's PointInTimeSpec.
-func pitrRequestFromSpec(pit *v1alpha1.PointInTimeSpec) (*pitrReplayRequest, error) {
+func pitrRequestFromSpec(pit *v1beta1.PointInTimeSpec) (*pitrReplayRequest, error) {
 	if pit == nil {
 		return nil, nil
 	}
@@ -438,7 +438,7 @@ func checkUserGTIDSetUUIDs(raw string) error {
 // statfs and the cgroup limit. The memory limit is the literal value, not
 // a downward-API reference, because the downward API reports node
 // allocatable memory for a container with no limit.
-func pitrDownloadBudgetEnv(backup *v1alpha1.BackupSpec, res corev1.ResourceRequirements) []corev1.EnvVar {
+func pitrDownloadBudgetEnv(backup *v1beta1.BackupSpec, res corev1.ResourceRequirements) []corev1.EnvVar {
 	var env []corev1.EnvVar
 	if backup != nil && backup.StagingVolumeSizeLimit != nil {
 		if v := backup.StagingVolumeSizeLimit.Value(); v > 0 {
@@ -484,7 +484,7 @@ type restorePITRFragments struct {
 	PodVolumes []corev1.Volume
 	// KeySecretName is the read binding's archive key snapshot the init
 	// container mounts ("" for a plaintext archive). Callers label the Job
-	// with it (v1alpha1.PITRKeySecretLabel, Δ18) and a verification holds it (K9).
+	// with it (v1beta1.PITRKeySecretLabel, Δ18) and a verification holds it (K9).
 	KeySecretName string
 }
 
@@ -506,7 +506,7 @@ type restorePITRFragments struct {
 // installed (updateGtidSet "replace"), which restore.py proves equals the
 // plan's baseline before replaying. In-place restores have no pointInTime:
 // a live primary's gtid_executed cannot be the dump's.
-func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
+func buildRestorePITRFragments(fg *v1beta1.MysqlFailoverGroup) (restorePITRFragments, error) {
 	if fg.Spec.InitFromBackup == nil {
 		return restorePITRFragments{}, nil
 	}
@@ -525,7 +525,7 @@ func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFrag
 // admission; this also covers objects admitted before the rule), and that
 // profile may not resolve to the group's own active PITR destination, so
 // the restored group never writes into the archive it restores from.
-func validateRestoreArchiveProfile(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1.PointInTimeSpec) error {
+func validateRestoreArchiveProfile(fg *v1beta1.MysqlFailoverGroup, pit *v1beta1.PointInTimeSpec) error {
 	if pit == nil {
 		return nil
 	}
@@ -565,7 +565,7 @@ func pitrReplayRequestEnv(req *pitrReplayRequest) []corev1.EnvVar {
 // verification Job carries for spec (nil for no replay), so the
 // cmd/bloodraven tests can feed it to the download planner. Not for
 // production use.
-func VerificationPITRRequestEnvForTest(spec *v1alpha1.PointInTimeVerificationSpec) (map[string]string, error) {
+func VerificationPITRRequestEnvForTest(spec *v1beta1.PointInTimeVerificationSpec) (map[string]string, error) {
 	req, err := verificationPITRRequest(spec)
 	if err != nil || req == nil {
 		return nil, err
@@ -580,7 +580,7 @@ func VerificationPITRRequestEnvForTest(spec *v1alpha1.PointInTimeVerificationSpe
 // buildRestorePITRFragmentsFor renders req's pitr-download init container
 // and the main container's replay env. A nil req is a no-op: callers get an
 // empty fragments struct and skip the init containers entirely.
-func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrReplayRequest) (restorePITRFragments, error) {
+func buildRestorePITRFragmentsFor(fg *v1beta1.MysqlFailoverGroup, req *pitrReplayRequest) (restorePITRFragments, error) {
 	var out restorePITRFragments
 
 	if req == nil {
@@ -669,7 +669,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	volumes := []corev1.Volume{emptyDirVol, dumpMetaVol}
 
 	switch profile.Storage.Type {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		if profile.Storage.S3 == nil {
 			return out, fmt.Errorf("pitr profile %q type=S3 but storage.s3 nil", profile.Name)
 		}
@@ -710,7 +710,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 			})
 		}
 
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		if profile.Storage.PVC == nil {
 			return out, fmt.Errorf("pitr profile %q type=PVC but storage.pvc nil", profile.Name)
 		}
@@ -749,7 +749,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, req *pitrRepl
 	// verified this pass). The path is the conventional one backup and
 	// restore Jobs use, so env var names stay consistent.
 	keySecret := ""
-	if binding.Encryption.Mode == v1alpha1.EncryptionModePassphrase {
+	if binding.Encryption.Mode == v1beta1.EncryptionModePassphrase {
 		keySecret = binding.Encryption.KeySecretName
 		if keySecret == "" {
 			return out, fmt.Errorf("internal error: Bound passphrase binding %s has no key snapshot", binding.ID)

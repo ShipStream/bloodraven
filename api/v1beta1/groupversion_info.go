@@ -1,4 +1,4 @@
-package v1alpha1
+package v1beta1
 
 import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	GroupVersion  = schema.GroupVersion{Group: "shipstream.io", Version: "v1alpha1"}
+	GroupVersion  = schema.GroupVersion{Group: "shipstream.io", Version: "v1beta1"}
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
 	AddToScheme   = SchemeBuilder.AddToScheme
 )

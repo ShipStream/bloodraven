@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -22,17 +22,17 @@ func TestEnvtest_BackupRetryLineageSurvivesLostStatus(t *testing.T) {
 	ns := createNamespace(t, "backup-retry-lineage")
 	ensureSecret(t, ns)
 	fg := newVerificationFG(ns)
-	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 3, InitialBackoff: &metav1.Duration{Duration: time.Second}, MaxBackoff: &metav1.Duration{Duration: time.Minute}}
-	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
+	fg.Spec.Backup.Retry = &v1beta1.BackupRetrySpec{MaxAttempts: 3, InitialBackoff: &metav1.Duration{Duration: time.Second}, MaxBackoff: &metav1.Duration{Duration: time.Minute}}
+	fg.Spec.Backup.Schedules = []v1beta1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	makeRun := func(name string, attempt int32, phase v1alpha1.BackupPhase, started time.Time) *v1alpha1.MysqlBackup {
+	makeRun := func(name string, attempt int32, phase v1beta1.BackupPhase, started time.Time) *v1beta1.MysqlBackup {
 		b := newSucceededBackup(ns, fg.Name, "nightly-s3")
 		b.Name = name
 		b.Labels["bloodraven.shipstream.io/backup-schedule"] = "nightly"
@@ -40,14 +40,14 @@ func TestEnvtest_BackupRetryLineageSurvivesLostStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 		start, end := metav1.NewTime(started), metav1.NewTime(started.Add(time.Minute))
-		b.Status = v1alpha1.MysqlBackupStatus{Phase: phase, Attempt: attempt, StartTime: &start, CompletionTime: &end}
+		b.Status = v1beta1.MysqlBackupStatus{Phase: phase, Attempt: attempt, StartTime: &start, CompletionTime: &end}
 		if err := k8sClient.Status().Update(ctx, b); err != nil {
 			t.Fatal(err)
 		}
 		return b
 	}
-	makeRun("yesterday", 2, v1alpha1.BackupPhaseSucceeded, time.Now().Add(-24*time.Hour))
-	failed := makeRun("today", 1, v1alpha1.BackupPhaseFailed, time.Now().Add(-time.Hour))
+	makeRun("yesterday", 2, v1beta1.BackupPhaseSucceeded, time.Now().Add(-24*time.Hour))
+	failed := makeRun("today", 1, v1beta1.BackupPhaseFailed, time.Now().Add(-time.Hour))
 	watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestEnvtest_BackupRetryLineageSurvivesLostStatus(t *testing.T) {
 			if err := c.List(ctx, list, opts...); err != nil {
 				return err
 			}
-			if backups, ok := list.(*v1alpha1.MysqlBackupList); ok {
+			if backups, ok := list.(*v1beta1.MysqlBackupList); ok {
 				visible := backups.Items[:0]
 				for _, b := range backups.Items {
 					if b.Annotations["bloodraven.shipstream.io/backup-attempt"] == "" {
@@ -69,7 +69,7 @@ func TestEnvtest_BackupRetryLineageSurvivesLostStatus(t *testing.T) {
 			return nil
 		},
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			if _, ok := obj.(*v1alpha1.MysqlBackup); ok && sub == "status" {
+			if _, ok := obj.(*v1beta1.MysqlBackup); ok && sub == "status" {
 				return fmt.Errorf("injected lost retry status")
 			}
 			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
@@ -81,14 +81,14 @@ func TestEnvtest_BackupRetryLineageSurvivesLostStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var backups v1alpha1.MysqlBackupList
+	var backups v1beta1.MysqlBackupList
 	if err := k8sClient.List(ctx, &backups, client.InNamespace(ns)); err != nil {
 		t.Fatal(err)
 	}
 	if len(backups.Items) != 3 {
 		t.Fatalf("expected retained history, failed run and exactly one retry; got %d", len(backups.Items))
 	}
-	var retry *v1alpha1.MysqlBackup
+	var retry *v1beta1.MysqlBackup
 	for i := range backups.Items {
 		if strings.HasPrefix(backups.Items[i].Name, "backup-retry-") {
 			retry = &backups.Items[i]
@@ -106,7 +106,7 @@ func TestEnvtest_BackupRetryLineageSurvivesLostStatus(t *testing.T) {
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(retry), retry); err != nil {
 		t.Fatal(err)
 	}
-	if retry.Status.Attempt != 2 || retry.Status.Phase != v1alpha1.BackupPhaseRunning {
+	if retry.Status.Attempt != 2 || retry.Status.Phase != v1beta1.BackupPhaseRunning {
 		t.Fatalf("backup reconciler lost persisted retry attempt: %+v", retry.Status)
 	}
 }
@@ -115,8 +115,8 @@ func TestEnvtest_BackupRetryConflictWarningPersistsAcrossRestarts(t *testing.T) 
 	ns := createNamespace(t, "retry-conflict-warning")
 	ensureSecret(t, ns)
 	fg := newVerificationFG(ns)
-	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 3, InitialBackoff: &metav1.Duration{Duration: time.Second}, MaxBackoff: &metav1.Duration{Duration: time.Minute}}
-	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
+	fg.Spec.Backup.Retry = &v1beta1.BackupRetrySpec{MaxAttempts: 3, InitialBackoff: &metav1.Duration{Duration: time.Second}, MaxBackoff: &metav1.Duration{Duration: time.Minute}}
+	fg.Spec.Backup.Schedules = []v1beta1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestEnvtest_BackupRetryConflictWarningPersistsAcrossRestarts(t *testing.T) 
 		t.Fatal(err)
 	}
 	completed := metav1.NewTime(time.Now().Add(-time.Hour))
-	failed.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseFailed, Attempt: 1, CompletionTime: &completed}
+	failed.Status = v1beta1.MysqlBackupStatus{Phase: v1beta1.BackupPhaseFailed, Attempt: 1, CompletionTime: &completed}
 	if err := k8sClient.Status().Update(ctx, failed); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestEnvtest_BackupRetryConflictWarningPersistsAcrossRestarts(t *testing.T) 
 		}
 	}
 	reconcile()
-	var successors v1alpha1.MysqlBackupList
+	var successors v1beta1.MysqlBackupList
 	if err := k8sClient.List(ctx, &successors, client.InNamespace(ns), client.MatchingLabels{"bloodraven.shipstream.io/backup-retry-of": string(failed.UID)}); err != nil || len(successors.Items) != 1 {
 		t.Fatalf("expected one retry: backups=%+v err=%v", successors.Items, err)
 	}

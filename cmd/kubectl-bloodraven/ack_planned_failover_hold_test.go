@@ -6,31 +6,31 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 func TestPlannedHoldAckValue(t *testing.T) {
-	held := func() *v1alpha1.MysqlFailoverGroup {
-		fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orders"}}
-		fg.Status.PlannedFailoverHold = &v1alpha1.PlannedFailoverHold{RunID: "run-1", HoldTime: metav1.Now()}
+	held := func() *v1beta1.MysqlFailoverGroup {
+		fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orders"}}
+		fg.Status.PlannedFailoverHold = &v1beta1.PlannedFailoverHold{RunID: "run-1", HoldTime: metav1.Now()}
 		return fg
 	}
-	markerOnly := func() *v1alpha1.MysqlFailoverGroup {
-		fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orders",
-			Annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: brcontroller.TerminalMarker{
-				RunID: "run-2", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}.String()}}}
+	markerOnly := func() *v1beta1.MysqlFailoverGroup {
+		fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orders",
+			Annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: brcontroller.TerminalMarker{
+				RunID: "run-2", Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}.String()}}}
 		return fg
 	}
-	namesNoRun := func() *v1alpha1.MysqlFailoverGroup {
-		fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orders"}}
-		fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue,
-			Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired}}
+	namesNoRun := func() *v1beta1.MysqlFailoverGroup {
+		fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orders"}}
+		fg.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue,
+			Reason: v1beta1.ReasonPlannedFailoverManualRecoveryRequired}}
 		return fg
 	}
 	for _, tc := range []struct {
 		name    string
-		fg      *v1alpha1.MysqlFailoverGroup
+		fg      *v1beta1.MysqlFailoverGroup
 		runID   string
 		want    string
 		wantErr string
@@ -39,7 +39,7 @@ func TestPlannedHoldAckValue(t *testing.T) {
 		{name: "explicit matching id", fg: held(), runID: "run-1", want: "run-1"},
 		{name: "explicit other id", fg: held(), runID: "run-0", wantErr: "does not name the held run"},
 		{name: "marker-only hold", fg: markerOnly(), want: "run-2"},
-		{name: "no hold", fg: &v1alpha1.MysqlFailoverGroup{}, wantErr: "has no planned-failover automation hold"},
+		{name: "no hold", fg: &v1beta1.MysqlFailoverGroup{}, wantErr: "has no planned-failover automation hold"},
 		{name: "condition naming no run", fg: namesNoRun(), wantErr: "names no run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

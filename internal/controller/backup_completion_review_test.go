@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	batchv1 "k8s.io/api/batch/v1"
@@ -33,7 +33,7 @@ func TestBackupMetadataReview_UnrecoverableHistoricalDestination(t *testing.T) {
 			if err := c.Update(ctx, job); err != nil {
 				t.Fatal(err)
 			}
-			mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
+			mb.Status.Phase = v1beta1.BackupPhaseSucceeded
 			// No recorded destination, and a Job that names none.
 			mb.Status.ArtifactStorage = nil
 			if err := c.Status().Update(ctx, mb); err != nil {
@@ -43,7 +43,7 @@ func TestBackupMetadataReview_UnrecoverableHistoricalDestination(t *testing.T) {
 			r.Recorder = recorder
 			retentionReads := 0
 			r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*v1alpha1.MysqlBackupList); ok {
+				if _, ok := list.(*v1beta1.MysqlBackupList); ok {
 					retentionReads++
 				}
 				return c.List(ctx, list, opts...)
@@ -59,14 +59,14 @@ func TestBackupMetadataReview_UnrecoverableHistoricalDestination(t *testing.T) {
 					t.Fatalf("historical metadata repair did not terminate: result=%+v err=%v", result, err)
 				}
 			}
-			var got v1alpha1.MysqlBackup
+			var got v1beta1.MysqlBackup
 			err := c.Get(ctx, client.ObjectKeyFromObject(mb), &got)
 			if deleting {
 				if !apierrors.IsNotFound(err) {
 					t.Fatalf("unrecoverable artifact wedged deletion: err=%v finalizers=%v", err, got.Finalizers)
 				}
 			} else {
-				condition := apiMeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionMetadataComplete)
+				condition := apiMeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionMetadataComplete)
 				if err != nil || retentionReads == 0 || condition == nil || condition.Reason != "DestinationUnavailable" {
 					t.Fatalf("repair did not record the outcome and run retention: reads=%d err=%v status=%+v", retentionReads, err, got.Status)
 				}
@@ -89,15 +89,15 @@ func TestBackupMetadataReview_UnrecoverableHistoricalDestination(t *testing.T) {
 }
 
 func TestBackupMetadataReview_ReadyConditionPreservedDuringCleanup(t *testing.T) {
-	for _, phase := range []v1alpha1.BackupPhase{v1alpha1.BackupPhaseSucceeded, v1alpha1.BackupPhaseRunning, v1alpha1.BackupPhaseFailed} {
+	for _, phase := range []v1beta1.BackupPhase{v1beta1.BackupPhaseSucceeded, v1beta1.BackupPhaseRunning, v1beta1.BackupPhaseFailed} {
 		t.Run(string(phase), func(t *testing.T) {
 			r, c, _, mb, _ := backupMetadataFixture(t, false)
 			mb.Status.Phase = phase
 			status := metav1.ConditionFalse
-			if phase == v1alpha1.BackupPhaseSucceeded {
+			if phase == v1beta1.BackupPhaseSucceeded {
 				status = metav1.ConditionTrue
 			}
-			original := metav1.Condition{Type: v1alpha1.ConditionReady, Status: status, Reason: "Original", Message: "original Job readiness message", LastTransitionTime: metav1.Now()}
+			original := metav1.Condition{Type: v1beta1.ConditionReady, Status: status, Reason: "Original", Message: "original Job readiness message", LastTransitionTime: metav1.Now()}
 			mb.Status.Conditions = append(mb.Status.Conditions, original)
 			if err := c.Status().Update(context.Background(), mb); err != nil {
 				t.Fatal(err)
@@ -105,14 +105,14 @@ func TestBackupMetadataReview_ReadyConditionPreservedDuringCleanup(t *testing.T)
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 				t.Fatal(err)
 			}
-			original = *apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
+			original = *apiMeta.FindStatusCondition(mb.Status.Conditions, v1beta1.ConditionReady)
 			if done, _, err := r.finalize(context.Background(), mb); err != nil || done {
 				t.Fatalf("expected artifact cleanup in progress: done=%v err=%v", done, err)
 			}
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 				t.Fatal(err)
 			}
-			got := apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
+			got := apiMeta.FindStatusCondition(mb.Status.Conditions, v1beta1.ConditionReady)
 			if !reflect.DeepEqual(got, &original) || mb.Status.Phase != phase {
 				t.Fatalf("cleanup changed readiness: got %+v want %+v phase=%s", got, original, mb.Status.Phase)
 			}
@@ -122,7 +122,7 @@ func TestBackupMetadataReview_ReadyConditionPreservedDuringCleanup(t *testing.T)
 
 func TestBackupMetadataReview_OlderRecoveryDoesNotReplaceLatestSize(t *testing.T) {
 	r, c, _, mb, job := backupMetadataFixture(t, false)
-	mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	mb.Status.Phase = v1beta1.BackupPhaseSucceeded
 	mb.Status.CompletionTime = job.Status.CompletionTime
 	// A lost launch record makes the reconciler collect the completion
 	// again from the Job.
@@ -155,7 +155,7 @@ func TestBackupMetadataReview_OlderRecoveryDoesNotReplaceLatestSize(t *testing.T
 func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	for _, storage := range []v1alpha1.BackupStorageType{v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC} {
+	for _, storage := range []v1beta1.BackupStorageType{v1beta1.BackupStorageS3, v1beta1.BackupStoragePVC} {
 		for _, encrypted := range []bool{false, true} {
 			for _, logs := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/encrypted-%v/logs-%v", storage, encrypted, logs), func(t *testing.T) {
@@ -164,13 +164,13 @@ func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 						fg = fgWithEncryptedBackup()
 					}
 					const raw = "$(BLOODRAVEN_STORAGE_TYPE)/$$cash/$$(BLOODRAVEN_STORAGE_TYPE)"
-					if storage == v1alpha1.BackupStoragePVC {
-						fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: storage, PVC: &v1alpha1.PVCStorage{ClaimName: "backups", SubPath: raw}}
+					if storage == v1beta1.BackupStoragePVC {
+						fg.Spec.Backup.Profiles[0].Storage = v1beta1.BackupStorage{Type: storage, PVC: &v1beta1.PVCStorage{ClaimName: "backups", SubPath: raw}}
 					} else {
 						fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = raw
 					}
 					fg.Status.ActiveSite = "iad"
-					fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
+					fg.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateWritable}}
 					mb := backupCR("runtime", fg.Name, "nightly-s3")
 					mb.UID = "runtime-backup"
 					r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
@@ -184,7 +184,7 @@ func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 						t.Fatal(err)
 					}
 					want := string(storage) + "/$cash/$(BLOODRAVEN_STORAGE_TYPE)/runtime"
-					if storage == v1alpha1.BackupStoragePVC {
+					if storage == v1beta1.BackupStoragePVC {
 						want = "/backups/" + want
 					} else if encrypted {
 						want = "s3://bloodraven-backups/" + want + "/"
@@ -207,7 +207,7 @@ func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 					if testArtifactLocation(mb) != want {
 						t.Fatalf("recorded raw env template: got %q want runtime %q", testArtifactLocation(mb), want)
 					}
-					if logs && !apiMeta.IsStatusConditionTrue(mb.Status.Conditions, v1alpha1.ConditionMetadataComplete) {
+					if logs && !apiMeta.IsStatusConditionTrue(mb.Status.Conditions, v1beta1.ConditionMetadataComplete) {
 						t.Fatalf("valid runtime sentinel was rejected: %+v", mb.Status.Conditions)
 					}
 				})

@@ -8,7 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/metrics"
@@ -52,9 +52,9 @@ func TestLicenseResolutionAndMetricLabels(t *testing.T) {
 	reg.MustRegister(metrics.LicenseInfo, metrics.LicenseUpdatesExpiry)
 
 	observe := func(mfg, operator string) {
-		fg := &v1alpha1.MysqlFailoverGroup{
+		fg := &v1beta1.MysqlFailoverGroup{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: group},
-			Spec:       v1alpha1.MysqlFailoverGroupSpec{License: mfg},
+			Spec:       v1beta1.MysqlFailoverGroupSpec{License: mfg},
 		}
 		r.OperatorLicense = operator
 		r.ObserveLicense(fg)

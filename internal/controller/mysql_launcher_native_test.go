@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestMySQLLauncherNative is opt-in (BLOODRAVEN_MYSQL_NATIVE_TEST=1, docker;
@@ -64,15 +64,15 @@ func TestMySQLLauncherNative(t *testing.T) {
 		image = defaultMySQLImage
 	}
 	encrypted := newTestFG()
-	encrypted.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	encrypted.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 	binlogOff := false
 	encryptedNoBinlog := newTestFG()
-	encryptedNoBinlog.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true,
-		Coverage: &v1alpha1.EncryptionCoverageSpec{BinaryLog: &binlogOff}}
+	encryptedNoBinlog.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true,
+		Coverage: &v1beta1.EncryptionCoverageSpec{BinaryLog: &binlogOff}}
 	for _, tc := range []struct {
 		name string
 		user string // docker --user; "" keeps the image default (root)
-		fg   *v1alpha1.MysqlFailoverGroup
+		fg   *v1beta1.MysqlFailoverGroup
 	}{
 		{name: "image default user", fg: newTestFG()},
 		{name: "runAsUser mysql", user: fmt.Sprintf("%d:%d", mysqlDataUID, mysqlDataGID), fg: newTestFG()},
@@ -97,7 +97,7 @@ type launcherNativeEnv struct {
 	docker  string
 	image   string
 	user    string
-	fg      *v1alpha1.MysqlFailoverGroup
+	fg      *v1beta1.MysqlFailoverGroup
 	network string
 }
 
@@ -113,7 +113,7 @@ type launcherNativeServer struct {
 	keyringSrc    string
 }
 
-func newLauncherNativeEnv(t *testing.T, docker, image, user string, fg *v1alpha1.MysqlFailoverGroup) *launcherNativeEnv {
+func newLauncherNativeEnv(t *testing.T, docker, image, user string, fg *v1beta1.MysqlFailoverGroup) *launcherNativeEnv {
 	t.Helper()
 	env := &launcherNativeEnv{t: t, docker: docker, image: image, user: user, fg: fg,
 		network: fmt.Sprintf("bloodraven-launcher-native-%d", time.Now().UnixNano())}

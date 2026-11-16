@@ -1,4 +1,4 @@
-package v1alpha1
+package v1beta1
 
 // Condition types and reasons, per kind, and the deployment API's
 // unstableReason values. The controllers write only the values declared

@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // runningBackup reconciles a fresh backup of the S3 profile until its Job
@@ -26,11 +26,11 @@ import (
 func runningBackup(t *testing.T, name string) (*MysqlBackupReconciler, client.Client, types.NamespacedName) {
 	t.Helper()
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR(name, "lion", "nightly-s3")
@@ -38,19 +38,19 @@ func runningBackup(t *testing.T, name string) (*MysqlBackupReconciler, client.Cl
 	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, name)
 	key := types.NamespacedName{Namespace: "ns", Name: name}
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != v1alpha1.BackupPhaseRunning || got.Status.ArtifactStorage == nil {
+	if got.Status.Phase != v1beta1.BackupPhaseRunning || got.Status.ArtifactStorage == nil {
 		t.Fatalf("setup: phase %q storage %+v, want Running with a recorded destination", got.Status.Phase, got.Status.ArtifactStorage)
 	}
 	return r, c, key
 }
 
-func readBackupByKey(t *testing.T, c client.Client, key types.NamespacedName) *v1alpha1.MysqlBackup {
+func readBackupByKey(t *testing.T, c client.Client, key types.NamespacedName) *v1beta1.MysqlBackup {
 	t.Helper()
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -109,13 +109,13 @@ func TestBackupLostLaunchStatusRecoversAttribution(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := readBackupByKey(t, c, key)
-			if tc.terminal == batchv1.JobFailed && got.Status.Phase != v1alpha1.BackupPhaseFailed {
+			if tc.terminal == batchv1.JobFailed && got.Status.Phase != v1beta1.BackupPhaseFailed {
 				t.Fatalf("phase %q, want Failed", got.Status.Phase)
 			}
 			if got.Status.ArtifactStorage == nil || *got.Status.ArtifactStorage != *want {
 				t.Fatalf("artifactStorage = %+v, want %+v recovered from the Job", got.Status.ArtifactStorage, want)
 			}
-			if got.Status.Encryption == nil || got.Status.Encryption.Mode != v1alpha1.EncryptionModeNone {
+			if got.Status.Encryption == nil || got.Status.Encryption.Mode != v1beta1.EncryptionModeNone {
 				t.Fatalf("encryption = %+v, want None recovered from the plaintext Job", got.Status.Encryption)
 			}
 		})
@@ -129,7 +129,7 @@ func TestBackupLostLaunchStatusRecoversAttribution(t *testing.T) {
 func TestBackupReplacementJobRefusedAtAnotherDestination(t *testing.T) {
 	r, c, key := runningBackup(t, "moved-profile")
 	ctx := context.Background()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "lion"}, &fg); err != nil {
 		t.Fatal(err)
 	}
@@ -145,8 +145,8 @@ func TestBackupReplacementJobRefusedAtAnotherDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readBackupByKey(t, c, key)
-	ready := apiMeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed || ready == nil || ready.Reason != v1alpha1.ReasonBuildJobFailed {
+	ready := apiMeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady)
+	if got.Status.Phase != v1beta1.BackupPhaseFailed || ready == nil || ready.Reason != v1beta1.ReasonBuildJobFailed {
 		t.Fatalf("phase %q Ready %+v, want Failed/BuildJobFailed", got.Status.Phase, ready)
 	}
 	if !strings.Contains(ready.Message, "another-bucket") || !strings.Contains(ready.Message, "recorded at launch") {
@@ -172,9 +172,9 @@ func TestBackupCompletionAtAnotherDestinationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readBackupByKey(t, c, key)
-	ready := apiMeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed || ready == nil || ready.Status != metav1.ConditionFalse ||
-		ready.Reason != v1alpha1.ReasonDestinationMismatch {
+	ready := apiMeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady)
+	if got.Status.Phase != v1beta1.BackupPhaseFailed || ready == nil || ready.Status != metav1.ConditionFalse ||
+		ready.Reason != v1beta1.ReasonDestinationMismatch {
 		t.Fatalf("phase %q Ready %+v, want Failed with Ready=False/DestinationMismatch", got.Status.Phase, ready)
 	}
 	if got.Status.ArtifactStorage.Bucket != "first-bucket" {
@@ -201,7 +201,7 @@ func TestBackupTerminalVerdictStartsGraceBeforeTheWrite(t *testing.T) {
 		t.Fatal("the lost reply was not reported")
 	}
 	got := readBackupByKey(t, c, key)
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed {
+	if got.Status.Phase != v1beta1.BackupPhaseFailed {
 		t.Fatalf("setup: phase %q, want the committed Failed verdict", got.Status.Phase)
 	}
 	if left := r.graceClock.left(got, nil, time.Now()); left <= 0 {
@@ -221,11 +221,11 @@ func TestTerminalBackupAcknowledgesSpecEdits(t *testing.T) {
 			finishBackupJob(t, c, key.Name, terminal)
 			reconcileUntilStable(t, r, key.Name)
 			before := readBackupByKey(t, c, key)
-			readyBefore := apiMeta.FindStatusCondition(before.Status.Conditions, v1alpha1.ConditionReady)
+			readyBefore := apiMeta.FindStatusCondition(before.Status.Conditions, v1beta1.ConditionReady)
 			if readyBefore == nil {
 				t.Fatal("setup: no Ready condition")
 			}
-			before.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+			before.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 			before.Generation++
 			if err := c.Update(context.Background(), before); err != nil {
 				t.Fatal(err)
@@ -238,7 +238,7 @@ func TestTerminalBackupAcknowledgesSpecEdits(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := readBackupByKey(t, c, key)
-			ready := apiMeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+			ready := apiMeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady)
 			if got.Status.ObservedGeneration != got.Generation || ready.ObservedGeneration != got.Generation {
 				t.Fatalf("observedGeneration %d / Ready %d, want generation %d", got.Status.ObservedGeneration, ready.ObservedGeneration, got.Generation)
 			}
@@ -264,7 +264,7 @@ func TestFinalize_LateRetainAfterCleanupStartedIsNotApplied(t *testing.T) {
 	if _, ok := f.cleanupJob(t); !ok {
 		t.Fatal("setup: no cleanup Job")
 	}
-	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	f.mb.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := f.c.Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -293,13 +293,13 @@ func TestFinalize_LateRetainAfterCleanupStartedIsNotApplied(t *testing.T) {
 func TestFinalize_LateRetainAfterFailedCleanupIsNotApplied(t *testing.T) {
 	f := newCleanupFixture(t)
 	ctx := context.Background()
-	if err := f.r.setArtifactCleanupCondition(ctx, f.mb, v1alpha1.ReasonCleanupFailed, "cleanup Job x failed: boom"); err != nil {
+	if err := f.r.setArtifactCleanupCondition(ctx, f.mb, v1beta1.ReasonCleanupFailed, "cleanup Job x failed: boom"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	f.mb.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := f.c.Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestFinalize_RetainRecordsLostDestinationBeforeStoppingProducer(t *testing.
 	want := readBackupByKey(t, c, key).Status.ArtifactStorage.Location
 	loseLaunchAttribution(t, c, key)
 	b := readBackupByKey(t, c, key)
-	b.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	b.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := c.Update(ctx, b); err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestFinalize_LateRetainAfterCleanupJobRemovedIsNotApplied(t *testing.T) {
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	f.mb.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := f.c.Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -430,11 +430,11 @@ func TestFinalize_RetainBeforeCleanupStartWinsTheRace(t *testing.T) {
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	var edited v1alpha1.MysqlBackup
+	var edited v1beta1.MysqlBackup
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), &edited); err != nil {
 		t.Fatal(err)
 	}
-	edited.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	edited.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := f.c.Update(ctx, &edited); err != nil {
 		t.Fatal(err)
 	}
@@ -461,12 +461,12 @@ func TestFinalize_RetainBeforeCleanupStartWinsTheRace(t *testing.T) {
 func TestFinalize_RetainWaitsForForeignCleanupPod(t *testing.T) {
 	f := newCleanupFixture(t)
 	ctx := context.Background()
-	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	f.mb.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := f.c.Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
 	pod := cleanupPodFor(&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "earlier-cleanup", Namespace: "ns",
-		Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name}, UID: "earlier-uid"}}, corev1.PodRunning, 0, "")
+		Labels: map[string]string{v1beta1.MysqlBackupLabel: f.mb.Name}, UID: "earlier-uid"}}, corev1.PodRunning, 0, "")
 	pod.Status.ContainerStatuses = nil
 	if err := f.c.Create(ctx, pod); err != nil {
 		t.Fatal(err)
@@ -517,7 +517,7 @@ func TestFinalize_RetainAppliesWhileCleanupJobCannotBeCreated(t *testing.T) {
 	if f.mb.Status.CleanupStartTime != nil {
 		t.Fatal("status.cleanupStartTime stayed recorded for a cleanup Job that was never created")
 	}
-	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	f.mb.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := f.c.Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}

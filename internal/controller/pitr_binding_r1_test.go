@@ -21,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -32,7 +32,7 @@ func (e *pbtEnv) siteRender(site string) pitrRenderInputs {
 	if err := e.c.Get(context.Background(), types.NamespacedName{Namespace: pbtNS, Name: "mysql-" + pbtName + "-" + site}, &d); err != nil {
 		e.t.Fatal(err)
 	}
-	in, err := parsePITRRender(d.Annotations[v1alpha1.PITRRenderAnnotation])
+	in, err := parsePITRRender(d.Annotations[v1beta1.PITRRenderAnnotation])
 	if err != nil {
 		e.t.Fatalf("site %s render: %v", site, err)
 	}
@@ -69,7 +69,7 @@ func TestPITRBindingReleaseSerializedWithOrderedRender(t *testing.T) {
 			// at once; the fixed one blocks until the release is done).
 			race := func(ctx context.Context, c client.WithWatch) error {
 				raced = true
-				var fg v1alpha1.MysqlFailoverGroup
+				var fg v1beta1.MysqlFailoverGroup
 				if err := c.Get(ctx, types.NamespacedName{Namespace: pbtNS, Name: pbtName}, &fg); err != nil {
 					return err
 				}
@@ -112,8 +112,8 @@ func TestPITRBindingReleaseSerializedWithOrderedRender(t *testing.T) {
 					return c.Delete(ctx, obj, opts...)
 				},
 			}
-			var a v1alpha1.BackupProfile
-			var entryA *v1alpha1.PITRArchiveBinding
+			var a v1beta1.BackupProfile
+			var entryA *v1beta1.PITRArchiveBinding
 			e, a, entryA = pbtReleaseEnv(t, funcs)
 			for _, site := range []string{"iad", "pdx"} {
 				if err := e.applySite(site); err != nil {
@@ -181,14 +181,14 @@ func TestPITRBindingReleaseWaitsForInFlightRender(t *testing.T) {
 		}
 		return c.Update(ctx, obj, opts...)
 	}}
-	var entryA *v1alpha1.PITRArchiveBinding
+	var entryA *v1beta1.PITRArchiveBinding
 	e, _, entryA = pbtReleaseEnv(t, funcs)
 	for _, site := range []string{"iad", "pdx"} {
 		if err := e.applySite(site); err != nil {
 			t.Fatal(err)
 		}
 	}
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "a" })
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "a" })
 	armed = true
 	var wg sync.WaitGroup
 	var renderEr error
@@ -198,12 +198,12 @@ func TestPITRBindingReleaseWaitsForInFlightRender(t *testing.T) {
 		renderEr = e.applySite("iad")
 	}()
 	<-aboutTo
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Backup.PITR.ProfileName = "c"
 		if fg.Annotations == nil {
 			fg.Annotations = map[string]string{}
 		}
-		fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = entryA.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID)
+		fg.Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation] = entryA.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID)
 	})
 	e.pass()
 	close(proceed)
@@ -256,7 +256,7 @@ func TestPITRBindingReleaseCrashAfterStatusWrite(t *testing.T) {
 	if _, ok := e.releaseAnnotation(); ok {
 		t.Fatal("the annotation outlived the finished release")
 	}
-	e.expectEvents(v1alpha1.EventPITRArchiveBindingReleased)
+	e.expectEvents(v1beta1.EventPITRArchiveBindingReleased)
 }
 
 // F-A: pass N binds an entry by its check Job's verdict, writes Bound and
@@ -272,15 +272,15 @@ func TestPITRBindingStaleCachedPassDoesNotDemoteBound(t *testing.T) {
 	e.deploy("iad", "")
 	e.deploy("pdx", "")
 	e.pass()
-	entry := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
+	entry := e.expectEntry(a, v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonAuthenticating)
 	if entry.Check == nil {
 		t.Fatalf("no check Job started: %+v", entry)
 	}
 	stale := e.fg() // the cache, frozen before pass N's write
 	e.verdict(entry, PITRArchiveCheckResult{State: PITRArchiveCheckStateVerified,
-		ArchiveID: pitrarchive.CreateArchiveID(pbtUID, e.dest(a)), Source: v1alpha1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID}})
+		ArchiveID: pitrarchive.CreateArchiveID(pbtUID, e.dest(a)), Source: v1beta1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID}})
 	e.pass()
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
+	e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound)
 	if len(e.jobs()) != 0 {
 		t.Fatal("fixture: the consumed check Job was not deleted")
 	}
@@ -291,7 +291,7 @@ func TestPITRBindingStaleCachedPassDoesNotDemoteBound(t *testing.T) {
 	if !errors.Is(err, errPITRBindingStatusMoved) {
 		t.Fatalf("stale pass = %v, want errPITRBindingStatusMoved", err)
 	}
-	got := e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
+	got := e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound)
 	if got.Check != nil {
 		t.Fatalf("the stale pass wrote a check: %+v", got)
 	}
@@ -299,13 +299,13 @@ func TestPITRBindingStaleCachedPassDoesNotDemoteBound(t *testing.T) {
 		t.Fatal("the stale pass started a duplicate check Job")
 	}
 	for _, ev := range e.events() {
-		if strings.Contains(ev, v1alpha1.EventPITRArchiveBound) {
-			t.Fatalf("the stale pass emitted a second %s: %q", v1alpha1.EventPITRArchiveBound, ev)
+		if strings.Contains(ev, v1beta1.EventPITRArchiveBound) {
+			t.Fatalf("the stale pass emitted a second %s: %q", v1beta1.EventPITRArchiveBound, ev)
 		}
 	}
 	// The next pass, from the stored state, is a no-op.
 	e.pass()
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
+	e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound)
 }
 
 // G3: a plaintext check runs against empty prefix p2 while the writer runs
@@ -331,18 +331,18 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 			e.deploy("iad", heldA)
 			e.deploy("pdx", heldA)
 
-			e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b" })
+			e.update(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b" })
 			e.pass()
-			entryB := e.expectEntry(b, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
-			if entryB.Check == nil || entryB.Encryption.Mode != v1alpha1.EncryptionModeNone {
+			entryB := e.expectEntry(b, v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonAuthenticating)
+			if entryB.Check == nil || entryB.Encryption.Mode != v1beta1.EncryptionModeNone {
 				t.Fatalf("no plaintext check: %+v", entryB)
 			}
 			e.verdict(entryB, PITRArchiveCheckResult{State: PITRArchiveCheckStateAbsent})
 			if consumeFirst {
 				e.pass()
-				e.expectEntry(b, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonEstablishing)
+				e.expectEntry(b, v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonEstablishing)
 			}
-			e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b2" })
+			e.update(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "b2" })
 
 			// Before the binding pass runs, the ordered updater may render
 			// from the stored status: it must hold A, not disable PITR.
@@ -353,8 +353,8 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 			for i := 0; i < 3; i++ {
 				e.pass()
 			}
-			got := e.expectEntry(b2, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
-			if got.Encryption.Mode != v1alpha1.EncryptionModePassphrase || got.Encryption.KeySecretName != e.snapName(b2, "k2") {
+			got := e.expectEntry(b2, v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonAuthenticating)
+			if got.Encryption.Mode != v1beta1.EncryptionModePassphrase || got.Encryption.KeySecretName != e.snapName(b2, "k2") {
 				t.Fatalf("entry candidate %+v, want the encrypted alias's key", got.Encryption)
 			}
 			if got.Check == nil {
@@ -366,7 +366,7 @@ func TestPITRBindingSupersededCandidateDoesNotWedge(t *testing.T) {
 			// The encrypted candidate's own Absent now establishes it.
 			e.verdict(got, PITRArchiveCheckResult{State: PITRArchiveCheckStateAbsent})
 			e.pass()
-			est := e.expectEntry(b2, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonEstablishing)
+			est := e.expectEntry(b2, v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonEstablishing)
 			if in, _ := resolvePITRRender(e.fg(), e.deploysList()); !in.Enabled || in.KeySecretName != est.Encryption.KeySecretName {
 				t.Fatalf("render once established = %+v, want the encrypted candidate", in)
 			}
@@ -394,12 +394,12 @@ func TestPITRBindingCheckVerdictDestinationDigest(t *testing.T) {
 	e.deploy("iad", "")
 	e.deploy("pdx", "")
 	e.pass()
-	entry := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
+	entry := e.expectEntry(a, v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonAuthenticating)
 	e.verdict(entry, PITRArchiveCheckResult{State: PITRArchiveCheckStateVerified,
-		ArchiveID: pitrarchive.CreateArchiveID(pbtUID, e.dest(a)), Source: v1alpha1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID},
+		ArchiveID: pitrarchive.CreateArchiveID(pbtUID, e.dest(a)), Source: v1beta1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID},
 		DestinationDigest: PITRArchiveCheckDestinationDigest("s3://archive-bucket/elsewhere/binlogs")})
 	e.pass()
-	got := e.expectEntry(a, v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating)
+	got := e.expectEntry(a, v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonAuthenticating)
 	if !strings.Contains(got.Message, "names another destination") {
 		t.Fatalf("message %q", got.Message)
 	}
@@ -413,30 +413,30 @@ func TestPITRBindingCheckVerdictDestinationDigest(t *testing.T) {
 func TestPITRBindingSpellingOnlyStorageEditRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		edit   func(p *v1alpha1.BackupProfile)
+		edit   func(p *v1beta1.BackupProfile)
 		reason string
 	}{
-		{name: "prefix slash, other Secret", edit: func(p *v1alpha1.BackupProfile) {
+		{name: "prefix slash, other Secret", edit: func(p *v1beta1.BackupProfile) {
 			p.Storage.S3.Prefix = "/" + p.Storage.S3.Prefix + "/"
 			p.Encryption.PassphraseSecretKeyRef.Name = "pass-x"
-		}, reason: v1alpha1.ReasonKeyChangeRefused},
-		{name: "endpoint case and port, encryption removed", edit: func(p *v1alpha1.BackupProfile) {
+		}, reason: v1beta1.ReasonKeyChangeRefused},
+		{name: "endpoint case and port, encryption removed", edit: func(p *v1beta1.BackupProfile) {
 			p.Storage.S3.EndpointURL = "https://S3.Example.Test:443/"
 			p.Encryption = nil
-		}, reason: v1alpha1.ReasonEncryptionChangeRefused},
+		}, reason: v1beta1.ReasonEncryptionChangeRefused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := pbtProfile("a", "p1", "pass-a")
 			e := newPBTEnv(t, pbtGroup(a), pbtSecret("pass-a", "k1"), pbtSecret("pass-x", "kx"))
 			bound := e.bound(a)
 			before := e.dest(a)
-			e.update(func(fg *v1alpha1.MysqlFailoverGroup) { tc.edit(&fg.Spec.Backup.Profiles[0]) })
+			e.update(func(fg *v1beta1.MysqlFailoverGroup) { tc.edit(&fg.Spec.Backup.Profiles[0]) })
 			if after := e.dest(e.fg().Spec.Backup.Profiles[0]); after != before {
 				t.Fatalf("fixture: the edit changed the destination %s -> %s", before, after)
 			}
 			e.pass()
 			got := e.entry(a)
-			if got == nil || got.State != v1alpha1.PITRArchiveBindingBound || got.Encryption != bound.Encryption {
+			if got == nil || got.State != v1beta1.PITRArchiveBindingBound || got.Encryption != bound.Encryption {
 				t.Fatalf("entry changed: %+v", got)
 			}
 			e.expectCond(metav1.ConditionFalse, tc.reason)
@@ -479,7 +479,7 @@ func TestPITRBindingLogCauseAndRenderNamespace(t *testing.T) {
 		t.Fatalf("new entry causes = %v, want [input]", got)
 	}
 	// The identity profile's Secret is missing: an input, not a check.
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "m" })
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "m" })
 	run()
 	if got := causeOf(); len(got) != 1 || got[0] != pitrBindingCauseInput {
 		t.Fatalf("missing key causes = %v, want [input]", got)

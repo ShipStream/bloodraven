@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -77,7 +77,7 @@ func TestOwnTransactionsLost_WitnessKeepsARegressedCandidateFromPromotion(t *tes
 			t.Fatalf("dc2 was promoted although dc3 holds %s:91-100, which dc2 issued and lacks; logs:\n%s", ownLossUUIDdc2, logs.String())
 		}
 		st := tm.Status()
-		if st.Sites[1].RecoveryState != v1alpha1.RecoveryStateRecloneRequired || st.Sites[1].LostGtid != ownLossUUIDdc2+":91-100" {
+		if st.Sites[1].RecoveryState != v1beta1.RecoveryStateRecloneRequired || st.Sites[1].LostGtid != ownLossUUIDdc2+":91-100" {
 			t.Fatalf("dc2 status = %+v, want RecloneRequired with the lost set", st.Sites[1])
 		}
 		if out := logs.String(); !strings.Contains(out, "failover picker: refusing candidate that lacks transactions it issued itself") ||

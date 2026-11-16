@@ -17,7 +17,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // credentialGrantsVersion is mixed into the credential hash so a change to
@@ -117,7 +117,7 @@ type credentialRole struct {
 // reconcileCredentials ensures MySQL users exist on the primary with
 // role-appropriate grants. It is a best-effort operation: failures are
 // logged but do not block the main reconcile loop.
-func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	logger := log.FromContext(ctx)
 
 	if fg.Status.ActiveSite == "" {
@@ -146,9 +146,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 
 	// Check if credentials have changed since last reconciliation, and
 	// whether the app role's mysql schema restriction still has to land.
-	rolesCurrent := fg.Annotations[v1alpha1.CredentialHashAnnotation] == currentHash
+	rolesCurrent := fg.Annotations[v1beta1.CredentialHashAnnotation] == currentHash
 	restrictionCurrent := fg.Spec.Credentials.AppSecretName == "" ||
-		fg.Annotations[v1alpha1.SystemSchemaRestrictionAnnotation] == currentHash
+		fg.Annotations[v1beta1.SystemSchemaRestrictionAnnotation] == currentHash
 	if rolesCurrent && restrictionCurrent {
 		return nil
 	}
@@ -190,7 +190,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 			}
 			logger.Info("reconciled MySQL user", "role", role.name)
 		}
-		if err := r.setCredentialAnnotation(ctx, fg, v1alpha1.CredentialHashAnnotation, currentHash); err != nil {
+		if err := r.setCredentialAnnotation(ctx, fg, v1beta1.CredentialHashAnnotation, currentHash); err != nil {
 			return err
 		}
 	}
@@ -209,7 +209,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 	if err := restrictSystemSchema(ctx, db, roles, ensure); err != nil {
 		return err
 	}
-	return r.setCredentialAnnotation(ctx, fg, v1alpha1.SystemSchemaRestrictionAnnotation, currentHash)
+	return r.setCredentialAnnotation(ctx, fg, v1beta1.SystemSchemaRestrictionAnnotation, currentHash)
 }
 
 // tenantClaimedUsernames returns the MySQL usernames owned by live
@@ -220,8 +220,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 // CRs being deleted keep their claim: only the finalizer decides whether the
 // account survives, and failing closed here costs one defer, not a password
 // reset.
-func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (map[string]string, error) {
-	var list v1alpha1.MysqlDatabaseList
+func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (map[string]string, error) {
+	var list v1beta1.MysqlDatabaseList
 	if err := r.List(ctx, &list, ctrlclient.InNamespace(fg.Namespace)); err != nil {
 		return nil, err
 	}
@@ -254,7 +254,7 @@ func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Contex
 	return claimed, nil
 }
 
-func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) []credentialRole {
+func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) []credentialRole {
 	var roles []credentialRole
 
 	readSecret := func(name string) (string, string) {
@@ -415,7 +415,7 @@ func credentialStatementErrorLabel(roleName, stmt string) string {
 // the group's digest key (see secret_digest.go): the result is published in
 // an annotation on the group, readable by principals denied Secret access,
 // so an unkeyed digest would let them verify password guesses offline.
-func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
+func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (string, error) {
 	key, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, fg)
 	if err != nil {
 		return "", err
@@ -439,9 +439,9 @@ func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
-func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, key, hash string) error {
+func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, key, hash string) error {
 	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-		var fresh v1alpha1.MysqlFailoverGroup
+		var fresh v1beta1.MysqlFailoverGroup
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &fresh); err != nil {
 			return err
 		}
@@ -458,7 +458,7 @@ func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Conte
 // to a group's primary as an administrator, plus the root password used for
 // the initial-setup fallback, from the operator Secret's username, password
 // and MYSQL_ROOT_PASSWORD keys.
-func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) (user, password, rootPassword string, err error) {
+func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1beta1.MysqlFailoverGroup) (user, password, rootPassword string, err error) {
 	secretName := fg.Spec.Credentials.OperatorSecretName
 	if secretName == "" {
 		return "", "", "", fmt.Errorf("group %q references no operator credential secret", fg.Name)
@@ -503,7 +503,7 @@ func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.Mys
 // root, the conventional replication user, and MySQL's built-in system
 // accounts (which pass ValidateMysqlUsername, since account names may
 // contain dots).
-func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) (map[string]bool, error) {
+func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1beta1.MysqlFailoverGroup) (map[string]bool, error) {
 	reserved := map[string]bool{
 		"root":             true,
 		"replicator":       true,
@@ -565,7 +565,7 @@ type openMySQLFunc func(user, password, addr, tlsConfigName string) (*sql.DB, er
 func openAdminConnection(
 	ctx context.Context,
 	c ctrlclient.Client,
-	fg *v1alpha1.MysqlFailoverGroup,
+	fg *v1beta1.MysqlFailoverGroup,
 	open openMySQLFunc,
 ) (*sql.DB, error) {
 	logger := log.FromContext(ctx)

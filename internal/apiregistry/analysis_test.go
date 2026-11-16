@@ -28,7 +28,7 @@ import (
 
 const (
 	modulePath = "github.com/shipstream/bloodraven"
-	apiPath    = modulePath + "/api/v1alpha1"
+	apiPath    = modulePath + "/api/v1beta1"
 	metaV1Path = "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apiMetaPkg = "k8s.io/apimachinery/pkg/api/meta"
 )
@@ -926,7 +926,7 @@ const (
 	// sinkMetricReason is the value of a metric's "reason" label.
 	sinkMetricReason = "metricReason"
 	// sinkStatusReasonPrefix + "<type>" is a typed status reason field that
-	// is not a condition: its values are the api/v1alpha1 constants of
+	// is not a condition: its values are the api/v1beta1 constants of
 	// that type.
 	sinkStatusReasonPrefix = "statusReason:"
 )
@@ -1140,7 +1140,7 @@ func (a *analysis) sinks() []sink {
 	return out
 }
 
-// apiPackage returns the loaded api/v1alpha1 package.
+// apiPackage returns the loaded api/v1beta1 package.
 func (a *analysis) apiPackage(t *testing.T) *packages.Package {
 	t.Helper()
 	var api *packages.Package
@@ -1155,7 +1155,7 @@ func (a *analysis) apiPackage(t *testing.T) *packages.Package {
 	return api
 }
 
-// apiConsts returns the string constants api/v1alpha1 declares, by file
+// apiConsts returns the string constants api/v1beta1 declares, by file
 // base name.
 func (a *analysis) apiConsts(t *testing.T) map[string]map[string]string {
 	t.Helper()
@@ -1195,7 +1195,7 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
-// apiKindOf names the api/v1alpha1 type t is, or points to.
+// apiKindOf names the api/v1beta1 type t is, or points to.
 func apiKindOf(t types.Type) string {
 	if p := namedPath(t); strings.HasPrefix(p, apiPath+".") {
 		return strings.TrimPrefix(p, apiPath+".")

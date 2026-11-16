@@ -1,4 +1,4 @@
-package v1alpha1
+package v1beta1
 
 // EffectiveBackupSecretName returns the secret name used for backup (and
 // backup verification) Jobs; restore Jobs use the operator secret. It

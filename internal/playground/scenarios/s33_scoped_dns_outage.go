@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -226,10 +226,10 @@ func s33ObserveDNSScoped() runner.Step {
 				}
 				writable := 0
 				for _, s := range mfg.Status.Sites {
-					if s.State == v1alpha1.SiteStateWritable {
+					if s.State == v1beta1.SiteStateWritable {
 						writable++
 					}
-					if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+					if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 						return fmt.Errorf("site %s RecoveryBlocked during scoped DNS outage", s.Name)
 					}
 				}
@@ -305,13 +305,13 @@ func s33RemovePolicyAndRecover() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Ready=True with one writable and replicating peer",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					writable, replicatingPeers := 0, 0
 					for _, s := range mfg.Status.Sites {
-						if s.State == v1alpha1.SiteStateWritable {
+						if s.State == v1beta1.SiteStateWritable {
 							writable++
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							return false, "RecoveryBlocked on " + s.Name, fmt.Errorf("site %s RecoveryBlocked after policy removal", s.Name)
 						}
 						if s.Name != mfg.Status.ActiveSite && s.Replication.Running() {

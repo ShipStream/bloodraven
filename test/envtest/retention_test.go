@@ -8,7 +8,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // E9 (A-55): one retention shape. A profile's retention and its
@@ -17,7 +17,7 @@ import (
 
 // retentionProfileObject is the first profile of a newVerificationFG group as
 // an unstructured map, so a test can write values a typed client would omit.
-func retentionProfileObject(t *testing.T, ns, name string, edit func(fg *v1alpha1.MysqlFailoverGroup)) (client.Object, map[string]any) {
+func retentionProfileObject(t *testing.T, ns, name string, edit func(fg *v1beta1.MysqlFailoverGroup)) (client.Object, map[string]any) {
 	t.Helper()
 	fg := newVerificationFG(ns)
 	fg.Name = name
@@ -34,11 +34,11 @@ func TestEnvtest_RetentionDefaults(t *testing.T) {
 	ns := createNamespace(t, "e9-retention")
 	fg := newVerificationFG(ns)
 	fg.Name = "defaults"
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	got := &v1alpha1.MysqlFailoverGroup{}
+	got := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), got); err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +55,9 @@ func TestEnvtest_RetentionDefaults(t *testing.T) {
 	// round trip (F-26).
 	fg = newVerificationFG(ns)
 	fg.Name = "zeros"
-	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 1, KeepWithinDays: new(int32(3)), KeepFailed: new(int32(0))}
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *",
-		Retention: v1alpha1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))}}
+	fg.Spec.Backup.Profiles[0].Retention = v1beta1.BackupRetention{KeepLast: 1, KeepWithinDays: new(int32(3)), KeepFailed: new(int32(0))}
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *",
+		Retention: v1beta1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))}}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -82,13 +82,13 @@ func TestEnvtest_RetentionDefaults(t *testing.T) {
 
 func TestEnvtest_RetentionRefusals(t *testing.T) {
 	ns := createNamespace(t, "e9-retention-refused")
-	withVerification := func(fg *v1alpha1.MysqlFailoverGroup) {
-		fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
+	withVerification := func(fg *v1beta1.MysqlFailoverGroup) {
+		fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
 	}
 	for i, tc := range []struct {
 		name  string
 		field string
-		edit  func(fg *v1alpha1.MysqlFailoverGroup)
+		edit  func(fg *v1beta1.MysqlFailoverGroup)
 		set   func(profile map[string]any)
 	}{
 		// keepLast >= 1 keeps the last good backup: no "keep none".

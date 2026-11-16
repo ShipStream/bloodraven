@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// The Event reason registry (A-76). api/v1alpha1/events.go declares every
+// The Event reason registry (A-76). api/v1beta1/events.go declares every
 // Event reason in const blocks, one block per documentation section. A
 // block's doc comment starts with the line
 //

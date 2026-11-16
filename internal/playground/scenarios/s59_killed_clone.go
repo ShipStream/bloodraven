@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -187,7 +187,7 @@ func s59KillReclone(st *s59State) runner.Step {
 			if err != nil {
 				return err
 			}
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1beta1.RecloneAnnotation, value); err != nil {
 				return fmt.Errorf("annotate reclone: %w", err)
 			}
 			env.Capture.Note("requested reclone-site=" + value)
@@ -362,13 +362,13 @@ func s59RestorePrimary(st *s59State) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 			defer cancel()
 			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "original primary active again",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					s := statusSiteByName(mfg, st.primary)
-					var state v1alpha1.SiteState
+					var state v1beta1.SiteState
 					if s != nil {
 						state = s.State
 					}
-					return mfg.Status.ActiveSite == st.primary && state == v1alpha1.SiteStateWritable,
+					return mfg.Status.ActiveSite == st.primary && state == v1beta1.SiteStateWritable,
 						fmt.Sprintf("activeSite=%q %s=%q", mfg.Status.ActiveSite, st.primary, state), nil
 				}); err != nil {
 				return err
@@ -406,8 +406,8 @@ func s59RepairCandidate(st *s59State) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "candidate re-cloned, group healthy",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					boot := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+					boot := findCondition(mfg.Status.Conditions, v1beta1.ConditionBootstrapping)
 					bootState := "<missing>"
 					if boot != nil {
 						bootState = boot.Reason
@@ -417,7 +417,7 @@ func s59RepairCandidate(st *s59State) runner.Step {
 					if !requested && time.Since(start) > time.Minute && bootstrapFailed(boot) {
 						value := controller.RecloneAnnotationValue(mfg, st.candidate)
 						if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-							v1alpha1.RecloneAnnotation, value); err != nil {
+							v1beta1.RecloneAnnotation, value); err != nil {
 							return false, "", fmt.Errorf("annotate repair reclone: %w", err)
 						}
 						requested = true

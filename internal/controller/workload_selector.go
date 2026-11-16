@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // A Deployment's and a StatefulSet's selector is immutable. When the live
@@ -24,21 +24,21 @@ import (
 // operator then re-creates.
 
 // mysqlDeploymentSelector is the selector of a site's MySQL Deployment.
-func mysqlDeploymentSelector(fg *v1alpha1.MysqlFailoverGroup, site string) *metav1.LabelSelector {
+func mysqlDeploymentSelector(fg *v1beta1.MysqlFailoverGroup, site string) *metav1.LabelSelector {
 	return &metav1.LabelSelector{MatchLabels: map[string]string{
-		labelAppName:       "mysql",
-		labelInstance:      fg.Name,
-		v1alpha1.SiteLabel: site,
+		labelAppName:      "mysql",
+		labelInstance:     fg.Name,
+		v1beta1.SiteLabel: site,
 	}}
 }
 
 // dragonflyStatefulSetSelector is the selector of a site's Dragonfly
 // StatefulSet.
-func dragonflyStatefulSetSelector(fg *v1alpha1.MysqlFailoverGroup, site string) *metav1.LabelSelector {
+func dragonflyStatefulSetSelector(fg *v1beta1.MysqlFailoverGroup, site string) *metav1.LabelSelector {
 	return &metav1.LabelSelector{MatchLabels: map[string]string{
-		labelAppName:       dragonflyAppName,
-		labelInstance:      fg.Name,
-		v1alpha1.SiteLabel: site,
+		labelAppName:      dragonflyAppName,
+		labelInstance:     fg.Name,
+		v1beta1.SiteLabel: site,
 	}}
 }
 
@@ -81,7 +81,7 @@ func checkWorkloadSelector(kind, name, site string, have, want *metav1.LabelSele
 }
 
 // deploymentSelectorMismatch checks a site's live MySQL Deployment.
-func deploymentSelectorMismatch(d *appsv1.Deployment, fg *v1alpha1.MysqlFailoverGroup, site string) *workloadSelectorMismatchError {
+func deploymentSelectorMismatch(d *appsv1.Deployment, fg *v1beta1.MysqlFailoverGroup, site string) *workloadSelectorMismatchError {
 	if d == nil || d.ResourceVersion == "" {
 		return nil
 	}
@@ -89,7 +89,7 @@ func deploymentSelectorMismatch(d *appsv1.Deployment, fg *v1alpha1.MysqlFailover
 }
 
 // statefulSetSelectorMismatch checks a site's live Dragonfly StatefulSet.
-func statefulSetSelectorMismatch(s *appsv1.StatefulSet, fg *v1alpha1.MysqlFailoverGroup, site string) *workloadSelectorMismatchError {
+func statefulSetSelectorMismatch(s *appsv1.StatefulSet, fg *v1beta1.MysqlFailoverGroup, site string) *workloadSelectorMismatchError {
 	if s == nil || s.ResourceVersion == "" {
 		return nil
 	}
@@ -100,9 +100,9 @@ func statefulSetSelectorMismatch(s *appsv1.StatefulSet, fg *v1alpha1.MysqlFailov
 // object kind/name: a mismatch becomes a group refusal (the runner emits
 // its Event once and reports Degraded), and an agreeing or absent object
 // clears it.
-func (r *MysqlFailoverGroupReconciler) noteWorkloadSelector(fg *v1alpha1.MysqlFailoverGroup, kind, name string, mismatch *workloadSelectorMismatchError) {
+func (r *MysqlFailoverGroupReconciler) noteWorkloadSelector(fg *v1beta1.MysqlFailoverGroup, kind, name string, mismatch *workloadSelectorMismatchError) {
 	if mismatch != nil {
-		r.Runner.SetGroupRefusal(fg, mismatch.refusalKey(), v1alpha1.ReasonWorkloadSelectorMismatch, mismatch.message())
+		r.Runner.SetGroupRefusal(fg, mismatch.refusalKey(), v1beta1.ReasonWorkloadSelectorMismatch, mismatch.message())
 		return
 	}
 	r.Runner.ClearGroupRefusal(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, workloadRefusalKey(kind, name))
@@ -110,7 +110,7 @@ func (r *MysqlFailoverGroupReconciler) noteWorkloadSelector(fg *v1alpha1.MysqlFa
 
 // clearDragonflySelectorRefusals clears the StatefulSet refusals of fg,
 // once Dragonfly is torn down.
-func (r *MysqlFailoverGroupReconciler) clearDragonflySelectorRefusals(fg *v1alpha1.MysqlFailoverGroup) {
+func (r *MysqlFailoverGroupReconciler) clearDragonflySelectorRefusals(fg *v1beta1.MysqlFailoverGroup) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	for _, k := range r.Runner.GroupRefusalKeys(nn, workloadRefusalKey("StatefulSet", "")) {
 		r.Runner.ClearGroupRefusal(nn, k)
@@ -122,7 +122,7 @@ func (r *MysqlFailoverGroupReconciler) clearDragonflySelectorRefusals(fg *v1alph
 // Deployment or Dragonfly StatefulSet was refused). The per-site checks
 // only ever look at spec sites, so nothing else would clear them, and a
 // standing refusal keeps Degraded=True and refuses deploy leases.
-func (r *MysqlFailoverGroupReconciler) pruneRemovedSiteSelectorRefusals(fg *v1alpha1.MysqlFailoverGroup) {
+func (r *MysqlFailoverGroupReconciler) pruneRemovedSiteSelectorRefusals(fg *v1beta1.MysqlFailoverGroup) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	keys := r.Runner.GroupRefusalKeys(nn, workloadRefusalPrefix)
 	if len(keys) == 0 {

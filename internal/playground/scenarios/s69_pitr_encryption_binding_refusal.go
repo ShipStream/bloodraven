@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
@@ -144,8 +144,8 @@ func s69AssertBound() runner.Step {
 			userSecret := ctxFetch(env, backupPassphraseSecretKey)
 			p1 := ctxFetch(env, "prefixP1")
 			mfg, entry, err := s69WaitBinding(ctx, env, "P1 binding Bound and PITRArchiveBindingReady=True", p1, backupE2EEndpoint,
-				func(mfg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.PITRArchiveBinding) (bool, string) {
-					ok := s69BoundBound(b) && b.Encryption.Mode == v1alpha1.EncryptionModePassphrase && b.Encryption.KeySecretName != "" &&
+				func(mfg *v1beta1.MysqlFailoverGroup, b *v1beta1.PITRArchiveBinding) (bool, string) {
+					ok := s69BoundBound(b) && b.Encryption.Mode == v1beta1.EncryptionModePassphrase && b.Encryption.KeySecretName != "" &&
 						s69BindingConditionIs(mfg, metav1.ConditionTrue, "")
 					return ok, s69BindingSummary(mfg, b)
 				})
@@ -169,7 +169,7 @@ func s69AssertBound() runner.Step {
 			// reported (Δ2); it follows the archiver poll.
 			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
-			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "status.pitr.archive.keyRevision is the snapshot", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "status.pitr.archive.keyRevision is the snapshot", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				ok := mfg.Status.PITR != nil && mfg.Status.PITR.Archive != nil && mfg.Status.PITR.Archive.KeyRevision == key
 				return ok, pitrArchiveSummary(mfg), nil
 			}); err != nil {
@@ -236,14 +236,14 @@ func s69AdmissionRefusals() runner.Step {
 			}
 			edits := []struct {
 				what string
-				fn   func(*v1alpha1.BackupProfile)
+				fn   func(*v1beta1.BackupProfile)
 			}{
-				{"remove encryption", func(p *v1alpha1.BackupProfile) { p.Encryption = nil }},
-				{"rename passphraseSecretKeyRef to a same-bytes copy", func(p *v1alpha1.BackupProfile) { p.Encryption.PassphraseSecretKeyRef.Name = copyName }},
-				{"change passphraseSecretKeyRef.key", func(p *v1alpha1.BackupProfile) { p.Encryption.PassphraseSecretKeyRef.Key = "passphrase-copy" }},
+				{"remove encryption", func(p *v1beta1.BackupProfile) { p.Encryption = nil }},
+				{"rename passphraseSecretKeyRef to a same-bytes copy", func(p *v1beta1.BackupProfile) { p.Encryption.PassphraseSecretKeyRef.Name = copyName }},
+				{"change passphraseSecretKeyRef.key", func(p *v1beta1.BackupProfile) { p.Encryption.PassphraseSecretKeyRef.Key = "passphrase-copy" }},
 			}
 			for _, e := range edits {
-				err := s69EditBackupDryRun(ctx, env, func(b *v1alpha1.BackupSpec) error {
+				err := s69EditBackupDryRun(ctx, env, func(b *v1beta1.BackupSpec) error {
 					p := s69Profile(b, backupE2EProfile)
 					if p == nil || p.Encryption == nil {
 						return fmt.Errorf("profile %s has no encryption to edit", backupE2EProfile)
@@ -281,10 +281,10 @@ func s69RotateInPlace() runner.Step {
 			if err := s69SetSecretPassphrase(ctx, env, ctxFetch(env, backupPassphraseSecretKey), s69RandomPassphrase()); err != nil {
 				return err
 			}
-			if err := s69WaitCondition(ctx, env, metav1.ConditionFalse, v1alpha1.ReasonKeyChangeRefused, nil); err != nil {
+			if err := s69WaitCondition(ctx, env, metav1.ConditionFalse, v1beta1.ReasonKeyChangeRefused, nil); err != nil {
 				return err
 			}
-			if _, err := s69WaitEvent(ctx, env, start, v1alpha1.EventPITRArchiveKeyChangeRefused, ""); err != nil {
+			if _, err := s69WaitEvent(ctx, env, start, v1beta1.EventPITRArchiveKeyChangeRefused, ""); err != nil {
 				return err
 			}
 			if err := s69AssertP1Unchanged(ctx, env); err != nil {
@@ -414,7 +414,7 @@ func s69RefusedEncryptionEdit() runner.Step {
 			} else if err := s69QuiesceForRestart(ctx, env, a, b); err != nil {
 				return err
 			}
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				b.PITR.Enabled = false
 				return nil
 			}); err != nil {
@@ -424,7 +424,7 @@ func s69RefusedEncryptionEdit() runner.Step {
 				return fmt.Errorf("disabling PITR: %w", err)
 			}
 			// The rule admits it: PITR is off in the old object.
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				p := s69Profile(b, backupE2EProfile)
 				if p == nil {
 					return fmt.Errorf("profile %s missing", backupE2EProfile)
@@ -439,16 +439,16 @@ func s69RefusedEncryptionEdit() runner.Step {
 				return err
 			}
 			enabledAt := time.Now()
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				b.PITR.Enabled = true
 				return nil
 			}); err != nil {
 				return err
 			}
-			if err := s69WaitCondition(ctx, env, metav1.ConditionFalse, v1alpha1.ReasonEncryptionChangeRefused, nil); err != nil {
+			if err := s69WaitCondition(ctx, env, metav1.ConditionFalse, v1beta1.ReasonEncryptionChangeRefused, nil); err != nil {
 				return err
 			}
-			if _, err := s69WaitEvent(ctx, env, enabledAt, v1alpha1.EventPITRArchiveEncryptionChangeRefused, ""); err != nil {
+			if _, err := s69WaitEvent(ctx, env, enabledAt, v1beta1.EventPITRArchiveEncryptionChangeRefused, ""); err != nil {
 				return err
 			}
 			if err := s69WaitRolled(ctx, env, disabled, p1); err != nil {
@@ -490,7 +490,7 @@ func s69RefusedEncryptionEdit() runner.Step {
 				return err
 			}
 			userSecret := ctxFetch(env, backupPassphraseSecretKey)
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				a := s69Profile(b, backupE2EProfile)
 				if a == nil {
 					return fmt.Errorf("profile %s missing", backupE2EProfile)
@@ -507,13 +507,13 @@ func s69RefusedEncryptionEdit() runner.Step {
 			if err := s69WaitCondition(ctx, env, metav1.ConditionTrue, "", nil); err != nil {
 				return err
 			}
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				s69Profile(b, backupE2EProfile).Encryption = backupE2EEncryption(userSecret)
 				return nil
 			}); err != nil {
 				return fmt.Errorf("restore A's encryption while the alias archives: %w", err)
 			}
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				b.PITR.ProfileName = backupE2EProfile
 				b.Profiles = s69WithoutProfile(b.Profiles, s69ProfileAlias)
 				return nil
@@ -543,7 +543,7 @@ func s69SameStorageAlias() runner.Step {
 				return err
 			}
 			start := time.Now()
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				a := s69Profile(b, backupE2EProfile)
 				if a == nil {
 					return fmt.Errorf("profile %s missing", backupE2EProfile)
@@ -557,10 +557,10 @@ func s69SameStorageAlias() runner.Step {
 			}); err != nil {
 				return err
 			}
-			if err := s69WaitCondition(ctx, env, metav1.ConditionFalse, v1alpha1.ReasonKeyChangeRefused, []string{backupE2EProfile, s69ProfileB}); err != nil {
+			if err := s69WaitCondition(ctx, env, metav1.ConditionFalse, v1beta1.ReasonKeyChangeRefused, []string{backupE2EProfile, s69ProfileB}); err != nil {
 				return err
 			}
-			if _, err := s69WaitEvent(ctx, env, start, v1alpha1.EventPITRArchiveKeyChangeRefused, ""); err != nil {
+			if _, err := s69WaitEvent(ctx, env, start, v1beta1.EventPITRArchiveKeyChangeRefused, ""); err != nil {
 				return err
 			}
 			if err := s69AssertNoRoll(ctx, env, before, s69ShortNoRollWindow); err != nil {
@@ -587,7 +587,7 @@ func s69SameStorageAlias() runner.Step {
 			if err := s69AssertArchiverKeyRevision(ctx, env, a, ctxFetch(env, "keySecretP1")); err != nil {
 				return err
 			}
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				b.PITR.ProfileName = backupE2EProfile
 				b.Profiles = s69WithoutProfile(b.Profiles, s69ProfileB)
 				return nil
@@ -613,7 +613,7 @@ func s69ReadBindingWrongKey() runner.Step {
 			if err != nil {
 				return err
 			}
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				a := s69Profile(b, backupE2EProfile)
 				if a == nil {
 					return fmt.Errorf("profile %s missing", backupE2EProfile)
@@ -636,13 +636,13 @@ func s69ReadBindingWrongKey() runner.Step {
 			if err != nil {
 				return err
 			}
-			refused, err := s69WatchReadBinding(ctx, env, p1, s69ReadEndpoint, start, name, func(b *v1alpha1.PITRArchiveBinding) bool {
-				return b.State == v1alpha1.PITRArchiveBindingRefused && b.Reason == v1alpha1.PITRArchiveBindingReasonKeyMismatch
+			refused, err := s69WatchReadBinding(ctx, env, p1, s69ReadEndpoint, start, name, func(b *v1beta1.PITRArchiveBinding) bool {
+				return b.State == v1beta1.PITRArchiveBindingRefused && b.Reason == v1beta1.PITRArchiveBindingReasonKeyMismatch
 			}, true)
 			if err != nil {
 				return err
 			}
-			if _, err := s69WaitEvent(ctx, env, start, v1alpha1.EventPITRArchiveBindingRefused, ""); err != nil {
+			if _, err := s69WaitEvent(ctx, env, start, v1beta1.EventPITRArchiveBindingRefused, ""); err != nil {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("read binding %s refused: %s", refused.ID, refused.Message))
@@ -753,7 +753,7 @@ func s69Procedure() runner.Step {
 			if err != nil {
 				return err
 			}
-			if err := s69EditBackup(ctx, env, func(b *v1alpha1.BackupSpec) error {
+			if err := s69EditBackup(ctx, env, func(b *v1beta1.BackupSpec) error {
 				a := s69Profile(b, backupE2EProfile)
 				if a == nil {
 					return fmt.Errorf("profile %s missing", backupE2EProfile)
@@ -836,10 +836,10 @@ func s69Release() runner.Step {
 			// incarnation's uid (WE-Q9), are both rejected.
 			for _, bad := range []string{pitrReleaseValue(idP1, "not-"+env.FG, uid), pitrReleaseValue(idP1, env.FG, "00000000-0000-4000-8000-000000000000")} {
 				rejectedAt := time.Now()
-				if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, bad); err != nil {
+				if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1beta1.ReleasePITRArchiveBindingAnnotation, bad); err != nil {
 					return err
 				}
-				if _, err := s69WaitEvent(ctx, env, rejectedAt, v1alpha1.EventPITRArchiveBindingReleaseRejected, ""); err != nil {
+				if _, err := s69WaitEvent(ctx, env, rejectedAt, v1beta1.EventPITRArchiveBindingReleaseRejected, ""); err != nil {
 					return err
 				}
 				if err := s69WaitAnnotationGone(ctx, env); err != nil {
@@ -860,10 +860,10 @@ func s69Release() runner.Step {
 				return err
 			}
 			refusedAt := time.Now()
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, pitrReleaseValue(idP1, env.FG, uid)); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1beta1.ReleasePITRArchiveBindingAnnotation, pitrReleaseValue(idP1, env.FG, uid)); err != nil {
 				return err
 			}
-			if _, err := s69WaitEvent(ctx, env, refusedAt, v1alpha1.EventPITRArchiveBindingReleaseRefused, ""); err != nil {
+			if _, err := s69WaitEvent(ctx, env, refusedAt, v1beta1.EventPITRArchiveBindingReleaseRefused, ""); err != nil {
 				return err
 			}
 			if err := s69AssertP1Unchanged(ctx, env); err != nil {
@@ -876,7 +876,7 @@ func s69Release() runner.Step {
 			}
 			// The refused annotation stays and is retried once nothing uses
 			// the binding.
-			if _, err := s69WaitEvent(ctx, env, refusedAt, v1alpha1.EventPITRArchiveBindingReleased, ""); err != nil {
+			if _, err := s69WaitEvent(ctx, env, refusedAt, v1beta1.EventPITRArchiveBindingReleased, ""); err != nil {
 				return err
 			}
 			if err := s69WaitReleased(ctx, env, idP1, keyP1); err != nil {
@@ -895,8 +895,8 @@ func s69Cleanup(ctx context.Context, env *runner.Env) error {
 	var errs []error
 	// A release annotation left by a failed step must not fire later.
 	if mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG); err == nil {
-		if _, ok := mfg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]; ok {
-			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.ReleasePITRArchiveBindingAnnotation, ""); err != nil {
+		if _, ok := mfg.Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation]; ok {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1beta1.ReleasePITRArchiveBindingAnnotation, ""); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -970,7 +970,7 @@ func s69SetSecretPassphrase(ctx context.Context, env *runner.Env, name string, p
 	return nil
 }
 
-func s69Profile(b *v1alpha1.BackupSpec, name string) *v1alpha1.BackupProfile {
+func s69Profile(b *v1beta1.BackupSpec, name string) *v1beta1.BackupProfile {
 	for i := range b.Profiles {
 		if b.Profiles[i].Name == name {
 			return &b.Profiles[i]
@@ -979,7 +979,7 @@ func s69Profile(b *v1alpha1.BackupSpec, name string) *v1alpha1.BackupProfile {
 	return nil
 }
 
-func s69WithoutProfile(profiles []v1alpha1.BackupProfile, name string) []v1alpha1.BackupProfile {
+func s69WithoutProfile(profiles []v1beta1.BackupProfile, name string) []v1beta1.BackupProfile {
 	out := profiles[:0]
 	for _, p := range profiles {
 		if p.Name != name {
@@ -992,7 +992,7 @@ func s69WithoutProfile(profiles []v1alpha1.BackupProfile, name string) []v1alpha
 // s69BackupPatch builds the JSON patch replacing spec.backup with fn's edit
 // of the live one. The scenario is the only spec writer; a resourceVersion
 // test would fail on every concurrent status write.
-func s69BackupPatch(ctx context.Context, env *runner.Env, fn func(*v1alpha1.BackupSpec) error) ([]byte, error) {
+func s69BackupPatch(ctx context.Context, env *runner.Env, fn func(*v1beta1.BackupSpec) error) ([]byte, error) {
 	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return nil, err
@@ -1007,24 +1007,24 @@ func s69BackupPatch(ctx context.Context, env *runner.Env, fn func(*v1alpha1.Back
 	return json.Marshal([]pgkube.JSONPatchOp{{Op: "replace", Path: "/spec/backup", Value: b}})
 }
 
-func s69EditBackup(ctx context.Context, env *runner.Env, fn func(*v1alpha1.BackupSpec) error) error {
+func s69EditBackup(ctx context.Context, env *runner.Env, fn func(*v1beta1.BackupSpec) error) error {
 	body, err := s69BackupPatch(ctx, env, fn)
 	if err != nil {
 		return err
 	}
-	target := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace, Name: env.FG}}
+	target := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace, Name: env.FG}}
 	if err := env.Kube.Controller.Patch(ctx, target, client.RawPatch(types.JSONPatchType, body)); err != nil {
 		return fmt.Errorf("patch spec.backup: %w", err)
 	}
 	return nil
 }
 
-func s69EditBackupDryRun(ctx context.Context, env *runner.Env, fn func(*v1alpha1.BackupSpec) error) error {
+func s69EditBackupDryRun(ctx context.Context, env *runner.Env, fn func(*v1beta1.BackupSpec) error) error {
 	body, err := s69BackupPatch(ctx, env, fn)
 	if err != nil {
 		return err
 	}
-	target := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace, Name: env.FG}}
+	target := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace, Name: env.FG}}
 	return env.Kube.Controller.Patch(ctx, target, client.RawPatch(types.JSONPatchType, body), client.DryRunAll)
 }
 
@@ -1037,7 +1037,7 @@ func s69Destination(prefix, endpoint string) (string, error) {
 	return d.String(), nil
 }
 
-func s69FindBinding(mfg *v1alpha1.MysqlFailoverGroup, destination string) *v1alpha1.PITRArchiveBinding {
+func s69FindBinding(mfg *v1beta1.MysqlFailoverGroup, destination string) *v1beta1.PITRArchiveBinding {
 	for i := range mfg.Status.PITRArchiveBindings {
 		if mfg.Status.PITRArchiveBindings[i].Destination == destination {
 			return &mfg.Status.PITRArchiveBindings[i]
@@ -1046,13 +1046,13 @@ func s69FindBinding(mfg *v1alpha1.MysqlFailoverGroup, destination string) *v1alp
 	return nil
 }
 
-func s69BoundBound(b *v1alpha1.PITRArchiveBinding) bool {
-	return b != nil && b.State == v1alpha1.PITRArchiveBindingBound && b.Reason == v1alpha1.PITRArchiveBindingReasonBound
+func s69BoundBound(b *v1beta1.PITRArchiveBinding) bool {
+	return b != nil && b.State == v1beta1.PITRArchiveBindingBound && b.Reason == v1beta1.PITRArchiveBindingReasonBound
 }
 
-func s69BindingSummary(mfg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.PITRArchiveBinding) string {
+func s69BindingSummary(mfg *v1beta1.MysqlFailoverGroup, b *v1beta1.PITRArchiveBinding) string {
 	cond := "<none>"
-	if c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady); c != nil {
+	if c := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveBindingReady); c != nil {
 		cond = fmt.Sprintf("%s/%s gen=%d/%d %q", c.Status, c.Reason, c.ObservedGeneration, mfg.Generation, c.Message)
 	}
 	if b == nil {
@@ -1063,19 +1063,19 @@ func s69BindingSummary(mfg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.PITRArchive
 
 // s69BindingConditionIs reports whether PITRArchiveBindingReady has status
 // (and reason, when set) at the current generation.
-func s69BindingConditionIs(mfg *v1alpha1.MysqlFailoverGroup, status metav1.ConditionStatus, reason string) bool {
-	c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady)
+func s69BindingConditionIs(mfg *v1beta1.MysqlFailoverGroup, status metav1.ConditionStatus, reason string) bool {
+	c := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveBindingReady)
 	return c != nil && c.Status == status && (reason == "" || c.Reason == reason) && c.ObservedGeneration == mfg.Generation
 }
 
-func s69WaitBinding(ctx context.Context, env *runner.Env, what, prefix, endpoint string, pred func(*v1alpha1.MysqlFailoverGroup, *v1alpha1.PITRArchiveBinding) (bool, string)) (*v1alpha1.MysqlFailoverGroup, *v1alpha1.PITRArchiveBinding, error) {
+func s69WaitBinding(ctx context.Context, env *runner.Env, what, prefix, endpoint string, pred func(*v1beta1.MysqlFailoverGroup, *v1beta1.PITRArchiveBinding) (bool, string)) (*v1beta1.MysqlFailoverGroup, *v1beta1.PITRArchiveBinding, error) {
 	dest, err := s69Destination(prefix, endpoint)
 	if err != nil {
 		return nil, nil, err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, s69BindingWait)
 	defer cancel()
-	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, what, func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, what, func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		ok, msg := pred(mfg, s69FindBinding(mfg, dest))
 		return ok, msg, nil
 	})
@@ -1091,9 +1091,9 @@ func s69WaitBinding(ctx context.Context, env *runner.Env, what, prefix, endpoint
 func s69WaitCondition(ctx context.Context, env *runner.Env, status metav1.ConditionStatus, reason string, snippets []string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, s69BindingWait)
 	defer cancel()
-	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, fmt.Sprintf("%s=%s/%s", v1alpha1.ConditionPITRArchiveBindingReady, status, reason), func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, fmt.Sprintf("%s=%s/%s", v1beta1.ConditionPITRArchiveBindingReady, status, reason), func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		ok := s69BindingConditionIs(mfg, status, reason)
-		if c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady); ok && c != nil {
+		if c := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveBindingReady); ok && c != nil {
 			for _, s := range snippets {
 				if !strings.Contains(c.Message, s) {
 					ok = false
@@ -1108,8 +1108,8 @@ func s69WaitCondition(ctx context.Context, env *runner.Env, status metav1.Condit
 func s69WaitBaselineNoteGone(ctx context.Context, env *runner.Env) error {
 	waitCtx, cancel := context.WithTimeout(ctx, s69BindingWait)
 	defer cancel()
-	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "baseline note dropped after β2", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady)
+	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "baseline note dropped after β2", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+		c := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveBindingReady)
 		return c != nil && c.Status == metav1.ConditionTrue && !strings.Contains(c.Message, s69BaselineNote), s69BindingSummary(mfg, nil), nil
 	})
 	return err
@@ -1146,7 +1146,7 @@ func s69AssertP1Unchanged(ctx context.Context, env *runner.Env) error {
 // s69AssertArchiveKeySnapshot checks the entry's snapshot (§4.3): an
 // immutable Secret with no owner, the group's labels, the acceptance
 // annotation with a keyCheck, and exactly the accepted bytes.
-func s69AssertArchiveKeySnapshot(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.PITRArchiveBinding, want []byte) error {
+func s69AssertArchiveKeySnapshot(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup, b *v1beta1.PITRArchiveBinding, want []byte) error {
 	s, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(ctx, b.Encryption.KeySecretName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("get key snapshot %s: %w", b.Encryption.KeySecretName, err)
@@ -1158,13 +1158,13 @@ func s69AssertArchiveKeySnapshot(ctx context.Context, env *runner.Env, mfg *v1al
 	if len(s.OwnerReferences) != 0 {
 		problems = append(problems, fmt.Sprintf("has ownerReferences %v", s.OwnerReferences))
 	}
-	for k, v := range map[string]string{pitrSnapshotAppLabel: pitrKeySnapshotApp, v1alpha1.FailoverGroupUIDLabel: string(mfg.UID), v1alpha1.PITRBindingIDLabel: b.ID} {
+	for k, v := range map[string]string{pitrSnapshotAppLabel: pitrKeySnapshotApp, v1beta1.FailoverGroupUIDLabel: string(mfg.UID), v1beta1.PITRBindingIDLabel: b.ID} {
 		if s.Labels[k] != v {
 			problems = append(problems, fmt.Sprintf("label %s=%q, want %q", k, s.Labels[k], v))
 		}
 	}
-	if s.Annotations[v1alpha1.PITRDestinationAnnotation] != b.Destination {
-		problems = append(problems, fmt.Sprintf("annotation %s=%q, want %q", v1alpha1.PITRDestinationAnnotation, s.Annotations[v1alpha1.PITRDestinationAnnotation], b.Destination))
+	if s.Annotations[v1beta1.PITRDestinationAnnotation] != b.Destination {
+		problems = append(problems, fmt.Sprintf("annotation %s=%q, want %q", v1beta1.PITRDestinationAnnotation, s.Annotations[v1beta1.PITRDestinationAnnotation], b.Destination))
 	}
 	var acc struct {
 		SchemaVersion int    `json:"schemaVersion"`
@@ -1172,8 +1172,8 @@ func s69AssertArchiveKeySnapshot(ctx context.Context, env *runner.Env, mfg *v1al
 		ArchiveID     string `json:"archiveID"`
 		KeyCheck      string `json:"keyCheck"`
 	}
-	if err := json.Unmarshal([]byte(s.Annotations[v1alpha1.PITRAcceptedAnnotation]), &acc); err != nil {
-		problems = append(problems, fmt.Sprintf("annotation %s does not decode: %v", v1alpha1.PITRAcceptedAnnotation, err))
+	if err := json.Unmarshal([]byte(s.Annotations[v1beta1.PITRAcceptedAnnotation]), &acc); err != nil {
+		problems = append(problems, fmt.Sprintf("annotation %s does not decode: %v", v1beta1.PITRAcceptedAnnotation, err))
 	} else if acc.SchemaVersion != 1 || acc.KeyCheck == "" || acc.ArchiveID != b.ArchiveID || acc.Destination != b.Destination {
 		problems = append(problems, fmt.Sprintf("acceptance %+v does not record the entry (archive %s, destination %s) with a keyCheck", acc, b.ArchiveID, b.Destination))
 	}
@@ -1188,8 +1188,8 @@ func s69AssertArchiveKeySnapshot(ctx context.Context, env *runner.Env, mfg *v1al
 
 // s69AssertDumpKeySnapshot checks a backup's recorded dump key (Δ1, Δ24):
 // its own immutable, ownerless snapshot of the profile's bytes at launch.
-func s69AssertDumpKeySnapshot(ctx context.Context, env *runner.Env, b *v1alpha1.MysqlBackup, want []byte) error {
-	if b.Status.Encryption == nil || b.Status.Encryption.Mode != v1alpha1.EncryptionModePassphrase ||
+func s69AssertDumpKeySnapshot(ctx context.Context, env *runner.Env, b *v1beta1.MysqlBackup, want []byte) error {
+	if b.Status.Encryption == nil || b.Status.Encryption.Mode != v1beta1.EncryptionModePassphrase ||
 		b.Status.ArtifactStorage == nil || b.Status.ArtifactStorage.PassphraseSecretKeyRef == nil {
 		return fmt.Errorf("MysqlBackup %s: encryption=%+v, no recorded dump key", b.Name, b.Status.Encryption)
 	}
@@ -1208,7 +1208,7 @@ func s69AssertDumpKeySnapshot(ctx context.Context, env *runner.Env, b *v1alpha1.
 	if len(s.OwnerReferences) != 0 {
 		problems = append(problems, fmt.Sprintf("has ownerReferences %v", s.OwnerReferences))
 	}
-	if s.Labels[pitrSnapshotAppLabel] != pitrDumpKeySnapshotApp || s.Labels[v1alpha1.MysqlBackupUIDLabel] != string(b.UID) {
+	if s.Labels[pitrSnapshotAppLabel] != pitrDumpKeySnapshotApp || s.Labels[v1beta1.MysqlBackupUIDLabel] != string(b.UID) {
 		problems = append(problems, fmt.Sprintf("labels %v do not name the dump key of %s", s.Labels, b.UID))
 	}
 	if string(s.Data[pitrSnapshotPassphraseKey]) != string(backupcrypto.TrimPassphrase(want)) {
@@ -1224,7 +1224,7 @@ func s69AssertDumpKeySnapshot(ctx context.Context, env *runner.Env, b *v1alpha1.
 // s69AssertRenders checks every primary-candidate site Deployment renders
 // the snapshot (optional mount, revision echo, pitr-render annotation) and
 // never the user Secret.
-func s69AssertRenders(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, key, userSecret string) error {
+func s69AssertRenders(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup, key, userSecret string) error {
 	for _, site := range PrimaryCandidates(mfg) {
 		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, pgkube.MysqlDeploymentName(env.FG, site))
 		if err != nil {
@@ -1275,11 +1275,11 @@ func s69CheckRender(dep *appsv1.Deployment, key, userSecret string) error {
 		EncryptionMode string `json:"encryptionMode"`
 		KeySecretName  string `json:"keySecretName"`
 	}
-	if err := json.Unmarshal([]byte(dep.Annotations[v1alpha1.PITRRenderAnnotation]), &render); err != nil {
-		return fmt.Errorf("annotation %s does not decode: %w", v1alpha1.PITRRenderAnnotation, err)
+	if err := json.Unmarshal([]byte(dep.Annotations[v1beta1.PITRRenderAnnotation]), &render); err != nil {
+		return fmt.Errorf("annotation %s does not decode: %w", v1beta1.PITRRenderAnnotation, err)
 	}
-	if !render.Enabled || render.EncryptionMode != string(v1alpha1.EncryptionModePassphrase) || render.KeySecretName != key {
-		return fmt.Errorf("annotation %s=%s does not render the binding's identity (Passphrase, %s)", v1alpha1.PITRRenderAnnotation, dep.Annotations[v1alpha1.PITRRenderAnnotation], key)
+	if !render.Enabled || render.EncryptionMode != string(v1beta1.EncryptionModePassphrase) || render.KeySecretName != key {
+		return fmt.Errorf("annotation %s=%s does not render the binding's identity (Passphrase, %s)", v1beta1.PITRRenderAnnotation, dep.Annotations[v1beta1.PITRRenderAnnotation], key)
 	}
 	return nil
 }
@@ -1302,7 +1302,7 @@ func s69TakeSnapshot(ctx context.Context, env *runner.Env) (s69Snapshot, error) 
 		if err != nil {
 			return s69Snapshot{}, err
 		}
-		snap.SpecHash[s.Name] = dep.Annotations[v1alpha1.SpecHashAnnotation]
+		snap.SpecHash[s.Name] = dep.Annotations[v1beta1.SpecHashAnnotation]
 		pod, err := env.Kube.GetSiteMysqlPod(ctx, env.Namespace, env.FG, s.Name)
 		if err != nil {
 			return s69Snapshot{}, err
@@ -1417,8 +1417,8 @@ func s69WaitRolled(ctx context.Context, env *runner.Env, before s69Snapshot, pre
 func s69WaitSettled(ctx context.Context, env *runner.Env, prefix string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, s69RolloutWait)
 	defer cancel()
-	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "group settled", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "group settled", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+		ready := conditionTrueForGeneration(mfg.Status.Conditions, v1beta1.ConditionReady, mfg.Generation)
 		return ready && mfg.Status.UpdatePhase == "" && mfg.Status.ActiveSite != "",
 			fmt.Sprintf("ready=%v updatePhase=%q active=%q", ready, mfg.Status.UpdatePhase, mfg.Status.ActiveSite), nil
 	})
@@ -1583,7 +1583,7 @@ func s69ExpectationAtM2(env *runner.Env, archiveProfile string) (pitrExpectation
 		return pitrExpectation{}, err
 	}
 	return pitrExpectation{
-		Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+		Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Outcome: v1beta1.PointInTimeTargetCovered,
 		Markers: []string{"baseline", "M1", "M2"}, ArchiveProfile: archiveProfile,
 	}, nil
 }
@@ -1593,7 +1593,7 @@ func s69ExpectationAtM2(env *runner.Env, archiveProfile string) (pitrExpectation
 // with the check labels, or a recorded binding.check). With verification
 // set, the verification must stay unfinished and report
 // PITRArchiveBindingNotReady while it waits.
-func s69WatchReadBinding(ctx context.Context, env *runner.Env, prefix, endpoint string, notBefore time.Time, verification string, done func(*v1alpha1.PITRArchiveBinding) bool, wantWaiting bool) (*v1alpha1.PITRArchiveBinding, error) {
+func s69WatchReadBinding(ctx context.Context, env *runner.Env, prefix, endpoint string, notBefore time.Time, verification string, done func(*v1beta1.PITRArchiveBinding) bool, wantWaiting bool) (*v1beta1.PITRArchiveBinding, error) {
 	dest, err := s69Destination(prefix, endpoint)
 	if err != nil {
 		return nil, err
@@ -1626,10 +1626,10 @@ func s69WatchReadBinding(ctx context.Context, env *runner.Env, prefix, endpoint 
 				if err != nil {
 					return nil, err
 				}
-				if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded || v.Status.Phase == v1alpha1.VerificationPhaseFailed {
+				if v.Status.Phase == v1beta1.VerificationPhaseSucceeded || v.Status.Phase == v1beta1.VerificationPhaseFailed {
 					return nil, fmt.Errorf("verification %s finished (%s) on a refused read binding: %s", verification, v.Status.Phase, verificationStatusSummary(v))
 				}
-				if s69VerificationMentions(v, string(v1alpha1.PITRTokenArchiveBindingNotReady)) {
+				if s69VerificationMentions(v, string(v1beta1.PITRTokenArchiveBindingNotReady)) {
 					return b, nil
 				}
 				last += "; verification " + verificationStatusSummary(v)
@@ -1643,7 +1643,7 @@ func s69WatchReadBinding(ctx context.Context, env *runner.Env, prefix, endpoint 
 	}
 }
 
-func s69VerificationMentions(v *v1alpha1.MysqlBackupVerification, token string) bool {
+func s69VerificationMentions(v *v1beta1.MysqlBackupVerification, token string) bool {
 	if strings.Contains(v.Status.Message, token) {
 		return true
 	}
@@ -1672,7 +1672,7 @@ func s69CheckJobsSince(ctx context.Context, env *runner.Env, notBefore time.Time
 // s69WaitEstablished follows the procedure's new write binding: it must
 // pass through Pending/Establishing (a check Job found the prefix empty)
 // and end Bound/Bound on the archive the sidecars report.
-func s69WaitEstablished(ctx context.Context, env *runner.Env, prefix string) (*v1alpha1.PITRArchiveBinding, error) {
+func s69WaitEstablished(ctx context.Context, env *runner.Env, prefix string) (*v1beta1.PITRArchiveBinding, error) {
 	dest, err := s69Destination(prefix, backupE2EEndpoint)
 	if err != nil {
 		return nil, err
@@ -1680,9 +1680,9 @@ func s69WaitEstablished(ctx context.Context, env *runner.Env, prefix string) (*v
 	waitCtx, cancel := context.WithTimeout(ctx, s69RolloutWait)
 	defer cancel()
 	establishing := false
-	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "P2 binding Establishing then Bound", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "P2 binding Establishing then Bound", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		b := s69FindBinding(mfg, dest)
-		if b != nil && b.State == v1alpha1.PITRArchiveBindingPending && b.Reason == v1alpha1.PITRArchiveBindingReasonEstablishing {
+		if b != nil && b.State == v1beta1.PITRArchiveBindingPending && b.Reason == v1beta1.PITRArchiveBindingReasonEstablishing {
 			establishing = true
 		}
 		done := establishing && s69BoundBound(b) && pitrObservedArchiveID(mfg, prefix) == b.ArchiveID && b.ArchiveID != ""
@@ -1833,13 +1833,13 @@ func s69WaitVerificationHold(ctx context.Context, env *runner.Env, name, snapsho
 		switch {
 		case err != nil:
 			last = err.Error()
-		case v.Status.Phase == v1alpha1.VerificationPhaseSucceeded || v.Status.Phase == v1alpha1.VerificationPhaseFailed:
+		case v.Status.Phase == v1beta1.VerificationPhaseSucceeded || v.Status.Phase == v1beta1.VerificationPhaseFailed:
 			return fmt.Errorf("verification %s finished before the release was tried: %s", name, verificationStatusSummary(v))
 		default:
 			s, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Get(waitCtx, snapshot, metav1.GetOptions{})
 			if err != nil {
 				last = err.Error()
-			} else if s.Annotations[v1alpha1.VerificationHoldAnnotationPrefix+string(v.UID)] == name {
+			} else if s.Annotations[v1beta1.VerificationHoldAnnotationPrefix+string(v.UID)] == name {
 				env.Capture.Note(fmt.Sprintf("verification %s holds key snapshot %s", name, snapshot))
 				return nil
 			} else {
@@ -1857,8 +1857,8 @@ func s69WaitVerificationHold(ctx context.Context, env *runner.Env, name, snapsho
 func s69WaitAnnotationGone(ctx context.Context, env *runner.Env) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "release annotation removed", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		v, ok := mfg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]
+	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "release annotation removed", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+		v, ok := mfg.Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation]
 		return !ok, fmt.Sprintf("annotation=%q", v), nil
 	})
 	return err
@@ -1869,8 +1869,8 @@ func s69WaitAnnotationGone(ctx context.Context, env *runner.Env) error {
 func s69WaitReleased(ctx context.Context, env *runner.Env, id, key string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, s69BindingWait)
 	defer cancel()
-	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "binding "+id+" released", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		_, pending := mfg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]
+	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "binding "+id+" released", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+		_, pending := mfg.Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation]
 		b := pitrFindBindingByID(mfg, id)
 		return !pending && b == nil, fmt.Sprintf("annotation=%v %s", pending, s69BindingSummary(mfg, b)), nil
 	})

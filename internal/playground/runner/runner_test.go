@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgwait "github.com/shipstream/bloodraven/internal/playground/wait"
@@ -93,7 +93,7 @@ func TestStepRunsSequentially(t *testing.T) {
 }
 
 func TestWaitForClusterReconvergeRequiresDragonflyReady(t *testing.T) {
-	env := testReconvergeEnv(t, testReconvergeMFG(v1alpha1.DragonflyPhaseDegraded))
+	env := testReconvergeEnv(t, testReconvergeMFG(v1beta1.DragonflyPhaseDegraded))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -107,7 +107,7 @@ func TestWaitForClusterReconvergeRequiresDragonflyReady(t *testing.T) {
 }
 
 func TestWaitForClusterReconvergeRequiresDragonflyActiveSiteMatch(t *testing.T) {
-	mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
+	mfg := testReconvergeMFG(v1beta1.DragonflyPhaseReady)
 	mfg.Status.Dragonfly.ActiveSite = "pdx"
 	env := testReconvergeEnv(t, mfg)
 
@@ -123,7 +123,7 @@ func TestWaitForClusterReconvergeRequiresDragonflyActiveSiteMatch(t *testing.T) 
 }
 
 func TestWaitForClusterReconvergeRequiresNoOrderedUpdate(t *testing.T) {
-	mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
+	mfg := testReconvergeMFG(v1beta1.DragonflyPhaseReady)
 	mfg.Status.UpdatePhase = "UpdateReplica"
 	env := testReconvergeEnv(t, mfg)
 
@@ -143,18 +143,18 @@ func TestWaitForClusterReconvergeRequiresNoOrderedUpdate(t *testing.T) {
 func TestWaitForClusterReconvergeRequiresTerminalPlannedFailover(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		edit func(*v1alpha1.MysqlFailoverGroup)
+		edit func(*v1beta1.MysqlFailoverGroup)
 		want string
 	}{
-		{"non-terminal run", func(m *v1alpha1.MysqlFailoverGroup) {
-			m.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhasePublishing}
+		{"non-terminal run", func(m *v1beta1.MysqlFailoverGroup) {
+			m.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhasePublishing}
 		}, "plannedFailover.phase=Publishing"},
-		{"standing hold", func(m *v1alpha1.MysqlFailoverGroup) {
-			m.Status.PlannedFailoverHold = &v1alpha1.PlannedFailoverHold{RunID: "r1"}
+		{"standing hold", func(m *v1beta1.MysqlFailoverGroup) {
+			m.Status.PlannedFailoverHold = &v1beta1.PlannedFailoverHold{RunID: "r1"}
 		}, "automationHold=r1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
+			mfg := testReconvergeMFG(v1beta1.DragonflyPhaseReady)
 			tc.edit(mfg)
 			env := testReconvergeEnv(t, mfg)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -165,8 +165,8 @@ func TestWaitForClusterReconvergeRequiresTerminalPlannedFailover(t *testing.T) {
 			}
 		})
 	}
-	mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
-	mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded}
+	mfg := testReconvergeMFG(v1beta1.DragonflyPhaseReady)
+	mfg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseSucceeded}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := waitForClusterReconvergeStable(ctx, testReconvergeEnv(t, mfg), time.Millisecond); err != nil {
@@ -175,7 +175,7 @@ func TestWaitForClusterReconvergeRequiresTerminalPlannedFailover(t *testing.T) {
 }
 
 func TestWaitForClusterReconvergeAcceptsDragonflyReady(t *testing.T) {
-	env := testReconvergeEnv(t, testReconvergeMFG(v1alpha1.DragonflyPhaseReady))
+	env := testReconvergeEnv(t, testReconvergeMFG(v1beta1.DragonflyPhaseReady))
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -188,7 +188,7 @@ func TestWaitForClusterReconvergeAcceptsDragonflyReady(t *testing.T) {
 // closed although status reads healthy with no update phase (#236: the
 // next scenario ran under the roll).
 func TestWaitForClusterReconvergeWaitsForUnappliedSpec(t *testing.T) {
-	mfg := testReconvergeMFG(v1alpha1.DragonflyPhaseReady)
+	mfg := testReconvergeMFG(v1beta1.DragonflyPhaseReady)
 	mfg.Spec.Sites[0].Resources = corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("384Mi")}}
 	stale := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: pgkube.MysqlDeploymentName(mfg.Name, mfg.Spec.Sites[0].Name), Namespace: mfg.Namespace}}
 	stale.Spec.Template.Spec.Containers = []corev1.Container{{Name: "mysql", Resources: corev1.ResourceRequirements{
@@ -206,7 +206,7 @@ func TestWaitForClusterReconvergeWaitsForUnappliedSpec(t *testing.T) {
 }
 
 func TestWaitForClusterReconvergeRequiresStableHealthyWindow(t *testing.T) {
-	env := testReconvergeEnv(t, testReconvergeMFG(v1alpha1.DragonflyPhaseReady))
+	env := testReconvergeEnv(t, testReconvergeMFG(v1beta1.DragonflyPhaseReady))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -219,10 +219,10 @@ func TestWaitForClusterReconvergeRequiresStableHealthyWindow(t *testing.T) {
 	}
 }
 
-func testReconvergeEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup, deployments ...runtime.Object) *Env {
+func testReconvergeEnv(t *testing.T, mfg *v1beta1.MysqlFailoverGroup, deployments ...runtime.Object) *Env {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	k := &pgkube.Client{
@@ -242,42 +242,42 @@ func testReconvergeEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup, deploymen
 	}
 }
 
-func testReconvergeMFG(dfPhase v1alpha1.DragonflyPhase) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func testReconvergeMFG(dfPhase v1beta1.DragonflyPhase) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pgkube.FailoverGroupName,
 			Namespace: pgkube.PlaygroundNamespace,
 		},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Dragonfly: &v1alpha1.DragonflySpec{Enabled: true},
-			Sites: []v1alpha1.SiteSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Dragonfly: &v1beta1.DragonflySpec{Enabled: true},
+			Sites: []v1beta1.SiteSpec{
 				{Name: "iad", ServerID: 101},
 				{Name: "pdx", ServerID: 102},
 			},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Conditions: []metav1.Condition{{
 				Type:   "Ready",
 				Status: metav1.ConditionTrue,
 			}},
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 			},
-			Dragonfly: &v1alpha1.DragonflyStatus{
+			Dragonfly: &v1beta1.DragonflyStatus{
 				ActiveSite: "iad",
 				Phase:      dfPhase,
-				Sites: []v1alpha1.DragonflySiteStatus{
+				Sites: []v1beta1.DragonflySiteStatus{
 					{
 						Name:      "iad",
-						Role:      v1alpha1.DragonflyRoleMaster,
+						Role:      v1beta1.DragonflyRoleMaster,
 						Reachable: true,
 						Ready:     true,
 					},
 					{
 						Name:             "pdx",
-						Role:             v1alpha1.DragonflyRoleReplica,
+						Role:             v1beta1.DragonflyRoleReplica,
 						Reachable:        true,
 						Ready:            true,
 						LinkStatus:       "up",

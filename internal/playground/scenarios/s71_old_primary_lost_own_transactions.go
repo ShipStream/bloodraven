@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -109,7 +109,7 @@ func scenario71OldPrimaryLostOwnTransactions() runner.Scenario {
 				return err
 			}
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, st.a+" replicating after cleanup",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					return pitrSiteReplicating(mfg, st.a)
 				})
 			return err
@@ -162,7 +162,7 @@ func s71SeedAndFailover(st *s71State) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
 			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, b+" promoted",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					return mfg.Status.ActiveSite == b, "activeSite=" + mfg.Status.ActiveSite, nil
 				}); err != nil {
 				return err
@@ -352,7 +352,7 @@ func s71ObserveReport(st *s71State) runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
-			ev, err := waitForMFGEvent(waitCtx, env, st.returnedAt, v1alpha1.EventOwnTransactionsLost, st.a+" lacks")
+			ev, err := waitForMFGEvent(waitCtx, env, st.returnedAt, v1beta1.EventOwnTransactionsLost, st.a+" lacks")
 			if err != nil {
 				return fmt.Errorf("no OwnTransactionsLost Event for %s: %w", st.a, err)
 			}
@@ -374,12 +374,12 @@ func s71VerifyRecloned(st *s71State) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, s71RecloneBudget)
 			defer cancel()
 			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, st.a+" recloned and replicating",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					site := statusSiteByName(mfg, st.a)
 					if site == nil {
 						return false, "site missing from status", nil
 					}
-					if site.RecoveryState == v1alpha1.RecoveryStateBlocked {
+					if site.RecoveryState == v1beta1.RecoveryStateBlocked {
 						return false, "", fmt.Errorf("%s is RecoveryBlocked (%s): the site was to lack transactions, not hold extra ones",
 							st.a, site.DivergentGtid)
 					}
@@ -410,10 +410,10 @@ func s71VerifyRecloned(st *s71State) runner.Step {
 			if strings.EqualFold(uuid, st.uuidBefore) {
 				return fmt.Errorf("%s still runs under server_uuid %s: it was not recloned", st.a, uuid)
 			}
-			if _, err := waitForMFGEvent(waitCtx, env, st.returnedAt, v1alpha1.EventOwnTransactionsLostResolved, st.a); err != nil {
+			if _, err := waitForMFGEvent(waitCtx, env, st.returnedAt, v1beta1.EventOwnTransactionsLostResolved, st.a); err != nil {
 				return fmt.Errorf("no OwnTransactionsLostResolved Event for %s: %w", st.a, err)
 			}
-			if ev, found, err := findMFGEvent(ctx, env, st.returnedAt, v1alpha1.EventOldPrimaryRecovered, st.a); err != nil {
+			if ev, found, err := findMFGEvent(ctx, env, st.returnedAt, v1beta1.EventOldPrimaryRecovered, st.a); err != nil {
 				return err
 			} else if found {
 				return fmt.Errorf("the operator announced a rejoin by replication of %s: %q", st.a, ev.Message)

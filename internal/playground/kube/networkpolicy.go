@@ -9,7 +9,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // ChaosNetworkPolicyLabelValue is the value of the "app" label stamped on
@@ -114,7 +114,7 @@ func BuildDNSEgressDenyPolicy(fg, site string, denyIPs []string) *networkingv1.N
 	return BuildDNSEgressDenyPolicyForSelector(DNSEgressDenyPolicyName(site), map[string]string{
 		"app.kubernetes.io/name":     "mysql",
 		"app.kubernetes.io/instance": fg,
-		v1alpha1.SiteLabel:           site,
+		v1beta1.SiteLabel:            site,
 	}, denyIPs)
 }
 
@@ -185,7 +185,7 @@ func BuildDragonflyPartitionPolicy(fg, site string) *networkingv1.NetworkPolicy 
 				MatchLabels: map[string]string{
 					"app.kubernetes.io/name":     "dragonfly",
 					"app.kubernetes.io/instance": fg,
-					v1alpha1.SiteLabel:           site,
+					v1beta1.SiteLabel:            site,
 				},
 			},
 			PolicyTypes: []networkingv1.PolicyType{
@@ -228,7 +228,7 @@ func BuildStandbyIngressHoldPolicy(fg, site string) *networkingv1.NetworkPolicy 
 				MatchLabels: map[string]string{
 					"app.kubernetes.io/name":     "mysql",
 					"app.kubernetes.io/instance": fg,
-					v1alpha1.SiteLabel:           site,
+					v1beta1.SiteLabel:            site,
 				},
 			},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},

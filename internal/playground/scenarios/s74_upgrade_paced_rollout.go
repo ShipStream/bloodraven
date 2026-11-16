@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -147,7 +147,7 @@ func s74Precheck(ctx context.Context, env *runner.Env) error {
 	for site, w := range g.Workloads {
 		if w.RenderedBy != "" {
 			return fmt.Errorf("precheck: the Deployment of site %s already carries %s=%s: this cluster does not run the previous release — install it with ./playground/upgrade-e2e.sh install on a fresh cluster",
-				site, v1alpha1.RenderedByAnnotation, w.RenderedBy)
+				site, v1beta1.RenderedByAnnotation, w.RenderedBy)
 		}
 	}
 	return nil
@@ -187,7 +187,7 @@ func s74Upgrade(ctx context.Context, env *runner.Env, run *s74Run) error {
 		}
 		for site, w := range g.Workloads {
 			if w.RenderedBy != "" {
-				return fmt.Errorf("group %s site %s already carries %s before the upgrade", name, site, v1alpha1.RenderedByAnnotation)
+				return fmt.Errorf("group %s site %s already carries %s before the upgrade", name, site, v1beta1.RenderedByAnnotation)
 			}
 			if len(g.Pods[site]) != 1 {
 				return fmt.Errorf("group %s site %s has %d pods before the upgrade, want 1", name, site, len(g.Pods[site]))
@@ -232,10 +232,10 @@ func s74ObserveAllComplete(ctx context.Context, env *runner.Env, run *s74Run) er
 			}
 			r := fg.Status.Rollout
 			state = append(state, fmt.Sprintf("%s: %s", name, pacedRolloutString(r)))
-			if r != nil && r.Phase == v1alpha1.RolloutPhaseStalled {
+			if r != nil && r.Phase == v1beta1.RolloutPhaseStalled {
 				return fmt.Errorf("the roll of group %s stalled during the upgrade: %s (%s)", name, pacedRolloutString(r), r.Message)
 			}
-			if r != nil && r.Phase == v1alpha1.RolloutPhaseComplete && r.CompletedTime != nil && !done[name] {
+			if r != nil && r.Phase == v1beta1.RolloutPhaseComplete && r.CompletedTime != nil && !done[name] {
 				done[name] = true
 				env.Capture.Measure(fmt.Sprintf("group %s completed its roll %s after the upgrade", name, time.Since(run.upgradeAt).Round(time.Second)))
 			}
@@ -319,7 +319,7 @@ func s74VerifyFinal(ctx context.Context, env *runner.Env, run *s74Run) error {
 	}
 	for r := range renderers {
 		env.Capture.Measure(fmt.Sprintf("every site Deployment of %d groups carries %s=%s; %d samples, never more than one group admitted; rollout took %s",
-			len(run.groups), v1alpha1.RenderedByAnnotation, r, len(samples), time.Since(run.upgradeAt).Round(time.Second)))
+			len(run.groups), v1beta1.RenderedByAnnotation, r, len(samples), time.Since(run.upgradeAt).Round(time.Second)))
 	}
 	return nil
 }

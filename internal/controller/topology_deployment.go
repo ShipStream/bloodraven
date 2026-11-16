@@ -3,7 +3,7 @@ package controller
 import (
 	"context"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -85,7 +85,7 @@ func (tm *TopologyManager) deploymentAuthorityLocked(site string) {
 	}
 }
 
-func (r *TopologyManagerRunner) hydrateDeploymentGeneration(fg *v1alpha1.MysqlFailoverGroup) {
+func (r *TopologyManagerRunner) hydrateDeploymentGeneration(fg *v1beta1.MysqlFailoverGroup) {
 	r.mu.RLock()
 	mt := r.managers[client.ObjectKeyFromObject(fg)]
 	r.mu.RUnlock()
@@ -105,7 +105,7 @@ func (tm *TopologyManager) beginDeploymentUpdate(ctx context.Context) (func(), b
 	if tm.deploymentLeases == nil {
 		return func() {}, true
 	}
-	fg := &v1alpha1.MysqlFailoverGroup{}
+	fg := &v1beta1.MysqlFailoverGroup{}
 	if err := tm.deploymentLeases.reader.Get(ctx, types.NamespacedName{Namespace: tm.cfg.Namespace, Name: tm.cfg.Name}, fg); err != nil {
 		return nil, false
 	}

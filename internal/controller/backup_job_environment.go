@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	batchv1 "k8s.io/api/batch/v1"
 )
@@ -56,7 +56,7 @@ func expandBackupEnvironment(value string, previous map[string]backupEnvironment
 
 // backupJobDestination is the storage type and artifact location job's main
 // container writes, with its env expanded as the kubelet would.
-func backupJobDestination(job *batchv1.Job) (v1alpha1.BackupStorageType, string, error) {
+func backupJobDestination(job *batchv1.Job) (v1beta1.BackupStorageType, string, error) {
 	c := backupJobMainContainer(job)
 	if c == nil {
 		return "", "", fmt.Errorf("backup Job has no dump or uploader container")
@@ -69,10 +69,10 @@ func backupJobDestination(job *batchv1.Job) (v1alpha1.BackupStorageType, string,
 		}
 		env[v.Name] = entry
 	}
-	storage := v1alpha1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value)
+	storage := v1beta1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value)
 	encrypted, _ := backupJobEncryptionChoice(job)
 	required := []string{"BLOODRAVEN_STORAGE_TYPE", "BLOODRAVEN_OUTPUT_URL"}
-	if encrypted && storage == v1alpha1.BackupStorageS3 {
+	if encrypted && storage == v1beta1.BackupStorageS3 {
 		required = append(required, "BLOODRAVEN_S3_BUCKET")
 	}
 	for _, name := range required {

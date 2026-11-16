@@ -13,7 +13,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
@@ -52,7 +52,7 @@ type simPlannedStore struct {
 	nn  types.NamespacedName
 	clk clock.Clock
 
-	obj *v1alpha1.MysqlFailoverGroup // nil: the CR is gone
+	obj *v1beta1.MysqlFailoverGroup // nil: the CR is gone
 	rv  int64
 
 	poll int
@@ -84,7 +84,7 @@ type simPlannedStore struct {
 
 	// onCommit observes every committed change (kind names the writer)
 	// with the object before and after; invariants hang off it.
-	onCommit func(kind string, before, after *v1alpha1.MysqlFailoverGroup)
+	onCommit func(kind string, before, after *v1beta1.MysqlFailoverGroup)
 
 	// log is every store operation and its outcome, in order.
 	log []storeOp
@@ -127,7 +127,7 @@ type storeFault struct {
 type lateCommit struct {
 	at     int
 	baseRV int64
-	status v1alpha1.MysqlFailoverGroupStatus
+	status v1beta1.MysqlFailoverGroupStatus
 }
 
 // storeOp is one entry of the store's operation log.
@@ -151,7 +151,7 @@ var (
 )
 
 // newSimPlannedStore builds the store around obj (copied).
-func newSimPlannedStore(obj *v1alpha1.MysqlFailoverGroup, clk clock.Clock) *simPlannedStore {
+func newSimPlannedStore(obj *v1beta1.MysqlFailoverGroup, clk clock.Clock) *simPlannedStore {
 	s := &simPlannedStore{
 		nn:  types.NamespacedName{Namespace: obj.Namespace, Name: obj.Name},
 		clk: clk,
@@ -279,7 +279,7 @@ func (s *simPlannedStore) BeginPoll(p int) {
 // ---------------------------------------------------------------------------
 
 // Object returns a deep copy of the current object (nil when gone).
-func (s *simPlannedStore) Object() *v1alpha1.MysqlFailoverGroup {
+func (s *simPlannedStore) Object() *v1beta1.MysqlFailoverGroup {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.obj == nil {
@@ -373,7 +373,7 @@ func (s *simPlannedStore) MergeSnapshot(snap controller.TopologySnapshot) error 
 // runnerPreservedConditions are the reconciler-owned conditions the
 // runner's status write re-reads instead of replaying (runner.go
 // reconcilerOwnedConditions) that the simulated group carries.
-var runnerPreservedConditions = []string{v1alpha1.ConditionAutomaticFailoverHeld}
+var runnerPreservedConditions = []string{v1beta1.ConditionAutomaticFailoverHeld}
 
 // PatchAnnotations is an unconditioned JSON merge patch of metadata (the
 // out-of-band failover record today; "" deletes a key).
@@ -394,7 +394,7 @@ func (s *simPlannedStore) SetRequest(value string) {
 	if s.obj == nil {
 		return
 	}
-	s.patchAnnotationsLocked("request", map[string]string{v1alpha1.PlannedFailoverAnnotation: value})
+	s.patchAnnotationsLocked("request", map[string]string{v1beta1.PlannedFailoverAnnotation: value})
 }
 
 // ---------------------------------------------------------------------------
@@ -402,13 +402,13 @@ func (s *simPlannedStore) SetRequest(value string) {
 // ---------------------------------------------------------------------------
 
 // Load returns a deep copy of the object; (nil, nil) when it is gone.
-func (s *simPlannedStore) Load(_ context.Context, _ types.NamespacedName) (*v1alpha1.MysqlFailoverGroup, error) {
+func (s *simPlannedStore) Load(_ context.Context, _ types.NamespacedName) (*v1beta1.MysqlFailoverGroup, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.loadLocked()
 }
 
-func (s *simPlannedStore) loadLocked() (*v1alpha1.MysqlFailoverGroup, error) {
+func (s *simPlannedStore) loadLocked() (*v1beta1.MysqlFailoverGroup, error) {
 	if s.deadLocked() {
 		return nil, errOperatorDead
 	}
@@ -423,8 +423,8 @@ func (s *simPlannedStore) loadLocked() (*v1alpha1.MysqlFailoverGroup, error) {
 }
 
 // Write is the engine's conditioned status write (§2.4 steps 3-5).
-func (s *simPlannedStore) Write(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, next v1alpha1.PlannedFailoverStatus,
-	mutate func(*v1alpha1.MysqlFailoverGroupStatus)) (controller.WriteOutcome, error) {
+func (s *simPlannedStore) Write(ctx context.Context, base *v1beta1.MysqlFailoverGroup, next v1beta1.PlannedFailoverStatus,
+	mutate func(*v1beta1.MysqlFailoverGroupStatus)) (controller.WriteOutcome, error) {
 	status := *base.Status.DeepCopy()
 	pf := next.DeepCopy()
 	status.PlannedFailover = pf
@@ -432,7 +432,7 @@ func (s *simPlannedStore) Write(ctx context.Context, base *v1alpha1.MysqlFailove
 		mutate(&status)
 	}
 	op := fmt.Sprintf("write %s rev=%d phase=%s", pf.RunID, pf.Revision, pf.Phase)
-	committed := func(cur *v1alpha1.MysqlFailoverGroup) bool {
+	committed := func(cur *v1beta1.MysqlFailoverGroup) bool {
 		got := cur.Status.PlannedFailover
 		return got != nil && got.RunID == pf.RunID && got.Revision >= pf.Revision
 	}
@@ -442,8 +442,8 @@ func (s *simPlannedStore) Write(ctx context.Context, base *v1alpha1.MysqlFailove
 // statusWrite issues one conditioned status write and settles an ambiguous
 // response with committed, the predicate that recognises the write in a
 // fresh read.
-func (s *simPlannedStore) statusWrite(ctx context.Context, op string, base *v1alpha1.MysqlFailoverGroup,
-	status v1alpha1.MysqlFailoverGroupStatus, committed func(*v1alpha1.MysqlFailoverGroup) bool) (controller.WriteOutcome, error) {
+func (s *simPlannedStore) statusWrite(ctx context.Context, op string, base *v1beta1.MysqlFailoverGroup,
+	status v1beta1.MysqlFailoverGroupStatus, committed func(*v1beta1.MysqlFailoverGroup) bool) (controller.WriteOutcome, error) {
 	s.mu.Lock()
 	if s.deadLocked() {
 		s.mu.Unlock()
@@ -506,9 +506,9 @@ func (s *simPlannedStore) statusWrite(ctx context.Context, op string, base *v1al
 // Settle is §2.4 step 5 for a write of (runID, revision) against baseRV.
 func (s *simPlannedStore) Settle(ctx context.Context, _ types.NamespacedName, baseRV, runID string,
 	revision int64) (controller.WriteOutcome, error) {
-	base := &v1alpha1.MysqlFailoverGroup{}
+	base := &v1beta1.MysqlFailoverGroup{}
 	base.ResourceVersion = baseRV
-	return s.settle(ctx, base, func(cur *v1alpha1.MysqlFailoverGroup) bool {
+	return s.settle(ctx, base, func(cur *v1beta1.MysqlFailoverGroup) bool {
 		got := cur.Status.PlannedFailover
 		return got != nil && got.RunID == runID && got.Revision >= revision
 	})
@@ -517,8 +517,8 @@ func (s *simPlannedStore) Settle(ctx context.Context, _ types.NamespacedName, ba
 // settleAttempts is §2.4 step 5's bound.
 const settleAttempts = 3
 
-func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
-	committed func(*v1alpha1.MysqlFailoverGroup) bool) (controller.WriteOutcome, error) {
+func (s *simPlannedStore) settle(_ context.Context, base *v1beta1.MysqlFailoverGroup,
+	committed func(*v1beta1.MysqlFailoverGroup) bool) (controller.WriteOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	baseRV := parseRV(base.ResourceVersion)
@@ -553,7 +553,7 @@ func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailover
 		// (K029). A fence that moved nothing proves nothing: Unknown.
 		s.fenceSeq++
 		s.patchAnnotationsLocked("statusFence", map[string]string{
-			v1alpha1.PlannedFailoverStatusFenceAnnotation: controller.FormatStatusFenceValue(
+			v1beta1.PlannedFailoverStatusFenceAnnotation: controller.FormatStatusFenceValue(
 				s.clk.Now().Add(time.Duration(s.fenceSeq))),
 		})
 		if s.rv == baseRV {
@@ -568,37 +568,37 @@ func (s *simPlannedStore) settle(_ context.Context, base *v1alpha1.MysqlFailover
 }
 
 // WriteTerminalMarker writes the terminal marker, conditioned on base.
-func (s *simPlannedStore) WriteTerminalMarker(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
+func (s *simPlannedStore) WriteTerminalMarker(_ context.Context, base *v1beta1.MysqlFailoverGroup,
 	m controller.TerminalMarker) (controller.WriteOutcome, error) {
 	return s.metadataWrite("terminalMarker", base, func(a map[string]string) map[string]string {
-		return map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: m.String()}
+		return map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: m.String()}
 	})
 }
 
 // ClearTerminalMarker removes the marker when it names runID.
-func (s *simPlannedStore) ClearTerminalMarker(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
+func (s *simPlannedStore) ClearTerminalMarker(_ context.Context, base *v1beta1.MysqlFailoverGroup,
 	runID string) (controller.WriteOutcome, error) {
 	return s.metadataWrite("clearTerminalMarker", base, func(a map[string]string) map[string]string {
-		if markerRunID(a[v1alpha1.PlannedFailoverTerminalAnnotation]) != runID {
+		if markerRunID(a[v1beta1.PlannedFailoverTerminalAnnotation]) != runID {
 			return nil
 		}
-		return map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: ""}
+		return map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: ""}
 	})
 }
 
 // ConsumeRequest removes the request annotation.
-func (s *simPlannedStore) ConsumeRequest(_ context.Context, base *v1alpha1.MysqlFailoverGroup) (controller.WriteOutcome, error) {
+func (s *simPlannedStore) ConsumeRequest(_ context.Context, base *v1beta1.MysqlFailoverGroup) (controller.WriteOutcome, error) {
 	return s.metadataWrite("consumeRequest", base, func(a map[string]string) map[string]string {
-		if _, ok := a[v1alpha1.PlannedFailoverAnnotation]; !ok {
+		if _, ok := a[v1beta1.PlannedFailoverAnnotation]; !ok {
 			return nil
 		}
-		return map[string]string{v1alpha1.PlannedFailoverAnnotation: ""}
+		return map[string]string{v1beta1.PlannedFailoverAnnotation: ""}
 	})
 }
 
 // MarkDeadlineStart records now for (kind, runID) unless the annotation
 // already names runID, and returns the durable start.
-func (s *simPlannedStore) MarkDeadlineStart(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
+func (s *simPlannedStore) MarkDeadlineStart(_ context.Context, base *v1beta1.MysqlFailoverGroup,
 	kind controller.DeadlineKind, runID string, now time.Time) (time.Time, controller.WriteOutcome, error) {
 	key := kind.Annotation()
 	if key == "" {
@@ -620,7 +620,7 @@ func (s *simPlannedStore) MarkDeadlineStart(_ context.Context, base *v1alpha1.My
 }
 
 // ClearDeadlineStart removes the annotation when it names runID.
-func (s *simPlannedStore) ClearDeadlineStart(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
+func (s *simPlannedStore) ClearDeadlineStart(_ context.Context, base *v1beta1.MysqlFailoverGroup,
 	kind controller.DeadlineKind, runID string) (controller.WriteOutcome, error) {
 	key := kind.Annotation()
 	return s.metadataWrite("clearDeadline:"+string(kind), base, func(a map[string]string) map[string]string {
@@ -634,8 +634,8 @@ func (s *simPlannedStore) ClearDeadlineStart(_ context.Context, base *v1alpha1.M
 // ClearHold commits final (when non-nil) and the removal of the
 // status.plannedFailoverHold naming runID (its condition set False) in one
 // status write.
-func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string,
-	final *v1alpha1.PlannedFailoverStatus) (controller.WriteOutcome, error) {
+func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string,
+	final *v1beta1.PlannedFailoverStatus) (controller.WriteOutcome, error) {
 	status := *base.Status.DeepCopy()
 	changed := false
 	if final != nil {
@@ -653,7 +653,7 @@ func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFai
 		s.mu.Unlock()
 		return controller.WriteCommitted, nil
 	}
-	committed := func(cur *v1alpha1.MysqlFailoverGroup) bool {
+	committed := func(cur *v1beta1.MysqlFailoverGroup) bool {
 		if holdNames(&cur.Status, runID) {
 			return false
 		}
@@ -667,13 +667,13 @@ func (s *simPlannedStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFai
 }
 
 // DeleteHoldAck removes the acknowledgement annotation when it names runID.
-func (s *simPlannedStore) DeleteHoldAck(_ context.Context, base *v1alpha1.MysqlFailoverGroup,
+func (s *simPlannedStore) DeleteHoldAck(_ context.Context, base *v1beta1.MysqlFailoverGroup,
 	runID string) (controller.WriteOutcome, error) {
 	return s.metadataWrite("deleteHoldAck", base, func(a map[string]string) map[string]string {
-		if v, ok := a[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; !ok || strings.TrimSpace(v) != runID {
+		if v, ok := a[v1beta1.AcknowledgePlannedFailoverHoldAnnotation]; !ok || strings.TrimSpace(v) != runID {
 			return nil
 		}
-		return map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: ""}
+		return map[string]string{v1beta1.AcknowledgePlannedFailoverHoldAnnotation: ""}
 	})
 }
 
@@ -682,7 +682,7 @@ func (s *simPlannedStore) DeleteHoldAck(_ context.Context, base *v1alpha1.MysqlF
 // patchAnnotations edits a copy of base. Nothing to change (nil) is a
 // no-op success with no API call: no death, gone or resourceVersion check
 // can fail it (K106).
-func (s *simPlannedStore) metadataWrite(op string, base *v1alpha1.MysqlFailoverGroup,
+func (s *simPlannedStore) metadataWrite(op string, base *v1beta1.MysqlFailoverGroup,
 	patch func(map[string]string) map[string]string) (controller.WriteOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -743,7 +743,7 @@ func (s *simPlannedStore) logLocked(op, outcome string) {
 
 // commitStatusLocked replaces the status; a byte-identical status does not
 // move the resourceVersion.
-func (s *simPlannedStore) commitStatusLocked(kind string, status v1alpha1.MysqlFailoverGroupStatus) {
+func (s *simPlannedStore) commitStatusLocked(kind string, status v1beta1.MysqlFailoverGroupStatus) {
 	if reflect.DeepEqual(s.obj.Status, status) {
 		return
 	}
@@ -778,7 +778,7 @@ func (s *simPlannedStore) patchAnnotationsLocked(kind string, kv map[string]stri
 	s.bumpLocked(kind, before)
 }
 
-func (s *simPlannedStore) bumpLocked(kind string, before *v1alpha1.MysqlFailoverGroup) {
+func (s *simPlannedStore) bumpLocked(kind string, before *v1beta1.MysqlFailoverGroup) {
 	s.rv++
 	s.obj.ResourceVersion = strconv.FormatInt(s.rv, 10)
 	if s.onCommit != nil {
@@ -809,7 +809,7 @@ func parseDeadlineStart(v string) (runID string, t time.Time, ok bool) {
 }
 
 // holdNames reports whether status.plannedFailoverHold names runID.
-func holdNames(st *v1alpha1.MysqlFailoverGroupStatus, runID string) bool {
+func holdNames(st *v1beta1.MysqlFailoverGroupStatus, runID string) bool {
 	return st.PlannedFailoverHold != nil && st.PlannedFailoverHold.RunID == runID
 }
 
@@ -817,15 +817,15 @@ func holdNames(st *v1alpha1.MysqlFailoverGroupStatus, runID string) bool {
 // status.plannedFailoverHold (or a True AutomaticFailoverHeld condition
 // without it, which the controller treats as a hold), or a terminal marker
 // with outcome ManualRecoveryRequired (§10.5).
-func holdStands(obj *v1alpha1.MysqlFailoverGroup) bool {
+func holdStands(obj *v1beta1.MysqlFailoverGroup) bool {
 	if obj == nil {
 		return false
 	}
 	if obj.Status.PlannedFailoverHold != nil || holdConditionTrue(obj) {
 		return true
 	}
-	m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
-	return ok && m.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
+	m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation])
+	return ok && m.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired
 }
 
 // PlannedStore is the simulated planned-failover store, exported for the
@@ -835,7 +835,7 @@ type PlannedStore = simPlannedStore
 
 // NewPlannedStore returns a store over a copy of obj, its fence and
 // deadline timestamps taken from clk.
-func NewPlannedStore(obj *v1alpha1.MysqlFailoverGroup, clk clock.Clock) *PlannedStore {
+func NewPlannedStore(obj *v1beta1.MysqlFailoverGroup, clk clock.Clock) *PlannedStore {
 	return newSimPlannedStore(obj, clk)
 }
 
@@ -859,7 +859,7 @@ func (s *simPlannedStore) SetAnnotations(kv map[string]string) {
 // MutateStatus applies fn to the stored status as an unconditioned status
 // writer would (another controller, a human). A no-op change does not move
 // the resourceVersion.
-func (s *simPlannedStore) MutateStatus(fn func(*v1alpha1.MysqlFailoverGroupStatus)) {
+func (s *simPlannedStore) MutateStatus(fn func(*v1beta1.MysqlFailoverGroupStatus)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.obj == nil {

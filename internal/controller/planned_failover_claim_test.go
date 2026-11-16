@@ -11,7 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -40,7 +40,7 @@ func TestClaimPlannedFailover_GrantAndIdempotence(t *testing.T) {
 		t.Fatalf("same run again = %+v, %v; want an idempotent Granted with the uuid", again, err)
 	}
 	other, _ := f.topo.ClaimPlannedFailover(context.Background(), f.nn, claimRequest(f.tm, "run-2"))
-	if other.Kind != ClaimWait || other.WaitReason != v1alpha1.PlannedFailoverWaitClaimHeld {
+	if other.Kind != ClaimWait || other.WaitReason != v1beta1.PlannedFailoverWaitClaimHeld {
 		t.Fatalf("another run = %+v; want Wait{ClaimHeld}", other)
 	}
 	if !f.topo.ReleasePlannedFailoverClaim(f.nn, "run-1", ReleaseNotCommitted) || f.reg.slot.Held() {
@@ -51,7 +51,7 @@ func TestClaimPlannedFailover_GrantAndIdempotence(t *testing.T) {
 	}
 	f.reg.slot.toHold("run-9")
 	held, _ := f.topo.ClaimPlannedFailover(context.Background(), f.nn, claimRequest(f.tm, "run-3"))
-	if held.Kind != ClaimReject || held.RejectReason != v1alpha1.PlannedFailoverReasonManualRecoveryPending {
+	if held.Kind != ClaimReject || held.RejectReason != v1beta1.PlannedFailoverReasonManualRecoveryPending {
 		t.Fatalf("claim during a hold = %+v; want Reject{ManualRecoveryPending}", held)
 	}
 	if f.topo.ReleasePlannedFailoverClaim(f.nn, "run-9", ReleaseZombie) {
@@ -66,15 +66,15 @@ func TestClaimPlannedFailover_PeerEvidence(t *testing.T) {
 		role   state.SiteRole
 		mutate func(f *opsFixture)
 		kind   ClaimDecisionKind
-		reason v1alpha1.PlannedFailoverWaitReason
+		reason v1beta1.PlannedFailoverWaitReason
 	}{
-		{"unreadable dr-only site", state.SiteRoleDROnly, func(f *opsFixture) { f.third.down = true }, ClaimWait, v1alpha1.PlannedFailoverWaitPeerUnreadable},
-		{"writable dr-only site", state.SiteRoleDROnly, func(f *opsFixture) { f.third.ro, f.third.sro = false, false }, ClaimWait, v1alpha1.PlannedFailoverWaitAuthorityUnsettled},
+		{"unreadable dr-only site", state.SiteRoleDROnly, func(f *opsFixture) { f.third.down = true }, ClaimWait, v1beta1.PlannedFailoverWaitPeerUnreadable},
+		{"writable dr-only site", state.SiteRoleDROnly, func(f *opsFixture) { f.third.ro, f.third.sro = false, false }, ClaimWait, v1beta1.PlannedFailoverWaitAuthorityUnsettled},
 		{"unreadable reader is allowed", state.SiteRoleReadOnly, func(f *opsFixture) { f.third.down = true }, ClaimGranted, ""},
-		{"writable reader", state.SiteRoleReadOnly, func(f *opsFixture) { f.third.ro, f.third.sro = false, false }, ClaimWait, v1alpha1.PlannedFailoverWaitAuthorityUnsettled},
-		{"target not replicating", "", func(f *opsFixture) { f.tgt.repl.SQLRunning = false }, ClaimWait, v1alpha1.PlannedFailoverWaitTargetNotReady},
-		{"target replicates elsewhere", "", func(f *opsFixture) { f.tgt.repl.SourceHost = "mysql-dc3" }, ClaimWait, v1alpha1.PlannedFailoverWaitTargetNotReady},
-		{"source turned read-only", "", func(f *opsFixture) { f.src.ro = true }, ClaimWait, v1alpha1.PlannedFailoverWaitAuthorityUnsettled},
+		{"writable reader", state.SiteRoleReadOnly, func(f *opsFixture) { f.third.ro, f.third.sro = false, false }, ClaimWait, v1beta1.PlannedFailoverWaitAuthorityUnsettled},
+		{"target not replicating", "", func(f *opsFixture) { f.tgt.repl.SQLRunning = false }, ClaimWait, v1beta1.PlannedFailoverWaitTargetNotReady},
+		{"target replicates elsewhere", "", func(f *opsFixture) { f.tgt.repl.SourceHost = "mysql-dc3" }, ClaimWait, v1beta1.PlannedFailoverWaitTargetNotReady},
+		{"source turned read-only", "", func(f *opsFixture) { f.src.ro = true }, ClaimWait, v1beta1.PlannedFailoverWaitAuthorityUnsettled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,7 +112,7 @@ func TestPF_BaselineMatchesAfterNanosecondFailover(t *testing.T) {
 	stale := newFailoverRecordRef(f.clk.Now().Add(-time.Hour), "dc1")
 	f.reg.slot.release("run-1", ReleaseNotCommitted)
 	d, _ = f.topo.ClaimPlannedFailover(context.Background(), f.nn, PlannedClaimRequest{RunID: "run-2", Target: "dc2", DurableBaseline: stale})
-	if d.Kind != ClaimWait || d.WaitReason != v1alpha1.PlannedFailoverWaitAuthorityUnsettled {
+	if d.Kind != ClaimWait || d.WaitReason != v1beta1.PlannedFailoverWaitAuthorityUnsettled {
 		t.Fatalf("claim over a stale durable record = %+v; want Wait{AuthorityUnsettled}", d)
 	}
 }
@@ -160,7 +160,7 @@ func TestPF_GateIsNonBlocking(t *testing.T) {
 	}
 	start := time.Now()
 	d, _ := f.topo.ClaimPlannedFailover(context.Background(), f.nn, claimRequest(f.tm, "run-1"))
-	if d.Kind != ClaimWait || d.WaitReason != v1alpha1.PlannedFailoverWaitRecoveryInFlight || time.Since(start) > time.Second {
+	if d.Kind != ClaimWait || d.WaitReason != v1beta1.PlannedFailoverWaitRecoveryInFlight || time.Since(start) > time.Second {
 		t.Fatalf("claim beside a running mutation = %+v after %s; want an immediate Wait{RecoveryInFlight}", d, time.Since(start))
 	}
 	if _, ok := f.tm.beginFollowerMutation(); ok {
@@ -261,10 +261,10 @@ func TestPlannedClaim_ClaimBetweenProbeAndPublishStopsIt(t *testing.T) {
 // (Admitting or Deferred) holds no claim, so every other claimant is
 // allowed and the topology manager defers nothing for it.
 func TestPlannedClaim_WaitingOwnsNothing(t *testing.T) {
-	for _, phase := range []v1alpha1.PlannedFailoverPhase{v1alpha1.PlannedFailoverPhaseAdmitting, v1alpha1.PlannedFailoverPhaseDeferred} {
+	for _, phase := range []v1beta1.PlannedFailoverPhase{v1beta1.PlannedFailoverPhaseAdmitting, v1beta1.PlannedFailoverPhaseDeferred} {
 		t.Run(string(phase), func(t *testing.T) {
 			fg := newTestFG()
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, TargetSite: "dc2"}
+			fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, TargetSite: "dc2"}
 			for i, col := range claimants {
 				f := newClaimFixture(t)
 				// Whatever the cached status says, nothing hydrates a
@@ -284,7 +284,7 @@ func TestPlannedClaim_WaitingOwnsNothing(t *testing.T) {
 func TestWireRegisteredManager_HydratesHoldOverRun(t *testing.T) {
 	f := newOpsFixture(t, "")
 	slot := &PlannedClaimSlot{}
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseDraining)
+	pf := opsRun(v1beta1.PlannedFailoverPhaseDraining)
 	WireRegisteredManager(f.tm, ManagerWiring{Slot: slot, HydrateFrom: pf, HoldFrom: &PlannedHold{RunID: "run-0", FromStatus: true}})
 	if v, _ := slot.View(); v.Mode != "Hold" || v.RunID != "run-0" {
 		t.Fatalf("slot = %+v; want the hold", v)
@@ -296,7 +296,7 @@ func TestWireRegisteredManager_HydratesHoldOverRun(t *testing.T) {
 	}
 	// A legacy block (no runId) is never hydrated.
 	legacy := &PlannedClaimSlot{}
-	WireRegisteredManager(f.tm, ManagerWiring{Slot: legacy, HydrateFrom: &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2"}})
+	WireRegisteredManager(f.tm, ManagerWiring{Slot: legacy, HydrateFrom: &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDraining, TargetSite: "dc2"}})
 	if legacy.Held() {
 		t.Fatal("a legacy block was hydrated")
 	}
@@ -306,11 +306,11 @@ func TestWireRegisteredManager_HydratesHoldOverRun(t *testing.T) {
 // marked run, and waits while an ordered update holds the sites.
 func TestEnsureClaim(t *testing.T) {
 	f := newOpsFixture(t, "")
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseWaitingForLag)
+	pf := opsRun(v1beta1.PlannedFailoverPhaseWaitingForLag)
 	fg := opsGroup(pf)
 	marked := fg.DeepCopy()
-	marked.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
-		Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}.String()}
+	marked.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
+		Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1beta1.PlannedFailoverReasonStatusStalled}.String()}
 	if _, err := f.topo.EnsureClaim(context.Background(), f.ref, marked); err != errClaimLost {
 		t.Fatalf("EnsureClaim on a marked run = %v; want errClaimLost", err)
 	}
@@ -333,7 +333,7 @@ func TestEnsureClaim(t *testing.T) {
 	// No manager: the slot is still taken, so the next manager is blocked.
 	g := newOpsFixture(t, "")
 	g.reg.current = nil
-	if d, _ := g.topo.EnsureClaim(context.Background(), g.ref, fg); d.Kind != ClaimWait || d.WaitReason != v1alpha1.PlannedFailoverWaitManagerAbsent || !g.reg.slot.Held() {
+	if d, _ := g.topo.EnsureClaim(context.Background(), g.ref, fg); d.Kind != ClaimWait || d.WaitReason != v1beta1.PlannedFailoverWaitManagerAbsent || !g.reg.slot.Held() {
 		t.Fatalf("EnsureClaim with no manager = %+v (held=%v)", d, g.reg.slot.Held())
 	}
 }
@@ -348,13 +348,13 @@ func TestSync_NeverTouchesClaim(t *testing.T) {
 		t.Fatal("setup: no manager")
 	}
 	r.Slot(nn).hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &live); err != nil {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
-	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseFailed, TargetSite: "dc2",
-		Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, CompletionTime: now}}
+	live.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: v1beta1.PlannedFailoverPhaseFailed, TargetSite: "dc2",
+		Result: &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeRolledBack, CompletionTime: now}}
 	if err := c.Status().Update(context.Background(), &live); err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestSync_NeverTouchesClaim(t *testing.T) {
 		t.Fatal("a sync released the claim")
 	}
 	r.Slot(nn).release("run-1", ReleaseTerminal)
-	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-2", Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2", SourceSite: "dc1"}
+	live.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-2", Phase: v1beta1.PlannedFailoverPhaseDraining, TargetSite: "dc2", SourceSite: "dc1"}
 	if err := c.Status().Update(context.Background(), &live); err != nil {
 		t.Fatal(err)
 	}

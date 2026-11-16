@@ -10,7 +10,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -23,14 +23,14 @@ const (
 // fgAfterDragonflyTakeover is a three-site group right after a takeover
 // made dc1 the Dragonfly master: MySQL and Dragonfly both name dc1, and dc3
 // is a third site (a reader) that replicates from it.
-func fgAfterDragonflyTakeover() *v1alpha1.MysqlFailoverGroup {
+func fgAfterDragonflyTakeover() *v1beta1.MysqlFailoverGroup {
 	fg := fgWithDragonflyEnabledAndActive()
 	dc3 := *fg.Spec.Sites[1].DeepCopy()
 	dc3.Name = "dc3"
 	dc3.ServerID = 103
 	dc3.Zone = "lion-dc3"
 	fg.Spec.Sites = append(fg.Spec.Sites, dc3)
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	return fg
 }
 
@@ -44,9 +44,9 @@ func dragonflyReplicaOf(host string) dragonfly.ReplicationInfo {
 	}
 }
 
-func dragonflyStatusOf(t *testing.T, c client.Client, key client.ObjectKey) *v1alpha1.DragonflyStatus {
+func dragonflyStatusOf(t *testing.T, c client.Client, key client.ObjectKey) *v1beta1.DragonflyStatus {
 	t.Helper()
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestDragonflyManager_Tick_StaleMasterReattachKeepsTheOnlyCopy(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgWithDragonflyEnabledAndActive()
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+			fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 			cb, key := newDragonflyFakeClient(fg)
 			c := cb.Build()
 			mgr := NewDragonflyManager(c, record.NewFakeRecorder(16), slog.Default(), key, 50*time.Millisecond)
@@ -415,7 +415,7 @@ func TestDragonflyMasterOverEmptyRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgWithDragonflyEnabledAndActive()
 			fg.Status.ActiveSite = tc.mysqlActive
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+			fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 			if got := activeDragonflySiteFromObservation(fg, tc.snaps, true); got != tc.want {
 				t.Errorf("active = %q, want %q", got, tc.want)
 			}
@@ -454,7 +454,7 @@ func TestActiveDragonflySiteFromObservation_UnobservedRecordedSite(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgWithDragonflyEnabledAndActive()
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+			fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 			if got := activeDragonflySiteFromObservation(fg, tc.snaps, tc.hold); got != tc.want {
 				t.Errorf("active = %q, want %q", got, tc.want)
 			}

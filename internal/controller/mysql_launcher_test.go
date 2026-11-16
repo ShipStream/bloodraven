@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // mysqlLauncherRotationGolden is the server_uuid step every mysql
@@ -144,7 +144,7 @@ func TestMySQLLauncherRendering(t *testing.T) {
 	t.Run("with encryption, binary log not covered", func(t *testing.T) {
 		fg := encTestFG()
 		off := false
-		fg.Spec.EncryptionAtRest.Coverage = &v1alpha1.EncryptionCoverageSpec{BinaryLog: &off}
+		fg.Spec.EncryptionAtRest.Coverage = &v1beta1.EncryptionCoverageSpec{BinaryLog: &off}
 		command, _ := mysqlLauncher(fg, flags)
 		want := "set -euo pipefail\n" + fmt.Sprintf(mysqlLauncherRotationGolden, "/run/mysql-keyring/keyring", 0) + mysqlLauncherEncryptionGolden + mysqlLauncherHandoffGolden
 		if command[2] != want {

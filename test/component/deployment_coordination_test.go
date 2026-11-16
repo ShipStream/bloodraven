@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	corev1 "k8s.io/api/core/v1"
@@ -21,24 +21,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroupReconciler, *controller.DeploymentLeaseManager, *v1alpha1.MysqlFailoverGroup, *clock.FakeClock) {
+func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroupReconciler, *controller.DeploymentLeaseManager, *v1beta1.MysqlFailoverGroup, *clock.FakeClock) {
 	t.Helper()
 	ctx := context.Background()
 	clk := clock.NewFakeClock(time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC))
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "default", UID: "deployment-coordination-uid"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", Storage: v1alpha1.StorageSpec{Size: "1Gi"}},
-				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", Storage: v1alpha1.StorageSpec{Size: "1Gi"}},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+			Sites: []v1beta1.SiteSpec{
+				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", Storage: v1beta1.StorageSpec{Size: "1Gi"}},
+				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", Storage: v1beta1.StorageSpec{Size: "1Gi"}},
 			},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "dc1", TopologyGeneration: 7,
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "dc1", State: v1alpha1.SiteStateWritable},
-				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+			Sites: []v1beta1.SiteStatus{
+				{Name: "dc1", State: v1beta1.SiteStateWritable},
+				{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 			},
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.NewTime(clk.Now())}},
 		},
@@ -55,7 +55,7 @@ func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroup
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(fg).WithObjects(fg, secret).Build()
@@ -73,7 +73,7 @@ func deploymentCoordinationFixture(t *testing.T) (*controller.MysqlFailoverGroup
 	return r, leases, fg, clk
 }
 
-func grantCoordinationHold(t *testing.T, leases *controller.DeploymentLeaseManager, fg *v1alpha1.MysqlFailoverGroup, operation, instance string, ttl int) controller.DeploymentLeaseResult {
+func grantCoordinationHold(t *testing.T, leases *controller.DeploymentLeaseManager, fg *v1beta1.MysqlFailoverGroup, operation, instance string, ttl int) controller.DeploymentLeaseResult {
 	t.Helper()
 	ctx := context.Background()
 	migration, err := leases.Grant(ctx, fg, "migration", operation, instance, "tenant-ns", "deployer", 120)
@@ -102,7 +102,7 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 			r, leases, fg, clk := deploymentCoordinationFixture(t)
 			later := grantCoordinationHold(t, leases, fg, "operation-long", "instance-long", 90)
 			earlier := grantCoordinationHold(t, leases, fg, "operation-short", "instance-short", 30)
-			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"}
 			if err := r.Update(ctx, fg); err != nil {
 				t.Fatal(err)
 			}
@@ -122,8 +122,8 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 				t.Helper()
 				result := reconcile()
 				pf := fg.Status.PlannedFailover
-				if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
-					pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold {
+				if pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
+					pf.Admission.DeferReason != v1beta1.PlannedFailoverDeferDeploymentHold {
 					t.Fatalf("planned failover = %+v, want Deferred/DeploymentHold", pf)
 				}
 				if pf.Admission.RetryTime == nil || !pf.Admission.RetryTime.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) {
@@ -135,7 +135,7 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 				if pf.TargetSite != "dc2" || pf.SourceSite != "" || fg.Status.ActiveSite != "dc1" {
 					t.Fatalf("hold changed switchover identity: status=%+v", fg.Status)
 				}
-				if fg.Annotations[v1alpha1.PlannedFailoverAnnotation] != "dc2" {
+				if fg.Annotations[v1beta1.PlannedFailoverAnnotation] != "dc2" {
 					t.Fatal("hold consumed annotation needed for automatic retry")
 				}
 				if want := max(time.Second, hold.ExpiresAt.Sub(clk.Now())+time.Nanosecond); result.RequeueAfter != want {
@@ -150,7 +150,7 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 			clk.Advance(time.Nanosecond)
 			assertHeld(later)
 			if unhealthy {
-				fg.Status.Sites[1].Replication = v1alpha1.SiteReplicationBroken
+				fg.Status.Sites[1].Replication = v1beta1.SiteReplicationBroken
 				if err := r.Status().Update(ctx, fg); err != nil {
 					t.Fatal(err)
 				}
@@ -162,16 +162,16 @@ func TestDeploymentCoordination_PlannedFailoverHoldExpiry(t *testing.T) {
 				t.Fatal("expiry cleared planned-failover status instead of revalidating")
 			}
 			if unhealthy {
-				if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonTargetUnhealthy {
+				if pf.Phase != v1beta1.PlannedFailoverPhaseFailed || pf.Result == nil || pf.Result.Reason != v1beta1.PlannedFailoverReasonTargetUnhealthy {
 					t.Fatalf("changed target was not revalidated: %+v", pf)
 				}
-			} else if pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Result != nil || result.RequeueAfter <= 0 || result.RequeueAfter > time.Second {
+			} else if pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.Result != nil || result.RequeueAfter <= 0 || result.RequeueAfter > time.Second {
 				t.Fatalf("expired holds did not resume admission: status=%+v result=%+v", pf, result)
 			}
 			if (pf.Admission != nil && pf.Admission.RetryTime != nil) || !pf.StartTime.Equal(start) {
 				t.Fatalf("expiry left retryAfter or reset startTime: %+v", pf)
 			}
-			if _, present := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]; present {
+			if _, present := fg.Annotations[v1beta1.PlannedFailoverAnnotation]; present {
 				t.Fatal("revalidated request retained annotation")
 			}
 			if hold, err := leases.Hold(ctx, fg); err != nil || hold != nil {
@@ -188,7 +188,7 @@ func TestDeploymentCoordination_DeferredHoldAllowsEmergencyPoll(t *testing.T) {
 	h := newTestHarness(t)
 	h.pollN(2)
 	r.Runner.SetManagerForTest(client.ObjectKeyFromObject(fg), h.tm)
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"}
 	if err := r.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -202,8 +202,8 @@ func TestDeploymentCoordination_DeferredHoldAllowsEmergencyPoll(t *testing.T) {
 	if err := r.Get(ctx, request.NamespacedName, fg); err != nil {
 		t.Fatal(err)
 	}
-	if pf := fg.Status.PlannedFailover; pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
-		pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold {
+	if pf := fg.Status.PlannedFailover; pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
+		pf.Admission.DeferReason != v1beta1.PlannedFailoverDeferDeploymentHold {
 		t.Fatalf("planned failover not held before emergency: %+v", pf)
 	}
 	if !h.dc2MySQL.isReadOnly() {
@@ -223,7 +223,7 @@ func TestDeploymentCoordination_DeferredHoldAllowsEmergencyPoll(t *testing.T) {
 		t.Fatal("emergency promotion did not fence the failed site and redirect DNS")
 	}
 	h.pollN(2)
-	if status := h.tm.Status(); status.Sites[0].State != v1alpha1.SiteStateUnreachable || status.Sites[1].State != v1alpha1.SiteStateWritable {
+	if status := h.tm.Status(); status.Sites[0].State != v1beta1.SiteStateUnreachable || status.Sites[1].State != v1beta1.SiteStateWritable {
 		t.Fatalf("emergency topology did not converge: %+v", status)
 	}
 }

@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -89,7 +89,7 @@ func lagString(secs *int64) string {
 	return shortDuration(time.Duration(*secs) * time.Second)
 }
 
-func lastFailoverAge(fg *v1alpha1.MysqlFailoverGroup) string {
+func lastFailoverAge(fg *v1beta1.MysqlFailoverGroup) string {
 	rec, _, _ := brcontroller.EffectiveFailoverRecord(fg, time.Now())
 	if rec.LastFailover.IsZero() {
 		return "-"
@@ -97,7 +97,7 @@ func lastFailoverAge(fg *v1alpha1.MysqlFailoverGroup) string {
 	return age(rec.LastFailover)
 }
 
-func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {
+func plannedFailoverSummary(fg *v1beta1.MysqlFailoverGroup) string {
 	held := ""
 	if brcontroller.PlannedHoldFrom(fg) != nil {
 		held = "+held"
@@ -114,13 +114,13 @@ func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 	if outcome, reason, ok := plannedTerminalMarker(fg); ok {
 		return fmt.Sprintf("Ended(%s)%s", plannedOutcomeReason(outcome, reason), held)
 	}
-	if r := pf.Result; r != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
+	if r := pf.Result; r != nil && pf.Phase == v1beta1.PlannedFailoverPhaseFailed {
 		return fmt.Sprintf("%s(%s)%s", pf.Phase, plannedOutcomeReason(r.Outcome, r.Reason), held)
 	}
-	if a := pf.Admission; a != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting && a.WaitReason != "" {
+	if a := pf.Admission; a != nil && pf.Phase == v1beta1.PlannedFailoverPhaseAdmitting && a.WaitReason != "" {
 		return fmt.Sprintf("%s(%s)%s", pf.Phase, a.WaitReason, held)
 	}
-	if a := pf.Admission; a != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred && a.DeferReason != "" {
+	if a := pf.Admission; a != nil && pf.Phase == v1beta1.PlannedFailoverPhaseDeferred && a.DeferReason != "" {
 		return fmt.Sprintf("%s(%s)%s", pf.Phase, a.DeferReason, held)
 	}
 	return string(pf.Phase) + held
@@ -130,12 +130,12 @@ func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 // marker when it names the group's current run: the run ended, whatever
 // status.plannedFailover.phase still says (the operator could not write
 // status, §6.4).
-func plannedTerminalMarker(fg *v1alpha1.MysqlFailoverGroup) (v1alpha1.PlannedFailoverOutcome, v1alpha1.PlannedFailoverReason, bool) {
+func plannedTerminalMarker(fg *v1beta1.MysqlFailoverGroup) (v1beta1.PlannedFailoverOutcome, v1beta1.PlannedFailoverReason, bool) {
 	pf := fg.Status.PlannedFailover
 	if pf == nil || pf.RunID == "" {
 		return "", "", false
 	}
-	m, ok := brcontroller.ParseTerminalMarker(fg.Annotations[v1alpha1.PlannedFailoverTerminalAnnotation])
+	m, ok := brcontroller.ParseTerminalMarker(fg.Annotations[v1beta1.PlannedFailoverTerminalAnnotation])
 	if !ok || m.RunID != pf.RunID {
 		return "", "", false
 	}
@@ -144,9 +144,9 @@ func plannedTerminalMarker(fg *v1alpha1.MysqlFailoverGroup) (v1alpha1.PlannedFai
 
 // plannedOutcomeReason renders a terminal result: the reason alone for a
 // run that never started (as before), "<outcome>:<reason>" otherwise.
-func plannedOutcomeReason(outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) string {
+func plannedOutcomeReason(outcome v1beta1.PlannedFailoverOutcome, reason v1beta1.PlannedFailoverReason) string {
 	switch {
-	case outcome == v1alpha1.PlannedFailoverOutcomeNotStarted && reason != "":
+	case outcome == v1beta1.PlannedFailoverOutcomeNotStarted && reason != "":
 		return string(reason)
 	case reason == "":
 		return string(outcome)
@@ -158,8 +158,8 @@ func plannedOutcomeReason(outcome v1alpha1.PlannedFailoverOutcome, reason v1alph
 // (status.rollout) as one line: "<phase> (<reason>): <message>". It is
 // empty when the group has no record or its roll completed, so a group
 // with nothing to wait for prints nothing.
-func rolloutSummary(r *v1alpha1.RolloutStatus) string {
-	if r == nil || r.Phase == "" || r.Phase == v1alpha1.RolloutPhaseComplete {
+func rolloutSummary(r *v1beta1.RolloutStatus) string {
+	if r == nil || r.Phase == "" || r.Phase == v1beta1.RolloutPhaseComplete {
 		return ""
 	}
 	s := string(r.Phase)
@@ -172,7 +172,7 @@ func rolloutSummary(r *v1alpha1.RolloutStatus) string {
 	return s
 }
 
-func recoverySummary(fg *v1alpha1.MysqlFailoverGroup) string {
+func recoverySummary(fg *v1beta1.MysqlFailoverGroup) string {
 	for _, s := range fg.Status.Sites {
 		if s.RecoveryState != "" {
 			return fmt.Sprintf("%s=%s", s.Name, s.RecoveryState)
@@ -181,13 +181,13 @@ func recoverySummary(fg *v1alpha1.MysqlFailoverGroup) string {
 	return "-"
 }
 
-func siteCountSummary(fg *v1alpha1.MysqlFailoverGroup) string {
+func siteCountSummary(fg *v1beta1.MysqlFailoverGroup) string {
 	writable, readonly, unhealthy := 0, 0, 0
 	for _, s := range fg.Status.Sites {
 		switch s.State {
-		case v1alpha1.SiteStateWritable:
+		case v1beta1.SiteStateWritable:
 			writable++
-		case v1alpha1.SiteStateReadOnly:
+		case v1beta1.SiteStateReadOnly:
 			readonly++
 		default:
 			// Includes "unreachable", "unknown", and the empty
@@ -202,9 +202,9 @@ func siteCountSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 }
 
 // readyString extracts the Ready condition value, defaulting to "-".
-func readyString(fg *v1alpha1.MysqlFailoverGroup) string {
+func readyString(fg *v1beta1.MysqlFailoverGroup) string {
 	for _, c := range fg.Status.Conditions {
-		if c.Type == v1alpha1.ConditionReady {
+		if c.Type == v1beta1.ConditionReady {
 			return string(c.Status)
 		}
 	}

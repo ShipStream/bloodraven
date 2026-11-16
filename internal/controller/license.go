@@ -11,7 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/metrics"
 )
@@ -67,11 +67,11 @@ func (r *MysqlFailoverGroupReconciler) operatorLicense() string {
 // ObserveLicense verifies the group's license offline and updates
 // metrics/logs/events. It never returns an error and must not affect
 // failover or reconcile results.
-func (r *MysqlFailoverGroupReconciler) ObserveLicense(fg *v1alpha1.MysqlFailoverGroup) {
+func (r *MysqlFailoverGroupReconciler) ObserveLicense(fg *v1beta1.MysqlFailoverGroup) {
 	r.observeLicense(fg)
 }
 
-func (r *MysqlFailoverGroupReconciler) observeLicense(fg *v1alpha1.MysqlFailoverGroup) {
+func (r *MysqlFailoverGroupReconciler) observeLicense(fg *v1beta1.MysqlFailoverGroup) {
 	if r == nil || fg == nil {
 		return
 	}
@@ -143,7 +143,7 @@ func licenseDigest(mfgToken, operatorToken string, result license.Result) string
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (r *MysqlFailoverGroupReconciler) applyLicenseObservation(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup, result license.Result, next licenseObservation) {
+func (r *MysqlFailoverGroupReconciler) applyLicenseObservation(nn types.NamespacedName, fg *v1beta1.MysqlFailoverGroup, result license.Result, next licenseObservation) {
 	r.licenseMu.Lock()
 	if r.licenseObs == nil {
 		r.licenseObs = make(map[types.NamespacedName]licenseObservation)
@@ -184,14 +184,14 @@ func (r *MysqlFailoverGroupReconciler) applyLicenseObservation(nn types.Namespac
 	}
 }
 
-func (r *MysqlFailoverGroupReconciler) emitLicenseSignals(fg *v1alpha1.MysqlFailoverGroup, result license.Result, next, prev licenseObservation, seen bool) {
+func (r *MysqlFailoverGroupReconciler) emitLicenseSignals(fg *v1beta1.MysqlFailoverGroup, result license.Result, next, prev licenseObservation, seen bool) {
 	logger := r.licenseLogger()
 	fgName := fg.Namespace + "/" + fg.Name
 	switch {
 	case !result.Valid:
 		logger.Warn(msgLicenseInvalid, "fg", fgName, "reason", result.Reason, "kid", result.Kid)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventLicenseInvalid,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventLicenseInvalid,
 				"license token failed offline verification (%s); operator behavior is unchanged", result.Reason)
 		}
 	case result.Community:
@@ -204,7 +204,7 @@ func (r *MysqlFailoverGroupReconciler) emitLicenseSignals(fg *v1alpha1.MysqlFail
 			"updatesUntil", result.UpdatesUntil.UTC().Format(time.RFC3339),
 		)
 		if r.Recorder != nil && (!seen || !prev.updatesExpired || prev.digest != next.digest) {
-			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventLicenseVerified,
+			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1beta1.EventLicenseVerified,
 				"license verified for %s (%s); update period ended %s; operator behavior is unchanged",
 				result.Organization, result.Edition, result.UpdatesUntil.UTC().Format(time.RFC3339))
 		}
@@ -218,7 +218,7 @@ func (r *MysqlFailoverGroupReconciler) emitLicenseSignals(fg *v1alpha1.MysqlFail
 			"kid", result.Kid,
 		)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventLicenseVerified,
+			r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1beta1.EventLicenseVerified,
 				"license verified for %s (%s); updates until %s",
 				result.Organization, result.Edition, result.UpdatesUntil.UTC().Format(time.RFC3339))
 		}

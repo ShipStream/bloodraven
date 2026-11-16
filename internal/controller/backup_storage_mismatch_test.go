@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func ownedPVC(name string, class *string, request string) *corev1.PersistentVolumeClaim {
@@ -31,7 +31,7 @@ func TestOwnedBackupPVCMismatch(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		class        *string
-		size         v1alpha1.StorageQuantity
+		size         v1beta1.StorageQuantity
 		pvcClass     *string
 		pvcRequest   string
 		wantRefusal  string
@@ -47,7 +47,7 @@ func TestOwnedBackupPVCMismatch(t *testing.T) {
 		{name: "larger request is an accepted expansion", size: "10Gi", pvcClass: new("fast"), pvcRequest: "50Gi", wantExpanded: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			refusal, expanded := ownedBackupPVCMismatch(&v1alpha1.ProvisionedVolumeSpec{StorageClassName: tc.class, Size: tc.size},
+			refusal, expanded := ownedBackupPVCMismatch(&v1beta1.ProvisionedVolumeSpec{StorageClassName: tc.class, Size: tc.size},
 				ownedPVC("mysql-lion-backup-local", tc.pvcClass, tc.pvcRequest))
 			if tc.wantRefusal == "" && refusal != "" {
 				t.Fatalf("refused a matching claim: %s", refusal)
@@ -66,37 +66,37 @@ func TestOwnedBackupPVCMismatch(t *testing.T) {
 // profile of the same name fails BackupStorageMismatch, without a Job; one
 // whose claim was expanded runs, with a Normal Event.
 func TestBackupRefusedOnMismatchedOwnedPVC(t *testing.T) {
-	setup := func(t *testing.T, pvc *corev1.PersistentVolumeClaim) (*MysqlBackupReconciler, *v1alpha1.MysqlBackup, func() *v1alpha1.MysqlBackup) {
+	setup := func(t *testing.T, pvc *corev1.PersistentVolumeClaim) (*MysqlBackupReconciler, *v1beta1.MysqlBackup, func() *v1beta1.MysqlBackup) {
 		fg := fgWithBackup()
 		fg.UID = "lion-uid"
 		fg.Status.ActiveSite = "iad"
-		fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
+		fg.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateWritable}}
 		mb := backupCR("local", fg.Name, "daily-local")
 		r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret(), pvc)
 		r.Recorder = record.NewFakeRecorder(50)
-		return r, mb, func() *v1alpha1.MysqlBackup { return getBackup(t, c, mb) }
+		return r, mb, func() *v1beta1.MysqlBackup { return getBackup(t, c, mb) }
 	}
 	name := ownedBackupPVCName("lion", "daily-local")
 
 	r, mb, get := setup(t, ownedPVC(name, new("slow"), "50Gi"))
 	reconcileUntilStable(t, r, mb.Name)
 	got := get()
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(conditionReasons(got.Status.Conditions), v1alpha1.ReasonBackupStorageMismatch) {
-		t.Fatalf("phase %s conditions %v, want Failed/%s", got.Status.Phase, got.Status.Conditions, v1alpha1.ReasonBackupStorageMismatch)
+	if got.Status.Phase != v1beta1.BackupPhaseFailed || !strings.Contains(conditionReasons(got.Status.Conditions), v1beta1.ReasonBackupStorageMismatch) {
+		t.Fatalf("phase %s conditions %v, want Failed/%s", got.Status.Phase, got.Status.Conditions, v1beta1.ReasonBackupStorageMismatch)
 	}
 	if got.Status.JobName != "" {
 		t.Fatalf("a Job %s was created for a mismatched claim", got.Status.JobName)
 	}
-	if countEvents(r.Recorder.(*record.FakeRecorder), v1alpha1.EventBackupStorageMismatch) != 1 {
+	if countEvents(r.Recorder.(*record.FakeRecorder), v1beta1.EventBackupStorageMismatch) != 1 {
 		t.Fatal("no BackupStorageMismatch Event")
 	}
 
 	r, mb, get = setup(t, ownedPVC(name, new("fast"), "80Gi"))
 	reconcileUntilStable(t, r, mb.Name)
-	if got := get(); got.Status.Phase == v1alpha1.BackupPhaseFailed {
+	if got := get(); got.Status.Phase == v1beta1.BackupPhaseFailed {
 		t.Fatalf("an expanded claim failed the backup: %+v", got.Status.Conditions)
 	}
-	if countEvents(r.Recorder.(*record.FakeRecorder), v1alpha1.EventBackupStorageExpansionAccepted) != 1 {
+	if countEvents(r.Recorder.(*record.FakeRecorder), v1beta1.EventBackupStorageExpansionAccepted) != 1 {
 		t.Fatal("no BackupStorageExpansionAccepted Event")
 	}
 }

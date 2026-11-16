@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestImageTag(t *testing.T) {
@@ -272,7 +272,7 @@ func TestSidecarImageRendered(t *testing.T) {
 	if err := r.Delete(context.Background(), dep); err != nil {
 		t.Fatal(err)
 	}
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(fg), &live); err != nil {
 		t.Fatal(err)
 	}

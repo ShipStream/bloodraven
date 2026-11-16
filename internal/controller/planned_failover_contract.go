@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/actionvalue"
 )
 
@@ -61,7 +61,7 @@ func sameFailoverRecord(a, b FailoverRecordRef) bool {
 }
 
 // failoverRecordRefFromAPI converts the persisted copy; nil is no history.
-func failoverRecordRefFromAPI(r *v1alpha1.FailoverRecordRef) FailoverRecordRef {
+func failoverRecordRefFromAPI(r *v1beta1.FailoverRecordRef) FailoverRecordRef {
 	if r == nil {
 		return FailoverRecordRef{}
 	}
@@ -74,8 +74,8 @@ func failoverRecordRefFromAPI(r *v1alpha1.FailoverRecordRef) FailoverRecordRef {
 
 // toAPI converts to the persisted copy, at second precision. A zero time is
 // omitted.
-func (r FailoverRecordRef) toAPI() *v1alpha1.FailoverRecordRef {
-	out := &v1alpha1.FailoverRecordRef{Target: r.LastFailoverTarget}
+func (r FailoverRecordRef) toAPI() *v1beta1.FailoverRecordRef {
+	out := &v1beta1.FailoverRecordRef{Target: r.LastFailoverTarget}
 	if !r.LastFailover.IsZero() {
 		t := metav1.NewTime(r.LastFailover.UTC().Truncate(time.Second))
 		out.Time = &t
@@ -85,7 +85,7 @@ func (r FailoverRecordRef) toAPI() *v1alpha1.FailoverRecordRef {
 
 // durableFailoverRecord is the newer of status and the out-of-band record
 // (EffectiveFailoverRecord), as a FailoverRecordRef; err as EffectiveFailoverRecord.
-func durableFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (FailoverRecordRef, error) {
+func durableFailoverRecord(fg *v1beta1.MysqlFailoverGroup, now time.Time) (FailoverRecordRef, error) {
 	rec, _, err := EffectiveFailoverRecord(fg, now)
 	return newFailoverRecordRef(rec.LastFailover, rec.LastFailoverTarget), err
 }
@@ -97,21 +97,21 @@ const TerminalMarkerSchemaVersion = 1
 // TerminalMarker is the planned-failover-terminal annotation value.
 type TerminalMarker struct {
 	RunID   string
-	Outcome v1alpha1.PlannedFailoverOutcome
-	Reason  v1alpha1.PlannedFailoverReason
+	Outcome v1beta1.PlannedFailoverOutcome
+	Reason  v1beta1.PlannedFailoverReason
 	// Warnings are the run's terminal warnings. A restart reads them back
 	// where the terminal status record has not landed: FenceNotAttributable
 	// keeps a SourceLeftFenced source from being named for re-assert.
-	Warnings []v1alpha1.PlannedFailoverWarning
+	Warnings []v1beta1.PlannedFailoverWarning
 }
 
 // terminalMarkerPayload is the annotation's JSON form.
 type terminalMarkerPayload struct {
-	SchemaVersion int                               `json:"schemaVersion"`
-	RunID         string                            `json:"runID"`
-	Outcome       v1alpha1.PlannedFailoverOutcome   `json:"outcome"`
-	Reason        v1alpha1.PlannedFailoverReason    `json:"reason,omitempty"`
-	Warnings      []v1alpha1.PlannedFailoverWarning `json:"warnings,omitempty"`
+	SchemaVersion int                              `json:"schemaVersion"`
+	RunID         string                           `json:"runID"`
+	Outcome       v1beta1.PlannedFailoverOutcome   `json:"outcome"`
+	Reason        v1beta1.PlannedFailoverReason    `json:"reason,omitempty"`
+	Warnings      []v1beta1.PlannedFailoverWarning `json:"warnings,omitempty"`
 }
 
 // String renders the versioned JSON payload; the reason may be empty.
@@ -166,11 +166,11 @@ func ParseTerminalMarker(v string) (TerminalMarker, bool) {
 // outcome, only that automation must stay held.
 func parseHoldMarker(v string) (TerminalMarker, bool) {
 	if m, ok := ParseTerminalMarker(v); ok {
-		return m, m.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
+		return m, m.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired
 	}
 	var p terminalMarkerPayload
 	if err := json.Unmarshal([]byte(v), &p); err != nil || strings.TrimSpace(p.RunID) == "" ||
-		p.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+		p.Outcome != v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 		return TerminalMarker{}, false
 	}
 	m := TerminalMarker{RunID: p.RunID, Outcome: p.Outcome}
@@ -194,57 +194,57 @@ func TerminalMarkerNames(v, runID string) bool {
 // plannedFailoverOutcomes and plannedFailoverReasons are every value of the
 // API enums, in their kubebuilder order.
 var (
-	plannedFailoverOutcomes = []v1alpha1.PlannedFailoverOutcome{
-		v1alpha1.PlannedFailoverOutcomeSucceeded,
-		v1alpha1.PlannedFailoverOutcomeNotStarted,
-		v1alpha1.PlannedFailoverOutcomeRolledBack,
-		v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-		v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed,
-		v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
+	plannedFailoverOutcomes = []v1beta1.PlannedFailoverOutcome{
+		v1beta1.PlannedFailoverOutcomeSucceeded,
+		v1beta1.PlannedFailoverOutcomeNotStarted,
+		v1beta1.PlannedFailoverOutcomeRolledBack,
+		v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+		v1beta1.PlannedFailoverOutcomePromotedUnconfirmed,
+		v1beta1.PlannedFailoverOutcomeManualRecoveryRequired,
 	}
-	plannedFailoverWarnings = []v1alpha1.PlannedFailoverWarning{
-		v1alpha1.PlannedFailoverWarningDNSUpdateFailed,
-		v1alpha1.PlannedFailoverWarningDragonflySessionsLost,
-		v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored,
-		v1alpha1.PlannedFailoverWarningUnreachablePeers,
-		v1alpha1.PlannedFailoverWarningFenceNotAttributable,
-		v1alpha1.PlannedFailoverWarningStatusStalled,
-		v1alpha1.PlannedFailoverWarningSourceReplaced,
-		v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored,
+	plannedFailoverWarnings = []v1beta1.PlannedFailoverWarning{
+		v1beta1.PlannedFailoverWarningDNSUpdateFailed,
+		v1beta1.PlannedFailoverWarningDragonflySessionsLost,
+		v1beta1.PlannedFailoverWarningTargetReplicationNotRestored,
+		v1beta1.PlannedFailoverWarningUnreachablePeers,
+		v1beta1.PlannedFailoverWarningFenceNotAttributable,
+		v1beta1.PlannedFailoverWarningStatusStalled,
+		v1beta1.PlannedFailoverWarningSourceReplaced,
+		v1beta1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored,
 	}
-	plannedFailoverReasons = []v1alpha1.PlannedFailoverReason{
-		v1alpha1.PlannedFailoverReasonInvalidAnnotation,
-		v1alpha1.PlannedFailoverReasonUnknownSite,
-		v1alpha1.PlannedFailoverReasonTargetNotPromotable,
-		v1alpha1.PlannedFailoverReasonAlreadyActive,
-		v1alpha1.PlannedFailoverReasonTargetUnhealthy,
-		v1alpha1.PlannedFailoverReasonDivergentTarget,
-		v1alpha1.PlannedFailoverReasonKeyringRotation,
-		v1alpha1.PlannedFailoverReasonCooldownActive,
-		v1alpha1.PlannedFailoverReasonConcurrentOperation,
-		v1alpha1.PlannedFailoverReasonInvalidFailoverState,
-		v1alpha1.PlannedFailoverReasonCanceled,
-		v1alpha1.PlannedFailoverReasonAdmissionTimeout,
-		v1alpha1.PlannedFailoverReasonAuthorityChanged,
-		v1alpha1.PlannedFailoverReasonLegacyRunRefused,
-		v1alpha1.PlannedFailoverReasonFenceFailed,
-		v1alpha1.PlannedFailoverReasonSourceLost,
-		v1alpha1.PlannedFailoverReasonSourceUnfenced,
-		v1alpha1.PlannedFailoverReasonTargetLost,
-		v1alpha1.PlannedFailoverReasonForeignWritable,
-		v1alpha1.PlannedFailoverReasonPeerUnreadable,
-		v1alpha1.PlannedFailoverReasonLagTimeout,
-		v1alpha1.PlannedFailoverReasonInvalidGTID,
-		v1alpha1.PlannedFailoverReasonDragonflySyncTimeout,
-		v1alpha1.PlannedFailoverReasonDragonflyPromotionFailed,
-		v1alpha1.PlannedFailoverReasonTargetChanged,
-		v1alpha1.PlannedFailoverReasonPromotionAborted,
-		v1alpha1.PlannedFailoverReasonPromotionUnconfirmed,
-		v1alpha1.PlannedFailoverReasonManagerUnavailable,
-		v1alpha1.PlannedFailoverReasonStatusStalled,
-		v1alpha1.PlannedFailoverReasonManualRecoveryPending,
-		v1alpha1.PlannedFailoverReasonExecuteFailed,
-		v1alpha1.PlannedFailoverReasonInternalError,
+	plannedFailoverReasons = []v1beta1.PlannedFailoverReason{
+		v1beta1.PlannedFailoverReasonInvalidAnnotation,
+		v1beta1.PlannedFailoverReasonUnknownSite,
+		v1beta1.PlannedFailoverReasonTargetNotPromotable,
+		v1beta1.PlannedFailoverReasonAlreadyActive,
+		v1beta1.PlannedFailoverReasonTargetUnhealthy,
+		v1beta1.PlannedFailoverReasonDivergentTarget,
+		v1beta1.PlannedFailoverReasonKeyringRotation,
+		v1beta1.PlannedFailoverReasonCooldownActive,
+		v1beta1.PlannedFailoverReasonConcurrentOperation,
+		v1beta1.PlannedFailoverReasonInvalidFailoverState,
+		v1beta1.PlannedFailoverReasonCanceled,
+		v1beta1.PlannedFailoverReasonAdmissionTimeout,
+		v1beta1.PlannedFailoverReasonAuthorityChanged,
+		v1beta1.PlannedFailoverReasonLegacyRunRefused,
+		v1beta1.PlannedFailoverReasonFenceFailed,
+		v1beta1.PlannedFailoverReasonSourceLost,
+		v1beta1.PlannedFailoverReasonSourceUnfenced,
+		v1beta1.PlannedFailoverReasonTargetLost,
+		v1beta1.PlannedFailoverReasonForeignWritable,
+		v1beta1.PlannedFailoverReasonPeerUnreadable,
+		v1beta1.PlannedFailoverReasonLagTimeout,
+		v1beta1.PlannedFailoverReasonInvalidGTID,
+		v1beta1.PlannedFailoverReasonDragonflySyncTimeout,
+		v1beta1.PlannedFailoverReasonDragonflyPromotionFailed,
+		v1beta1.PlannedFailoverReasonTargetChanged,
+		v1beta1.PlannedFailoverReasonPromotionAborted,
+		v1beta1.PlannedFailoverReasonPromotionUnconfirmed,
+		v1beta1.PlannedFailoverReasonManagerUnavailable,
+		v1beta1.PlannedFailoverReasonStatusStalled,
+		v1beta1.PlannedFailoverReasonManualRecoveryPending,
+		v1beta1.PlannedFailoverReasonExecuteFailed,
+		v1beta1.PlannedFailoverReasonInternalError,
 	}
 )
 
@@ -252,7 +252,7 @@ var (
 // ManagerWiring.HoldFrom carries it; nil means no hold.
 type PlannedHold struct {
 	RunID      string
-	Reason     v1alpha1.PlannedFailoverReason
+	Reason     v1beta1.PlannedFailoverReason
 	Sites      []string // status.plannedFailoverHold.ambiguousSites (nil from a marker or a bare condition)
 	FromStatus bool     // status.plannedFailoverHold names RunID (or a True AutomaticFailoverHeld condition stands without it)
 	FromMarker bool     // a terminal marker with outcome ManualRecoveryRequired names RunID
@@ -261,26 +261,26 @@ type PlannedHold struct {
 // plannedHoldConditionMessage is the human-readable message of a True
 // AutomaticFailoverHeld condition, a summary of status.plannedFailoverHold.
 // Nothing reads it back: the hold's fields are the record.
-func plannedHoldConditionMessage(h *v1alpha1.PlannedFailoverHold) string {
+func plannedHoldConditionMessage(h *v1beta1.PlannedFailoverHold) string {
 	named := "none recorded"
 	if len(h.AmbiguousSites) > 0 {
 		named = strings.Join(h.AmbiguousSites, ", ")
 	}
 	return fmt.Sprintf("planned failover run %s ended ManualRecoveryRequired (%s); writable or ambiguous sites: %s. "+
 		"Automatic failover is held: resolve the split brain by hand, then annotate %s=%s",
-		h.RunID, h.Reason, named, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
+		h.RunID, h.Reason, named, v1beta1.AcknowledgePlannedFailoverHoldAnnotation, h.RunID)
 }
 
 // setPlannedHold records the automation hold h in status and sets the True
 // AutomaticFailoverHeld condition that summarises it, stamped with
 // generation (the generation of the object the terminal write is built on).
 // Runner status writes preserve both: they are reconciler-owned.
-func setPlannedHold(st *v1alpha1.MysqlFailoverGroupStatus, h v1alpha1.PlannedFailoverHold, generation int64) {
+func setPlannedHold(st *v1beta1.MysqlFailoverGroupStatus, h v1beta1.PlannedFailoverHold, generation int64) {
 	st.PlannedFailoverHold = h.DeepCopy()
 	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionAutomaticFailoverHeld,
+		Type:               v1beta1.ConditionAutomaticFailoverHeld,
 		Status:             metav1.ConditionTrue,
-		Reason:             v1alpha1.ReasonPlannedFailoverManualRecoveryRequired,
+		Reason:             v1beta1.ReasonPlannedFailoverManualRecoveryRequired,
 		Message:            plannedHoldConditionMessage(&h),
 		ObservedGeneration: generation,
 		LastTransitionTime: h.HoldTime,
@@ -290,15 +290,15 @@ func setPlannedHold(st *v1alpha1.MysqlFailoverGroupStatus, h v1alpha1.PlannedFai
 // ClearPlannedHold removes the hold of runID from status and sets the
 // AutomaticFailoverHeld condition False/PlannedFailoverHoldAcknowledged.
 // false: status carries no hold of runID, and nothing changed.
-func ClearPlannedHold(st *v1alpha1.MysqlFailoverGroupStatus, runID string, generation int64, now time.Time) bool {
+func ClearPlannedHold(st *v1beta1.MysqlFailoverGroupStatus, runID string, generation int64, now time.Time) bool {
 	if st.PlannedFailoverHold == nil || st.PlannedFailoverHold.RunID != runID {
 		return false
 	}
 	st.PlannedFailoverHold = nil
 	apimeta.SetStatusCondition(&st.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionAutomaticFailoverHeld,
+		Type:               v1beta1.ConditionAutomaticFailoverHeld,
 		Status:             metav1.ConditionFalse,
-		Reason:             v1alpha1.ReasonPlannedFailoverHoldAcknowledged,
+		Reason:             v1beta1.ReasonPlannedFailoverHoldAcknowledged,
 		Message:            fmt.Sprintf("the automation hold of planned failover run %s was acknowledged; automatic failover resumes", runID),
 		ObservedGeneration: generation,
 		LastTransitionTime: metav1.NewTime(now),
@@ -307,7 +307,7 @@ func ClearPlannedHold(st *v1alpha1.MysqlFailoverGroupStatus, runID string, gener
 }
 
 // statusHoldNames reports whether status records the hold of runID.
-func statusHoldNames(st *v1alpha1.MysqlFailoverGroupStatus, runID string) bool {
+func statusHoldNames(st *v1beta1.MysqlFailoverGroupStatus, runID string) bool {
 	return st.PlannedFailoverHold != nil && st.PlannedFailoverHold.RunID == runID
 }
 
@@ -351,7 +351,7 @@ func FormatStatusFenceValue(now time.Time) string {
 // plannedFailoverRun returns the planned-failover block and whether the
 // terminal marker names its run. A marked run is terminal whatever its
 // phase says.
-func plannedFailoverRun(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFailoverStatus, marked bool) {
+func plannedFailoverRun(fg *v1beta1.MysqlFailoverGroup) (pf *v1beta1.PlannedFailoverStatus, marked bool) {
 	if fg == nil || fg.Status.PlannedFailover == nil {
 		return nil, false
 	}
@@ -359,7 +359,7 @@ func plannedFailoverRun(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFa
 	if pf.RunID == "" {
 		return pf, false
 	}
-	m, ok := ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
+	m, ok := ParseTerminalMarker(fg.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation])
 	return pf, ok && m.RunID == pf.RunID
 }
 
@@ -367,13 +367,13 @@ func plannedFailoverRun(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFa
 // It owns nothing in status. The slot may hold a provisional grant between
 // the grant and a committed Fencing write; consumers that must exclude it
 // also ask Runner.PlannedClaimHeld.
-func plannedFailoverPending(fg *v1alpha1.MysqlFailoverGroup) bool {
+func plannedFailoverPending(fg *v1beta1.MysqlFailoverGroup) bool {
 	pf, marked := plannedFailoverRun(fg)
 	if pf == nil || marked {
 		return false
 	}
 	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhaseAdmitting, v1alpha1.PlannedFailoverPhaseDeferred:
+	case v1beta1.PlannedFailoverPhaseAdmitting, v1beta1.PlannedFailoverPhaseDeferred:
 		return true
 	}
 	return false
@@ -381,19 +381,19 @@ func plannedFailoverPending(fg *v1alpha1.MysqlFailoverGroup) bool {
 
 // plannedFailoverOwnsSites: the run holds the claim durably (Fencing
 // through Promoting, or RollingBack) and is not marked.
-func plannedFailoverOwnsSites(fg *v1alpha1.MysqlFailoverGroup) bool {
+func plannedFailoverOwnsSites(fg *v1beta1.MysqlFailoverGroup) bool {
 	pf, marked := plannedFailoverRun(fg)
 	if pf == nil || marked {
 		return false
 	}
 	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhaseFencing,
-		v1alpha1.PlannedFailoverPhaseDraining,
-		v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting,
-		v1alpha1.PlannedFailoverPhaseRollingBack:
+	case v1beta1.PlannedFailoverPhaseFencing,
+		v1beta1.PlannedFailoverPhaseDraining,
+		v1beta1.PlannedFailoverPhaseWaitingForLag,
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync,
+		v1beta1.PlannedFailoverPhasePromotingDragonfly,
+		v1beta1.PlannedFailoverPhasePromoting,
+		v1beta1.PlannedFailoverPhaseRollingBack:
 		return true
 	}
 	return false
@@ -408,7 +408,7 @@ func plannedFailoverOwnsSites(fg *v1alpha1.MysqlFailoverGroup) bool {
 // would defer automation again, and a re-proof after a later emergency
 // failover would hold the group (O-m1). The engine drives it to Publishing
 // without a claim.
-func PlannedRunNeedsClaim(fg *v1alpha1.MysqlFailoverGroup, now time.Time) bool {
+func PlannedRunNeedsClaim(fg *v1beta1.MysqlFailoverGroup, now time.Time) bool {
 	if !plannedFailoverOwnsSites(fg) {
 		return false
 	}
@@ -417,24 +417,24 @@ func PlannedRunNeedsClaim(fg *v1alpha1.MysqlFailoverGroup, now time.Time) bool {
 
 // plannedPromotionRecorded reports whether pf is a Promoting block whose
 // own failover record (recognised by content) is the durable record of fg.
-func plannedPromotionRecorded(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) bool {
-	return pf != nil && pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && plannedOwnRecordDurable(fg, pf, now)
+func plannedPromotionRecorded(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus, now time.Time) bool {
+	return pf != nil && pf.Phase == v1beta1.PlannedFailoverPhasePromoting && plannedOwnRecordDurable(fg, pf, now)
 }
 
 // plannedFailoverActive: the run is not terminal (pending, owning sites, or
 // Publishing) and not marked. Use it only for informational and
 // conservative refusals.
-func plannedFailoverActive(fg *v1alpha1.MysqlFailoverGroup) bool {
+func plannedFailoverActive(fg *v1beta1.MysqlFailoverGroup) bool {
 	if plannedFailoverPending(fg) || plannedFailoverOwnsSites(fg) {
 		return true
 	}
 	pf, marked := plannedFailoverRun(fg)
-	return pf != nil && !marked && pf.Phase == v1alpha1.PlannedFailoverPhasePublishing
+	return pf != nil && !marked && pf.Phase == v1beta1.PlannedFailoverPhasePublishing
 }
 
 // plannedFailoverFencedSite returns the run's source while the run owns
 // sites; otherwise "".
-func plannedFailoverFencedSite(fg *v1alpha1.MysqlFailoverGroup) string {
+func plannedFailoverFencedSite(fg *v1beta1.MysqlFailoverGroup) string {
 	if !plannedFailoverOwnsSites(fg) {
 		return ""
 	}
@@ -449,17 +449,17 @@ func plannedFailoverFencedSite(fg *v1alpha1.MysqlFailoverGroup) string {
 // acknowledgement can match it, so an administrator removes it by hand.
 // When both records name different runs the status hold's run is reported;
 // the marker rebuilds its own hold once the status hold is gone.
-func PlannedHoldFrom(fg *v1alpha1.MysqlFailoverGroup) *PlannedHold {
+func PlannedHoldFrom(fg *v1beta1.MysqlFailoverGroup) *PlannedHold {
 	if fg == nil {
 		return nil
 	}
 	var hold *PlannedHold
 	if h := fg.Status.PlannedFailoverHold; h != nil {
 		hold = &PlannedHold{RunID: h.RunID, Reason: h.Reason, Sites: h.AmbiguousSites, FromStatus: true}
-	} else if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
+	} else if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld); c != nil && c.Status == metav1.ConditionTrue {
 		hold = &PlannedHold{FromStatus: true}
 	}
-	m, ok := parseHoldMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
+	m, ok := parseHoldMarker(fg.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation])
 	if !ok {
 		return hold
 	}
@@ -531,11 +531,11 @@ const (
 func (k DeadlineKind) Annotation() string {
 	switch k {
 	case DeadlineStatusStall:
-		return v1alpha1.PlannedFailoverStallSinceAnnotation
+		return v1beta1.PlannedFailoverStallSinceAnnotation
 	case DeadlineManagerAbsent:
-		return v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation
+		return v1beta1.PlannedFailoverManagerAbsentSinceAnnotation
 	case DeadlinePromotionConfirmed:
-		return v1alpha1.PlannedFailoverConfirmedAnnotation
+		return v1beta1.PlannedFailoverConfirmedAnnotation
 	}
 	return ""
 }
@@ -547,13 +547,13 @@ func (k DeadlineKind) Annotation() string {
 type PlannedFailoverStore interface {
 	// Load returns a deep copy of the uncached object; (nil, nil) on
 	// NotFound. Any other error: requeue, nothing decided.
-	Load(ctx context.Context, nn types.NamespacedName) (*v1alpha1.MysqlFailoverGroup, error)
+	Load(ctx context.Context, nn types.NamespacedName) (*v1beta1.MysqlFailoverGroup, error)
 	// Write issues Status().Update of base with status.plannedFailover = next
 	// and mutate applied (terminal writes: the failover record and the hold
 	// condition; nil otherwise). An Ambiguous response is settled inside
 	// Write, so the caller never sees "Ambiguous".
-	Write(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, next v1alpha1.PlannedFailoverStatus,
-		mutate func(*v1alpha1.MysqlFailoverGroupStatus)) (WriteOutcome, error)
+	Write(ctx context.Context, base *v1beta1.MysqlFailoverGroup, next v1beta1.PlannedFailoverStatus,
+		mutate func(*v1beta1.MysqlFailoverGroupStatus)) (WriteOutcome, error)
 	// Settle decides an ambiguous write of (runID, revision) made against
 	// baseRV: detached from ctx's deadline, 10s per attempt, at most 3
 	// attempts. Exported on the interface for tests.
@@ -561,23 +561,23 @@ type PlannedFailoverStore interface {
 
 	// Metadata writes: MergeFromWithOptimisticLock on base, never /status.
 	// WriteConflict means reload and retry.
-	WriteTerminalMarker(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, m TerminalMarker) (WriteOutcome, error)
-	ClearTerminalMarker(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error) // only if it names runID
+	WriteTerminalMarker(ctx context.Context, base *v1beta1.MysqlFailoverGroup, m TerminalMarker) (WriteOutcome, error)
+	ClearTerminalMarker(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string) (WriteOutcome, error) // only if it names runID
 	// ConsumeRequest removes the request annotation; only after Admitting committed.
-	ConsumeRequest(ctx context.Context, base *v1alpha1.MysqlFailoverGroup) (WriteOutcome, error)
+	ConsumeRequest(ctx context.Context, base *v1beta1.MysqlFailoverGroup) (WriteOutcome, error)
 	// MarkDeadlineStart records now for (kind, runID) unless a value for the
 	// same runID exists, and returns the durable start (never moved forward).
-	MarkDeadlineStart(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, kind DeadlineKind, runID string,
+	MarkDeadlineStart(ctx context.Context, base *v1beta1.MysqlFailoverGroup, kind DeadlineKind, runID string,
 		now time.Time) (time.Time, WriteOutcome, error)
-	ClearDeadlineStart(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, kind DeadlineKind, runID string) (WriteOutcome, error)
+	ClearDeadlineStart(ctx context.Context, base *v1beta1.MysqlFailoverGroup, kind DeadlineKind, runID string) (WriteOutcome, error)
 	// ClearHold commits, in one conditioned status write, the terminal record
 	// final (when base does not carry it yet; nil otherwise), the removal of
 	// status.plannedFailoverHold naming runID, and the AutomaticFailoverHeld
 	// condition set False/PlannedFailoverHoldAcknowledged (it is never
 	// removed; see ClearPlannedHold).
-	ClearHold(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string,
-		final *v1alpha1.PlannedFailoverStatus) (WriteOutcome, error)
-	DeleteHoldAck(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error)
+	ClearHold(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string,
+		final *v1beta1.PlannedFailoverStatus) (WriteOutcome, error)
+	DeleteHoldAck(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string) (WriteOutcome, error)
 }
 
 // ---------- topology facade ----------
@@ -602,11 +602,11 @@ const (
 // PlannedClaimDecision is the topology manager's answer to a claim request.
 type PlannedClaimDecision struct {
 	Kind             ClaimDecisionKind
-	Source           string                             // Granted
-	SourceServerUUID string                             // Granted: the grant probe's pooled ReadGTIDSnapshot
-	Baseline         FailoverRecordRef                  // Granted: persisted as claimBaseline
-	WaitReason       v1alpha1.PlannedFailoverWaitReason // Wait
-	RejectReason     v1alpha1.PlannedFailoverReason     // Reject
+	Source           string                            // Granted
+	SourceServerUUID string                            // Granted: the grant probe's pooled ReadGTIDSnapshot
+	Baseline         FailoverRecordRef                 // Granted: persisted as claimBaseline
+	WaitReason       v1beta1.PlannedFailoverWaitReason // Wait
+	RejectReason     v1beta1.PlannedFailoverReason     // Reject
 	Message          string
 }
 
@@ -657,7 +657,7 @@ const (
 // FenceProof is the result of a fence attempt or of re-proving a fence.
 type FenceProof struct {
 	Kind             FenceResultKind
-	Reason           v1alpha1.PlannedFailoverReason
+	Reason           v1beta1.PlannedFailoverReason
 	SourceWritable   bool // FenceNotSent: RolledBack vs SourceLeftFenced
 	SourceServerUUID string
 	GtidSet          string // F, when Applied
@@ -709,9 +709,9 @@ const (
 type PromoteOutcome struct {
 	Kind             PromoteOutcomeKind
 	Stage            PromotionStage
-	Reason           v1alpha1.PlannedFailoverReason
-	Terminal         v1alpha1.PlannedFailoverOutcome // non-empty: a direct terminal outcome
-	Warnings         []v1alpha1.PlannedFailoverWarning
+	Reason           v1beta1.PlannedFailoverReason
+	Terminal         v1beta1.PlannedFailoverOutcome // non-empty: a direct terminal outcome
+	Warnings         []v1beta1.PlannedFailoverWarning
 	TargetServerUUID string
 	TargetReachable  bool // feeds the target-loss window
 	MayHaveWritten   bool // the memo, or the stage, says SRO=OFF may have been sent
@@ -744,9 +744,9 @@ type PromoteOutcome struct {
 // ReproveResult: OK, or exactly one of RollBack, Hold, HandOff.
 type ReproveResult struct {
 	OK       bool
-	RollBack *v1alpha1.PlannedFailoverReason // go to RollingBack with this reason
-	Hold     *v1alpha1.PlannedFailoverReason // ManualRecoveryRequired{reason} plus a hold
-	HandOff  *PromoteOutcome                 // apply the pre-write gate / confirm mapping
+	RollBack *v1beta1.PlannedFailoverReason // go to RollingBack with this reason
+	Hold     *v1beta1.PlannedFailoverReason // ManualRecoveryRequired{reason} plus a hold
+	HandOff  *PromoteOutcome                // apply the pre-write gate / confirm mapping
 	// SourceUnreachable: the source did not answer the re-proof's identity
 	// read before Promoting. Nothing is decided; the engine counts it
 	// toward the source-loss window and re-proves on its next pass.
@@ -755,9 +755,9 @@ type ReproveResult struct {
 
 // RollbackResult is the result of one rollback attempt.
 type RollbackResult struct {
-	Outcome  v1alpha1.PlannedFailoverOutcome // "": not finished; retry until rollbackDeadline
-	Reason   v1alpha1.PlannedFailoverReason
-	Warnings []v1alpha1.PlannedFailoverWarning
+	Outcome  v1beta1.PlannedFailoverOutcome // "": not finished; retry until rollbackDeadline
+	Reason   v1beta1.PlannedFailoverReason
+	Warnings []v1beta1.PlannedFailoverWarning
 	// LostGtid is set only for ManualRecoveryRequired{SourceUnfenced}: the
 	// transactions the writable source provably lacks (plannedSourceLost).
 	LostGtid string
@@ -779,7 +779,7 @@ type RollbackResult struct {
 // no claim. ctx carries the pass bound.
 type PlannedFailoverTopology interface {
 	ClaimPlannedFailover(ctx context.Context, nn types.NamespacedName, req PlannedClaimRequest) (PlannedClaimDecision, error)
-	EnsureClaim(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (PlannedClaimDecision, error)
+	EnsureClaim(ctx context.Context, ref PlannedRunRef, fg *v1beta1.MysqlFailoverGroup) (PlannedClaimDecision, error)
 	ReleasePlannedFailoverClaim(nn types.NamespacedName, runID string, why ClaimReleaseReason) bool
 	// ConvertToHold is why=toHold; sites, when known, are the hold's
 	// ambiguous sites (for the log only).
@@ -805,21 +805,21 @@ type PlannedFailoverTopology interface {
 	// (errReproveRequired for a hydrated claim). It sends nothing.
 	CheckRunClaim(ref PlannedRunRef) error
 
-	Reprove(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (ReproveResult, error)
+	Reprove(ctx context.Context, ref PlannedRunRef, fg *v1beta1.MysqlFailoverGroup) (ReproveResult, error)
 	Fence(ctx context.Context, ref PlannedRunRef, sourceServerUUID string) (FenceProof, error)
-	ProveFence(ctx context.Context, ref PlannedRunRef, fence v1alpha1.PlannedFailoverFenceRecord) (FenceProof, error)
+	ProveFence(ctx context.Context, ref PlannedRunRef, fence v1beta1.PlannedFailoverFenceRecord) (FenceProof, error)
 	KillAppConnections(ctx context.Context, ref PlannedRunRef) (remaining int32, err error)
 	ProbeLag(ctx context.Context, ref PlannedRunRef, fenced string) (LagProbe, error)
 	ReadTargetServerUUID(ctx context.Context, ref PlannedRunRef) (string, error) // pinned; for the Promoting intent
-	Promote(ctx context.Context, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error)
+	Promote(ctx context.Context, ref PlannedRunRef, pf *v1beta1.PlannedFailoverStatus) (PromoteOutcome, error)
 	RecordPlannedPromotion(ctx context.Context, ref PlannedRunRef, confirmedAt time.Time, watermark string) error
-	ApplyDNS(ctx context.Context, ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error)
+	ApplyDNS(ctx context.Context, ref PlannedRunRef) (v1beta1.PlannedFailoverDNSState, error)
 	NameUnconfirmedTarget(ref PlannedRunRef) error // errManagerAbsent: no name recorded
 	// NameFencedSource binds the name to sourceServerUUID, the server the
 	// run's fence intent names. errManagerAbsent: restoreFailoverState names
 	// it later.
 	NameFencedSource(ref PlannedRunRef, sourceServerUUID, fenceGtid string) error
-	Rollback(ctx context.Context, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (RollbackResult, error)
+	Rollback(ctx context.Context, ref PlannedRunRef, pf *v1beta1.PlannedFailoverStatus) (RollbackResult, error)
 	ActiveSite(nn types.NamespacedName) (site string, ok bool)
 }
 
@@ -856,12 +856,12 @@ type RegistrySnapshot struct {
 // PlannedFailoverSink receives events and metrics. Production: the
 // reconciler's Recorder and internal/metrics; tests: a recorder fake.
 type PlannedFailoverSink interface {
-	Event(fg *v1alpha1.MysqlFailoverGroup, eventType, reason, message string)
+	Event(fg *v1beta1.MysqlFailoverGroup, eventType, reason, message string)
 	// RunTerminal records bloodraven_planned_failovers_total{target_site,
 	// result=labels.PlannedFailoverResult(pf.Result.Outcome)} and the duration histogram.
-	RunTerminal(nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus)
+	RunTerminal(nn types.NamespacedName, pf *v1beta1.PlannedFailoverStatus)
 	LagWaitObserved(nn types.NamespacedName, target string, d time.Duration)
-	Deferred(nn types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason)
+	Deferred(nn types.NamespacedName, reason v1beta1.PlannedFailoverDeferReason)
 }
 
 // SimHooks is nil-Yield in production.
@@ -879,8 +879,8 @@ type SimHooks struct {
 // ManagerWiring is everything a manager must see before Run.
 type ManagerWiring struct {
 	Slot                   *PlannedClaimSlot
-	HydrateFrom            *v1alpha1.PlannedFailoverStatus // uncached, non-marked owns-sites run; nil = nothing to hydrate
-	HoldFrom               *PlannedHold                    // nil = no hold
+	HydrateFrom            *v1beta1.PlannedFailoverStatus // uncached, non-marked owns-sites run; nil = nothing to hydrate
+	HoldFrom               *PlannedHold                   // nil = no hold
 	PendingRotations       []string
 	RetiringUpdateInFlight bool
 	RetiringBusy           func() bool // nil when no retiring manager

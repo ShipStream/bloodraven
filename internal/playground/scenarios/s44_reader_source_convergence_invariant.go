@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -142,7 +142,7 @@ func s44VerifyDirectSourceRestored(state *s44RunState) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"reader serving status converged on the active primary",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					status := statusSiteByName(mfg, state.topo.reader)
 					if status == nil {
 						return false, "reader status missing", nil

@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestRetentionGraceClock pins when terminalRetentionGrace starts: the
@@ -19,8 +19,8 @@ import (
 // countFromFirstUse is set) this process's first grace evaluation.
 func TestRetentionGraceClock(t *testing.T) {
 	now := time.Now()
-	obj := func(name, uid string) *v1alpha1.MysqlBackup {
-		return &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: types.UID(uid)}}
+	obj := func(name, uid string) *v1beta1.MysqlBackup {
+		return &v1beta1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: types.UID(uid)}}
 	}
 	at := func(d time.Duration) *metav1.Time { tm := metav1.NewTime(now.Add(d)); return &tm }
 	near := func(t *testing.T, got, want time.Duration) {
@@ -88,12 +88,12 @@ func TestRetentionGraceClock(t *testing.T) {
 // the pass that writes its verdict: the grace counts from that write.
 func TestMysqlBackupReconciler_LateFailedVerdictKeepsTerminalGrace(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))}
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Spec.Backup.Profiles[0].Retention = v1beta1.BackupRetention{KeepLast: 7, KeepFailed: new(int32(0))}
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("late", "lion", "nightly-s3")
@@ -118,14 +118,14 @@ func TestMysqlBackupReconciler_LateFailedVerdictKeepsTerminalGrace(t *testing.T)
 	if err != nil {
 		t.Fatalf("terminal reconcile: %v", err)
 	}
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "late", Namespace: "ns"}, &got); err != nil {
 		t.Fatalf("the backup was deleted in its own terminal pass: %v", err)
 	}
 	if got.DeletionTimestamp != nil {
 		t.Fatal("the backup was deleted in its own terminal pass")
 	}
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed {
+	if got.Status.Phase != v1beta1.BackupPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", got.Status.Phase)
 	}
 	if !got.Status.CompletionTime.Time.Equal(failedAt.Rfc3339Copy().Time) {
@@ -136,7 +136,7 @@ func TestMysqlBackupReconciler_LateFailedVerdictKeepsTerminalGrace(t *testing.T)
 	}
 
 	// The requeued pass after the grace prunes it.
-	if _, err := r.pruneFailed(context.Background(), []v1alpha1.MysqlBackup{got}, 0, nil, time.Now().Add(terminalRetentionGrace)); err != nil {
+	if _, err := r.pruneFailed(context.Background(), []v1beta1.MysqlBackup{got}, 0, nil, time.Now().Add(terminalRetentionGrace)); err != nil {
 		t.Fatalf("pruneFailed: %v", err)
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "late", Namespace: "ns"}, &got); err == nil && got.DeletionTimestamp == nil {
@@ -148,8 +148,8 @@ func TestMysqlBackupReconciler_LateFailedVerdictKeepsTerminalGrace(t *testing.T)
 // operator observed it keeps the grace from the verdict write.
 func TestVerificationReconciler_LateVerdictKeepsTerminalGrace(t *testing.T) {
 	fg := verifyFG()
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
-		Retention: v1alpha1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))},
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{
+		Retention: v1beta1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))},
 	}
 	backup := successfulBackup("nightly-happy", "lion", "nightly-s3")
 	v := verifyCR("verify-late", "lion", "nightly-s3")
@@ -170,21 +170,21 @@ func TestVerificationReconciler_LateVerdictKeepsTerminalGrace(t *testing.T) {
 	}
 
 	reconcileVerifUntilStable(t, r, "verify-late")
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-late", Namespace: "ns"}, &got); err != nil {
 		t.Fatalf("the verification was deleted in its own terminal pass: %v", err)
 	}
 	if got.DeletionTimestamp != nil {
 		t.Fatal("the verification was deleted in its own terminal pass")
 	}
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", got.Status.Phase)
 	}
 	if got.Status.CompletionTime == nil || time.Since(got.Status.CompletionTime.Time) < 9*time.Minute {
 		t.Fatalf("completionTime = %v, want the Job's failure time", got.Status.CompletionTime)
 	}
 
-	if _, err := r.pruneVerificationsByPhase(context.Background(), []v1alpha1.MysqlBackupVerification{got}, v1alpha1.VerificationPhaseFailed, 0, time.Now().Add(terminalRetentionGrace)); err != nil {
+	if _, err := r.pruneVerificationsByPhase(context.Background(), []v1beta1.MysqlBackupVerification{got}, v1beta1.VerificationPhaseFailed, 0, time.Now().Add(terminalRetentionGrace)); err != nil {
 		t.Fatalf("pruneVerificationsByPhase: %v", err)
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-late", Namespace: "ns"}, &got); err == nil && got.DeletionTimestamp == nil {

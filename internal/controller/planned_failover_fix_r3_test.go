@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -22,7 +22,7 @@ import (
 // TargetSuperReadOnlyNotRestored and TargetReplicationNotRestored instead
 // of a clean RolledBack.
 func TestFixR3_K072_WritableSourceRollbackNeedsVerifiedTargetRefence(t *testing.T) {
-	setup := func(t *testing.T, fail bool) (*opsFixture, *v1alpha1.PlannedFailoverStatus) {
+	setup := func(t *testing.T, fail bool) (*opsFixture, *v1beta1.PlannedFailoverStatus) {
 		f := newOpsFixture(t, "")
 		f.hold(false)
 		f.src.mu.Lock()
@@ -32,7 +32,7 @@ func TestFixR3_K072_WritableSourceRollbackNeedsVerifiedTargetRefence(t *testing.
 		if fail {
 			f.tgt.failStmt = map[string]error{"sro=ON": errors.New("lock wait timeout")}
 		}
-		return f, opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonPeerUnreadable, false)
+		return f, opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonPeerUnreadable, false)
 	}
 	t.Run("re-fence fails", func(t *testing.T) {
 		f, pf := setup(t, true)
@@ -45,9 +45,9 @@ func TestFixR3_K072_WritableSourceRollbackNeedsVerifiedTargetRefence(t *testing.
 		}
 		f.clk.Advance(plannedFailoverRollbackDeadline - plannedRequeuePoll)
 		res, err = f.topo.Rollback(context.Background(), f.ref, pf)
-		if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack ||
-			!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) ||
-			!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
+		if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack ||
+			!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) ||
+			!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored) {
 			t.Fatalf("at the deadline: Rollback = %+v, %v; want RolledBack with TargetSuperReadOnlyNotRestored", res, err)
 		}
 		if got := f.tgt.statements(); slices.ContainsFunc(got, func(s string) bool { return strings.HasPrefix(s, "change:") || s == "start" }) {
@@ -57,8 +57,8 @@ func TestFixR3_K072_WritableSourceRollbackNeedsVerifiedTargetRefence(t *testing.
 	t.Run("re-fence succeeds", func(t *testing.T) {
 		f, pf := setup(t, false)
 		res, err := f.topo.Rollback(context.Background(), f.ref, pf)
-		if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack ||
-			slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) {
+		if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack ||
+			slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) {
 			t.Fatalf("Rollback = %+v, %v; want a clean RolledBack", res, err)
 		}
 		if got := f.tgt.statements(); len(got) == 0 || got[0] != "sro=ON" {
@@ -84,8 +84,8 @@ func TestFixR3_I001_TargetRoleRecheckedBeforeTheWrite(t *testing.T) {
 		f.hold(false)
 		f.fenced()
 		setRole(f, state.SiteRoleReadOnly)
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonTargetNotPromotable || out.Terminal != "" {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonTargetNotPromotable || out.Terminal != "" {
 			t.Fatalf("Promote = %+v, %v; want Aborted{TargetNotPromotable} into RollingBack", out, err)
 		}
 		if got := f.tgt.statements(); len(got) != 0 {
@@ -101,8 +101,8 @@ func TestFixR3_I001_TargetRoleRecheckedBeforeTheWrite(t *testing.T) {
 				setRole(f, state.SiteRoleDROnly)
 			}
 		}})
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonTargetNotPromotable {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonTargetNotPromotable {
 			t.Fatalf("Promote = %+v, %v; want Aborted{TargetNotPromotable}", out, err)
 		}
 		if got := f.tgt.statements(); slices.Contains(got, "sro=OFF") || slices.Contains(got, "ro=OFF") {
@@ -116,7 +116,7 @@ func TestFixR3_I001_TargetRoleRecheckedBeforeTheWrite(t *testing.T) {
 type fixR3FailingReader struct{ client.Reader }
 
 func (f fixR3FailingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+	if _, ok := obj.(*v1beta1.MysqlFailoverGroup); ok {
 		return errors.New("apiserver: connection reset")
 	}
 	return f.Reader.Get(ctx, key, obj, opts...)
@@ -127,7 +127,7 @@ func (f fixR3FailingReader) Get(ctx context.Context, key client.ObjectKey, obj c
 // returning the error into the controller's exponential backoff.
 func TestFixR3_I002_LoadFailureKeepsTheEngineRequeue(t *testing.T) {
 	fg := plannedFailoverFG("")
-	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, time.Now())
+	fg.Status.PlannedFailover = pfRunAt(v1beta1.PlannedFailoverPhaseWaitingForLag, time.Now())
 	r, _, topo, _ := ultraAReconciler(t, interceptor.Funcs{}, newTestSecret(), fg)
 	topo.setHeld("run-1", false)
 	r.APIReader = fixR3FailingReader{Reader: r.Client}

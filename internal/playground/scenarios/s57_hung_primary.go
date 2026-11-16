@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -115,7 +115,7 @@ func s57ObserveFailover(st *s57State) runner.Step {
 			waitCtx, cancel := context.WithDeadline(ctx, st.freeze.FrozenAt.Add(s57DetectBudget))
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "activeSite moves to the peer",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					return mfg.Status.ActiveSite == st.peer,
 						fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite), nil
 				})

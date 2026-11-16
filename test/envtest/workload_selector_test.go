@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -50,8 +50,8 @@ func TestEnvtest_WorkloadSelectorMismatchRefused(t *testing.T) {
 	}
 	rec := record.NewFakeRecorder(64)
 	runner := controller.NewTopologyManagerRunner(k8sClient, nil, nil, rec, slog.New(slog.DiscardHandler))
-	for _, strategy := range []v1alpha1.UpdateStrategyType{"", v1alpha1.UpdateStrategyRecreate} {
-		var cur v1alpha1.MysqlFailoverGroup
+	for _, strategy := range []v1beta1.UpdateStrategyType{"", v1beta1.UpdateStrategyRecreate} {
+		var cur v1beta1.MysqlFailoverGroup
 		nn := types.NamespacedName{Name: fg.Name, Namespace: ns}
 		if err := k8sClient.Get(ctx, nn, &cur); err != nil {
 			t.Fatal(err)
@@ -74,7 +74,7 @@ func TestEnvtest_WorkloadSelectorMismatchRefused(t *testing.T) {
 	}
 	n := 0
 	for len(rec.Events) > 0 {
-		if e := <-rec.Events; strings.Contains(e, v1alpha1.EventWorkloadSelectorMismatch) && strings.Contains(e, "mysql-lion-dc1") {
+		if e := <-rec.Events; strings.Contains(e, v1beta1.EventWorkloadSelectorMismatch) && strings.Contains(e, "mysql-lion-dc1") {
 			n++
 		}
 	}
@@ -87,19 +87,19 @@ func TestEnvtest_WorkloadSelectorMismatchRefused(t *testing.T) {
 		ActiveSite: "dc1",
 		Sites: []controller.SiteSnapshot{
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
-			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: v1alpha1.SourceConvergenceConverged},
+			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: v1beta1.SourceConvergenceConverged},
 		},
-		DegradedReason: v1alpha1.ReasonHealthy,
+		DegradedReason: v1beta1.ReasonHealthy,
 	}
 	if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
 		t.Fatal(err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, nn, &got); err != nil {
 		t.Fatal(err)
 	}
-	d := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionDegraded)
-	if d == nil || d.Status != metav1.ConditionTrue || d.Reason != v1alpha1.ReasonWorkloadSelectorMismatch || !strings.Contains(d.Message, "mysql-lion-dc1") {
+	d := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionDegraded)
+	if d == nil || d.Status != metav1.ConditionTrue || d.Reason != v1beta1.ReasonWorkloadSelectorMismatch || !strings.Contains(d.Message, "mysql-lion-dc1") {
 		t.Fatalf("Degraded = %+v, want True/WorkloadSelectorMismatch naming mysql-lion-dc1", d)
 	}
 }

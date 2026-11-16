@@ -1,6 +1,6 @@
 // Package apiregistry holds the tests that keep the operator's served tokens
 // (Event reasons, condition types and reasons, the deployment API's
-// unstableReason) declared in api/v1alpha1. It has no non-test code.
+// unstableReason) declared in api/v1beta1. It has no non-test code.
 package apiregistry
 
 import (
@@ -29,7 +29,7 @@ func tokenStrings[T ~string](ts []T) []string {
 
 // trustedSources are the functions that parse a reason out of a message or
 // an error. Their results are catalog values, and
-// TestPITRTokenCatalogMatchesAPI pins the catalog to api/v1alpha1.
+// TestPITRTokenCatalogMatchesAPI pins the catalog to api/v1beta1.
 var trustedSources = []trustedSource{
 	{name: modulePath + "/internal/controller.pitrFailureReason", values: tokenStrings(pitrarchive.ServedTokens)},
 	{name: modulePath + "/internal/pitrarchive.ParseToken", values: tokenStrings(pitrarchive.AllTokens)},
@@ -37,7 +37,7 @@ var trustedSources = []trustedSource{
 }
 
 // catalogPackages may spell a served value with their own constants: they
-// do not import api/v1alpha1 (the sidecar's PITR catalog, the pure topology
+// do not import api/v1beta1 (the sidecar's PITR catalog, the pure topology
 // matrix), and each value they produce is checked against the API like any
 // other.
 var catalogPackages = []string{
@@ -80,7 +80,7 @@ func newRegistry(t *testing.T, a *analysis) registry {
 		unstable:         map[string]string{},
 	}
 	if len(consts["events.go"]) == 0 || len(consts["conditions.go"]) == 0 {
-		t.Fatalf("api/v1alpha1 declares no constants in events.go or conditions.go")
+		t.Fatalf("api/v1beta1 declares no constants in events.go or conditions.go")
 	}
 	for name, v := range consts["events.go"] {
 		r.events[v] = name
@@ -115,7 +115,7 @@ func newRegistry(t *testing.T, a *analysis) registry {
 
 func (r registry) forKind(kind string) (map[string]string, string) {
 	if typ, ok := strings.CutPrefix(kind, sinkStatusReasonPrefix); ok {
-		return r.byType[typ], "an api/v1alpha1." + typ + " constant"
+		return r.byType[typ], "an api/v1beta1." + typ + " constant"
 	}
 	switch kind {
 	case sinkEvent:
@@ -150,7 +150,7 @@ func (r registry) forKind(kind string) (map[string]string, string) {
 				}
 			}
 		}
-		return all, "a reason constant in api/v1alpha1"
+		return all, "a reason constant in api/v1beta1"
 	}
 	return nil, ""
 }
@@ -158,7 +158,7 @@ func (r registry) forKind(kind string) (map[string]string, string) {
 // TestServedValuesAreDeclared follows every value that reaches an Event, a
 // condition (written or compared), a deployment API unstableReason or a
 // lease refusal reason back to where it is spelled. Each value must be
-// declared in api/v1alpha1, and spelled with that constant (or with a
+// declared in api/v1beta1, and spelled with that constant (or with a
 // catalog package's own constant), not with a literal or a constant
 // declared anywhere else.
 func TestServedValuesAreDeclared(t *testing.T) {
@@ -195,7 +195,7 @@ func TestServedValuesAreDeclared(t *testing.T) {
 			if o.constant != "" {
 				how = "the constant " + o.constant
 			}
-			report("%s %q at %s is spelled as %s; use api/v1alpha1.%s", s.kind, o.value, o.pos, how, allowed[o.value])
+			report("%s %q at %s is spelled as %s; use api/v1beta1.%s", s.kind, o.value, o.pos, how, allowed[o.value])
 		}
 	}
 }
@@ -229,7 +229,7 @@ func TestUnstableReasonsAreReachable(t *testing.T) {
 	}
 	for _, v := range sortedKeys(reg.unstable) {
 		if !served[v] {
-			t.Errorf("api/v1alpha1.%s = %q is never served by the deployment API", reg.unstable[v], v)
+			t.Errorf("api/v1beta1.%s = %q is never served by the deployment API", reg.unstable[v], v)
 		}
 	}
 }
@@ -283,7 +283,7 @@ func referencesConst(p *packages.Package, e ast.Expr, name string) bool {
 	return false
 }
 
-// TestPITRTokenCatalogMatchesAPI pins api/v1alpha1's PITRToken and
+// TestPITRTokenCatalogMatchesAPI pins api/v1beta1's PITRToken and
 // PITRArchiveRefusalReason constants to internal/pitrarchive's catalog,
 // which the sidecar uses because it does not import the API package: the
 // same names (PITR + the catalog name) and the same values, no more, no
@@ -357,7 +357,7 @@ func TestPITRTokenCatalogMatchesAPI(t *testing.T) {
 	// Names follow the catalog's: TokenArchiveGap is PITRTokenArchiveGap.
 	for v, apiName := range invert(byType["PITRToken"]) {
 		if want := "PITR" + tokenNames[v]; apiName != want {
-			t.Errorf("api/v1alpha1.%s = %q; the catalog names it %s, so the API constant is %s", apiName, v, tokenNames[v], want)
+			t.Errorf("api/v1beta1.%s = %q; the catalog names it %s, so the API constant is %s", apiName, v, tokenNames[v], want)
 		}
 	}
 }
@@ -374,12 +374,12 @@ func compareSets(t *testing.T, what string, got, want map[string]string) {
 	t.Helper()
 	for v := range want {
 		if _, ok := got[v]; !ok {
-			t.Errorf("api/v1alpha1 has no %s constant for the catalog value %q", what, v)
+			t.Errorf("api/v1beta1 has no %s constant for the catalog value %q", what, v)
 		}
 	}
 	for v, name := range got {
 		if _, ok := want[v]; !ok {
-			t.Errorf("api/v1alpha1.%s = %q is not in internal/pitrarchive's catalog", name, v)
+			t.Errorf("api/v1beta1.%s = %q is not in internal/pitrarchive's catalog", name, v)
 		}
 	}
 }

@@ -9,7 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	"github.com/shipstream/bloodraven/internal/util"
 )
@@ -108,8 +108,8 @@ func ownedBackupPVCName(fgName, profileName string) string {
 // pvc.provisioned, resolved by pitrprofile.ClaimFor, and whether there is
 // one. A claimName profile, an S3 profile and a profile whose pvc names no
 // claim have none.
-func ownedProfileClaim(fgName string, profile *v1alpha1.BackupProfile) (string, bool) {
-	if profile == nil || profile.Storage.Type != v1alpha1.BackupStoragePVC {
+func ownedProfileClaim(fgName string, profile *v1beta1.BackupProfile) (string, bool) {
+	if profile == nil || profile.Storage.Type != v1beta1.BackupStoragePVC {
 		return "", false
 	}
 	claim, owned, err := pitrprofile.ClaimFor(fgName, profile.Name, profile.Storage.PVC)
@@ -170,7 +170,7 @@ func trimDNS1123Tail(s string) string {
 
 // findProfile locates a named BackupProfile on a MysqlFailoverGroup.
 // Returns nil if the group has no backup spec or no matching profile.
-func findProfile(fg *v1alpha1.MysqlFailoverGroup, name string) *v1alpha1.BackupProfile {
+func findProfile(fg *v1beta1.MysqlFailoverGroup, name string) *v1beta1.BackupProfile {
 	if fg.Spec.Backup == nil {
 		return nil
 	}
@@ -183,18 +183,18 @@ func findProfile(fg *v1alpha1.MysqlFailoverGroup, name string) *v1alpha1.BackupP
 }
 
 // backupImage returns the resolved backup image for a failover group.
-func backupImage(fg *v1alpha1.MysqlFailoverGroup) string {
+func backupImage(fg *v1beta1.MysqlFailoverGroup) string {
 	if fg.Spec.Backup != nil && fg.Spec.Backup.Image != "" {
 		return fg.Spec.Backup.Image
 	}
-	return v1alpha1.DefaultBackupImage
+	return v1beta1.DefaultBackupImage
 }
 
 // mysqlImageFor returns the resolved MySQL server image for a failover
 // group. Mirrors the resolution used by the Deployment syncer in
 // reconciler.go. Exposed here so backup CRs can stamp the tag in use at
 // dump time onto MysqlBackup.status.mysqlImage.
-func mysqlImageFor(fg *v1alpha1.MysqlFailoverGroup) string {
+func mysqlImageFor(fg *v1beta1.MysqlFailoverGroup) string {
 	if fg.Spec.Image != "" {
 		return fg.Spec.Image
 	}
@@ -215,11 +215,11 @@ func mysqlImageFor(fg *v1alpha1.MysqlFailoverGroup) string {
 // `kubectl create`) means retention, finalizers, and the failover-group
 // rollup can all use label-selector lookups without having to list and
 // filter the whole namespace.
-func ensureBackupLabels(backup *v1alpha1.MysqlBackup) bool {
+func ensureBackupLabels(backup *v1beta1.MysqlBackup) bool {
 	desired := map[string]string{
-		v1alpha1.FailoverGroupLabel: backup.Spec.FailoverGroupRef.Name,
-		v1alpha1.BackupProfileLabel: backup.Spec.ProfileName,
-		labelManagedBy:              managerName,
+		v1beta1.FailoverGroupLabel: backup.Spec.FailoverGroupRef.Name,
+		v1beta1.BackupProfileLabel: backup.Spec.ProfileName,
+		labelManagedBy:             managerName,
 	}
 	changed := false
 	if backup.Labels == nil {
@@ -249,7 +249,7 @@ func humanBytes(n int64) string { return util.HumanBytes(n) }
 // node ephemeral-storage — intended for dedicated-node deployments.
 // Set the cap on any shared cluster to prevent a large dump from
 // triggering DiskPressure on unrelated pods.
-func stagingEmptyDirSource(backup *v1alpha1.BackupSpec) *corev1.EmptyDirVolumeSource {
+func stagingEmptyDirSource(backup *v1beta1.BackupSpec) *corev1.EmptyDirVolumeSource {
 	src := &corev1.EmptyDirVolumeSource{}
 	if backup != nil && backup.StagingVolumeSizeLimit != nil {
 		lim := backup.StagingVolumeSizeLimit.DeepCopy()

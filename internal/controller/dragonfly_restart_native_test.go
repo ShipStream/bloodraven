@@ -14,7 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -59,7 +59,7 @@ func TestDragonflyNativeManagerKeepsCacheOverRestartedMaster(t *testing.T) {
 
 	fg := fgWithDragonflyEnabledAndActive() // sites dc1 (MySQL active) and dc2
 	fg.Spec.Dragonfly.Auth = nil
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	host := func(site string) string {
 		h, _ := splitHostPort(dragonflyAddr(fg, site), 6379)
 		return h
@@ -76,7 +76,7 @@ func TestDragonflyNativeManagerKeepsCacheOverRestartedMaster(t *testing.T) {
 		_ = exec.Command(docker, "network", "rm", network).Run()
 	})
 	// The flags the operator renders for a Dragonfly container.
-	flags := append(buildDragonflyArgs(&v1alpha1.DragonflySpec{}, 6379, 9999), "--proactor_threads=2")
+	flags := append(buildDragonflyArgs(&v1beta1.DragonflySpec{}, 6379, 9999), "--proactor_threads=2")
 	if !strings.Contains(strings.Join(flags, " "), "--break_replication_on_master_restart") {
 		t.Fatalf("operator flags %v do not set --break_replication_on_master_restart; the restart handling rests on it", flags)
 	}
@@ -232,7 +232,7 @@ func TestDragonflyNativeManagerKeepsCacheOverRestartedMaster(t *testing.T) {
 	// The stamp is aged and the manager's clock moved here; in a cluster
 	// this is pendingPromotionActiveSiteTTL later.
 	mgr.now = func() time.Time { return time.Now().Add(2 * dragonflyTakeBackBaseDelay) }
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, key, &live); err != nil {
 		t.Fatal(err)
 	}

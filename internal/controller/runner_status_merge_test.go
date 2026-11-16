@@ -7,7 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -16,7 +16,7 @@ import (
 // was before MergeTopologySnapshotStatus was extracted, copied verbatim
 // (freshFG.Status is st; the early return is false). It is the golden
 // reference for TestMergeTopologySnapshotStatus_EqualsLegacy.
-func legacyMergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) bool {
+func legacyMergeTopologySnapshotStatus(st *v1beta1.MysqlFailoverGroupStatus, snap TopologySnapshot) bool {
 	if snap.TopologyGeneration < st.TopologyGeneration {
 		return false
 	}
@@ -27,7 +27,7 @@ func legacyMergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, sn
 	}
 	st.TopologyGeneration = snap.TopologyGeneration
 	if len(st.Sites) != len(snap.Sites) {
-		st.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
+		st.Sites = make([]v1beta1.SiteStatus, len(snap.Sites))
 	}
 	for i, s := range snap.Sites {
 		st.Sites[i] = siteStatusFromSnapshot(s, snap.MaxLagSeconds)
@@ -51,7 +51,7 @@ func legacyMergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, sn
 		}
 		st.Sites[i].DivergenceDetectedBy = ""
 		st.Sites[i].DivergenceComparedTo = ""
-		if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+		if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 			st.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
 			st.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
 		}
@@ -67,7 +67,7 @@ func legacyMergeTopologySnapshotStatus(st *v1alpha1.MysqlFailoverGroupStatus, sn
 // merge (OPEN-2): the failover triple never moves to a strictly older
 // lastFailover (second precision), and an equal one changes only the
 // target.
-func monotonicFailoverTriple(merged, stored *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
+func monotonicFailoverTriple(merged, stored *v1beta1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
 	snapAt := snap.LastFailover.UTC().Truncate(time.Second)
 	var storedAt time.Time
 	if t := stored.LastFailoverTime(); t != nil {
@@ -91,22 +91,22 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 	lag := int64(3)
 	stale := int64(9)
 
-	statuses := map[string]v1alpha1.MysqlFailoverGroupStatus{
+	statuses := map[string]v1beta1.MysqlFailoverGroupStatus{
 		"empty": {},
 		"populated": {
 			ActiveSite:         "iad",
 			TopologyGeneration: 4,
-			Sites:              []v1alpha1.SiteStatus{{Name: "iad", State: "Writable", DivergentTransactionCount: &stale, DivergenceDetectedBy: "audit"}, {Name: "pdx", State: "ReadOnly"}},
-			LastFailover:       &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &earlier, Target: "iad"}, PromotionGtidExecuted: "uuid1:1-10"},
+			Sites:              []v1beta1.SiteStatus{{Name: "iad", State: "Writable", DivergentTransactionCount: &stale, DivergenceDetectedBy: "audit"}, {Name: "pdx", State: "ReadOnly"}},
+			LastFailover:       &v1beta1.FailoverRecord{FailoverRecordRef: v1beta1.FailoverRecordRef{Time: &earlier, Target: "iad"}, PromotionGtidExecuted: "uuid1:1-10"},
 			UpdatePhase:        "UpdatingReplicas",
 			Conditions:         []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy"}},
-			PlannedFailover:    &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, TargetSite: "pdx"},
-			RestoreReclones:    &v1alpha1.RestoreReclonesStatus{Pending: []string{"pdx"}},
-			Dragonfly:          &v1alpha1.DragonflyStatus{},
+			PlannedFailover:    &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: v1beta1.PlannedFailoverPhaseAdmitting, TargetSite: "pdx"},
+			RestoreReclones:    &v1beta1.RestoreReclonesStatus{Pending: []string{"pdx"}},
+			Dragonfly:          &v1beta1.DragonflyStatus{},
 		},
 		"three sites": {
 			TopologyGeneration: 7,
-			Sites:              []v1alpha1.SiteStatus{{Name: "iad"}, {Name: "pdx"}, {Name: "dfw"}},
+			Sites:              []v1beta1.SiteStatus{{Name: "iad"}, {Name: "pdx"}, {Name: "dfw"}},
 		},
 	}
 	sites := []SiteSnapshot{
@@ -115,7 +115,7 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 			Name: "pdx", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, LastSeen: t0,
 			Replication:        &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: &lag, ExecutedGtidSet: "uuid1:1-20"},
 			ReplicationHealthy: true, SourceHost: "iad", SourceConvergenceState: sourceConvergenceConverged,
-			RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: "uuid2:1-3", DivergentTxnCount: 3,
+			RecoveryState: v1beta1.RecoveryStateBlocked, DivergentGtid: "uuid2:1-3", DivergentTxnCount: 3,
 			DivergenceDetectedBy: divergenceDetectedByAudit, DivergenceComparedTo: "iad",
 		},
 	}
@@ -137,7 +137,7 @@ func TestMergeTopologySnapshotStatus_EqualsLegacy(t *testing.T) {
 			LastFailover: t0, LastFailoverTarget: "pdx",
 		},
 		"recovery in progress without count": {
-			TopologyGeneration: 9, Sites: []SiteSnapshot{{Name: "iad", RecoveryState: v1alpha1.RecoveryStateInProgress, DivergentGtid: "uuid2:1", DivergenceDetectedBy: "x", DivergenceComparedTo: "y"}},
+			TopologyGeneration: 9, Sites: []SiteSnapshot{{Name: "iad", RecoveryState: v1beta1.RecoveryStateInProgress, DivergentGtid: "uuid2:1", DivergenceDetectedBy: "x", DivergenceComparedTo: "y"}},
 		},
 	}
 

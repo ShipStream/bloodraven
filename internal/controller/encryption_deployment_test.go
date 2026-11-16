@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -160,7 +160,7 @@ func TestReconcile_UnencryptedDeployHasNoKeyringArtifacts(t *testing.T) {
 	}
 	var tok corev1.Secret
 	err := c.Get(context.Background(), types.NamespacedName{
-		Namespace: "shared-lion", Name: v1alpha1.KeyringTokenSecretName("lion", "dc1"),
+		Namespace: "shared-lion", Name: v1beta1.KeyringTokenSecretName("lion", "dc1"),
 	}, &tok)
 	if err == nil {
 		t.Error("no escrow token should be minted when encryption is off")
@@ -171,11 +171,11 @@ func TestReconcile_SealedSiteRendersSecretProjection(t *testing.T) {
 	fg := encTestFG()
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{
-			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
-			{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+			{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
 		},
 	}
@@ -235,15 +235,15 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 		t.Fatalf("initial config reference = %q", canonical)
 	}
 
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
 	if err := c.Get(context.Background(), nn, &live); err != nil {
 		t.Fatalf("get group: %v", err)
 	}
-	live.Spec.TLS = &v1alpha1.TLSSpec{
+	live.Spec.TLS = &v1beta1.TLSSpec{
 		SecretName: "mysql-tls",
 	}
-	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1alpha1.EncryptionExistingDataLeavePlaintext}
+	live.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1beta1.EncryptionExistingDataLeavePlaintext}
 	if err := c.Update(context.Background(), &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 		t.Fatalf("unrolled site received encryption settings without keyring wiring:\n%s", oldConfig.Data["bloodraven.cnf"])
 	}
 
-	var refreshed v1alpha1.MysqlFailoverGroup
+	var refreshed v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &refreshed); err != nil {
 		t.Fatalf("refresh group: %v", err)
 	}
@@ -384,32 +384,32 @@ func keyringWiring(t *testing.T, r *MysqlFailoverGroupReconciler, site string) s
 // and a stale rotation over a persisted Sealed (would unseal a sealed site).
 func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
 	digest := keyringDigest([]byte("k"))
-	sealed := v1alpha1.SiteEncryptionStatus{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+	sealed := v1beta1.SiteEncryptionStatus{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed,
 		KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest}
 	rotating := sealed
-	rotating.Phase, rotating.UnsealReason = v1alpha1.KeyringPhaseUnsealed, v1alpha1.UnsealReasonRotation
+	rotating.Phase, rotating.UnsealReason = v1beta1.KeyringPhaseUnsealed, v1beta1.UnsealReasonRotation
 	for _, tc := range []struct {
 		name             string
-		persisted, stale v1alpha1.SiteEncryptionStatus
-		deployment       func(fg *v1alpha1.MysqlFailoverGroup) *appsv1.Deployment
+		persisted, stale v1beta1.SiteEncryptionStatus
+		deployment       func(fg *v1beta1.MysqlFailoverGroup) *appsv1.Deployment
 	}{
 		{"stale sealed over persisted rotation", rotating, sealed,
-			func(fg *v1alpha1.MysqlFailoverGroup) *appsv1.Deployment { return unsealedDeployment(fg, "dc2") }},
+			func(fg *v1beta1.MysqlFailoverGroup) *appsv1.Deployment { return unsealedDeployment(fg, "dc2") }},
 		{"stale rotation over persisted sealed", sealed, rotating,
-			func(fg *v1alpha1.MysqlFailoverGroup) *appsv1.Deployment {
+			func(fg *v1beta1.MysqlFailoverGroup) *appsv1.Deployment {
 				return sealedDeployment(fg, "dc2", "mysql-lion-dc2-keyring-v1")
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			fg := encTestFG()
-			fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
-			fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
+			fg.Spec.UpdateStrategy = v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreate}
+			fg.Finalizers = []string{v1beta1.FailoverGroupFinalizer}
 			fg.Status.ActiveSite = "dc1"
-			dc1 := v1alpha1.SiteEncryptionStatus{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+			dc1 := v1beta1.SiteEncryptionStatus{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest}
-			fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{dc1, tc.persisted}}
-			staleStatus := &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{dc1, tc.stale}}
+			fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{Sites: []v1beta1.SiteEncryptionStatus{dc1, tc.persisted}}
+			staleStatus := &v1beta1.EncryptionAtRestStatus{Sites: []v1beta1.SiteEncryptionStatus{dc1, tc.stale}}
 
 			r, c := encReconciler(t, nil, fg,
 				sealedDeployment(fg, "dc1", "mysql-lion-dc1-keyring-v1"), tc.deployment(fg))
@@ -426,7 +426,7 @@ func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
 			// pass's conditioned write sees the newer persisted state.
 			var lagging atomic.Bool
 			lagging.Store(true)
-			r.keyringStatus = func(context.Context, *v1alpha1.MysqlFailoverGroup, string) (*internalmysql.KeyringStatus, error) {
+			r.keyringStatus = func(context.Context, *v1beta1.MysqlFailoverGroup, string) (*internalmysql.KeyringStatus, error) {
 				lagging.Store(false)
 				return nil, errors.New("sidecar unreachable")
 			}
@@ -435,7 +435,7 @@ func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
 					if err := cl.Get(ctx, key, obj, opts...); err != nil {
 						return err
 					}
-					if mfg, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok && lagging.Load() {
+					if mfg, ok := obj.(*v1beta1.MysqlFailoverGroup); ok && lagging.Load() {
 						mfg.Status.EncryptionAtRest = staleStatus.DeepCopy()
 					}
 					return nil
@@ -452,7 +452,7 @@ func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
 			if after := keyringWiring(t, r, "dc2"); after != before {
 				t.Fatalf("dc2 keyring wiring changed from %s to %s on a discarded pass", before, after)
 			}
-			var stored v1alpha1.MysqlFailoverGroup
+			var stored v1beta1.MysqlFailoverGroup
 			if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &stored); err != nil {
 				t.Fatal(err)
 			}

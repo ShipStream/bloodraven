@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -92,7 +92,7 @@ func runTriage(t *testing.T, c triageCase, withJQ bool) string {
 	return string(out)
 }
 
-func marker(runID string, outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) string {
+func marker(runID string, outcome v1beta1.PlannedFailoverOutcome, reason v1beta1.PlannedFailoverReason) string {
 	return controller.TerminalMarker{RunID: runID, Outcome: outcome, Reason: reason}.String()
 }
 
@@ -100,7 +100,7 @@ func marker(runID string, outcome v1alpha1.PlannedFailoverOutcome, reason v1alph
 // enforces (controller.PlannedHoldFrom), including a hold carried only by a
 // ManualRecoveryRequired terminal marker, with and without jq.
 func TestTriageReportsHolds(t *testing.T) {
-	mrr := marker("r1", v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonPromotionUnconfirmed)
+	mrr := marker("r1", v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonPromotionUnconfirmed)
 	for _, tc := range []struct {
 		name    string
 		c       triageCase
@@ -115,7 +115,7 @@ func TestTriageReportsHolds(t *testing.T) {
 		},
 		{
 			name:    "non-hold marker",
-			c:       triageCase{marker: marker("r1", v1alpha1.PlannedFailoverOutcomeSucceeded, ""), phase: "Publishing", pfRun: "r1"},
+			c:       triageCase{marker: marker("r1", v1beta1.PlannedFailoverOutcomeSucceeded, ""), phase: "Publishing", pfRun: "r1"},
 			notWant: []string{"🔴", "acknowledge-planned-failover-hold"},
 		},
 		{

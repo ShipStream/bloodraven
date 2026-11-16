@@ -12,7 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
 )
@@ -53,10 +53,10 @@ const (
 // verificationJobInputs bundles the resolved inputs for building the
 // verification Job. Mirrors BackupJobInputs in spirit.
 type verificationJobInputs struct {
-	FailoverGroup        *v1alpha1.MysqlFailoverGroup
-	Profile              v1alpha1.BackupProfile
-	Verification         *v1alpha1.MysqlBackupVerification
-	Backup               *v1alpha1.MysqlBackup
+	FailoverGroup        *v1beta1.MysqlFailoverGroup
+	Profile              v1beta1.BackupProfile
+	Verification         *v1beta1.MysqlBackupVerification
+	Backup               *v1beta1.MysqlBackup
 	CredsSecretName      string
 	ScriptsConfigMapName string
 }
@@ -89,13 +89,13 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	image := backupImage(fg)
 
 	labels := map[string]string{
-		labelAppName:                          "mysql-verify",
-		labelInstance:                         fg.Name,
-		v1alpha1.FailoverGroupLabel:           fg.Name,
-		v1alpha1.BackupProfileLabel:           in.Profile.Name,
-		v1alpha1.MysqlBackupVerificationLabel: v.Name,
-		labelManagedBy:                        managerName,
-		v1alpha1.ResourceLabel:                verificationResourceKindCR,
+		labelAppName:                         "mysql-verify",
+		labelInstance:                        fg.Name,
+		v1beta1.FailoverGroupLabel:           fg.Name,
+		v1beta1.BackupProfileLabel:           in.Profile.Name,
+		v1beta1.MysqlBackupVerificationLabel: v.Name,
+		labelManagedBy:                       managerName,
+		v1beta1.ResourceLabel:                verificationResourceKindCR,
 	}
 
 	loadOptsJSON, err := marshalVerificationLoadOptions(verificationLoadOptions())
@@ -124,7 +124,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	if pitrFrags.KeySecretName != "" {
 		// Correlation label (Δ18); the verification also holds the
 		// snapshot (K9) before this Job is created.
-		labels[v1alpha1.PITRKeySecretLabel] = pitrFrags.KeySecretName
+		labels[v1beta1.PITRKeySecretLabel] = pitrFrags.KeySecretName
 	}
 	// An encrypted backup is decrypted only with the key it recorded (its
 	// dump-key snapshot, status.artifactStorage.passphraseSecretKeyRef), never
@@ -251,7 +251,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// read-only so mysqlsh util.loadDump() can read the on-disk dump.
 	awsCredsSecret := ""
 	switch storage.Type {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		if in.Profile.Storage.S3 == nil {
 			return nil, fmt.Errorf("verification job: backup %q is on S3 but profile %q has no s3 config",
 				backup.Name, in.Profile.Name)
@@ -268,7 +268,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		if storage.Region != "" {
 			env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: literalArtifactEnvValue(storage.Region)})
 		}
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		volumes = append(volumes, corev1.Volume{
 			Name: "backup-src",
 			VolumeSource: corev1.VolumeSource{
@@ -368,7 +368,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		}
 
 		switch storage.Type {
-		case v1alpha1.BackupStorageS3:
+		case v1beta1.BackupStorageS3:
 			_, prefix := splitS3Location(storage.Location)
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(prefix)},
@@ -409,7 +409,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 				Name: "BLOODRAVEN_INPUT_URL", Value: decryptDir,
 			})
 
-		case v1alpha1.BackupStoragePVC:
+		case v1beta1.BackupStoragePVC:
 			const decPVCMount = "/restore-src-encrypted"
 			// Swap the read-only backup-src mount to the decrypt init
 			// container; drop from the main container's mounts since
@@ -509,7 +509,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			ActiveDeadlineSeconds: &activeDeadline,
 			BackoffLimit:          &backoff,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{v1alpha1.VerificationBackupAnnotation: string(sourceSnapshot)}},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{v1beta1.VerificationBackupAnnotation: string(sourceSnapshot)}},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
@@ -597,7 +597,7 @@ const defaultSanityCheckTimeout = 60 * time.Second
 // builders render. It returns nil (no replay) when the block is absent.
 // Verifications read the group's own active PITR archive and never accept
 // a Partial outcome.
-func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrReplayRequest, error) {
+func verificationPITRRequest(in *v1beta1.PointInTimeVerificationSpec) (*pitrReplayRequest, error) {
 	if in == nil {
 		return nil, nil
 	}
@@ -636,9 +636,9 @@ func verificationPITRRequest(in *v1alpha1.PointInTimeVerificationSpec) (*pitrRep
 // with --skip-log-bin anyway; LoadIndexes=true so a
 // "restore loads successfully" result is not weakened by deferred
 // index builds that would only fail later.
-func verificationLoadOptions() *v1alpha1.LoadOptions {
+func verificationLoadOptions() *v1beta1.LoadOptions {
 	t := true
-	return &v1alpha1.LoadOptions{
+	return &v1beta1.LoadOptions{
 		Threads:     4,
 		SkipBinlog:  &t,
 		LoadIndexes: &t,
@@ -652,7 +652,7 @@ func verificationLoadOptions() *v1alpha1.LoadOptions {
 // exactly like a bootstrap PITR restore into a fresh group; see
 // marshalDumpGtidBaselineLoadOptions for why that needs
 // updateGtidSet:"replace" with skipBinlog:true.
-func marshalVerificationLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
+func marshalVerificationLoadOptions(l *v1beta1.LoadOptions) (string, error) {
 	return marshalDumpGtidBaselineLoadOptions(l)
 }
 
@@ -660,7 +660,7 @@ func marshalVerificationLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 // backup's dump with: the one the backup recorded (Δ17). nil for a
 // plaintext backup; an encrypted backup that recorded none is refused with
 // PITRBackupDumpKeyMissing.
-func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecretKeyRef, error) {
+func verificationDumpKey(backup *v1beta1.MysqlBackup) (*v1beta1.PassphraseSecretKeyRef, error) {
 	if !backupStatusEncrypted(&backup.Status) {
 		return nil, nil
 	}
@@ -670,5 +670,5 @@ func verificationDumpKey(backup *v1alpha1.MysqlBackup) (*v1alpha1.PassphraseSecr
 			pitrarchive.TokenBackupDumpKeyMissing, backup.Name)
 	}
 	recorded := backup.Status.ArtifactStorage.PassphraseSecretKeyRef
-	return &v1alpha1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}, nil
+	return &v1beta1.PassphraseSecretKeyRef{Name: recorded.Name, Key: recorded.Key}, nil
 }

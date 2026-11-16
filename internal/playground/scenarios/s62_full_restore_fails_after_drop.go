@@ -9,7 +9,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -153,7 +153,7 @@ func s62CreateBackup() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			b, err := waitForBackupPhase(waitCtx, env, name, v1alpha1.BackupPhaseSucceeded)
+			b, err := waitForBackupPhase(waitCtx, env, name, v1beta1.BackupPhaseSucceeded)
 			if err != nil {
 				return err
 			}
@@ -227,9 +227,9 @@ func s62StartRestoreAndCutStorage() runner.Step {
 			if err != nil {
 				return err
 			}
-			spec := v1alpha1.RestoreInPlaceSpec{
+			spec := v1beta1.RestoreInPlaceSpec{
 				Confirm: confirm,
-				Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: ctxFetch(env, "backupName")}},
+				Source:  v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: ctxFetch(env, "backupName")}},
 			}
 			if _, err := patchRestoreInPlace(ctx, env, spec); err != nil {
 				return fmt.Errorf("patch full-instance restoreInPlace: %w", err)
@@ -247,7 +247,7 @@ func s62ObserveFailedAfterDrop() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 			defer cancel()
-			rip, err := waitRestoreInPlacePhase(waitCtx, env, v1alpha1.RestoreInPlaceFailed)
+			rip, err := waitRestoreInPlacePhase(waitCtx, env, v1beta1.RestoreInPlaceFailed)
 			if err != nil {
 				return fmt.Errorf("restore did not reach terminal Failed: %w", err)
 			}
@@ -264,12 +264,12 @@ func s62ObserveFailedAfterDrop() runner.Step {
 			if !dropped {
 				return fmt.Errorf("restore Job %s failed without logging %s; the failure must come after the DROP for this scenario", jobName, s62DropDoneMarker)
 			}
-			_, err = env.Wait.UntilCR(waitCtx, env.Namespace, "restoreReclones Held", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace, "restoreReclones Held", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				q := mfg.Status.RestoreReclones
 				if q == nil {
 					return false, "status.restoreReclones cleared", fmt.Errorf("the reclone queue was discarded after a restore that dropped the primary's schemas")
 				}
-				return q.Phase == v1alpha1.RestoreReclonesHeld, fmt.Sprintf("phase=%s pending=%v fenced=%q", q.Phase, q.Pending, q.FencedGtidExecuted), nil
+				return q.Phase == v1beta1.RestoreReclonesHeld, fmt.Sprintf("phase=%s pending=%v fenced=%q", q.Phase, q.Pending, q.FencedGtidExecuted), nil
 			})
 			return err
 		},

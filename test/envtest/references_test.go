@@ -14,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // dnsSubdomainOfLength returns a valid DNS-1123 subdomain of exactly n
@@ -53,10 +53,10 @@ func TestE5_DNSSubdomainOfLength(t *testing.T) {
 func TestE5_EmptyBackupRefRejected(t *testing.T) {
 	ns := createNamespace(t, "e5-empty-backupref")
 
-	mbv := inertFieldsObject(t, &v1alpha1.MysqlBackupVerification{
+	mbv := inertFieldsObject(t, &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "empty-ref", Namespace: ns},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}, "MysqlBackupVerification")
@@ -83,17 +83,17 @@ func TestE5_EmptyBackupRefRejected(t *testing.T) {
 	// The renamed one-of rule still counts the reference.
 	fg := newTestFG(ns)
 	fg.Name = "two-sources"
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{
-		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "nightly"},
-		PVC:       &v1alpha1.InitFromBackupPVCSource{ClaimName: "seed"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{
+		BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "nightly"},
+		PVC:       &v1beta1.InitFromBackupPVCSource{ClaimName: "seed"},
 	}}
 	if err := k8sClient.Create(ctx, fg); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "exactly one of backupRef, s3, or pvc must be set") {
 		t.Fatalf("two restore sources: want the one-of refusal, got %v", err)
 	}
 	fg = newTestFG(ns)
 	fg.Name = "one-source"
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{
-		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "nightly"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{
+		BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "nightly"},
 	}}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("a backupRef restore source refused: %v", err)
@@ -107,50 +107,50 @@ func TestE5_ReferenceNameBounds(t *testing.T) {
 	ns := createNamespace(t, "e5-name-bounds")
 	type field struct {
 		name, path string
-		set        func(fg *v1alpha1.MysqlFailoverGroup, v string)
+		set        func(fg *v1beta1.MysqlFailoverGroup, v string)
 	}
-	s3Profile := func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.S3Storage {
-		fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{{
+	s3Profile := func(fg *v1beta1.MysqlFailoverGroup) *v1beta1.S3Storage {
+		fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{{
 			Name: "nightly",
-			Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{
+			Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3, S3: &v1beta1.S3Storage{
 				Bucket: "b", CredentialsSecretName: "s3-creds",
 			}},
 		}}}
 		return fg.Spec.Backup.Profiles[0].Storage.S3
 	}
-	dragonfly := func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.DragonflySpec {
-		fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0"}
+	dragonfly := func(fg *v1beta1.MysqlFailoverGroup) *v1beta1.DragonflySpec {
+		fg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0"}
 		return fg.Spec.Dragonfly
 	}
 	names := []field{
-		{"operator", "credentials.operatorSecretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.OperatorSecretName = v }},
-		{"app", "credentials.appSecretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.AppSecretName = v }},
-		{"read-only", "credentials.readOnlySecretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.ReadOnlySecretName = v }},
-		{"monitor", "credentials.monitorSecretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.MonitorSecretName = v }},
-		{"backup", "credentials.backupSecretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.BackupSecretName = v }},
-		{"tls", "tls.secretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) { fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: v} }},
-		{"s3", "s3.credentialsSecretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) { s3Profile(fg).CredentialsSecretName = v }},
-		{"passphrase", "encryption.passphraseSecretKeyRef.name", func(fg *v1alpha1.MysqlFailoverGroup, v string) {
+		{"operator", "credentials.operatorSecretName", func(fg *v1beta1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.OperatorSecretName = v }},
+		{"app", "credentials.appSecretName", func(fg *v1beta1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.AppSecretName = v }},
+		{"read-only", "credentials.readOnlySecretName", func(fg *v1beta1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.ReadOnlySecretName = v }},
+		{"monitor", "credentials.monitorSecretName", func(fg *v1beta1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.MonitorSecretName = v }},
+		{"backup", "credentials.backupSecretName", func(fg *v1beta1.MysqlFailoverGroup, v string) { fg.Spec.Credentials.BackupSecretName = v }},
+		{"tls", "tls.secretName", func(fg *v1beta1.MysqlFailoverGroup, v string) { fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: v} }},
+		{"s3", "s3.credentialsSecretName", func(fg *v1beta1.MysqlFailoverGroup, v string) { s3Profile(fg).CredentialsSecretName = v }},
+		{"passphrase", "encryption.passphraseSecretKeyRef.name", func(fg *v1beta1.MysqlFailoverGroup, v string) {
 			s3Profile(fg)
-			fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: v}}
+			fg.Spec.Backup.Profiles[0].Encryption = &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: v}}
 		}},
-		{"dragonfly-auth", "auth.passwordSecretKeyRef.name", func(fg *v1alpha1.MysqlFailoverGroup, v string) {
-			dragonfly(fg).Auth = &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: v}}
+		{"dragonfly-auth", "auth.passwordSecretKeyRef.name", func(fg *v1beta1.MysqlFailoverGroup, v string) {
+			dragonfly(fg).Auth = &v1beta1.DragonflyAuthSpec{PasswordSecretKeyRef: v1beta1.DragonflyPasswordSecretKeyRef{Name: v}}
 		}},
-		{"dragonfly-snapshot", "snapshot.credentialsSecretName", func(fg *v1alpha1.MysqlFailoverGroup, v string) {
-			dragonfly(fg).Snapshot = &v1alpha1.DragonflySnapshotSpec{CredentialsSecretName: v}
+		{"dragonfly-snapshot", "snapshot.credentialsSecretName", func(fg *v1beta1.MysqlFailoverGroup, v string) {
+			dragonfly(fg).Snapshot = &v1beta1.DragonflySnapshotSpec{CredentialsSecretName: v}
 		}},
-		{"restore-backup-ref", "initFromBackup.source.backupRef.name", func(fg *v1alpha1.MysqlFailoverGroup, v string) {
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: v}}}
+		{"restore-backup-ref", "initFromBackup.source.backupRef.name", func(fg *v1beta1.MysqlFailoverGroup, v string) {
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: v}}}
 		}},
 	}
 	keys := []field{
-		{"passphrase-key", "encryption.passphraseSecretKeyRef.key", func(fg *v1alpha1.MysqlFailoverGroup, v string) {
+		{"passphrase-key", "encryption.passphraseSecretKeyRef.key", func(fg *v1beta1.MysqlFailoverGroup, v string) {
 			s3Profile(fg)
-			fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "k", Key: v}}
+			fg.Spec.Backup.Profiles[0].Encryption = &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "k", Key: v}}
 		}},
-		{"dragonfly-auth-key", "auth.passwordSecretKeyRef.key", func(fg *v1alpha1.MysqlFailoverGroup, v string) {
-			dragonfly(fg).Auth = &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "k", Key: v}}
+		{"dragonfly-auth-key", "auth.passwordSecretKeyRef.key", func(fg *v1beta1.MysqlFailoverGroup, v string) {
+			dragonfly(fg).Auth = &v1beta1.DragonflyAuthSpec{PasswordSecretKeyRef: v1beta1.DragonflyPasswordSecretKeyRef{Name: "k", Key: v}}
 		}},
 	}
 	run := func(t *testing.T, f field, value string, ok bool, label string) {
@@ -199,11 +199,11 @@ func TestE5_ReferenceNameBounds(t *testing.T) {
 	// The key defaults to "password".
 	fg = newTestFG(ns)
 	fg.Name = "dragonfly-auth-default"
-	dragonfly(fg).Auth = &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth"}}
+	dragonfly(fg).Auth = &v1beta1.DragonflyAuthSpec{PasswordSecretKeyRef: v1beta1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth"}}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	var stored v1alpha1.MysqlFailoverGroup
+	var stored v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &stored); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestE5_ReferenceNameBounds(t *testing.T) {
 			t.Fatalf("MysqlDatabase owner.secretName pattern: got %v", err)
 		}
 		mdb = newMysqlDatabaseCR(ns, "mdb-user-pattern")
-		mdb.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: "User_Secret", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.MysqlPrivilege("SELECT")}}}
+		mdb.Spec.Users = []v1beta1.MysqlDatabaseUser{{SecretName: "User_Secret", Privileges: []v1beta1.MysqlPrivilege{v1beta1.MysqlPrivilege("SELECT")}}}
 		if err := k8sClient.Create(ctx, mdb); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.users[0].secretName") {
 			t.Fatalf("MysqlDatabase users[].secretName pattern: got %v", err)
 		}
@@ -235,22 +235,22 @@ func TestE5_ReferenceNameBounds(t *testing.T) {
 			t.Fatalf("MysqlStandbyCluster s3.credentialsSecretName pattern: got %v", err)
 		}
 
-		mbk := &v1alpha1.MysqlBackup{
+		mbk := &v1beta1.MysqlBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: "mbk-group-pattern", Namespace: ns},
-			Spec: v1alpha1.MysqlBackupSpec{
-				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "Lion"},
+			Spec: v1beta1.MysqlBackupSpec{
+				FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "Lion"},
 				ProfileName:      "nightly",
 			},
 		}
 		if err := k8sClient.Create(ctx, mbk); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.failoverGroupRef.name") {
 			t.Fatalf("MysqlBackup failoverGroupRef.name pattern: got %v", err)
 		}
-		mbv := &v1alpha1.MysqlBackupVerification{
+		mbv := &v1beta1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: "mbv-backup-over", Namespace: ns},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{
-				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+			Spec: v1beta1.MysqlBackupVerificationSpec{
+				FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 				ProfileName:      "nightly",
-				BackupRef:        &v1alpha1.LocalMysqlBackupRef{Name: over},
+				BackupRef:        &v1beta1.LocalMysqlBackupRef{Name: over},
 			},
 		}
 		if err := k8sClient.Create(ctx, mbv); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "spec.backupRef.name") {
@@ -264,21 +264,21 @@ func TestE5_ReferenceNameBounds(t *testing.T) {
 // the site-name pattern.
 func TestE5_ProfileAndSiteSelectors(t *testing.T) {
 	ns := createNamespace(t, "e5-selectors")
-	mbk := func(name, profile, site string) *v1alpha1.MysqlBackup {
-		return &v1alpha1.MysqlBackup{
+	mbk := func(name, profile, site string) *v1beta1.MysqlBackup {
+		return &v1beta1.MysqlBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: v1alpha1.MysqlBackupSpec{
-				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+			Spec: v1beta1.MysqlBackupSpec{
+				FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 				ProfileName:      profile,
 				SourceSite:       site,
 			},
 		}
 	}
-	mbv := func(name, profile string) *v1alpha1.MysqlBackupVerification {
-		return &v1alpha1.MysqlBackupVerification{
+	mbv := func(name, profile string) *v1beta1.MysqlBackupVerification {
+		return &v1beta1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{
-				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+			Spec: v1beta1.MysqlBackupVerificationSpec{
+				FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 				ProfileName:      profile,
 			},
 		}
@@ -311,7 +311,7 @@ func TestE5_ProfileAndSiteSelectors(t *testing.T) {
 
 	fg := newTestFG(ns)
 	fg.Name = "schedule-profile"
-	fg.Spec.Backup = &v1alpha1.BackupSpec{Schedules: []v1alpha1.BackupSchedule{{Name: "hourly", ProfileName: "Hourly_S3", Schedule: "0 * * * *"}}}
+	fg.Spec.Backup = &v1beta1.BackupSpec{Schedules: []v1beta1.BackupSchedule{{Name: "hourly", ProfileName: "Hourly_S3", Schedule: "0 * * * *"}}}
 	if err := k8sClient.Create(ctx, fg); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "schedules[0].profileName") {
 		t.Fatalf("schedule profileName pattern: got %v", err)
 	}
@@ -432,11 +432,11 @@ func TestE5_ArtifactPassphraseSecretKeyRefImmutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := metav1.NewTime(time.Now())
-	b.Status = v1alpha1.MysqlBackupStatus{
-		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
-			Type: v1alpha1.BackupStorageS3, Location: "lion/encrypted", Bucket: "bloodraven",
-			PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "mysqlbackup-encrypted-dump-key-0a1b2c3d", Key: "passphrase"},
+	b.Status = v1beta1.MysqlBackupStatus{
+		Phase: v1beta1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
+		ArtifactStorage: &v1beta1.BackupArtifactStorage{
+			Type: v1beta1.BackupStorageS3, Location: "lion/encrypted", Bucket: "bloodraven",
+			PassphraseSecretKeyRef: &v1beta1.SecretKeyRef{Name: "mysqlbackup-encrypted-dump-key-0a1b2c3d", Key: "passphrase"},
 		},
 	}
 	if err := k8sClient.Status().Update(ctx, b); err != nil {
@@ -447,7 +447,7 @@ func TestE5_ArtifactPassphraseSecretKeyRefImmutable(t *testing.T) {
 		`{"status":{"artifactStorage":{"passphraseSecretKeyRef":{"name":"someone-else"}}}}`,
 		`{"status":{"artifactStorage":{"passphraseSecretKeyRef":null}}}`,
 	} {
-		target := &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: b.Name, Namespace: ns}}
+		target := &v1beta1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: b.Name, Namespace: ns}}
 		err := k8sClient.Status().Patch(ctx, target, client.RawPatch(types.MergePatchType, []byte(p)))
 		if err == nil || !strings.Contains(err.Error(), "status.artifactStorage cannot be changed or removed") {
 			t.Fatalf("status patch %s: want the artifactStorage immutability refusal, got %v", p, err)
@@ -460,9 +460,9 @@ func TestE5_ArtifactPassphraseSecretKeyRefImmutable(t *testing.T) {
 	if err := k8sClient.Create(ctx, other); err != nil {
 		t.Fatal(err)
 	}
-	other.Status = v1alpha1.MysqlBackupStatus{ArtifactStorage: &v1alpha1.BackupArtifactStorage{
+	other.Status = v1beta1.MysqlBackupStatus{ArtifactStorage: &v1beta1.BackupArtifactStorage{
 		Location: "lion/bad-key", Bucket: "bloodraven",
-		PassphraseSecretKeyRef: &v1alpha1.SecretKeyRef{Name: "dump-key", Key: "pass/phrase"},
+		PassphraseSecretKeyRef: &v1beta1.SecretKeyRef{Name: "dump-key", Key: "pass/phrase"},
 	}}
 	if err := k8sClient.Status().Update(ctx, other); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "status.artifactStorage.passphraseSecretKeyRef.key") {
 		t.Fatalf("artifact passphraseSecretKeyRef.key pattern: got %v", err)

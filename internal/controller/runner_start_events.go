@@ -6,7 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const (
@@ -56,7 +56,7 @@ func (r *TopologyManagerRunner) clockNow() time.Time {
 // manager in this process is warned about only once the failure outlives a
 // resync, which absorbs a CR applied just before its Secret. hadManager
 // reports that this sync tore down a registered manager.
-func (r *TopologyManagerRunner) noteStartFailure(fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, err error, hadManager bool) {
+func (r *TopologyManagerRunner) noteStartFailure(fg *v1beta1.MysqlFailoverGroup, nn types.NamespacedName, err error, hadManager bool) {
 	msg := err.Error()
 	now := r.clockNow()
 
@@ -92,14 +92,14 @@ func (r *TopologyManagerRunner) noteStartFailure(fg *v1alpha1.MysqlFailoverGroup
 	r.mu.Unlock()
 
 	if emit && r.recorder != nil {
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventTopologyManagerStartFailed,
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventTopologyManagerStartFailed,
 			"no topology manager is running for this group (no polling, status updates or failover); start failed: %s; retrying every 30s", msg)
 	}
 }
 
 // noteStartSuccess ends a start-failure episode, emitting a Normal
 // TopologyManagerStarted Event when the episode was warned about.
-func (r *TopologyManagerRunner) noteStartSuccess(fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) {
+func (r *TopologyManagerRunner) noteStartSuccess(fg *v1beta1.MysqlFailoverGroup, nn types.NamespacedName) {
 	r.mu.Lock()
 	st := r.startFailures[nn]
 	delete(r.startFailures, nn)
@@ -108,7 +108,7 @@ func (r *TopologyManagerRunner) noteStartSuccess(fg *v1alpha1.MysqlFailoverGroup
 	if st == nil || !st.warned || st.uid != fg.UID || r.recorder == nil {
 		return
 	}
-	r.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventTopologyManagerStarted,
+	r.recorder.Eventf(fg, corev1.EventTypeNormal, v1beta1.EventTopologyManagerStarted,
 		"topology manager started after %d failed attempts", st.count)
 }
 

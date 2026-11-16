@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -45,11 +45,11 @@ func pbcPVCDest(t *testing.T) pitrarchive.Destination {
 	return d
 }
 
-func pbcGroup() *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func pbcGroup() *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "db", UID: pbcUID},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}, {Name: "sfo", ServerID: 103}},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}, {Name: "sfo", ServerID: 103}},
 		},
 	}
 }
@@ -63,10 +63,10 @@ func pbcRender(t *testing.T) pitrRenderInputs {
 		Enabled:           true,
 		Destination:       d.String(),
 		ArchiveID:         pitrarchive.CreateArchiveID(pbcUID, d),
-		StorageType:       string(v1alpha1.BackupStorageS3),
+		StorageType:       string(v1beta1.BackupStorageS3),
 		Bucket:            d.Bucket,
 		KeyPrefix:         d.KeyPrefix,
-		EncryptionMode:    string(v1alpha1.EncryptionModePassphrase),
+		EncryptionMode:    string(v1beta1.EncryptionModePassphrase),
 		Algorithm:         pitrarchive.AlgorithmAES256GCM,
 		KeySecretName:     "mysql-orders-pitr-key-0123456789",
 		Region:            "us-east-1",
@@ -79,10 +79,10 @@ func pbcRender(t *testing.T) pitrRenderInputs {
 func pbcDeploy(name, group, site, render string) appsv1.Deployment {
 	d := appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 		Name: name, Namespace: "db",
-		Labels: map[string]string{labelAppName: "mysql", v1alpha1.FailoverGroupLabel: group, v1alpha1.SiteLabel: site},
+		Labels: map[string]string{labelAppName: "mysql", v1beta1.FailoverGroupLabel: group, v1beta1.SiteLabel: site},
 	}}
 	if render != "" {
-		d.Annotations = map[string]string{v1alpha1.PITRRenderAnnotation: render}
+		d.Annotations = map[string]string{v1beta1.PITRRenderAnnotation: render}
 	}
 	return d
 }
@@ -92,70 +92,70 @@ func pbcDeploy(name, group, site, render string) appsv1.Deployment {
 // downstream tooling filters on them.
 func TestPITRBindingContractStrings(t *testing.T) {
 	cases := map[string]string{
-		v1alpha1.PITRRenderAnnotation:                    "bloodraven.shipstream.io/pitr-render",
-		v1alpha1.PITRDestinationAnnotation:               "bloodraven.shipstream.io/pitr-destination",
-		v1alpha1.PITRAcceptedAnnotation:                  "bloodraven.shipstream.io/pitr-accepted",
-		v1alpha1.PITRKeySecretUIDAnnotation:              "bloodraven.shipstream.io/pitr-key-secret-uid",
-		v1alpha1.PITRBindingIDLabel:                      "bloodraven.shipstream.io/pitr-binding-id",
-		v1alpha1.FailoverGroupUIDLabel:                   "bloodraven.shipstream.io/failover-group-uid",
-		v1alpha1.MysqlBackupUIDLabel:                     "bloodraven.shipstream.io/mysqlbackup-uid",
-		v1alpha1.PITRKeySecretLabel:                      "bloodraven.shipstream.io/pitr-key-secret",
-		v1alpha1.ReleasePITRArchiveBindingAnnotation:     "bloodraven.shipstream.io/release-pitr-archive-binding",
-		appNamePITRKeySnapshot:                           "mysql-pitr-key",
-		appNameDumpKeySnapshot:                           "mysql-dump-key",
-		appNameBackupJob:                                 "mysql-backup",
-		resourcePITRArchiveCheck:                         "pitr-archive-check",
-		pitrKeySnapshotDataKey:                           "passphrase",
-		pitrKeyRevisionPlaintext:                         "plaintext",
-		pitrBindingIDDomain:                              "bloodraven-pitr-binding-v1\x00",
-		pitrKeySnapshotNameDomain:                        "bloodraven-pitr-key-v1\x00",
-		v1alpha1.ConditionPITRArchiveBindingReady:        "PITRArchiveBindingReady",
-		v1alpha1.ReasonBindingLimitReached:               "BindingLimitReached",
-		v1alpha1.ReasonEncryptionChangeRefused:           "EncryptionChangeRefused",
-		v1alpha1.ReasonKeyChangeRefused:                  "KeyChangeRefused",
-		string(v1alpha1.PITRTokenArchiveBindingNotReady): "PITRArchiveBindingNotReady",
-		v1alpha1.EventPITRArchiveBound:                   "PITRArchiveBound",
-		v1alpha1.EventPITRArchiveBindingReleased:         "PITRArchiveBindingReleased",
-		v1alpha1.EventPITRArchiveEncryptionChangeRefused: "PITRArchiveEncryptionChangeRefused",
-		v1alpha1.EventPITRArchiveKeyChangeRefused:        "PITRArchiveKeyChangeRefused",
-		v1alpha1.EventPITRArchiveBindingRefused:          "PITRArchiveBindingRefused",
-		v1alpha1.EventPITRArchiveKeySourceRemoved:        "PITRArchiveKeySourceRemoved",
-		v1alpha1.EventPITRArchiveKeySnapshotRecreated:    "PITRArchiveKeySnapshotRecreated",
-		v1alpha1.EventPITRArchiveKeyMaterialLost:         "PITRArchiveKeyMaterialLost",
-		v1alpha1.EventPITRArchiveKeySnapshotReadFailed:   "PITRArchiveKeySnapshotReadFailed",
-		v1alpha1.EventPITRArchiveBindingReleaseRefused:   "PITRArchiveBindingReleaseRefused",
-		v1alpha1.EventPITRArchiveBindingReleaseRejected:  "PITRArchiveBindingReleaseRejected",
-		v1alpha1.EventPITRArchiveBindingLimitReached:     "PITRArchiveBindingLimitReached",
-		v1alpha1.EventBackupScheduleRefused:              "BackupScheduleRefused",
-		v1alpha1.ReasonProfileReadOnly:                   "ProfileReadOnly",
-		v1alpha1.ReasonPITRArchiveRolloutPending:         "PITRArchiveRolloutPending",
-		v1alpha1.ReasonDumpKeySnapshotConflict:           "DumpKeySnapshotConflict",
-		v1alpha1.ReasonPassphraseSecretMissing:           "PassphraseSecretMissing",
-		logMsgPITRBindingChanged:                         "pitr archive binding changed",
-		logMsgPITRBindingReleased:                        "pitr archive binding released",
-		logMsgPITRRenderIgnored:                          "pitr render annotation ignored",
-		logMsgPITRRenderDeferred:                         "pitr render deferred",
-		pitrBindingCauseProof:                            "proof",
-		pitrBindingCauseCheck:                            "check",
-		pitrBindingCauseRecovery:                         "recovery",
-		pitrBindingCauseIntegrity:                        "integrity",
-		pitrBindingCauseC3:                               "c3",
-		PITRArchiveCheckLinePrefix:                       "BLOODRAVEN_PITR_ARCHIVE_CHECK v=2",
-		PITRArchiveCheckLogMsg:                           "pitr archive check",
-		PITRArchiveCheckStateAbsent:                      "Absent",
-		PITRArchiveCheckStateVerified:                    "Verified",
-		PITRArchiveCheckStateRefused:                     "Refused",
-		PITRArchiveCheckRoleEnv:                          "BLOODRAVEN_PITR_CHECK_ROLE",
-		PITRArchiveCheckRoleWriter:                       "Writer",
-		PITRArchiveCheckRoleReader:                       "Reader",
+		v1beta1.PITRRenderAnnotation:                    "bloodraven.shipstream.io/pitr-render",
+		v1beta1.PITRDestinationAnnotation:               "bloodraven.shipstream.io/pitr-destination",
+		v1beta1.PITRAcceptedAnnotation:                  "bloodraven.shipstream.io/pitr-accepted",
+		v1beta1.PITRKeySecretUIDAnnotation:              "bloodraven.shipstream.io/pitr-key-secret-uid",
+		v1beta1.PITRBindingIDLabel:                      "bloodraven.shipstream.io/pitr-binding-id",
+		v1beta1.FailoverGroupUIDLabel:                   "bloodraven.shipstream.io/failover-group-uid",
+		v1beta1.MysqlBackupUIDLabel:                     "bloodraven.shipstream.io/mysqlbackup-uid",
+		v1beta1.PITRKeySecretLabel:                      "bloodraven.shipstream.io/pitr-key-secret",
+		v1beta1.ReleasePITRArchiveBindingAnnotation:     "bloodraven.shipstream.io/release-pitr-archive-binding",
+		appNamePITRKeySnapshot:                          "mysql-pitr-key",
+		appNameDumpKeySnapshot:                          "mysql-dump-key",
+		appNameBackupJob:                                "mysql-backup",
+		resourcePITRArchiveCheck:                        "pitr-archive-check",
+		pitrKeySnapshotDataKey:                          "passphrase",
+		pitrKeyRevisionPlaintext:                        "plaintext",
+		pitrBindingIDDomain:                             "bloodraven-pitr-binding-v1\x00",
+		pitrKeySnapshotNameDomain:                       "bloodraven-pitr-key-v1\x00",
+		v1beta1.ConditionPITRArchiveBindingReady:        "PITRArchiveBindingReady",
+		v1beta1.ReasonBindingLimitReached:               "BindingLimitReached",
+		v1beta1.ReasonEncryptionChangeRefused:           "EncryptionChangeRefused",
+		v1beta1.ReasonKeyChangeRefused:                  "KeyChangeRefused",
+		string(v1beta1.PITRTokenArchiveBindingNotReady): "PITRArchiveBindingNotReady",
+		v1beta1.EventPITRArchiveBound:                   "PITRArchiveBound",
+		v1beta1.EventPITRArchiveBindingReleased:         "PITRArchiveBindingReleased",
+		v1beta1.EventPITRArchiveEncryptionChangeRefused: "PITRArchiveEncryptionChangeRefused",
+		v1beta1.EventPITRArchiveKeyChangeRefused:        "PITRArchiveKeyChangeRefused",
+		v1beta1.EventPITRArchiveBindingRefused:          "PITRArchiveBindingRefused",
+		v1beta1.EventPITRArchiveKeySourceRemoved:        "PITRArchiveKeySourceRemoved",
+		v1beta1.EventPITRArchiveKeySnapshotRecreated:    "PITRArchiveKeySnapshotRecreated",
+		v1beta1.EventPITRArchiveKeyMaterialLost:         "PITRArchiveKeyMaterialLost",
+		v1beta1.EventPITRArchiveKeySnapshotReadFailed:   "PITRArchiveKeySnapshotReadFailed",
+		v1beta1.EventPITRArchiveBindingReleaseRefused:   "PITRArchiveBindingReleaseRefused",
+		v1beta1.EventPITRArchiveBindingReleaseRejected:  "PITRArchiveBindingReleaseRejected",
+		v1beta1.EventPITRArchiveBindingLimitReached:     "PITRArchiveBindingLimitReached",
+		v1beta1.EventBackupScheduleRefused:              "BackupScheduleRefused",
+		v1beta1.ReasonProfileReadOnly:                   "ProfileReadOnly",
+		v1beta1.ReasonPITRArchiveRolloutPending:         "PITRArchiveRolloutPending",
+		v1beta1.ReasonDumpKeySnapshotConflict:           "DumpKeySnapshotConflict",
+		v1beta1.ReasonPassphraseSecretMissing:           "PassphraseSecretMissing",
+		logMsgPITRBindingChanged:                        "pitr archive binding changed",
+		logMsgPITRBindingReleased:                       "pitr archive binding released",
+		logMsgPITRRenderIgnored:                         "pitr render annotation ignored",
+		logMsgPITRRenderDeferred:                        "pitr render deferred",
+		pitrBindingCauseProof:                           "proof",
+		pitrBindingCauseCheck:                           "check",
+		pitrBindingCauseRecovery:                        "recovery",
+		pitrBindingCauseIntegrity:                       "integrity",
+		pitrBindingCauseC3:                              "c3",
+		PITRArchiveCheckLinePrefix:                      "BLOODRAVEN_PITR_ARCHIVE_CHECK v=2",
+		PITRArchiveCheckLogMsg:                          "pitr archive check",
+		PITRArchiveCheckStateAbsent:                     "Absent",
+		PITRArchiveCheckStateVerified:                   "Verified",
+		PITRArchiveCheckStateRefused:                    "Refused",
+		PITRArchiveCheckRoleEnv:                         "BLOODRAVEN_PITR_CHECK_ROLE",
+		PITRArchiveCheckRoleWriter:                      "Writer",
+		PITRArchiveCheckRoleReader:                      "Reader",
 	}
 	for got, want := range cases {
 		if got != want {
 			t.Errorf("contract string %q, want %q", got, want)
 		}
 	}
-	if v1alpha1.FailoverGroupUIDLabel != v1alpha1.BackupJobFailoverGroupUIDAnnotation {
-		t.Errorf("FailoverGroupUIDLabel %q drifted from BackupJobFailoverGroupUIDAnnotation %q", v1alpha1.FailoverGroupUIDLabel, v1alpha1.BackupJobFailoverGroupUIDAnnotation)
+	if v1beta1.FailoverGroupUIDLabel != v1beta1.BackupJobFailoverGroupUIDAnnotation {
+		t.Errorf("FailoverGroupUIDLabel %q drifted from BackupJobFailoverGroupUIDAnnotation %q", v1beta1.FailoverGroupUIDLabel, v1beta1.BackupJobFailoverGroupUIDAnnotation)
 	}
 	if pitrArchiveBindingsMax != 16 || pitrBindingMessageMaxRefusals != 8 || pitrRenderSchemaVersion != 1 || pitrAcceptanceSchemaVersion != 1 {
 		t.Errorf("bounds drifted")
@@ -166,11 +166,11 @@ func TestPITRBindingContractStrings(t *testing.T) {
 	}
 
 	// Every binding reason constant is in the CRD enum, and vice versa.
-	reasons := []v1alpha1.PITRArchiveBindingReason{
-		v1alpha1.PITRArchiveBindingReasonAuthenticating, v1alpha1.PITRArchiveBindingReasonEstablishing, v1alpha1.PITRArchiveBindingReasonBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost,
-		v1alpha1.PITRArchiveBindingReasonKeyMismatch, v1alpha1.PITRArchiveBindingReasonArchiveForeign, v1alpha1.PITRArchiveBindingReasonArchiveCopy, v1alpha1.PITRArchiveBindingReasonArchiveLegacy,
-		v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing, v1alpha1.PITRArchiveBindingReasonArchiveNotFound, v1alpha1.PITRArchiveBindingReasonArchiveEncryptionMismatch,
-		v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported, v1alpha1.PITRArchiveBindingReasonArchiveListFailed,
+	reasons := []v1beta1.PITRArchiveBindingReason{
+		v1beta1.PITRArchiveBindingReasonAuthenticating, v1beta1.PITRArchiveBindingReasonEstablishing, v1beta1.PITRArchiveBindingReasonBound, v1beta1.PITRArchiveBindingReasonKeyMaterialLost,
+		v1beta1.PITRArchiveBindingReasonKeyMismatch, v1beta1.PITRArchiveBindingReasonArchiveForeign, v1beta1.PITRArchiveBindingReasonArchiveCopy, v1beta1.PITRArchiveBindingReasonArchiveLegacy,
+		v1beta1.PITRArchiveBindingReasonArchiveDescriptorMissing, v1beta1.PITRArchiveBindingReasonArchiveNotFound, v1beta1.PITRArchiveBindingReasonArchiveEncryptionMismatch,
+		v1beta1.PITRArchiveBindingReasonArchiveVersionUnsupported, v1beta1.PITRArchiveBindingReasonArchiveListFailed,
 	}
 	enum := "Authenticating;Establishing;Bound;KeyMaterialLost;KeyMismatch;ArchiveForeign;ArchiveCopy;ArchiveLegacy;ArchiveDescriptorMissing;ArchiveNotFound;ArchiveEncryptionMismatch;ArchiveVersionUnsupported;ArchiveListFailed"
 	var names []string
@@ -209,7 +209,7 @@ func TestPITRBindingID(t *testing.T) {
 func TestPITRBindingFind(t *testing.T) {
 	fg := pbcGroup()
 	d1, d2 := pbcS3Dest(t, "p1"), pbcS3Dest(t, "p2")
-	fg.Status.PITRArchiveBindings = []v1alpha1.PITRArchiveBinding{
+	fg.Status.PITRArchiveBindings = []v1beta1.PITRArchiveBinding{
 		{ID: pitrBindingID(d1), Destination: d1.String()},
 		{ID: pitrBindingID(d2), Destination: d2.String()},
 	}
@@ -230,13 +230,13 @@ func TestPITRBindingFind(t *testing.T) {
 
 func TestPITRBindingKeyRevision(t *testing.T) {
 	cases := []struct {
-		enc  v1alpha1.PITRArchiveBindingEncryption
+		enc  v1beta1.PITRArchiveBindingEncryption
 		want string
 	}{
-		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone}, "plaintext"},
-		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModePassphrase, KeySecretName: "snap"}, "snap"},
-		{v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModePassphrase}, ""},
-		{v1alpha1.PITRArchiveBindingEncryption{}, ""},
+		{v1beta1.PITRArchiveBindingEncryption{Mode: v1beta1.EncryptionModeNone}, "plaintext"},
+		{v1beta1.PITRArchiveBindingEncryption{Mode: v1beta1.EncryptionModePassphrase, KeySecretName: "snap"}, "snap"},
+		{v1beta1.PITRArchiveBindingEncryption{Mode: v1beta1.EncryptionModePassphrase}, ""},
+		{v1beta1.PITRArchiveBindingEncryption{}, ""},
 	}
 	for _, c := range cases {
 		if got := pitrKeyRevision(c.enc); got != c.want {
@@ -247,7 +247,7 @@ func TestPITRBindingKeyRevision(t *testing.T) {
 	if r.keyRevision() != r.KeySecretName {
 		t.Errorf("render keyRevision = %q", r.keyRevision())
 	}
-	r.EncryptionMode, r.Algorithm, r.KeySecretName = string(v1alpha1.EncryptionModeNone), "", ""
+	r.EncryptionMode, r.Algorithm, r.KeySecretName = string(v1beta1.EncryptionModeNone), "", ""
 	if r.keyRevision() != "plaintext" {
 		t.Errorf("plaintext render keyRevision = %q", r.keyRevision())
 	}
@@ -257,14 +257,14 @@ func TestPITRBindingKeyRevision(t *testing.T) {
 }
 
 func TestPITRBindingReasonMappings(t *testing.T) {
-	refusals := map[v1alpha1.PITRArchiveRefusalReason]v1alpha1.PITRArchiveBindingReason{
-		"ArchiveKeyMismatch":        v1alpha1.PITRArchiveBindingReasonKeyMismatch,
-		"ArchiveForeign":            v1alpha1.PITRArchiveBindingReasonArchiveForeign,
-		"ArchiveCopy":               v1alpha1.PITRArchiveBindingReasonArchiveCopy,
-		"ArchiveLegacy":             v1alpha1.PITRArchiveBindingReasonArchiveLegacy,
-		"ArchiveDescriptorMissing":  v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing,
-		"ArchiveEncryptionMismatch": v1alpha1.PITRArchiveBindingReasonArchiveEncryptionMismatch,
-		"ArchiveVersionUnsupported": v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported,
+	refusals := map[v1beta1.PITRArchiveRefusalReason]v1beta1.PITRArchiveBindingReason{
+		"ArchiveKeyMismatch":        v1beta1.PITRArchiveBindingReasonKeyMismatch,
+		"ArchiveForeign":            v1beta1.PITRArchiveBindingReasonArchiveForeign,
+		"ArchiveCopy":               v1beta1.PITRArchiveBindingReasonArchiveCopy,
+		"ArchiveLegacy":             v1beta1.PITRArchiveBindingReasonArchiveLegacy,
+		"ArchiveDescriptorMissing":  v1beta1.PITRArchiveBindingReasonArchiveDescriptorMissing,
+		"ArchiveEncryptionMismatch": v1beta1.PITRArchiveBindingReasonArchiveEncryptionMismatch,
+		"ArchiveVersionUnsupported": v1beta1.PITRArchiveBindingReasonArchiveVersionUnsupported,
 		"ArchiveUnsafeHistory":      "",
 		"ArchiveStoreUnsupported":   "",
 		"":                          "",
@@ -275,16 +275,16 @@ func TestPITRBindingReasonMappings(t *testing.T) {
 			t.Errorf("pitrBindingReasonForRefusal(%q) = %q,%v; want %q", in, got, ok, want)
 		}
 	}
-	tokens := map[pitrarchive.Token]v1alpha1.PITRArchiveBindingReason{
-		pitrarchive.TokenArchiveKeyMismatch:        v1alpha1.PITRArchiveBindingReasonKeyMismatch,
-		pitrarchive.TokenArchiveForeign:            v1alpha1.PITRArchiveBindingReasonArchiveForeign,
-		pitrarchive.TokenArchiveCopy:               v1alpha1.PITRArchiveBindingReasonArchiveCopy,
-		pitrarchive.TokenArchiveLegacy:             v1alpha1.PITRArchiveBindingReasonArchiveLegacy,
-		pitrarchive.TokenArchiveDescriptorMissing:  v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing,
-		pitrarchive.TokenArchiveNotFound:           v1alpha1.PITRArchiveBindingReasonArchiveNotFound,
-		pitrarchive.TokenArchiveEncryptionMismatch: v1alpha1.PITRArchiveBindingReasonArchiveEncryptionMismatch,
-		pitrarchive.TokenArchiveVersionUnsupported: v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported,
-		pitrarchive.TokenArchiveListFailed:         v1alpha1.PITRArchiveBindingReasonArchiveListFailed,
+	tokens := map[pitrarchive.Token]v1beta1.PITRArchiveBindingReason{
+		pitrarchive.TokenArchiveKeyMismatch:        v1beta1.PITRArchiveBindingReasonKeyMismatch,
+		pitrarchive.TokenArchiveForeign:            v1beta1.PITRArchiveBindingReasonArchiveForeign,
+		pitrarchive.TokenArchiveCopy:               v1beta1.PITRArchiveBindingReasonArchiveCopy,
+		pitrarchive.TokenArchiveLegacy:             v1beta1.PITRArchiveBindingReasonArchiveLegacy,
+		pitrarchive.TokenArchiveDescriptorMissing:  v1beta1.PITRArchiveBindingReasonArchiveDescriptorMissing,
+		pitrarchive.TokenArchiveNotFound:           v1beta1.PITRArchiveBindingReasonArchiveNotFound,
+		pitrarchive.TokenArchiveEncryptionMismatch: v1beta1.PITRArchiveBindingReasonArchiveEncryptionMismatch,
+		pitrarchive.TokenArchiveVersionUnsupported: v1beta1.PITRArchiveBindingReasonArchiveVersionUnsupported,
+		pitrarchive.TokenArchiveListFailed:         v1beta1.PITRArchiveBindingReasonArchiveListFailed,
 		pitrarchive.TokenArchiveUnsafeHistory:      "",
 		pitrarchive.TokenArchiveIdentityMismatch:   "",
 		"":                                         "",
@@ -301,12 +301,12 @@ func TestPITRWriterEligible(t *testing.T) {
 	fg := pbcGroup()
 	d := pbcS3Dest(t, "p1")
 	copyDest := pbcS3Dest(t, "p1-copy")
-	own := v1alpha1.PITRArchiveSource{Namespace: "db", Name: "orders", UID: pbcUID}
-	foreign := v1alpha1.PITRArchiveSource{Namespace: "db", Name: "orders", UID: pbcOther}
-	bound := func(mut func(*v1alpha1.PITRArchiveBinding)) *v1alpha1.PITRArchiveBinding {
-		e := &v1alpha1.PITRArchiveBinding{
+	own := v1beta1.PITRArchiveSource{Namespace: "db", Name: "orders", UID: pbcUID}
+	foreign := v1beta1.PITRArchiveSource{Namespace: "db", Name: "orders", UID: pbcOther}
+	bound := func(mut func(*v1beta1.PITRArchiveBinding)) *v1beta1.PITRArchiveBinding {
+		e := &v1beta1.PITRArchiveBinding{
 			ID: pitrBindingID(d), Destination: d.String(), ArchiveID: pitrarchive.CreateArchiveID(pbcUID, d),
-			Source: own.DeepCopy(), State: v1alpha1.PITRArchiveBindingBound, Reason: v1alpha1.PITRArchiveBindingReasonBound,
+			Source: own.DeepCopy(), State: v1beta1.PITRArchiveBindingBound, Reason: v1beta1.PITRArchiveBindingReasonBound,
 		}
 		if mut != nil {
 			mut(e)
@@ -315,29 +315,29 @@ func TestPITRWriterEligible(t *testing.T) {
 	}
 	cases := []struct {
 		name   string
-		entry  *v1alpha1.PITRArchiveBinding
+		entry  *v1beta1.PITRArchiveBinding
 		ok     bool
-		reason v1alpha1.PITRArchiveBindingReason
+		reason v1beta1.PITRArchiveBindingReason
 	}{
 		{"nil entry", nil, false, ""},
-		{"pending", bound(func(e *v1alpha1.PITRArchiveBinding) {
-			e.State, e.Reason = v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonEstablishing
+		{"pending", bound(func(e *v1beta1.PITRArchiveBinding) {
+			e.State, e.Reason = v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonEstablishing
 		}), false, ""},
-		{"refused", bound(func(e *v1alpha1.PITRArchiveBinding) {
-			e.State, e.Reason = v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch
+		{"refused", bound(func(e *v1beta1.PITRArchiveBinding) {
+			e.State, e.Reason = v1beta1.PITRArchiveBindingRefused, v1beta1.PITRArchiveBindingReasonKeyMismatch
 		}), false, ""},
 		{"own", bound(nil), true, ""},
-		{"own, key material lost", bound(func(e *v1alpha1.PITRArchiveBinding) { e.Reason = v1alpha1.PITRArchiveBindingReasonKeyMaterialLost }), true, ""},
-		{"foreign uid", bound(func(e *v1alpha1.PITRArchiveBinding) {
+		{"own, key material lost", bound(func(e *v1beta1.PITRArchiveBinding) { e.Reason = v1beta1.PITRArchiveBindingReasonKeyMaterialLost }), true, ""},
+		{"foreign uid", bound(func(e *v1beta1.PITRArchiveBinding) {
 			e.Source = foreign.DeepCopy()
 			e.ArchiveID = pitrarchive.CreateArchiveID(pbcOther, d)
-		}), false, v1alpha1.PITRArchiveBindingReasonArchiveForeign},
-		{"no source", bound(func(e *v1alpha1.PITRArchiveBinding) { e.Source = nil }), false, v1alpha1.PITRArchiveBindingReasonArchiveForeign},
-		{"copy: id derived for another destination", bound(func(e *v1alpha1.PITRArchiveBinding) {
+		}), false, v1beta1.PITRArchiveBindingReasonArchiveForeign},
+		{"no source", bound(func(e *v1beta1.PITRArchiveBinding) { e.Source = nil }), false, v1beta1.PITRArchiveBindingReasonArchiveForeign},
+		{"copy: id derived for another destination", bound(func(e *v1beta1.PITRArchiveBinding) {
 			e.ArchiveID = pitrarchive.CreateArchiveID(pbcUID, copyDest)
-		}), false, v1alpha1.PITRArchiveBindingReasonArchiveCopy},
-		{"empty archive id", bound(func(e *v1alpha1.PITRArchiveBinding) { e.ArchiveID = "" }), false, v1alpha1.PITRArchiveBindingReasonArchiveCopy},
-		{"unparsable destination", bound(func(e *v1alpha1.PITRArchiveBinding) { e.Destination = "s3://not canonical" }), false, v1alpha1.PITRArchiveBindingReasonArchiveCopy},
+		}), false, v1beta1.PITRArchiveBindingReasonArchiveCopy},
+		{"empty archive id", bound(func(e *v1beta1.PITRArchiveBinding) { e.ArchiveID = "" }), false, v1beta1.PITRArchiveBindingReasonArchiveCopy},
+		{"unparsable destination", bound(func(e *v1beta1.PITRArchiveBinding) { e.Destination = "s3://not canonical" }), false, v1beta1.PITRArchiveBindingReasonArchiveCopy},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -349,7 +349,7 @@ func TestPITRWriterEligible(t *testing.T) {
 	}
 	noUID := pbcGroup()
 	noUID.UID = ""
-	if ok, reason := pitrWriterEligible(noUID, bound(nil)); ok || reason != v1alpha1.PITRArchiveBindingReasonArchiveForeign {
+	if ok, reason := pitrWriterEligible(noUID, bound(nil)); ok || reason != v1beta1.PITRArchiveBindingReasonArchiveForeign {
 		t.Fatalf("group without UID: %v,%q", ok, reason)
 	}
 }
@@ -419,8 +419,8 @@ func TestPITRRenderCanonical(t *testing.T) {
 	pd := pbcPVCDest(t)
 	pvc := pitrRenderInputs{
 		Enabled: true, Destination: pd.String(), ArchiveID: pitrarchive.CreateArchiveID(pbcUID, pd),
-		StorageType: string(v1alpha1.BackupStoragePVC), Claim: pd.Claim, KeyPrefix: pd.KeyPrefix, SubPath: "pitr",
-		EncryptionMode: string(v1alpha1.EncryptionModeNone), PollInterval: "1m0s",
+		StorageType: string(v1beta1.BackupStoragePVC), Claim: pd.Claim, KeyPrefix: pd.KeyPrefix, SubPath: "pitr",
+		EncryptionMode: string(v1beta1.EncryptionModeNone), PollInterval: "1m0s",
 	}
 	back, err = parsePITRRender(pvc.Canonical())
 	if err != nil {
@@ -611,7 +611,7 @@ func TestPITRRenderGroupHold(t *testing.T) {
 
 // pbcAccepted returns a Bound entry, its snapshot Secret with a valid
 // acceptance, and the descriptor a writer made with the same key.
-func pbcAccepted(t *testing.T, key string) (*v1alpha1.PITRArchiveBinding, *corev1.Secret, *pitrarchive.Descriptor) {
+func pbcAccepted(t *testing.T, key string) (*v1beta1.PITRArchiveBinding, *corev1.Secret, *pitrarchive.Descriptor) {
 	t.Helper()
 	d := pbcS3Dest(t, "p1")
 	src := pitrarchive.Source{Namespace: "db", Name: "orders", UID: pbcUID}
@@ -619,14 +619,14 @@ func pbcAccepted(t *testing.T, key string) (*v1alpha1.PITRArchiveBinding, *corev
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := &v1alpha1.PITRArchiveBinding{
+	entry := &v1beta1.PITRArchiveBinding{
 		ID: pitrBindingID(d), Destination: d.String(), ArchiveID: desc.ArchiveID,
-		Source: &v1alpha1.PITRArchiveSource{Namespace: "db", Name: "orders", UID: pbcUID},
-		Encryption: v1alpha1.PITRArchiveBindingEncryption{
-			Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM,
+		Source: &v1beta1.PITRArchiveSource{Namespace: "db", Name: "orders", UID: pbcUID},
+		Encryption: v1beta1.PITRArchiveBindingEncryption{
+			Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM,
 			KeySecretName: "mysql-orders-pitr-key-0123456789",
 		},
-		State: v1alpha1.PITRArchiveBindingBound, Reason: v1alpha1.PITRArchiveBindingReasonBound,
+		State: v1beta1.PITRArchiveBindingBound, Reason: v1beta1.PITRArchiveBindingReasonBound,
 	}
 	a, err := newPITRAcceptance(entry, []byte(key), time.Unix(1_800_000_100, 5))
 	if err != nil {
@@ -639,7 +639,7 @@ func pbcAccepted(t *testing.T, key string) (*v1alpha1.PITRArchiveBinding, *corev
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: entry.Encryption.KeySecretName, Namespace: "db",
-			Annotations: map[string]string{v1alpha1.PITRAcceptedAnnotation: enc, v1alpha1.PITRDestinationAnnotation: d.String()},
+			Annotations: map[string]string{v1beta1.PITRAcceptedAnnotation: enc, v1beta1.PITRDestinationAnnotation: d.String()},
 		},
 		Data: map[string][]byte{pitrKeySnapshotDataKey: []byte(key)},
 	}
@@ -671,10 +671,10 @@ func TestPITRAcceptance(t *testing.T) {
 	editAcceptance := func(f func(m map[string]any)) *corev1.Secret {
 		return withAnn(func(s *corev1.Secret) {
 			var m map[string]any
-			_ = json.Unmarshal([]byte(s.Annotations[v1alpha1.PITRAcceptedAnnotation]), &m)
+			_ = json.Unmarshal([]byte(s.Annotations[v1beta1.PITRAcceptedAnnotation]), &m)
 			f(m)
 			b, _ := json.Marshal(m)
-			s.Annotations[v1alpha1.PITRAcceptedAnnotation] = string(b)
+			s.Annotations[v1beta1.PITRAcceptedAnnotation] = string(b)
 		})
 	}
 	cases := []struct {
@@ -684,8 +684,8 @@ func TestPITRAcceptance(t *testing.T) {
 	}{
 		{"whitespace-padded bytes verify", withAnn(func(s *corev1.Secret) { s.Data[pitrKeySnapshotDataKey] = []byte("\n" + key + " \n") }), nil},
 		{"nil secret", nil, errPITRAcceptanceMissing},
-		{"no annotation", withAnn(func(s *corev1.Secret) { delete(s.Annotations, v1alpha1.PITRAcceptedAnnotation) }), errPITRAcceptanceMissing},
-		{"not json", withAnn(func(s *corev1.Secret) { s.Annotations[v1alpha1.PITRAcceptedAnnotation] = "{" }), errPITRAcceptanceMalformed},
+		{"no annotation", withAnn(func(s *corev1.Secret) { delete(s.Annotations, v1beta1.PITRAcceptedAnnotation) }), errPITRAcceptanceMissing},
+		{"not json", withAnn(func(s *corev1.Secret) { s.Annotations[v1beta1.PITRAcceptedAnnotation] = "{" }), errPITRAcceptanceMalformed},
 		{"unknown field", editAcceptance(func(m map[string]any) { m["extra"] = 1 }), errPITRAcceptanceMalformed},
 		{"unknown version", editAcceptance(func(m map[string]any) { m["schemaVersion"] = 2 }), errPITRAcceptanceMalformed},
 		{"bad keyCheck form", editAcceptance(func(m map[string]any) { m["keyCheck"] = "short" }), errPITRAcceptanceMalformed},
@@ -695,7 +695,7 @@ func TestPITRAcceptance(t *testing.T) {
 		{"wrong bytes", withAnn(func(s *corev1.Secret) { s.Data[pitrKeySnapshotDataKey] = []byte("rotated") }), errPITRAcceptanceMismatch},
 		{"missing key", withAnn(func(s *corev1.Secret) { s.Data = nil }), errPITRAcceptanceMismatch},
 		{"destination annotation differs", withAnn(func(s *corev1.Secret) {
-			s.Annotations[v1alpha1.PITRDestinationAnnotation] = pbcS3Dest(t, "p2").String()
+			s.Annotations[v1beta1.PITRDestinationAnnotation] = pbcS3Dest(t, "p2").String()
 		}), errPITRAcceptanceMismatch},
 		{"wrong fields: archive id edited", editAcceptance(func(m map[string]any) {
 			m["archiveID"] = pitrarchive.CreateArchiveID(pbcOther, pbcS3Dest(t, "p1"))
@@ -722,16 +722,16 @@ func TestPITRAcceptance(t *testing.T) {
 	// newPITRAcceptance refusals.
 	refuse := []struct {
 		name string
-		mut  func(*v1alpha1.PITRArchiveBinding)
+		mut  func(*v1beta1.PITRArchiveBinding)
 		key  string
 	}{
-		{"not bound", func(e *v1alpha1.PITRArchiveBinding) { e.State = v1alpha1.PITRArchiveBindingPending }, key},
-		{"no source", func(e *v1alpha1.PITRArchiveBinding) { e.Source = nil }, key},
-		{"plaintext", func(e *v1alpha1.PITRArchiveBinding) {
-			e.Encryption = v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone}
+		{"not bound", func(e *v1beta1.PITRArchiveBinding) { e.State = v1beta1.PITRArchiveBindingPending }, key},
+		{"no source", func(e *v1beta1.PITRArchiveBinding) { e.Source = nil }, key},
+		{"plaintext", func(e *v1beta1.PITRArchiveBinding) {
+			e.Encryption = v1beta1.PITRArchiveBindingEncryption{Mode: v1beta1.EncryptionModeNone}
 		}, key},
-		{"no archive id", func(e *v1alpha1.PITRArchiveBinding) { e.ArchiveID = "" }, key},
-		{"empty key", func(*v1alpha1.PITRArchiveBinding) {}, " \n"},
+		{"no archive id", func(e *v1beta1.PITRArchiveBinding) { e.ArchiveID = "" }, key},
+		{"empty key", func(*v1beta1.PITRArchiveBinding) {}, " \n"},
 	}
 	for _, c := range refuse {
 		e := entry.DeepCopy()
@@ -754,7 +754,7 @@ func TestPITRAcceptance(t *testing.T) {
 // same name (another uid) is refused.
 func TestPITRBindingReleaseParse(t *testing.T) {
 	id := pitrBindingID(pbcS3Dest(t, "p1"))
-	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "orders", UID: "1111-2222"}}
+	fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "orders", UID: "1111-2222"}}
 	cases := []struct {
 		in   string
 		ok   bool
@@ -784,20 +784,20 @@ func TestPITRBindingReleaseParse(t *testing.T) {
 
 func TestPITRBindingReadTerminal(t *testing.T) {
 	cases := map[string]bool{
-		string(v1alpha1.PITRArchiveBindingReasonArchiveNotFound):           true,
-		string(v1alpha1.PITRArchiveBindingReasonArchiveDescriptorMissing):  true,
-		string(v1alpha1.PITRArchiveBindingReasonArchiveLegacy):             true,
-		string(v1alpha1.PITRArchiveBindingReasonArchiveVersionUnsupported): true,
-		string(v1alpha1.PITRArchiveBindingReasonKeyMismatch):               false,
-		string(v1alpha1.PITRArchiveBindingReasonArchiveEncryptionMismatch): false,
-		string(v1alpha1.PITRArchiveBindingReasonArchiveListFailed):         false,
-		string(v1alpha1.PITRArchiveBindingReasonArchiveForeign):            false,
-		string(v1alpha1.PITRArchiveBindingReasonArchiveCopy):               false,
-		string(v1alpha1.PITRArchiveBindingReasonAuthenticating):            false,
-		string(v1alpha1.PITRArchiveBindingReasonEstablishing):              false,
-		string(v1alpha1.PITRArchiveBindingReasonKeyMaterialLost):           false,
-		v1alpha1.ReasonBindingLimitReached:                                 false,
-		"":                                                                 false,
+		string(v1beta1.PITRArchiveBindingReasonArchiveNotFound):           true,
+		string(v1beta1.PITRArchiveBindingReasonArchiveDescriptorMissing):  true,
+		string(v1beta1.PITRArchiveBindingReasonArchiveLegacy):             true,
+		string(v1beta1.PITRArchiveBindingReasonArchiveVersionUnsupported): true,
+		string(v1beta1.PITRArchiveBindingReasonKeyMismatch):               false,
+		string(v1beta1.PITRArchiveBindingReasonArchiveEncryptionMismatch): false,
+		string(v1beta1.PITRArchiveBindingReasonArchiveListFailed):         false,
+		string(v1beta1.PITRArchiveBindingReasonArchiveForeign):            false,
+		string(v1beta1.PITRArchiveBindingReasonArchiveCopy):               false,
+		string(v1beta1.PITRArchiveBindingReasonAuthenticating):            false,
+		string(v1beta1.PITRArchiveBindingReasonEstablishing):              false,
+		string(v1beta1.PITRArchiveBindingReasonKeyMaterialLost):           false,
+		v1beta1.ReasonBindingLimitReached:                                 false,
+		"":                                                                false,
 	}
 	for reason, want := range cases {
 		if got := pitrBindingReadTerminal(reason); got != want {
@@ -805,21 +805,21 @@ func TestPITRBindingReadTerminal(t *testing.T) {
 		}
 	}
 
-	entry := func(state v1alpha1.PITRArchiveBindingState, reason v1alpha1.PITRArchiveBindingReason) *v1alpha1.PITRArchiveBinding {
-		return &v1alpha1.PITRArchiveBinding{State: state, Reason: reason, Message: "m"}
+	entry := func(state v1beta1.PITRArchiveBindingState, reason v1beta1.PITRArchiveBindingReason) *v1beta1.PITRArchiveBinding {
+		return &v1beta1.PITRArchiveBinding{State: state, Reason: reason, Message: "m"}
 	}
 	ready := []struct {
 		name     string
-		entry    *v1alpha1.PITRArchiveBinding
+		entry    *v1beta1.PITRArchiveBinding
 		ready    bool
 		terminal bool
 	}{
 		{"absent", nil, false, false},
-		{"bound", entry(v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound), true, false},
-		{"key material lost", entry(v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost), false, false},
-		{"authenticating", entry(v1alpha1.PITRArchiveBindingPending, v1alpha1.PITRArchiveBindingReasonAuthenticating), false, false},
-		{"key mismatch", entry(v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonKeyMismatch), false, false},
-		{"not found", entry(v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveNotFound), false, true},
+		{"bound", entry(v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound), true, false},
+		{"key material lost", entry(v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonKeyMaterialLost), false, false},
+		{"authenticating", entry(v1beta1.PITRArchiveBindingPending, v1beta1.PITRArchiveBindingReasonAuthenticating), false, false},
+		{"key mismatch", entry(v1beta1.PITRArchiveBindingRefused, v1beta1.PITRArchiveBindingReasonKeyMismatch), false, false},
+		{"not found", entry(v1beta1.PITRArchiveBindingRefused, v1beta1.PITRArchiveBindingReasonArchiveNotFound), false, true},
 	}
 	for _, c := range ready {
 		err := pitrBindingReadiness(c.entry)
@@ -837,7 +837,7 @@ func TestPITRBindingReadTerminal(t *testing.T) {
 			t.Errorf("%s: message %q does not start with the token", c.name, err.Error())
 		}
 	}
-	e := &errPITRBindingNotReady{reason: v1alpha1.ReasonBindingLimitReached, message: "17th destination"}
+	e := &errPITRBindingNotReady{reason: v1beta1.ReasonBindingLimitReached, message: "17th destination"}
 	if got := e.Error(); got != "PITRArchiveBindingNotReady: archive binding is absent/BindingLimitReached: 17th destination" {
 		t.Errorf("Error() = %q", got)
 	}
@@ -845,7 +845,7 @@ func TestPITRBindingReadTerminal(t *testing.T) {
 
 func TestPITRBindingWatchMaps(t *testing.T) {
 	r := &MysqlFailoverGroupReconciler{}
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "db"}}
+	v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "db"}}
 	if got := r.mapVerificationToGroup(context.Background(), v); got != nil {
 		t.Fatalf("map of an unbound verification = %v", got)
 	}
@@ -858,7 +858,7 @@ func TestPITRBindingWatchMaps(t *testing.T) {
 	}
 
 	snap := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "db", Labels: map[string]string{
-		labelAppName: appNamePITRKeySnapshot, v1alpha1.FailoverGroupLabel: "orders",
+		labelAppName: appNamePITRKeySnapshot, v1beta1.FailoverGroupLabel: "orders",
 	}}}
 	if got := r.mapPITRKeySnapshotToGroup(context.Background(), snap); len(got) != 1 || got[0].Name != "orders" || got[0].Namespace != "db" {
 		t.Fatalf("snapshot map = %v", got)
@@ -873,7 +873,7 @@ func TestPITRBindingWatchMaps(t *testing.T) {
 		t.Fatal("dump snapshots must not map")
 	}
 	noGroup := snap.DeepCopy()
-	delete(noGroup.Labels, v1alpha1.FailoverGroupLabel)
+	delete(noGroup.Labels, v1beta1.FailoverGroupLabel)
 	if r.mapPITRKeySnapshotToGroup(context.Background(), noGroup) != nil {
 		t.Fatal("a snapshot without a group label must not map")
 	}

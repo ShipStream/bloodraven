@@ -9,7 +9,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestShortDuration(t *testing.T) {
@@ -86,8 +86,8 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestReadyString(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+	fg := &v1beta1.MysqlFailoverGroup{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			Conditions: []metav1.Condition{
 				{Type: "Ready", Status: metav1.ConditionTrue},
 			},
@@ -96,20 +96,20 @@ func TestReadyString(t *testing.T) {
 	if got := readyString(fg); got != "True" {
 		t.Errorf("readyString = %q, want True", got)
 	}
-	empty := &v1alpha1.MysqlFailoverGroup{}
+	empty := &v1beta1.MysqlFailoverGroup{}
 	if got := readyString(empty); got != "-" {
 		t.Errorf("readyString(empty) = %q, want -", got)
 	}
 }
 
 func TestSiteCountSummary(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Status: v1alpha1.MysqlFailoverGroupStatus{
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly},
-				{Name: "lhr", State: v1alpha1.SiteStateUnreachable},
-				{Name: "fra", State: v1alpha1.SiteStateUnknown},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Status: v1beta1.MysqlFailoverGroupStatus{
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly},
+				{Name: "lhr", State: v1beta1.SiteStateUnreachable},
+				{Name: "fra", State: v1beta1.SiteStateUnknown},
 			},
 		},
 	}
@@ -119,44 +119,44 @@ func TestSiteCountSummary(t *testing.T) {
 }
 
 func TestPlannedFailoverSummary(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{}
+	fg := &v1beta1.MysqlFailoverGroup{}
 	if got := plannedFailoverSummary(fg); got != "-" {
 		t.Errorf("no planned failover -> %q, want -", got)
 	}
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
 		RunID: "run-1",
-		Phase: v1alpha1.PlannedFailoverPhaseFailed,
-		Result: &v1alpha1.PlannedFailoverResult{
-			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonCooldownActive},
+		Phase: v1beta1.PlannedFailoverPhaseFailed,
+		Result: &v1beta1.PlannedFailoverResult{
+			Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonCooldownActive},
 	}
 	if got := plannedFailoverSummary(fg); got != "Failed(CooldownActive)" {
 		t.Errorf("failed planned failover -> %q, want Failed(CooldownActive)", got)
 	}
-	fg.Status.PlannedFailover.Result = &v1alpha1.PlannedFailoverResult{
-		Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, Reason: v1alpha1.PlannedFailoverReasonLagTimeout}
+	fg.Status.PlannedFailover.Result = &v1beta1.PlannedFailoverResult{
+		Outcome: v1beta1.PlannedFailoverOutcomeRolledBack, Reason: v1beta1.PlannedFailoverReasonLagTimeout}
 	if got := plannedFailoverSummary(fg); got != "Failed(RolledBack:LagTimeout)" {
 		t.Errorf("rolled-back planned failover -> %q, want Failed(RolledBack:LagTimeout)", got)
 	}
-	fg.Status.PlannedFailover.Result = &v1alpha1.PlannedFailoverResult{
-		Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonForeignWritable}
-	fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue}}
+	fg.Status.PlannedFailover.Result = &v1beta1.PlannedFailoverResult{
+		Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1beta1.PlannedFailoverReasonForeignWritable}
+	fg.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue}}
 	if got := plannedFailoverSummary(fg); got != "Failed(ManualRecoveryRequired:ForeignWritable)+held" {
 		t.Errorf("held planned failover -> %q, want Failed(ManualRecoveryRequired:ForeignWritable)+held", got)
 	}
 	fg.Status.Conditions = nil
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	fg.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhaseWaitingForLag
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if got := plannedFailoverSummary(fg); got != "Ended(SourceLeftFenced:StatusStalled)" {
 		t.Errorf("marked planned failover -> %q, want Ended(SourceLeftFenced:StatusStalled)", got)
 	}
 	fg.Annotations = nil
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-2", Phase: v1alpha1.PlannedFailoverPhaseAdmitting,
-		Admission: &v1alpha1.PlannedFailoverAdmission{WaitReason: v1alpha1.PlannedFailoverWaitPeerUnreadable}}
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-2", Phase: v1beta1.PlannedFailoverPhaseAdmitting,
+		Admission: &v1beta1.PlannedFailoverAdmission{WaitReason: v1beta1.PlannedFailoverWaitPeerUnreadable}}
 	if got := plannedFailoverSummary(fg); got != "Admitting(PeerUnreadable)" {
 		t.Errorf("waiting planned failover -> %q, want Admitting(PeerUnreadable)", got)
 	}
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-3", Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
-		Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded}}
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-3", Phase: v1beta1.PlannedFailoverPhaseSucceeded,
+		Result: &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeSucceeded}}
 	if got := plannedFailoverSummary(fg); got != "Succeeded" {
 		t.Errorf("succeeded planned failover -> %q, want Succeeded", got)
 	}
@@ -166,10 +166,10 @@ func TestPlannedFailoverSummary(t *testing.T) {
 // wide-mode column set, table-mode column set, and the empty-active
 // case rendering as "-" instead of a blank column.
 func TestPrintGroupList(t *testing.T) {
-	items := []v1alpha1.MysqlFailoverGroup{
+	items := []v1beta1.MysqlFailoverGroup{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-			Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
+			Spec:       v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 			// Leave ActiveSite empty to assert the emptyDash fallback.
 		},
 	}
@@ -219,20 +219,20 @@ func TestPrintGroupList(t *testing.T) {
 
 func TestPrintGroupStatus(t *testing.T) {
 	now := metav1.Now()
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default", CreationTimestamp: now},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Sites: []v1beta1.SiteSpec{
 				{Name: "iad", ServerID: 101, Zone: "us-east-1a"},
 				{Name: "pdx", ServerID: 102, Zone: "us-west-2a"},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "orders.example.com", TTLSeconds: 60},
+			DNS: v1beta1.DNSSpec{Hostname: "orders.example.com", TTLSeconds: 60},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable, LastSeenTime: &now, Replication: v1alpha1.SiteReplicationNotApplicable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, LastSeenTime: &now, Replication: v1alpha1.SiteReplicationHealthy},
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable, LastSeenTime: &now, Replication: v1beta1.SiteReplicationNotApplicable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly, LastSeenTime: &now, Replication: v1beta1.SiteReplicationHealthy},
 			},
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
 		},
@@ -265,10 +265,10 @@ func TestPrintGroupStatus(t *testing.T) {
 
 func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 	msg := "Ordered update stalled: site pdx was updated but its pod mysql-orders-pdx-1 is not Ready (sidecar not ready: crash looping, last exit code 1 (Error))"
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{
+		Spec:       v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
+		Status: v1beta1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{
 			Type: "Updating", Status: metav1.ConditionTrue, Reason: "OrderedUpdateStalled", Message: msg,
 		}}},
 	}
@@ -294,9 +294,9 @@ func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
 // group stands in the paced rollout while it waits for or holds the slot,
 // and says nothing for a group without a record or with a completed roll.
 func TestPrintGroupStatus_ShowsRollout(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
+		Spec:       v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 	}
 	render := func() string {
 		t.Helper()
@@ -311,24 +311,24 @@ func TestPrintGroupStatus_ShowsRollout(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name string
-		rec  v1alpha1.RolloutStatus
+		rec  v1beta1.RolloutStatus
 		want string
 	}{
 		{
 			name: "halted",
-			rec: v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhasePending, Reason: "RolloutHalted",
+			rec: v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhasePending, Reason: "RolloutHalted",
 				Message: "the rollout is halted: the roll of default/billing stalled; this group keeps its pods"},
 			want: "  Rollout: Pending (RolloutHalted): the rollout is halted: the roll of default/billing stalled; this group keeps its pods\n",
 		},
 		{
 			name: "stalled",
-			rec: v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseStalled, Reason: "OrderedUpdateStalled",
+			rec: v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseStalled, Reason: "OrderedUpdateStalled",
 				Message: "Ordered update stalled: site pdx was updated but its pod is not Ready"},
 			want: "  Rollout: Stalled (OrderedUpdateStalled): Ordered update stalled: site pdx was updated but its pod is not Ready\n",
 		},
 		{
 			name: "no reason or message",
-			rec:  v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseRolling},
+			rec:  v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseRolling},
 			want: "  Rollout: Rolling\n",
 		},
 	} {
@@ -341,7 +341,7 @@ func TestPrintGroupStatus_ShowsRollout(t *testing.T) {
 		})
 	}
 	now := metav1.Now()
-	fg.Status.Rollout = &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseComplete, AdmittedTime: &now, StartedTime: &now, CompletedTime: &now}
+	fg.Status.Rollout = &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseComplete, AdmittedTime: &now, StartedTime: &now, CompletedTime: &now}
 	if out := render(); strings.Contains(out, "Rollout:") {
 		t.Errorf("a completed roll shows a rollout line:\n%s", out)
 	}
@@ -351,9 +351,9 @@ func TestPrintGroupStatus_ShowsRollout(t *testing.T) {
 // fallback so a freshly-deployed group with no active site doesn't
 // produce a confusing blank row mid-table.
 func TestPrintGroupStatus_EmptyActiveRendersDash(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "fresh", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}}},
+		Spec:       v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}}},
 	}
 	var buf bytes.Buffer
 	if err := printGroupStatus(&buf, fg, "table"); err != nil {
@@ -401,10 +401,10 @@ func TestSiteCountSummaryBucketsUnknownStateAsUnhealthy(t *testing.T) {
 	// poll a site's State is "". Previously this dropped silently out
 	// of the W/RO/X totals — the column undercounted in exactly the
 	// moment an operator most needs an accurate row count.
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Status: v1alpha1.MysqlFailoverGroupStatus{
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Status: v1beta1.MysqlFailoverGroupStatus{
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable},
 				{Name: "pdx", State: ""},
 				{Name: "lhr", State: "weird-future-value"},
 			},
@@ -420,22 +420,22 @@ func TestSiteCountSummaryBucketsUnknownStateAsUnhealthy(t *testing.T) {
 func TestPrintGroupStatus_ShowsSiteReports(t *testing.T) {
 	lost, divergent := int64(10), int64(1)
 	waiting := "pdx lacks 10 transactions it issued itself that iad holds (22222222-0000-11f1-8000-0000000000b2:91-100); automatic reclone waiting: another topology change holds the sites (an ordered update, a planned failover or its hold, or a promotion that is not observed yet) (by hand: kubectl bloodraven reclone orders pdx --cold). Replication cannot bring these transactions back (the site's receiver drops events with its own server_id), so the site is not replicated and not promoted until it is recloned."
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{
 			{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}, {Name: "dfw", ServerID: 103}}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateRecloneRequired,
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly, RecoveryState: v1beta1.RecoveryStateRecloneRequired,
 					LostGtid: "22222222-0000-11f1-8000-0000000000b2:91-100", LostTransactionCount: &lost, LostComparedTo: "iad"},
-				{Name: "dfw", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked,
+				{Name: "dfw", State: v1beta1.SiteStateReadOnly, RecoveryState: v1beta1.RecoveryStateBlocked,
 					DivergentGtid: "33333333-0000-11f1-8000-0000000000c3:7", DivergentTransactionCount: &divergent, DivergenceComparedTo: "iad"},
 			},
 			Conditions: []metav1.Condition{
-				{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonDivergentTransactions, Message: "dfw holds 1 transaction"},
-				{Type: v1alpha1.ConditionRecoveryPending, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonOwnTransactionsLost, Message: waiting},
+				{Type: v1beta1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonDivergentTransactions, Message: "dfw holds 1 transaction"},
+				{Type: v1beta1.ConditionRecoveryPending, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonOwnTransactionsLost, Message: waiting},
 			},
 		},
 	}

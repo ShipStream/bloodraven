@@ -9,7 +9,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -20,7 +20,7 @@ import (
 // duplicate Warning.
 func TestPITRArchiveUnanchoredHandoffStaysUnanchored(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	persistedFalse := &metav1.Condition{Type: v1alpha1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1alpha1.ReasonArchiveStoreInitFailed,
+	persistedFalse := &metav1.Condition{Type: v1beta1.ConditionPITRArchiveReady, Status: cFalse, Reason: v1beta1.ReasonArchiveStoreInitFailed,
 		Message: "iad: archive store init: boom", ObservedGeneration: 3, LastTransitionTime: metav1.NewTime(t0.Add(-time.Hour))}
 	clean := pitrRound{iad: pitrClean(), pdx: pitrClean()}
 	for _, reader := range []string{"reader still failing", "reader recovered before replacement"} {
@@ -60,7 +60,7 @@ func TestPITRArchiveUnanchoredHandoffStaysUnanchored(t *testing.T) {
 					round = pitrRound{iad: pitrMiss(), pdx: pitrClean()}
 				}
 				observeAndWrite(t, r, b, nn, t0.Add(30*time.Second), round.results())
-				if cond, _ := pitrCondition(t, c, nn); cond.Status != cFalse || cond.Reason != v1alpha1.ReasonArchiveStoreInitFailed {
+				if cond, _ := pitrCondition(t, c, nn); cond.Status != cFalse || cond.Reason != v1beta1.ReasonArchiveStoreInitFailed {
 					t.Fatalf("after the replacement's first round: %+v, want the persisted False kept", cond)
 				}
 				if first == "missed" {

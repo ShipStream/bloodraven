@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
@@ -29,7 +29,7 @@ func pfSyncFixture(t *testing.T, policy string, source, target DragonflyConnecti
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFIad: source, pfDFPdx: target})
 	nn := fgNN(fg)
 	pfDFPass(t, r, nn)
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetCaptured {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Dragonfly.SourceOffsetState != v1beta1.DragonflyOffsetCaptured {
 		t.Fatalf("offset capture = %+v", pf.Dragonfly)
 	}
 	return r, nn
@@ -72,18 +72,18 @@ func TestPlannedFailoverDragonflySync_UnprovableTargetReliesOnTheTakeover(t *tes
 				r, nn := pfSyncFixture(t, policy, syncProofMaster("a", 24, 28), tc.target())
 				pfDFPass(t, r, nn)
 				pf := fetchFG(t, r, nn).Status.PlannedFailover
-				if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions == v1alpha1.DragonflySessionsLost ||
+				if pf.Phase != v1beta1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions == v1beta1.DragonflySessionsLost ||
 					pf.Dragonfly.Reason != "" || !strings.Contains(pf.Dragonfly.Message, "relying on REPLTAKEOVER") {
 					t.Fatalf("phase = %s dragonfly = %+v, want the takeover at once, no sessions-lost mark, and the reason", pf.Phase, pf.Dragonfly)
 				}
-				if pf.Dragonfly.Takeover == nil || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverIntended {
+				if pf.Dragonfly.Takeover == nil || pf.Dragonfly.Takeover.State != v1beta1.DragonflyTakeoverIntended {
 					t.Fatalf("takeover = %+v, want Intended", pf.Dragonfly.Takeover)
 				}
 				if pf.Dragonfly.SyncWaitSeconds == nil || *pf.Dragonfly.SyncWaitSeconds > 1 {
 					t.Fatalf("syncWaitSeconds = %v, want no wait", pf.Dragonfly.SyncWaitSeconds)
 				}
 				events := drainEventsCh(r.Recorder.(*record.FakeRecorder).Events, 8, 50*time.Millisecond)
-				if !eventsContain(events, v1alpha1.EventDragonflySyncUnproven) || eventsContain(events, v1alpha1.EventDragonflySyncTimedOut) {
+				if !eventsContain(events, v1beta1.EventDragonflySyncUnproven) || eventsContain(events, v1beta1.EventDragonflySyncTimedOut) {
 					t.Fatalf("events = %v, want DragonflySyncUnproven and no DragonflySyncTimedOut", events)
 				}
 			})
@@ -100,12 +100,12 @@ func TestPlannedFailoverDragonflySync_UnprovableTargetReliesOnTheTakeover(t *tes
 		installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFIad: source, pfDFPdx: syncProofReplica("a", 1, 1)})
 		nn := fgNN(fg)
 		pfDFPass(t, r, nn)
-		if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetUnavailable {
+		if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Dragonfly.SourceOffsetState != v1beta1.DragonflyOffsetUnavailable {
 			t.Fatalf("dragonfly = %+v, want sourceOffsetState Unavailable", pf.Dragonfly)
 		}
 		pfDFPass(t, r, nn)
 		pf := fetchFG(t, r, nn).Status.PlannedFailover
-		if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions == v1alpha1.DragonflySessionsLost {
+		if pf.Phase != v1beta1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Sessions == v1beta1.DragonflySessionsLost {
 			t.Fatalf("phase = %s dragonfly = %+v, want the takeover, not a rollback", pf.Phase, pf.Dragonfly)
 		}
 	})
@@ -131,13 +131,13 @@ func TestPlannedFailoverDragonflySync_UnprovableTargetReliesOnTheTakeover(t *tes
 			for i := 0; i < 3; i++ {
 				pfDFPass(t, r, nn)
 			}
-			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {
+			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseWaitingForDragonflySync {
 				t.Fatalf("phase = %s, want the wait to continue: the link checks do not hold", pf.Phase)
 			}
 			r.plannedClock.(*clock.FakeClock).Advance(2 * time.Hour)
 			pfDFPass(t, r, nn)
-			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack ||
-				pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonDragonflySyncTimeout {
+			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseRollingBack ||
+				pf.Rollback.Reason != v1beta1.PlannedFailoverReasonDragonflySyncTimeout {
 				t.Fatalf("phase = %s rollback = %+v, want RollingBack at maxSyncWait", pf.Phase, pf.Rollback)
 			}
 		})
@@ -167,7 +167,7 @@ func TestPlannedFailoverDragonflySync_UnprovableTargetReliesOnTheTakeover(t *tes
 			for i := 0; i < 3; i++ {
 				pfDFPass(t, r, nn)
 			}
-			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {
+			if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseWaitingForDragonflySync {
 				t.Fatalf("phase = %s, want the wait to continue", pf.Phase)
 			}
 		})
@@ -201,8 +201,8 @@ func TestPlannedFailoverDragonflySync_SourceRestartRereadsThePositionOnce(t *tes
 	source.info.MasterReplID, source.position = "b", &dragonfly.Position{Role: "master", Flows: []int64{3, 4}, ReplID: "b"}
 	target.info.MasterReplID, target.position = "b", &dragonfly.Position{Role: "slave", Flows: []int64{3, 4}, ReplID: "b"}
 	pfDFPass(t, r, nn)
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly ||
-		pf.Dragonfly.Sessions == v1alpha1.DragonflySessionsLost {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhasePromotingDragonfly ||
+		pf.Dragonfly.Sessions == v1beta1.DragonflySessionsLost {
 		t.Fatalf("phase = %s dragonfly = %+v, want PromotingDragonfly: the target reached the restarted source", pf.Phase, pf.Dragonfly)
 	}
 	if source.reads != 2 {
@@ -220,7 +220,7 @@ func TestPlannedFailoverDragonflySync_SourceRereadIsBounded(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		pfDFPass(t, r, nn)
 	}
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseWaitingForDragonflySync {
 		t.Fatalf("phase = %s, want the wait to continue to its deadline", pf.Phase)
 	}
 	if source.reads != 2 {
@@ -228,7 +228,7 @@ func TestPlannedFailoverDragonflySync_SourceRereadIsBounded(t *testing.T) {
 	}
 	r.plannedClock.(*clock.FakeClock).Advance(2 * time.Hour)
 	pfDFPass(t, r, nn)
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseRollingBack {
 		t.Fatalf("phase = %s, want RollingBack at maxSyncWait", pf.Phase)
 	}
 }
@@ -239,9 +239,9 @@ func pfTakeoverFixture(t *testing.T, policy string, source, target DragonflyConn
 	t.Helper()
 	fg := plannedFailoverFGWithDragonfly(policy)
 	now := metav1.Now()
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
-	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: now}
+	fg.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhasePromotingDragonfly
+	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1beta1.DragonflyOffsetCaptured
+	fg.Status.PlannedFailover.Dragonfly.Takeover = &v1beta1.DragonflyTakeoverRecord{State: v1beta1.DragonflyTakeoverIntended, IntentTime: now}
 	r, c, _ := pfDFReconciler(t, fg, makeDragonflyPod(fg.Name, "iad", "master", true), makeDragonflyPod(fg.Name, "pdx", "replica", true))
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFIad: source, pfDFPdx: target})
 	return r, c, fgNN(fg)
@@ -257,7 +257,7 @@ func TestPlannedFailoverDragonfly_TargetOffsetOnlyFromAMaster(t *testing.T) {
 		r, _, nn := pfTakeoverFixture(t, "Proceed", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}, target)
 		pfDFPass(t, r, nn)
 		tk := fetchFG(t, r, nn).Status.PlannedFailover.Dragonfly.Takeover
-		if tk.State != v1alpha1.DragonflyTakeoverSucceeded || tk.TargetOffset == nil || *tk.TargetOffset != 77 {
+		if tk.State != v1beta1.DragonflyTakeoverSucceeded || tk.TargetOffset == nil || *tk.TargetOffset != 77 {
 			t.Fatalf("takeover = %+v, want Succeeded with targetOffset 77", tk)
 		}
 	})
@@ -267,7 +267,7 @@ func TestPlannedFailoverDragonfly_TargetOffsetOnlyFromAMaster(t *testing.T) {
 		r, _, nn := pfTakeoverFixture(t, "Proceed", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}, target)
 		pfDFPass(t, r, nn)
 		tk := fetchFG(t, r, nn).Status.PlannedFailover.Dragonfly.Takeover
-		if tk.State != v1alpha1.DragonflyTakeoverSucceeded || tk.TargetOffset != nil {
+		if tk.State != v1beta1.DragonflyTakeoverSucceeded || tk.TargetOffset != nil {
 			t.Fatalf("takeover = %+v, want Succeeded without a targetOffset: a replica's position is not the promoted master's", tk)
 		}
 	})
@@ -295,7 +295,7 @@ func TestPlannedFailoverDragonfly_CanceledTakeoverIsUnconfirmed(t *testing.T) {
 			r, c, nn := pfTakeoverFixture(t, "Proceed", source, target)
 			pfDFPass(t, r, nn)
 			pf := fetchFG(t, r, nn).Status.PlannedFailover
-			if pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed {
+			if pf.Dragonfly.Takeover.State != v1beta1.DragonflyTakeoverFailed {
 				t.Fatalf("takeover = %+v, want Failed", pf.Dragonfly.Takeover)
 			}
 			msg := pf.Dragonfly.Message
@@ -313,7 +313,7 @@ func TestPlannedFailoverDragonfly_CanceledTakeoverIsUnconfirmed(t *testing.T) {
 			if err := c.Get(context.Background(), types.NamespacedName{Namespace: nn.Namespace, Name: makeDragonflyPod(nn.Name, "iad", "", false).Name}, &pod); err != nil {
 				t.Fatal(err)
 			}
-			if pod.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+			if pod.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || pod.Labels[v1beta1.DragonflyRoleLabel] != "master" {
 				t.Fatalf("source labels = %v, want master with traffic", pod.Labels)
 			}
 		})

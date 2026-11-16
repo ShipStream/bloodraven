@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // The Dragonfly template rollout inside one group (issue #217).
@@ -74,7 +74,7 @@ const (
 
 // dragonflyRolloutSite is one site's StatefulSet as the rollout pass read it.
 type dragonflyRolloutSite struct {
-	site    v1alpha1.SiteSpec
+	site    v1beta1.SiteSpec
 	current *appsv1.StatefulSet
 	// drift: the template differs from the running render and the paced
 	// rollout does not hold it. The rollout has to write it.
@@ -102,7 +102,7 @@ type dragonflyRolloutWaitState struct {
 // StatefulSets and moves the others to the running render one site at a
 // time (see the protocol at the top of this file). A positive duration
 // means the rollout is not finished and the group is to be reconciled again.
-func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
+func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (time.Duration, error) {
 	reader := r.authorityReader()
 	sites := make([]dragonflyRolloutSite, 0, len(fg.Spec.Sites))
 	anyDrift, anyInFlight, anyHeld := false, false, false
@@ -148,7 +148,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 				return 0, fmt.Errorf("restamp dragonfly statefulset %s: %w", site.Name, err)
 			}
 		}
-		st.inFlight = current.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] != ""
+		st.inFlight = current.Annotations[v1beta1.DragonflyRolloutInFlightAnnotation] != ""
 		anyDrift = anyDrift || st.drift
 		anyInFlight = anyInFlight || st.inFlight
 		sites = append(sites, st)
@@ -170,7 +170,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 // DragonflyRestartInPlaceAnnotation that has nothing left to apply to, so
 // that it does not stay armed for a later rollout. While the paced rollout
 // holds a template the annotation is kept: it may be meant for that roll.
-func (r *MysqlFailoverGroupReconciler) endDragonflyRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, held bool) error {
+func (r *MysqlFailoverGroupReconciler) endDragonflyRollout(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, held bool) error {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	r.noteDragonflyRolloutWait(ctx, fg, dragonflyRolloutWait{})
 	r.dragonflyRolloutMu.Lock()
@@ -180,12 +180,12 @@ func (r *MysqlFailoverGroupReconciler) endDragonflyRollout(ctx context.Context, 
 		}
 	}
 	r.dragonflyRolloutMu.Unlock()
-	if held || fg.Annotations[v1alpha1.DragonflyRestartInPlaceAnnotation] == "" {
+	if held || fg.Annotations[v1beta1.DragonflyRestartInPlaceAnnotation] == "" {
 		return nil
 	}
 	removed, err := r.removeDragonflyRestartInPlace(ctx, nn, "")
 	if err != nil {
-		return fmt.Errorf("remove the %s annotation: %w", v1alpha1.DragonflyRestartInPlaceAnnotation, err)
+		return fmt.Errorf("remove the %s annotation: %w", v1beta1.DragonflyRestartInPlaceAnnotation, err)
 	}
 	if removed {
 		log.FromContext(ctx).Info("dragonfly rollout: removed the restart-in-place annotation",
@@ -202,12 +202,12 @@ func (r *MysqlFailoverGroupReconciler) removeDragonflyRestartInPlace(ctx context
 	if err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
-	value, ok := fresh.Annotations[v1alpha1.DragonflyRestartInPlaceAnnotation]
+	value, ok := fresh.Annotations[v1beta1.DragonflyRestartInPlaceAnnotation]
 	if !ok || (site != "" && value != site) {
 		return false, nil
 	}
 	base := fresh.DeepCopy()
-	delete(fresh.Annotations, v1alpha1.DragonflyRestartInPlaceAnnotation)
+	delete(fresh.Annotations, v1beta1.DragonflyRestartInPlaceAnnotation)
 	if err := r.Patch(ctx, fresh, metadataPatch(base)); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
@@ -216,7 +216,7 @@ func (r *MysqlFailoverGroupReconciler) removeDragonflyRestartInPlace(ctx context
 
 // stepDragonflyRollout takes the rollout's next step, at most one template
 // write, from the sites one pass read. wait says what it waits for.
-func (r *MysqlFailoverGroupReconciler) stepDragonflyRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sites []dragonflyRolloutSite) (time.Duration, dragonflyRolloutWait, error) {
+func (r *MysqlFailoverGroupReconciler) stepDragonflyRollout(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, sites []dragonflyRolloutSite) (time.Duration, dragonflyRolloutWait, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	// The status the rollout decides by is read uncached: the reconcile's
 	// own read can be behind a promotion that has just been stamped.
@@ -229,7 +229,7 @@ func (r *MysqlFailoverGroupReconciler) stepDragonflyRollout(ctx context.Context,
 	}
 
 	// The administrator's way past a wait comes before every proof.
-	inPlace := fresh.Annotations[v1alpha1.DragonflyRestartInPlaceAnnotation]
+	inPlace := fresh.Annotations[v1beta1.DragonflyRestartInPlaceAnnotation]
 	inPlaceNote := ""
 	if inPlace != "" {
 		known := false
@@ -245,7 +245,7 @@ func (r *MysqlFailoverGroupReconciler) stepDragonflyRollout(ctx context.Context,
 		}
 		if !known {
 			inPlaceNote = fmt.Sprintf("; the %s annotation names %q, which is not a site with a Dragonfly StatefulSet",
-				v1alpha1.DragonflyRestartInPlaceAnnotation, inPlace)
+				v1beta1.DragonflyRestartInPlaceAnnotation, inPlace)
 		}
 	}
 
@@ -317,7 +317,7 @@ func (r *MysqlFailoverGroupReconciler) stepDragonflyRollout(ctx context.Context,
 // rollDragonflyMasterSite is the rollout's last step: the master's own site.
 // Its template is written only by a takeover that succeeded
 // (promoteDragonflyForRollout). Until then the site keeps its pod.
-func (r *MysqlFailoverGroupReconciler) rollDragonflyMasterSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sites []dragonflyRolloutSite, master dragonflyRolloutSite) (time.Duration, dragonflyRolloutWait, error) {
+func (r *MysqlFailoverGroupReconciler) rollDragonflyMasterSite(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, sites []dragonflyRolloutSite, master dragonflyRolloutSite) (time.Duration, dragonflyRolloutWait, error) {
 	// A planned failover that owns the group's Dragonfly owns its active
 	// site too (plannedOwnsDragonfly): with the topology manager
 	// registered, the claim slot decides (a run, its provisional grant,
@@ -389,7 +389,7 @@ type dragonflyRolloutAuthority struct {
 // group, that site answers INFO as a master, and no other site that answers
 // does. A site that does not answer is not a master that serves, so it does
 // not make the answer unknown, unless it is the one status names.
-func (r *MysqlFailoverGroupReconciler) dragonflyRolloutAuthority(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) dragonflyRolloutAuthority {
+func (r *MysqlFailoverGroupReconciler) dragonflyRolloutAuthority(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) dragonflyRolloutAuthority {
 	claimed := effectiveDragonflyMasterSite(fg)
 	if claimed == "" {
 		return dragonflyRolloutAuthority{Detail: "status names no Dragonfly master (status.dragonfly.activeSite and status.activeSite are empty)"}
@@ -443,7 +443,7 @@ func dragonflyObservedRole(ctx context.Context, dial dragonflySiteDialer, site s
 // (dragonflyProveSync, which a replica in a full sync, one that is behind
 // and one that follows another instance do not pass). detail says what is
 // missing.
-func (r *MysqlFailoverGroupReconciler) dragonflyRolloutSiteSettled(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s dragonflyRolloutSite, master string) (bool, string) {
+func (r *MysqlFailoverGroupReconciler) dragonflyRolloutSiteSettled(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, s dragonflyRolloutSite, master string) (bool, string) {
 	if !dragonflyStatefulSetRolloutComplete(s.current) {
 		return false, "no Ready pod on the new template yet"
 	}
@@ -460,7 +460,7 @@ func (r *MysqlFailoverGroupReconciler) dragonflyRolloutSiteSettled(ctx context.C
 // rollDragonflyStatefulSetTemplate writes site's StatefulSet with the
 // running render and marks it in flight in the same update. The caller
 // holds the group's Dragonfly gate.
-func (r *MysqlFailoverGroupReconciler) rollDragonflyStatefulSetTemplate(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+func (r *MysqlFailoverGroupReconciler) rollDragonflyStatefulSetTemplate(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) error {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dragonflyStatefulSetName(fg.Name, site.Name),
@@ -485,7 +485,7 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyStatefulSetTemplate(ctx cont
 		if sts.Annotations == nil {
 			sts.Annotations = make(map[string]string)
 		}
-		sts.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] = r.now().UTC().Format(time.RFC3339)
+		sts.Annotations[v1beta1.DragonflyRolloutInFlightAnnotation] = r.now().UTC().Format(time.RFC3339)
 		return nil
 	})
 	return err
@@ -495,7 +495,7 @@ func (r *MysqlFailoverGroupReconciler) rollDragonflyStatefulSetTemplate(ctx cont
 // that one annotation.
 func (r *MysqlFailoverGroupReconciler) clearDragonflyRolloutInFlight(ctx context.Context, sts *appsv1.StatefulSet) error {
 	base := sts.DeepCopy()
-	delete(sts.Annotations, v1alpha1.DragonflyRolloutInFlightAnnotation)
+	delete(sts.Annotations, v1beta1.DragonflyRolloutInFlightAnnotation)
 	return client.IgnoreNotFound(r.Patch(ctx, sts, client.MergeFrom(base)))
 }
 
@@ -505,7 +505,7 @@ func (r *MysqlFailoverGroupReconciler) clearDragonflyRolloutInFlight(ctx context
 // for a planned failover that owns the group's Dragonfly, and it takes the
 // group's Dragonfly gate. The annotation is removed once the template is
 // written: it covers one restart.
-func (r *MysqlFailoverGroupReconciler) restartDragonflySiteInPlace(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (time.Duration, error) {
+func (r *MysqlFailoverGroupReconciler) restartDragonflySiteInPlace(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	logger := log.FromContext(ctx)
 	release, ok := r.acquireDragonflyGate(ctx, nn)
@@ -517,7 +517,7 @@ func (r *MysqlFailoverGroupReconciler) restartDragonflySiteInPlace(ctx context.C
 	if err != nil {
 		return 0, fmt.Errorf("re-read failover group before the in-place dragonfly restart of %s: %w", site.Name, err)
 	}
-	if fresh.Annotations[v1alpha1.DragonflyRestartInPlaceAnnotation] != site.Name {
+	if fresh.Annotations[v1beta1.DragonflyRestartInPlaceAnnotation] != site.Name {
 		return dragonflyGateRetry, nil
 	}
 	if r.plannedOwnsDragonfly(fresh) || r.plannedClaimHeld(nn) || PlannedHoldFrom(fresh) != nil {
@@ -531,12 +531,12 @@ func (r *MysqlFailoverGroupReconciler) restartDragonflySiteInPlace(ctx context.C
 		return 0, fmt.Errorf("reconcile dragonfly statefulset %s in place: %w", site.Name, err)
 	}
 	if r.Recorder != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyRestartedInPlace,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventDragonflyRestartedInPlace,
 			"the pod template of Dragonfly site %q was applied in place because the %s annotation names it (status names %q as the Dragonfly master); if the site held the master, its cache is lost",
-			site.Name, v1alpha1.DragonflyRestartInPlaceAnnotation, master)
+			site.Name, v1beta1.DragonflyRestartInPlaceAnnotation, master)
 	}
 	if _, err := r.removeDragonflyRestartInPlace(ctx, nn, site.Name); err != nil {
-		return 0, fmt.Errorf("remove the %s annotation: %w", v1alpha1.DragonflyRestartInPlaceAnnotation, err)
+		return 0, fmt.Errorf("remove the %s annotation: %w", v1beta1.DragonflyRestartInPlaceAnnotation, err)
 	}
 	return dragonflyRolloutRequeue, nil
 }
@@ -545,7 +545,7 @@ func (r *MysqlFailoverGroupReconciler) restartDragonflySiteInPlace(ctx context.C
 // line every pass: the state is logged when it changes, with the detail,
 // and a wait that has lasted dragonflyRolloutStallAfter is reported once in
 // a Warning Event (DragonflyRolloutStalled). The zero wait ends the record.
-func (r *MysqlFailoverGroupReconciler) noteDragonflyRolloutWait(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, wait dragonflyRolloutWait) {
+func (r *MysqlFailoverGroupReconciler) noteDragonflyRolloutWait(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, wait dragonflyRolloutWait) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	now := r.now()
 	r.dragonflyRolloutMu.Lock()
@@ -581,7 +581,7 @@ func (r *MysqlFailoverGroupReconciler) noteDragonflyRolloutWait(ctx context.Cont
 		logger.Info("dragonfly rollout: stalled", "state", wait.State, "detail", wait.Detail,
 			"waited", waited.Truncate(time.Second).String(), "fg", nn)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDragonflyRolloutStalled,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventDragonflyRolloutStalled,
 				"the Dragonfly template rollout has waited %s and changes no StatefulSet until this clears (%s): %s",
 				waited.Truncate(time.Second), wait.State, wait.Detail)
 		}

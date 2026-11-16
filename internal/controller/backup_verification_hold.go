@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 var (
@@ -24,16 +24,16 @@ var (
 	errHoldBackupTerminating = errors.New("backup is being deleted")
 )
 
-func verificationHoldKey(v *v1alpha1.MysqlBackupVerification) string {
-	return v1alpha1.VerificationHoldAnnotationPrefix + string(v.UID)
+func verificationHoldKey(v *v1beta1.MysqlBackupVerification) string {
+	return v1beta1.VerificationHoldAnnotationPrefix + string(v.UID)
 }
 
 // BackupHasVerificationHold reports whether any verification hold is
 // recorded on the backup, live or not. The PITR cutoff uses it to keep the
 // binlog coverage of a backup that is being deleted while it is read.
-func BackupHasVerificationHold(b *v1alpha1.MysqlBackup) bool {
+func BackupHasVerificationHold(b *v1beta1.MysqlBackup) bool {
 	for key := range b.Annotations {
-		if strings.HasPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix) {
+		if strings.HasPrefix(key, v1beta1.VerificationHoldAnnotationPrefix) {
 			return true
 		}
 	}
@@ -60,7 +60,7 @@ func verificationExecutionStopped(ctx context.Context, reader client.Reader, nam
 		return false, nil
 	}
 	var pods corev1.PodList
-	if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{v1alpha1.MysqlBackupVerificationLabel: name}); err != nil {
+	if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{v1beta1.MysqlBackupVerificationLabel: name}); err != nil {
 		return false, fmt.Errorf("list verification pods: %w", err)
 	}
 	for i := range pods.Items {
@@ -85,7 +85,7 @@ func jobFinished(job *batchv1.Job) bool {
 // verificationReading reports whether v may still read its backup. A live,
 // non-terminal verification always may, even before its Job exists; a
 // terminal or deleted one may until its execution has stopped.
-func verificationReading(ctx context.Context, reader client.Reader, v *v1alpha1.MysqlBackupVerification) (bool, error) {
+func verificationReading(ctx context.Context, reader client.Reader, v *v1beta1.MysqlBackupVerification) (bool, error) {
 	if v.DeletionTimestamp.IsZero() && !verificationTerminal(v.Status.Phase) {
 		return true, nil
 	}
@@ -114,7 +114,7 @@ type artifactReader struct {
 // reading; a holder that is gone (or was replaced by a same-name successor)
 // is live only while pods under that name still run.
 func holdLive(ctx context.Context, reader client.Reader, namespace, uid, name string) (bool, error) {
-	var v v1alpha1.MysqlBackupVerification
+	var v v1beta1.MysqlBackupVerification
 	err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &v)
 	switch {
 	case err == nil && string(v.UID) == uid:
@@ -130,7 +130,7 @@ func holdLive(ctx context.Context, reader client.Reader, namespace, uid, name st
 // artifactReaders returns the names of the verifications, and of the
 // groups whose restore, may still be reading the backup's artifact. See
 // artifactReaderRefs.
-func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]string, error) {
+func artifactReaders(ctx context.Context, reader client.Reader, backup *v1beta1.MysqlBackup) ([]string, error) {
 	refs, err := artifactReaderRefs(ctx, reader, backup)
 	if err != nil {
 		return nil, err
@@ -162,14 +162,14 @@ func readerUIDs(refs []artifactReader) []string {
 // It honours stamped holds and also scans verifications and failover
 // groups directly, which covers runs started by an operator that did not
 // stamp holds and the window before a new one stamps.
-func artifactReaderRefs(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]artifactReader, error) {
+func artifactReaderRefs(ctx context.Context, reader client.Reader, backup *v1beta1.MysqlBackup) ([]artifactReader, error) {
 	return NewBackupReadChecker(reader).readers(ctx, backup)
 }
 
 // artifactReaderRefsFromList is artifactReaderRefs with the namespace's
 // verifications and failover groups already listed, so several backups
 // share one List of each.
-func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, list *v1alpha1.MysqlBackupVerificationList, groups *v1alpha1.MysqlFailoverGroupList) ([]artifactReader, error) {
+func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backup *v1beta1.MysqlBackup, list *v1beta1.MysqlBackupVerificationList, groups *v1beta1.MysqlFailoverGroupList) ([]artifactReader, error) {
 	readers := map[string]string{}
 	restores := map[string]string{}
 	seen := map[types.UID]bool{}
@@ -177,9 +177,9 @@ func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backu
 	// (resolveBackup skips Terminating ones and stampVerificationHold
 	// refuses them), so it is a prospective reader of nothing else. The
 	// same holds for a restore that has no Job yet (holdRestoreBackup).
-	pickable := backup.DeletionTimestamp.IsZero() && backup.Status.Phase == v1alpha1.BackupPhaseSucceeded
+	pickable := backup.DeletionTimestamp.IsZero() && backup.Status.Phase == v1beta1.BackupPhaseSucceeded
 	for key, name := range backup.Annotations {
-		if holdID, ok := strings.CutPrefix(key, v1alpha1.RestoreHoldAnnotationPrefix); ok {
+		if holdID, ok := strings.CutPrefix(key, v1beta1.RestoreHoldAnnotationPrefix); ok {
 			// The value is the restoring group's name.
 			live, err := restoreHoldLive(ctx, reader, backup, holdID, name)
 			if err != nil {
@@ -190,7 +190,7 @@ func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backu
 			}
 			continue
 		}
-		uid, ok := strings.CutPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix)
+		uid, ok := strings.CutPrefix(key, v1beta1.VerificationHoldAnnotationPrefix)
 		if !ok {
 			continue
 		}
@@ -244,7 +244,7 @@ func artifactReaderRefsFromList(ctx context.Context, reader client.Reader, backu
 // removed by hand, or a restore of a group that was deleted). They would
 // otherwise keep the PITR cutoff pinned. With prefixes, only holds of
 // those kinds are looked at.
-func deadHoldKeys(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, prefixes ...string) ([]string, error) {
+func deadHoldKeys(ctx context.Context, reader client.Reader, backup *v1beta1.MysqlBackup, prefixes ...string) ([]string, error) {
 	var dead []string
 	for key, value := range backup.Annotations {
 		if len(prefixes) > 0 && !slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(key, p) }) {
@@ -265,7 +265,7 @@ func deadHoldKeys(ctx context.Context, reader client.Reader, backup *v1alpha1.My
 // stripDeadHolds removes dead holds from a backup being deleted, with an
 // optimistic lock so a hold stamped concurrently is never dropped. done is
 // false when the patch lost a race and the caller should look again.
-func (r *MysqlBackupReconciler) stripDeadHolds(ctx context.Context, backup *v1alpha1.MysqlBackup) (done bool, err error) {
+func (r *MysqlBackupReconciler) stripDeadHolds(ctx context.Context, backup *v1beta1.MysqlBackup) (done bool, err error) {
 	dead, err := deadHoldKeys(ctx, r.apiReader(), backup)
 	if err != nil || len(dead) == 0 {
 		return err == nil, err
@@ -283,7 +283,7 @@ func (r *MysqlBackupReconciler) stripDeadHolds(ctx context.Context, backup *v1al
 	// One line per kind: the verification line's fields are a log contract.
 	var verifications, restores []string
 	for _, key := range dead {
-		if strings.HasPrefix(key, v1alpha1.RestoreHoldAnnotationPrefix) {
+		if strings.HasPrefix(key, v1beta1.RestoreHoldAnnotationPrefix) {
 			restores = append(restores, key)
 		} else {
 			verifications = append(verifications, key)
@@ -307,32 +307,32 @@ func (r *MysqlBackupReconciler) stripDeadHolds(ctx context.Context, backup *v1al
 // that callers fail closed.
 type BackupReadChecker struct {
 	reader client.Reader
-	lists  map[string]*v1alpha1.MysqlBackupVerificationList
-	groups map[string]*v1alpha1.MysqlFailoverGroupList
+	lists  map[string]*v1beta1.MysqlBackupVerificationList
+	groups map[string]*v1beta1.MysqlFailoverGroupList
 }
 
 // NewBackupReadChecker returns a checker for one decision (one request).
 func NewBackupReadChecker(reader client.Reader) *BackupReadChecker {
 	return &BackupReadChecker{
 		reader: reader,
-		lists:  map[string]*v1alpha1.MysqlBackupVerificationList{},
-		groups: map[string]*v1alpha1.MysqlFailoverGroupList{},
+		lists:  map[string]*v1beta1.MysqlBackupVerificationList{},
+		groups: map[string]*v1beta1.MysqlFailoverGroupList{},
 	}
 }
 
 // BeingRead reports whether any verification or restore may still read
 // the backup.
-func (c *BackupReadChecker) BeingRead(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+func (c *BackupReadChecker) BeingRead(ctx context.Context, backup *v1beta1.MysqlBackup) (bool, error) {
 	readers, err := c.readers(ctx, backup)
 	return len(readers) > 0, err
 }
 
 // readers returns the verifications and the restoring groups that may
 // still read the backup.
-func (c *BackupReadChecker) readers(ctx context.Context, backup *v1alpha1.MysqlBackup) ([]artifactReader, error) {
+func (c *BackupReadChecker) readers(ctx context.Context, backup *v1beta1.MysqlBackup) ([]artifactReader, error) {
 	list, ok := c.lists[backup.Namespace]
 	if !ok {
-		list = &v1alpha1.MysqlBackupVerificationList{}
+		list = &v1beta1.MysqlBackupVerificationList{}
 		if err := c.reader.List(ctx, list, client.InNamespace(backup.Namespace)); err != nil {
 			return nil, fmt.Errorf("list verifications: %w", err)
 		}
@@ -340,7 +340,7 @@ func (c *BackupReadChecker) readers(ctx context.Context, backup *v1alpha1.MysqlB
 	}
 	groups, ok := c.groups[backup.Namespace]
 	if !ok {
-		groups = &v1alpha1.MysqlFailoverGroupList{}
+		groups = &v1beta1.MysqlFailoverGroupList{}
 		if err := c.reader.List(ctx, groups, client.InNamespace(backup.Namespace)); err != nil {
 			return nil, fmt.Errorf("list failover groups: %w", err)
 		}
@@ -354,12 +354,12 @@ func (c *BackupReadChecker) readers(ctx context.Context, backup *v1alpha1.MysqlB
 // backup changed (including being marked for deletion) since it was read.
 // allowTerminating is set for a verification that is already running: its
 // hold still defers artifact cleanup and keeps the PITR coverage.
-func (r *MysqlBackupVerificationReconciler) stampVerificationHold(ctx context.Context, v *v1alpha1.MysqlBackupVerification, allowTerminating bool) error {
+func (r *MysqlBackupVerificationReconciler) stampVerificationHold(ctx context.Context, v *v1beta1.MysqlBackupVerification, allowTerminating bool) error {
 	ref := v.Status.BackupRef
 	if ref == nil || ref.Name == "" {
 		return nil
 	}
-	var backup v1alpha1.MysqlBackup
+	var backup v1beta1.MysqlBackup
 	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: ref.Name}, &backup); err != nil {
 		if apierrors.IsNotFound(err) {
 			return errHoldBackupGone
@@ -393,9 +393,9 @@ func (r *MysqlBackupVerificationReconciler) stampVerificationHold(ctx context.Co
 // launchHoldConfirmed re-reads the pinned backup right before the Job is
 // created: it must be the pinned object, not being deleted, and carry v's
 // hold. Returns a reason for refusing the launch, or "".
-func (r *MysqlBackupVerificationReconciler) launchHoldConfirmed(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (string, error) {
+func (r *MysqlBackupVerificationReconciler) launchHoldConfirmed(ctx context.Context, v *v1beta1.MysqlBackupVerification) (string, error) {
 	ref := v.Status.BackupRef
-	var backup v1alpha1.MysqlBackup
+	var backup v1beta1.MysqlBackup
 	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: ref.Name}, &backup); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Sprintf("pinned backup %q is gone", ref.Name), nil
@@ -415,7 +415,7 @@ func (r *MysqlBackupVerificationReconciler) launchHoldConfirmed(ctx context.Cont
 
 // releaseVerificationHold removes v's hold from its pinned backup once v's
 // execution has stopped. done is false while readers may still run.
-func (r *MysqlBackupVerificationReconciler) releaseVerificationHold(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (done bool, err error) {
+func (r *MysqlBackupVerificationReconciler) releaseVerificationHold(ctx context.Context, v *v1beta1.MysqlBackupVerification) (done bool, err error) {
 	// The PITR archive key snapshot hold (K9) goes with the backup hold,
 	// under the same "execution stopped" rule.
 	if done, err := r.releaseKeySnapshotHoldsIfStopped(ctx, v); err != nil || !done {
@@ -425,7 +425,7 @@ func (r *MysqlBackupVerificationReconciler) releaseVerificationHold(ctx context.
 	if ref == nil || ref.Name == "" {
 		return true, nil
 	}
-	var backup v1alpha1.MysqlBackup
+	var backup v1beta1.MysqlBackup
 	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: ref.Name}, &backup); err != nil {
 		if apierrors.IsNotFound(err) {
 			return true, nil
@@ -470,12 +470,12 @@ func (r *MysqlBackupReconciler) apiReader() client.Reader {
 // and failover groups are listed once; a verification or restore that pins
 // after that List must stamp a hold (bumping the resourceVersion) before
 // it reads, so the precondition still protects it.
-func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *v1alpha1.MysqlBackup, checker *BackupReadChecker) error {
-	var fresh v1alpha1.MysqlBackup
+func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *v1beta1.MysqlBackup, checker *BackupReadChecker) error {
+	var fresh v1beta1.MysqlBackup
 	if err := r.apiReader().Get(ctx, client.ObjectKeyFromObject(victim), &fresh); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if fresh.UID != victim.UID || !fresh.DeletionTimestamp.IsZero() || fresh.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+	if fresh.UID != victim.UID || !fresh.DeletionTimestamp.IsZero() || fresh.Status.Phase != v1beta1.BackupPhaseSucceeded {
 		return nil
 	}
 	readers, err := checker.readers(ctx, &fresh)
@@ -498,7 +498,7 @@ func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *
 				"fg", fresh.Spec.FailoverGroupRef.Name, "profile", fresh.Spec.ProfileName,
 				"restoreGroups", readerNames(restores))
 		}
-		r.Recorder.Eventf(&fresh, corev1.EventTypeNormal, v1alpha1.EventRetentionDeferred,
+		r.Recorder.Eventf(&fresh, corev1.EventTypeNormal, v1beta1.EventRetentionDeferred,
 			"retention keeps this backup while %s may be reading it", describeReaders(readers))
 		return nil
 	}
@@ -525,7 +525,7 @@ var errHoldKeySnapshotGone = errors.New("PITR archive key snapshot is gone")
 // fails, and a release that deleted it first makes this stamp fail with
 // errHoldKeySnapshotGone. Only an archive key snapshot of v's group is
 // stamped.
-func (r *MysqlBackupVerificationReconciler) stampPITRKeySnapshotHold(ctx context.Context, v *v1alpha1.MysqlBackupVerification, fg *v1alpha1.MysqlFailoverGroup, name string) error {
+func (r *MysqlBackupVerificationReconciler) stampPITRKeySnapshotHold(ctx context.Context, v *v1beta1.MysqlBackupVerification, fg *v1beta1.MysqlFailoverGroup, name string) error {
 	var snap corev1.Secret
 	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: name}, &snap); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -533,7 +533,7 @@ func (r *MysqlBackupVerificationReconciler) stampPITRKeySnapshotHold(ctx context
 		}
 		return fmt.Errorf("get PITR key snapshot: %w", err)
 	}
-	if snap.Labels[labelAppName] != appNamePITRKeySnapshot || snap.Labels[v1alpha1.FailoverGroupUIDLabel] != string(fg.UID) {
+	if snap.Labels[labelAppName] != appNamePITRKeySnapshot || snap.Labels[v1beta1.FailoverGroupUIDLabel] != string(fg.UID) {
 		return fmt.Errorf("Secret %s is not an archive key snapshot of group %s", name, fg.Name)
 	}
 	if !snap.DeletionTimestamp.IsZero() {
@@ -560,7 +560,7 @@ func (r *MysqlBackupVerificationReconciler) stampPITRKeySnapshotHold(ctx context
 // pitrKeySnapshotHoldConfirmed re-reads the key snapshot right before the
 // Job is created: it must exist and carry v's hold. Returns a reason for
 // waiting, or "".
-func (r *MysqlBackupVerificationReconciler) pitrKeySnapshotHoldConfirmed(ctx context.Context, v *v1alpha1.MysqlBackupVerification, name string) (string, error) {
+func (r *MysqlBackupVerificationReconciler) pitrKeySnapshotHoldConfirmed(ctx context.Context, v *v1beta1.MysqlBackupVerification, name string) (string, error) {
 	var snap corev1.Secret
 	if err := r.apiReader().Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: name}, &snap); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -581,7 +581,7 @@ func (r *MysqlBackupVerificationReconciler) pitrKeySnapshotHoldConfirmed(ctx con
 // snapshot in its namespace that carries it, once v's execution has
 // stopped. Listing by label covers a snapshot whose name v's status never
 // recorded. done is false while readers may still run.
-func (r *MysqlBackupVerificationReconciler) releaseKeySnapshotHoldsIfStopped(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (bool, error) {
+func (r *MysqlBackupVerificationReconciler) releaseKeySnapshotHoldsIfStopped(ctx context.Context, v *v1beta1.MysqlBackupVerification) (bool, error) {
 	var list corev1.SecretList
 	if err := r.apiReader().List(ctx, &list, client.InNamespace(v.Namespace),
 		client.MatchingLabels{labelAppName: appNamePITRKeySnapshot}); err != nil {

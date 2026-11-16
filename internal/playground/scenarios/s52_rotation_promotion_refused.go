@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -107,12 +107,12 @@ func s52StartReplicaRotation(state *s52RunState) runner.Step {
 				return err
 			}
 			before := mfg.Status.EncryptionAtRest.SiteEncryptionStatusByName(state.replicaSite)
-			if before == nil || before.Phase != v1alpha1.KeyringPhaseSealed {
+			if before == nil || before.Phase != v1beta1.KeyringPhaseSealed {
 				return fmt.Errorf("replica %s is not sealed before rotation: %+v", state.replicaSite, before)
 			}
 
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				v1alpha1.RotateKeyringAnnotation, state.replicaSite); err != nil {
+				v1beta1.RotateKeyringAnnotation, state.replicaSite); err != nil {
 				return fmt.Errorf("annotate for replica rotation: %w", err)
 			}
 			state.rotated = true
@@ -121,7 +121,7 @@ func s52StartReplicaRotation(state *s52RunState) runner.Step {
 			defer cancel()
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s UnsealReason=Rotation", state.replicaSite),
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
 					}
@@ -129,7 +129,7 @@ func s52StartReplicaRotation(state *s52RunState) runner.Step {
 					if s == nil {
 						return false, "no status entry for " + state.replicaSite, nil
 					}
-					if s.UnsealReason == v1alpha1.UnsealReasonRotation {
+					if s.UnsealReason == v1beta1.UnsealReasonRotation {
 						return true, "", nil
 					}
 					return false, fmt.Sprintf("phase=%s reason=%s (%s)", s.Phase, s.UnsealReason, s.Message), nil
@@ -179,7 +179,7 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 			staleCutoff := env.StartTime.Add(-2 * time.Second)
 			got, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("plannedFailover Failed reason=%s target=%s", s52PlannedFailoverRejectReason, state.replicaSite),
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.ActiveSite != "" && m.Status.ActiveSite != state.activeSite {
 						return false, fmt.Sprintf("activeSite=%s", m.Status.ActiveSite),
 							fmt.Errorf("planned failover onto a rotating site changed activeSite from %s to %s",
@@ -194,10 +194,10 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 					}
 					msg := fmt.Sprintf("phase=%q target=%q reason=%q active=%q",
 						pf.Phase, pf.TargetSite, plannedReason(pf), m.Status.ActiveSite)
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseSucceeded {
 						return false, msg, fmt.Errorf("planned failover onto rotating %s unexpectedly Succeeded", state.replicaSite)
 					}
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseFailed {
 						if plannedReason(pf) != s52PlannedFailoverRejectReason {
 							return false, msg, fmt.Errorf("planned failover Failed with reason %q, want %s",
 								plannedReason(pf), s52PlannedFailoverRejectReason)
@@ -215,7 +215,7 @@ func s52RefusePlannedFailover(state *s52RunState) runner.Step {
 			if got.Status.ActiveSite != state.activeSite {
 				return fmt.Errorf("activeSite=%q after planned reject, want %q", got.Status.ActiveSite, state.activeSite)
 			}
-			if _, present := got.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; present {
+			if _, present := got.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; present {
 				return fmt.Errorf("planned-failover annotation was not consumed after KeyringRotation reject")
 			}
 
@@ -304,7 +304,7 @@ func s52RefuseEmergencyPromotion(state *s52RunState) runner.Step {
 					if berr != nil {
 						last = berr.Error()
 					} else {
-						_, evOK, evErr := findMFGEvent(ctx, env, eventBefore, v1alpha1.EventKeyringPromotionRefused, state.replicaSite)
+						_, evOK, evErr := findMFGEvent(ctx, env, eventBefore, v1beta1.EventKeyringPromotionRefused, state.replicaSite)
 						if evErr != nil {
 							return evErr
 						}
@@ -407,7 +407,7 @@ func s52RestoreAndReseal(state *s52RunState) runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"exactly one writable primary-candidate and the rotating site has left Rotation",
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					writable := s52WritableCandidates(m)
 					rotating := m.SiteKeyringRotationBlocksPromotion(state.replicaSite)
 					msg := fmt.Sprintf("writable=%v active=%q rotating=%v", writable, m.Status.ActiveSite, rotating)
@@ -428,7 +428,7 @@ func s52RestoreAndReseal(state *s52RunState) runner.Step {
 			defer sealCancel()
 			_, err = env.Wait.UntilCR(sealCtx, env.Namespace,
 				fmt.Sprintf("site %s Sealed after rotation", state.replicaSite),
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
 					}
@@ -436,10 +436,10 @@ func s52RestoreAndReseal(state *s52RunState) runner.Step {
 					if s == nil {
 						return false, "no status entry for " + state.replicaSite, nil
 					}
-					if s.Phase == v1alpha1.KeyringPhaseFailed {
+					if s.Phase == v1beta1.KeyringPhaseFailed {
 						return false, s.Message, fmt.Errorf("replica %s failed during rotation: %s", state.replicaSite, s.Message)
 					}
-					if s.Phase != v1alpha1.KeyringPhaseSealed {
+					if s.Phase != v1beta1.KeyringPhaseSealed {
 						return false, fmt.Sprintf("phase=%s reason=%s (%s)", s.Phase, s.UnsealReason, s.Message), nil
 					}
 					return true, "", nil
@@ -455,7 +455,7 @@ func s52RestoreAndReseal(state *s52RunState) runner.Step {
 			rollCtx, rollCancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer rollCancel()
 			_, err = env.Wait.UntilCR(rollCtx, env.Namespace, "ordered update idle after rotation reseal",
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.UpdatePhase != "" {
 						return false, "updatePhase=" + string(m.Status.UpdatePhase), nil
 					}
@@ -483,12 +483,12 @@ func s52Cleanup(state *s52RunState) func(context.Context, *runner.Env) error {
 		if err != nil {
 			return fmt.Errorf("read MFG to clear leftover rotate annotation: %w", err)
 		}
-		if _, present := mfg.GetAnnotations()[v1alpha1.RotateKeyringAnnotation]; !present {
+		if _, present := mfg.GetAnnotations()[v1beta1.RotateKeyringAnnotation]; !present {
 			state.rotated = false
 			return nil
 		}
 		if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-			v1alpha1.RotateKeyringAnnotation, ""); err != nil {
+			v1beta1.RotateKeyringAnnotation, ""); err != nil {
 			return fmt.Errorf("clear rotate annotation: %w", err)
 		}
 		state.rotated = false
@@ -496,28 +496,28 @@ func s52Cleanup(state *s52RunState) func(context.Context, *runner.Env) error {
 	}
 }
 
-func s52SiteWritable(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
+func s52SiteWritable(mfg *v1beta1.MysqlFailoverGroup, name string) bool {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == name {
-			return s.State == v1alpha1.SiteStateWritable
+			return s.State == v1beta1.SiteStateWritable
 		}
 	}
 	return false
 }
 
-func s52WritableCandidates(mfg *v1alpha1.MysqlFailoverGroup) []string {
+func s52WritableCandidates(mfg *v1beta1.MysqlFailoverGroup) []string {
 	var out []string
 	for _, s := range mfg.Status.Sites {
-		if s.State == v1alpha1.SiteStateWritable && isPromotableSite(mfg, s.Name) {
+		if s.State == v1beta1.SiteStateWritable && isPromotableSite(mfg, s.Name) {
 			out = append(out, s.Name)
 		}
 	}
 	return out
 }
 
-func s52Degraded(mfg *v1alpha1.MysqlFailoverGroup) (reason, message string) {
+func s52Degraded(mfg *v1beta1.MysqlFailoverGroup) (reason, message string) {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == v1alpha1.ConditionDegraded {
+		if c.Type == v1beta1.ConditionDegraded {
 			return c.Reason, c.Message
 		}
 	}

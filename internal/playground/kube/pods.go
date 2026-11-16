@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // MysqlDeploymentName returns the name of the MySQL deployment for a
@@ -23,7 +23,7 @@ func MysqlDeploymentName(fg, site string) string {
 // MysqlPodSelector builds a label selector that targets a single
 // site's MySQL pod (deployment-managed; one replica per site).
 func MysqlPodSelector(fg, site string) string {
-	return fmt.Sprintf("app.kubernetes.io/name=mysql,app.kubernetes.io/instance=%s,%s=%s", fg, v1alpha1.SiteLabel, site)
+	return fmt.Sprintf("app.kubernetes.io/name=mysql,app.kubernetes.io/instance=%s,%s=%s", fg, v1beta1.SiteLabel, site)
 }
 
 // ListMysqlPods returns the MySQL pods for a single site.
@@ -126,7 +126,7 @@ func (c *Client) ApplyDenyAllNetworkPolicy(ctx context.Context, namespace, fg, s
 				MatchLabels: map[string]string{
 					"app.kubernetes.io/name":     "mysql",
 					"app.kubernetes.io/instance": fg,
-					v1alpha1.SiteLabel:           site,
+					v1beta1.SiteLabel:            site,
 				},
 			},
 			PolicyTypes: []networkingv1.PolicyType{

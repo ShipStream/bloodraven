@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -26,7 +26,7 @@ func TestPITRArchiveCoverageKeptWhenASiteHasNoSampleAfterRestart(t *testing.T) {
 	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	oldest, newest, last := metav1.NewTime(t0.Add(-48*time.Hour)), metav1.NewTime(t0.Add(-time.Minute)), metav1.NewTime(t0.Add(-30*time.Second))
 	fg := pitrArchiveFG(nil)
-	fg.Status.PITR = &v1alpha1.PITRStatus{
+	fg.Status.PITR = &v1beta1.PITRStatus{
 		ArchivedFileCount: 10, ArchivedBytes: 100,
 		OldestArchivedTime: &oldest, NewestArchivedTime: &newest, LastArchivedTime: &last,
 	}
@@ -67,7 +67,7 @@ func TestPITRArchiveMessageOnlyChangesAreRateLimited(t *testing.T) {
 		return pitrRunError("load manifest: operation error S3: GetObject, https response error StatusCode: 403, RequestID: " + id + ", HostID: " + id + "==, api error AccessDenied: Access Denied")
 	}
 	rv := func() string {
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &got); err != nil {
 			t.Fatal(err)
 		}
@@ -82,8 +82,8 @@ func TestPITRArchiveMessageOnlyChangesAreRateLimited(t *testing.T) {
 	step(0, s3err("A1"), pitrClean())
 	step(30*time.Second, s3err("A2"), pitrClean())
 	cond, _ := pitrCondition(t, c, nn)
-	if cond == nil || cond.Reason != v1alpha1.ReasonArchiverError {
-		t.Fatalf("condition = %+v, want False/%s", cond, v1alpha1.ReasonArchiverError)
+	if cond == nil || cond.Reason != v1beta1.ReasonArchiverError {
+		t.Fatalf("condition = %+v, want False/%s", cond, v1beta1.ReasonArchiverError)
 	}
 	written := rv()
 
@@ -129,11 +129,11 @@ func TestPITRArchiveTopologyWriterInterleavedWithPollerWrite(t *testing.T) {
 		hookFinished bool
 	)
 	base := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 	c := interceptor.NewClient(base, interceptor.Funcs{
 		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if armed && !inHook {
-				if _, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+				if _, ok := obj.(*v1beta1.MysqlFailoverGroup); ok {
 					gets++
 					if gets == 2 {
 						inHook = true

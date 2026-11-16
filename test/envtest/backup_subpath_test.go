@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestBackupPVCSubPathRejectsParentSegments exercises the subPath pattern:
@@ -15,12 +15,12 @@ import (
 func TestBackupPVCSubPathRejectsParentSegments(t *testing.T) {
 	ns := createNamespace(t, "backup-subpath")
 
-	withSubPath := func(name, sub string) *v1alpha1.MysqlFailoverGroup {
+	withSubPath := func(name, sub string) *v1beta1.MysqlFailoverGroup {
 		fg := newVerificationFG(ns)
 		fg.Name = name
-		fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{
-			Type: v1alpha1.BackupStoragePVC,
-			PVC:  &v1alpha1.PVCStorage{ClaimName: "backups", SubPath: sub},
+		fg.Spec.Backup.Profiles[0].Storage = v1beta1.BackupStorage{
+			Type: v1beta1.BackupStoragePVC,
+			PVC:  &v1beta1.PVCStorage{ClaimName: "backups", SubPath: sub},
 		}
 		return fg
 	}

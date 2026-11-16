@@ -17,7 +17,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 	"github.com/shipstream/bloodraven/internal/metrics"
@@ -56,22 +56,22 @@ func (s *stubDF) Close() error { return nil }
 func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-	_ = v1alpha1.AddToScheme(scheme)
+	_ = v1beta1.AddToScheme(scheme)
 
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "ns"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
-			Dragonfly: &v1alpha1.DragonflySpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
+			Dragonfly: &v1beta1.DragonflySpec{
 				Enabled: true,
 				Image:   "example.invalid/dragonfly:old",
 				Port:    6379,
 			},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad"},
+		Status: v1beta1.MysqlFailoverGroupStatus{ActiveSite: "iad"},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		Build()
 	key := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -102,7 +102,7 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 	}
 
 	probeEvents := drainRec(rec, 4, 100*time.Millisecond)
-	if !eventHas(probeEvents, v1alpha1.EventDragonflyReplTakeoverUnsupported) {
+	if !eventHas(probeEvents, v1beta1.EventDragonflyReplTakeoverUnsupported) {
 		t.Fatalf("missing unsupported event: %v", probeEvents)
 	}
 
@@ -124,7 +124,7 @@ func TestDragonflyCapabilityProbeAndLoudFallback(t *testing.T) {
 		t.Errorf("sessions_lost = %v, want %v", after, before+1)
 	}
 	fbEvents := drainRec(rec, 4, 100*time.Millisecond)
-	if !eventHas(fbEvents, v1alpha1.EventDragonflySessionsLost) {
+	if !eventHas(fbEvents, v1beta1.EventDragonflySessionsLost) {
 		t.Fatalf("missing sessions-lost event: %v", fbEvents)
 	}
 }

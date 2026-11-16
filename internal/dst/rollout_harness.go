@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -126,7 +126,7 @@ type rolloutGroupSim struct {
 	dirty bool
 	// rec is the group's stored status.rollout, kept current by the
 	// interceptor so that the invariants need not read it back.
-	rec *v1alpha1.RolloutStatus
+	rec *v1beta1.RolloutStatus
 
 	// Invariant bookkeeping (rollout_invariants.go).
 	admitAnno, releaseAnno bool
@@ -255,7 +255,7 @@ func (s *rolloutSim) setup() {
 	if err := clientgoscheme.AddToScheme(s.scheme); err != nil {
 		panic(err)
 	}
-	if err := v1alpha1.AddToScheme(s.scheme); err != nil {
+	if err := v1beta1.AddToScheme(s.scheme); err != nil {
 		panic(err)
 	}
 	var objs []client.Object
@@ -266,24 +266,24 @@ func (s *rolloutSim) setup() {
 				"username": []byte("bloodraven"), "password": []byte("password"), "MYSQL_ROOT_PASSWORD": []byte("root-password"),
 			},
 		})
-		fg := &v1alpha1.MysqlFailoverGroup{
+		fg := &v1beta1.MysqlFailoverGroup{
 			ObjectMeta: metav1.ObjectMeta{Name: spec.Name, Namespace: rolloutNamespace(spec.Name), UID: types.UID("uid-" + spec.Name), Generation: 1},
-			Spec: v1alpha1.MysqlFailoverGroupSpec{
+			Spec: v1beta1.MysqlFailoverGroupSpec{
 				Image:        "mysql:9.7",
-				Credentials:  v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-				Sidecar:      v1alpha1.SidecarSpec{Image: "bloodraven-sidecar:sim"},
+				Credentials:  v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+				Sidecar:      v1beta1.SidecarSpec{Image: "bloodraven-sidecar:sim"},
 				PollInterval: &metav1.Duration{Duration: rolloutStep},
 			},
 		}
 		if spec.Recreate {
-			fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+			fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 		}
 		for si, site := range spec.Sites {
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{
+			fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{
 				Name: site, ServerID: int64(100*(gi+1) + si), Zone: spec.Name + "-" + site,
 				LoadBalancerIP:    fmt.Sprintf("10.%d.0.%d", gi+1, si+1),
 				TaintNodeSelector: map[string]string{"sim/group": spec.Name, "sim/site": site},
-				Storage:           v1alpha1.StorageSpec{Size: "1Gi"},
+				Storage:           v1beta1.StorageSpec{Size: "1Gi"},
 			})
 		}
 		cfg, err := controller.CRConfigToTopologyConfig(fg)
@@ -310,7 +310,7 @@ func (s *rolloutSim) setup() {
 		objs = append(objs, fg)
 	}
 	s.under = fake.NewClientBuilder().WithScheme(s.scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}, &appsv1.Deployment{}).WithObjects(objs...).Build()
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}, &appsv1.Deployment{}).WithObjects(objs...).Build()
 	s.reads = newReadCache(s.under)
 	s.api = interceptor.NewClient(s.under, s.interceptorFuncs())
 
@@ -328,9 +328,9 @@ func (s *rolloutSim) setup() {
 				panic(fmt.Sprintf("dst: rollout setup: %v", err))
 			}
 			if s.identity == "" {
-				s.identity = d.Annotations[v1alpha1.RenderedByAnnotation]
+				s.identity = d.Annotations[v1beta1.RenderedByAnnotation]
 			}
-			if s.identity == "" || d.Annotations[v1alpha1.RenderedByAnnotation] != s.identity {
+			if s.identity == "" || d.Annotations[v1beta1.RenderedByAnnotation] != s.identity {
 				panic("dst: rollout setup: a created Deployment carries no renderer")
 			}
 		}
@@ -344,8 +344,8 @@ func (s *rolloutSim) deployment(g *rolloutGroupSim, site string) (*appsv1.Deploy
 	return &d, err
 }
 
-func (s *rolloutSim) group(g *rolloutGroupSim) *v1alpha1.MysqlFailoverGroup {
-	var fg v1alpha1.MysqlFailoverGroup
+func (s *rolloutSim) group(g *rolloutGroupSim) *v1beta1.MysqlFailoverGroup {
+	var fg v1beta1.MysqlFailoverGroup
 	if err := s.reads.Get(context.Background(), g.key, &fg); err != nil {
 		panic(fmt.Sprintf("dst: rollout: get %s: %v", g.key, err))
 	}
@@ -570,7 +570,7 @@ func (s *rolloutSim) groupPass(g *rolloutGroupSim) {
 	if s.isDead() {
 		return
 	}
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := s.api.Get(proc.ctx, g.key, &fg); err != nil {
 		return
 	}
@@ -667,11 +667,11 @@ func (s *rolloutSim) applyOp(op Op, p int) {
 	case OpSiteUp:
 		g.cluster.Recover(op.Site, false, false)
 	case OpRolloutAdmit:
-		s.setAnnotation(g, v1alpha1.RolloutAdmitAnnotation, true)
-		g.annoUntil[v1alpha1.RolloutAdmitAnnotation] = p + op.N
+		s.setAnnotation(g, v1beta1.RolloutAdmitAnnotation, true)
+		g.annoUntil[v1beta1.RolloutAdmitAnnotation] = p + op.N
 	case OpRolloutReleaseSlot:
-		s.setAnnotation(g, v1alpha1.RolloutReleaseSlotAnnotation, true)
-		g.annoUntil[v1alpha1.RolloutReleaseSlotAnnotation] = p + op.N
+		s.setAnnotation(g, v1beta1.RolloutReleaseSlotAnnotation, true)
+		g.annoUntil[v1beta1.RolloutReleaseSlotAnnotation] = p + op.N
 	default:
 		panic(fmt.Sprintf("dst: rollout applyOp unhandled kind %q", op.Kind))
 	}
@@ -696,15 +696,15 @@ func (s *rolloutSim) release(p, down int) {
 				panic(err)
 			}
 			g.everPending = true
-			if d.Annotations[v1alpha1.RenderedByAnnotation] != s.identity {
+			if d.Annotations[v1beta1.RenderedByAnnotation] != s.identity {
 				continue
 			}
-			d.Annotations[v1alpha1.RenderedByAnnotation] = earlier
-			d.Annotations[v1alpha1.SpecHashAnnotation] = earlier + "-hash"
+			d.Annotations[v1beta1.RenderedByAnnotation] = earlier
+			d.Annotations[v1beta1.SpecHashAnnotation] = earlier + "-hash"
 			if d.Spec.Template.Annotations == nil {
 				d.Spec.Template.Annotations = map[string]string{}
 			}
-			d.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation] = earlier + "-hash"
+			d.Spec.Template.Annotations[v1beta1.SpecHashAnnotation] = earlier + "-hash"
 			err = s.under.Update(ctx, d)
 			s.reads.wrote(d.Namespace)
 			if err != nil {
@@ -752,9 +752,9 @@ func (s *rolloutSim) setAnnotation(g *rolloutGroupSim, key string, on bool) {
 	defer s.mu.Unlock()
 	g.dirty = true
 	switch key {
-	case v1alpha1.RolloutAdmitAnnotation:
+	case v1beta1.RolloutAdmitAnnotation:
 		g.admitAnno = on
-	case v1alpha1.RolloutReleaseSlotAnnotation:
+	case v1beta1.RolloutReleaseSlotAnnotation:
 		g.releaseAnno = on
 		if on && fg.Status.Rollout.InFlight() {
 			g.manual = true
@@ -942,7 +942,7 @@ func (s *rolloutSim) write(verb string, obj client.Object, dryRun bool, apply fu
 		return apply()
 	}
 	what := fmt.Sprintf("%s %T", verb, obj)
-	what = strings.NewReplacer("*v1alpha1.", "", "*v1.", "").Replace(what)
+	what = strings.NewReplacer("*v1beta1.", "", "*v1.", "").Replace(what)
 	fatal := false
 	// The reconciler sends deletes of objects that are long gone on every
 	// pass; a death there is a death before the next write that matters,
@@ -1017,12 +1017,12 @@ func (s *rolloutSim) observe(obj client.Object, before client.Object) {
 		old, _ := before.(*appsv1.Deployment)
 		ref.g.dirty = true
 		s.observeDeployment(ref.g, ref.site, old, &now)
-	case *v1alpha1.MysqlFailoverGroup:
+	case *v1beta1.MysqlFailoverGroup:
 		g := s.byName[obj.GetName()]
 		if g == nil {
 			return
 		}
-		var now v1alpha1.MysqlFailoverGroup
+		var now v1beta1.MysqlFailoverGroup
 		if err := s.reads.Get(context.Background(), g.key, &now); err != nil {
 			return
 		}

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestScheduledVerificationKeepsTTLPresence (F-11): the scheduled trigger
@@ -18,8 +18,8 @@ func TestScheduledVerificationKeepsTTLPresence(t *testing.T) {
 		ttl  *int32
 	}{{name: "omitted"}, {name: "zero", ttl: new(int32(0))}, {name: "set", ttl: new(int32(600))}} {
 		t.Run(tc.name, func(t *testing.T) {
-			fg := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{
-				Profiles: []v1alpha1.BackupProfile{{Name: "nightly", Verification: &v1alpha1.VerificationSpec{Enabled: true, TTLSecondsAfterFinished: tc.ttl}}},
+			fg := &v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{Backup: &v1beta1.BackupSpec{
+				Profiles: []v1beta1.BackupProfile{{Name: "nightly", Verification: &v1beta1.VerificationSpec{Enabled: true, TTLSecondsAfterFinished: tc.ttl}}},
 			}}}
 			cr := buildScheduledVerification(fg, "orders", "nightly", "ns")
 			got := cr.Spec.TTLSecondsAfterFinished
@@ -47,11 +47,11 @@ func TestScheduledVerificationKeepsTTLPresence(t *testing.T) {
 // carries the verification-schedule label with the value its CronJob has
 // (the profile name), so the documented selector finds scheduled runs.
 func TestScheduledVerificationCarriesScheduleLabel(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{
-		Profiles: []v1alpha1.BackupProfile{{Name: "nightly", Verification: &v1alpha1.VerificationSpec{Enabled: true}}},
+	fg := &v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{Backup: &v1beta1.BackupSpec{
+		Profiles: []v1beta1.BackupProfile{{Name: "nightly", Verification: &v1beta1.VerificationSpec{Enabled: true}}},
 	}}}
 	cr := buildScheduledVerification(fg, "orders", "nightly", "ns")
-	if got := cr.Labels[v1alpha1.VerificationScheduleLabel]; got != "nightly" {
-		t.Fatalf("%s = %q, want the profile name %q", v1alpha1.VerificationScheduleLabel, got, "nightly")
+	if got := cr.Labels[v1beta1.VerificationScheduleLabel]; got != "nightly" {
+		t.Fatalf("%s = %q, want the profile name %q", v1beta1.VerificationScheduleLabel, got, "nightly")
 	}
 }

@@ -12,23 +12,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
-func waitFixture(marker string, phase v1alpha1.PlannedFailoverPhase) *v1alpha1.MysqlFailoverGroup {
-	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "lion"}}
+func waitFixture(marker string, phase v1beta1.PlannedFailoverPhase) *v1beta1.MysqlFailoverGroup {
+	fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "lion"}}
 	if marker != "" {
-		fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: marker}
+		fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: marker}
 	}
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 4, Phase: phase, TargetSite: "pdx", SourceSite: "iad",
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 4, Phase: phase, TargetSite: "pdx", SourceSite: "iad",
 		StartTime: metav1.Now()}
 	return fg
 }
 
-func waitClient(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) *fake.ClientBuilder {
+func waitClient(t *testing.T, fg *v1beta1.MysqlFailoverGroup) *fake.ClientBuilder {
 	t.Helper()
 	s := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(s); err != nil {
+	if err := v1beta1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	if err := corev1.AddToScheme(s); err != nil {
@@ -54,7 +54,7 @@ func TestWaitForPlannedFailover_HonoursTerminalMarker(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cl := waitClient(t, waitFixture(tc.marker, v1alpha1.PlannedFailoverPhasePromoting)).Build()
+			cl := waitClient(t, waitFixture(tc.marker, v1beta1.PlannedFailoverPhasePromoting)).Build()
 			var out, errOut bytes.Buffer
 			start := time.Now()
 			err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{site: "pdx"})
@@ -76,16 +76,16 @@ func TestWaitForPlannedFailover_HonoursTerminalMarker(t *testing.T) {
 
 // A marker of an earlier run does not end the current one.
 func TestPlannedTerminalMarker_OtherRunIgnored(t *testing.T) {
-	if _, _, ok := plannedTerminalMarker(waitFixture(`{"schemaVersion":1,"runID":"run-0","outcome":"Succeeded"}`, v1alpha1.PlannedFailoverPhasePromoting)); ok {
+	if _, _, ok := plannedTerminalMarker(waitFixture(`{"schemaVersion":1,"runID":"run-0","outcome":"Succeeded"}`, v1beta1.PlannedFailoverPhasePromoting)); ok {
 		t.Fatal("a marker naming another run ended the current one")
 	}
 }
 
 // Succeeded prints the run's warnings, and detailed status shows the marker.
 func TestPlannedFailoverOutput_WarningsAndMarker(t *testing.T) {
-	fg := waitFixture("", v1alpha1.PlannedFailoverPhaseSucceeded)
-	fg.Status.PlannedFailover.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded,
-		CompletionTime: metav1.Now(), Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningDNSUpdateFailed}}
+	fg := waitFixture("", v1beta1.PlannedFailoverPhaseSucceeded)
+	fg.Status.PlannedFailover.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeSucceeded,
+		CompletionTime: metav1.Now(), Warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningDNSUpdateFailed}}
 	cl := waitClient(t, fg).Build()
 	var out, errOut bytes.Buffer
 	if err := waitForPlannedFailover(&out, &errOut, cl, "ns", "lion", 5*time.Second, plannedWaitBaseline{site: "pdx"}); err != nil {
@@ -95,7 +95,7 @@ func TestPlannedFailoverOutput_WarningsAndMarker(t *testing.T) {
 		t.Fatalf("stdout = %q", out.String())
 	}
 	var detail bytes.Buffer
-	printPlannedFailover(&detail, waitFixture(`{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, v1alpha1.PlannedFailoverPhaseDraining))
+	printPlannedFailover(&detail, waitFixture(`{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, v1beta1.PlannedFailoverPhaseDraining))
 	if !strings.Contains(detail.String(), "Ended by terminal marker: SourceLeftFenced:StatusStalled") {
 		t.Fatalf("status detail = %q", detail.String())
 	}

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/pitrplan"
@@ -20,7 +20,7 @@ import (
 
 // mustTopologyConfig is CRConfigToTopologyConfig for fixtures whose roles
 // are valid.
-func mustTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
+func mustTopologyConfig(fg *v1beta1.MysqlFailoverGroup) TopologyConfig {
 	cfg, err := CRConfigToTopologyConfig(fg)
 	if err != nil {
 		panic(err)
@@ -29,9 +29,9 @@ func mustTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 }
 
 // apiModeOf is the API point-in-time mode whose wire value is wire.
-func apiModeOf(t *testing.T, wire string) v1alpha1.PointInTimeMode {
+func apiModeOf(t *testing.T, wire string) v1beta1.PointInTimeMode {
 	t.Helper()
-	for _, m := range []v1alpha1.PointInTimeMode{v1alpha1.PointInTimeModeLatest, v1alpha1.PointInTimeModeTimestamp} {
+	for _, m := range []v1beta1.PointInTimeMode{v1beta1.PointInTimeModeLatest, v1beta1.PointInTimeModeTimestamp} {
 		if w, err := pitrWireMode(m); err == nil && string(w) == wire {
 			return m
 		}
@@ -41,7 +41,7 @@ func apiModeOf(t *testing.T, wire string) v1alpha1.PointInTimeMode {
 }
 
 // wireModeOf is pitrWireMode for a valid mode.
-func wireModeOf(t *testing.T, m v1alpha1.PointInTimeMode) string {
+func wireModeOf(t *testing.T, m v1beta1.PointInTimeMode) string {
 	t.Helper()
 	w, err := pitrWireMode(m)
 	if err != nil {
@@ -51,12 +51,12 @@ func wireModeOf(t *testing.T, m v1alpha1.PointInTimeMode) string {
 }
 
 // apiEnumValues returns the +kubebuilder:validation:Enum values declared on
-// the api/v1alpha1 type typeName: the set the apiserver admits, so a test
+// the api/v1beta1 type typeName: the set the apiserver admits, so a test
 // that ranges over it covers every value a future edit adds.
 func apiEnumValues(t *testing.T, typeName string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	files, err := filepath.Glob(filepath.Join("..", "..", "api", "v1alpha1", "*.go"))
+	files, err := filepath.Glob(filepath.Join("..", "..", "api", "v1beta1", "*.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,12 +80,12 @@ func apiEnumValues(t *testing.T, typeName string) []string {
 							return strings.Split(v, ";")
 						}
 					}
-					t.Fatalf("api/v1alpha1.%s has no Enum marker", typeName)
+					t.Fatalf("api/v1beta1.%s has no Enum marker", typeName)
 				}
 			}
 		}
 	}
-	t.Fatalf("api/v1alpha1.%s not found", typeName)
+	t.Fatalf("api/v1beta1.%s not found", typeName)
 	return nil
 }
 
@@ -94,9 +94,9 @@ var internalSiteStates = []state.SiteState{state.StateUnknown, state.StateWritab
 // Every API role maps to an internal role and back to itself; an unset
 // role is the API default; anything else is refused.
 func TestTopologySiteRoleRoundTrip(t *testing.T) {
-	seen := map[state.SiteRole]v1alpha1.SiteRole{}
+	seen := map[state.SiteRole]v1beta1.SiteRole{}
 	for _, v := range apiEnumValues(t, "SiteRole") {
-		r := v1alpha1.SiteRole(v)
+		r := v1beta1.SiteRole(v)
 		internal, err := topologySiteRole(r)
 		if err != nil {
 			t.Fatalf("%s: %v", r, err)
@@ -112,7 +112,7 @@ func TestTopologySiteRoleRoundTrip(t *testing.T) {
 	if got, err := topologySiteRole(""); err != nil || got != state.SiteRolePrimaryCandidate {
 		t.Errorf("unset role -> %q, %v; want the PrimaryCandidate default", got, err)
 	}
-	for _, bad := range []v1alpha1.SiteRole{"primary-candidate", "dr-only", "read-only", "primarycandidate", "Primary"} {
+	for _, bad := range []v1beta1.SiteRole{"primary-candidate", "dr-only", "read-only", "primarycandidate", "Primary"} {
 		if got, err := topologySiteRole(bad); err == nil {
 			t.Errorf("%q -> %q; want refused", bad, got)
 		}
@@ -138,7 +138,7 @@ func TestCRConfigToTopologyConfigRefusesUnknownRole(t *testing.T) {
 // PrimaryCandidate, because the matrix compares the internal spelling.
 func TestAPIRolesThroughTopologyIntoEvalCrossSite(t *testing.T) {
 	for _, v := range apiEnumValues(t, "SiteRole") {
-		role := v1alpha1.SiteRole(v)
+		role := v1beta1.SiteRole(v)
 		t.Run(v, func(t *testing.T) {
 			fg := newTestFG()
 			third := fg.Spec.Sites[1]
@@ -154,7 +154,7 @@ func TestAPIRolesThroughTopologyIntoEvalCrossSite(t *testing.T) {
 
 			action := state.EvalCrossSite(tm.observations(), cfg.SitePriorities)
 			fenced := slices.Contains(action.FenceSites, "x")
-			if role == v1alpha1.SiteRolePrimaryCandidate {
+			if role == v1beta1.SiteRolePrimaryCandidate {
 				if fenced || action.SplitBrain {
 					t.Fatalf("writable PrimaryCandidate: action = %+v, want it unfenced", action)
 				}
@@ -175,11 +175,11 @@ func TestAPIRolesThroughTopologyIntoEvalCrossSite(t *testing.T) {
 func TestStatusEndpointsServeCRVocabulary(t *testing.T) {
 	states := apiEnumValues(t, "SiteState")
 	for _, v := range apiEnumValues(t, "SiteRole") {
-		role := v1alpha1.SiteRole(v)
+		role := v1beta1.SiteRole(v)
 		for _, st := range internalSiteStates {
 			fg := newTestFG()
 			fg.Spec.Sites[1].Role = role
-			if role == v1alpha1.SiteRolePrimaryCandidate {
+			if role == v1beta1.SiteRolePrimaryCandidate {
 				fg.Spec.Sites[0].Role = role
 			}
 			tm := NewTopologyManager(mustTopologyConfig(fg), []mysql.Checker{&mockMySQL{}, &mockMySQL{}}, NewFailoverController(testLogger()),
@@ -222,7 +222,7 @@ func TestStatusEndpointsServeCRVocabulary(t *testing.T) {
 // admits, and every API value is reached.
 func TestAPISiteStateCoversEveryInternalState(t *testing.T) {
 	enum := apiEnumValues(t, "SiteState")
-	got := map[v1alpha1.SiteState]state.SiteState{}
+	got := map[v1beta1.SiteState]state.SiteState{}
 	for _, s := range internalSiteStates {
 		v := apiSiteState(s)
 		if !slices.Contains(enum, string(v)) {
@@ -259,7 +259,7 @@ func TestAPIDragonflyRoleCoversClassifier(t *testing.T) {
 			t.Errorf("classifier value %q is not in the mapped list", r)
 		}
 	}
-	got := map[v1alpha1.DragonflyRole]dragonfly.SiteRole{}
+	got := map[v1beta1.DragonflyRole]dragonfly.SiteRole{}
 	for _, r := range classifier {
 		v := apiDragonflyRole(r)
 		if !slices.Contains(enum, string(v)) {
@@ -280,7 +280,7 @@ func TestAPIDragonflyRoleCoversClassifier(t *testing.T) {
 func TestPITRWireModeIsExhaustive(t *testing.T) {
 	want := map[string]pitrplan.Mode{"Latest": pitrplan.ModeLatest, "Timestamp": pitrplan.ModeTimestamp}
 	for _, v := range apiEnumValues(t, "PointInTimeMode") {
-		w, err := pitrWireMode(v1alpha1.PointInTimeMode(v))
+		w, err := pitrWireMode(v1beta1.PointInTimeMode(v))
 		if err != nil {
 			t.Fatalf("%s: %v", v, err)
 		}
@@ -288,7 +288,7 @@ func TestPITRWireModeIsExhaustive(t *testing.T) {
 			t.Errorf("%s -> %q, want %q", v, w, want[v])
 		}
 	}
-	for _, bad := range []v1alpha1.PointInTimeMode{"", "none", "latest", "timestamp"} {
+	for _, bad := range []v1beta1.PointInTimeMode{"", "none", "latest", "timestamp"} {
 		if w, err := pitrWireMode(bad); err == nil {
 			t.Errorf("%q -> %q; want refused", bad, w)
 		}

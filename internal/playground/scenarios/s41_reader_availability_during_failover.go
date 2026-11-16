@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -119,7 +119,7 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 			flipCtx, cancelFlip := context.WithTimeout(ctx, 2*time.Minute)
 			_, err := env.Wait.UntilCR(flipCtx, env.Namespace,
 				fmt.Sprintf("activeSite flips %s -> %s", state.topo.active, state.topo.standby),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 					if mfg.Status.ActiveSite == "" || mfg.Status.ActiveSite == state.topo.active {
 						return false, msg, nil
@@ -189,7 +189,7 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 	}
 }
 
-func (s *s41RunState) readerRepointed(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+func (s *s41RunState) readerRepointed(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 	if active := mfg.Status.ActiveSite; active != "" && active != s.topo.standby {
 		return false, "", fmt.Errorf("active site changed again during reader repoint: %q", active)
 	}
@@ -276,10 +276,10 @@ func s41ObserveContinuously(ctx context.Context, env *runner.Env, state *s41RunS
 				observation.fail(fmt.Errorf("continuous observer read MFG: %w", err))
 			}
 		} else if status := statusSiteByName(mfg, state.topo.reader); status != nil {
-			if status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
+			if status.SourceConvergenceState == v1beta1.SourceConvergenceBlocked {
 				observation.fail(fmt.Errorf("reader entered SourceConvergenceState=Blocked (reason=%s) during failover", status.SourceConvergenceReason))
 			}
-			if status.RecoveryState == v1alpha1.RecoveryStateBlocked {
+			if status.RecoveryState == v1beta1.RecoveryStateBlocked {
 				observation.fail(fmt.Errorf("reader entered RecoveryBlocked during failover"))
 			}
 			observation.recordSourceHost(status.SourceHost)

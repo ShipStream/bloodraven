@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 	corev1 "k8s.io/api/core/v1"
@@ -31,22 +31,22 @@ func TestSiteReplicationState(t *testing.T) {
 		repl    *mysql.ReplicaStatus
 		read    bool
 		streak  bool
-		want    v1alpha1.SiteReplicationState
+		want    v1beta1.SiteReplicationState
 		running bool
 	}{
-		{"primary", state.StateWritable, nil, false, false, v1alpha1.SiteReplicationNotApplicable, false},
-		{"primary with a stale streak", state.StateWritable, healthy, true, true, v1alpha1.SiteReplicationNotApplicable, false},
-		{"not probed yet", state.StateUnknown, nil, false, false, v1alpha1.SiteReplicationUnknown, false},
-		{"unreachable", state.StateUnreachable, nil, false, true, v1alpha1.SiteReplicationUnknown, false},
-		{"read failed", state.StateReadOnly, nil, false, true, v1alpha1.SiteReplicationUnknown, false},
-		{"streak building", state.StateReadOnly, healthy, true, false, v1alpha1.SiteReplicationUnknown, false},
-		{"healthy, lag unknown", state.StateReadOnly, healthy, true, true, v1alpha1.SiteReplicationHealthy, true},
-		{"healthy at the threshold", state.StateReadOnly, lag(*healthy, 60), true, true, v1alpha1.SiteReplicationHealthy, true},
-		{"lagging above the threshold", state.StateReadOnly, lag(*healthy, 61), true, true, v1alpha1.SiteReplicationLagging, true},
-		{"no source configured", state.StateReadOnly, nil, true, false, v1alpha1.SiteReplicationBroken, false},
-		{"IO thread stopped", state.StateReadOnly, &mysql.ReplicaStatus{SQLRunning: true, SourceHost: "dc1"}, true, false, v1alpha1.SiteReplicationBroken, false},
-		{"SQL thread stopped", state.StateReadOnly, &mysql.ReplicaStatus{IORunning: true, SourceHost: "dc1"}, true, false, v1alpha1.SiteReplicationBroken, false},
-		{"no source host", state.StateReadOnly, &mysql.ReplicaStatus{IORunning: true, SQLRunning: true}, true, false, v1alpha1.SiteReplicationBroken, false},
+		{"primary", state.StateWritable, nil, false, false, v1beta1.SiteReplicationNotApplicable, false},
+		{"primary with a stale streak", state.StateWritable, healthy, true, true, v1beta1.SiteReplicationNotApplicable, false},
+		{"not probed yet", state.StateUnknown, nil, false, false, v1beta1.SiteReplicationUnknown, false},
+		{"unreachable", state.StateUnreachable, nil, false, true, v1beta1.SiteReplicationUnknown, false},
+		{"read failed", state.StateReadOnly, nil, false, true, v1beta1.SiteReplicationUnknown, false},
+		{"streak building", state.StateReadOnly, healthy, true, false, v1beta1.SiteReplicationUnknown, false},
+		{"healthy, lag unknown", state.StateReadOnly, healthy, true, true, v1beta1.SiteReplicationHealthy, true},
+		{"healthy at the threshold", state.StateReadOnly, lag(*healthy, 60), true, true, v1beta1.SiteReplicationHealthy, true},
+		{"lagging above the threshold", state.StateReadOnly, lag(*healthy, 61), true, true, v1beta1.SiteReplicationLagging, true},
+		{"no source configured", state.StateReadOnly, nil, true, false, v1beta1.SiteReplicationBroken, false},
+		{"IO thread stopped", state.StateReadOnly, &mysql.ReplicaStatus{SQLRunning: true, SourceHost: "dc1"}, true, false, v1beta1.SiteReplicationBroken, false},
+		{"SQL thread stopped", state.StateReadOnly, &mysql.ReplicaStatus{IORunning: true, SourceHost: "dc1"}, true, false, v1beta1.SiteReplicationBroken, false},
+		{"no source host", state.StateReadOnly, &mysql.ReplicaStatus{IORunning: true, SQLRunning: true}, true, false, v1beta1.SiteReplicationBroken, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := siteReplicationState(tc.st, tc.repl, tc.read, tc.streak, 60)
@@ -102,14 +102,14 @@ func TestPoll_PublishesReplicationState(t *testing.T) {
 		defer mu.Unlock()
 		snaps = append(snaps, s)
 	}
-	published := func() (v1alpha1.SiteReplicationState, v1alpha1.SiteReplicationState, int) {
+	published := func() (v1beta1.SiteReplicationState, v1beta1.SiteReplicationState, int) {
 		t.Helper()
 		mu.Lock()
 		defer mu.Unlock()
 		if len(snaps) == 0 {
 			t.Fatal("no status published")
 		}
-		var st v1alpha1.MysqlFailoverGroupStatus
+		var st v1beta1.MysqlFailoverGroupStatus
 		snap := snaps[len(snaps)-1]
 		if !MergeTopologySnapshotStatus(&st, snap) {
 			t.Fatal("snapshot not merged")
@@ -125,7 +125,7 @@ func TestPoll_PublishesReplicationState(t *testing.T) {
 		site1.startReplicaErr = errors.New("START REPLICA refused")
 		site1.mu.Unlock()
 	}
-	tracked := func() v1alpha1.SiteReplicationState {
+	tracked := func() v1beta1.SiteReplicationState {
 		tm.mu.RLock()
 		defer tm.mu.RUnlock()
 		return tm.sites[1].replicationState
@@ -133,14 +133,14 @@ func TestPoll_PublishesReplicationState(t *testing.T) {
 
 	// Classification takes RecoveryThreshold polls; the first read-only
 	// poll has a streak of one.
-	for i := 0; i < 6 && tracked() != v1alpha1.SiteReplicationUnknown; i++ {
+	for i := 0; i < 6 && tracked() != v1beta1.SiteReplicationUnknown; i++ {
 		pollN(tm, 1)
-		if tm.sites[1].state == state.StateReadOnly && tracked() == v1alpha1.SiteReplicationHealthy {
+		if tm.sites[1].state == state.StateReadOnly && tracked() == v1beta1.SiteReplicationHealthy {
 			t.Fatal("Healthy before the healthy streak reached its threshold")
 		}
 	}
 	pollN(tm, 4)
-	if p, r, _ := published(); p != v1alpha1.SiteReplicationNotApplicable || r != v1alpha1.SiteReplicationHealthy {
+	if p, r, _ := published(); p != v1beta1.SiteReplicationNotApplicable || r != v1beta1.SiteReplicationHealthy {
 		t.Fatalf("after a healthy streak: primary=%s replica=%s", p, r)
 	}
 
@@ -148,15 +148,15 @@ func TestPoll_PublishesReplicationState(t *testing.T) {
 		name string
 		rs   *mysql.ReplicaStatus
 		err  error
-		want v1alpha1.SiteReplicationState
+		want v1beta1.SiteReplicationState
 	}{
-		{"lag above the threshold", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1", SecondsBehindSource: new(int64(61))}, nil, v1alpha1.SiteReplicationLagging},
-		{"caught up again", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1", SecondsBehindSource: new(int64(1))}, nil, v1alpha1.SiteReplicationHealthy},
-		{"SQL thread stopped", &mysql.ReplicaStatus{IORunning: true, SourceHost: "mysql-dc1"}, nil, v1alpha1.SiteReplicationBroken},
-		{"replica status unreadable", nil, context.DeadlineExceeded, v1alpha1.SiteReplicationUnknown},
-		{"no source configured", nil, nil, v1alpha1.SiteReplicationBroken},
-		{"healthy again: streak rebuilding", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}, nil, v1alpha1.SiteReplicationUnknown},
-		{"streak complete", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}, nil, v1alpha1.SiteReplicationHealthy},
+		{"lag above the threshold", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1", SecondsBehindSource: new(int64(61))}, nil, v1beta1.SiteReplicationLagging},
+		{"caught up again", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1", SecondsBehindSource: new(int64(1))}, nil, v1beta1.SiteReplicationHealthy},
+		{"SQL thread stopped", &mysql.ReplicaStatus{IORunning: true, SourceHost: "mysql-dc1"}, nil, v1beta1.SiteReplicationBroken},
+		{"replica status unreadable", nil, context.DeadlineExceeded, v1beta1.SiteReplicationUnknown},
+		{"no source configured", nil, nil, v1beta1.SiteReplicationBroken},
+		{"healthy again: streak rebuilding", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}, nil, v1beta1.SiteReplicationUnknown},
+		{"streak complete", &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}, nil, v1beta1.SiteReplicationHealthy},
 	}
 	for _, s := range steps {
 		_, _, before := published()
@@ -183,8 +183,8 @@ func TestEmitStatusSnapshot_FailedReadIsUnknown(t *testing.T) {
 	var last TopologySnapshot
 	tm.StatusCallback = func(s TopologySnapshot) { last = s }
 	pollN(tm, 8)
-	var st v1alpha1.MysqlFailoverGroupStatus
-	if !MergeTopologySnapshotStatus(&st, last) || st.Sites[1].Replication != v1alpha1.SiteReplicationHealthy {
+	var st v1beta1.MysqlFailoverGroupStatus
+	if !MergeTopologySnapshotStatus(&st, last) || st.Sites[1].Replication != v1beta1.SiteReplicationHealthy {
 		t.Fatalf("setup: replica replication %s, want Healthy", st.Sites[1].Replication)
 	}
 
@@ -192,11 +192,11 @@ func TestEmitStatusSnapshot_FailedReadIsUnknown(t *testing.T) {
 	site1.replicaStatusVal, site1.replicaStatusErr = nil, context.DeadlineExceeded
 	site1.mu.Unlock()
 	tm.emitStatusSnapshot()
-	st = v1alpha1.MysqlFailoverGroupStatus{}
+	st = v1beta1.MysqlFailoverGroupStatus{}
 	if !MergeTopologySnapshotStatus(&st, last) {
 		t.Fatal("snapshot not merged")
 	}
-	if got := st.Sites[1].Replication; got != v1alpha1.SiteReplicationUnknown {
+	if got := st.Sites[1].Replication; got != v1beta1.SiteReplicationUnknown {
 		t.Fatalf("a failed out-of-band read published %s, want Unknown", got)
 	}
 
@@ -205,9 +205,9 @@ func TestEmitStatusSnapshot_FailedReadIsUnknown(t *testing.T) {
 	site1.replicaStatusErr = nil
 	site1.mu.Unlock()
 	tm.emitStatusSnapshot()
-	st = v1alpha1.MysqlFailoverGroupStatus{}
+	st = v1beta1.MysqlFailoverGroupStatus{}
 	MergeTopologySnapshotStatus(&st, last)
-	if got := st.Sites[1].Replication; got != v1alpha1.SiteReplicationBroken {
+	if got := st.Sites[1].Replication; got != v1beta1.SiteReplicationBroken {
 		t.Fatalf("a read with no source published %s, want Broken", got)
 	}
 }
@@ -242,12 +242,12 @@ func TestWSStatusCarriesCRShapes(t *testing.T) {
 	// Threads run, but the streak has not built: the per-poll flag would
 	// have said true, the CR value says Unknown.
 	m := decode()
-	if got := site(m, 1)["replication"]; got != string(v1alpha1.SiteReplicationUnknown) {
+	if got := site(m, 1)["replication"]; got != string(v1beta1.SiteReplicationUnknown) {
 		t.Fatalf("replica replication before the streak = %v, want Unknown", got)
 	}
 	pollN(tm, 4)
 	m = decode()
-	for i, want := range []v1alpha1.SiteReplicationState{v1alpha1.SiteReplicationNotApplicable, v1alpha1.SiteReplicationHealthy} {
+	for i, want := range []v1beta1.SiteReplicationState{v1beta1.SiteReplicationNotApplicable, v1beta1.SiteReplicationHealthy} {
 		s := site(m, i)
 		if s["replication"] != string(want) {
 			t.Errorf("site %d replication = %v, want %s", i, s["replication"], want)
@@ -288,19 +288,19 @@ func TestWSStatusCarriesCRShapes(t *testing.T) {
 func TestBackupSourceSelection_AcceptsLaggingReplica(t *testing.T) {
 	lag := int64(120) // over maxLagSeconds, within maxLagSecondsForSource
 	for _, tc := range []struct {
-		repl v1alpha1.SiteReplicationState
+		repl v1beta1.SiteReplicationState
 		want string
 	}{
-		{v1alpha1.SiteReplicationHealthy, "pdx"},
-		{v1alpha1.SiteReplicationLagging, "pdx"},
-		{v1alpha1.SiteReplicationUnknown, "iad"},
-		{v1alpha1.SiteReplicationBroken, "iad"},
+		{v1beta1.SiteReplicationHealthy, "pdx"},
+		{v1beta1.SiteReplicationLagging, "pdx"},
+		{v1beta1.SiteReplicationUnknown, "iad"},
+		{v1beta1.SiteReplicationBroken, "iad"},
 	} {
-		status := &v1alpha1.MysqlFailoverGroupStatus{
+		status := &v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: tc.repl, SecondsBehindSource: &lag},
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable, Replication: v1beta1.SiteReplicationNotApplicable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: tc.repl, SecondsBehindSource: &lag},
 			},
 		}
 		site, _, err := selectSourceSite(backupTestGroup(status), "", 300)
@@ -312,13 +312,13 @@ func TestBackupSourceSelection_AcceptsLaggingReplica(t *testing.T) {
 
 func TestPlannedFailoverTarget_AcceptsLaggingTarget(t *testing.T) {
 	for _, tc := range []struct {
-		repl   v1alpha1.SiteReplicationState
+		repl   v1beta1.SiteReplicationState
 		accept bool
 	}{
-		{v1alpha1.SiteReplicationHealthy, true},
-		{v1alpha1.SiteReplicationLagging, true},
-		{v1alpha1.SiteReplicationUnknown, false},
-		{v1alpha1.SiteReplicationBroken, false},
+		{v1beta1.SiteReplicationHealthy, true},
+		{v1beta1.SiteReplicationLagging, true},
+		{v1beta1.SiteReplicationUnknown, false},
+		{v1beta1.SiteReplicationBroken, false},
 	} {
 		fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 		for i := range fg.Status.Sites {
@@ -336,26 +336,26 @@ func TestPlannedFailoverTarget_AcceptsLaggingTarget(t *testing.T) {
 func TestReaderHealthyLabel_AcceptsLaggingReader(t *testing.T) {
 	lag0 := int64(0)
 	for _, tc := range []struct {
-		repl v1alpha1.SiteReplicationState
+		repl v1beta1.SiteReplicationState
 		yes  bool
 	}{
-		{v1alpha1.SiteReplicationHealthy, true},
-		{v1alpha1.SiteReplicationLagging, true},
-		{v1alpha1.SiteReplicationUnknown, false},
-		{v1alpha1.SiteReplicationBroken, false},
+		{v1beta1.SiteReplicationHealthy, true},
+		{v1beta1.SiteReplicationLagging, true},
+		{v1beta1.SiteReplicationUnknown, false},
+		{v1beta1.SiteReplicationBroken, false},
 	} {
 		t.Run(string(tc.repl), func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
+			fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly})
 			fg.Status.ActiveSite = "dc1"
-			fg.Status.Sites = []v1alpha1.SiteStatus{
-				{Name: "dc1", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
-				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
-				{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: tc.repl, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local",
-					SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
+			fg.Status.Sites = []v1beta1.SiteStatus{
+				{Name: "dc1", State: v1beta1.SiteStateWritable, Replication: v1beta1.SiteReplicationNotApplicable},
+				{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
+				{Name: "reader", State: v1beta1.SiteStateReadOnly, Replication: tc.repl, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local",
+					SourceConvergenceState: v1beta1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 			}
 			readerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "reader", v1alpha1.RoleLabel: "replica",
+				labelAppName: "mysql", labelInstance: fg.Name, v1beta1.SiteLabel: "reader", v1beta1.RoleLabel: "replica",
 			}}}
 			r, c := newReconciler(fg, readerPod)
 			if err := r.syncPodLabels(context.Background(), fg); err != nil {
@@ -365,8 +365,8 @@ func TestReaderHealthyLabel_AcceptsLaggingReader(t *testing.T) {
 			if err := c.Get(context.Background(), types.NamespacedName{Name: readerPod.Name, Namespace: fg.Namespace}, &got); err != nil {
 				t.Fatal(err)
 			}
-			if (got.Labels[v1alpha1.HealthyLabel] == v1alpha1.LabelValueTrue) != tc.yes {
-				t.Fatalf("healthy label %q, want yes=%t", got.Labels[v1alpha1.HealthyLabel], tc.yes)
+			if (got.Labels[v1beta1.HealthyLabel] == v1beta1.LabelValueTrue) != tc.yes {
+				t.Fatalf("healthy label %q, want yes=%t", got.Labels[v1beta1.HealthyLabel], tc.yes)
 			}
 		})
 	}
@@ -376,15 +376,15 @@ func TestReaderHealthyLabel_AcceptsLaggingReader(t *testing.T) {
 // replication is Healthy or Lagging, as it refused replicating=false.
 func TestDeploymentUnstableReason_ReplicationEnum(t *testing.T) {
 	for _, tc := range []struct {
-		repl v1alpha1.SiteReplicationState
+		repl v1beta1.SiteReplicationState
 		want string
 	}{
-		{v1alpha1.SiteReplicationHealthy, ""},
-		{v1alpha1.SiteReplicationLagging, ""},
-		{v1alpha1.SiteReplicationUnknown, v1alpha1.UnstableReasonReplicationNotRunning},
-		{v1alpha1.SiteReplicationBroken, v1alpha1.UnstableReasonReplicationNotRunning},
-		{v1alpha1.SiteReplicationNotApplicable, v1alpha1.UnstableReasonReplicationNotRunning},
-		{"", v1alpha1.UnstableReasonReplicationNotRunning},
+		{v1beta1.SiteReplicationHealthy, ""},
+		{v1beta1.SiteReplicationLagging, ""},
+		{v1beta1.SiteReplicationUnknown, v1beta1.UnstableReasonReplicationNotRunning},
+		{v1beta1.SiteReplicationBroken, v1beta1.UnstableReasonReplicationNotRunning},
+		{v1beta1.SiteReplicationNotApplicable, v1beta1.UnstableReasonReplicationNotRunning},
+		{"", v1beta1.UnstableReasonReplicationNotRunning},
 	} {
 		_, fg, _ := deploymentLeaseFixture(t)
 		if got := DeploymentUnstableReason(fg); got != "" {

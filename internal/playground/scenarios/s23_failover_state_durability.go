@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -102,7 +102,7 @@ func s23ObserveFailoverComplete() runner.Step {
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"activeSite flipped AND status/annotation failover records stamped",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					hasTarget := mfg.Status.LastFailoverTarget() != ""
 					hasStamp := mfg.Status.LastFailoverTime() != nil && !mfg.Status.LastFailoverTime().IsZero()
 					oob, oobErr := brcontroller.FailoverRecordFromAnnotations(mfg.GetAnnotations())

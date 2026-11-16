@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -29,7 +29,7 @@ func TestFailoverStateRecorder_ConditionedNoOverwrite(t *testing.T) {
 	rec := NewAnnotationFailoverStateRecorderWithClock(c, c, nn, clock.NewFakeClock(t1))
 	read := func() FailoverRecord {
 		t.Helper()
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &got); err != nil {
 			t.Fatal(err)
 		}
@@ -96,10 +96,10 @@ func TestRestore_WatermarkFromNewerOOBRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := newTestFG()
 			fg.Status.SetLastFailover(&older, "dc1", opsUUIDA+":1-10")
-			fg.Annotations = map[string]string{v1alpha1.LastFailoverAnnotation: failoverStampFormat(newer), v1alpha1.LastFailoverTargetAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1beta1.LastFailoverAnnotation: failoverStampFormat(newer), v1beta1.LastFailoverTargetAnnotation: "dc2"}
 			if tc.oobWater != "" {
-				fg.Annotations[v1alpha1.PromotionGtidExecutedAnnotation] = tc.oobWater
-				fg.Annotations[v1alpha1.PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(newer, "dc2")
+				fg.Annotations[v1beta1.PromotionGtidExecutedAnnotation] = tc.oobWater
+				fg.Annotations[v1beta1.PromotionGtidExecutedForAnnotation] = failoverWatermarkBinding(newer, "dc2")
 			}
 			tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{readOnly: true})
 			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg).Build()
@@ -138,7 +138,7 @@ func TestUpdateCRStatus_TrackingTripleMonotonic(t *testing.T) {
 			fg := newTestFG()
 			at := metav1.NewTime(stored)
 			fg.Status.SetLastFailover(&at, "dc2", "stored")
-			c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+			c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 			r := &TopologyManagerRunner{client: c, logger: testLogger(), recorder: record.NewFakeRecorder(32),
 				managers: make(map[types.NamespacedName]*managedTopology)}
 			nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
@@ -146,7 +146,7 @@ func TestUpdateCRStatus_TrackingTripleMonotonic(t *testing.T) {
 			if err := r.updateCRStatus(context.Background(), nn, snap); err != nil {
 				t.Fatal(err)
 			}
-			var got v1alpha1.MysqlFailoverGroup
+			var got v1beta1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &got); err != nil {
 				t.Fatal(err)
 			}
@@ -162,10 +162,10 @@ func TestUpdateCRStatus_TrackingTripleMonotonic(t *testing.T) {
 // upgradeDuringEmergency is a snapshot upgrade in phase retaining dc1,
 // started at start, with MySQL's durable record saying it failed over to
 // dc2 at failedAt.
-func upgradeDuringEmergency(phase v1alpha1.DragonflyUpgradePhase, start, failedAt time.Time) *v1alpha1.MysqlFailoverGroup {
+func upgradeDuringEmergency(phase v1beta1.DragonflyUpgradePhase, start, failedAt time.Time) *v1beta1.MysqlFailoverGroup {
 	fg := fgWithDragonflySnapshotUpgrade()
 	st := metav1.NewTime(start)
-	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{Phase: phase, ActiveSite: "dc1",
+	fg.Status.Dragonfly.Upgrade = &v1beta1.DragonflyUpgradeStatus{Phase: phase, ActiveSite: "dc1",
 		TargetImage: fg.Spec.Dragonfly.Image, SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, StartTime: &st}
 	if !failedAt.IsZero() {
 		at := metav1.NewTime(failedAt)
@@ -180,14 +180,14 @@ func upgradeDuringEmergency(phase v1alpha1.DragonflyUpgradePhase, start, failedA
 // durable failover record when the manager was restarted in between (its
 // in-memory authority is gone), and nothing is sent to Dragonfly.
 func TestDragonflyUpgrade_EmergencyDuringSavingSnapshot(t *testing.T) {
-	testDragonflyUpgradeEmergency(t, v1alpha1.DragonflyUpgradePhaseSavingSnapshot)
+	testDragonflyUpgradeEmergency(t, v1beta1.DragonflyUpgradePhaseSavingSnapshot)
 }
 
 func TestDragonflyUpgrade_EmergencyDuringReattachingReplicas(t *testing.T) {
-	testDragonflyUpgradeEmergency(t, v1alpha1.DragonflyUpgradePhaseReattachingReplicas)
+	testDragonflyUpgradeEmergency(t, v1beta1.DragonflyUpgradePhaseReattachingReplicas)
 }
 
-func testDragonflyUpgradeEmergency(t *testing.T, phase v1alpha1.DragonflyUpgradePhase) {
+func testDragonflyUpgradeEmergency(t *testing.T, phase v1beta1.DragonflyUpgradePhase) {
 	start := time.Now().Add(-time.Minute).Truncate(time.Second)
 	t.Run("manager restarted: from the durable record", func(t *testing.T) {
 		fg := upgradeDuringEmergency(phase, start, start.Add(10*time.Second))
@@ -202,7 +202,7 @@ func testDragonflyUpgradeEmergency(t *testing.T, phase v1alpha1.DragonflyUpgrade
 			t.Fatal(err)
 		}
 		got := getFGByKey(t, c, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
-		if up := got.Status.Dragonfly.Upgrade; up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != "ActiveSiteChanged" {
+		if up := got.Status.Dragonfly.Upgrade; up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != "ActiveSiteChanged" {
 			t.Fatalf("upgrade = %s/%s, want Failed/ActiveSiteChanged", up.Phase, up.Reason)
 		}
 		if dials != 0 {
@@ -235,7 +235,7 @@ func testDragonflyUpgradeEmergency(t *testing.T, phase v1alpha1.DragonflyUpgrade
 		if _, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), fg); err != nil {
 			t.Fatal(err)
 		}
-		if up := getFGByKey(t, c, nn).Status.Dragonfly.Upgrade; up.Phase != v1alpha1.DragonflyUpgradePhaseFailed {
+		if up := getFGByKey(t, c, nn).Status.Dragonfly.Upgrade; up.Phase != v1beta1.DragonflyUpgradePhaseFailed {
 			t.Fatalf("upgrade phase = %s, want Failed", up.Phase)
 		}
 		req := df.peekPending()

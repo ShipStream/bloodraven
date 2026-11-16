@@ -8,7 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -16,17 +16,17 @@ func TestRotationBlockedSites(t *testing.T) {
 	if got := rotationBlockedSites(nil); got != nil {
 		t.Fatalf("nil fg = %v, want nil", got)
 	}
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			EncryptionAtRest: &v1alpha1.EncryptionAtRestSpec{Enabled: true},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			EncryptionAtRest: &v1beta1.EncryptionAtRestSpec{Enabled: true},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
-			EncryptionAtRest: &v1alpha1.EncryptionAtRestStatus{
-				Sites: []v1alpha1.SiteEncryptionStatus{
-					{Name: "pdx", UnsealReason: v1alpha1.UnsealReasonRotation},
-					{Name: "iad", UnsealReason: v1alpha1.UnsealReasonClone},
-					{Name: "fra", UnsealReason: v1alpha1.UnsealReasonRotation},
+		Status: v1beta1.MysqlFailoverGroupStatus{
+			EncryptionAtRest: &v1beta1.EncryptionAtRestStatus{
+				Sites: []v1beta1.SiteEncryptionStatus{
+					{Name: "pdx", UnsealReason: v1beta1.UnsealReasonRotation},
+					{Name: "iad", UnsealReason: v1beta1.UnsealReasonClone},
+					{Name: "fra", UnsealReason: v1beta1.UnsealReasonRotation},
 				},
 			},
 		},
@@ -119,7 +119,7 @@ func TestHandoffBlockErr(t *testing.T) {
 		{"eligible", handoffBlock{}, ""},
 		{"rotation", handoffBlock{rotation: true}, "UnsealReason=Rotation"},
 		{"reclone", handoffBlock{reclonePending: true}, "pending post-restore reclone"},
-		{"divergent", handoffBlock{divergence: siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentCount: 3}}, "3 transactions the primary lacks"},
+		{"divergent", handoffBlock{divergence: siteRecovery{state: v1beta1.RecoveryStateBlocked, divergentCount: 3}}, "3 transactions the primary lacks"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.block.err("iad")

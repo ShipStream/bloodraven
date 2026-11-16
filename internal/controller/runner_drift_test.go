@@ -16,13 +16,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // driftFixture is a group with its digest key and one Deployment per site
 // that carries the hash (and pitr-render annotation) of render.
-func driftFixture(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, annotate bool) []client.Object {
+func driftFixture(t *testing.T, fg *v1beta1.MysqlFailoverGroup, annotate bool) []client.Object {
 	t.Helper()
 	key := bytes.Repeat([]byte{1}, digestKeyBytes)
 	objs := []client.Object{
@@ -31,9 +31,9 @@ func driftFixture(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, annotate bool) 
 	}
 	render := testPITRRender(fg)
 	for _, site := range fg.Spec.Sites {
-		ann := map[string]string{v1alpha1.SpecHashAnnotation: ComputeSpecHash(fg, site, secretContentDigest(key, map[string]map[string][]byte{}), render)}
+		ann := map[string]string{v1beta1.SpecHashAnnotation: ComputeSpecHash(fg, site, secretContentDigest(key, map[string]map[string][]byte{}), render)}
 		if annotate {
-			ann[v1alpha1.PITRRenderAnnotation] = render.Canonical()
+			ann[v1beta1.PITRRenderAnnotation] = render.Canonical()
 		}
 		objs = append(objs, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 			Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace,
@@ -52,7 +52,7 @@ func TestCheckSpecDriftConfirmsUncached(t *testing.T) {
 	stale := fresh.DeepCopy()
 	stale.Spec.Image = "mysql:9.6" // the cached copy predates the image change
 	objs := driftFixture(t, fresh, true)
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).Build()
 
 	cachedOnly := &TopologyManagerRunner{client: c, logger: testLogger()}
 	tm := &TopologyManager{}
@@ -69,7 +69,7 @@ func TestCheckSpecDriftConfirmsUncached(t *testing.T) {
 	}
 
 	// Real drift (an image change) survives the confirm.
-	var g v1alpha1.MysqlFailoverGroup
+	var g v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, client.ObjectKeyFromObject(fresh), &g); err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +110,8 @@ func TestCheckSpecDriftFailedConfirmKeepsSet(t *testing.T) {
 func TestCheckSpecDriftSkipsDeferredSites(t *testing.T) {
 	ctx := context.Background()
 	fg := pitrRolloutFG(false)
-	fg.Status.PITRArchiveBindings[0].State = v1alpha1.PITRArchiveBindingPending
-	fg.Status.PITRArchiveBindings[0].Reason = v1alpha1.PITRArchiveBindingReasonAuthenticating
+	fg.Status.PITRArchiveBindings[0].State = v1beta1.PITRArchiveBindingPending
+	fg.Status.PITRArchiveBindings[0].Reason = v1beta1.PITRArchiveBindingReasonAuthenticating
 	objs := driftFixture(t, fg, false)
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).Build()
 	if _, action := resolvePITRRender(fg, deploymentsOf(objs)); action != pitrRenderDefer {
@@ -144,21 +144,21 @@ func TestRunnerStatusPreservesPITRBindings(t *testing.T) {
 	ctx := context.Background()
 	fg := pitrRolloutFG(false)
 	fg.Status.ActiveSite = "dc1"
-	setCondition(&fg.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionPITRArchiveBindingReady, Status: metav1.ConditionTrue, Reason: string(v1alpha1.PITRArchiveBindingReasonBound), Message: "bound"})
+	setCondition(&fg.Status.Conditions, metav1.Condition{Type: v1beta1.ConditionPITRArchiveBindingReady, Status: metav1.ConditionTrue, Reason: string(v1beta1.PITRArchiveBindingReasonBound), Message: "bound"})
 	want := fg.Status.PITRArchiveBindings[0]
 	gets := 0
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg.DeepCopy()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg.DeepCopy()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if err := c.Get(ctx, key, obj, opts...); err != nil {
 					return err
 				}
-				if g, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+				if g, ok := obj.(*v1beta1.MysqlFailoverGroup); ok {
 					gets++
 					if gets == 1 {
 						// The first read is the stale copy: no binding, no condition.
 						g.Status.PITRArchiveBindings = nil
-						removeCondition(&g.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady)
+						removeCondition(&g.Status.Conditions, v1beta1.ConditionPITRArchiveBindingReady)
 					}
 				}
 				return nil
@@ -170,14 +170,14 @@ func TestRunnerStatusPreservesPITRBindings(t *testing.T) {
 	if err := r.updateCRStatus(ctx, nn, snap); err != nil {
 		t.Fatal(err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &got); err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Status.PITRArchiveBindings) != 1 || got.Status.PITRArchiveBindings[0].ID != want.ID || got.Status.PITRArchiveBindings[0].State != want.State {
 		t.Fatalf("bindings after the runner's write = %+v, want %+v", got.Status.PITRArchiveBindings, want)
 	}
-	if c := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionPITRArchiveBindingReady); c == nil || c.Message != "bound" {
+	if c := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionPITRArchiveBindingReady); c == nil || c.Message != "bound" {
 		t.Fatalf("binding condition after the runner's write = %+v", c)
 	}
 }
@@ -192,23 +192,23 @@ func TestUpdateCRStatusKeepsTheLiveRolloutRecord(t *testing.T) {
 	fg := pitrRolloutFG(false)
 	fg.Status.ActiveSite = "dc1"
 	started := metav1.Now()
-	fg.Status.Rollout = &v1alpha1.RolloutStatus{
-		Renderer: rendererIdentity(), Phase: v1alpha1.RolloutPhaseRolling, Reason: rolloutReasonStarted,
+	fg.Status.Rollout = &v1beta1.RolloutStatus{
+		Renderer: rendererIdentity(), Phase: v1beta1.RolloutPhaseRolling, Reason: rolloutReasonStarted,
 		AdmittedTime: &started, StartedTime: &started,
 	}
 	gets := 0
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg.DeepCopy()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg.DeepCopy()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if err := c.Get(ctx, key, obj, opts...); err != nil {
 					return err
 				}
-				if g, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+				if g, ok := obj.(*v1beta1.MysqlFailoverGroup); ok {
 					gets++
 					if gets == 1 {
 						// The first read is the stale copy: admitted, not latched.
 						g.Status.Rollout.StartedTime = nil
-						g.Status.Rollout.Phase = v1alpha1.RolloutPhaseAdmitted
+						g.Status.Rollout.Phase = v1beta1.RolloutPhaseAdmitted
 					}
 				}
 				return nil
@@ -223,11 +223,11 @@ func TestUpdateCRStatusKeepsTheLiveRolloutRecord(t *testing.T) {
 	if gets < 2 {
 		t.Fatalf("the stale read was not staged (%d reads)", gets)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Rollout == nil || got.Status.Rollout.StartedTime == nil || got.Status.Rollout.Phase != v1alpha1.RolloutPhaseRolling {
+	if got.Status.Rollout == nil || got.Status.Rollout.StartedTime == nil || got.Status.Rollout.Phase != v1beta1.RolloutPhaseRolling {
 		t.Fatalf("status.rollout = %+v, want the live record with its start latch", got.Status.Rollout)
 	}
 }

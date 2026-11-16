@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -26,11 +26,11 @@ import (
 // parseHoldMarker's fail-closed fallback is kept (a ManualRecoveryRequired
 // marker still holds); a known or malformed marker is not reported here.
 func TestTerminalMarkerVersionProblem(t *testing.T) {
-	fgWith := func(v string) *v1alpha1.MysqlFailoverGroup {
-		return &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "lion",
-			Annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: v}}}
+	fgWith := func(v string) *v1beta1.MysqlFailoverGroup {
+		return &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "lion",
+			Annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: v}}}
 	}
-	known := TerminalMarker{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack}.String()
+	known := TerminalMarker{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeRolledBack}.String()
 	for _, tc := range []struct {
 		name, value, want string
 		holds             bool
@@ -80,43 +80,43 @@ func TestGroupRefusal_DegradedAndOneEvent(t *testing.T) {
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 		},
-		DegradedReason: v1alpha1.ReasonHealthy,
+		DegradedReason: v1beta1.ReasonHealthy,
 	}
 	degraded := func(s TopologySnapshot) *metav1.Condition {
 		t.Helper()
 		if err := runner.updateCRStatus(ctx, nn, s); err != nil {
 			t.Fatal(err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
-		return apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionDegraded)
+		return apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionDegraded)
 	}
 	msg := "annotation x has schemaVersion 2"
-	runner.SetGroupRefusal(fg, terminalMarkerRefusalKey, v1alpha1.ReasonMetadataVersionUnsupported, msg)
-	runner.SetGroupRefusal(fg, terminalMarkerRefusalKey, v1alpha1.ReasonMetadataVersionUnsupported, msg)
-	if ev := drainEventReasons(rec); len(ev) != 1 || ev[0] != v1alpha1.EventMetadataVersionUnsupported {
-		t.Fatalf("Events = %v, want one %s", ev, v1alpha1.EventMetadataVersionUnsupported)
+	runner.SetGroupRefusal(fg, terminalMarkerRefusalKey, v1beta1.ReasonMetadataVersionUnsupported, msg)
+	runner.SetGroupRefusal(fg, terminalMarkerRefusalKey, v1beta1.ReasonMetadataVersionUnsupported, msg)
+	if ev := drainEventReasons(rec); len(ev) != 1 || ev[0] != v1beta1.EventMetadataVersionUnsupported {
+		t.Fatalf("Events = %v, want one %s", ev, v1beta1.EventMetadataVersionUnsupported)
 	}
-	if d := degraded(snap); d == nil || d.Status != metav1.ConditionTrue || d.Reason != v1alpha1.ReasonMetadataVersionUnsupported || d.Message != msg {
+	if d := degraded(snap); d == nil || d.Status != metav1.ConditionTrue || d.Reason != v1beta1.ReasonMetadataVersionUnsupported || d.Message != msg {
 		t.Fatalf("Degraded = %+v", d)
 	}
 	// A workload refusal outranks a payload refusal.
-	runner.SetGroupRefusal(fg, workloadRefusalKey("Deployment", "d"), v1alpha1.ReasonWorkloadSelectorMismatch, "Deployment d")
-	if d := degraded(snap); d == nil || d.Reason != v1alpha1.ReasonWorkloadSelectorMismatch {
+	runner.SetGroupRefusal(fg, workloadRefusalKey("Deployment", "d"), v1beta1.ReasonWorkloadSelectorMismatch, "Deployment d")
+	if d := degraded(snap); d == nil || d.Reason != v1beta1.ReasonWorkloadSelectorMismatch {
 		t.Fatalf("Degraded = %+v, want WorkloadSelectorMismatch", d)
 	}
 	// A topology alert wins over both.
 	alert := snap
-	alert.DegradedReason = v1alpha1.ReasonSplitBrain
+	alert.DegradedReason = v1beta1.ReasonSplitBrain
 	alert.Alert = "both writable"
-	if d := degraded(alert); d == nil || d.Reason != v1alpha1.ReasonSplitBrain {
+	if d := degraded(alert); d == nil || d.Reason != v1beta1.ReasonSplitBrain {
 		t.Fatalf("Degraded = %+v, want SplitBrain", d)
 	}
 	runner.ClearGroupRefusal(nn, workloadRefusalKey("Deployment", "d"))
 	runner.ClearGroupRefusal(nn, terminalMarkerRefusalKey)
-	if d := degraded(snap); d == nil || d.Status != metav1.ConditionFalse || d.Reason != v1alpha1.ReasonHealthy {
+	if d := degraded(snap); d == nil || d.Status != metav1.ConditionFalse || d.Reason != v1beta1.ReasonHealthy {
 		t.Fatalf("Degraded = %+v after the refusals cleared", d)
 	}
 }
@@ -134,12 +134,12 @@ func TestDeploymentLeaseRecordVersion(t *testing.T) {
 	}
 	l := &leases.Items[0]
 	var probe map[string]any
-	if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &probe); err != nil || probe["schemaVersion"] != float64(1) {
+	if err := json.Unmarshal([]byte(l.Annotations[v1beta1.DeploymentLeaseAnnotation]), &probe); err != nil || probe["schemaVersion"] != float64(1) {
 		t.Fatalf("record = %v (%v), want schemaVersion 1", probe, err)
 	}
 	probe["schemaVersion"] = 2
 	b, _ := json.Marshal(probe)
-	l.Annotations[v1alpha1.DeploymentLeaseAnnotation] = string(b)
+	l.Annotations[v1beta1.DeploymentLeaseAnnotation] = string(b)
 	if err := m.client.Update(context.Background(), l); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestDeploymentLeaseRecordVersion(t *testing.T) {
 		t.Fatalf("read = %v, want errLeaseRecordVersion", err)
 	}
 	nn := client.ObjectKeyFromObject(fg)
-	if reason, msg := runner.refusalDegraded(nn); reason != v1alpha1.ReasonMetadataVersionUnsupported || !strings.Contains(msg, l.Name) {
+	if reason, msg := runner.refusalDegraded(nn); reason != v1beta1.ReasonMetadataVersionUnsupported || !strings.Contains(msg, l.Name) {
 		t.Fatalf("refusal = %s %q", reason, msg)
 	}
 }
@@ -180,18 +180,18 @@ func TestDeploymentLeaseRecordVersionRefusalEndsWithTheLease(t *testing.T) {
 				t.Fatal(err)
 			}
 			var probe map[string]any
-			if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &probe); err != nil {
+			if err := json.Unmarshal([]byte(l.Annotations[v1beta1.DeploymentLeaseAnnotation]), &probe); err != nil {
 				t.Fatal(err)
 			}
 			probe["schemaVersion"] = 2
 			b, _ := json.Marshal(probe)
-			l.Annotations[v1alpha1.DeploymentLeaseAnnotation] = string(b)
+			l.Annotations[v1beta1.DeploymentLeaseAnnotation] = string(b)
 			if err := m.client.Update(ctx, l); err != nil {
 				t.Fatal(err)
 			}
 			nn := client.ObjectKeyFromObject(fg)
 			snap := TopologySnapshot{
-				TopologyGeneration: fg.Status.TopologyGeneration, ActiveSite: "iad", DegradedReason: v1alpha1.ReasonHealthy,
+				TopologyGeneration: fg.Status.TopologyGeneration, ActiveSite: "iad", DegradedReason: v1beta1.ReasonHealthy,
 				Sites: []SiteSnapshot{
 					{Name: "iad", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
 					{Name: "pdx", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged,
@@ -213,7 +213,7 @@ func TestDeploymentLeaseRecordVersionRefusalEndsWithTheLease(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDegraded); c == nil || c.Reason != v1alpha1.ReasonMetadataVersionUnsupported {
+			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1beta1.ConditionDegraded); c == nil || c.Reason != v1beta1.ReasonMetadataVersionUnsupported {
 				t.Fatalf("Degraded = %+v, want MetadataVersionUnsupported", c)
 			}
 			_, err = m.Grant(ctx, fg, "migration", "op2", "tenant", "tenant-ns", "deployer", 60)
@@ -234,7 +234,7 @@ func TestDeploymentLeaseRecordVersionRefusalEndsWithTheLease(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDegraded); c == nil || c.Status != metav1.ConditionFalse {
+			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, v1beta1.ConditionDegraded); c == nil || c.Status != metav1.ConditionFalse {
 				t.Fatalf("Degraded = %+v, want False once the Lease is gone", c)
 			}
 			// A new lease of the deleted Lease's kind is granted.
@@ -246,7 +246,7 @@ func TestDeploymentLeaseRecordVersionRefusalEndsWithTheLease(t *testing.T) {
 // TestVerificationSourceRecordVersion: the verification-backup record
 // carries schemaVersion 1; one of another version proves no source.
 func TestVerificationSourceRecordVersion(t *testing.T) {
-	ref := &v1alpha1.VerificationBackupRef{Name: "b", UID: "uid-b", ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "s3://bucket/x"}}
+	ref := &v1beta1.VerificationBackupRef{Name: "b", UID: "uid-b", ArtifactStorage: &v1beta1.BackupArtifactStorage{Type: v1beta1.BackupStorageS3, Location: "s3://bucket/x"}}
 	b, err := encodeVerificationSource(ref)
 	if err != nil {
 		t.Fatal(err)
@@ -255,13 +255,13 @@ func TestVerificationSourceRecordVersion(t *testing.T) {
 	if err := json.Unmarshal(b, &probe); err != nil || probe["schemaVersion"] != float64(1) || probe["name"] != "b" {
 		t.Fatalf("record = %s", b)
 	}
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "ns", UID: "uid-v"}}
+	v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "ns", UID: "uid-v"}}
 	for _, raw := range []string{`{"schemaVersion":2,"name":"b","uid":"uid-b"}`, `{"name":"b","uid":"uid-b"}`} {
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "ns", OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: v1alpha1.GroupVersion.String(), Kind: "MysqlBackupVerification", Name: v.Name, UID: v.UID, Controller: ptrTo(true)}}},
+				APIVersion: v1beta1.GroupVersion.String(), Kind: "MysqlBackupVerification", Name: v.Name, UID: v.UID, Controller: ptrTo(true)}}},
 			Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{v1alpha1.VerificationBackupAnnotation: raw}}}},
+				Annotations: map[string]string{v1beta1.VerificationBackupAnnotation: raw}}}},
 		}
 		_, err := verificationJobSource(v, job)
 		var verr errVerificationSourceVersion
@@ -289,20 +289,20 @@ func TestDeploymentLeaseRecordVersionIsStructuredRefusal(t *testing.T) {
 	}
 	l := &leases.Items[0]
 	var probe map[string]any
-	if err := json.Unmarshal([]byte(l.Annotations[v1alpha1.DeploymentLeaseAnnotation]), &probe); err != nil {
+	if err := json.Unmarshal([]byte(l.Annotations[v1beta1.DeploymentLeaseAnnotation]), &probe); err != nil {
 		t.Fatal(err)
 	}
 	probe["schemaVersion"] = 2
 	b, _ := json.Marshal(probe)
-	l.Annotations[v1alpha1.DeploymentLeaseAnnotation] = string(b)
+	l.Annotations[v1beta1.DeploymentLeaseAnnotation] = string(b)
 	if err := m.client.Update(ctx, l); err != nil {
 		t.Fatal(err)
 	}
 	check := func(name string, err error) {
 		t.Helper()
 		var le *DeploymentLeaseError
-		if !errors.As(err, &le) || le.Status != 423 || le.Code != "unstable" || le.Reason != v1alpha1.ReasonMetadataVersionUnsupported {
-			t.Errorf("%s = %v, want 423 unstable/%s", name, err, v1alpha1.ReasonMetadataVersionUnsupported)
+		if !errors.As(err, &le) || le.Status != 423 || le.Code != "unstable" || le.Reason != v1beta1.ReasonMetadataVersionUnsupported {
+			t.Errorf("%s = %v, want 423 unstable/%s", name, err, v1beta1.ReasonMetadataVersionUnsupported)
 		}
 	}
 	_, err := m.Renew(ctx, fg, "migration", "op1", "tenant", "tenant-ns", "deployer", lease.Token, 30)

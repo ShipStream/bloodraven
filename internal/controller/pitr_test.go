@@ -10,27 +10,27 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
-	for _, storageType := range []v1alpha1.BackupStorageType{v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC} {
+	for _, storageType := range []v1beta1.BackupStorageType{v1beta1.BackupStorageS3, v1beta1.BackupStoragePVC} {
 		for _, contextName := range []string{"default", "explicit non-root", "fsGroup"} {
 			t.Run(string(storageType)+"/"+contextName, func(t *testing.T) {
 				fg := newTestFG()
-				storage := v1alpha1.BackupStorage{Type: storageType}
-				if storageType == v1alpha1.BackupStorageS3 {
-					storage.S3 = &v1alpha1.S3Storage{Bucket: "backups", CredentialsSecretName: "aws-creds"}
+				storage := v1beta1.BackupStorage{Type: storageType}
+				if storageType == v1beta1.BackupStorageS3 {
+					storage.S3 = &v1beta1.S3Storage{Bucket: "backups", CredentialsSecretName: "aws-creds"}
 				} else {
-					storage.PVC = &v1alpha1.PVCStorage{ClaimName: "backups"}
+					storage.PVC = &v1beta1.PVCStorage{ClaimName: "backups"}
 				}
-				fg.Spec.Backup = &v1alpha1.BackupSpec{
-					PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "encrypted"},
-					Profiles: []v1alpha1.BackupProfile{{
+				fg.Spec.Backup = &v1beta1.BackupSpec{
+					PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "encrypted"},
+					Profiles: []v1beta1.BackupProfile{{
 						Name: "encrypted", Storage: storage,
-						Encryption: &v1alpha1.BackupEncryptionSpec{
-							PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "archive-key", Key: "selected-key"},
+						Encryption: &v1beta1.BackupEncryptionSpec{
+							PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "archive-key", Key: "selected-key"},
 						},
 					}},
 				}
@@ -109,13 +109,13 @@ func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
 func TestBuildPITRSidecarFragments_Disabled(t *testing.T) {
 	cases := []struct {
 		name string
-		fg   *v1alpha1.MysqlFailoverGroup
+		fg   *v1beta1.MysqlFailoverGroup
 	}{
-		{"nil backup", &v1alpha1.MysqlFailoverGroup{}},
+		{"nil backup", &v1beta1.MysqlFailoverGroup{}},
 		{"nil pitr", withBackup(nil)},
-		{"disabled pitr", withBackup(&v1alpha1.PITRSpec{Enabled: false, ProfileName: "p"})},
-		{"enabled without profile name", withBackup(&v1alpha1.PITRSpec{Enabled: true})},
-		{"enabled, unknown profile", withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "ghost"})},
+		{"disabled pitr", withBackup(&v1beta1.PITRSpec{Enabled: false, ProfileName: "p"})},
+		{"enabled without profile name", withBackup(&v1beta1.PITRSpec{Enabled: true})},
+		{"enabled, unknown profile", withBackup(&v1beta1.PITRSpec{Enabled: true, ProfileName: "ghost"})},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,13 +133,13 @@ func TestBuildPITRSidecarFragments_Disabled(t *testing.T) {
 // TestBuildPITRSidecarFragments_S3 checks the env and mount additions
 // for an S3-backed profile with a credentials secret.
 func TestBuildPITRSidecarFragments_S3(t *testing.T) {
-	fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "primary"})
-	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{
+	fg := withBackup(&v1beta1.PITRSpec{Enabled: true, ProfileName: "primary"})
+	fg.Spec.Backup.Profiles = []v1beta1.BackupProfile{
 		{
 			Name: "primary",
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3,
-				S3: &v1alpha1.S3Storage{
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStorageS3,
+				S3: &v1beta1.S3Storage{
 					Bucket:                "lion",
 					Prefix:                "dumps",
 					Region:                "us-east-1",
@@ -232,13 +232,13 @@ func assertPITRStateVolume(t *testing.T, frags pitrSidecarFragments) {
 
 // TestBuildPITRSidecarFragments_PVC covers the alternate backend.
 func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
-	fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "local"})
-	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{
+	fg := withBackup(&v1beta1.PITRSpec{Enabled: true, ProfileName: "local"})
+	fg.Spec.Backup.Profiles = []v1beta1.BackupProfile{
 		{
 			Name: "local",
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC,
-				PVC: &v1alpha1.PVCStorage{
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStoragePVC,
+				PVC: &v1beta1.PVCStorage{
 					ClaimName: "backup-pvc",
 					SubPath:   "shard1",
 				},
@@ -272,8 +272,8 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 // archive binlogs: nothing to replay (F152, F032).
 func TestBuildRestorePITRFragments_RequiresSourceArchive(t *testing.T) {
 	fg := withBackup(nil)
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		PointInTime: &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z")},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		PointInTime: &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z")},
 	}
 	_, err := buildRestorePITRFragments(fg)
 	if err == nil || !strings.HasPrefix(err.Error(), string(pitrarchive.TokenTargetInvalid)+": pointInTime.archiveProfileName is required") {
@@ -349,13 +349,13 @@ func TestCanonicalExcludeGtidsBounds(t *testing.T) {
 // init container is emitted with the right image/command and that
 // both the AWS creds secret and the shared emptyDir are mounted.
 func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
-	fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "primary"})
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "us-east-1a", ServerID: 101}, {Name: "us-east-1b", ServerID: 102}}
-	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{{
+	fg := withBackup(&v1beta1.PITRSpec{Enabled: true, ProfileName: "primary"})
+	fg.Spec.Sites = []v1beta1.SiteSpec{{Name: "us-east-1a", ServerID: 101}, {Name: "us-east-1b", ServerID: 102}}
+	fg.Spec.Backup.Profiles = []v1beta1.BackupProfile{{
 		Name: "primary",
-		Storage: v1alpha1.BackupStorage{
-			Type: v1alpha1.BackupStorageS3,
-			S3: &v1alpha1.S3Storage{
+		Storage: v1beta1.BackupStorage{
+			Type: v1beta1.BackupStorageS3,
+			S3: &v1beta1.S3Storage{
 				Bucket:                "lion",
 				Prefix:                "dumps",
 				Region:                "us-east-1",
@@ -369,8 +369,8 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	source.Name = "source"
 	source.Storage.S3.Prefix = "source-dumps"
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, source)
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		PointInTime: &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		PointInTime: &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source"},
 	}
 	bindTestPITRArchive(t, fg, "source")
 
@@ -432,30 +432,30 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 // resolve to the group's own active PITR destination, however it is
 // spelled.
 func TestValidateRestoreArchiveProfile(t *testing.T) {
-	s3 := func(name, bucket, prefix, endpoint string) v1alpha1.BackupProfile {
-		return v1alpha1.BackupProfile{Name: name, Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
-			S3: &v1alpha1.S3Storage{Bucket: bucket, Prefix: prefix, EndpointURL: endpoint}}}
+	s3 := func(name, bucket, prefix, endpoint string) v1beta1.BackupProfile {
+		return v1beta1.BackupProfile{Name: name, Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3,
+			S3: &v1beta1.S3Storage{Bucket: bucket, Prefix: prefix, EndpointURL: endpoint}}}
 	}
 	tests := []struct {
 		name     string
-		pitr     *v1alpha1.PITRSpec
-		profiles []v1alpha1.BackupProfile
+		pitr     *v1beta1.PITRSpec
+		profiles []v1beta1.BackupProfile
 		archive  string
 		want     string
 	}{
-		{name: "missing archiveProfileName", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, want: "archiveProfileName is required"},
-		{name: "unknown profile", profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, archive: "ghost", want: "not found"},
-		{name: "same profile as the active archive", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, archive: "own", want: "PITRArchiveDestinationShared"},
-		{name: "alias of the active destination", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"},
-			profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "https://S3.example.com:443/"), s3("alias", "b", "/own/", "https://s3.example.com")}, archive: "alias", want: "PITRArchiveDestinationShared"},
-		{name: "a different prefix", pitr: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", ""), s3("source", "b", "source", "")}, archive: "source"},
-		{name: "own profile while PITR is disabled", pitr: &v1alpha1.PITRSpec{Enabled: false, ProfileName: "own"}, profiles: []v1alpha1.BackupProfile{s3("own", "b", "own", "")}, archive: "own"},
+		{name: "missing archiveProfileName", pitr: &v1beta1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1beta1.BackupProfile{s3("own", "b", "own", "")}, want: "archiveProfileName is required"},
+		{name: "unknown profile", profiles: []v1beta1.BackupProfile{s3("own", "b", "own", "")}, archive: "ghost", want: "not found"},
+		{name: "same profile as the active archive", pitr: &v1beta1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1beta1.BackupProfile{s3("own", "b", "own", "")}, archive: "own", want: "PITRArchiveDestinationShared"},
+		{name: "alias of the active destination", pitr: &v1beta1.PITRSpec{Enabled: true, ProfileName: "own"},
+			profiles: []v1beta1.BackupProfile{s3("own", "b", "own", "https://S3.example.com:443/"), s3("alias", "b", "/own/", "https://s3.example.com")}, archive: "alias", want: "PITRArchiveDestinationShared"},
+		{name: "a different prefix", pitr: &v1beta1.PITRSpec{Enabled: true, ProfileName: "own"}, profiles: []v1beta1.BackupProfile{s3("own", "b", "own", ""), s3("source", "b", "source", "")}, archive: "source"},
+		{name: "own profile while PITR is disabled", pitr: &v1beta1.PITRSpec{Enabled: false, ProfileName: "own"}, profiles: []v1beta1.BackupProfile{s3("own", "b", "own", "")}, archive: "own"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := withBackup(tt.pitr)
 			fg.Spec.Backup.Profiles = tt.profiles
-			err := validateRestoreArchiveProfile(fg, &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: tt.archive})
+			err := validateRestoreArchiveProfile(fg, &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: tt.archive})
 			if tt.want == "" {
 				if err != nil {
 					t.Fatalf("unexpected refusal: %v", err)
@@ -471,11 +471,11 @@ func TestValidateRestoreArchiveProfile(t *testing.T) {
 
 // ---- helpers ----
 
-func withBackup(p *v1alpha1.PITRSpec) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func withBackup(p *v1beta1.PITRSpec) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "shared-lion", UID: "uid-lion"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Backup: &v1alpha1.BackupSpec{PITR: p},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Backup: &v1beta1.BackupSpec{PITR: p},
 		},
 	}
 }
@@ -511,8 +511,8 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 		{name: "unparsable", in: u + ":9-2", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			restore, rerr := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:00Z"), ExcludeGtids: tc.in})
-			verify, verr := verificationPITRRequest(&v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ExcludeGtids: tc.in})
+			restore, rerr := pitrRequestFromSpec(&v1beta1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:00Z"), ExcludeGtids: tc.in})
+			verify, verr := verificationPITRRequest(&v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest, ExcludeGtids: tc.in})
 			for name, err := range map[string]error{"restore": rerr, "verification": verr} {
 				if tc.wantErr {
 					if err == nil || string(pitrFailureReason(err.Error())) != string(pitrarchive.TokenTargetInvalid) {
@@ -544,13 +544,13 @@ func TestPITRRequestCanonicalizesExcludeGtids(t *testing.T) {
 func TestPITRIdentityEnvSurvivesKubeletExpansion(t *testing.T) {
 	for _, prefix := range []string{"cash$$", "team/$(POD_NAMESPACE)/x", "plain"} {
 		t.Run(prefix, func(t *testing.T) {
-			fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "primary"})
+			fg := withBackup(&v1beta1.PITRSpec{Enabled: true, ProfileName: "primary"})
 			fg.UID = "uid-lion"
-			fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{
-				{Name: "primary", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
-					S3: &v1alpha1.S3Storage{Bucket: "lion", Prefix: prefix, EndpointURL: "https://s3.example.com"}}},
-				{Name: "other", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3,
-					S3: &v1alpha1.S3Storage{Bucket: "lion", Prefix: "elsewhere", EndpointURL: "https://s3.example.com"}}},
+			fg.Spec.Backup.Profiles = []v1beta1.BackupProfile{
+				{Name: "primary", Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3,
+					S3: &v1beta1.S3Storage{Bucket: "lion", Prefix: prefix, EndpointURL: "https://s3.example.com"}}},
+				{Name: "other", Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3,
+					S3: &v1beta1.S3Storage{Bucket: "lion", Prefix: "elsewhere", EndpointURL: "https://s3.example.com"}}},
 			}
 			activeDest, ok := activePITRDestination(fg)
 			if !ok {

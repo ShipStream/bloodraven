@@ -11,7 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -41,7 +41,7 @@ const (
 
 	// plannedClaimedEventReason is the Event the run emits once, when the
 	// topology manager grants its claim (spec §11 Events).
-	plannedClaimedEventReason = v1alpha1.EventPlannedFailoverClaimGranted
+	plannedClaimedEventReason = v1beta1.EventPlannedFailoverClaimGranted
 	// plannedDeferredCrossSiteLog is the topology manager's line for a
 	// cross-site action deferred while a planned failover holds its claim.
 	plannedDeferredCrossSiteLog = "cross-site action deferred: planned failover in progress"
@@ -259,14 +259,14 @@ func s63HoldInWaitingForLag() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "new planned run reaches WaitingForLag",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					pf := currentPlannedRun(mfg, baseline)
 					if pf == nil {
 						return false, "no new planned run yet", nil
 					}
 					msg := plannedRunSummary(pf)
 					switch {
-					case pf.Phase == v1alpha1.PlannedFailoverPhaseWaitingForLag:
+					case pf.Phase == v1beta1.PlannedFailoverPhaseWaitingForLag:
 						return true, msg, nil
 					case pf.Result != nil || plannedTerminal(pf.Phase):
 						return false, msg, fmt.Errorf("planned run ended before WaitingForLag: %s", msg)
@@ -426,7 +426,7 @@ func s63VerifyHoldSurvivesRestart() runner.Step {
 // s63HoldViolation checks one status snapshot of the held run. It returns an
 // error when the run changed identity or phase, or when the group shows an
 // emergency promotion of the target.
-func s63HoldViolation(mfg *v1alpha1.MysqlFailoverGroup, runID, target, baselineLastFailoverTarget string) error {
+func s63HoldViolation(mfg *v1beta1.MysqlFailoverGroup, runID, target, baselineLastFailoverTarget string) error {
 	pf := mfg.Status.PlannedFailover
 	if pf == nil {
 		return fmt.Errorf("status.plannedFailover vanished while run %s was held", runID)
@@ -434,7 +434,7 @@ func s63HoldViolation(mfg *v1alpha1.MysqlFailoverGroup, runID, target, baselineL
 	if pf.RunID != runID {
 		return fmt.Errorf("planned run identity changed across the restart: runID=%q, want %q (%s)", pf.RunID, runID, plannedRunSummary(pf))
 	}
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForLag {
+	if pf.Phase != v1beta1.PlannedFailoverPhaseWaitingForLag {
 		return fmt.Errorf("planned run %s left WaitingForLag while the target applier was stopped: %s", runID, plannedRunSummary(pf))
 	}
 	if mfg.Status.ActiveSite == target {
@@ -482,7 +482,7 @@ func s63ObserveSucceeded() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "run "+runID+" result.outcome==Succeeded",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					pf := mfg.Status.PlannedFailover
 					if pf == nil {
 						return false, "no plannedFailover status", nil
@@ -497,7 +497,7 @@ func s63ObserveSucceeded() runner.Step {
 						}
 						return false, msg, nil
 					}
-					if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded || pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+					if pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded || pf.Phase != v1beta1.PlannedFailoverPhaseSucceeded {
 						return false, msg, fmt.Errorf("planned run ended %s/%s, want Succeeded: %s", pf.Result.Outcome, pf.Result.Reason, pf.Message)
 					}
 					if pf.TargetSite != target {
@@ -719,7 +719,7 @@ func s63Cleanup(ctx context.Context, env *runner.Env) error {
 		return errors.Join(append(errs, fmt.Errorf("get MFG: %w", err))...)
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != v1alpha1.SiteStateWritable {
+		if s.State != v1beta1.SiteStateWritable {
 			continue
 		}
 		c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, s.Name, env.Creds)
@@ -741,7 +741,7 @@ func s63Cleanup(ctx context.Context, env *runner.Env) error {
 // run started after the baseline was read: a non-empty runId different from
 // the one in status before the annotation. Keying on runId instead of
 // startTime cannot be fooled by second-granularity timestamps.
-func currentPlannedRun(mfg *v1alpha1.MysqlFailoverGroup, baselineRunID string) *v1alpha1.PlannedFailoverStatus {
+func currentPlannedRun(mfg *v1beta1.MysqlFailoverGroup, baselineRunID string) *v1beta1.PlannedFailoverStatus {
 	pf := mfg.Status.PlannedFailover
 	if pf == nil || pf.RunID == "" || pf.RunID == baselineRunID {
 		return nil
@@ -751,12 +751,12 @@ func currentPlannedRun(mfg *v1alpha1.MysqlFailoverGroup, baselineRunID string) *
 
 // plannedPastLagWait reports whether phase is after WaitingForLag on the
 // success path (the Dragonfly phases, Promoting, Publishing).
-func plannedPastLagWait(phase v1alpha1.PlannedFailoverPhase) bool {
+func plannedPastLagWait(phase v1beta1.PlannedFailoverPhase) bool {
 	switch phase {
-	case v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting,
-		v1alpha1.PlannedFailoverPhasePublishing:
+	case v1beta1.PlannedFailoverPhaseWaitingForDragonflySync,
+		v1beta1.PlannedFailoverPhasePromotingDragonfly,
+		v1beta1.PlannedFailoverPhasePromoting,
+		v1beta1.PlannedFailoverPhasePublishing:
 		return true
 	}
 	return false
@@ -764,22 +764,22 @@ func plannedPastLagWait(phase v1alpha1.PlannedFailoverPhase) bool {
 
 // plannedOwnsSites mirrors the spec's plannedFailoverOwnsSites phase set
 // (§2.2): the phases in which a run durably holds the claim.
-func plannedOwnsSites(phase v1alpha1.PlannedFailoverPhase) bool {
+func plannedOwnsSites(phase v1beta1.PlannedFailoverPhase) bool {
 	switch phase {
-	case v1alpha1.PlannedFailoverPhaseFencing,
-		v1alpha1.PlannedFailoverPhaseDraining,
-		v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting,
-		v1alpha1.PlannedFailoverPhaseRollingBack:
+	case v1beta1.PlannedFailoverPhaseFencing,
+		v1beta1.PlannedFailoverPhaseDraining,
+		v1beta1.PlannedFailoverPhaseWaitingForLag,
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync,
+		v1beta1.PlannedFailoverPhasePromotingDragonfly,
+		v1beta1.PlannedFailoverPhasePromoting,
+		v1beta1.PlannedFailoverPhaseRollingBack:
 		return true
 	}
 	return false
 }
 
 // plannedRunSummary is a one-line description of a run for wait messages.
-func plannedRunSummary(pf *v1alpha1.PlannedFailoverStatus) string {
+func plannedRunSummary(pf *v1beta1.PlannedFailoverStatus) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "runID=%q revision=%d phase=%q targetSite=%q sourceSite=%q", pf.RunID, pf.Revision, pf.Phase, pf.TargetSite, pf.SourceSite)
 	if a := pf.Admission; a != nil {

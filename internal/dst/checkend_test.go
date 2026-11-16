@@ -3,7 +3,7 @@ package dst
 import (
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestCheckEnd_HoldKeepsTransactionAccounting: a standing automation hold
@@ -61,11 +61,11 @@ func TestCheckEnd_HoldKeepsTransactionAccounting(t *testing.T) {
 // CooldownViolated; a recorded (Succeeded) run's promotion still is.
 func TestCheckEnd_UnrecordedPlannedPromotionStampsNoCooldown(t *testing.T) {
 	for _, tc := range []struct {
-		outcome v1alpha1.PlannedFailoverOutcome
+		outcome v1beta1.PlannedFailoverOutcome
 		want    bool
 	}{
-		{v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, false},
-		{v1alpha1.PlannedFailoverOutcomeSucceeded, true},
+		{v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, false},
+		{v1beta1.PlannedFailoverOutcomeSucceeded, true},
 	} {
 		tr := twoSiteHandTrial(15, true, 20)
 		tr.Actors = Actors{Enabled: true}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -89,14 +89,14 @@ func (c cloneIdentity) assertRotated(ctx context.Context, env *runner.Env) (stri
 	if err := cloneIdentityVerdict(c.site, c.before, after); err != nil {
 		return "", err
 	}
-	ev, found, err := findMFGEvent(ctx, env, c.since, v1alpha1.EventCloneServerUUIDNotRotated, fmt.Sprintf(cloneNotRotatedEventPrefix, c.site))
+	ev, found, err := findMFGEvent(ctx, env, c.since, v1beta1.EventCloneServerUUIDNotRotated, fmt.Sprintf(cloneNotRotatedEventPrefix, c.site))
 	if err != nil {
 		return "", fmt.Errorf("list events after the clone of %s: %w", c.site, err)
 	}
 	if found {
 		return "", fmt.Errorf("the operator reported the clone of %s as not rotated although its server_uuid changed %s -> %s: %s", c.site, c.before, after, ev.Message)
 	}
-	env.Capture.Note(fmt.Sprintf("clone of %s: server_uuid %s -> %s; no %s Event", c.site, c.before, after, v1alpha1.EventCloneServerUUIDNotRotated))
+	env.Capture.Note(fmt.Sprintf("clone of %s: server_uuid %s -> %s; no %s Event", c.site, c.before, after, v1beta1.EventCloneServerUUIDNotRotated))
 	return after, nil
 }
 

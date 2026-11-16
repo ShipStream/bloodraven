@@ -8,7 +8,7 @@ import (
 
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // D-03: a maxBinlogSize that is not a size never reaches my.cnf. Admission
@@ -27,7 +27,7 @@ func TestEffectivePITRMaxBinlogSize(t *testing.T) {
 		{"1.5G", defaultPITRMaxBinlogSize, "1.5G"},
 	} {
 		fg := newTestFG()
-		fg.Spec.Backup = &v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: tc.spec}}
+		fg.Spec.Backup = &v1beta1.BackupSpec{PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: tc.spec}}
 		value, refused := effectivePITRMaxBinlogSize(fg)
 		if value != tc.value || refused != tc.refused {
 			t.Errorf("maxBinlogSize %q: got (%q, %q), want (%q, %q)", tc.spec, value, refused, tc.value, tc.refused)
@@ -37,7 +37,7 @@ func TestEffectivePITRMaxBinlogSize(t *testing.T) {
 
 func TestGenerateMyCnf_RefusesInjectedMaxBinlogSize(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.Backup = &v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "100M\n[mysqld]\nskip-grant-tables"}}
+	fg.Spec.Backup = &v1beta1.BackupSpec{PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "100M\n[mysqld]\nskip-grant-tables"}}
 	cnf := generateMyCnf(fg, true, fg.Spec.Sites[0])
 	if strings.Contains(cnf, "skip-grant-tables") || strings.Count(cnf, "[mysqld]") != 1 {
 		t.Fatalf("an injected maxBinlogSize reached my.cnf:\n%s", cnf)
@@ -49,7 +49,7 @@ func TestGenerateMyCnf_RefusesInjectedMaxBinlogSize(t *testing.T) {
 
 func TestReconcileSiteConfigMaps_WarnsOnRefusedMaxBinlogSize(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.Backup = &v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "64M\nskip-grant-tables"}}
+	fg.Spec.Backup = &v1beta1.BackupSpec{PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "64M\nskip-grant-tables"}}
 	r, _ := newReconciler(fg)
 	render := groupPITRRender{inputs: pitrRenderInputs{Enabled: true}, action: pitrRenderApply}
 	if err := r.reconcileSiteConfigMaps(context.Background(), fg, render, nil); err != nil {
@@ -58,8 +58,8 @@ func TestReconcileSiteConfigMaps_WarnsOnRefusedMaxBinlogSize(t *testing.T) {
 	events := r.Recorder.(*record.FakeRecorder).Events
 	select {
 	case e := <-events:
-		if !strings.HasPrefix(e, "Warning "+v1alpha1.EventMysqlConfIgnored+" ") || !strings.Contains(e, "spec.backup.pitr.maxBinlogSize") {
-			t.Fatalf("event %q, want a Warning %s naming spec.backup.pitr.maxBinlogSize", e, v1alpha1.EventMysqlConfIgnored)
+		if !strings.HasPrefix(e, "Warning "+v1beta1.EventMysqlConfIgnored+" ") || !strings.Contains(e, "spec.backup.pitr.maxBinlogSize") {
+			t.Fatalf("event %q, want a Warning %s naming spec.backup.pitr.maxBinlogSize", e, v1beta1.EventMysqlConfIgnored)
 		}
 	default:
 		t.Fatal("no Event for a refused maxBinlogSize")

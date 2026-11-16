@@ -1,4 +1,4 @@
-package v1alpha1
+package v1beta1
 
 // Well-known metadata: the labels, annotations, finalizers and the node
 // taint Bloodraven reads or writes. Every key is under

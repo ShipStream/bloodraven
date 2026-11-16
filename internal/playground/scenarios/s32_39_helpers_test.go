@@ -6,7 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestNewConfirmTokenIsRFC3339(t *testing.T) {
@@ -17,8 +17,8 @@ func TestNewConfirmTokenIsRFC3339(t *testing.T) {
 }
 
 func TestSiteLBIPAndStringsContain(t *testing.T) {
-	mfg := &v1alpha1.MysqlFailoverGroup{}
-	mfg.Spec.Sites = []v1alpha1.SiteSpec{
+	mfg := &v1beta1.MysqlFailoverGroup{}
+	mfg.Spec.Sites = []v1beta1.SiteSpec{
 		{Name: "iad", ServerID: 101, LoadBalancerIP: "10.0.0.1"},
 		{Name: "pdx", ServerID: 102, LoadBalancerIP: "10.0.0.2"},
 	}
@@ -82,8 +82,8 @@ func TestRestoreInPlaceStatusChanged(t *testing.T) {
 	// a fresh API GET on a later poll.
 	t0Again := metav1.NewTime(t0.Time)
 
-	staleFailed := &v1alpha1.RestoreInPlaceStatus{
-		Phase:     v1alpha1.RestoreInPlaceFailed,
+	staleFailed := &v1beta1.RestoreInPlaceStatus{
+		Phase:     v1beta1.RestoreInPlaceFailed,
 		Message:   `confirm must be an RFC 3339 timestamp: cannot parse "not-a-timestamp"`,
 		StartTime: &t0,
 	}
@@ -104,8 +104,8 @@ func TestRestoreInPlaceStatusChanged(t *testing.T) {
 	// Re-observing the exact same stale status on a later poll (as happens
 	// while the controller has not yet reconciled the freshly-patched spec)
 	// must NOT be treated as changed — this is the bug scenario 36 hit live.
-	sameAgain := &v1alpha1.RestoreInPlaceStatus{
-		Phase:     v1alpha1.RestoreInPlaceFailed,
+	sameAgain := &v1beta1.RestoreInPlaceStatus{
+		Phase:     v1beta1.RestoreInPlaceFailed,
 		Message:   staleFailed.Message,
 		StartTime: &t0Again,
 	}
@@ -116,8 +116,8 @@ func TestRestoreInPlaceStatusChanged(t *testing.T) {
 	// A fresh dispatch always moves to a non-terminal phase first
 	// (reconcileInPlaceRestore's cur==nil branch) with a brand new
 	// StartTime: must be detected as changed.
-	freshPreflight := &v1alpha1.RestoreInPlaceStatus{
-		Phase:     v1alpha1.RestoreInPlacePreflight,
+	freshPreflight := &v1beta1.RestoreInPlaceStatus{
+		Phase:     v1beta1.RestoreInPlacePreflight,
 		Message:   "validating preconditions",
 		StartTime: &t1,
 	}
@@ -128,7 +128,7 @@ func TestRestoreInPlaceStatusChanged(t *testing.T) {
 	// Same phase and startTime but a different message (e.g. two ticks of
 	// the same fresh attempt re-failing) must still be changed — do not
 	// rely on startTime alone.
-	sameStartDifferentMessage := &v1alpha1.RestoreInPlaceStatus{
+	sameStartDifferentMessage := &v1beta1.RestoreInPlaceStatus{
 		Phase:     staleFailed.Phase,
 		Message:   "a materially different failure",
 		StartTime: &t0Again,
@@ -140,7 +140,7 @@ func TestRestoreInPlaceStatusChanged(t *testing.T) {
 	// Same phase/message/startTime but a populated jobName (Restoring
 	// reached on the same StartTime as a fresh dispatch would carry
 	// forward) must be changed.
-	withJob := &v1alpha1.RestoreInPlaceStatus{
+	withJob := &v1beta1.RestoreInPlaceStatus{
 		Phase:     staleFailed.Phase,
 		Message:   staleFailed.Message,
 		JobName:   "mysql-fg-iad-inplace-restore",

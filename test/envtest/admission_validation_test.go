@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // e16Admit creates obj under a fresh name in ns and reports the error. The
@@ -52,7 +52,7 @@ func e16Expect(t *testing.T, what string, err error, ok bool, want string) {
 	}
 }
 
-func e16FG(mutate func(*v1alpha1.MysqlFailoverGroup)) *v1alpha1.MysqlFailoverGroup {
+func e16FG(mutate func(*v1beta1.MysqlFailoverGroup)) *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG("")
 	if mutate != nil {
 		mutate(fg)
@@ -115,11 +115,11 @@ func TestE16_MysqlConfInjectionRefused(t *testing.T) {
 // k, K, M and G only.
 func TestE16_SizePatterns(t *testing.T) {
 	ns := createNamespace(t, "e16-sizes")
-	withPITR := func(size string) *v1alpha1.MysqlFailoverGroup {
-		return e16FG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup = &v1alpha1.BackupSpec{
-				Profiles: []v1alpha1.BackupProfile{pitrS3Profile("a", "p1", "")},
-				PITR:     &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a", MaxBinlogSize: size},
+	withPITR := func(size string) *v1beta1.MysqlFailoverGroup {
+		return e16FG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup = &v1beta1.BackupSpec{
+				Profiles: []v1beta1.BackupProfile{pitrS3Profile("a", "p1", "")},
+				PITR:     &v1beta1.PITRSpec{Enabled: true, ProfileName: "a", MaxBinlogSize: size},
 			}
 		})
 	}
@@ -134,11 +134,11 @@ func TestE16_SizePatterns(t *testing.T) {
 		err := e16Admit(t, ns, withPITR(tc.size), "MysqlFailoverGroup", nil)
 		e16Expect(t, fmt.Sprintf("maxBinlogSize %q", tc.size), err, tc.ok, "maxBinlogSize")
 	}
-	withChunk := func(chunk string) *v1alpha1.MysqlFailoverGroup {
-		return e16FG(func(fg *v1alpha1.MysqlFailoverGroup) {
+	withChunk := func(chunk string) *v1beta1.MysqlFailoverGroup {
+		return e16FG(func(fg *v1beta1.MysqlFailoverGroup) {
 			p := pitrS3Profile("a", "p1", "")
-			p.Dump = &v1alpha1.DumpOptions{BytesPerChunk: chunk}
-			fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{p}}
+			p.Dump = &v1beta1.DumpOptions{BytesPerChunk: chunk}
+			fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{p}}
 		})
 	}
 	for _, tc := range []struct {
@@ -161,57 +161,57 @@ func TestE16_DanglingProfileReferences(t *testing.T) {
 	const verifyMsg = "verification.schedule is required when verification.enabled is true"
 	const archiveMsg = "spec.backup.profiles[].verification.pointInTime.archiveProfileName must name an entry of spec.backup.profiles"
 	const initMsg = "spec.initFromBackup.pointInTime.archiveProfileName must name an entry of spec.backup.profiles"
-	backup := func(b v1alpha1.BackupSpec) *v1alpha1.MysqlFailoverGroup {
-		return e16FG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup = &b })
+	backup := func(b v1beta1.BackupSpec) *v1beta1.MysqlFailoverGroup {
+		return e16FG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup = &b })
 	}
 	profile := pitrS3Profile("a", "p1", "")
-	sched := func(profile string) v1alpha1.BackupSchedule {
-		return v1alpha1.BackupSchedule{Name: "nightly", ProfileName: profile, Schedule: "0 3 * * *"}
+	sched := func(profile string) v1beta1.BackupSchedule {
+		return v1beta1.BackupSchedule{Name: "nightly", ProfileName: profile, Schedule: "0 3 * * *"}
 	}
-	verifying := func(v v1alpha1.VerificationSpec) v1alpha1.BackupProfile {
+	verifying := func(v v1beta1.VerificationSpec) v1beta1.BackupProfile {
 		p := pitrS3Profile("a", "p1", "")
 		p.Verification = &v
 		return p
 	}
 	for _, tc := range []struct {
 		name string
-		fg   *v1alpha1.MysqlFailoverGroup
+		fg   *v1beta1.MysqlFailoverGroup
 		edit func(*unstructured.Unstructured)
 		ok   bool
 		want string
 	}{
-		{"no profiles and no schedules", backup(v1alpha1.BackupSpec{}), nil, true, ""},
-		{"pitr absent", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}}), nil, true, ""},
-		{"pitr disabled, unknown profile", backup(v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{ProfileName: "missing"}}), nil, true, ""},
-		{"pitr enabled, existing profile", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}, PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"}}), nil, true, ""},
-		{"pitr enabled without profileName", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}, PITR: &v1alpha1.PITRSpec{Enabled: true}}), nil, false, pitrMsg},
-		{"pitr enabled, no profiles", backup(v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"}}), nil, false, pitrMsg},
-		{"pitr enabled, unknown profile", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}, PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "missing"}}), nil, false, pitrMsg},
-		{"pitr profileName \"\"", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}, PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"}}),
+		{"no profiles and no schedules", backup(v1beta1.BackupSpec{}), nil, true, ""},
+		{"pitr absent", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile}}), nil, true, ""},
+		{"pitr disabled, unknown profile", backup(v1beta1.BackupSpec{PITR: &v1beta1.PITRSpec{ProfileName: "missing"}}), nil, true, ""},
+		{"pitr enabled, existing profile", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile}, PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "a"}}), nil, true, ""},
+		{"pitr enabled without profileName", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile}, PITR: &v1beta1.PITRSpec{Enabled: true}}), nil, false, pitrMsg},
+		{"pitr enabled, no profiles", backup(v1beta1.BackupSpec{PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "a"}}), nil, false, pitrMsg},
+		{"pitr enabled, unknown profile", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile}, PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "missing"}}), nil, false, pitrMsg},
+		{"pitr profileName \"\"", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile}, PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "a"}}),
 			func(u *unstructured.Unstructured) { inertFieldsSet(t, u, "", "spec", "backup", "pitr", "profileName") }, false, "spec.backup.pitr.profileName"},
-		{"schedule, existing profile", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}, Schedules: []v1alpha1.BackupSchedule{sched("a")}}), nil, true, ""},
-		{"schedule, unknown profile", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile}, Schedules: []v1alpha1.BackupSchedule{sched("missing")}}), nil, false, schedMsg},
-		{"schedule, no profiles", backup(v1alpha1.BackupSpec{Schedules: []v1alpha1.BackupSchedule{sched("a")}}), nil, false, schedMsg},
-		{"verification enabled with a schedule", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{verifying(v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 4 * * *"})}}), nil, true, ""},
-		{"verification disabled without a schedule", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{verifying(v1alpha1.VerificationSpec{})}}), nil, true, ""},
-		{"verification enabled without a schedule", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{verifying(v1alpha1.VerificationSpec{Enabled: true})}}), nil, false, verifyMsg},
-		{"verification enabled, schedule \"\"", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{verifying(v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 4 * * *"})}}),
+		{"schedule, existing profile", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile}, Schedules: []v1beta1.BackupSchedule{sched("a")}}), nil, true, ""},
+		{"schedule, unknown profile", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile}, Schedules: []v1beta1.BackupSchedule{sched("missing")}}), nil, false, schedMsg},
+		{"schedule, no profiles", backup(v1beta1.BackupSpec{Schedules: []v1beta1.BackupSchedule{sched("a")}}), nil, false, schedMsg},
+		{"verification enabled with a schedule", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{verifying(v1beta1.VerificationSpec{Enabled: true, Schedule: "0 4 * * *"})}}), nil, true, ""},
+		{"verification disabled without a schedule", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{verifying(v1beta1.VerificationSpec{})}}), nil, true, ""},
+		{"verification enabled without a schedule", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{verifying(v1beta1.VerificationSpec{Enabled: true})}}), nil, false, verifyMsg},
+		{"verification enabled, schedule \"\"", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{verifying(v1beta1.VerificationSpec{Enabled: true, Schedule: "0 4 * * *"})}}),
 			func(u *unstructured.Unstructured) {
 				profiles, _, _ := unstructured.NestedSlice(u.Object, "spec", "backup", "profiles")
 				profiles[0].(map[string]any)["verification"].(map[string]any)["schedule"] = ""
 				inertFieldsSet(t, u, profiles, "spec", "backup", "profiles")
 			}, false, verifyMsg},
-		{"verification archiveProfileName, existing profile", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{verifying(v1alpha1.VerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: "a"}})}}), nil, true, ""},
-		{"verification archiveProfileName, unknown profile", backup(v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{verifying(v1alpha1.VerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: "retired"}})}}), nil, false, archiveMsg},
-		{"initFromBackup archiveProfileName, existing profile", e16FG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{pitrS3Profile("source", "orders", "")}}
+		{"verification archiveProfileName, existing profile", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{verifying(v1beta1.VerificationSpec{PointInTime: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest, ArchiveProfileName: "a"}})}}), nil, true, ""},
+		{"verification archiveProfileName, unknown profile", backup(v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{verifying(v1beta1.VerificationSpec{PointInTime: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest, ArchiveProfileName: "retired"}})}}), nil, false, archiveMsg},
+		{"initFromBackup archiveProfileName, existing profile", e16FG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{pitrS3Profile("source", "orders", "")}}
 			fg.Spec.InitFromBackup = e16InitPITR("source")
 		}), nil, true, ""},
-		{"initFromBackup archiveProfileName, unknown profile", e16FG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{pitrS3Profile("source", "orders", "")}}
+		{"initFromBackup archiveProfileName, unknown profile", e16FG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{pitrS3Profile("source", "orders", "")}}
 			fg.Spec.InitFromBackup = e16InitPITR("missing")
 		}), nil, false, initMsg},
-		{"initFromBackup archiveProfileName, no backup block", e16FG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup archiveProfileName, no backup block", e16FG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup = e16InitPITR("source")
 		}), nil, false, initMsg},
 	} {
@@ -223,39 +223,39 @@ func TestE16_DanglingProfileReferences(t *testing.T) {
 	// names is refused; removing it with the reference is not.
 	for _, tc := range []struct {
 		name string
-		spec v1alpha1.BackupSpec
-		drop func(*v1alpha1.BackupSpec)
+		spec v1beta1.BackupSpec
+		drop func(*v1beta1.BackupSpec)
 		ok   bool
 		want string
 	}{
-		{"profile a schedule names", v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile, pitrS3Profile("b", "p2", "")}, Schedules: []v1alpha1.BackupSchedule{sched("a")}},
-			func(b *v1alpha1.BackupSpec) { b.Profiles = b.Profiles[1:] }, false, schedMsg},
-		{"profile and its schedule together", v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{profile, pitrS3Profile("b", "p2", "")}, Schedules: []v1alpha1.BackupSchedule{sched("a")}},
-			func(b *v1alpha1.BackupSpec) { b.Profiles, b.Schedules = b.Profiles[1:], nil }, true, ""},
-		{"profile another profile's verification reads", v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{pitrS3Profile("retained", "p0", ""), verifying(v1alpha1.VerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: "retained"}})}},
-			func(b *v1alpha1.BackupSpec) { b.Profiles = b.Profiles[1:] }, false, archiveMsg},
+		{"profile a schedule names", v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile, pitrS3Profile("b", "p2", "")}, Schedules: []v1beta1.BackupSchedule{sched("a")}},
+			func(b *v1beta1.BackupSpec) { b.Profiles = b.Profiles[1:] }, false, schedMsg},
+		{"profile and its schedule together", v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{profile, pitrS3Profile("b", "p2", "")}, Schedules: []v1beta1.BackupSchedule{sched("a")}},
+			func(b *v1beta1.BackupSpec) { b.Profiles, b.Schedules = b.Profiles[1:], nil }, true, ""},
+		{"profile another profile's verification reads", v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{pitrS3Profile("retained", "p0", ""), verifying(v1beta1.VerificationSpec{PointInTime: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest, ArchiveProfileName: "retained"}})}},
+			func(b *v1beta1.BackupSpec) { b.Profiles = b.Profiles[1:] }, false, archiveMsg},
 	} {
-		fg := e16FG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup = tc.spec.DeepCopy() })
+		fg := e16FG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup = tc.spec.DeepCopy() })
 		e16Seq++
 		fg.Namespace, fg.Name = ns, fmt.Sprintf("e16-%d", e16Seq)
-		err := pitrUpdate(t, fg, func(cur *v1alpha1.MysqlFailoverGroup) { tc.drop(cur.Spec.Backup) })
+		err := pitrUpdate(t, fg, func(cur *v1beta1.MysqlFailoverGroup) { tc.drop(cur.Spec.Backup) })
 		e16Expect(t, "update: remove "+tc.name, err, tc.ok, tc.want)
 	}
 
 	// The initFromBackup reference is checked when the group is created:
 	// initFromBackup is fixed at creation, so a standing rule would pin the
 	// source profile forever.
-	fg := e16FG(func(fg *v1alpha1.MysqlFailoverGroup) {
-		fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{pitrS3Profile("source", "orders", ""), pitrS3Profile("own", "p1", "")}}
+	fg := e16FG(func(fg *v1beta1.MysqlFailoverGroup) {
+		fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{pitrS3Profile("source", "orders", ""), pitrS3Profile("own", "p1", "")}}
 		fg.Spec.InitFromBackup = e16InitPITR("source")
 	})
 	e16Seq++
 	fg.Namespace, fg.Name = ns, fmt.Sprintf("e16-%d", e16Seq)
-	err := pitrUpdate(t, fg, func(cur *v1alpha1.MysqlFailoverGroup) { cur.Spec.Backup.Profiles = cur.Spec.Backup.Profiles[1:] })
+	err := pitrUpdate(t, fg, func(cur *v1beta1.MysqlFailoverGroup) { cur.Spec.Backup.Profiles = cur.Spec.Backup.Profiles[1:] })
 	e16Expect(t, "update: remove the initFromBackup source profile after creation", err, true, "")
 	// Status writes still pass every rule (1.31 validates spec rules on
 	// them without ratcheting).
-	cur := &v1alpha1.MysqlFailoverGroup{}
+	cur := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), cur); err != nil {
 		t.Fatal(err)
 	}
@@ -265,10 +265,10 @@ func TestE16_DanglingProfileReferences(t *testing.T) {
 	}
 }
 
-func e16InitPITR(archiveProfile string) *v1alpha1.InitFromBackupSpec {
-	return &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "orders-nightly"}},
-		PointInTime: &v1alpha1.PointInTimeSpec{
+func e16InitPITR(archiveProfile string) *v1beta1.InitFromBackupSpec {
+	return &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "orders-nightly"}},
+		PointInTime: &v1beta1.PointInTimeSpec{
 			ArchiveProfileName: archiveProfile,
 			StopTime:           metav1.Time{Time: time.Date(2026, 4, 15, 9, 30, 0, 0, time.UTC)},
 		},
@@ -280,9 +280,9 @@ func e16InitPITR(archiveProfile string) *v1alpha1.InitFromBackupSpec {
 func TestE16_DragonflyArgs(t *testing.T) {
 	ns := createNamespace(t, "e16-dragonfly")
 	const msg = "spec.dragonfly.args must not set a flag the operator owns"
-	withArgs := func(args ...string) *v1alpha1.MysqlFailoverGroup {
-		return e16FG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0", Args: args}
+	withArgs := func(args ...string) *v1beta1.MysqlFailoverGroup {
+		return e16FG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0", Args: args}
 		})
 	}
 	for _, tc := range []struct {
@@ -343,7 +343,7 @@ func TestE16_LicenseShape(t *testing.T) {
 		{" a.b.c", false},
 		{"a.b.c=", false},
 	} {
-		fg := e16FG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.License = tc.value })
+		fg := e16FG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.License = tc.value })
 		err := e16Admit(t, ns, fg, "MysqlFailoverGroup", nil)
 		e16Expect(t, fmt.Sprintf("license %.40q (%d chars)", tc.value, len(tc.value)), err, tc.ok, "spec.license")
 	}
@@ -357,7 +357,7 @@ func TestE16_KindMetadataServed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	list, err := dc.ServerResourcesForGroupVersion(v1alpha1.GroupVersion.String())
+	list, err := dc.ServerResourcesForGroupVersion(v1beta1.GroupVersion.String())
 	if err != nil {
 		t.Fatal(err)
 	}

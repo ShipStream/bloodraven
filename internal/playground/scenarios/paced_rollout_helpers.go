@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -98,7 +98,7 @@ var pacedAuxGroupNames = []string{"paced-a", "paced-b"}
 // pacedAuxGroupManifest renders one auxiliary group. index keeps server
 // ids, DNS names and load-balancer addresses apart.
 func pacedAuxGroupManifest(namespace, name, zone string, index int) string {
-	return fmt.Sprintf(`apiVersion: shipstream.io/v1alpha1
+	return fmt.Sprintf(`apiVersion: shipstream.io/v1beta1
 kind: MysqlFailoverGroup
 metadata:
   name: %[2]s
@@ -163,8 +163,8 @@ spec:
 
 // pacedAuxGroupObject parses pacedAuxGroupManifest strictly, so a field the
 // API does not know fails here and not as a silently dropped key.
-func pacedAuxGroupObject(namespace, name, zone string, index int) (*v1alpha1.MysqlFailoverGroup, error) {
-	fg := &v1alpha1.MysqlFailoverGroup{}
+func pacedAuxGroupObject(namespace, name, zone string, index int) (*v1beta1.MysqlFailoverGroup, error) {
+	fg := &v1beta1.MysqlFailoverGroup{}
 	if err := sigsyaml.UnmarshalStrict([]byte(pacedAuxGroupManifest(namespace, name, zone, index)), fg); err != nil {
 		return nil, fmt.Errorf("parse auxiliary group %s: %w", name, err)
 	}
@@ -175,8 +175,8 @@ func pacedAuxGroupObject(namespace, name, zone string, index int) (*v1alpha1.Mys
 // paced-rollout scenarios create, for zone. Exported for the envtest that
 // submits them to the API server: a CRD rule that refuses them would
 // otherwise only show on a cluster.
-func PacedRolloutAuxGroups(namespace, zone string) ([]*v1alpha1.MysqlFailoverGroup, error) {
-	groups := make([]*v1alpha1.MysqlFailoverGroup, 0, len(pacedAuxGroupNames))
+func PacedRolloutAuxGroups(namespace, zone string) ([]*v1beta1.MysqlFailoverGroup, error) {
+	groups := make([]*v1beta1.MysqlFailoverGroup, 0, len(pacedAuxGroupNames))
 	for i, name := range pacedAuxGroupNames {
 		fg, err := pacedAuxGroupObject(namespace, name, zone, i)
 		if err != nil {
@@ -243,7 +243,7 @@ func pacedWaitGroupsHealthy(ctx context.Context, env *runner.Env, groups []strin
 
 // pacedListAuxGroups returns the names of the auxiliary groups present.
 func pacedListAuxGroups(ctx context.Context, env *runner.Env) ([]string, error) {
-	var list v1alpha1.MysqlFailoverGroupList
+	var list v1beta1.MysqlFailoverGroupList
 	if err := env.Kube.Controller.List(ctx, &list, client.InNamespace(env.Namespace), client.MatchingLabels{pacedAuxLabel: "true"}); err != nil {
 		return nil, fmt.Errorf("list auxiliary groups: %w", err)
 	}
@@ -268,7 +268,7 @@ func pacedDeleteAuxGroups(ctx context.Context, env *runner.Env) error {
 		return nil
 	}
 	for _, name := range names {
-		fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace, Name: name}}
+		fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace, Name: name}}
 		if err := env.Kube.Controller.Delete(ctx, fg, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete auxiliary group %s: %w", name, err)
 		}
@@ -306,7 +306,7 @@ func pacedDeleteAuxGroups(ctx context.Context, env *runner.Env) error {
 }
 
 // pacedSiteZone is the zone of site in fg's spec.
-func pacedSiteZone(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+func pacedSiteZone(fg *v1beta1.MysqlFailoverGroup, site string) string {
 	for _, s := range fg.Spec.Sites {
 		if s.Name == site {
 			return s.Zone
@@ -336,7 +336,7 @@ func pacedNodeUsable(node *corev1.Node) bool {
 // pacedPickSpareNode chooses a node the fg group never taints: one that
 // carries none of the group's taintNodeSelector labels and accepts pods
 // now. It prefers a node that already has a zone label.
-func pacedPickSpareNode(nodes []corev1.Node, fg *v1alpha1.MysqlFailoverGroup) *corev1.Node {
+func pacedPickSpareNode(nodes []corev1.Node, fg *v1beta1.MysqlFailoverGroup) *corev1.Node {
 	groupLabels := map[string]bool{}
 	for _, s := range fg.Spec.Sites {
 		for k := range s.TaintNodeSelector {
@@ -733,7 +733,7 @@ type pacedGroupSample struct {
 	Group      string
 	ActiveSite string
 	Ready      bool
-	Rollout    *v1alpha1.RolloutStatus
+	Rollout    *v1beta1.RolloutStatus
 	// Pods and Workloads are by site name.
 	Pods      map[string][]pacedPod
 	Workloads map[string]pacedWorkload
@@ -780,8 +780,8 @@ func pacedReadGroup(ctx context.Context, k *pgkube.Client, namespace, group stri
 			return out, fmt.Errorf("get deployment of %s/%s: %w", group, site.Name, err)
 		}
 		w := pacedWorkload{
-			RenderedBy: dep.Annotations[v1alpha1.RenderedByAnnotation],
-			SpecHash:   dep.Annotations[v1alpha1.SpecHashAnnotation],
+			RenderedBy: dep.Annotations[v1beta1.RenderedByAnnotation],
+			SpecHash:   dep.Annotations[v1beta1.SpecHashAnnotation],
 		}
 		for _, c := range dep.Spec.Template.Spec.Containers {
 			if c.Name == "sidecar" {
@@ -879,7 +879,7 @@ func (o *pacedObserver) Failures() (int, error) {
 
 // --- invariants over samples ----------------------------------------------
 
-func pacedRolloutString(r *v1alpha1.RolloutStatus) string {
+func pacedRolloutString(r *v1beta1.RolloutStatus) string {
 	if r == nil {
 		return "none"
 	}
@@ -1087,7 +1087,7 @@ func pacedCheckRolled(base, final pacedGroupSample) (renderer string, err error)
 	for _, site := range sites {
 		b, f := base.Workloads[site], final.Workloads[site]
 		if f.RenderedBy == "" {
-			return "", fmt.Errorf("group %s site %s: the Deployment has no %s annotation", base.Group, site, v1alpha1.RenderedByAnnotation)
+			return "", fmt.Errorf("group %s site %s: the Deployment has no %s annotation", base.Group, site, v1beta1.RenderedByAnnotation)
 		}
 		if f.RenderedBy == b.RenderedBy {
 			return "", fmt.Errorf("group %s site %s: the Deployment is still rendered by %q", base.Group, site, b.RenderedBy)
@@ -1223,7 +1223,7 @@ func pacedDumpForensics(ctx context.Context, env *runner.Env, groups []string, s
 
 // pacedWaitRollout polls group until cond holds for its rollout record.
 func pacedWaitRollout(ctx context.Context, env *runner.Env, group, what string, timeout time.Duration,
-	cond func(fg *v1alpha1.MysqlFailoverGroup) bool) (*v1alpha1.MysqlFailoverGroup, error) {
+	cond func(fg *v1beta1.MysqlFailoverGroup) bool) (*v1beta1.MysqlFailoverGroup, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	started := time.Now()

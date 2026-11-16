@@ -12,28 +12,28 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
-func s3CredsTestFG() *v1alpha1.MysqlFailoverGroup {
+func s3CredsTestFG() *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG()
-	fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{{
+	fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{{
 		Name: "nightly",
-		Storage: v1alpha1.BackupStorage{
-			Type: v1alpha1.BackupStorageS3,
-			S3:   &v1alpha1.S3Storage{Bucket: "b", CredentialsSecretName: "s3-creds"},
+		Storage: v1beta1.BackupStorage{
+			Type: v1beta1.BackupStorageS3,
+			S3:   &v1beta1.S3Storage{Bucket: "b", CredentialsSecretName: "s3-creds"},
 		},
 	}}}
 	return fg
 }
 
-func s3CredsCondition(t *testing.T, r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup) *metav1.Condition {
+func s3CredsCondition(t *testing.T, r *MysqlFailoverGroupReconciler, fg *v1beta1.MysqlFailoverGroup) *metav1.Condition {
 	t.Helper()
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := r.Get(context.Background(), types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &got); err != nil {
 		t.Fatal(err)
 	}
-	return apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionS3CredentialsReady)
+	return apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionS3CredentialsReady)
 }
 
 func TestReconcileS3CredentialsCondition(t *testing.T) {
@@ -94,7 +94,7 @@ func TestReconcileS3CredentialsCondition(t *testing.T) {
 
 func TestReconcileS3CredentialsCondition_RemovedWithoutS3Storage(t *testing.T) {
 	fg := newTestFG()
-	fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionS3CredentialsReady, Status: metav1.ConditionFalse, Reason: "CredentialsIncomplete", LastTransitionTime: metav1.Now()}}
+	fg.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionS3CredentialsReady, Status: metav1.ConditionFalse, Reason: "CredentialsIncomplete", LastTransitionTime: metav1.Now()}}
 	r, _ := newReconciler(fg)
 	if s3CredsCondition(t, r, fg) == nil {
 		t.Fatal("test setup: seeded condition missing")
@@ -117,19 +117,19 @@ func TestReconcileS3CredentialsCondition_SucceededBootstrapImportSecretIgnored(t
 	}}
 	for _, tc := range []struct {
 		name       string
-		phase      v1alpha1.BackupPhase
+		phase      v1beta1.BackupPhase
 		wantStatus metav1.ConditionStatus
 	}{
-		{"restore succeeded", v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue},
-		{"restore running", v1alpha1.BackupPhaseRunning, metav1.ConditionFalse},
-		{"restore failed", v1alpha1.BackupPhaseFailed, metav1.ConditionFalse},
+		{"restore succeeded", v1beta1.BackupPhaseSucceeded, metav1.ConditionTrue},
+		{"restore running", v1beta1.BackupPhaseRunning, metav1.ConditionFalse},
+		{"restore failed", v1beta1.BackupPhaseFailed, metav1.ConditionFalse},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := s3CredsTestFG()
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{
-				S3: &v1alpha1.S3Storage{Bucket: "import", CredentialsSecretName: "import-creds"},
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{
+				S3: &v1beta1.S3Storage{Bucket: "import", CredentialsSecretName: "import-creds"},
 			}}
-			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: tc.phase}
+			fg.Status.Restore = &v1beta1.RestoreStatus{Phase: tc.phase}
 			r, _ := newReconciler(fg, profileSecret.DeepCopy())
 			rec := record.NewFakeRecorder(10)
 			r.Recorder = rec

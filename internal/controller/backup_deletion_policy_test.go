@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // retainFixture is a cleanup fixture whose backup is encrypted (its
@@ -23,7 +23,7 @@ func retainFixture(t *testing.T) (*cleanupFixture, *corev1.Secret) {
 	f := newCleanupFixture(t)
 	ctx := context.Background()
 	snap := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: dumpKeySnapshotName(f.mb), Namespace: f.mb.Namespace,
-		Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(f.mb.UID)}},
+		Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1beta1.MysqlBackupUIDLabel: string(f.mb.UID)}},
 		Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("passphrase")}}
 	if err := f.c.Create(ctx, snap); err != nil {
 		t.Fatal(err)
@@ -31,11 +31,11 @@ func retainFixture(t *testing.T) (*cleanupFixture, *corev1.Secret) {
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	f.mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	f.mb.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := f.c.Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
-	f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: snap.Name, Key: pitrKeySnapshotDataKey}
+	f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1beta1.SecretKeyRef{Name: snap.Name, Key: pitrKeySnapshotDataKey}
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestFinalize_RetainKeepsArtifactAndDumpKey(t *testing.T) {
 // TestFinalize_DeleteIsTheDefault: a backup with no deletionPolicy (the
 // CRD defaults it to Delete) still cleans up its artifact.
 func TestFinalize_DeleteIsTheDefault(t *testing.T) {
-	for _, policy := range []v1alpha1.DeletionPolicy{"", v1alpha1.DeletionPolicyDelete} {
+	for _, policy := range []v1beta1.DeletionPolicy{"", v1beta1.DeletionPolicyDelete} {
 		t.Run(string(policy)+"/", func(t *testing.T) {
 			f := newCleanupFixture(t)
 			ctx := context.Background()
@@ -102,7 +102,7 @@ func TestFinalize_RetainUnfinishedWaitsForProducer(t *testing.T) {
 	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	f.mb.Status.Phase, f.mb.Status.CompletionTime = v1alpha1.BackupPhaseRunning, nil
+	f.mb.Status.Phase, f.mb.Status.CompletionTime = v1beta1.BackupPhaseRunning, nil
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +149,8 @@ func TestFinalize_RetainWaitsForVerificationReaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := verifyCR("reader", "lion", "nightly-s3")
-	reader.Status.Phase = v1alpha1.VerificationPhaseRestoring
-	reader.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, testArtifactLocation(f.mb))}
+	reader.Status.Phase = v1beta1.VerificationPhaseRestoring
+	reader.Status.BackupRef = &v1beta1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, testArtifactLocation(f.mb))}
 	if err := f.c.Create(ctx, reader); err != nil {
 		t.Fatal(err)
 	}
@@ -161,14 +161,14 @@ func TestFinalize_RetainWaitsForVerificationReaders(t *testing.T) {
 		}
 	}
 	cond := cleanupCondition(t, f)
-	if cond == nil || cond.Reason != v1alpha1.ReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
+	if cond == nil || cond.Reason != v1beta1.ReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
 		t.Fatalf("condition %+v, want HeldByVerification naming the reader", cond)
 	}
 	if n := countEvents(f.rec, "ArtifactRetained"); n != 0 {
 		t.Fatal("ArtifactRetained emitted while a verification still reads")
 	}
 
-	reader.Status.Phase = v1alpha1.VerificationPhaseSucceeded
+	reader.Status.Phase = v1beta1.VerificationPhaseSucceeded
 	if err := f.c.Update(ctx, reader); err != nil {
 		t.Fatal(err)
 	}

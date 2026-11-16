@@ -8,7 +8,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // recreateRemedy is the phrase every initFromBackup refusal whose cause is
@@ -44,33 +44,33 @@ func TestInitFromBackupRefusalsGiveTheRecreateRemedyOnce(t *testing.T) {
 		}
 		return b.String()
 	}
-	pitrFromBackupRef := func(mut func(*v1alpha1.InitFromBackupSpec)) (*v1alpha1.MysqlFailoverGroup, []client.Object) {
+	pitrFromBackupRef := func(mut func(*v1beta1.InitFromBackupSpec)) (*v1beta1.MysqlFailoverGroup, []client.Object) {
 		fg := fgInitFromMysqlBackup()
-		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
+		fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		fg.Spec.InitFromBackup.PointInTime = &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
 		mut(fg.Spec.InitFromBackup)
 		return fg, []client.Object{succeededSeedBackup()}
 	}
 	for _, tc := range []struct {
 		name      string
-		build     func() (*v1alpha1.MysqlFailoverGroup, []client.Object)
+		build     func() (*v1beta1.MysqlFailoverGroup, []client.Object)
 		wantToken string
 		wantCause string
 	}{
 		{
 			name: "skipBinlog false with pointInTime",
-			build: func() (*v1alpha1.MysqlFailoverGroup, []client.Object) {
-				return pitrFromBackupRef(func(in *v1alpha1.InitFromBackupSpec) {
-					in.LoadOptions = &v1alpha1.LoadOptions{SkipBinlog: &f}
+			build: func() (*v1beta1.MysqlFailoverGroup, []client.Object) {
+				return pitrFromBackupRef(func(in *v1beta1.InitFromBackupSpec) {
+					in.LoadOptions = &v1beta1.LoadOptions{SkipBinlog: &f}
 				})
 			},
 			wantCause: "initFromBackup.loadOptions.skipBinlog=false is incompatible",
 		},
 		{
 			name: "schema filter with pointInTime",
-			build: func() (*v1alpha1.MysqlFailoverGroup, []client.Object) {
-				return pitrFromBackupRef(func(in *v1alpha1.InitFromBackupSpec) {
-					in.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{"app"}}
+			build: func() (*v1beta1.MysqlFailoverGroup, []client.Object) {
+				return pitrFromBackupRef(func(in *v1beta1.InitFromBackupSpec) {
+					in.LoadOptions = &v1beta1.LoadOptions{IncludeSchemas: []string{"app"}}
 				})
 			},
 			wantToken: "PITRBackupFiltered",
@@ -78,8 +78,8 @@ func TestInitFromBackupRefusalsGiveTheRecreateRemedyOnce(t *testing.T) {
 		},
 		{
 			name: "excludeGtids over the env limit",
-			build: func() (*v1alpha1.MysqlFailoverGroup, []client.Object) {
-				return pitrFromBackupRef(func(in *v1alpha1.InitFromBackupSpec) {
+			build: func() (*v1beta1.MysqlFailoverGroup, []client.Object) {
+				return pitrFromBackupRef(func(in *v1beta1.InitFromBackupSpec) {
 					in.PointInTime.ExcludeGtids = manyTags(4000)
 				})
 			},
@@ -88,13 +88,13 @@ func TestInitFromBackupRefusalsGiveTheRecreateRemedyOnce(t *testing.T) {
 		},
 		{
 			name: "direct S3 dump at the root of its store",
-			build: func() (*v1alpha1.MysqlFailoverGroup, []client.Object) {
+			build: func() (*v1beta1.MysqlFailoverGroup, []client.Object) {
 				fg := fgWithBackup()
-				fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{
-					S3: &v1alpha1.S3Storage{Bucket: "b", CredentialsSecretName: "aws"},
+				fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{
+					S3: &v1beta1.S3Storage{Bucket: "b", CredentialsSecretName: "aws"},
 				}}
-				fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
+				fg.Spec.InitFromBackup.PointInTime = &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
 				return fg, nil
 			},
 			wantToken: "PITRBackupIdentityUnknown",
@@ -102,7 +102,7 @@ func TestInitFromBackupRefusalsGiveTheRecreateRemedyOnce(t *testing.T) {
 		},
 		{
 			name: "backupRef profile no longer supplies S3 credentials",
-			build: func() (*v1alpha1.MysqlFailoverGroup, []client.Object) {
+			build: func() (*v1beta1.MysqlFailoverGroup, []client.Object) {
 				fg := fgInitFromMysqlBackup()
 				seed := succeededSeedBackup()
 				seed.Spec.ProfileName = "gone"
@@ -112,11 +112,11 @@ func TestInitFromBackupRefusalsGiveTheRecreateRemedyOnce(t *testing.T) {
 		},
 		{
 			name: "encrypted backupRef whose recorded dump key is gone",
-			build: func() (*v1alpha1.MysqlFailoverGroup, []client.Object) {
+			build: func() (*v1beta1.MysqlFailoverGroup, []client.Object) {
 				fg := fgWithEncryptedBackup()
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}}
-				seed := encryptedRefSeed("nightly-s3", v1alpha1.BackupStorageS3)
-				seed.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "seed-dump-key", Key: pitrKeySnapshotDataKey}
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"}}}
+				seed := encryptedRefSeed("nightly-s3", v1beta1.BackupStorageS3)
+				seed.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1beta1.SecretKeyRef{Name: "seed-dump-key", Key: pitrKeySnapshotDataKey}
 				return fg, []client.Object{seed}
 			},
 			wantToken: "PITRBackupDumpKeyMissing",
@@ -139,7 +139,7 @@ func TestInitFromBackupRefusalsGiveTheRecreateRemedyOnce(t *testing.T) {
 			}
 			assertOneRecreateRemedy(t, "RestoreBuildFailed", msg)
 
-			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, Reason: pitrFailureReason(msg), Message: msg}
+			fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, Reason: pitrFailureReason(msg), Message: msg}
 			_, ready := initRestoreReadyCondition(fg)
 			assertOneRecreateRemedy(t, "Ready", ready)
 		})
@@ -150,7 +150,7 @@ func TestInitFromBackupRefusalsGiveTheRecreateRemedyOnce(t *testing.T) {
 // remedy; the Ready condition adds the fixed-at-creation note once.
 func TestInitRestoreReadyConditionAddsTheNoteOnce(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
-	fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, Message: `get referenced mysqlbackup: mysqlbackups "seed" not found`}
+	fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, Message: `get referenced mysqlbackup: mysqlbackups "seed" not found`}
 	_, ready := initRestoreReadyCondition(fg)
 	if strings.Count(ready, initFromBackupRecoveryDoc) != 1 || strings.Count(ready, recreateRemedy) != 1 {
 		t.Fatalf("Ready message %q: want the recovery URL and the recreate remedy once each", ready)
@@ -161,7 +161,7 @@ func TestInitRestoreReadyConditionAddsTheNoteOnce(t *testing.T) {
 // delete with the labels the operator puts on them, and the URL once.
 func TestInitRestoreRecoveryEmptiesPodsAndClaims(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
-	fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, JobName: "mysql-lion-dc1-restore", TargetSite: "dc1", Message: "load failed"}
+	fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, JobName: "mysql-lion-dc1-restore", TargetSite: "dc1", Message: "load failed"}
 	_, ready := initRestoreReadyCondition(fg)
 	want := fmt.Sprintf("delete the group's MySQL pods and PVCs (kubectl delete pvc,pod -l app.kubernetes.io/instance=%s,app.kubernetes.io/name=mysql -n %s), "+
 		"wait until the operator has re-created every claim Bound and every pod Running, then delete the restore Job", fg.Name, fg.Namespace)
@@ -182,7 +182,7 @@ func TestRestoreInPlaceRefusalsKeepEditRemedies(t *testing.T) {
 	for _, tc := range []struct{ got, want string }{
 		{restoreSpecFix("restoreInPlace", "source.s3"), "set restoreInPlace.source.s3"},
 		{restoreRemedy("restoreInPlace", "remove skipBinlog or set it to true", "x"), "remove skipBinlog or set it to true"},
-		{pitrLoadFilterRefusal("restoreInPlace", &v1alpha1.LoadOptions{ExcludeSchemas: []string{"a"}}).Error(), "; remove the schema filters"},
+		{pitrLoadFilterRefusal("restoreInPlace", &v1beta1.LoadOptions{ExcludeSchemas: []string{"a"}}).Error(), "; remove the schema filters"},
 	} {
 		if !strings.HasSuffix(tc.got, tc.want) || strings.Contains(tc.got, recreateRemedy) || strings.Contains(tc.got, initFromBackupRecoveryDoc) {
 			t.Errorf("restoreInPlace remedy %q, want it to end %q and not recreate the group", tc.got, tc.want)

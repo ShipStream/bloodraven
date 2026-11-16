@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // syncDragonflyPodLabels enforces the steady-state Dragonfly pod
@@ -43,7 +43,7 @@ import (
 // The returned duration is non-zero while the sweep holds a site's traffic
 // for a snapshot load (dragonflySweepHoldsTraffic): the load ending
 // produces no event, so the reconcile must come back to probe it.
-func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
+func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (time.Duration, error) {
 	if !dragonflyEnabled(fg) {
 		return 0, nil
 	}
@@ -90,9 +90,9 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 		if err := r.List(ctx, pods,
 			client.InNamespace(fg.Namespace),
 			client.MatchingLabels{
-				labelAppName:       dragonflyAppName,
-				labelInstance:      fg.Name,
-				v1alpha1.SiteLabel: site.Name,
+				labelAppName:      dragonflyAppName,
+				labelInstance:     fg.Name,
+				v1beta1.SiteLabel: site.Name,
 			},
 		); err != nil {
 			return 0, fmt.Errorf("list dragonfly pods for site %s: %w", site.Name, err)
@@ -112,8 +112,8 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 		}
 		for i := range pods.Items {
 			pod := &pods.Items[i]
-			needRole := pod.Labels[v1alpha1.DragonflyRoleLabel] != desiredRole
-			needTraffic := !stripActiveOnSource && !holdTraffic && pod.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled
+			needRole := pod.Labels[v1beta1.DragonflyRoleLabel] != desiredRole
+			needTraffic := !stripActiveOnSource && !holdTraffic && pod.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled
 			if !needRole && !needTraffic {
 				continue
 			}
@@ -127,11 +127,11 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 				if fresh.Labels == nil {
 					fresh.Labels = map[string]string{}
 				}
-				if fresh.Labels[v1alpha1.DragonflyRoleLabel] != desiredRole {
-					fresh.Labels[v1alpha1.DragonflyRoleLabel] = desiredRole
+				if fresh.Labels[v1beta1.DragonflyRoleLabel] != desiredRole {
+					fresh.Labels[v1beta1.DragonflyRoleLabel] = desiredRole
 				}
-				if !stripActiveOnSource && !holdTraffic && fresh.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
-					fresh.Labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
+				if !stripActiveOnSource && !holdTraffic && fresh.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+					fresh.Labels[v1beta1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 				}
 				return r.Update(ctx, &fresh)
 			}); err != nil {
@@ -156,15 +156,15 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 // source's traffic): the pod's TCP readiness probe passes while it loads.
 // Once the site answers as loaded the marks are removed; a mark on a site
 // that is no longer gated is removed without a probe.
-func (r *MysqlFailoverGroupReconciler) dragonflySweepHoldsTraffic(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site, desiredRole string, stripActiveOnSource bool, pods []corev1.Pod) (bool, error) {
+func (r *MysqlFailoverGroupReconciler) dragonflySweepHoldsTraffic(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site, desiredRole string, stripActiveOnSource bool, pods []corev1.Pod) (bool, error) {
 	marked := false
 	serves := false
 	for i := range pods {
-		if _, ok := pods[i].Annotations[v1alpha1.DragonflyLoadHoldAnnotation]; ok {
+		if _, ok := pods[i].Annotations[v1beta1.DragonflyLoadHoldAnnotation]; ok {
 			marked = true
 		}
-		traffic := pods[i].Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled
-		if !traffic || (desiredRole == "master" && pods[i].Labels[v1alpha1.DragonflyRoleLabel] != desiredRole) {
+		traffic := pods[i].Labels[v1beta1.DragonflyTrafficLabel] == dragonflyTrafficEnabled
+		if !traffic || (desiredRole == "master" && pods[i].Labels[v1beta1.DragonflyRoleLabel] != desiredRole) {
 			serves = true
 		}
 	}
@@ -195,19 +195,19 @@ func (r *MysqlFailoverGroupReconciler) dragonflySweepHoldsTraffic(ctx context.Co
 // holdDragonflyTrafficForLoad removes the traffic label from site's
 // Dragonfly pods and marks them with DragonflyLoadHoldAnnotation, so the
 // label sweep keeps re-checking them until the site has loaded.
-func holdDragonflyTrafficForLoad(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string, now time.Time) error {
+func holdDragonflyTrafficForLoad(ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string, now time.Time) error {
 	return updateDragonflySitePods(ctx, c, fg, site, func(p *corev1.Pod) bool {
-		_, traffic := p.Labels[v1alpha1.DragonflyTrafficLabel]
-		_, marked := p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation]
+		_, traffic := p.Labels[v1beta1.DragonflyTrafficLabel]
+		_, marked := p.Annotations[v1beta1.DragonflyLoadHoldAnnotation]
 		if !traffic && marked {
 			return false
 		}
-		delete(p.Labels, v1alpha1.DragonflyTrafficLabel)
+		delete(p.Labels, v1beta1.DragonflyTrafficLabel)
 		if !marked {
 			if p.Annotations == nil {
 				p.Annotations = map[string]string{}
 			}
-			p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation] = now.UTC().Format(time.RFC3339)
+			p.Annotations[v1beta1.DragonflyLoadHoldAnnotation] = now.UTC().Format(time.RFC3339)
 		}
 		return true
 	})
@@ -215,19 +215,19 @@ func holdDragonflyTrafficForLoad(ctx context.Context, c client.Client, fg *v1alp
 
 // releaseDragonflyLoadHold removes DragonflyLoadHoldAnnotation from site's
 // Dragonfly pods. It does not restore traffic; the sweep does.
-func releaseDragonflyLoadHold(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) error {
+func releaseDragonflyLoadHold(ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) error {
 	return updateDragonflySitePods(ctx, c, fg, site, func(p *corev1.Pod) bool {
-		if _, ok := p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation]; !ok {
+		if _, ok := p.Annotations[v1beta1.DragonflyLoadHoldAnnotation]; !ok {
 			return false
 		}
-		delete(p.Annotations, v1alpha1.DragonflyLoadHoldAnnotation)
+		delete(p.Annotations, v1beta1.DragonflyLoadHoldAnnotation)
 		return true
 	})
 }
 
 // updateDragonflySitePods applies mutate to each of site's Dragonfly pods
 // and writes the ones it changed, retrying on a conflict.
-func updateDragonflySitePods(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string, mutate func(*corev1.Pod) bool) error {
+func updateDragonflySitePods(ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string, mutate func(*corev1.Pod) bool) error {
 	pods, err := listDragonflyPodsForSite(ctx, c, fg, site)
 	if err != nil {
 		return err
@@ -260,7 +260,7 @@ func updateDragonflySitePods(ctx context.Context, c client.Client, fg *v1alpha1.
 // (set=false) is preferred over stamping a "disabled" value because
 // the active-Service selector is an exists-and-equals check on
 // "true" — a missing key sheds the endpoint without ambiguity.
-func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string, set bool) error {
+func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, siteName string, set bool) error {
 	return setDragonflyTrafficOnSite(ctx, r.Client, fg, siteName, set)
 }
 
@@ -269,14 +269,14 @@ func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Con
 // takeover (reconcilerDragonflyOps in planned_failover_df.go) so role
 // transitions land deterministically in-phase rather than waiting for the
 // next reconcile sweep.
-func (r *MysqlFailoverGroupReconciler) setDragonflyRoleOnSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
+func (r *MysqlFailoverGroupReconciler) setDragonflyRoleOnSite(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, siteName, role string) error {
 	return setDragonflyRoleOnSite(ctx, r.Client, fg, siteName, role)
 }
 
 // setDragonflyTrafficOnSite is the package-level helper. Both the
 // reconciler and the DragonflyManager call this directly; previously
 // each had its own copy that drifted. Callers pass a client.Client.
-func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, siteName string, set bool) error {
+func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup, siteName string, set bool) error {
 	pods, err := listDragonflyPodsForSite(ctx, c, fg, siteName)
 	if err != nil {
 		return err
@@ -284,7 +284,7 @@ func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1alpha
 	logger := log.FromContext(ctx)
 	for i := range pods {
 		pod := &pods[i]
-		current, has := pod.Labels[v1alpha1.DragonflyTrafficLabel]
+		current, has := pod.Labels[v1beta1.DragonflyTrafficLabel]
 		if set {
 			if has && current == dragonflyTrafficEnabled {
 				continue
@@ -303,9 +303,9 @@ func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1alpha
 				fresh.Labels = map[string]string{}
 			}
 			if set {
-				fresh.Labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
+				fresh.Labels[v1beta1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 			} else {
-				delete(fresh.Labels, v1alpha1.DragonflyTrafficLabel)
+				delete(fresh.Labels, v1beta1.DragonflyTrafficLabel)
 			}
 			return c.Update(ctx, &fresh)
 		}); err != nil {
@@ -317,7 +317,7 @@ func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1alpha
 }
 
 // setDragonflyRoleOnSite is the package-level helper.
-func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
+func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup, siteName, role string) error {
 	pods, err := listDragonflyPodsForSite(ctx, c, fg, siteName)
 	if err != nil {
 		return err
@@ -325,7 +325,7 @@ func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1alpha1.M
 	logger := log.FromContext(ctx)
 	for i := range pods {
 		pod := &pods[i]
-		if pod.Labels[v1alpha1.DragonflyRoleLabel] == role {
+		if pod.Labels[v1beta1.DragonflyRoleLabel] == role {
 			continue
 		}
 		podName := pod.Name
@@ -338,7 +338,7 @@ func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1alpha1.M
 			if fresh.Labels == nil {
 				fresh.Labels = map[string]string{}
 			}
-			fresh.Labels[v1alpha1.DragonflyRoleLabel] = role
+			fresh.Labels[v1beta1.DragonflyRoleLabel] = role
 			return c.Update(ctx, &fresh)
 		}); err != nil {
 			return fmt.Errorf("update dragonfly role label on pod %s: %w", podName, err)
@@ -351,14 +351,14 @@ func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1alpha1.M
 // listDragonflyPodsForSite returns the Dragonfly pods belonging to the
 // given site for a failover group. Centralized so the label helpers
 // share the same selector and don't drift.
-func listDragonflyPodsForSite(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, siteName string) ([]corev1.Pod, error) {
+func listDragonflyPodsForSite(ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup, siteName string) ([]corev1.Pod, error) {
 	pods := &corev1.PodList{}
 	if err := c.List(ctx, pods,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			labelAppName:       dragonflyAppName,
-			labelInstance:      fg.Name,
-			v1alpha1.SiteLabel: siteName,
+			labelAppName:      dragonflyAppName,
+			labelInstance:     fg.Name,
+			v1beta1.SiteLabel: siteName,
 		},
 	); err != nil {
 		return nil, fmt.Errorf("list dragonfly pods for site %s: %w", siteName, err)

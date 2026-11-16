@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // These tests cover spec.users[] — the Secret-backed additional principals —
@@ -36,11 +36,11 @@ func mdbSupportSecret() *corev1.Secret {
 
 // withSupportUser declares the support_ro-shaped users[] entry: SELECT-only
 // with resource limits.
-func withSupportUser(m *v1alpha1.MysqlDatabase) {
-	m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+func withSupportUser(m *v1beta1.MysqlDatabase) {
+	m.Spec.Users = []v1beta1.MysqlDatabaseUser{{
 		SecretName: mdbSupportSecretName,
-		Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
-		ResourceLimits: &v1alpha1.MysqlUserResourceLimits{
+		Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
+		ResourceLimits: &v1beta1.MysqlUserResourceLimits{
 			MaxUserConnections: 5,
 			MaxQueriesPerHour:  3600,
 		},
@@ -197,8 +197,8 @@ func TestMysqlDatabaseUsersRotationSurvivesFailedReadyStamp(t *testing.T) {
 	h.server.removeUser(mdbSupportUser)
 	h.server.addUser("acme_support_v2", "support-pw-2")
 	mdb := h.get()
-	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
-	mdb.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
+	mdb.Status.Phase = v1beta1.MysqlDatabasePhaseApplying
+	mdb.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{{
 		SecretName:      mdbSupportSecretName,
 		Username:        mdbSupportUser,
 		PendingUsername: "acme_support_v2",
@@ -241,7 +241,7 @@ func TestMysqlDatabaseUsersRemovalRevokesAndDrops(t *testing.T) {
 	if err := h.client.Delete(context.Background(), &s); err != nil {
 		t.Fatalf("delete support secret: %v", err)
 	}
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users = nil })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users = nil })
 
 	before := h.server.statementCount()
 	h.reconcile()
@@ -308,7 +308,7 @@ func TestMysqlDatabaseUsersRefusesPreExistingAccount(t *testing.T) {
 		}
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if !h.server.hasUser(mdbSupportUser) {
@@ -317,8 +317,8 @@ func TestMysqlDatabaseUsersRefusesPreExistingAccount(t *testing.T) {
 }
 
 func TestMysqlDatabaseDeletePolicyDropsUsersPrincipals(t *testing.T) {
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 
@@ -369,7 +369,7 @@ func TestMysqlDatabaseUsersLimitRemovalResetsToZero(t *testing.T) {
 		t.Fatalf("resource limits = %q, want 5/3600", limits)
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].ResourceLimits = nil })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users[0].ResourceLimits = nil })
 	h.reconcile()
 	h.requireReady()
 
@@ -391,10 +391,10 @@ func TestMysqlDatabaseUsersDropsAbandonedRotationTarget(t *testing.T) {
 	// The ledger a crashed/failed rotation leaves behind: settled on
 	// mdbSupportUser (which the Secret still names), with the rotation
 	// target it created recorded as pending.
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
+	cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) {
 		m.Status.DatabaseCreated = true
 		m.Status.OwnerUser = mdbOwnerUser
-		m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
+		m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{{
 			SecretName:      mdbSupportSecretName,
 			Username:        mdbSupportUser,
 			PendingUsername: abandoned,
@@ -440,7 +440,7 @@ func TestMysqlDatabaseUsersSecretRenameTransfersAccount(t *testing.T) {
 	if err := h.client.Create(context.Background(), renamedSecret); err != nil {
 		t.Fatalf("create renamed support secret: %v", err)
 	}
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].SecretName = renamed })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users[0].SecretName = renamed })
 
 	before := h.server.statementCount()
 	h.reconcile()
@@ -490,10 +490,10 @@ func TestMysqlDatabaseUsersNewEntryTakesRotatedName(t *testing.T) {
 		s.Data["username"] = []byte("acme_support_v2")
 		s.Data["password"] = []byte("support-pw-2")
 	})
-	h.update(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Users = append(m.Spec.Users, v1alpha1.MysqlDatabaseUser{
+	h.update(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Users = append(m.Spec.Users, v1beta1.MysqlDatabaseUser{
 			SecretName: biSecret,
-			Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+			Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
 		})
 	})
 
@@ -545,12 +545,12 @@ func (h *mdbHarness) sawEvent(reason string) bool {
 
 var threeHosts = []string{"35.1.2.3", "35.4.5.6", "35.7.8.9"}
 
-func withOwnerHosts(hosts ...string) func(*v1alpha1.MysqlDatabase) {
-	return func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Hosts = hosts }
+func withOwnerHosts(hosts ...string) func(*v1beta1.MysqlDatabase) {
+	return func(m *v1beta1.MysqlDatabase) { m.Spec.Owner.Hosts = hosts }
 }
 
-func withSupportHosts(hosts ...string) func(*v1alpha1.MysqlDatabase) {
-	return func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].Hosts = hosts }
+func withSupportHosts(hosts ...string) func(*v1beta1.MysqlDatabase) {
+	return func(m *v1beta1.MysqlDatabase) { m.Spec.Users[0].Hosts = hosts }
 }
 
 func TestMysqlDatabaseHostsCreateOneAccountPerHostInOneStatement(t *testing.T) {
@@ -603,7 +603,7 @@ func TestMysqlDatabaseHostsRemovalDropsOnlyThatHost(t *testing.T) {
 	h.reconcile()
 	h.requireReady()
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
+	h.update(func(m *v1beta1.MysqlDatabase) {
 		m.Spec.Owner.Hosts = threeHosts[:2]
 		m.Spec.Users[0].Hosts = threeHosts[1:]
 	})
@@ -638,7 +638,7 @@ func TestMysqlDatabaseHostsAdditionAndPasswordRotationTouchEveryAccount(t *testi
 	h.reconcile()
 	h.requireReady()
 
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].Hosts = threeHosts })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users[0].Hosts = threeHosts })
 	h.updateSupportSecret(func(s *corev1.Secret) { s.Data["password"] = []byte("support-pw-2") })
 	before := h.server.statementCount()
 	h.reconcile()
@@ -699,8 +699,8 @@ func TestMysqlDatabaseHostsUsernameRotationDropsOldNameOnEveryHost(t *testing.T)
 }
 
 func TestMysqlDatabaseHostsDeletePolicyDropsEveryAccount(t *testing.T) {
-	cr := mdbCR(withOwnerHosts(threeHosts...), withSupportUser, withSupportHosts(threeHosts...), func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	cr := mdbCR(withOwnerHosts(threeHosts...), withSupportUser, withSupportHosts(threeHosts...), func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.reconcile()
@@ -734,7 +734,7 @@ func TestMysqlDatabaseHostsUpgradeFromPreHostsStatus(t *testing.T) {
 		t.Fatalf("strip hosts from status: %v", err)
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
+	h.update(func(m *v1beta1.MysqlDatabase) {
 		m.Spec.Owner.Hosts = threeHosts[:1]
 		m.Spec.Users[0].Hosts = threeHosts[:1]
 	})
@@ -767,8 +767,8 @@ func TestMysqlDatabaseHostsUpgradeFromPreHostsStatus(t *testing.T) {
 // refusal must not leave the foreign name in status.pendingOwnerUser — that
 // record is a deletion drop candidate.
 func TestMysqlDatabaseRefusedOwnerRotationRestoresPendingRecord(t *testing.T) {
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.reconcile()
@@ -878,10 +878,10 @@ func TestMysqlDatabaseUsersSecondRotationDropsUnresolvedTargetFirst(t *testing.T
 		staleTarget = "acme_support_v2"
 		next        = "acme_support_v3"
 	)
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
+	cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) {
 		m.Status.DatabaseCreated = true
 		m.Status.OwnerUser = mdbOwnerUser
-		m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
+		m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{{
 			SecretName:      mdbSupportSecretName,
 			Username:        mdbSupportUser,
 			PendingUsername: staleTarget,
@@ -939,11 +939,11 @@ func TestMysqlDatabaseUsersSecondRotationDropsUnresolvedTargetFirst(t *testing.T
 // see that; the sibling's persisted claim must, before this CR stamps or
 // creates anything. Once the claim is gone the CR converges.
 func TestMysqlDatabaseUsersRefusesSiblingClaimedName(t *testing.T) {
-	sibling := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+	sibling := mdbCR(func(m *v1beta1.MysqlDatabase) {
 		m.Name = "tenant-sibling"
 		m.Spec.DatabaseName = "sibling_wms"
 		m.Spec.Owner.SecretName = "sibling-owner"
-		m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+		m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{
 			{SecretName: "sibling-support", Username: mdbSupportUser},
 		}
 	})
@@ -963,7 +963,7 @@ func TestMysqlDatabaseUsersRefusesSiblingClaimedName(t *testing.T) {
 	}
 
 	// The sibling releases the name: its ledger no longer records it.
-	var other v1alpha1.MysqlDatabase
+	var other v1beta1.MysqlDatabase
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: "tenant-sibling"}, &other); err != nil {
 		t.Fatalf("get sibling: %v", err)
 	}

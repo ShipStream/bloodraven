@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/testutil"
@@ -376,7 +376,7 @@ func TestPlannedPromote_RotatesOncePerRun(t *testing.T) {
 	f.src.down = true
 	f.src.mu.Unlock()
 	for pass := 1; pass <= 2; pass++ {
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		if err != nil || out.Kind != PromoteUnconfirmed {
 			t.Fatalf("pass %d: Promote = %+v, %v; want Unconfirmed while the source is unreadable", pass, out, err)
 		}
@@ -387,7 +387,7 @@ func TestPlannedPromote_RotatesOncePerRun(t *testing.T) {
 	f.src.mu.Lock()
 	f.src.down = false
 	f.src.mu.Unlock()
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if err != nil || out.Kind != PromoteConfirmed {
 		t.Fatalf("Promote = %+v, %v; want Confirmed", out, err)
 	}
@@ -402,7 +402,7 @@ func TestPlannedPromote_RotatesOncePerRun(t *testing.T) {
 		t.Fatalf("target statements = %v, want %v", got, want)
 	}
 	// Confirmed: a re-run finds the target writable and sends nothing.
-	if _, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting)); err != nil {
+	if _, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting)); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(f.tgt.flushLog()); got != 1 {
@@ -431,7 +431,7 @@ func TestPlannedPromote_ClaimLostBeforeTheRotation(t *testing.T) {
 			released = f.reg.slot.release(f.ref.RunID, ReleaseTerminal)
 		}
 	}
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if !released {
 		t.Fatal("fixture: the claim was not held when RESET REPLICA ALL arrived")
 	}
@@ -561,7 +561,7 @@ func TestPlannedFence_SealsTheSourceOnce(t *testing.T) {
 			}
 			// The same process proves the fence again (a lost Draining
 			// write): no second rotation.
-			fence := v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, SourceServerUUID: opsUUIDA}
+			fence := v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceIntended, SourceServerUUID: opsUUIDA}
 			if proof, err := f.topo.ProveFence(context.Background(), f.ref, fence); err != nil || proof.Kind != FenceApplied {
 				t.Fatalf("ProveFence = %+v, %v", proof, err)
 			}
@@ -593,7 +593,7 @@ func TestPlannedFence_UnsealedSourceIsLogged(t *testing.T) {
 		return logs
 	}
 	count := func(logs *syncBuffer) int { return strings.Count(logs.String(), `msg="`+msg+`"`) }
-	intended := v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, SourceServerUUID: opsUUIDA}
+	intended := v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceIntended, SourceServerUUID: opsUUIDA}
 
 	t.Run("the fence's read-back was lost", func(t *testing.T) {
 		f := newOpsFixture(t, "")
@@ -693,7 +693,7 @@ func TestPlannedFence_UnsealedSourceIsLogged(t *testing.T) {
 		f.hold(false)
 		f.fenced()
 		applied := intended
-		applied.State = v1alpha1.PlannedFailoverFenceApplied
+		applied.State = v1beta1.PlannedFailoverFenceApplied
 		if proof, err := f.topo.ProveFence(context.Background(), f.ref, applied); err != nil || proof.Kind != FenceApplied {
 			t.Fatalf("ProveFence = %+v, %v", proof, err)
 		}

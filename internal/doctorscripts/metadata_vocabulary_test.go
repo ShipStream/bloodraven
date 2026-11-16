@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // oldPrefixJSONPath matches a kubectl JSONPath that reads a label or
@@ -60,12 +60,12 @@ func TestDoctorScriptsReadKeysAtBloodravenPrefix(t *testing.T) {
 	}
 
 	want := []string{
-		jsonPathKey("annotations", v1alpha1.BackupAttemptAnnotation),
-		jsonPathKey("labels", v1alpha1.BackupRetryOfLabel),
-		jsonPathKey("annotations", v1alpha1.BackupRetryRootAnnotation),
-		jsonPathKey("annotations", v1alpha1.BackupRetryRootUIDAnnotation),
-		jsonPathKey("labels", v1alpha1.MysqlBackupLabel),
-		jsonPathKey("annotations", v1alpha1.VerificationBackupAnnotation),
+		jsonPathKey("annotations", v1beta1.BackupAttemptAnnotation),
+		jsonPathKey("labels", v1beta1.BackupRetryOfLabel),
+		jsonPathKey("annotations", v1beta1.BackupRetryRootAnnotation),
+		jsonPathKey("annotations", v1beta1.BackupRetryRootUIDAnnotation),
+		jsonPathKey("labels", v1beta1.MysqlBackupLabel),
+		jsonPathKey("annotations", v1beta1.VerificationBackupAnnotation),
 	}
 	for _, name := range []string{"triage.sh", "support-bundle.sh"} {
 		body := readScript(t, name)
@@ -183,11 +183,11 @@ func expandAlternation(t *testing.T, pattern string) []string {
 }
 
 // apiEventReasons returns the values of every Event* string constant in
-// api/v1alpha1, resolving constants defined as another constant.
+// api/v1beta1, resolving constants defined as another constant.
 func apiEventReasons(t *testing.T) map[string]bool {
 	t.Helper()
 	_, file, _, _ := runtime.Caller(0)
-	dir := filepath.Join(filepath.Dir(file), "..", "..", "api", "v1alpha1")
+	dir := filepath.Join(filepath.Dir(file), "..", "..", "api", "v1beta1")
 	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
 		t.Fatal(err)
@@ -267,7 +267,7 @@ func TestTriagePITREventFilterNamesRegisteredReasons(t *testing.T) {
 	reasons := apiEventReasons(t)
 	for _, n := range names {
 		if !reasons[n] {
-			t.Errorf("triage.sh PITR filter names %q, which is not an Event reason in api/v1alpha1", n)
+			t.Errorf("triage.sh PITR filter names %q, which is not an Event reason in api/v1beta1", n)
 		}
 	}
 }

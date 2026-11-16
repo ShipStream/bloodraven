@@ -23,7 +23,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // pitrRuleMessage is a stable fragment of the root rule's message.
@@ -31,12 +31,12 @@ const pitrRuleMessage = "cannot change while that profile archives PITR binlogs 
 
 // pitrS3Profile is an S3 profile at prefix, optionally encrypted with the
 // passphrase in Secret secretName (key left to its default).
-func pitrS3Profile(name, prefix, secretName string) v1alpha1.BackupProfile {
-	p := v1alpha1.BackupProfile{
+func pitrS3Profile(name, prefix, secretName string) v1beta1.BackupProfile {
+	p := v1beta1.BackupProfile{
 		Name: name,
-		Storage: v1alpha1.BackupStorage{
-			Type: v1alpha1.BackupStorageS3,
-			S3: &v1alpha1.S3Storage{
+		Storage: v1beta1.BackupStorage{
+			Type: v1beta1.BackupStorageS3,
+			S3: &v1beta1.S3Storage{
 				Bucket:                "archive",
 				Prefix:                prefix,
 				EndpointURL:           "http://rustfs.storage.svc:9000",
@@ -45,8 +45,8 @@ func pitrS3Profile(name, prefix, secretName string) v1alpha1.BackupProfile {
 		},
 	}
 	if secretName != "" {
-		p.Encryption = &v1alpha1.BackupEncryptionSpec{
-			PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secretName},
+		p.Encryption = &v1beta1.BackupEncryptionSpec{
+			PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: secretName},
 		}
 	}
 	return p
@@ -54,19 +54,19 @@ func pitrS3Profile(name, prefix, secretName string) v1alpha1.BackupProfile {
 
 // newPITRBindingFG is a valid group whose active PITR profile "a" archives,
 // encrypted, to s3://archive/p1, with a second dump-only profile "b".
-func newPITRBindingFG(ns, name string) *v1alpha1.MysqlFailoverGroup {
+func newPITRBindingFG(ns, name string) *v1beta1.MysqlFailoverGroup {
 	fg := newEncryptionFG(ns, name)
-	fg.Spec.Backup = &v1alpha1.BackupSpec{
-		Profiles: []v1alpha1.BackupProfile{
+	fg.Spec.Backup = &v1beta1.BackupSpec{
+		Profiles: []v1beta1.BackupProfile{
 			pitrS3Profile("a", "p1", "pitr-key"),
 			pitrS3Profile("b", "dumps", "dump-key"),
 		},
-		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"},
+		PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "a"},
 	}
 	return fg
 }
 
-func pitrProfile(fg *v1alpha1.MysqlFailoverGroup, name string) *v1alpha1.BackupProfile {
+func pitrProfile(fg *v1beta1.MysqlFailoverGroup, name string) *v1beta1.BackupProfile {
 	for i := range fg.Spec.Backup.Profiles {
 		if fg.Spec.Backup.Profiles[i].Name == name {
 			return &fg.Spec.Backup.Profiles[i]
@@ -77,12 +77,12 @@ func pitrProfile(fg *v1alpha1.MysqlFailoverGroup, name string) *v1alpha1.BackupP
 
 // pitrUpdate creates fg (after setup), then applies edit to a fresh copy
 // and returns the Update error.
-func pitrUpdate(t *testing.T, fg *v1alpha1.MysqlFailoverGroup, edit func(*v1alpha1.MysqlFailoverGroup)) error {
+func pitrUpdate(t *testing.T, fg *v1beta1.MysqlFailoverGroup, edit func(*v1beta1.MysqlFailoverGroup)) error {
 	t.Helper()
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("create %s: %v", fg.Name, err)
 	}
-	cur := &v1alpha1.MysqlFailoverGroup{}
+	cur := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), cur); err != nil {
 		t.Fatalf("get %s: %v", fg.Name, err)
 	}
@@ -167,31 +167,31 @@ func TestPITRBindingCELRefusesEncryptionChange(t *testing.T) {
 
 	cases := []struct {
 		name  string
-		setup func(*v1alpha1.MysqlFailoverGroup)
-		edit  func(*v1alpha1.MysqlFailoverGroup)
+		setup func(*v1beta1.MysqlFailoverGroup)
+		edit  func(*v1beta1.MysqlFailoverGroup)
 	}{
 		{
 			name: "remove-encryption",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
+			edit: func(fg *v1beta1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
 		},
 		{
 			name:  "add-encryption",
-			setup: func(fg *v1alpha1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
-				pitrProfile(fg, "a").Encryption = &v1alpha1.BackupEncryptionSpec{
-					PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pitr-key"},
+			setup: func(fg *v1beta1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
+				pitrProfile(fg, "a").Encryption = &v1beta1.BackupEncryptionSpec{
+					PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "pitr-key"},
 				}
 			},
 		},
 		{
 			name: "selector-name",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				pitrProfile(fg, "a").Encryption.PassphraseSecretKeyRef.Name = "pitr-key-copy"
 			},
 		},
 		{
 			name: "selector-key",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				pitrProfile(fg, "a").Encryption.PassphraseSecretKeyRef.Key = "other"
 			},
 		},
@@ -199,7 +199,7 @@ func TestPITRBindingCELRefusesEncryptionChange(t *testing.T) {
 			// Credentials and region are access fields, not identity: an
 			// edit of them alongside does not open the rule.
 			name: "selector-name-with-access-edit",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Encryption.PassphraseSecretKeyRef.Name = "pitr-key-copy"
 				a.Storage.S3.CredentialsSecretName = "s3-creds-2"
@@ -208,14 +208,14 @@ func TestPITRBindingCELRefusesEncryptionChange(t *testing.T) {
 		},
 		{
 			name: "pvc-remove-encryption",
-			setup: func(fg *v1alpha1.MysqlFailoverGroup) {
+			setup: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
-				a.Storage = v1alpha1.BackupStorage{
-					Type: v1alpha1.BackupStoragePVC,
-					PVC:  &v1alpha1.PVCStorage{ClaimName: "archive", SubPath: "p1"},
+				a.Storage = v1beta1.BackupStorage{
+					Type: v1beta1.BackupStoragePVC,
+					PVC:  &v1beta1.PVCStorage{ClaimName: "archive", SubPath: "p1"},
 				}
 			},
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
+			edit: func(fg *v1beta1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
 		},
 	}
 	for i, tc := range cases {
@@ -237,12 +237,12 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 
 	cases := []struct {
 		name  string
-		setup func(*v1alpha1.MysqlFailoverGroup)
-		edit  func(*v1alpha1.MysqlFailoverGroup)
+		setup func(*v1beta1.MysqlFailoverGroup)
+		edit  func(*v1beta1.MysqlFailoverGroup)
 	}{
 		{
 			name: "remove-encryption-with-prefix-change",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Encryption = nil
 				a.Storage.S3.Prefix = "p2"
@@ -250,7 +250,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "selector-with-bucket-change",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Encryption.PassphraseSecretKeyRef.Name = "other-key"
 				a.Storage.S3.Bucket = "archive-2"
@@ -258,7 +258,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "selector-with-endpoint-change",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Encryption.PassphraseSecretKeyRef.Key = "k2"
 				a.Storage.S3.EndpointURL = "http://rustfs.storage.svc.cluster.local:9000"
@@ -266,20 +266,20 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "s3-to-pvc-with-encryption-removed",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Encryption = nil
-				a.Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "archive"}}
+				a.Storage = v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{ClaimName: "archive"}}
 			},
 		},
 		{
 			name: "pvc-subpath-change",
-			setup: func(fg *v1alpha1.MysqlFailoverGroup) {
-				pitrProfile(fg, "a").Storage = v1alpha1.BackupStorage{
-					Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "archive", SubPath: "p1"},
+			setup: func(fg *v1beta1.MysqlFailoverGroup) {
+				pitrProfile(fg, "a").Storage = v1beta1.BackupStorage{
+					Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{ClaimName: "archive", SubPath: "p1"},
 				}
 			},
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Encryption.PassphraseSecretKeyRef.Name = "other-key"
 				a.Storage.PVC.SubPath = "p2"
@@ -287,12 +287,12 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "pvc-claim-change",
-			setup: func(fg *v1alpha1.MysqlFailoverGroup) {
-				pitrProfile(fg, "a").Storage = v1alpha1.BackupStorage{
-					Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "archive", SubPath: "p1"},
+			setup: func(fg *v1beta1.MysqlFailoverGroup) {
+				pitrProfile(fg, "a").Storage = v1beta1.BackupStorage{
+					Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{ClaimName: "archive", SubPath: "p1"},
 				}
 			},
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Encryption = nil
 				a.Storage.PVC.ClaimName = "archive-2"
@@ -300,7 +300,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "non-pitr-profile",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				b := pitrProfile(fg, "b")
 				b.Encryption.PassphraseSecretKeyRef.Name = "dump-key-2"
 				b.Encryption.PassphraseSecretKeyRef.Key = "k2"
@@ -308,31 +308,31 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "non-pitr-profile-remove-encryption",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) { pitrProfile(fg, "b").Encryption = nil },
+			edit: func(fg *v1beta1.MysqlFailoverGroup) { pitrProfile(fg, "b").Encryption = nil },
 		},
 		{
 			name:  "pitr-disabled-in-old",
-			setup: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.Enabled = false },
-			edit:  func(fg *v1alpha1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
+			setup: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.Enabled = false },
+			edit:  func(fg *v1beta1.MysqlFailoverGroup) { pitrProfile(fg, "a").Encryption = nil },
 		},
 		{
 			name: "pitr-disabled-in-new",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.Backup.PITR.Enabled = false
 				pitrProfile(fg, "a").Encryption = nil
 			},
 		},
 		{
 			name:  "pitr-section-absent-in-old",
-			setup: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR = nil },
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"}
+			setup: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR = nil },
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "a"}
 				pitrProfile(fg, "a").Encryption.PassphraseSecretKeyRef.Name = "other-key"
 			},
 		},
 		{
 			name: "across-profile-name-change",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.Backup.PITR.ProfileName = "b"
 				pitrProfile(fg, "a").Encryption = nil
 				pitrProfile(fg, "b").Encryption.PassphraseSecretKeyRef.Name = "dump-key-2"
@@ -342,7 +342,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 			// Renaming the active profile (and pitr.profileName with it) is a
 			// profile-name change, which the rule leaves to reconcile.
 			name: "active-profile-renamed",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Name = "c"
 				a.Encryption = nil
@@ -351,11 +351,11 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "access-fields-only",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Storage.S3.CredentialsSecretName = "s3-creds-2"
 				a.Storage.S3.Region = strings.Repeat("r", 64)
-				a.Retention = v1alpha1.BackupRetention{KeepLast: 3, KeepFailed: new(int32(0))}
+				a.Retention = v1beta1.BackupRetention{KeepLast: 3, KeepFailed: new(int32(0))}
 			},
 		},
 		{
@@ -364,7 +364,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 			// change; reconcile refuses it (EncryptionChangeRefused /
 			// KeyChangeRefused, controller TestPITRBindingSpellingOnlyStorageEditRefused).
 			name: "spelling-only-prefix-with-selector-change",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Storage.S3.Prefix += "/"
 				a.Encryption.PassphraseSecretKeyRef.Name = "other-key"
@@ -372,7 +372,7 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "spelling-only-endpoint-with-encryption-removed",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				a := pitrProfile(fg, "a")
 				a.Storage.S3.EndpointURL = strings.Replace(a.Storage.S3.EndpointURL, "rustfs", "RustFS", 1) + "/"
 				a.Encryption = nil
@@ -380,9 +380,9 @@ func TestPITRBindingCELAllowedEdits(t *testing.T) {
 		},
 		{
 			name: "algorithm-explicit-and-key-explicit",
-			edit: func(fg *v1alpha1.MysqlFailoverGroup) {
+			edit: func(fg *v1beta1.MysqlFailoverGroup) {
 				e := pitrProfile(fg, "a").Encryption
-				e.Algorithm = v1alpha1.EncryptionAlgorithmAES256GCM
+				e.Algorithm = v1beta1.EncryptionAlgorithmAES256GCM
 				e.PassphraseSecretKeyRef.Key = "passphrase"
 			},
 		},
@@ -410,7 +410,7 @@ func TestPITRBindingCELLongRegionCreate(t *testing.T) {
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("create with a 64-character region: %v", err)
 	}
-	cur := &v1alpha1.MysqlFailoverGroup{}
+	cur := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), cur); err != nil {
 		t.Fatal(err)
 	}
@@ -439,13 +439,13 @@ func TestPITRBindingCELAlgorithmEnum(t *testing.T) {
 	}
 
 	fg = newPITRBindingFG(ns, "good-alg")
-	pitrProfile(fg, "a").Encryption.Algorithm = v1alpha1.EncryptionAlgorithmAES256GCM
+	pitrProfile(fg, "a").Encryption.Algorithm = v1beta1.EncryptionAlgorithmAES256GCM
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("explicit AES-256-GCM refused: %v", err)
 	}
 }
 
-var mfgGVK = schema.GroupVersionKind{Group: "shipstream.io", Version: "v1alpha1", Kind: "MysqlFailoverGroup"}
+var mfgGVK = schema.GroupVersionKind{Group: "shipstream.io", Version: "v1beta1", Kind: "MysqlFailoverGroup"}
 
 // unstructuredPITRFG is newPITRBindingFG written without the encryption
 // defaults (algorithm, passphraseSecretKeyRef.key), as a GitOps tool would.
@@ -488,7 +488,7 @@ func TestPITRBindingCELDefaultsOmitted(t *testing.T) {
 	key := types.NamespacedName{Namespace: ns, Name: "omitted"}
 
 	// The operator's typed finalizer Update.
-	typed := &v1alpha1.MysqlFailoverGroup{}
+	typed := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, key, typed); err != nil {
 		t.Fatal(err)
 	}
@@ -545,43 +545,43 @@ func TestPITRBindingCELBounds(t *testing.T) {
 		name  string
 		field string // substring expected in the refusal
 		max   int
-		set   func(fg *v1alpha1.MysqlFailoverGroup, n int)
+		set   func(fg *v1beta1.MysqlFailoverGroup, n int)
 	}
 	ascii := func(n int) string { return strings.Repeat("a", n) }
-	pvc := func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.PVCStorage {
+	pvc := func(fg *v1beta1.MysqlFailoverGroup) *v1beta1.PVCStorage {
 		b := pitrProfile(fg, "b")
-		b.Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "c"}}
+		b.Storage = v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{ClaimName: "c"}}
 		return b.Storage.PVC
 	}
 	bounds := []bound{
-		{"bucket", "bucket", 63, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"bucket", "bucket", 63, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Storage.S3.Bucket = ascii(n)
 		}},
-		{"endpoint", "endpointURL", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"endpoint", "endpointURL", 512, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Storage.S3.EndpointURL = "http://h/" + ascii(n-len("http://h/"))
 		}},
-		{"claim", "claimName", 253, func(fg *v1alpha1.MysqlFailoverGroup, n int) { pvc(fg).ClaimName = ascii(n) }},
-		{"subpath", "subPath", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) { pvc(fg).SubPath = ascii(n) }},
-		{"secret-name", "passphraseSecretKeyRef.name", 253, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"claim", "claimName", 253, func(fg *v1beta1.MysqlFailoverGroup, n int) { pvc(fg).ClaimName = ascii(n) }},
+		{"subpath", "subPath", 512, func(fg *v1beta1.MysqlFailoverGroup, n int) { pvc(fg).SubPath = ascii(n) }},
+		{"secret-name", "passphraseSecretKeyRef.name", 253, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Encryption.PassphraseSecretKeyRef.Name = dnsSubdomainOfLength(n)
 		}},
-		{"secret-key", "passphraseSecretKeyRef.key", 253, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"secret-key", "passphraseSecretKeyRef.key", 253, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Encryption.PassphraseSecretKeyRef.Key = ascii(n)
 		}},
-		{"pitr-profile-name", "pitr.profileName", 63, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"pitr-profile-name", "pitr.profileName", 63, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Name = ascii(n)
 			fg.Spec.Backup.PITR.ProfileName = ascii(n)
 		}},
-		{"init-from-backup-decryption-name", "initFromBackup.decryption.passphraseSecretKeyRef.name", 253, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-				Source:     v1alpha1.RestoreSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "seed"}},
-				Decryption: &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: dnsSubdomainOfLength(n)}},
+		{"init-from-backup-decryption-name", "initFromBackup.decryption.passphraseSecretKeyRef.name", 253, func(fg *v1beta1.MysqlFailoverGroup, n int) {
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+				Source:     v1beta1.RestoreSource{PVC: &v1beta1.InitFromBackupPVCSource{ClaimName: "seed"}},
+				Decryption: &v1beta1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: dnsSubdomainOfLength(n)}},
 			}
 		}},
-		{"init-from-backup-decryption-key", "initFromBackup.decryption.passphraseSecretKeyRef.key", 253, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-				Source:     v1alpha1.RestoreSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "seed"}},
-				Decryption: &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "k", Key: ascii(n)}},
+		{"init-from-backup-decryption-key", "initFromBackup.decryption.passphraseSecretKeyRef.key", 253, func(fg *v1beta1.MysqlFailoverGroup, n int) {
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+				Source:     v1beta1.RestoreSource{PVC: &v1beta1.InitFromBackupPVCSource{ClaimName: "seed"}},
+				Decryption: &v1beta1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "k", Key: ascii(n)}},
 			}
 		}},
 	}
@@ -610,17 +610,17 @@ func TestPITRBindingCELBounds(t *testing.T) {
 	// disabled at reconcile.
 	multibyte := func(nBytes int) string { return strings.Repeat("é", nBytes/2) + strings.Repeat("a", nBytes%2) }
 	byteBounds := []bound{
-		{"bucket-bytes", "bucket must be at most 63 bytes", 63, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"bucket-bytes", "bucket must be at most 63 bytes", 63, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Storage.S3.Bucket = multibyte(n)
 		}},
-		{"prefix-bytes", "prefix must be at most 512 bytes", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"prefix-bytes", "prefix must be at most 512 bytes", 512, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Storage.S3.Prefix = multibyte(n)
 		}},
-		{"endpoint-bytes", "endpointURL must be at most 512 bytes", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) {
+		{"endpoint-bytes", "endpointURL must be at most 512 bytes", 512, func(fg *v1beta1.MysqlFailoverGroup, n int) {
 			pitrProfile(fg, "a").Storage.S3.EndpointURL = "http://h/" + multibyte(n-len("http://h/"))
 		}},
-		{"claim-bytes", "claimName must be at most 253 bytes", 253, func(fg *v1alpha1.MysqlFailoverGroup, n int) { pvc(fg).ClaimName = multibyte(n) }},
-		{"subpath-bytes", "subPath must be at most 512 bytes", 512, func(fg *v1alpha1.MysqlFailoverGroup, n int) { pvc(fg).SubPath = multibyte(n) }},
+		{"claim-bytes", "claimName must be at most 253 bytes", 253, func(fg *v1beta1.MysqlFailoverGroup, n int) { pvc(fg).ClaimName = multibyte(n) }},
+		{"subpath-bytes", "subPath must be at most 512 bytes", 512, func(fg *v1beta1.MysqlFailoverGroup, n int) { pvc(fg).SubPath = multibyte(n) }},
 	}
 	for i, b := range byteBounds {
 		t.Run(b.name, func(t *testing.T) {
@@ -657,7 +657,7 @@ func TestPITRBindingCELBounds(t *testing.T) {
 	})
 
 	t.Run("profiles-max-items", func(t *testing.T) {
-		build := func(name string, n int) *v1alpha1.MysqlFailoverGroup {
+		build := func(name string, n int) *v1beta1.MysqlFailoverGroup {
 			fg := newPITRBindingFG(ns, name)
 			for i := len(fg.Spec.Backup.Profiles); i < n; i++ {
 				fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, pitrS3Profile(fmt.Sprintf("p%d", i), fmt.Sprintf("x%d", i), "k"))
@@ -676,15 +676,15 @@ func TestPITRBindingCELBounds(t *testing.T) {
 	t.Run("msc-source-decryption", func(t *testing.T) {
 		for _, tc := range []struct {
 			name, field string
-			ref         v1alpha1.PassphraseSecretKeyRef
+			ref         v1beta1.PassphraseSecretKeyRef
 			ok          bool
 		}{
-			{"msc-dec-name-max", "", v1alpha1.PassphraseSecretKeyRef{Name: dnsSubdomainOfLength(253)}, true},
-			{"msc-dec-name-over", "decryption.passphraseSecretKeyRef.name", v1alpha1.PassphraseSecretKeyRef{Name: dnsSubdomainOfLength(254)}, false},
-			{"msc-dec-key-over", "decryption.passphraseSecretKeyRef.key", v1alpha1.PassphraseSecretKeyRef{Name: "k", Key: ascii(254)}, false},
+			{"msc-dec-name-max", "", v1beta1.PassphraseSecretKeyRef{Name: dnsSubdomainOfLength(253)}, true},
+			{"msc-dec-name-over", "decryption.passphraseSecretKeyRef.name", v1beta1.PassphraseSecretKeyRef{Name: dnsSubdomainOfLength(254)}, false},
+			{"msc-dec-key-over", "decryption.passphraseSecretKeyRef.key", v1beta1.PassphraseSecretKeyRef{Name: "k", Key: ascii(254)}, false},
 		} {
 			msc := minimalEnvtestStandby(tc.name, ns)
-			msc.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: tc.ref}
+			msc.Spec.Source.Decryption = &v1beta1.BackupDecryptionSpec{PassphraseSecretKeyRef: tc.ref}
 			err := k8sClient.Create(ctx, msc)
 			if tc.ok {
 				if err != nil {
@@ -713,12 +713,12 @@ func TestPITRBindingCELVerificationArchiveProfileName(t *testing.T) {
 		{"Bad_Name", false},
 		{"-leading", false},
 	} {
-		v := &v1alpha1.MysqlBackupVerification{
+		v := &v1beta1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: fmt.Sprintf("mbv-%d", i)},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{
-				FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+			Spec: v1beta1.MysqlBackupVerificationSpec{
+				FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 				ProfileName:      "nightly",
-				PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ArchiveProfileName: tc.value},
+				PointInTime:      &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest, ArchiveProfileName: tc.value},
 			},
 		}
 		err := k8sClient.Create(ctx, v)
@@ -746,7 +746,7 @@ func TestPITRBindingSSAProfilesListMap(t *testing.T) {
 	}
 	profileNames := func() []string {
 		t.Helper()
-		got := &v1alpha1.MysqlFailoverGroup{}
+		got := &v1beta1.MysqlFailoverGroup{}
 		if err := k8sClient.Get(ctx, key, got); err != nil {
 			t.Fatal(err)
 		}
@@ -757,8 +757,8 @@ func TestPITRBindingSSAProfilesListMap(t *testing.T) {
 		return names
 	}
 	profileObj := func(name, prefix string) map[string]any {
-		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Backup: &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{pitrS3Profile(name, prefix, "")}},
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{
+			Backup: &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{pitrS3Profile(name, prefix, "")}},
 		}})
 		if err != nil {
 			t.Fatal(err)
@@ -806,7 +806,7 @@ func TestPITRBindingSSAProfilesListMap(t *testing.T) {
 	}
 
 	// The operator's typed Update of the whole spec keeps every entry.
-	typed := &v1alpha1.MysqlFailoverGroup{}
+	typed := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, key, typed); err != nil {
 		t.Fatal(err)
 	}
@@ -850,18 +850,18 @@ func containsAll(have []string, want ...string) bool {
 	return true
 }
 
-func pitrBindingFixture(i int, destination string) v1alpha1.PITRArchiveBinding {
-	return v1alpha1.PITRArchiveBinding{
+func pitrBindingFixture(i int, destination string) v1beta1.PITRArchiveBinding {
+	return v1beta1.PITRArchiveBinding{
 		ID:          fmt.Sprintf("pab-%016x", i),
 		Destination: destination,
 		ArchiveID:   "ar1-" + strings.Repeat("a", 26),
-		Source:      &v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "lion", UID: "0a1b2c3d-0000-4000-8000-000000000001"},
-		Encryption: v1alpha1.PITRArchiveBindingEncryption{
-			Mode:          v1alpha1.EncryptionModePassphrase,
-			Algorithm:     v1alpha1.EncryptionAlgorithmAES256GCM,
+		Source:      &v1beta1.PITRArchiveSource{Namespace: "ns", Name: "lion", UID: "0a1b2c3d-0000-4000-8000-000000000001"},
+		Encryption: v1beta1.PITRArchiveBindingEncryption{
+			Mode:          v1beta1.EncryptionModePassphrase,
+			Algorithm:     v1beta1.EncryptionAlgorithmAES256GCM,
 			KeySecretName: fmt.Sprintf("mysql-lion-pitr-key-%010x", i),
 		},
-		State:  v1alpha1.PITRArchiveBindingBound,
+		State:  v1beta1.PITRArchiveBindingBound,
 		Reason: "Bound",
 	}
 }
@@ -878,7 +878,7 @@ func TestPITRBindingStatusBounds(t *testing.T) {
 	}
 	key := client.ObjectKeyFromObject(fg)
 
-	cur := &v1alpha1.MysqlFailoverGroup{}
+	cur := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, key, cur); err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +894,7 @@ func TestPITRBindingStatusBounds(t *testing.T) {
 	if err := k8sClient.Status().Update(ctx, cur); err != nil {
 		t.Fatalf("status Update with 16 bindings refused: %v", err)
 	}
-	got := &v1alpha1.MysqlFailoverGroup{}
+	got := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, key, got); err != nil {
 		t.Fatal(err)
 	}
@@ -908,9 +908,9 @@ func TestPITRBindingStatusBounds(t *testing.T) {
 		t.Fatal("a status write changed spec")
 	}
 
-	refuse := func(name, want string, edit func(*v1alpha1.MysqlFailoverGroup)) {
+	refuse := func(name, want string, edit func(*v1beta1.MysqlFailoverGroup)) {
 		t.Helper()
-		c := &v1alpha1.MysqlFailoverGroup{}
+		c := &v1beta1.MysqlFailoverGroup{}
 		if err := k8sClient.Get(ctx, key, c); err != nil {
 			t.Fatal(err)
 		}
@@ -920,22 +920,22 @@ func TestPITRBindingStatusBounds(t *testing.T) {
 			t.Errorf("%s: want a refusal mentioning %q, got %v", name, want, err)
 		}
 	}
-	refuse("17th binding", "pitrArchiveBindings", func(c *v1alpha1.MysqlFailoverGroup) {
+	refuse("17th binding", "pitrArchiveBindings", func(c *v1beta1.MysqlFailoverGroup) {
 		c.Status.PITRArchiveBindings = append(c.Status.PITRArchiveBindings, pitrBindingFixture(16, "s3://archive/16"))
 	})
-	refuse("bad id", "id", func(c *v1alpha1.MysqlFailoverGroup) {
+	refuse("bad id", "id", func(c *v1beta1.MysqlFailoverGroup) {
 		c.Status.PITRArchiveBindings[0].ID = "pab-NOTHEX"
 	})
-	refuse("duplicate id", "Duplicate value", func(c *v1alpha1.MysqlFailoverGroup) {
+	refuse("duplicate id", "Duplicate value", func(c *v1beta1.MysqlFailoverGroup) {
 		c.Status.PITRArchiveBindings[1].ID = c.Status.PITRArchiveBindings[0].ID
 	})
-	refuse("over-long destination", "destination", func(c *v1alpha1.MysqlFailoverGroup) {
+	refuse("over-long destination", "destination", func(c *v1beta1.MysqlFailoverGroup) {
 		c.Status.PITRArchiveBindings[0].Destination += "x"
 	})
-	refuse("bad state", "state", func(c *v1alpha1.MysqlFailoverGroup) {
+	refuse("bad state", "state", func(c *v1beta1.MysqlFailoverGroup) {
 		c.Status.PITRArchiveBindings[0].State = "Accepted"
 	})
-	refuse("bad archive id", "archiveID", func(c *v1alpha1.MysqlFailoverGroup) {
+	refuse("bad archive id", "archiveID", func(c *v1beta1.MysqlFailoverGroup) {
 		c.Status.PITRArchiveBindings[0].ArchiveID = "ar1-UPPER"
 	})
 

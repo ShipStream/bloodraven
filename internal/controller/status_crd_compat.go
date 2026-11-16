@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Status writes against a CRD that is older than the operator.
@@ -64,19 +64,19 @@ const crdDegradedRetryInterval = 10 * time.Minute
 //     An operator that restarts on such a status restores the report
 //     without its set and holder (ownLossReportDegradedForOlderCRD), and
 //     its own comparisons find the set again.
-func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
+func degradeStatusForOlderCRD(st *v1beta1.MysqlFailoverGroupStatus) bool {
 	changed := false
 	for i := range st.Sites {
 		if st.Sites[i].LostGtid != "" || st.Sites[i].LostTransactionCount != nil || st.Sites[i].LostComparedTo != "" {
 			st.Sites[i].LostGtid, st.Sites[i].LostTransactionCount, st.Sites[i].LostComparedTo = "", nil, ""
 			changed = true
 		}
-		if st.Sites[i].RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
-			st.Sites[i].RecoveryState = v1alpha1.RecoveryStateBlocked
+		if st.Sites[i].RecoveryState == v1beta1.RecoveryStateRecloneRequired {
+			st.Sites[i].RecoveryState = v1beta1.RecoveryStateBlocked
 			changed = true
 		}
-		if st.Sites[i].SourceConvergenceReason == v1alpha1.SourceReasonOwnTransactionsLost {
-			st.Sites[i].SourceConvergenceReason = v1alpha1.SourceReasonGTIDDiverged
+		if st.Sites[i].SourceConvergenceReason == v1beta1.SourceReasonOwnTransactionsLost {
+			st.Sites[i].SourceConvergenceReason = v1beta1.SourceReasonGTIDDiverged
 			changed = true
 		}
 	}
@@ -90,8 +90,8 @@ func degradeStatusForOlderCRD(st *v1alpha1.MysqlFailoverGroupStatus) bool {
 // operator that restarts on it restores the report without its set
 // (TopologyManager.SetOwnTransactionsLostUnknown): the report must not be
 // lost with the field the CRD pruned.
-func ownLossReportDegradedForOlderCRD(s v1alpha1.SiteStatus) bool {
-	return s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergentGtid == "" && s.LostGtid == ""
+func ownLossReportDegradedForOlderCRD(s v1beta1.SiteStatus) bool {
+	return s.RecoveryState == v1beta1.RecoveryStateBlocked && s.DivergentGtid == "" && s.LostGtid == ""
 }
 
 // ownLossReportWithoutSet reports whether s is what the current CRD stores
@@ -102,8 +102,8 @@ func ownLossReportDegradedForOlderCRD(s v1alpha1.SiteStatus) bool {
 // without a set on a site that also carries a divergence block is stored
 // as that block alone and is not restored; the block keeps the site out of
 // promotion and replication, and the reclone that resolves it repairs both.
-func ownLossReportWithoutSet(s v1alpha1.SiteStatus) bool {
-	return s.RecoveryState == v1alpha1.RecoveryStateRecloneRequired && s.LostGtid == ""
+func ownLossReportWithoutSet(s v1beta1.SiteStatus) bool {
+	return s.RecoveryState == v1beta1.RecoveryStateRecloneRequired && s.LostGtid == ""
 }
 
 // errStatusLostGtidPruned is what noteStatusDegradedForOlderCRD logs when
@@ -111,7 +111,7 @@ func ownLossReportWithoutSet(s v1alpha1.SiteStatus) bool {
 var errStatusLostGtidPruned = errors.New("the API server accepted the status and pruned status.sites[].lostGtid")
 
 // statusLostGtid returns the sites of st that carry a lostGtid.
-func statusLostGtid(st *v1alpha1.MysqlFailoverGroupStatus) map[string]bool {
+func statusLostGtid(st *v1beta1.MysqlFailoverGroupStatus) map[string]bool {
 	out := map[string]bool{}
 	for _, s := range st.Sites {
 		if s.LostGtid != "" {
@@ -124,7 +124,7 @@ func statusLostGtid(st *v1alpha1.MysqlFailoverGroupStatus) map[string]bool {
 // statusLostGtidPruned reports whether stored, the status the API server
 // answered a write with, lacks a lostGtid that the write carried for one
 // of the sites in sent: the installed CRD has no such field.
-func statusLostGtidPruned(sent map[string]bool, stored *v1alpha1.MysqlFailoverGroupStatus) bool {
+func statusLostGtidPruned(sent map[string]bool, stored *v1beta1.MysqlFailoverGroupStatus) bool {
 	if len(sent) == 0 {
 		return false
 	}

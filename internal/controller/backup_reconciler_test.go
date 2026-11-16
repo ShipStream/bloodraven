@@ -18,25 +18,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // --- selectSourceSite ----------------------------------------------------
 
-func backupTestGroup(status *v1alpha1.MysqlFailoverGroupStatus) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
-		Spec:   v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
+func backupTestGroup(status *v1beta1.MysqlFailoverGroupStatus) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
+		Spec:   v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
 		Status: *status,
 	}
 }
 
 func TestSelectSourceSite_ReplicaHealthy_PicksReplica(t *testing.T) {
 	lag := int64(30)
-	status := &v1alpha1.MysqlFailoverGroupStatus{
+	status := &v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, SecondsBehindSource: &lag},
 		},
 	}
 	site, reason, err := selectSourceSite(backupTestGroup(status), "", 300)
@@ -53,11 +53,11 @@ func TestSelectSourceSite_ReplicaHealthy_PicksReplica(t *testing.T) {
 
 func TestSelectSourceSite_ReplicaLagging_FallsBackToPrimary(t *testing.T) {
 	lag := int64(1000)
-	status := &v1alpha1.MysqlFailoverGroupStatus{
+	status := &v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, SecondsBehindSource: &lag},
 		},
 	}
 	site, reason, err := selectSourceSite(backupTestGroup(status), "", 300)
@@ -73,11 +73,11 @@ func TestSelectSourceSite_ReplicaLagging_FallsBackToPrimary(t *testing.T) {
 }
 
 func TestSelectSourceSite_ReplicaUnreachable_FallsBackToPrimary(t *testing.T) {
-	status := &v1alpha1.MysqlFailoverGroupStatus{
+	status := &v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateUnreachable},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateUnreachable},
 		},
 	}
 	site, _, err := selectSourceSite(backupTestGroup(status), "", 300)
@@ -87,11 +87,11 @@ func TestSelectSourceSite_ReplicaUnreachable_FallsBackToPrimary(t *testing.T) {
 }
 
 func TestSelectSourceSite_NoHealthySource_Error(t *testing.T) {
-	status := &v1alpha1.MysqlFailoverGroupStatus{
+	status := &v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateUnreachable},
-			{Name: "pdx", State: v1alpha1.SiteStateUnreachable},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateUnreachable},
+			{Name: "pdx", State: v1beta1.SiteStateUnreachable},
 		},
 	}
 	if _, _, err := selectSourceSite(backupTestGroup(status), "", 300); err == nil {
@@ -100,11 +100,11 @@ func TestSelectSourceSite_NoHealthySource_Error(t *testing.T) {
 }
 
 func TestSelectSourceSite_OverrideWins(t *testing.T) {
-	status := &v1alpha1.MysqlFailoverGroupStatus{
+	status := &v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateUnreachable},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateUnreachable},
 		},
 	}
 	site, reason, err := selectSourceSite(backupTestGroup(status), "pdx", 300)
@@ -117,11 +117,11 @@ func TestSelectSourceSite_OverrideWins(t *testing.T) {
 }
 
 func TestSelectSourceSite_OverrideUnknown_Error(t *testing.T) {
-	status := &v1alpha1.MysqlFailoverGroupStatus{
+	status := &v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly},
 		},
 	}
 	if _, _, err := selectSourceSite(backupTestGroup(status), "nope", 300); err == nil {
@@ -131,14 +131,14 @@ func TestSelectSourceSite_OverrideUnknown_Error(t *testing.T) {
 
 func TestSelectSourceSite_ExcludesReadOnlyRole(t *testing.T) {
 	lag := int64(0)
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
-			{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRoleDisasterRecovery}, {Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{
+			{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102, Role: v1beta1.SiteRoleDisasterRecovery}, {Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly},
 		}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SecondsBehindSource: &lag},
+		Status: v1beta1.MysqlFailoverGroupStatus{ActiveSite: "iad", Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "reader", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, SecondsBehindSource: &lag},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, SecondsBehindSource: &lag},
 		}},
 	}
 	site, _, err := selectSourceSite(fg, "", 300)
@@ -152,31 +152,31 @@ func TestSelectSourceSite_ExcludesReadOnlyRole(t *testing.T) {
 
 // --- BuildBackupJob ------------------------------------------------------
 
-func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
+func fgWithBackup() *v1beta1.MysqlFailoverGroup {
 	t := true
-	return &v1alpha1.MysqlFailoverGroup{
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "ns"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-			Sites: []v1alpha1.SiteSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+			Sites: []v1beta1.SiteSpec{
 				{Name: "iad", ServerID: 101, Zone: "az-iad", LoadBalancerIP: "10.0.0.1",
-					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
+					Storage: v1beta1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
 				{Name: "pdx", ServerID: 102, Zone: "az-pdx", LoadBalancerIP: "10.0.0.2",
-					Storage: v1alpha1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
+					Storage: v1beta1.StorageSpec{StorageClassName: "gp3", Size: "10Gi"}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.example.com", TTLSeconds: 60},
-			Backup: &v1alpha1.BackupSpec{
+			DNS: v1beta1.DNSSpec{Hostname: "lion.example.com", TTLSeconds: 60},
+			Backup: &v1beta1.BackupSpec{
 				Image:                  "mysql/mysql-shell:8.0.34",
 				MaxLagSecondsForSource: new(int64(60)),
 				ActiveDeadlineSeconds:  3600,
 				BackoffLimit:           new(int32(1)),
-				Profiles: []v1alpha1.BackupProfile{
+				Profiles: []v1beta1.BackupProfile{
 					{
 						Name: "nightly-s3",
-						Storage: v1alpha1.BackupStorage{
-							Type: v1alpha1.BackupStorageS3,
-							S3: &v1alpha1.S3Storage{
+						Storage: v1beta1.BackupStorage{
+							Type: v1beta1.BackupStorageS3,
+							S3: &v1beta1.S3Storage{
 								Bucket:                "bloodraven-backups",
 								Prefix:                "lion",
 								Region:                "us-east-1",
@@ -184,26 +184,26 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 								CredentialsSecretName: "s3-creds",
 							},
 						},
-						Dump: &v1alpha1.DumpOptions{
+						Dump: &v1beta1.DumpOptions{
 							Threads:       8,
 							BytesPerChunk: "128M",
 							Compression:   "zstd",
 							Consistent:    &t,
 						},
-						Retention: v1alpha1.BackupRetention{KeepLast: 5},
+						Retention: v1beta1.BackupRetention{KeepLast: 5},
 					},
 					{
 						Name: "daily-local",
-						Storage: v1alpha1.BackupStorage{
-							Type: v1alpha1.BackupStoragePVC,
-							PVC: &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{
+						Storage: v1beta1.BackupStorage{
+							Type: v1beta1.BackupStoragePVC,
+							PVC: &v1beta1.PVCStorage{Provisioned: &v1beta1.ProvisionedVolumeSpec{
 								StorageClassName: new("fast"),
 								Size:             "50Gi",
 							}},
 						},
 					},
 				},
-				Schedules: []v1alpha1.BackupSchedule{
+				Schedules: []v1beta1.BackupSchedule{
 					{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"},
 				},
 			},
@@ -213,9 +213,9 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 
 func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 	fg := fgWithBackup()
-	mb := &v1alpha1.MysqlBackup{
+	mb := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-nightly-abc", Namespace: "ns"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
 		DumpKeySecretName:    testDumpKeySecret,
@@ -272,7 +272,7 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 	if envMap["BLOODRAVEN_AWS_CREDS_DIR"] != backupAWSCredsMountPath {
 		t.Errorf("want BLOODRAVEN_AWS_CREDS_DIR=%s, got %q", backupAWSCredsMountPath, envMap["BLOODRAVEN_AWS_CREDS_DIR"])
 	}
-	if envMap["BLOODRAVEN_STORAGE_TYPE"] != string(v1alpha1.BackupStorageS3) {
+	if envMap["BLOODRAVEN_STORAGE_TYPE"] != string(v1beta1.BackupStorageS3) {
 		t.Errorf("want BLOODRAVEN_STORAGE_TYPE=S3, got %q", envMap["BLOODRAVEN_STORAGE_TYPE"])
 	}
 
@@ -311,10 +311,10 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 func TestBuildBackupJob_PVCWithoutClaimIsRefused(t *testing.T) {
 	fg := fgWithBackup()
 	profile := *fg.Spec.Backup.Profiles[1].DeepCopy()
-	profile.Storage.PVC = &v1alpha1.PVCStorage{SubPath: "orders"}
-	mb := &v1alpha1.MysqlBackup{
+	profile.Storage.PVC = &v1beta1.PVCStorage{SubPath: "orders"}
+	mb := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-daily-xyz", Namespace: "ns"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: profile.Name},
+		Spec:       v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: profile.Name},
 	}
 	_, err := BuildBackupJob(BackupJobInputs{
 		DumpKeySecretName:    testDumpKeySecret,
@@ -335,9 +335,9 @@ func TestBuildBackupJob_PVCWithoutClaimIsRefused(t *testing.T) {
 
 func TestBuildBackupJob_PVC_MountsClaim(t *testing.T) {
 	fg := fgWithBackup()
-	mb := &v1alpha1.MysqlBackup{
+	mb := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-daily-xyz", Namespace: "ns"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "daily-local"},
+		Spec:       v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "daily-local"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
 		DumpKeySecretName:    testDumpKeySecret,
@@ -407,7 +407,7 @@ func TestMarshalLoadOptions_DefaultEmpty(t *testing.T) {
 }
 
 func TestMarshalLoadOptions_IncludeSchemas(t *testing.T) {
-	l := &v1alpha1.LoadOptions{
+	l := &v1beta1.LoadOptions{
 		IncludeSchemas: []string{"tenant_42"},
 	}
 	got, err := marshalLoadOptions(l)
@@ -420,7 +420,7 @@ func TestMarshalLoadOptions_IncludeSchemas(t *testing.T) {
 }
 
 func TestMarshalLoadOptions_ExcludeSchemas(t *testing.T) {
-	l := &v1alpha1.LoadOptions{
+	l := &v1beta1.LoadOptions{
 		ExcludeSchemas: []string{"tmp", "scratch"},
 	}
 	got, err := marshalLoadOptions(l)
@@ -435,7 +435,7 @@ func TestMarshalLoadOptions_ExcludeSchemas(t *testing.T) {
 func TestMarshalLoadOptions_AllFields(t *testing.T) {
 	skipBin := false
 	loadIdx := true
-	l := &v1alpha1.LoadOptions{
+	l := &v1beta1.LoadOptions{
 		Threads:        8,
 		SkipBinlog:     &skipBin,
 		LoadIndexes:    &loadIdx,
@@ -480,7 +480,7 @@ func TestJobPhase_FailedCounterFallback(t *testing.T) {
 		Status: batchv1.JobStatus{Failed: 3}, // past the limit, no conditions yet
 	}
 	phase, msg := jobPhase(j, "backup")
-	if phase != v1alpha1.BackupPhaseFailed {
+	if phase != v1beta1.BackupPhaseFailed {
 		t.Errorf("want Failed, got %s (msg=%s)", phase, msg)
 	}
 	if !strings.Contains(msg, "backoffLimit=2") {
@@ -542,7 +542,7 @@ func newBackupReconciler(t *testing.T, objs ...client.Object) (*MysqlBackupRecon
 	scheme := testScheme()
 	cb := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlBackup{}, &v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlBackup{}, &v1beta1.MysqlFailoverGroup{}).
 		WithObjects(objs...)
 	c := cb.Build()
 	r := &MysqlBackupReconciler{
@@ -553,15 +553,15 @@ func newBackupReconciler(t *testing.T, objs ...client.Object) (*MysqlBackupRecon
 	return r, c
 }
 
-func backupCR(name, fgName, profile string) *v1alpha1.MysqlBackup {
-	return &v1alpha1.MysqlBackup{
+func backupCR(name, fgName, profile string) *v1beta1.MysqlBackup {
+	return &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         "ns",
 			CreationTimestamp: metav1.Now(),
 		},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 	}
@@ -595,42 +595,42 @@ func TestMysqlBackupReconciler_GroupNotFound_TransitionsToFailed(t *testing.T) {
 	r, c := newBackupReconciler(t, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "orphan")
 
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "orphan", Namespace: "ns"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed {
+	if got.Status.Phase != v1beta1.BackupPhaseFailed {
 		t.Errorf("want Failed phase, got %q (message=%q)", got.Status.Phase, got.Status.Message)
 	}
 }
 
 func TestMysqlBackupReconciler_ProfileNotFound_TransitionsToFailed(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("bad-profile", "lion", "does-not-exist")
 	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "bad-profile")
 
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "bad-profile", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed {
+	if got.Status.Phase != v1beta1.BackupPhaseFailed {
 		t.Errorf("want Failed phase, got %q", got.Status.Phase)
 	}
 }
 
 func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("happy-path", "lion", "nightly-s3")
@@ -644,16 +644,16 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 		t.Fatalf("job not created: %v", err)
 	}
 
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "happy-path", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.BackupPhaseRunning {
+	if got.Status.Phase != v1beta1.BackupPhaseRunning {
 		t.Errorf("want Running, got %s", got.Status.Phase)
 	}
 	if got.Status.SourceSite != "pdx" {
 		t.Errorf("want source pdx, got %s", got.Status.SourceSite)
 	}
-	if job.Labels[v1alpha1.SiteLabel] != "pdx" {
-		t.Errorf("want Job source-site label pdx, got %q", job.Labels[v1alpha1.SiteLabel])
+	if job.Labels[v1beta1.SiteLabel] != "pdx" {
+		t.Errorf("want Job source-site label pdx, got %q", job.Labels[v1beta1.SiteLabel])
 	}
 	// Phase 2: capture the active-site MySQL image tag for
 	// version-pinned verification.
@@ -678,22 +678,22 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 
 func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateReadOnly},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateReadOnly},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("wait-for-source", "lion", "nightly-s3")
 	// Stale Job attribution from a deleted/GC'd Job must be cleared on Pending.
-	mb.Status = v1alpha1.MysqlBackupStatus{
-		Phase:             v1alpha1.BackupPhaseRunning,
+	mb.Status = v1beta1.MysqlBackupStatus{
+		Phase:             v1beta1.BackupPhaseRunning,
 		JobName:           backupJobName(mb.Name),
 		SourceSite:        "pdx",
 		ActiveSiteAtStart: "iad",
 		StartTime:         &metav1.Time{Time: time.Now().Add(-time.Minute)},
 		Conditions: []metav1.Condition{{
-			Type:   v1alpha1.ConditionJobCreated,
+			Type:   v1beta1.ConditionJobCreated,
 			Status: metav1.ConditionTrue,
 			Reason: "Created",
 		}},
@@ -701,12 +701,12 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "wait-for-source")
 
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	key := types.NamespacedName{Name: "wait-for-source", Namespace: "ns"}
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get pending backup: %v", err)
 	}
-	if got.Status.Phase != v1alpha1.BackupPhasePending {
+	if got.Status.Phase != v1beta1.BackupPhasePending {
 		t.Fatalf("phase=%q, want Pending (message=%q)", got.Status.Phase, got.Status.Message)
 	}
 	if got.Status.CompletionTime != nil {
@@ -716,7 +716,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 		t.Fatalf("pending status still has Job fields: job=%q source=%q activeAtStart=%q startTime=%v",
 			got.Status.JobName, got.Status.SourceSite, got.Status.ActiveSiteAtStart, got.Status.StartTime)
 	}
-	if cond := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
+	if cond := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Fatalf("JobCreated condition=%v, want False", cond)
 	}
 	rec, ok := r.Recorder.(*record.FakeRecorder)
@@ -726,7 +726,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	noHealthyCount := 0
 	for len(rec.Events) > 0 {
 		ev := <-rec.Events
-		if strings.Contains(ev, v1alpha1.ReasonWaitingForHealthySource) {
+		if strings.Contains(ev, v1beta1.ReasonWaitingForHealthySource) {
 			noHealthyCount++
 		}
 	}
@@ -740,15 +740,15 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 		t.Fatalf("Job should not exist without a source, get err=%v", err)
 	}
 
-	var liveFG v1alpha1.MysqlFailoverGroup
+	var liveFG v1beta1.MysqlFailoverGroup
 	fgKey := types.NamespacedName{Name: "lion", Namespace: "ns"}
 	if err := c.Get(context.Background(), fgKey, &liveFG); err != nil {
 		t.Fatalf("get failover group: %v", err)
 	}
 	liveFG.Status.ActiveSite = "iad"
-	liveFG.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: v1alpha1.SiteStateWritable},
-		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+	liveFG.Status.Sites = []v1beta1.SiteStatus{
+		{Name: "iad", State: v1beta1.SiteStateWritable},
+		{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 	}
 	if err := c.Status().Update(context.Background(), &liveFG); err != nil {
 		t.Fatalf("make source healthy: %v", err)
@@ -758,7 +758,7 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get running backup: %v", err)
 	}
-	if got.Status.Phase != v1alpha1.BackupPhaseRunning {
+	if got.Status.Phase != v1beta1.BackupPhaseRunning {
 		t.Fatalf("phase=%q, want Running after source recovery (message=%q)", got.Status.Phase, got.Status.Message)
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{
@@ -770,23 +770,23 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 
 func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateReadOnly},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateReadOnly},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("pending-too-long", "lion", "nightly-s3")
 	mb.CreationTimestamp = metav1.NewTime(time.Now().Add(-(maxBackupPendingDuration + time.Minute)))
 	// Stale Job attribution must be cleared even on the terminal deadline path.
-	mb.Status = v1alpha1.MysqlBackupStatus{
-		Phase:             v1alpha1.BackupPhaseRunning,
+	mb.Status = v1beta1.MysqlBackupStatus{
+		Phase:             v1beta1.BackupPhaseRunning,
 		JobName:           backupJobName(mb.Name),
 		SourceSite:        "pdx",
 		ActiveSiteAtStart: "iad",
 		StartTime:         &metav1.Time{Time: time.Now().Add(-time.Hour)},
 		Conditions: []metav1.Condition{{
-			Type:   v1alpha1.ConditionJobCreated,
+			Type:   v1beta1.ConditionJobCreated,
 			Status: metav1.ConditionTrue,
 			Reason: "Created",
 		}},
@@ -794,24 +794,24 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
 	reconcileUntilStable(t, r, "pending-too-long")
 
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "pending-too-long", Namespace: "ns"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed {
+	if got.Status.Phase != v1beta1.BackupPhaseFailed {
 		t.Fatalf("phase=%q, want Failed after pending deadline (message=%q)", got.Status.Phase, got.Status.Message)
 	}
 	if !strings.Contains(got.Status.Message, "pending for") {
 		t.Fatalf("message=%q, want pending-duration suffix", got.Status.Message)
 	}
-	if cond := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady); cond == nil || cond.Reason != "NoHealthySource" {
+	if cond := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady); cond == nil || cond.Reason != "NoHealthySource" {
 		t.Fatalf("Ready condition=%v, want Reason=NoHealthySource", cond)
 	}
 	if got.Status.JobName != "" || got.Status.SourceSite != "" || got.Status.ActiveSiteAtStart != "" || got.Status.StartTime != nil {
 		t.Fatalf("failed pre-launch status still has Job fields: job=%q source=%q activeAtStart=%q startTime=%v",
 			got.Status.JobName, got.Status.SourceSite, got.Status.ActiveSiteAtStart, got.Status.StartTime)
 	}
-	if cond := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
+	if cond := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Fatalf("JobCreated condition=%v, want False after pre-launch deadline fail", cond)
 	}
 }
@@ -822,12 +822,12 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 // every other wait fails PendingTimedOut and names the wait in the message.
 func TestPendBackup_TimeoutNeverCarriesAPendingReason(t *testing.T) {
 	pending := []string{
-		v1alpha1.ReasonPending,
-		v1alpha1.ReasonWaitingForHealthySource,
-		v1alpha1.ReasonBackupJobConflict,
-		v1alpha1.ReasonPITRArchiveRolloutPending,
-		v1alpha1.ReasonDumpKeySnapshotConflict,
-		v1alpha1.ReasonPassphraseSecretMissing,
+		v1beta1.ReasonPending,
+		v1beta1.ReasonWaitingForHealthySource,
+		v1beta1.ReasonBackupJobConflict,
+		v1beta1.ReasonPITRArchiveRolloutPending,
+		v1beta1.ReasonDumpKeySnapshotConflict,
+		v1beta1.ReasonPassphraseSecretMissing,
 	}
 	for _, reason := range pending {
 		t.Run(reason, func(t *testing.T) {
@@ -839,16 +839,16 @@ func TestPendBackup_TimeoutNeverCarriesAPendingReason(t *testing.T) {
 			if _, err := r.pendBackup(context.Background(), mb, reason, "still waiting"); err != nil {
 				t.Fatal(err)
 			}
-			var got v1alpha1.MysqlBackup
+			var got v1beta1.MysqlBackup
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), &got); err != nil {
 				t.Fatal(err)
 			}
-			want := v1alpha1.ReasonPendingTimedOut
-			if reason == v1alpha1.ReasonWaitingForHealthySource {
-				want = v1alpha1.ReasonNoHealthySource
+			want := v1beta1.ReasonPendingTimedOut
+			if reason == v1beta1.ReasonWaitingForHealthySource {
+				want = v1beta1.ReasonNoHealthySource
 			}
-			ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
-			if got.Status.Phase != v1alpha1.BackupPhaseFailed || ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != want {
+			ready := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady)
+			if got.Status.Phase != v1beta1.BackupPhaseFailed || ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != want {
 				t.Fatalf("phase=%s Ready=%+v, want Failed with Ready=False/%s", got.Status.Phase, ready, want)
 			}
 			for _, p := range pending {
@@ -859,7 +859,7 @@ func TestPendBackup_TimeoutNeverCarriesAPendingReason(t *testing.T) {
 			if !strings.Contains(ready.Message, "pending for") || !strings.Contains(ready.Message, "still waiting") {
 				t.Fatalf("message %q, want the wait duration and the pending message", ready.Message)
 			}
-			if want == v1alpha1.ReasonPendingTimedOut && !strings.Contains(ready.Message, reason) {
+			if want == v1beta1.ReasonPendingTimedOut && !strings.Contains(ready.Message, reason) {
 				t.Fatalf("message %q does not name the wait %s", ready.Message, reason)
 			}
 			if n := countEvents(rec, want); n != 1 {
@@ -874,11 +874,11 @@ func TestPendBackup_TimeoutNeverCarriesAPendingReason(t *testing.T) {
 // reason or Running) and the condition's generation is the backup's.
 func TestMysqlBackupReconciler_ReadyFromCreation(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("ready-from-creation", "lion", "nightly-s3")
@@ -887,8 +887,8 @@ func TestMysqlBackupReconciler_ReadyFromCreation(t *testing.T) {
 	var reasons []string
 	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			if b, ok := obj.(*v1alpha1.MysqlBackup); ok && sub == "status" {
-				if ready := meta.FindStatusCondition(b.Status.Conditions, v1alpha1.ConditionReady); ready != nil {
+			if b, ok := obj.(*v1beta1.MysqlBackup); ok && sub == "status" {
+				if ready := meta.FindStatusCondition(b.Status.Conditions, v1beta1.ConditionReady); ready != nil {
 					if ready.Status != metav1.ConditionFalse || ready.ObservedGeneration != b.Generation {
 						t.Errorf("Ready=%+v at generation %d, want False stamped with the backup's generation", ready, b.Generation)
 					}
@@ -901,18 +901,18 @@ func TestMysqlBackupReconciler_ReadyFromCreation(t *testing.T) {
 		},
 	})
 	reconcileUntilStable(t, r, mb.Name)
-	if len(reasons) < 2 || reasons[0] != v1alpha1.ReasonPending || reasons[len(reasons)-1] != v1alpha1.ReasonRunning {
+	if len(reasons) < 2 || reasons[0] != v1beta1.ReasonPending || reasons[len(reasons)-1] != v1beta1.ReasonRunning {
 		t.Fatalf("Ready reasons written %v, want Pending first and Running once the Job runs", reasons)
 	}
 }
 
 func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("in-flight-failover", "lion", "nightly-s3")
@@ -920,24 +920,24 @@ func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testin
 	reconcileUntilStable(t, r, "in-flight-failover")
 
 	backupKey := types.NamespacedName{Name: mb.Name, Namespace: mb.Namespace}
-	var running v1alpha1.MysqlBackup
+	var running v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), backupKey, &running); err != nil {
 		t.Fatalf("get running backup: %v", err)
 	}
-	if running.Status.Phase != v1alpha1.BackupPhaseRunning || running.Status.SourceSite != "pdx" {
+	if running.Status.Phase != v1beta1.BackupPhaseRunning || running.Status.SourceSite != "pdx" {
 		t.Fatalf("initial status phase=%q source=%q, want Running/pdx", running.Status.Phase, running.Status.SourceSite)
 	}
 
 	// Reproduce the nightly race: the backup Job already targets pdx, while
 	// an ordered update briefly publishes no active site on the group.
-	var liveFG v1alpha1.MysqlFailoverGroup
+	var liveFG v1beta1.MysqlFailoverGroup
 	fgKey := types.NamespacedName{Name: "lion", Namespace: "ns"}
 	if err := c.Get(context.Background(), fgKey, &liveFG); err != nil {
 		t.Fatalf("get failover group: %v", err)
 	}
 	liveFG.Status.ActiveSite = ""
 	for i := range liveFG.Status.Sites {
-		liveFG.Status.Sites[i].State = v1alpha1.SiteStateReadOnly
+		liveFG.Status.Sites[i].State = v1beta1.SiteStateReadOnly
 	}
 	if err := c.Status().Update(context.Background(), &liveFG); err != nil {
 		t.Fatalf("publish transient no-primary state: %v", err)
@@ -948,7 +948,7 @@ func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testin
 	if err := c.Get(context.Background(), backupKey, &running); err != nil {
 		t.Fatalf("get backup after no-primary reconcile: %v", err)
 	}
-	if running.Status.Phase != v1alpha1.BackupPhaseRunning {
+	if running.Status.Phase != v1beta1.BackupPhaseRunning {
 		t.Fatalf("in-flight backup became %q during no-primary window (message=%q)", running.Status.Phase, running.Status.Message)
 	}
 
@@ -970,11 +970,11 @@ func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testin
 	}
 	reconcileUntilStable(t, r, mb.Name)
 
-	var done v1alpha1.MysqlBackup
+	var done v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), backupKey, &done); err != nil {
 		t.Fatalf("get completed backup: %v", err)
 	}
-	if done.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+	if done.Status.Phase != v1beta1.BackupPhaseSucceeded {
 		t.Fatalf("phase=%q, want Succeeded (message=%q)", done.Status.Phase, done.Status.Message)
 	}
 	if done.Status.SourceSite != "pdx" {
@@ -984,11 +984,11 @@ func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testin
 
 func TestMysqlBackupReconciler_JobSucceeded_MarksSucceeded(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("done", "lion", "nightly-s3")
@@ -1017,9 +1017,9 @@ func TestMysqlBackupReconciler_JobSucceeded_MarksSucceeded(t *testing.T) {
 	// Second pass: observes success.
 	reconcileUntilStable(t, r, "done")
 
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "done", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+	if got.Status.Phase != v1beta1.BackupPhaseSucceeded {
 		t.Errorf("want Succeeded, got %s (msg=%s)", got.Status.Phase, got.Status.Message)
 	}
 	if got.Status.CompletionTime == nil {
@@ -1029,11 +1029,11 @@ func TestMysqlBackupReconciler_JobSucceeded_MarksSucceeded(t *testing.T) {
 
 func TestMysqlBackupReconciler_JobFailed_MarksFailed(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+	fg.Status = v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "iad",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 		},
 	}
 	mb := backupCR("boom", "lion", "nightly-s3")
@@ -1058,9 +1058,9 @@ func TestMysqlBackupReconciler_JobFailed_MarksFailed(t *testing.T) {
 
 	reconcileUntilStable(t, r, "boom")
 
-	var got v1alpha1.MysqlBackup
+	var got v1beta1.MysqlBackup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "boom", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.BackupPhaseFailed {
+	if got.Status.Phase != v1beta1.BackupPhaseFailed {
 		t.Errorf("want Failed, got %s", got.Status.Phase)
 	}
 	if !strings.Contains(got.Status.Message, "BackoffLimit") {

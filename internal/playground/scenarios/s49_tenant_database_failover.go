@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -138,28 +138,28 @@ func s49CreateTenantDatabase() runner.Step {
 				return fmt.Errorf("create users[] secret: %w", err)
 			}
 
-			mdb := &v1alpha1.MysqlDatabase{
+			mdb := &v1beta1.MysqlDatabase{
 				ObjectMeta: metav1.ObjectMeta{Name: s49CRName, Namespace: env.Namespace},
-				Spec: v1alpha1.MysqlDatabaseSpec{
-					FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG},
+				Spec: v1beta1.MysqlDatabaseSpec{
+					FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: env.FG},
 					DatabaseName:     s49DatabaseName,
-					Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: s49SecretName},
-					Users: []v1alpha1.MysqlDatabaseUser{{
+					Owner:            v1beta1.MysqlDatabaseOwner{SecretName: s49SecretName},
+					Users: []v1beta1.MysqlDatabaseUser{{
 						SecretName: s49UserSecretName,
-						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+						Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
 						Hosts:      s49SupportHosts,
-						ResourceLimits: &v1alpha1.MysqlUserResourceLimits{
+						ResourceLimits: &v1beta1.MysqlUserResourceLimits{
 							MaxUserConnections: 5,
 							MaxQueriesPerHour:  3600,
 						},
 					}},
-					Grants: []v1alpha1.MysqlDatabaseGrant{{
+					Grants: []v1beta1.MysqlDatabaseGrant{{
 						Username:   s49GrantUser,
-						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete},
+						Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect, v1beta1.PrivilegeDelete},
 					}},
 					// Explicit, even though it is the default: this scenario
 					// creates a real database and must clean it up.
-					DeletionPolicy: v1alpha1.DeletionPolicyDelete,
+					DeletionPolicy: v1beta1.DeletionPolicyDelete,
 				},
 			}
 			if err := env.Kube.Controller.Create(ctx, mdb); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -480,21 +480,21 @@ func s49ExpectDenied(ctx context.Context, c *pgmysql.SiteClient, stmt string) er
 // s49WaitForReady polls the CR until it is Ready with observedGeneration
 // caught up. When wantSite is non-empty it additionally requires
 // status.activeSite to have moved there.
-func s49WaitForReady(ctx context.Context, env *runner.Env, timeout time.Duration, wantSite string) (*v1alpha1.MysqlDatabase, error) {
+func s49WaitForReady(ctx context.Context, env *runner.Env, timeout time.Duration, wantSite string) (*v1beta1.MysqlDatabase, error) {
 	deadline := time.Now().Add(timeout)
 	var last string
 	for time.Now().Before(deadline) {
-		var mdb v1alpha1.MysqlDatabase
+		var mdb v1beta1.MysqlDatabase
 		key := client.ObjectKey{Namespace: env.Namespace, Name: s49CRName}
 		if err := env.Kube.Controller.Get(ctx, key, &mdb); err != nil {
 			last = err.Error()
 		} else {
 			switch {
-			case mdb.Status.Phase == v1alpha1.MysqlDatabasePhaseFailed:
+			case mdb.Status.Phase == v1beta1.MysqlDatabasePhaseFailed:
 				// Failed is terminal-shaped; waiting out the timeout would
 				// only delay the same verdict with a worse message.
 				return nil, fmt.Errorf("MysqlDatabase failed: %s", mdb.Status.Message)
-			case mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseReady:
+			case mdb.Status.Phase != v1beta1.MysqlDatabasePhaseReady:
 				last = fmt.Sprintf("phase=%s message=%q", mdb.Status.Phase, mdb.Status.Message)
 			case mdb.Status.ObservedGeneration != mdb.Generation:
 				last = fmt.Sprintf("observedGeneration=%d generation=%d", mdb.Status.ObservedGeneration, mdb.Generation)
@@ -519,7 +519,7 @@ func s49WaitForReady(ctx context.Context, env *runner.Env, timeout time.Duration
 // Ready CR that makes the observe step pass without the operator doing
 // anything.
 func s49DeleteLeftovers(ctx context.Context, env *runner.Env) error {
-	mdb := &v1alpha1.MysqlDatabase{ObjectMeta: metav1.ObjectMeta{Name: s49CRName, Namespace: env.Namespace}}
+	mdb := &v1beta1.MysqlDatabase{ObjectMeta: metav1.ObjectMeta{Name: s49CRName, Namespace: env.Namespace}}
 	if err := env.Kube.Controller.Delete(ctx, mdb); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete mysqldatabase: %w", err)
 	}
@@ -533,7 +533,7 @@ func s49DeleteLeftovers(ctx context.Context, env *runner.Env) error {
 	deadline := time.Now().Add(2 * time.Minute)
 	released := false
 	for time.Now().Before(deadline) {
-		var live v1alpha1.MysqlDatabase
+		var live v1beta1.MysqlDatabase
 		key := client.ObjectKey{Namespace: env.Namespace, Name: s49CRName}
 		err := env.Kube.Controller.Get(ctx, key, &live)
 		if apierrors.IsNotFound(err) {
@@ -550,7 +550,7 @@ func s49DeleteLeftovers(ctx context.Context, env *runner.Env) error {
 		}
 	}
 	if !released {
-		var live v1alpha1.MysqlDatabase
+		var live v1beta1.MysqlDatabase
 		key := client.ObjectKey{Namespace: env.Namespace, Name: s49CRName}
 		state := "unknown"
 		if err := env.Kube.Controller.Get(ctx, key, &live); err == nil {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 	"github.com/shipstream/bloodraven/internal/testutil"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -22,7 +22,7 @@ import (
 // its object in the API, and a topology manager with the real ordered
 // updater whose Deployment writes go through the real reconciler.
 type rolloutFleetGroup struct {
-	fg *v1alpha1.MysqlFailoverGroup
+	fg *v1beta1.MysqlFailoverGroup
 	h  *stallHarness
 }
 
@@ -43,7 +43,7 @@ type rolloutFleetHarness struct {
 	brokenAfterRoll map[string]bool
 }
 
-func rolloutFleetFG(name string) *v1alpha1.MysqlFailoverGroup {
+func rolloutFleetFG(name string) *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG()
 	fg.Name, fg.UID = name, types.UID("uid-"+name)
 	fg.Spec.Sites[0].Name, fg.Spec.Sites[1].Name = "primary", "follower-a"
@@ -78,7 +78,7 @@ func (f *rolloutFleetHarness) restart() {
 		RolloutPacing: true, rolloutPollInterval: time.Millisecond, rolloutWaitTimeout: 50 * time.Millisecond}
 	f.runner = rolloutRunner(f.c)
 	f.pacer = NewRolloutPacer(f.c, f.c, record.NewFakeRecorder(1000), testutil.TestLogger(), f.r,
-		func(*v1alpha1.MysqlFailoverGroup) string { return "" }, RolloutPacerConfig{Soak: -1})
+		func(*v1beta1.MysqlFailoverGroup) string { return "" }, RolloutPacerConfig{Soak: -1})
 	f.pacer.SetClock(func() time.Time { return f.now })
 	for _, g := range f.groups {
 		g := g
@@ -87,7 +87,7 @@ func (f *rolloutFleetHarness) restart() {
 		g.h = h
 		for site, pod := range h.pods {
 			f.mu.Lock()
-			pod.broken = f.brokenAfterRoll[g.fg.Name+"/"+site] && siteDeployment(f.t, f.c, g.fg, site).Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash
+			pod.broken = f.brokenAfterRoll[g.fg.Name+"/"+site] && siteDeployment(f.t, f.c, g.fg, site).Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash
 			f.mu.Unlock()
 		}
 		h.tm.ApplyUpdate = func(ctx context.Context, site string) error {
@@ -111,10 +111,10 @@ func (f *rolloutFleetHarness) restart() {
 			h.snaps = append(h.snaps, s)
 			h.mu.Unlock()
 			fresh := freshGroup(f.t, f.c, g.fg)
-			cond := metav1.Condition{Type: v1alpha1.ConditionUpdating, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonNotUpdating}
+			cond := metav1.Condition{Type: v1beta1.ConditionUpdating, Status: metav1.ConditionFalse, Reason: v1beta1.ReasonNotUpdating}
 			if s.UpdateStalled != "" {
-				cond = metav1.Condition{Type: v1alpha1.ConditionUpdating, Status: metav1.ConditionTrue,
-					Reason: v1alpha1.ReasonOrderedUpdateStalled, Message: orderedUpdateStalledMessage(s.UpdateStalled)}
+				cond = metav1.Condition{Type: v1beta1.ConditionUpdating, Status: metav1.ConditionTrue,
+					Reason: v1beta1.ReasonOrderedUpdateStalled, Message: orderedUpdateStalledMessage(s.UpdateStalled)}
 			}
 			apimeta.SetStatusCondition(&fresh.Status.Conditions, cond)
 			if err := f.c.Status().Update(context.Background(), fresh); err != nil {
@@ -160,7 +160,7 @@ func (f *rolloutFleetHarness) later() {
 	}
 }
 
-func (f *rolloutFleetHarness) record(name string) *v1alpha1.RolloutStatus {
+func (f *rolloutFleetHarness) record(name string) *v1beta1.RolloutStatus {
 	f.t.Helper()
 	return freshGroup(f.t, f.c, f.group(name).fg).Status.Rollout
 }
@@ -172,8 +172,8 @@ func (f *rolloutFleetHarness) requireUntouched(name, when string) {
 	g := f.group(name)
 	for _, site := range g.fg.Spec.Sites {
 		d := siteDeployment(f.t, f.c, g.fg, site.Name)
-		if d.Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash || d.Annotations[v1alpha1.RenderedByAnnotation] != "" ||
-			d.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash {
+		if d.Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash || d.Annotations[v1beta1.RenderedByAnnotation] != "" ||
+			d.Spec.Template.Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash {
 			f.t.Fatalf("%s: %s/%s was rolled outside its slot: %v", when, name, site.Name, d.Annotations)
 		}
 	}
@@ -205,15 +205,15 @@ func TestPacedRollout_BadBuildStopsAtTheFirstGroup(t *testing.T) {
 	if got := lion.h.appliedSites(); got != "follower-a" {
 		t.Fatalf("lion applied %q, want only its replica", got)
 	}
-	if rec := f.record("lion"); rec.Phase != v1alpha1.RolloutPhaseStalled || rec.Reason != rolloutReasonUpdateStalled || !rec.Started() ||
+	if rec := f.record("lion"); rec.Phase != v1beta1.RolloutPhaseStalled || rec.Reason != rolloutReasonUpdateStalled || !rec.Started() ||
 		!strings.Contains(rec.Message, "follower-a") {
 		t.Fatalf("lion record = %+v, want its roll started and stalled on follower-a", rec)
 	}
-	if rec := f.record("tiger"); rec == nil || rec.Phase != v1alpha1.RolloutPhasePending || rec.Reason != rolloutReasonHalted {
+	if rec := f.record("tiger"); rec == nil || rec.Phase != v1beta1.RolloutPhasePending || rec.Reason != rolloutReasonHalted {
 		t.Fatalf("tiger record = %+v, want Pending/RolloutHalted", rec)
 	}
 	f.requireUntouched("tiger", "after lion stalled")
-	if d := siteDeployment(t, f.c, lion.fg, "primary"); d.Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash {
+	if d := siteDeployment(t, f.c, lion.fg, "primary"); d.Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash {
 		t.Fatal("lion's primary was rolled although its replica is not Ready")
 	}
 	if p := lion.h.tm.sites[0].mysql.(*mockMySQL); p.readOnly || p.superReadOnly {
@@ -227,7 +227,7 @@ func TestPacedRollout_BadBuildStopsAtTheFirstGroup(t *testing.T) {
 		f.pass()
 	}
 	f.requireUntouched("tiger", "after retries")
-	if rec := f.record("lion"); rec.Phase != v1alpha1.RolloutPhaseStalled || !rec.StalledTime.Equal(stalledAt) {
+	if rec := f.record("lion"); rec.Phase != v1beta1.RolloutPhaseStalled || !rec.StalledTime.Equal(stalledAt) {
 		t.Fatalf("lion record after retries = %+v", rec)
 	}
 	if got := lion.h.appliedSites(); got != "follower-a" {
@@ -241,13 +241,13 @@ func TestPacedRollout_BadBuildStopsAtTheFirstGroup(t *testing.T) {
 	f.later()
 	f.pass()
 	f.requireUntouched("tiger", "after an operator restart")
-	if rec := f.record("lion"); rec.Phase != v1alpha1.RolloutPhaseStalled || !rec.StalledTime.Equal(stalledAt) || !rec.Started() {
+	if rec := f.record("lion"); rec.Phase != v1beta1.RolloutPhaseStalled || !rec.StalledTime.Equal(stalledAt) || !rec.Started() {
 		t.Fatalf("lion record after a restart = %+v, want the same stall", rec)
 	}
 	if got := lion.h.appliedSites(); got != "" {
 		t.Fatalf("after a restart lion's updater applied %q; its replica is still not Ready", got)
 	}
-	if rec := f.record("tiger"); rec.Phase != v1alpha1.RolloutPhasePending || rec.InFlight() {
+	if rec := f.record("tiger"); rec.Phase != v1beta1.RolloutPhasePending || rec.InFlight() {
 		t.Fatalf("tiger record after a restart = %+v", rec)
 	}
 
@@ -263,7 +263,7 @@ func TestPacedRollout_BadBuildStopsAtTheFirstGroup(t *testing.T) {
 	if rec.Renderer != rendererIdentity() || !rec.Started() || rec.StalledTime == nil || !rec.StalledTime.Equal(stalledAt) {
 		t.Fatalf("lion record after a second upgrade = %+v, want the same admission for the new renderer", rec)
 	}
-	if rec := f.record("tiger"); rec.Renderer != rendererIdentity() || rec.Phase != v1alpha1.RolloutPhasePending || rec.Reason != rolloutReasonHalted {
+	if rec := f.record("tiger"); rec.Renderer != rendererIdentity() || rec.Phase != v1beta1.RolloutPhasePending || rec.Reason != rolloutReasonHalted {
 		t.Fatalf("tiger record after a second upgrade = %+v", rec)
 	}
 	if got := lion.h.appliedSites(); slices.Contains(strings.Split(got, ","), "primary") {
@@ -278,17 +278,17 @@ func TestPacedRollout_BadBuildStopsAtTheFirstGroup(t *testing.T) {
 	p.mu.Lock()
 	p.broken = false
 	p.mu.Unlock()
-	for i := 0; i < 6 && f.record("tiger").Phase != v1alpha1.RolloutPhaseComplete; i++ {
+	for i := 0; i < 6 && f.record("tiger").Phase != v1beta1.RolloutPhaseComplete; i++ {
 		f.later()
 		f.pass()
 	}
 	for _, name := range []string{"lion", "tiger"} {
-		if rec := f.record(name); rec.Phase != v1alpha1.RolloutPhaseComplete || rec.StalledTime != nil {
+		if rec := f.record(name); rec.Phase != v1beta1.RolloutPhaseComplete || rec.StalledTime != nil {
 			t.Fatalf("%s record = %+v, want Complete", name, rec)
 		}
 		for _, site := range f.group(name).fg.Spec.Sites {
 			d := siteDeployment(t, f.c, f.group(name).fg, site.Name)
-			if d.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() || d.Annotations[v1alpha1.SpecHashAnnotation] == oldReleaseHash {
+			if d.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() || d.Annotations[v1beta1.SpecHashAnnotation] == oldReleaseHash {
 				t.Fatalf("%s/%s was not rolled: %v", name, site.Name, d.Annotations)
 			}
 		}

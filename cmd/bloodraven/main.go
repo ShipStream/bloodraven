@@ -30,7 +30,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/metrics"
@@ -133,7 +133,7 @@ func main() {
 
 	scheme := k8sruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(v1beta1.AddToScheme(scheme))
 
 	restConfig := ctrl.GetConfigOrDie()
 
@@ -616,7 +616,7 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 		// of its bound destinations (Δ12): the ID is derived from the group's
 		// UID, so another group's archive, or a copy, is refused.
 		groupCtx, groupCancel := context.WithTimeout(r.Context(), 5*time.Second)
-		var mfg v1alpha1.MysqlFailoverGroup
+		var mfg v1beta1.MysqlFailoverGroup
 		groupErr := k8sClient.Get(groupCtx, types.NamespacedName{Namespace: ns, Name: group}, &mfg)
 		groupCancel()
 		if groupErr != nil {

@@ -10,18 +10,18 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
 // rolloutUnprovenFixture is a group whose replica site has been rolled to
 // a new image and whose active site, dc1, is next, with source and target
 // as the two sites' Dragonfly.
-func rolloutUnprovenFixture(t *testing.T, source, target *fakeDragonflyConn) (*MysqlFailoverGroupReconciler, client.Client, *v1alpha1.MysqlFailoverGroup, string) {
+func rolloutUnprovenFixture(t *testing.T, source, target *fakeDragonflyConn) (*MysqlFailoverGroupReconciler, client.Client, *v1beta1.MysqlFailoverGroup, string) {
 	t.Helper()
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1", Phase: v1beta1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	r.Recorder = record.NewFakeRecorder(64)
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: source, syncProofDC2: target})
@@ -43,9 +43,9 @@ func rolloutUnprovenFixture(t *testing.T, source, target *fakeDragonflyConn) (*M
 	return r, c, fg, oldImage
 }
 
-func rolloutActiveSite(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) string {
+func rolloutActiveSite(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup) string {
 	t.Helper()
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestReconcileDragonflyResources_RolloutWithoutAPositionPromotesByTakeover(t
 			events := drainEventsCh(r.Recorder.(*record.FakeRecorder).Events, 16, 50*time.Millisecond)
 			n := 0
 			for _, ev := range events {
-				if eventsContain([]string{ev}, v1alpha1.EventDragonflySyncUnproven) {
+				if eventsContain([]string{ev}, v1beta1.EventDragonflySyncUnproven) {
 					n++
 				}
 			}

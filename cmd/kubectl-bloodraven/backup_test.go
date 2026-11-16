@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestBuildBackupCR(t *testing.T) {
@@ -73,7 +73,7 @@ func TestBuildBackupCR(t *testing.T) {
 			if got := b.Labels["app.kubernetes.io/managed-by"]; got != "bloodraven" {
 				t.Errorf("managed-by label = %q, want bloodraven", got)
 			}
-			if got := b.Annotations[v1alpha1.TriggeredByAnnotation]; got != tc.wantTrigger {
+			if got := b.Annotations[v1beta1.TriggeredByAnnotation]; got != tc.wantTrigger {
 				t.Errorf("triggered-by annotation = %q, want %q", got, tc.wantTrigger)
 			}
 		})
@@ -164,10 +164,10 @@ func TestGenerateNameWithInfix(t *testing.T) {
 }
 
 func TestGroupHasBackupProfile(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Backup: &v1alpha1.BackupSpec{
-				Profiles: []v1alpha1.BackupProfile{
+	fg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Backup: &v1beta1.BackupSpec{
+				Profiles: []v1beta1.BackupProfile{
 					{Name: "nightly"},
 					{Name: "weekly"},
 				},
@@ -180,7 +180,7 @@ func TestGroupHasBackupProfile(t *testing.T) {
 	if groupHasBackupProfile(fg, "monthly") {
 		t.Errorf("monthly should not match")
 	}
-	if groupHasBackupProfile(&v1alpha1.MysqlFailoverGroup{}, "any") {
+	if groupHasBackupProfile(&v1beta1.MysqlFailoverGroup{}, "any") {
 		t.Errorf("nil backup spec should never match")
 	}
 }

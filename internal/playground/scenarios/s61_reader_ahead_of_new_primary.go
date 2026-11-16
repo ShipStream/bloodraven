@@ -8,7 +8,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -104,7 +104,7 @@ func scenario61ReaderAheadOfNewPrimary() runner.Scenario {
 							PodSelector: mysqlPodSelector(env.FG, st.topo.standby),
 							PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
 							Egress: []networkingv1.NetworkPolicyEgressRule{{
-								To: peersExcept(v1alpha1.SiteLabel, []string{st.topo.active}, cidrs),
+								To: peersExcept(v1beta1.SiteLabel, []string{st.topo.active}, cidrs),
 							}},
 						},
 					}
@@ -141,7 +141,7 @@ func scenario61ReaderAheadOfNewPrimary() runner.Scenario {
 					waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 					defer cancel()
 					if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "candidate promoted",
-						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+						func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 							return mfg.Status.ActiveSite == st.topo.standby, "activeSite=" + mfg.Status.ActiveSite, nil
 						}); err != nil {
 						return err
@@ -186,7 +186,7 @@ func scenario61ReaderAheadOfNewPrimary() runner.Scenario {
 					waitCtx, cancel := context.WithTimeout(ctx, s61ConvergeBudget)
 					defer cancel()
 					_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "reader converged on the new primary",
-						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+						func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 							rs := statusSiteByName(mfg, st.topo.reader)
 							if rs == nil {
 								return false, "reader missing from status", nil

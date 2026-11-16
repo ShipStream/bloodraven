@@ -10,24 +10,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // holdUltraEngine runs the production engine and store over a fake client
 // holding fg, against the real topology facade of f.
-func holdUltraEngine(t *testing.T, f *opsFixture, fg *v1alpha1.MysqlFailoverGroup) (*PlannedFailoverEngine, func() *v1alpha1.MysqlFailoverGroup, func(func(*v1alpha1.MysqlFailoverGroup))) {
+func holdUltraEngine(t *testing.T, f *opsFixture, fg *v1beta1.MysqlFailoverGroup) (*PlannedFailoverEngine, func() *v1beta1.MysqlFailoverGroup, func(func(*v1beta1.MysqlFailoverGroup))) {
 	t.Helper()
 	c := newPFFakeClient(&pfFaults{}, fg)
 	e := NewPlannedFailoverEngine(newAPIPlannedFailoverStore(c, c, f.clk), f.topo, &pfFakeSink{}, f.clk, SimHooks{})
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	get := func() *v1alpha1.MysqlFailoverGroup {
-		var cur v1alpha1.MysqlFailoverGroup
+	get := func() *v1beta1.MysqlFailoverGroup {
+		var cur v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &cur); err != nil {
 			t.Fatal(err)
 		}
 		return &cur
 	}
-	edit := func(fn func(*v1alpha1.MysqlFailoverGroup)) {
+	edit := func(fn func(*v1beta1.MysqlFailoverGroup)) {
 		cur := get()
 		fn(cur)
 		if err := c.Status().Update(context.Background(), cur); err != nil {
@@ -37,7 +37,7 @@ func holdUltraEngine(t *testing.T, f *opsFixture, fg *v1alpha1.MysqlFailoverGrou
 	return e, get, edit
 }
 
-func holdUltraStep(t *testing.T, e *PlannedFailoverEngine, fg *v1alpha1.MysqlFailoverGroup) {
+func holdUltraStep(t *testing.T, e *PlannedFailoverEngine, fg *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	if _, err := e.Step(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}); err != nil {
 		t.Fatalf("Step: %v", err)
@@ -45,8 +45,8 @@ func holdUltraStep(t *testing.T, e *PlannedFailoverEngine, fg *v1alpha1.MysqlFai
 }
 
 func heldConditionOnly() []metav1.Condition {
-	return []metav1.Condition{{Type: v1alpha1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue,
-		Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired, Message: "set by hand", LastTransitionTime: metav1.Now()}}
+	return []metav1.Condition{{Type: v1beta1.ConditionAutomaticFailoverHeld, Status: metav1.ConditionTrue,
+		Reason: v1beta1.ReasonPlannedFailoverManualRecoveryRequired, Message: "set by hand", LastTransitionTime: metav1.Now()}}
 }
 
 // K001: a hold rebuilt from a True AutomaticFailoverHeld condition that
@@ -63,8 +63,8 @@ func TestUltraK001_ConditionOnlyHoldInstalledAndReleasedWithTheCondition(t *test
 		t.Fatalf("slot after a pass over a condition-only hold = %+v, %v; want a run-less Hold", v, ok)
 	}
 
-	edit(func(cur *v1alpha1.MysqlFailoverGroup) {
-		apimeta.RemoveStatusCondition(&cur.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
+	edit(func(cur *v1beta1.MysqlFailoverGroup) {
+		apimeta.RemoveStatusCondition(&cur.Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld)
 	})
 	holdUltraStep(t, e, fg)
 	if f.reg.slot.Held() {
@@ -103,8 +103,8 @@ func TestUltraK004_OrphanNamedHoldReleasedByThePass(t *testing.T) {
 	f.reg.slot.hydrate(plannedClaim{mode: claimModeHold, runID: "run-9"})
 
 	backed := newTestFG()
-	setPlannedHold(&backed.Status, v1alpha1.PlannedFailoverHold{RunID: "run-9",
-		Reason: v1alpha1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}, 1)
+	setPlannedHold(&backed.Status, v1beta1.PlannedFailoverHold{RunID: "run-9",
+		Reason: v1beta1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}, 1)
 	e, _, edit := holdUltraEngine(t, f, backed)
 	holdUltraStep(t, e, backed)
 	if v, ok := f.reg.slot.View(); !ok || v.Mode != "Hold" || v.RunID != "run-9" {
@@ -113,7 +113,7 @@ func TestUltraK004_OrphanNamedHoldReleasedByThePass(t *testing.T) {
 
 	// The record goes (an acknowledgement already ran, or the object was
 	// recreated without it); no ack annotation remains.
-	edit(func(cur *v1alpha1.MysqlFailoverGroup) {
+	edit(func(cur *v1beta1.MysqlFailoverGroup) {
 		cur.Status.PlannedFailoverHold = nil
 		cur.Status.Conditions = nil
 	})
@@ -128,8 +128,8 @@ func TestUltraK004_OrphanNamedHoldReleasedByThePass(t *testing.T) {
 // run does not suppress hydration (fail closed).
 func TestUltraK004_StaleViewDoesNotRehydrateAcknowledgedHold(t *testing.T) {
 	view := newTestFG()
-	setPlannedHold(&view.Status, v1alpha1.PlannedFailoverHold{RunID: "run-1",
-		Reason: v1alpha1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}, 1)
+	setPlannedHold(&view.Status, v1beta1.PlannedFailoverHold{RunID: "run-1",
+		Reason: v1beta1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}, 1)
 	nn := types.NamespacedName{Namespace: view.Namespace, Name: view.Name}
 
 	for _, tc := range []struct {
@@ -251,7 +251,7 @@ func TestUltraK085_TerminalMarkerNamesLenientHoldMarker(t *testing.T) {
 	if TerminalMarkerNames(other, "run-1") {
 		t.Fatal("a lenient non-hold marker matched")
 	}
-	strict := TerminalMarker{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack}.String()
+	strict := TerminalMarker{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeRolledBack}.String()
 	if !TerminalMarkerNames(strict, "run-1") {
 		t.Fatal("a strict marker did not match its run")
 	}
@@ -260,7 +260,7 @@ func TestUltraK085_TerminalMarkerNamesLenientHoldMarker(t *testing.T) {
 	// and holds the slot.
 	f := newOpsFixture(t, "")
 	fg := newTestFG()
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: lenient}
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: lenient}
 	e, _, _ := holdUltraEngine(t, f, fg)
 	holdUltraStep(t, e, fg)
 	if v, ok := f.reg.slot.View(); !ok || v.Mode != "Hold" || v.RunID != "run-1" {

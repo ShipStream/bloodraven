@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -116,8 +116,8 @@ type runObs struct {
 	// landed first).
 	holdJudged bool
 	terminal   bool
-	outcome    v1alpha1.PlannedFailoverOutcome
-	reason     v1alpha1.PlannedFailoverReason
+	outcome    v1beta1.PlannedFailoverOutcome
+	reason     v1beta1.PlannedFailoverReason
 
 	// watermark tracking (WatermarkRegressed).
 	published      bool
@@ -298,7 +298,7 @@ type plannedMonitor struct {
 	roles map[string]state.SiteRole
 	sites []string
 
-	cur   *v1alpha1.MysqlFailoverGroup // the object after the last commit
+	cur   *v1beta1.MysqlFailoverGroup // the object after the last commit
 	runs  map[string]*runObs
 	order []string
 
@@ -409,7 +409,7 @@ func (m *plannedMonitor) activeRun() *runObs {
 // ownsSites is the controller's plannedFailoverOwnsSites (through its sim
 // seam, so the two cannot drift, K181), restricted to blocks that name a
 // run: a block without a runID is malformed, and no claim can name it.
-func ownsSites(obj *v1alpha1.MysqlFailoverGroup) bool {
+func ownsSites(obj *v1beta1.MysqlFailoverGroup) bool {
 	if obj == nil || obj.Status.PlannedFailover == nil || obj.Status.PlannedFailover.RunID == "" {
 		return false
 	}
@@ -495,7 +495,7 @@ func (m *plannedMonitor) onEvent(e Event) {
 		// SourceLeftFenced, or made it a replica of another site: the
 		// source is the manager's from here on (FencedSourceNeverHealed).
 		for _, id := range m.order {
-			if r := m.runs[id]; r.terminal && r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed && e.Site == r.source {
+			if r := m.runs[id]; r.terminal && r.outcome == v1beta1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed && e.Site == r.source {
 				r.superseded = true
 			}
 		}
@@ -652,7 +652,7 @@ func (m *plannedMonitor) onPFMutation(e Event, before, after SiteTruth) {
 		m.violate("PlannedMutationWithoutRun", fmt.Sprintf("%d", e.Seq), fmt.Sprintf(
 			"the planned path sent %s %s to %s with no run recorded", e.Kind, e.Detail, e.Site))
 		return
-	case r.marked || markerRunID(m.cur.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) == r.id:
+	case r.marked || markerRunID(m.cur.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]) == r.id:
 		m.violate("MarkedRunResumed", r.id, fmt.Sprintf("run %s sent %s %s to %s after its terminal marker",
 			r.id, e.Kind, e.Detail, e.Site))
 		return
@@ -776,14 +776,14 @@ func (m *plannedMonitor) onYield(point string) {
 			}
 		}
 		switch m.cur.Status.PlannedFailover.Phase {
-		case v1alpha1.PlannedFailoverPhaseRollingBack:
+		case v1beta1.PlannedFailoverPhaseRollingBack:
 			if src.Name != "" && src.Writable() {
 				r.rollbackSawSourceWritable = true
 				if class == YieldPeerProbe && sourceLacksHistory(src, truth, r.fenceSet) {
 					r.sourceLost = true
 				}
 			}
-		case v1alpha1.PlannedFailoverPhaseFencing:
+		case v1beta1.PlannedFailoverPhaseFencing:
 			if class == YieldPeerProbe && src.Name != "" && src.Writable() {
 				r.fencingSawSourceWritable = true
 			}
@@ -853,7 +853,7 @@ func (m *plannedMonitor) onYield(point string) {
 }
 
 // onCommit observes every committed object change.
-func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFailoverGroup) {
+func (m *plannedMonitor) onCommit(kind string, before, after *v1beta1.MysqlFailoverGroup) {
 	m.cur = after
 	m.onMarker(before, after)
 	// The status failover record is timestamp-monotonic: no writer moves it
@@ -886,16 +886,16 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 			r.fenceSet = *pf.Fence.GtidSet
 		}
 	}
-	if markerRunID(after.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) == r.id {
+	if markerRunID(after.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]) == r.id {
 		r.marked = true
 	}
-	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && r.promotingGen < 0 {
+	if pf.Phase == v1beta1.PlannedFailoverPhasePromoting && r.promotingGen < 0 {
 		r.promotingGen = m.procGen
 	}
 	if pf.Promotion != nil {
 		r.targetUUID = pf.Promotion.TargetServerUUID
 	}
-	if pf.Phase == v1alpha1.PlannedFailoverPhaseRollingBack && r.rollbackTarget == nil {
+	if pf.Phase == v1beta1.PlannedFailoverPhaseRollingBack && r.rollbackTarget == nil {
 		// The rollback was decided over the server that answers for the
 		// target now.
 		for _, t := range m.c.Truth() {
@@ -910,7 +910,7 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 			r.rollbackTarget = obs
 		}
 	}
-	if (pf.Phase == v1alpha1.PlannedFailoverPhasePublishing || pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded) &&
+	if (pf.Phase == v1beta1.PlannedFailoverPhasePublishing || pf.Phase == v1beta1.PlannedFailoverPhaseSucceeded) &&
 		!r.published && r.fenceSet != "" {
 		r.published = true
 		r.publishWritable = m.readableOrPromotable(m.c.writableSites())
@@ -944,8 +944,8 @@ func (m *plannedMonitor) onCommit(kind string, before, after *v1alpha1.MysqlFail
 // copies it lands only after status writes heal, against later truth. A
 // ManualRecoveryRequired marker is a hold on its own (PlannedHoldFrom), so
 // its justification is judged then too (K077).
-func (m *plannedMonitor) onMarker(before, after *v1alpha1.MysqlFailoverGroup) {
-	key := v1alpha1.PlannedFailoverTerminalAnnotation
+func (m *plannedMonitor) onMarker(before, after *v1beta1.MysqlFailoverGroup) {
+	key := v1beta1.PlannedFailoverTerminalAnnotation
 	v := after.GetAnnotations()[key]
 	if v == "" || v == before.GetAnnotations()[key] {
 		return
@@ -965,7 +965,7 @@ func (m *plannedMonitor) onMarker(before, after *v1alpha1.MysqlFailoverGroup) {
 		r.reason = mk.Reason
 		m.checkTerminal(r)
 	}
-	if mk.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+	if mk.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 		m.judgeHold(r)
 	}
 }
@@ -979,12 +979,12 @@ func (m *plannedMonitor) judgeHold(r *runObs) {
 	m.checkHoldAtRisk(r)
 }
 
-func holdConditionTrue(obj *v1alpha1.MysqlFailoverGroup) bool {
+func holdConditionTrue(obj *v1beta1.MysqlFailoverGroup) bool {
 	if obj == nil {
 		return false
 	}
 	for _, c := range obj.Status.Conditions {
-		if c.Type == v1alpha1.ConditionAutomaticFailoverHeld && c.Status == "True" {
+		if c.Type == v1beta1.ConditionAutomaticFailoverHeld && c.Status == "True" {
 			return true
 		}
 	}
@@ -1045,11 +1045,11 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 	}
 	src, tgt := truth[r.source], truth[r.target]
 	switch r.outcome {
-	case v1alpha1.PlannedFailoverOutcomeNotStarted:
+	case v1beta1.PlannedFailoverOutcomeNotStarted:
 		if r.pfMutations > 0 {
 			dishonest(fmt.Sprintf("it sent %d mutations", r.pfMutations))
 		}
-	case v1alpha1.PlannedFailoverOutcomeRolledBack:
+	case v1beta1.PlannedFailoverOutcomeRolledBack:
 		// RolledBack says nothing was written to the target. After a
 		// read_only=OFF reached it (or may have), that is judged by what
 		// the server held when the rollback was decided, not by the
@@ -1093,7 +1093,7 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 		// minutes of the stall is not the run's doing.
 		switch {
 		case r.source == "" || src.Writable() || r.rollbackSawSourceWritable || fencingSawSourceWritable:
-		case r.reason == v1alpha1.PlannedFailoverReasonStatusStalled && r.fenceGen < 0:
+		case r.reason == v1beta1.PlannedFailoverReasonStatusStalled && r.fenceGen < 0:
 			m.stats.StalledBeforeFence++
 		default:
 			dishonest("the source " + r.source + " is not writable")
@@ -1105,38 +1105,38 @@ func (m *plannedMonitor) checkTerminal(r *runObs) {
 				dishonest(fmt.Sprintf("the target holds own-UUID extras %s", extra))
 			}
 		}
-	case v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
+	case v1beta1.PlannedFailoverOutcomeSourceLeftFenced:
 		// SourceLost and ManagerUnavailable end the run without reaching the
 		// source (§6.2): whether it is fenced is what the run cannot know,
 		// and the sidecar lease rule or the emergency path decides it.
 		// So does a run ended while no manager is registered, whatever
 		// reason its block already carried: a RollingBack run keeps its
 		// rollback reason through the 5m manager-absence end.
-		unreachable := r.reason == v1alpha1.PlannedFailoverReasonSourceLost ||
-			r.reason == v1alpha1.PlannedFailoverReasonManagerUnavailable ||
+		unreachable := r.reason == v1beta1.PlannedFailoverReasonSourceLost ||
+			r.reason == v1beta1.PlannedFailoverReasonManagerUnavailable ||
 			(m.noManager != nil && m.noManager())
 		if r.source != "" && src.Writable() && !unreachable && !m.externallyWritable(r.source, r.startSeq) {
 			dishonest("the source " + r.source + " is writable")
 		}
-	case v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed:
+	case v1beta1.PlannedFailoverOutcomePromotedUnconfirmed:
 		// ManagerUnavailable ends a Promoting run without MySQL access, as
 		// PromotedUnconfirmed by rule (§6.3): like SourceLeftFenced above, the
 		// run cannot read what reached the target, so no attempt is required.
-		if !r.writeTried && !r.crossProcess(m.procGen) && r.reason != v1alpha1.PlannedFailoverReasonManagerUnavailable {
+		if !r.writeTried && !r.crossProcess(m.procGen) && r.reason != v1beta1.PlannedFailoverReasonManagerUnavailable {
 			dishonest("it never sent super_read_only=OFF or read_only=OFF")
 		}
 		// The UnconfirmedBlocksEmergency window opens here whether or not
 		// the target answers at this moment: a poll in which it answers
 		// only starts the window again (endPoll).
 		r.unconfirmedSince, r.unconfirmedGen = m.poll, m.procGen
-	case v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
+	case v1beta1.PlannedFailoverOutcomeManualRecoveryRequired:
 		// A hold needs a possible write to the target, or a source the
 		// rollback found writable without transactions it held (two
 		// histories whatever the run sent).
 		if !r.promotionStmt && !r.crossProcess(m.procGen) && !r.sourceLost {
 			dishonest("it sent no promotion statement")
 		}
-	case v1alpha1.PlannedFailoverOutcomeSucceeded:
+	case v1beta1.PlannedFailoverOutcomeSucceeded:
 		// The claim was released at the Publishing record; what happens to
 		// the sites after it (a target restart, a pod booting writable) is
 		// the topology manager's to handle. The run is judged at its
@@ -1240,7 +1240,7 @@ func sourceLacksHistory(src SiteTruth, others []SiteTruth, fence string) bool {
 // Publishing record committed, or it ended Succeeded.
 func (m *plannedMonitor) runRecorded(id string) bool {
 	r := m.runs[id]
-	return r != nil && (r.published || (r.terminal && r.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded))
+	return r != nil && (r.published || (r.terminal && r.outcome == v1beta1.PlannedFailoverOutcomeSucceeded))
 }
 
 // crossProcess reports whether a process other than the one that wrote the
@@ -1392,7 +1392,7 @@ func (m *plannedMonitor) replacedTargetRollbackDue(r *runObs, truth []SiteTruth,
 // checkWatermarks is WatermarkRegressed: once a run's Publishing record
 // committed and status carried its watermark, status must keep containing
 // it until a later promotion record.
-func (m *plannedMonitor) checkWatermarks(obj *v1alpha1.MysqlFailoverGroup) {
+func (m *plannedMonitor) checkWatermarks(obj *v1beta1.MysqlFailoverGroup) {
 	for _, id := range m.order {
 		r := m.runs[id]
 		if !r.published || r.watermarkFlags {
@@ -1521,7 +1521,7 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 		farFuture := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 		if managerReady && ownsSites(m.cur) && controller.PlannedRunNeedsClaim(m.cur, farFuture) {
 			id := m.cur.Status.PlannedFailover.RunID
-			tail := m.cur.Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhasePromoting && m.runs[id] != nil && m.runs[id].tailReleased &&
+			tail := m.cur.Status.PlannedFailover.Phase == v1beta1.PlannedFailoverPhasePromoting && m.runs[id] != nil && m.runs[id].tailReleased &&
 				m.runs[id].tailReleasedGen == m.procGen
 			if held, _, ok := m.claim.Held(); !tail && (!ok || held != id) {
 				m.violate("ClaimRevoked", id+"|slot", fmt.Sprintf(
@@ -1536,7 +1536,7 @@ func (m *plannedMonitor) endPoll(p int, managerReady bool) {
 	}
 	for _, id := range m.order {
 		r := m.runs[id]
-		if r.terminal && r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed {
+		if r.terminal && r.outcome == v1beta1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed {
 			for _, t := range truth {
 				if t.Name == r.source && t.Writable() {
 					r.healed = true
@@ -1628,7 +1628,7 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 	sort.Strings(ids)
 	for _, id := range ids {
 		r := m.runs[id]
-		if r.outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed {
+		if r.outcome == v1beta1.PlannedFailoverOutcomeSourceLeftFenced && !r.healed {
 			// Judged only while the source still carries the run's own
 			// fence: a restart since (a new incarnation) replaced it, and a
 			// fence that was healed once and came back is not the run's.
@@ -1664,7 +1664,7 @@ func (m *plannedMonitor) checkEnd(endPoll int) []Violation {
 	// A request annotation nobody consumed after heal and settle never
 	// produced a run, so no run entry can report it (K182).
 	if m.cur != nil {
-		if v, ok := m.cur.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
+		if v, ok := m.cur.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; ok {
 			m.violate("PlannedRunStuck", "request", fmt.Sprintf(
 				"the planned-failover request %q is still unconsumed after heal and settle", v))
 		}

@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -28,13 +28,13 @@ import (
 // MySQL — the reconciler's dialer fails the test if it is called, because
 // every case below must reach its verdict without a connection.
 
-func newMysqlDatabaseCR(namespace, name string) *v1alpha1.MysqlDatabase {
-	return &v1alpha1.MysqlDatabase{
+func newMysqlDatabaseCR(namespace, name string) *v1beta1.MysqlDatabase {
+	return &v1beta1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: v1alpha1.MysqlDatabaseSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+		Spec: v1beta1.MysqlDatabaseSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "main"},
 			DatabaseName:     "acme_wms",
-			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			Owner:            v1beta1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 		},
 	}
 }
@@ -58,7 +58,7 @@ func newMysqlDatabaseReconciler(t *testing.T) *controller.MysqlDatabaseReconcile
 // deletionTimestamp and its namespace forever terminating.
 func deleteAndDrainFinalizer(t *testing.T, r *controller.MysqlDatabaseReconciler, nn types.NamespacedName) {
 	t.Helper()
-	var cr v1alpha1.MysqlDatabase
+	var cr v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &cr); err != nil {
 		return
 	}
@@ -66,7 +66,7 @@ func deleteAndDrainFinalizer(t *testing.T, r *controller.MysqlDatabaseReconciler
 	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: nn})
 }
 
-func mysqlDatabaseReadyCondition(mdb *v1alpha1.MysqlDatabase) *metav1.Condition {
+func mysqlDatabaseReadyCondition(mdb *v1beta1.MysqlDatabase) *metav1.Condition {
 	for i := range mdb.Status.Conditions {
 		if mdb.Status.Conditions[i].Type == "Ready" {
 			return &mdb.Status.Conditions[i]
@@ -84,7 +84,7 @@ func TestMysqlDatabase_EnvtestDefaults(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
 
-	var got v1alpha1.MysqlDatabase
+	var got v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "tenant-acme"}, &got); err != nil {
 		t.Fatalf("get MysqlDatabase: %v", err)
 	}
@@ -100,10 +100,10 @@ func TestMysqlDatabase_EnvtestDefaults(t *testing.T) {
 	// The default that matters. Dropping a tenant database because a CR was
 	// garbage-collected is an unrecoverable data-loss incident, so the API
 	// server must default this to Retain without the caller saying so.
-	if got.Spec.DeletionPolicy != v1alpha1.DeletionPolicyRetain {
+	if got.Spec.DeletionPolicy != v1beta1.DeletionPolicyRetain {
 		t.Errorf("spec.deletionPolicy = %q, want Retain", got.Spec.DeletionPolicy)
 	}
-	if len(got.Spec.Owner.Privileges) != 1 || got.Spec.Owner.Privileges[0] != v1alpha1.PrivilegeAllPrivileges {
+	if len(got.Spec.Owner.Privileges) != 1 || got.Spec.Owner.Privileges[0] != v1beta1.PrivilegeAllPrivileges {
 		t.Errorf("spec.owner.privileges = %v, want [ALL PRIVILEGES]", got.Spec.Owner.Privileges)
 	}
 }
@@ -113,137 +113,137 @@ func TestMysqlDatabase_EnvtestSchemaRejections(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlDatabase)
+		mutate func(*v1beta1.MysqlDatabase)
 	}{
 		{
 			name:   "database name with a backtick",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "acme`wms" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "acme`wms" },
 		},
 		{
 			name:   "database name with a quote and trailing SQL",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "acme'; DROP DATABASE other; --" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "acme'; DROP DATABASE other; --" },
 		},
 		{
 			name:   "database name with a hyphen",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "acme-wms" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "acme-wms" },
 		},
 		{
 			name:   "empty database name",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "" },
 		},
 		{
 			name:   "database name over 64 characters",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = strings.Repeat("a", 65) },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = strings.Repeat("a", 65) },
 		},
 		{
 			name:   "character set with injected DDL",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.CharacterSet = "utf8mb4 DEFAULT ENCRYPTION='N'" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.CharacterSet = "utf8mb4 DEFAULT ENCRYPTION='N'" },
 		},
 		{
 			name:   "collation with injected DDL",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.Collation = "x; DROP DATABASE other" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.Collation = "x; DROP DATABASE other" },
 		},
 		{
 			name:   "owner privilege outside the allowlist",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Privileges = []v1alpha1.MysqlPrivilege{"SUPER"} },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.Owner.Privileges = []v1beta1.MysqlPrivilege{"SUPER"} },
 		},
 		{
 			// The privilege that must never be expressible through this CRD.
 			name:   "owner GRANT OPTION",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Privileges = []v1alpha1.MysqlPrivilege{"GRANT OPTION"} },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.Owner.Privileges = []v1beta1.MysqlPrivilege{"GRANT OPTION"} },
 		},
 		{
 			name: "owner ALL PRIVILEGES combined with another privilege",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Owner.Privileges = []v1alpha1.MysqlPrivilege{
-					v1alpha1.PrivilegeAllPrivileges, v1alpha1.PrivilegeSelect,
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Owner.Privileges = []v1beta1.MysqlPrivilege{
+					v1beta1.PrivilegeAllPrivileges, v1beta1.PrivilegeSelect,
 				}
 			},
 		},
 		{
 			name: "grant privilege outside the allowlist",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-					{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{"FILE"}},
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+					{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{"FILE"}},
 				}
 			},
 		},
 		{
 			name: "grant username with a quote",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-					{Username: "maester'@'%", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+					{Username: "maester'@'%", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 				}
 			},
 		},
 		{
 			name: "grant with no privileges",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "maester"}}
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "maester"}}
 			},
 		},
 		{
 			name: "duplicate grant usernames",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-					{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
-					{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeDelete}},
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+					{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
+					{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeDelete}},
 				}
 			},
 		},
 		{
 			name:   "unknown deletion policy",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = "Destroy" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = "Destroy" },
 		},
 		{
 			// users[] must never express an all-privileges principal; that
 			// shape is the owner's.
 			name: "users ALL PRIVILEGES",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
-					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}},
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Users = []v1beta1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeAllPrivileges}},
 				}
 			},
 		},
 		{
 			name: "users GRANT OPTION",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
-					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{"GRANT OPTION"}},
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Users = []v1beta1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1beta1.MysqlPrivilege{"GRANT OPTION"}},
 				}
 			},
 		},
 		{
 			name: "users entry with no privileges",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: "support-ro-mysql"}}
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Users = []v1beta1.MysqlDatabaseUser{{SecretName: "support-ro-mysql"}}
 			},
 		},
 		{
 			name: "users entry reusing the owner secret",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
-					{SecretName: m.Spec.Owner.SecretName, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Users = []v1beta1.MysqlDatabaseUser{
+					{SecretName: m.Spec.Owner.SecretName, Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 				}
 			},
 		},
 		{
 			name: "duplicate users secret names",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
-					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
-					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeDelete}},
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Users = []v1beta1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
+					{SecretName: "support-ro-mysql", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeDelete}},
 				}
 			},
 		},
 		{
 			name: "negative users resource limit",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Users = []v1beta1.MysqlDatabaseUser{
 					{
 						SecretName:     "support-ro-mysql",
-						Privileges:     []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
-						ResourceLimits: &v1alpha1.MysqlUserResourceLimits{MaxUserConnections: -1},
+						Privileges:     []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
+						ResourceLimits: &v1beta1.MysqlUserResourceLimits{MaxUserConnections: -1},
 					},
 				}
 			},
@@ -252,50 +252,50 @@ func TestMysqlDatabase_EnvtestSchemaRejections(t *testing.T) {
 			// The items pattern admits only IP/CIDR/wildcard characters;
 			// hostnames never reach the Go-side validator.
 			name: "owner host that is a hostname",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
+			mutate: func(m *v1beta1.MysqlDatabase) {
 				m.Spec.Owner.Hosts = []string{"db.example.com"}
 			},
 		},
 		{
 			name: "duplicate owner hosts",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
+			mutate: func(m *v1beta1.MysqlDatabase) {
 				m.Spec.Owner.Hosts = []string{"10.0.0.1", "10.0.0.1"}
 			},
 		},
 		{
 			name: "more than eight users hosts",
-			mutate: func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+			mutate: func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Users = []v1beta1.MysqlDatabaseUser{{
 					SecretName: "support-ro-mysql",
-					Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+					Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
 					Hosts:      []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.8", "10.0.0.9"},
 				}}
 			},
 		},
 		{
 			name:   "empty owner secret name",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.SecretName = "" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.Owner.SecretName = "" },
 		},
 		{
 			name:   "empty group ref",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.FailoverGroupRef.Name = "" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.FailoverGroupRef.Name = "" },
 		},
 		{
 			name:   "system schema mysql",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "mysql" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "mysql" },
 		},
 		{
 			// Case-insensitive: the denylist must not be bypassable by casing.
 			name:   "system schema SYS in uppercase",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "SYS" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "SYS" },
 		},
 		{
 			name:   "system schema information_schema",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "information_schema" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "information_schema" },
 		},
 		{
 			name:   "system schema performance_schema",
-			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "performance_schema" },
+			mutate: func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = "performance_schema" },
 		},
 	}
 
@@ -330,12 +330,12 @@ func TestMysqlDatabase_EnvtestDatabaseNameIsImmutable(t *testing.T) {
 	}
 
 	// Any other spec edit still goes through.
-	var fresh v1alpha1.MysqlDatabase
+	var fresh v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), &fresh); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	fresh.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-		{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	fresh.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+		{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 	}
 	if err := k8sClient.Update(ctx, &fresh); err != nil {
 		t.Fatalf("an unrelated spec edit was rejected: %v", err)
@@ -352,7 +352,7 @@ func TestMysqlDatabase_EnvtestExplicitEmptyOwnerPrivilegesRejected(t *testing.T)
 	ns := createNamespace(t, "mydb-empty-privs")
 
 	u := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "shipstream.io/v1alpha1",
+		"apiVersion": "shipstream.io/v1beta1",
 		"kind":       "MysqlDatabase",
 		"metadata":   map[string]any{"name": "tenant-empty", "namespace": ns},
 		"spec": map[string]any{
@@ -397,20 +397,20 @@ func TestMysqlDatabase_EnvtestFailoverGroupRefIsImmutable(t *testing.T) {
 func TestMysqlDatabase_EnvtestAcceptsFullAllowlist(t *testing.T) {
 	ns := createNamespace(t, "mydb-allowlist")
 
-	privs := make([]v1alpha1.MysqlPrivilege, 0)
-	for _, name := range v1alpha1.AllowedPrivilegeNames() {
-		if name == string(v1alpha1.PrivilegeAllPrivileges) {
+	privs := make([]v1beta1.MysqlPrivilege, 0)
+	for _, name := range v1beta1.AllowedPrivilegeNames() {
+		if name == string(v1beta1.PrivilegeAllPrivileges) {
 			continue // cannot be combined; covered separately
 		}
-		privs = append(privs, v1alpha1.MysqlPrivilege(name))
+		privs = append(privs, v1beta1.MysqlPrivilege(name))
 	}
 
 	cr := newMysqlDatabaseCR(ns, "tenant-allowlist")
 	cr.Spec.Owner.Privileges = privs
-	cr.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: "app-mysql", Privileges: privs}}
-	cr.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+	cr.Spec.Users = []v1beta1.MysqlDatabaseUser{{SecretName: "app-mysql", Privileges: privs}}
+	cr.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
 		{Username: "maester", Privileges: privs},
-		{Username: "reporting", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}},
+		{Username: "reporting", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeAllPrivileges}},
 	}
 
 	if err := k8sClient.Create(ctx, cr); err != nil {
@@ -437,11 +437,11 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
 		t.Fatalf("reconcile (finalizer): %v", err)
 	}
-	var afterFinalizer v1alpha1.MysqlDatabase
+	var afterFinalizer v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &afterFinalizer); err != nil {
 		t.Fatalf("get after finalizer reconcile: %v", err)
 	}
-	if !controllerutil.ContainsFinalizer(&afterFinalizer, v1alpha1.MysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(&afterFinalizer, v1beta1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer was not added")
 	}
 
@@ -453,11 +453,11 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 		t.Error("want a non-zero requeue while the group is absent")
 	}
 
-	var got v1alpha1.MysqlDatabase
+	var got v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &got); err != nil {
 		t.Fatalf("get after reconcile: %v", err)
 	}
-	if got.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if got.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Errorf("status.phase = %q, want Pending", got.Status.Phase)
 	}
 	if got.Status.ObservedGeneration != got.Generation {
@@ -467,7 +467,7 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if cond == nil {
 		t.Fatal("Ready condition missing; it is part of the polling contract")
 	}
-	if cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1.ReasonGroupNotYetCreated {
+	if cond.Status != metav1.ConditionFalse || cond.Reason != v1beta1.ReasonGroupNotYetCreated {
 		t.Errorf("Ready = %s/%s, want False/GroupNotYetCreated", cond.Status, cond.Reason)
 	}
 	if cond.ObservedGeneration != got.Generation {
@@ -487,35 +487,35 @@ func TestMysqlDatabase_EnvtestStatusIsASubresource(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
 
 	nn := types.NamespacedName{Namespace: ns, Name: "tenant-acme"}
-	var forged v1alpha1.MysqlDatabase
+	var forged v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &forged); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	forged.Status.Phase = v1alpha1.MysqlDatabasePhaseReady
+	forged.Status.Phase = v1beta1.MysqlDatabasePhaseReady
 	forged.Status.OwnerUser = "impostor"
 	if err := k8sClient.Update(ctx, &forged); err != nil {
 		t.Fatalf("update spec-side: %v", err)
 	}
 
-	var after v1alpha1.MysqlDatabase
+	var after v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &after); err != nil {
 		t.Fatalf("get after update: %v", err)
 	}
-	if after.Status.Phase == v1alpha1.MysqlDatabasePhaseReady || after.Status.OwnerUser == "impostor" {
+	if after.Status.Phase == v1beta1.MysqlDatabasePhaseReady || after.Status.OwnerUser == "impostor" {
 		t.Fatalf("status was writable through the main resource: %+v", after.Status)
 	}
 
 	// The status subresource does accept it.
-	after.Status.Phase = v1alpha1.MysqlDatabasePhaseReady
+	after.Status.Phase = v1beta1.MysqlDatabasePhaseReady
 	after.Status.OwnerUser = "acme_app"
 	if err := k8sClient.Status().Update(ctx, &after); err != nil {
 		t.Fatalf("status subresource update: %v", err)
 	}
-	var final v1alpha1.MysqlDatabase
+	var final v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &final); err != nil {
 		t.Fatalf("get after status update: %v", err)
 	}
-	if final.Status.Phase != v1alpha1.MysqlDatabasePhaseReady {
+	if final.Status.Phase != v1beta1.MysqlDatabasePhaseReady {
 		t.Fatalf("status.phase = %q after a subresource write, want Ready", final.Status.Phase)
 	}
 }
@@ -536,7 +536,7 @@ func TestMysqlDatabase_EnvtestRetainDeletionReleasesFinalizer(t *testing.T) {
 		t.Fatalf("reconcile (finalizer): %v", err)
 	}
 
-	var live v1alpha1.MysqlDatabase
+	var live v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &live); err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -546,7 +546,7 @@ func TestMysqlDatabase_EnvtestRetainDeletionReleasesFinalizer(t *testing.T) {
 
 	// The finalizer holds the object; the API server has stamped
 	// deletionTimestamp.
-	var deleting v1alpha1.MysqlDatabase
+	var deleting v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &deleting); err != nil {
 		t.Fatalf("get during deletion: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestMysqlDatabase_EnvtestRetainDeletionReleasesFinalizer(t *testing.T) {
 		t.Fatalf("reconcile (deletion): %v", err)
 	}
 
-	var gone v1alpha1.MysqlDatabase
+	var gone v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &gone); err == nil {
 		t.Fatalf("CR still present after Retain deletion: finalizers=%v", gone.Finalizers)
 	}
@@ -570,17 +570,17 @@ func TestMysqlDatabase_EnvtestRetainDeletionReleasesFinalizer(t *testing.T) {
 func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 	ns := createNamespace(t, "mydb-delete-optin")
 	cr := newMysqlDatabaseCR(ns, "tenant-acme")
-	cr.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	cr.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 	if err := k8sClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create with deletionPolicy=Delete: %v", err)
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
 
-	var got v1alpha1.MysqlDatabase
+	var got v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "tenant-acme"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Spec.DeletionPolicy != v1alpha1.DeletionPolicyDelete {
+	if got.Spec.DeletionPolicy != v1beta1.DeletionPolicyDelete {
 		t.Fatalf("spec.deletionPolicy = %q, want Delete", got.Spec.DeletionPolicy)
 	}
 
@@ -624,20 +624,20 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 		t.Fatalf("create operator secret: %v", err)
 	}
 
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: ns},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
-			Sites: []v1alpha1.SiteSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
+			Sites: []v1beta1.SiteSpec{
 				{Name: "dc1", ServerID: 101, Zone: "main-dc1", LoadBalancerIP: "203.0.113.1",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.main": "dc1"},
-					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
+					Storage:           v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
 				{Name: "dc2", ServerID: 102, Zone: "main-dc2", LoadBalancerIP: "203.0.113.2",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.main": "dc2"},
-					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
+					Storage:           v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "main.az.example.com", TTLSeconds: 60},
+			DNS: v1beta1.DNSSpec{Hostname: "main.az.example.com", TTLSeconds: 60},
 		},
 	}
 	if err := k8sClient.Create(ctx, fg); err != nil {
@@ -662,11 +662,11 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 		}
 	}
 
-	var got v1alpha1.MysqlDatabase
+	var got v1beta1.MysqlDatabase
 	if err := k8sClient.Get(ctx, nn, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if got.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q, want Pending for an unreachable primary", got.Status.Phase)
 	}
 	// The write-ahead record is stamped only once a connection is open: a

@@ -9,7 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -108,7 +108,7 @@ func s50Precheck(state *s50RunState) func(context.Context, *runner.Env) error {
 // s50RequireEncryptedBaseline is shared by the encryption scenarios so
 // they all fail with the same actionable message rather than timing out
 // on an unencrypted playground.
-func s50RequireEncryptedBaseline(mfg *v1alpha1.MysqlFailoverGroup) error {
+func s50RequireEncryptedBaseline(mfg *v1beta1.MysqlFailoverGroup) error {
 	if !mfg.Spec.EncryptionEnabled() {
 		return fmt.Errorf(
 			"spec.encryptionAtRest is not enabled on %s/%s; run ./playground/enable-encryption.sh first",
@@ -178,7 +178,7 @@ func s50CaptureSealedState(state *s50RunState) runner.Step {
 				return err
 			}
 			s := mfg.Status.EncryptionAtRest.SiteEncryptionStatusByName(state.replicaSite)
-			if s == nil || s.Phase != v1alpha1.KeyringPhaseSealed {
+			if s == nil || s.Phase != v1beta1.KeyringPhaseSealed {
 				return fmt.Errorf("replica %s is not sealed: %+v", state.replicaSite, s)
 			}
 			state.sealedSecret = s.KeyringSecret
@@ -291,7 +291,7 @@ func s50VerifyReplacementDecrypts(state *s50RunState) runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Wait.UntilCR(ctx, env.Namespace,
 				fmt.Sprintf("site %s back to Sealed after the pod replace", state.replicaSite),
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
 					}
@@ -299,7 +299,7 @@ func s50VerifyReplacementDecrypts(state *s50RunState) runner.Step {
 					if s == nil {
 						return false, "no status entry for " + state.replicaSite, nil
 					}
-					if s.Phase != v1alpha1.KeyringPhaseSealed {
+					if s.Phase != v1beta1.KeyringPhaseSealed {
 						return false, fmt.Sprintf("phase=%s (%s)", s.Phase, s.Message), nil
 					}
 					return true, "", nil

@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // The operator's RBAC grants list and delete but not deletecollection, so
@@ -37,7 +37,7 @@ func TestTeardownDragonflyResourcesNeedsNoDeleteCollection(t *testing.T) {
 		},
 	})
 	r := &MysqlFailoverGroupReconciler{Client: c}
-	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: ns}}
+	fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: ns}}
 	ctx := context.Background()
 
 	if err := r.teardownDragonflyResources(ctx, fg); err != nil {

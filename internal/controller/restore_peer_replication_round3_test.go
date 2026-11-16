@@ -10,7 +10,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Third review round for #212.
@@ -67,22 +67,22 @@ func TestRestoreOfflineFenceGuard(t *testing.T) {
 	no := false
 	for _, tc := range []struct {
 		name  string
-		phase v1alpha1.RestoreInPlacePhase
-		queue v1alpha1.RestoreReclonesPhase
+		phase v1beta1.RestoreInPlacePhase
+		queue v1beta1.RestoreReclonesPhase
 		prior *bool
 		want  string
 	}{
-		{"running restore", v1alpha1.RestoreInPlaceRestoring, v1alpha1.RestoreReclonesArmed, &no, "iad"},
-		{"failed, queue still Armed (settling)", v1alpha1.RestoreInPlaceFailed, v1alpha1.RestoreReclonesArmed, &no, "iad"},
-		{"failed, queue settled Held", v1alpha1.RestoreInPlaceFailed, v1alpha1.RestoreReclonesHeld, &no, ""},
-		{"succeeded, Draining", v1alpha1.RestoreInPlaceSucceeded, v1alpha1.RestoreReclonesDraining, &no, ""},
-		{"prior never recorded", v1alpha1.RestoreInPlaceFailed, v1alpha1.RestoreReclonesArmed, nil, ""},
+		{"running restore", v1beta1.RestoreInPlaceRestoring, v1beta1.RestoreReclonesArmed, &no, "iad"},
+		{"failed, queue still Armed (settling)", v1beta1.RestoreInPlaceFailed, v1beta1.RestoreReclonesArmed, &no, "iad"},
+		{"failed, queue settled Held", v1beta1.RestoreInPlaceFailed, v1beta1.RestoreReclonesHeld, &no, ""},
+		{"succeeded, Draining", v1beta1.RestoreInPlaceSucceeded, v1beta1.RestoreReclonesDraining, &no, ""},
+		{"prior never recorded", v1beta1.RestoreInPlaceFailed, v1beta1.RestoreReclonesArmed, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgThreeSiteRestore()
-			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
-			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: tc.queue, Pending: []string{"pdx"}}
-			fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: tc.prior}
+			fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: tc.phase, TargetSite: "iad", Scope: &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull}}
+			fg.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{Phase: tc.queue, Pending: []string{"pdx"}}
+			fg.Status.RestoreOfflineFence = &v1beta1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: tc.prior}
 			if got, _ := restoreOfflineFenceGuard(fg); got != tc.want {
 				t.Fatalf("guard = %q, want %q", got, tc.want)
 			}
@@ -97,7 +97,7 @@ func TestConfirmBumpDuringSettlement_DoesNotStallReconcile(t *testing.T) {
 	const confirmB = "2026-04-18T10:00:00Z"
 	fg := jobLostFG(time.Now())
 	fg.Spec.RestoreInPlace.Confirm = confirmB
-	fg.SetAnnotations(map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx"})
+	fg.SetAnnotations(map[string]string{v1beta1.PlannedFailoverAnnotation: "pdx"})
 	r, c := newReconciler(fg, operatorCredsSecret(), restorePod(corev1.PodRunning))
 	r.Recorder = record.NewFakeRecorder(200)
 	_, mocks := withFenceRunner(r, c, fg)
@@ -115,10 +115,10 @@ func TestConfirmBumpDuringSettlement_DoesNotStallReconcile(t *testing.T) {
 		events = append(events, drainEvents(r.Recorder.(*record.FakeRecorder))...)
 	}
 	fresh := getFG(t, c, fg)
-	if rip := fresh.Status.RestoreInPlace; rip.Phase != v1alpha1.RestoreInPlaceFailed || rip.RunConfirm != "" {
+	if rip := fresh.Status.RestoreInPlace; rip.Phase != v1beta1.RestoreInPlaceFailed || rip.RunConfirm != "" {
 		t.Fatalf("restore = %+v, want the previous run still shown; the new one not started", rip)
 	}
-	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed || fresh.Status.RestoreOfflineFence == nil {
+	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed || fresh.Status.RestoreOfflineFence == nil {
 		t.Fatalf("queue %+v fence %+v, want Armed with the fence up while the pod lives", q, fresh.Status.RestoreOfflineFence)
 	}
 	if fresh.Status.PlannedFailover == nil {

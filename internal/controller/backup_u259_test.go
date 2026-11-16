@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
@@ -27,16 +27,16 @@ import (
 // withKey creates the snapshot.
 func encryptedAbandonedFixture(t *testing.T, withKey bool) *cleanupFixture {
 	t.Helper()
-	f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
+	f := abandonedFixture(t, v1beta1.BackupPhaseFailed)
 	ctx := context.Background()
-	f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
-	f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: dumpKeySnapshotName(f.mb), Key: pitrKeySnapshotDataKey}
+	f.mb.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
+	f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1beta1.SecretKeyRef{Name: dumpKeySnapshotName(f.mb), Key: pitrKeySnapshotDataKey}
 	if err := f.c.Status().Update(ctx, f.mb); err != nil {
 		t.Fatal(err)
 	}
 	if withKey {
 		snap := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb),
-			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1alpha1.MysqlBackupUIDLabel: string(f.mb.UID)}},
+			Labels: map[string]string{labelAppName: appNameDumpKeySnapshot, v1beta1.MysqlBackupUIDLabel: string(f.mb.UID)}},
 			Data: map[string][]byte{pitrKeySnapshotDataKey: []byte("k")}}
 		if err := f.c.Create(ctx, snap); err != nil {
 			t.Fatal(err)
@@ -101,9 +101,9 @@ func TestFinalize_AbandonedRecordedKeyMissingBlocks(t *testing.T) {
 	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 		t.Fatal(err)
 	}
-	c := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
-	if c == nil || c.Reason != v1alpha1.ReasonPassphraseSecretMissing {
-		t.Fatalf("condition %+v, want %s", c, v1alpha1.ReasonPassphraseSecretMissing)
+	c := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1beta1.ConditionArtifactCleanup)
+	if c == nil || c.Reason != v1beta1.ReasonPassphraseSecretMissing {
+		t.Fatalf("condition %+v, want %s", c, v1beta1.ReasonPassphraseSecretMissing)
 	}
 	// Restoring the Secret lets the cleanup run.
 	if err := f.c.Create(context.Background(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: f.mb.Namespace, Name: dumpKeySnapshotName(f.mb)},
@@ -125,14 +125,14 @@ func TestVerificationRecordedDumpKeyGone(t *testing.T) {
 	fg := fgWithEncryptedBackup()
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	setTestArtifactLocation(backup, "s3://bloodraven-backups/lion/seed/")
-	setTestArtifactType(backup, v1alpha1.BackupStorageS3)
-	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
-	ensureTestArtifact(backup).PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}
+	setTestArtifactType(backup, v1beta1.BackupStorageS3)
+	backup.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
+	ensureTestArtifact(backup).PassphraseSecretKeyRef = &v1beta1.SecretKeyRef{Name: "mysqlbackup-seed-dump-key-gone", Key: pitrKeySnapshotDataKey}
 	v := verifyCR("verify-gone", "lion", "nightly-s3")
 	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	got := getVerification(t, c, v)
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed || verifiedReason(got) != string(pitrarchive.TokenBackupDumpKeyMissing) {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed || verifiedReason(got) != string(pitrarchive.TokenBackupDumpKeyMissing) {
 		t.Fatalf("phase %s reason %q message %q", got.Status.Phase, verifiedReason(got), got.Status.Message)
 	}
 	var job batchv1.Job
@@ -160,7 +160,7 @@ func TestCRDDecryptionHelpIsCurrent(t *testing.T) {
 	}
 	// The PassphraseSecretKeyRef type doc (Go API reference) names the one
 	// Job that still mounts a profile's Secret.
-	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1alpha1", "backup_types.go"))
+	src, err := os.ReadFile(filepath.Join("..", "..", "api", "v1beta1", "backup_types.go"))
 	if err != nil {
 		t.Fatal(err)
 	}

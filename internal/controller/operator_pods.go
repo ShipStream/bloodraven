@@ -3,7 +3,7 @@ package controller
 import (
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // operatorBinaryPath is where the operator image installs the bloodraven
@@ -22,14 +22,14 @@ func operatorCommand(args ...string) []string {
 
 // groupReadOnlyTolerations returns the tolerations every operator-built
 // pod of a failover group carries: its own group's read-only taint
-// (v1alpha1.ReadOnlyTaintKey), any effect. The taint exists to evict
+// (v1beta1.ReadOnlyTaintKey), any effect. The taint exists to evict
 // write-dependent application pods from the demoted site; the group's own
 // MySQL, Dragonfly, backup, verification, restore and cleanup pods are not
 // such workloads and must not be evicted by it. Other groups' taint keys
 // are deliberately not tolerated, matching the MySQL Deployment.
-func groupReadOnlyTolerations(fg *v1alpha1.MysqlFailoverGroup) []corev1.Toleration {
+func groupReadOnlyTolerations(fg *v1beta1.MysqlFailoverGroup) []corev1.Toleration {
 	return []corev1.Toleration{{
-		Key:      v1alpha1.ReadOnlyTaintKey(fg.Namespace, fg.Name),
+		Key:      v1beta1.ReadOnlyTaintKey(fg.Namespace, fg.Name),
 		Operator: corev1.TolerationOpExists,
 	}}
 }

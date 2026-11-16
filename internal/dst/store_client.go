@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // storeClient serves the simulated object to production code that talks to
@@ -40,7 +40,7 @@ type storeClient struct {
 var gr = schema.GroupResource{Group: "shipstream.io", Resource: "mysqlfailovergroups"}
 
 func (c *storeClient) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-	fg, ok := obj.(*v1alpha1.MysqlFailoverGroup)
+	fg, ok := obj.(*v1beta1.MysqlFailoverGroup)
 	if !ok {
 		return fmt.Errorf("dst: storeClient.Get of %T is not modeled", obj)
 	}
@@ -113,7 +113,7 @@ func (c *storeClient) Patch(_ context.Context, obj client.Object, patch client.P
 	s.patchAnnotationsLocked("failoverRecord", kv)
 	s.logLocked("recorderPatch", "committed")
 	c.delivered = append(c.delivered, data)
-	s.obj.DeepCopyInto(obj.(*v1alpha1.MysqlFailoverGroup))
+	s.obj.DeepCopyInto(obj.(*v1beta1.MysqlFailoverGroup))
 	return nil
 }
 

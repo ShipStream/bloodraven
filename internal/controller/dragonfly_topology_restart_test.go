@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -25,7 +25,7 @@ type restartHarness struct {
 	clock time.Time
 }
 
-func newRestartHarness(t *testing.T, mutate func(*v1alpha1.MysqlFailoverGroup)) *restartHarness {
+func newRestartHarness(t *testing.T, mutate func(*v1beta1.MysqlFailoverGroup)) *restartHarness {
 	t.Helper()
 	h := &restartHarness{thresholdHarness: newThresholdHarness(t, mutate), clock: time.Unix(1_800_000_000, 0)}
 	h.mgr.now = func() time.Time { return h.clock }
@@ -144,7 +144,7 @@ func TestDragonflyManager_Tick_RestartedEmptyMaster(t *testing.T) {
 // count it could not read, it re-attaches the replica as it always did.
 func TestDragonflyManager_Tick_RestartedMasterWithKeys(t *testing.T) {
 	maxAge := func(h *restartHarness) time.Duration {
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := h.c.Get(context.Background(), h.key, &fg); err != nil {
 			t.Fatal(err)
 		}
@@ -248,7 +248,7 @@ func TestDragonflyManager_Tick_RestartedMasterEvidence(t *testing.T) {
 func TestDragonflyManager_ReconcileReplication_KeepsCacheOverRestartedMaster(t *testing.T) {
 	h := newRestartHarness(t, nil)
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	zero, many := int64(0), int64(300)
 	replica := dragonflyReplicaOf(restartTestDC1Host)
 	replica.MasterLinkStatus, replica.MasterReplID = "down", restartTestOldReplID
@@ -275,7 +275,7 @@ func TestDragonflyManager_ReconcileReplication_KeepsCacheOverRestartedMaster(t *
 // instance's journal is promoted; the other replica and the restarted
 // master are then attached to it.
 func TestDragonflyManager_Tick_RestartedMasterThreeSites(t *testing.T) {
-	h := newRestartHarness(t, func(fg *v1alpha1.MysqlFailoverGroup) {
+	h := newRestartHarness(t, func(fg *v1beta1.MysqlFailoverGroup) {
 		dc3 := *fg.Spec.Sites[1].DeepCopy()
 		dc3.Name, dc3.ServerID, dc3.Zone = "dc3", 103, "lion-dc3"
 		fg.Spec.Sites = append(fg.Spec.Sites, dc3)
@@ -318,7 +318,7 @@ func TestDragonflyManager_Tick_RestartedMasterThreeSites(t *testing.T) {
 // is ahead of it. Promoting dc3 made a second master beside the one the
 // MySQL failover then promoted (scenario 76's finding, on this path).
 func TestDragonflyManager_Tick_RestartedMasterFollowsMySQL(t *testing.T) {
-	h := newRestartHarness(t, func(fg *v1alpha1.MysqlFailoverGroup) {
+	h := newRestartHarness(t, func(fg *v1beta1.MysqlFailoverGroup) {
 		dc3 := *fg.Spec.Sites[1].DeepCopy()
 		dc3.Name, dc3.ServerID, dc3.Zone = "dc3", 103, "lion-dc3"
 		fg.Spec.Sites = append(fg.Spec.Sites, dc3)
@@ -544,7 +544,7 @@ func TestDragonflyManager_Tick_MissCountStartsAgainWithTheActiveSite(t *testing.
 
 	// dc2 becomes the active site (a promotion elsewhere recorded it), and
 	// dc1 is back as its replica. Then dc2 is missed once.
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := h.c.Get(context.Background(), h.key, &fg); err != nil {
 		t.Fatal(err)
 	}

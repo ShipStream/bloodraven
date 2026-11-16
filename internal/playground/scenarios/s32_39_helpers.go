@@ -10,7 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -25,7 +25,7 @@ const operatorServiceAccount = "bloodraven"
 // siteLBIP returns spec.sites[<site>].loadBalancerIP, or "" if the site is unknown.
 // The DNSEndpoint failover scenario (38) compares this against the live
 // DNSEndpoint targets.
-func siteLBIP(mfg *v1alpha1.MysqlFailoverGroup, site string) string {
+func siteLBIP(mfg *v1beta1.MysqlFailoverGroup, site string) string {
 	for _, s := range mfg.Spec.Sites {
 		if s.Name == site {
 			return s.LoadBalancerIP
@@ -209,7 +209,7 @@ func newConfirmToken(base time.Time, offset time.Duration) string {
 // the request it just made. Callers that need to tell the fresh request's
 // status apart from a leftover terminal status (e.g. waitRestoreInPlaceActive)
 // should pass this snapshot through to restoreInPlaceStatusChanged.
-func patchRestoreInPlace(ctx context.Context, env *runner.Env, spec v1alpha1.RestoreInPlaceSpec) (*v1alpha1.RestoreInPlaceStatus, error) {
+func patchRestoreInPlace(ctx context.Context, env *runner.Env, spec v1beta1.RestoreInPlaceSpec) (*v1beta1.RestoreInPlaceStatus, error) {
 	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return nil, err
@@ -246,10 +246,10 @@ func removeRestoreInPlaceSpec(ctx context.Context, env *runner.Env) error {
 // waitRestoreInPlacePhase polls status.restoreInPlace.phase until it equals
 // want or reaches a different terminal phase (Succeeded/Failed). Returns the
 // observed status. An unexpected terminal phase is returned as an error.
-func waitRestoreInPlacePhase(ctx context.Context, env *runner.Env, want v1alpha1.RestoreInPlacePhase) (*v1alpha1.RestoreInPlaceStatus, error) {
-	var result *v1alpha1.RestoreInPlaceStatus
+func waitRestoreInPlacePhase(ctx context.Context, env *runner.Env, want v1beta1.RestoreInPlacePhase) (*v1beta1.RestoreInPlaceStatus, error) {
+	var result *v1beta1.RestoreInPlaceStatus
 	_, err := env.Wait.UntilCR(ctx, env.Namespace, fmt.Sprintf("restoreInPlace.phase==%s", want),
-		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 			rip := mfg.Status.RestoreInPlace
 			if rip == nil {
 				return false, "no status.restoreInPlace yet", nil
@@ -280,10 +280,10 @@ func waitRestoreInPlacePhase(ctx context.Context, env *runner.Env, want v1alpha1
 // distinguishable from stale, it cannot be attributed to the fresh request,
 // so it is neither a terminal failure nor progress — the wait keeps polling
 // instead of surfacing it as a hard error.
-func waitRestoreInPlaceActive(ctx context.Context, env *runner.Env, stale *v1alpha1.RestoreInPlaceStatus) (*v1alpha1.RestoreInPlaceStatus, error) {
-	var result *v1alpha1.RestoreInPlaceStatus
+func waitRestoreInPlaceActive(ctx context.Context, env *runner.Env, stale *v1beta1.RestoreInPlaceStatus) (*v1beta1.RestoreInPlaceStatus, error) {
+	var result *v1beta1.RestoreInPlaceStatus
 	_, err := env.Wait.UntilCR(ctx, env.Namespace, "restoreInPlace Job active (phase=Restoring, jobName set)",
-		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 			rip := mfg.Status.RestoreInPlace
 			if rip == nil {
 				return false, "no status.restoreInPlace yet", nil
@@ -293,10 +293,10 @@ func waitRestoreInPlaceActive(ctx context.Context, env *runner.Env, stale *v1alp
 				return false, "stale status from prior request: " + msg, nil
 			}
 			result = rip
-			if rip.Phase == v1alpha1.RestoreInPlaceFailed || rip.Phase == v1alpha1.RestoreInPlaceSucceeded {
+			if rip.Phase == v1beta1.RestoreInPlaceFailed || rip.Phase == v1beta1.RestoreInPlaceSucceeded {
 				return false, msg, fmt.Errorf("restoreInPlace terminal %q before the Job became observable: %s", rip.Phase, rip.Message)
 			}
-			return rip.Phase == v1alpha1.RestoreInPlaceRestoring && rip.JobName != "", msg, nil
+			return rip.Phase == v1beta1.RestoreInPlaceRestoring && rip.JobName != "", msg, nil
 		})
 	return result, err
 }
@@ -313,7 +313,7 @@ func waitRestoreInPlaceActive(ctx context.Context, env *runner.Env, stale *v1alp
 // transition, but comparing every field avoids relying on clock resolution.
 // A nil stale snapshot means no restoreInPlace status existed before the
 // patch, so any non-nil observed status is by definition already changed.
-func restoreInPlaceStatusChanged(stale, observed *v1alpha1.RestoreInPlaceStatus) bool {
+func restoreInPlaceStatusChanged(stale, observed *v1beta1.RestoreInPlaceStatus) bool {
 	if stale == nil || observed == nil {
 		return stale != observed
 	}
@@ -326,8 +326,8 @@ func restoreInPlaceStatusChanged(stale, observed *v1alpha1.RestoreInPlaceStatus)
 	return !stale.StartTime.Equal(observed.StartTime)
 }
 
-func restoreInPlaceTerminal(p v1alpha1.RestoreInPlacePhase) bool {
-	return p == v1alpha1.RestoreInPlaceSucceeded || p == v1alpha1.RestoreInPlaceFailed
+func restoreInPlaceTerminal(p v1beta1.RestoreInPlacePhase) bool {
+	return p == v1beta1.RestoreInPlaceSucceeded || p == v1beta1.RestoreInPlaceFailed
 }
 
 // deleteJobIfPresent best-effort deletes a batch Job by name (foreground

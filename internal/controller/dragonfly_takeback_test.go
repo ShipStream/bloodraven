@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -29,7 +29,7 @@ const (
 // the same position.
 func (h *restartHarness) ledElsewhere() {
 	h.t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := h.c.Get(context.Background(), h.key, &fg); err != nil {
 		h.t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func (h *restartHarness) ledElsewhere() {
 // agePromotionRecord makes status.dragonfly.lastPromotionTime 40 s old.
 func (h *restartHarness) agePromotionRecord() {
 	h.t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := h.c.Get(context.Background(), h.key, &fg); err != nil {
 		h.t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestDragonflyManager_Tick_TakeBackNeedsTheSyncProof(t *testing.T) {
 		if n := strings.Count(logs, takeBackNotInSyncMsg); n != 1 || !strings.Contains(logs, "state="+wantState) {
 			t.Fatalf("the wait was logged %d times over three cycles, want once with state %s\n%s", n, wantState, logs)
 		}
-		if got := h.podLabels("dc2")[v1alpha1.DragonflyTrafficLabel]; got != dragonflyTrafficEnabled {
+		if got := h.podLabels("dc2")[v1beta1.DragonflyTrafficLabel]; got != dragonflyTrafficEnabled {
 			t.Fatalf("the master's traffic label = %q; it must keep serving", got)
 		}
 	}
@@ -155,12 +155,12 @@ func TestDragonflyManager_Tick_TakeBackStallIsReportedOnce(t *testing.T) {
 	h.ledElsewhere()
 	h.dc1.info.MasterLinkStatus = "down"
 	h.tick(1)
-	if got := h.eventsOf(v1alpha1.EventDragonflyFollowStalled); len(got) != 0 {
+	if got := h.eventsOf(v1beta1.EventDragonflyFollowStalled); len(got) != 0 {
 		t.Fatalf("stall reported at once: %v", got)
 	}
 	h.advance(dragonflyFollowStallAfter)
 	h.tick(3)
-	events := h.eventsOf(v1alpha1.EventDragonflyFollowStalled)
+	events := h.eventsOf(v1beta1.EventDragonflyFollowStalled)
 	if len(events) != 1 || !strings.Contains(events[0], dragonflyRolloutNotLinked) {
 		t.Fatalf("DragonflyFollowStalled events = %v, want one naming the state", events)
 	}
@@ -214,16 +214,16 @@ func TestDragonflyManager_Promote_NoFallbackOverAMasterThatStillServes(t *testin
 				t.Fatalf("activeSite = %q, want dc2 to keep the role", st.ActiveSite)
 			}
 			labels := h.podLabels("dc2")
-			if labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || labels[v1alpha1.DragonflyRoleLabel] != "master" {
+			if labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || labels[v1beta1.DragonflyRoleLabel] != "master" {
 				t.Fatalf("old master labels = %v, want master with its traffic label put back", labels)
 			}
 			if len(h.dc2.clientKillTypes) != 0 {
 				t.Fatalf("the old master's clients were killed after a promotion that did not happen")
 			}
-			if got := h.eventsOf(v1alpha1.EventDragonflyPromotionFailed); len(got) != 1 {
+			if got := h.eventsOf(v1beta1.EventDragonflyPromotionFailed); len(got) != 1 {
 				t.Fatalf("DragonflyPromotionFailed events = %v, want one", got)
 			}
-			if got := h.eventsOf(v1alpha1.EventDragonflySessionsLost); len(got) != 0 {
+			if got := h.eventsOf(v1beta1.EventDragonflySessionsLost); len(got) != 0 {
 				t.Fatalf("DragonflySessionsLost emitted for a promotion that did not happen: %v", got)
 			}
 		})
@@ -289,7 +289,7 @@ func TestDragonflyManager_Tick_TakeBackWithoutAPositionIsTakeoverOnly(t *testing
 			t.Fatalf("REPLTAKEOVER %d, REPLICAOF NO ONE %d, taken back %v\n%s",
 				h.dc1.replTakeoverCalls, h.dc1.replicaOfNoOneCalls, h.takenBack(), h.logs.String())
 		}
-		if got := h.eventsOf(v1alpha1.EventDragonflySyncUnproven); len(got) != 1 {
+		if got := h.eventsOf(v1beta1.EventDragonflySyncUnproven); len(got) != 1 {
 			t.Fatalf("DragonflySyncUnproven events = %v, want one", got)
 		}
 	})
@@ -315,7 +315,7 @@ func TestDragonflyManager_Tick_TakeBackWithoutAPositionIsTakeoverOnly(t *testing
 		if h.dc1.replTakeoverCalls != 2 {
 			t.Fatalf("REPLTAKEOVER sent %d times, want a second attempt once the record is 30 s old", h.dc1.replTakeoverCalls)
 		}
-		if got := h.eventsOf(v1alpha1.EventDragonflySyncUnproven); len(got) != 1 {
+		if got := h.eventsOf(v1beta1.EventDragonflySyncUnproven); len(got) != 1 {
 			t.Fatalf("DragonflySyncUnproven emitted %d times over two attempts, want once", len(got))
 		}
 	})
@@ -345,7 +345,7 @@ func TestDragonflyManager_Tick_TakeBackWithoutAPositionIsTakeoverOnly(t *testing
 		if h.dc1.replTakeoverCalls != 0 || h.dc1.replicaOfNoOneCalls != 0 {
 			t.Fatalf("REPLTAKEOVER %d, REPLICAOF NO ONE %d; want nothing", h.dc1.replTakeoverCalls, h.dc1.replicaOfNoOneCalls)
 		}
-		if got := h.eventsOf(v1alpha1.EventDragonflySyncUnproven); len(got) != 0 {
+		if got := h.eventsOf(v1beta1.EventDragonflySyncUnproven); len(got) != 0 {
 			t.Fatalf("DragonflySyncUnproven emitted for a target that is not linked: %v", got)
 		}
 	})
@@ -356,7 +356,7 @@ func TestDragonflyManager_Tick_TakeBackWithoutAPositionIsTakeoverOnly(t *testing
 // an old master that does not answer the probe.
 func TestDragonflyManager_Promote_TakeoverOnlyNeverFallsBack(t *testing.T) {
 	promote := func(h *restartHarness) bool {
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := h.c.Get(context.Background(), h.key, &fg); err != nil {
 			h.t.Fatal(err)
 		}
@@ -530,7 +530,7 @@ func TestDragonflyManager_Tick_CrashLoopingMasterDoesNotCycleUnbounded(t *testin
 	}
 	// Three restarts in under four minutes: three DragonflySessionsLost
 	// Events, and no more until the third delay ends.
-	if got := h.eventsOf(v1alpha1.EventDragonflySessionsLost); len(got) != 3 {
+	if got := h.eventsOf(v1beta1.EventDragonflySessionsLost); len(got) != 3 {
 		t.Fatalf("DragonflySessionsLost events = %d, want 3", len(got))
 	}
 }

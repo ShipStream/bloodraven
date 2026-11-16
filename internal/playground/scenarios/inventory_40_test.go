@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -42,18 +42,18 @@ func TestCanonicalMySQLHost(t *testing.T) {
 func TestAssertReaderServingStatus(t *testing.T) {
 	maxLag := int64(10)
 	lag := int64(10)
-	mfg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Replication: &v1alpha1.ReplicationSpec{ReadOnlyMaxLagSeconds: &maxLag},
+	mfg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Replication: &v1beta1.ReplicationSpec{ReadOnlyMaxLagSeconds: &maxLag},
 		},
 	}
-	status := v1alpha1.SiteStatus{
+	status := v1beta1.SiteStatus{
 		Name:                   "reader",
-		State:                  v1alpha1.SiteStateReadOnly,
-		Replication:            v1alpha1.SiteReplicationHealthy,
+		State:                  v1beta1.SiteStateReadOnly,
+		Replication:            v1beta1.SiteReplicationHealthy,
 		SecondsBehindSource:    &lag,
 		SourceHost:             "mysql-playground-iad-internal.ns.svc.cluster.local:3306",
-		SourceConvergenceState: v1alpha1.SourceConvergenceConverged,
+		SourceConvergenceState: v1beta1.SourceConvergenceConverged,
 	}
 	if err := assertReaderServingStatus(mfg, &status, "mysql-playground-iad-internal.ns.svc.cluster.local"); err != nil {
 		t.Fatalf("exact-threshold reader rejected: %v", err)

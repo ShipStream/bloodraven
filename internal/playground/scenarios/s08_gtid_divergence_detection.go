@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -67,7 +67,7 @@ func s08VerifyRecoveryBlocked() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s recoveryState=RecoveryBlocked && divergentCount>0", site),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					for _, s := range mfg.Status.Sites {
 						if s.Name != site {
 							continue
@@ -78,7 +78,7 @@ func s08VerifyRecoveryBlocked() runner.Step {
 						}
 						msg := fmt.Sprintf("site=%s recoveryState=%q divergentCount=%d divergentGtid=%q",
 							s.Name, s.RecoveryState, count, s.DivergentGtid)
-						return s.RecoveryState == v1alpha1.RecoveryStateBlocked && count > 0, msg, nil
+						return s.RecoveryState == v1beta1.RecoveryStateBlocked && count > 0, msg, nil
 					}
 					return false, fmt.Sprintf("site %s not present in status.sites", site), nil
 				},
@@ -142,23 +142,23 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 	}
 	value := controller.RecloneAnnotationValueWithPrefix(mfg, divergent, gtid[:8])
 	env.Capture.Note(fmt.Sprintf("cleanup: submitting reclone-site=%s to clear divergence", value))
-	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1alpha1.RecloneAnnotation, value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, v1beta1.RecloneAnnotation, value); err != nil {
 		return fmt.Errorf("cleanup: set reclone annotation: %w", err)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
 	_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 		"auto-reclone clears divergence",
-		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 			var writable, readOnly, blocked, div []string
 			for _, s := range mfg.Status.Sites {
 				switch s.State {
-				case v1alpha1.SiteStateWritable:
+				case v1beta1.SiteStateWritable:
 					writable = append(writable, s.Name)
-				case v1alpha1.SiteStateReadOnly:
+				case v1beta1.SiteStateReadOnly:
 					readOnly = append(readOnly, s.Name)
 				}
-				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+				if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 					blocked = append(blocked, s.Name)
 				}
 				if s.DivergentGtid != "" {

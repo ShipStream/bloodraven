@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
@@ -146,7 +146,7 @@ func TestPlannedFailoverDragonflySync_HealthyLinkBehindSourceDoesNotPass(t *test
 
 	pfDFPass(t, r, nn)
 	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetCaptured || pf.Dragonfly.SourceOffset == nil || *pf.Dragonfly.SourceOffset != 52 {
+	if pf.Dragonfly.SourceOffsetState != v1beta1.DragonflyOffsetCaptured || pf.Dragonfly.SourceOffset == nil || *pf.Dragonfly.SourceOffset != 52 {
 		t.Fatalf("offset capture = %+v, want Captured with the sum 52", pf.Dragonfly)
 	}
 	// The source writes on. The goal stays the position read when the wait
@@ -155,15 +155,15 @@ func TestPlannedFailoverDragonflySync_HealthyLinkBehindSourceDoesNotPass(t *test
 	source.position.Flows = []int64{90, 90}
 	for i := 0; i < 3; i++ {
 		pfDFPass(t, r, nn)
-		if pf = fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {
+		if pf = fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseWaitingForDragonflySync {
 			t.Fatalf("phase = %s with the target behind on both flows, want the sync wait to continue", pf.Phase)
 		}
 	}
 	// The target catches up to the captured position: the wait ends.
 	target.position.Flows = []int64{24, 28}
 	pfDFPass(t, r, nn)
-	if pf = fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly ||
-		pf.Dragonfly.Sessions == v1alpha1.DragonflySessionsLost {
+	if pf = fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhasePromotingDragonfly ||
+		pf.Dragonfly.Sessions == v1beta1.DragonflySessionsLost {
 		t.Fatalf("phase = %s dragonfly = %+v, want PromotingDragonfly once the target reached the source", pf.Phase, pf.Dragonfly)
 	}
 }
@@ -179,11 +179,11 @@ func TestPlannedFailoverDragonflySync_SourceWithoutPositionIsUnavailable(t *test
 
 	pfDFPass(t, r, nn)
 	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Dragonfly.SourceOffsetState != v1alpha1.DragonflyOffsetUnavailable || pf.Dragonfly.SourceOffset != nil {
+	if pf.Dragonfly.SourceOffsetState != v1beta1.DragonflyOffsetUnavailable || pf.Dragonfly.SourceOffset != nil {
 		t.Fatalf("dragonfly = %+v, want sourceOffsetState Unavailable and no offset", pf.Dragonfly)
 	}
 	pfDFPass(t, r, nn)
-	if pf = fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack {
+	if pf = fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseRollingBack {
 		t.Fatalf("phase = %s, want RollingBack under onSyncTimeout=Fail", pf.Phase)
 	}
 }
@@ -195,7 +195,7 @@ func TestPlannedFailoverDragonflySync_SourceWithoutPositionIsUnavailable(t *test
 func TestPlannedFailoverDragonflySync_RestartReadsTheSourceAgain(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Fail")
 	fg.Status.PlannedFailover.Settings.Dragonfly.MaxSyncWait = metav1.Duration{Duration: time.Hour}
-	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
+	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1beta1.DragonflyOffsetCaptured
 	recorded := int64(52)
 	fg.Status.PlannedFailover.Dragonfly.SourceOffset = &recorded
 	r, _, _ := pfDFReconciler(t, fg)
@@ -207,7 +207,7 @@ func TestPlannedFailoverDragonflySync_RestartReadsTheSourceAgain(t *testing.T) {
 	nn := fgNN(fg)
 
 	pfDFPass(t, r, nn)
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseWaitingForDragonflySync {
 		t.Fatalf("phase = %s, want the wait to continue: the target is behind the source read after the restart", pf.Phase)
 	}
 	// The position is read once per process: the source moving on does not
@@ -215,7 +215,7 @@ func TestPlannedFailoverDragonflySync_RestartReadsTheSourceAgain(t *testing.T) {
 	source.position.Flows = []int64{90, 90}
 	target.position.Flows = []int64{40, 40}
 	pfDFPass(t, r, nn)
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhasePromotingDragonfly {
 		t.Fatalf("phase = %s, want PromotingDragonfly: the target reached the position read after the restart", pf.Phase)
 	}
 }
@@ -225,7 +225,7 @@ func TestPlannedFailoverDragonflySync_RestartReadsTheSourceAgain(t *testing.T) {
 func TestPlannedFailoverDragonflySync_RestartWithUnreadableSourceTimesOut(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Fail")
 	fg.Status.PlannedFailover.Settings.Dragonfly.MaxSyncWait = metav1.Duration{Duration: 30 * time.Second}
-	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetCaptured
+	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1beta1.DragonflyOffsetCaptured
 	recorded := int64(0)
 	fg.Status.PlannedFailover.Dragonfly.SourceOffset = &recorded
 	r, _, _ := pfDFReconciler(t, fg)
@@ -233,12 +233,12 @@ func TestPlannedFailoverDragonflySync_RestartWithUnreadableSourceTimesOut(t *tes
 	nn := fgNN(fg)
 
 	pfDFPass(t, r, nn)
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseWaitingForDragonflySync {
 		t.Fatalf("phase = %s, want the wait to continue while the source cannot be read", pf.Phase)
 	}
 	r.plannedClock.(*clock.FakeClock).Advance(time.Minute)
 	pfDFPass(t, r, nn)
-	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack {
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseRollingBack {
 		t.Fatalf("phase = %s, want RollingBack after maxSyncWait", pf.Phase)
 	}
 }
@@ -460,7 +460,7 @@ func TestNoteDragonflyRolloutReadiness(t *testing.T) {
 	now = now.Add(dragonflyRolloutStallAfter)
 	r.noteDragonflyRolloutReadiness(ctx, fg, "dc2", "dc1", behind)
 	got := events()
-	if len(got) != 1 || !strings.Contains(got[0], v1alpha1.EventDragonflyRolloutStalled) || !strings.Contains(got[0], "behind source 24") {
+	if len(got) != 1 || !strings.Contains(got[0], v1beta1.EventDragonflyRolloutStalled) || !strings.Contains(got[0], "behind source 24") {
 		t.Fatalf("Events = %v, want one DragonflyRolloutStalled with the detail", got)
 	}
 	now = now.Add(time.Hour)
@@ -498,7 +498,7 @@ func TestNoteDragonflyRolloutReadiness(t *testing.T) {
 func TestReconcileDragonflyResources_RolloutDoesNotPromoteReplicaBehindTheMaster(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1", Phase: v1beta1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	target := syncProofReplica("a", 1, 1)
 	installFakeDragonflyConn(t, r, map[string]DragonflyConnection{syncProofDC1: syncProofMaster("a", 24, 28), syncProofDC2: target})
@@ -521,7 +521,7 @@ func TestReconcileDragonflyResources_RolloutDoesNotPromoteReplicaBehindTheMaster
 	if requeue, err := r.reconcileDragonflyResources(ctx, fg); err != nil || requeue == 0 {
 		t.Fatalf("reconcile with the replica behind: requeue=%v err=%v, want a requeue", requeue, err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}

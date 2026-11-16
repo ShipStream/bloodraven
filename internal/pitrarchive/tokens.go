@@ -113,7 +113,7 @@ func ParseToken(msg string) (Token, bool) {
 }
 
 // RefusalReason is a PITRArchiveReady=False reason (D-27): the token without
-// its "PITR" prefix. The API mirrors it as v1alpha1.PITRArchiveRefusalReason.
+// its "PITR" prefix. The API mirrors it as v1beta1.PITRArchiveRefusalReason.
 type RefusalReason string
 
 const (

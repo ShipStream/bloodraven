@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -37,14 +37,14 @@ func TestFixR5_DragonflyTakeoverFinishesOnlyOnInProcessSuccessReply(t *testing.T
 			pfDFPass(t, r, fgNN(fg))
 		}
 		pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
-		if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverSucceeded {
+		if pf.Phase != v1beta1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1beta1.DragonflyTakeoverSucceeded {
 			t.Fatalf("block = %s %+v, want Promoting with the takeover Succeeded", pf.Phase, pf.Dragonfly.Takeover)
 		}
 		if target.takeovers != 1 || len(source.clientKillTypes) != 1 || !pfDFPodGone(t, c, sourcePod) {
 			t.Errorf("REPLTAKEOVER %d, CLIENT KILL %v, source deleted %v; want the takeover finished once",
 				target.takeovers, source.clientKillTypes, pfDFPodGone(t, c, sourcePod))
 		}
-		if l := pfDFPodLabels(t, c, targetPod); l[v1alpha1.DragonflyRoleLabel] != "master" || l[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+		if l := pfDFPodLabels(t, c, targetPod); l[v1beta1.DragonflyRoleLabel] != "master" || l[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 			t.Errorf("target labels = %v, want the serving master", l)
 		}
 	})
@@ -65,8 +65,8 @@ func TestFixR5_DragonflyTakeoverFinishesOnlyOnInProcessSuccessReply(t *testing.T
 		}
 		got := fetchFG(t, r, fgNN(fg))
 		pf := got.Status.PlannedFailover
-		if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed ||
-			pf.Dragonfly.Reason != v1alpha1.DragonflyPlannedReasonPromotionFailed || pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsLost ||
+		if pf.Phase != v1beta1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1beta1.DragonflyTakeoverFailed ||
+			pf.Dragonfly.Reason != v1beta1.DragonflyPlannedReasonPromotionFailed || pf.Dragonfly.Sessions != v1beta1.DragonflySessionsLost ||
 			!strings.Contains(pf.Dragonfly.Message, "unconfirmed") {
 			t.Fatalf("block = %s %+v, want Promoting (Proceed) with the takeover Failed as unconfirmed", pf.Phase, pf.Dragonfly)
 		}
@@ -80,10 +80,10 @@ func TestFixR5_DragonflyTakeoverFinishesOnlyOnInProcessSuccessReply(t *testing.T
 	})
 	for _, tc := range []struct {
 		name, policy, role string
-		want               v1alpha1.PlannedFailoverPhase
+		want               v1beta1.PlannedFailoverPhase
 	}{
-		{"restart with an Intended record, target a replica, Fail", "Fail", "slave", v1alpha1.PlannedFailoverPhaseRollingBack},
-		{"restart with an Intended record, target master, Proceed", "Proceed", "master", v1alpha1.PlannedFailoverPhasePromoting},
+		{"restart with an Intended record, target a replica, Fail", "Fail", "slave", v1beta1.PlannedFailoverPhaseRollingBack},
+		{"restart with an Intended record, target master, Proceed", "Proceed", "master", v1beta1.PlannedFailoverPhasePromoting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// An earlier process wrote the intent (and stripped the source's
@@ -101,12 +101,12 @@ func TestFixR5_DragonflyTakeoverFinishesOnlyOnInProcessSuccessReply(t *testing.T
 			installFakeDragonflyConn(t, r, map[string]DragonflyConnection{pfDFPdx: target, pfDFIad: source})
 			pfDFTakeoverPasses(t, r, fgNN(fg))
 			pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
-			if pf.Phase != tc.want || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed ||
-				pf.Dragonfly.Reason != v1alpha1.DragonflyPlannedReasonPromotionFailed || !strings.Contains(pf.Dragonfly.Message, "unconfirmed") {
+			if pf.Phase != tc.want || pf.Dragonfly.Takeover.State != v1beta1.DragonflyTakeoverFailed ||
+				pf.Dragonfly.Reason != v1beta1.DragonflyPlannedReasonPromotionFailed || !strings.Contains(pf.Dragonfly.Message, "unconfirmed") {
 				t.Fatalf("block = %s %+v, want %s with the takeover Failed as unconfirmed", pf.Phase, pf.Dragonfly, tc.want)
 			}
-			if tc.want == v1alpha1.PlannedFailoverPhaseRollingBack &&
-				(pf.Rollback == nil || pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonDragonflyPromotionFailed) {
+			if tc.want == v1beta1.PlannedFailoverPhaseRollingBack &&
+				(pf.Rollback == nil || pf.Rollback.Reason != v1beta1.PlannedFailoverReasonDragonflyPromotionFailed) {
 				t.Errorf("rollback = %+v, want DragonflyPromotionFailed", pf.Rollback)
 			}
 			if target.takeovers != 0 {
@@ -114,7 +114,7 @@ func TestFixR5_DragonflyTakeoverFinishesOnlyOnInProcessSuccessReply(t *testing.T
 			}
 			// The source's traffic label is put back; nothing else moves.
 			pfDFAssertSourceKept(t, c, source, sourcePod, targetPod)
-			if l := pfDFPodLabels(t, c, targetPod); l[v1alpha1.DragonflyRoleLabel] != "replica" {
+			if l := pfDFPodLabels(t, c, targetPod); l[v1beta1.DragonflyRoleLabel] != "replica" {
 				t.Errorf("target labels = %v, want them untouched", l)
 			}
 		})
@@ -134,16 +134,16 @@ func TestFixR5_K072_UnreadableTargetIsNotAVerifiedRefence(t *testing.T) {
 	f.tgt.mu.Lock()
 	f.tgt.repl, f.tgt.down = nil, true
 	f.tgt.mu.Unlock()
-	pf := opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonTargetLost, false)
+	pf := opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonTargetLost, false)
 	res, err := f.topo.Rollback(context.Background(), f.ref, pf)
 	if err != nil || res.Outcome != "" {
 		t.Fatalf("Rollback = %+v, %v; want a retry while the target cannot be read", res, err)
 	}
 	f.clk.Advance(plannedFailoverRollbackDeadline - plannedRequeuePoll)
 	res, err = f.topo.Rollback(context.Background(), f.ref, pf)
-	if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack ||
-		!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) ||
-		!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
+	if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack ||
+		!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) ||
+		!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored) {
 		t.Fatalf("at the deadline: Rollback = %+v, %v; want RolledBack with TargetSuperReadOnlyNotRestored", res, err)
 	}
 	// The target comes back readable and re-fences: a clean RolledBack.
@@ -155,8 +155,8 @@ func TestFixR5_K072_UnreadableTargetIsNotAVerifiedRefence(t *testing.T) {
 	f2.tgt.mu.Lock()
 	f2.tgt.repl, f2.tgt.ro, f2.tgt.sro = nil, true, false
 	f2.tgt.mu.Unlock()
-	if res, err := f2.topo.Rollback(context.Background(), f2.ref, opsUltraRollbackRun(f2, v1alpha1.PlannedFailoverReasonTargetLost, false)); err != nil ||
-		res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack || slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) {
+	if res, err := f2.topo.Rollback(context.Background(), f2.ref, opsUltraRollbackRun(f2, v1beta1.PlannedFailoverReasonTargetLost, false)); err != nil ||
+		res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack || slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored) {
 		t.Fatalf("readable target: Rollback = %+v, %v; want a clean RolledBack", res, err)
 	}
 }
@@ -183,7 +183,7 @@ func TestFixR5_I001_ManagerReplacedBetweenGateProbesAndSROClear(t *testing.T) {
 		f.reg.current = next
 		f.reg.mu.Unlock()
 	}})
-	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+	pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 	out, err := f.topo.Promote(context.Background(), f.ref, pf)
 	if err != nil || out.Kind != PromoteUnconfirmed || !replaced {
 		t.Fatalf("Promote across the replacement = %+v, %v (replaced %v); want nothing more sent (Unconfirmed, retried)", out, err, replaced)
@@ -192,7 +192,7 @@ func TestFixR5_I001_ManagerReplacedBetweenGateProbesAndSROClear(t *testing.T) {
 		t.Fatalf("target statements = %v; the retired manager cleared the target's fences", got)
 	}
 	out, err = f.topo.Promote(context.Background(), f.ref, pf)
-	if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonTargetNotPromotable {
+	if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonTargetNotPromotable {
 		t.Fatalf("next pass = %+v, %v; want Aborted{TargetNotPromotable}", out, err)
 	}
 	if got := f.tgt.statements(); slices.Contains(got, "sro=OFF") || slices.Contains(got, "ro=OFF") {

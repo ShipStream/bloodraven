@@ -10,7 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;create;update;patch
@@ -26,7 +26,7 @@ func scheduleTriggerName(fgName string) string {
 // scheduleTriggerNeeded reports whether the group renders any schedule
 // CronJob, mirroring reconcileBackupSchedules and
 // reconcileVerificationSchedules.
-func scheduleTriggerNeeded(fg *v1alpha1.MysqlFailoverGroup) bool {
+func scheduleTriggerNeeded(fg *v1beta1.MysqlFailoverGroup) bool {
 	if fg.Spec.Backup == nil {
 		return false
 	}
@@ -48,12 +48,12 @@ func scheduleTriggerNeeded(fg *v1alpha1.MysqlFailoverGroup) bool {
 func scheduleTriggerRules(fgName string) []rbacv1.PolicyRule {
 	return []rbacv1.PolicyRule{
 		{
-			APIGroups: []string{v1alpha1.GroupVersion.Group},
+			APIGroups: []string{v1beta1.GroupVersion.Group},
 			Resources: []string{"mysqlbackups", "mysqlbackupverifications"},
 			Verbs:     []string{"create"},
 		},
 		{
-			APIGroups:     []string{v1alpha1.GroupVersion.Group},
+			APIGroups:     []string{v1beta1.GroupVersion.Group},
 			Resources:     []string{"mysqlfailovergroups"},
 			ResourceNames: []string{fgName},
 			Verbs:         []string{"get"},
@@ -68,7 +68,7 @@ func scheduleTriggerRules(fgName string) []rbacv1.PolicyRule {
 // operator namespace and did not exist in any other. The objects are
 // owned by the group, so they go when it does; a group that stops
 // scheduling keeps them until then.
-func (r *MysqlFailoverGroupReconciler) reconcileScheduleTriggerRBAC(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileScheduleTriggerRBAC(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	if !scheduleTriggerNeeded(fg) {
 		return nil
 	}
@@ -86,9 +86,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileScheduleTriggerRBAC(ctx context.
 		c = uncachedGetClient{Client: r.Client, reader: r.APIReader}
 	}
 	labels := map[string]string{
-		labelInstance:               fg.Name,
-		v1alpha1.FailoverGroupLabel: fg.Name,
-		labelManagedBy:              managerName,
+		labelInstance:              fg.Name,
+		v1beta1.FailoverGroupLabel: fg.Name,
+		labelManagedBy:             managerName,
 	}
 	mutate := func(obj client.Object, set func()) controllerutil.MutateFn {
 		return func() error {

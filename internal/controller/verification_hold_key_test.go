@@ -9,7 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestVerificationHoldKeyProtectsBackup pins A-77's hold family: the key
@@ -20,7 +20,7 @@ import (
 // protects nothing: no dual-key reads.
 func TestVerificationHoldKeyProtectsBackup(t *testing.T) {
 	const uid = "6f1c2d3e-0000-4000-8000-0000000000aa"
-	if got := verificationHoldKey(&v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{UID: uid}}); got != "verification-hold.bloodraven.shipstream.io/"+uid {
+	if got := verificationHoldKey(&v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{UID: uid}}); got != "verification-hold.bloodraven.shipstream.io/"+uid {
 		t.Fatalf("verificationHoldKey = %q", got)
 	}
 	now := metav1.Now()
@@ -30,27 +30,27 @@ func TestVerificationHoldKeyProtectsBackup(t *testing.T) {
 		terminating bool
 		want        bool
 	}{
-		{name: "active verification", key: v1alpha1.VerificationHoldAnnotationPrefix + uid, want: true},
-		{name: "terminating verification", key: v1alpha1.VerificationHoldAnnotationPrefix + uid, terminating: true, want: true},
+		{name: "active verification", key: v1beta1.VerificationHoldAnnotationPrefix + uid, want: true},
+		{name: "terminating verification", key: v1beta1.VerificationHoldAnnotationPrefix + uid, terminating: true, want: true},
 		{name: "the pre-A-77 key", key: "hold.verification.shipstream.io/" + uid, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			backup := &v1alpha1.MysqlBackup{
+			backup := &v1beta1.MysqlBackup{
 				ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "ns", UID: "uid-b", Annotations: map[string]string{tc.key: "reader"}},
-				Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "p"},
-				Status:     v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded},
+				Spec:       v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "p"},
+				Status:     v1beta1.MysqlBackupStatus{Phase: v1beta1.BackupPhaseSucceeded},
 			}
 			// Only the hold names the backup: the verification is for
 			// another profile and has not pinned a source.
-			v := &v1alpha1.MysqlBackupVerification{
+			v := &v1beta1.MysqlBackupVerification{
 				ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: "ns", UID: uid},
-				Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "other"},
-				Status:     v1alpha1.MysqlBackupVerificationStatus{Phase: v1alpha1.VerificationPhaseRestoring},
+				Spec:       v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "fg"}, ProfileName: "other"},
+				Status:     v1beta1.MysqlBackupVerificationStatus{Phase: v1beta1.VerificationPhaseRestoring},
 			}
 			objs := []client.Object{backup}
 			if tc.terminating {
 				v.DeletionTimestamp = &now
-				v.Finalizers = []string{v1alpha1.MysqlBackupVerificationFinalizer}
+				v.Finalizers = []string{v1beta1.MysqlBackupVerificationFinalizer}
 				objs = append(objs, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: verificationJobName(v.Name), Namespace: "ns"}})
 			}
 			objs = append(objs, v)

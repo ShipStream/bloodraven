@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
 )
@@ -90,7 +90,7 @@ func s22ObserveFailoverFlip() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"activeSite changes",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite)
 					return mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original, msg, nil
 				},
@@ -120,18 +120,18 @@ func s22ObserveRecovery() runner.Step {
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"sites: writable=1 read-only=N-1 blocked=0",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}
@@ -168,10 +168,10 @@ func s22VerifyCRReplicatingTrue() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"read-only site status.replication becomes Healthy or Lagging",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					var replica *v1alpha1.SiteStatus
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+					var replica *v1beta1.SiteStatus
 					for i := range mfg.Status.Sites {
-						if mfg.Status.Sites[i].State == v1alpha1.SiteStateReadOnly {
+						if mfg.Status.Sites[i].State == v1beta1.SiteStateReadOnly {
 							replica = &mfg.Status.Sites[i]
 							break
 						}
@@ -207,7 +207,7 @@ func s22VerifySidecarReplicatingTrue() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == v1alpha1.SiteStateReadOnly {
+				if s.State == v1beta1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}

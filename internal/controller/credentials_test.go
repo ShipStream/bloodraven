@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestCredentialStatementErrorLabelRedactsPasswords(t *testing.T) {
@@ -54,12 +54,12 @@ func TestCredentialStatementErrorLabelKeepsNonSensitiveContext(t *testing.T) {
 // password must not turn an operator-connect failure into an
 // empty-password root login attempt.
 func TestOpenAdminConnectionRootFallback(t *testing.T) {
-	fixtures := func(rootPass string, includeKey bool) (*v1alpha1.MysqlFailoverGroup, *corev1.Secret) {
-		fg := &v1alpha1.MysqlFailoverGroup{
+	fixtures := func(rootPass string, includeKey bool) (*v1beta1.MysqlFailoverGroup, *corev1.Secret) {
+		fg := &v1beta1.MysqlFailoverGroup{
 			ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
-			Spec: v1alpha1.MysqlFailoverGroupSpec{
-				Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
-				Sites:       []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate}},
+			Spec: v1beta1.MysqlFailoverGroupSpec{
+				Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
+				Sites:       []v1beta1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate}},
 			},
 		}
 		fg.Status.ActiveSite = "dc1"
@@ -165,12 +165,12 @@ func TestOpenAdminConnectionRootFallback(t *testing.T) {
 func TestReconcileCredentialsRefusesTenantClaimedUsername(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		claim func(st *v1alpha1.MysqlDatabaseStatus)
+		claim func(st *v1beta1.MysqlDatabaseStatus)
 	}{
-		{"recorded owner", func(st *v1alpha1.MysqlDatabaseStatus) { st.OwnerUser = "tenant_app" }},
+		{"recorded owner", func(st *v1beta1.MysqlDatabaseStatus) { st.OwnerUser = "tenant_app" }},
 		// An owner rotation target is written ahead before its first
 		// statement, so it is as much a tenant claim as the recorded owner.
-		{"pending owner", func(st *v1alpha1.MysqlDatabaseStatus) {
+		{"pending owner", func(st *v1beta1.MysqlDatabaseStatus) {
 			st.OwnerUser = "tenant_old"
 			st.PendingOwnerUser = "tenant_app"
 		}},
@@ -181,16 +181,16 @@ func TestReconcileCredentialsRefusesTenantClaimedUsername(t *testing.T) {
 	}
 }
 
-func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1alpha1.MysqlDatabaseStatus)) {
+func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1beta1.MysqlDatabaseStatus)) {
 	t.Helper()
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: v1alpha1.CredentialsSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Credentials: v1beta1.CredentialsSpec{
 				OperatorSecretName: "mysql-operator",
 				AppSecretName:      "mysql-app",
 			},
-			Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate}},
+			Sites: []v1beta1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate}},
 		},
 	}
 	fg.Status.ActiveSite = "dc1"
@@ -203,19 +203,19 @@ func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1a
 		ObjectMeta: metav1.ObjectMeta{Name: "mysql-app", Namespace: mdbTestNamespace},
 		Data:       map[string][]byte{"username": []byte("tenant_app"), "password": []byte("app-pw")},
 	}
-	mdb := &v1alpha1.MysqlDatabase{
+	mdb := &v1beta1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: "tenant-acme", Namespace: mdbTestNamespace},
-		Spec: v1alpha1.MysqlDatabaseSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+		Spec: v1beta1.MysqlDatabaseSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "main"},
 			DatabaseName:     "acme_wms",
-			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			Owner:            v1beta1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 		},
 	}
 	claim(&mdb.Status)
 
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlDatabase{}).
+		WithStatusSubresource(&v1beta1.MysqlDatabase{}).
 		WithObjects(fg, operatorSecret, appSecret, mdb).
 		Build()
 	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: testScheme()}
@@ -236,21 +236,21 @@ func testReconcileCredentialsRefusesTenantClaim(t *testing.T, claim func(st *v1a
 func TestReconcileCredentialsDefersDuringInitFromBackup(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		status *v1alpha1.RestoreStatus
+		status *v1beta1.RestoreStatus
 		fenced bool
 	}{
 		{"not yet started", nil, true},
-		{"running", &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning}, true},
-		{"failed", &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed}, true},
-		{"succeeded", &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded}, false},
+		{"running", &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning}, true},
+		{"failed", &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed}, true},
+		{"succeeded", &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseSucceeded}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fg := &v1alpha1.MysqlFailoverGroup{
+			fg := &v1beta1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
-				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Credentials:    v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
-					Sites:          []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate}},
-					InitFromBackup: &v1alpha1.InitFromBackupSpec{},
+				Spec: v1beta1.MysqlFailoverGroupSpec{
+					Credentials:    v1beta1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
+					Sites:          []v1beta1.SiteSpec{{Name: "dc1", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate}},
+					InitFromBackup: &v1beta1.InitFromBackupSpec{},
 				},
 			}
 			fg.Status.ActiveSite = "dc1"

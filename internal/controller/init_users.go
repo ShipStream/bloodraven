@@ -8,14 +8,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // reconcileInitUsersConfigMap creates or updates the ConfigMap containing the
 // shell script that runs during MySQL first-boot (via /docker-entrypoint-initdb.d/).
 // The script reads credentials from mounted Secret volumes and creates MySQL
 // users with role-appropriate GRANTs.
-func (r *MysqlFailoverGroupReconciler) reconcileInitUsersConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileInitUsersConfigMap(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("mysql-%s-init-users", fg.Name),
@@ -28,10 +28,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileInitUsersConfigMap(ctx context.C
 			return err
 		}
 		cm.Labels = map[string]string{
-			labelAppName:                "mysql",
-			labelInstance:               fg.Name,
-			v1alpha1.FailoverGroupLabel: fg.Name,
-			labelManagedBy:              managerName,
+			labelAppName:               "mysql",
+			labelInstance:              fg.Name,
+			v1beta1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:             managerName,
 		}
 		cm.Data = map[string]string{
 			"01-bloodraven-users.sh": generateInitUsersScript(fg),
@@ -83,7 +83,7 @@ run_mysql() {
 // user, the dedicated replication user when the operator Secret names one,
 // and the configured role users, from the credential Secrets mounted under
 // /etc/mysql/creds. Every statement is idempotent.
-func generateInitUsersScript(fg *v1alpha1.MysqlFailoverGroup) string {
+func generateInitUsersScript(fg *v1beta1.MysqlFailoverGroup) string {
 	script := `#!/bin/bash
 set -euo pipefail
 

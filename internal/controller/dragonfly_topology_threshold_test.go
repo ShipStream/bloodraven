@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -31,10 +31,10 @@ type thresholdHarness struct {
 	dc2  *fakeDragonflyConn
 }
 
-func newThresholdHarness(t *testing.T, mutate func(*v1alpha1.MysqlFailoverGroup)) *thresholdHarness {
+func newThresholdHarness(t *testing.T, mutate func(*v1beta1.MysqlFailoverGroup)) *thresholdHarness {
 	t.Helper()
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	if mutate != nil {
 		mutate(fg)
 	}
@@ -142,7 +142,7 @@ func TestDragonflyManager_Tick_MasterLossThresholdIsSpecFailureThreshold(t *test
 		{"one", 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newThresholdHarness(t, func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.FailureThreshold = tc.threshold })
+			h := newThresholdHarness(t, func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.FailureThreshold = tc.threshold })
 			h.missMaster()
 			h.tick(tc.want - 1)
 			if got := h.promoted(); got != "" {
@@ -252,7 +252,7 @@ func TestDragonflyManager_Tick_ThresholdDoesNotEndTheHoldOverEmptyMaster(t *test
 func TestDragonflyManager_MySQLFollowDoesNotWaitForTheThreshold(t *testing.T) {
 	t.Run("active-site drift", func(t *testing.T) {
 		// MySQL moved to dc2; the Dragonfly master is still dc1 and answers.
-		h := newThresholdHarness(t, func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.ActiveSite = "dc2" })
+		h := newThresholdHarness(t, func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.ActiveSite = "dc2" })
 		h.tick(1)
 		if got := h.promoted(); got != "dc2" {
 			t.Fatalf("promoted %q on the first cycle, want dc2 to follow MySQL", got)
@@ -275,7 +275,7 @@ func TestDragonflyManager_MySQLFollowDoesNotWaitForTheThreshold(t *testing.T) {
 func TestDragonflyOnlyPromotionCandidate_MissesOfAnotherSiteDoNotCount(t *testing.T) {
 	h := newThresholdHarness(t, nil)
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	seven := int64(7)
 	snaps := []DragonflySiteSnapshot{
 		{Name: "dc1"},
@@ -334,7 +334,7 @@ func TestDragonflyOnlyPromotionCandidate_FollowsMySQLOnceItMoved(t *testing.T) {
 			h := newThresholdHarness(t, nil)
 			fg := fgWithDragonflyEnabledAndActive()
 			fg.Status.ActiveSite = tc.mysql
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+			fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 			snaps := []DragonflySiteSnapshot{{Name: "dc1"}, {Name: "dc2"}, replica("dc3", &nine, 20)}
 			if tc.dc2Seen {
 				snaps[1] = replica("dc2", &seven, 10)

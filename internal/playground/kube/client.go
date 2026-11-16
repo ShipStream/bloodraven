@@ -11,7 +11,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // PlaygroundNamespace is the default namespace used by every
@@ -124,7 +124,7 @@ func New(opts LoadOptions) (*Client, error) {
 
 func newScheme() (*runtimeScheme, error) {
 	s := defaultScheme()
-	if err := v1alpha1.AddToScheme(s); err != nil {
+	if err := v1beta1.AddToScheme(s); err != nil {
 		return nil, err
 	}
 	return s, nil

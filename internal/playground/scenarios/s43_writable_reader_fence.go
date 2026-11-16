@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -290,7 +290,7 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"plannedFailover Failed with the only-PrimaryCandidate role error",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					pf := mfg.Status.PlannedFailover
 					if pf == nil {
 						return false, "no plannedFailover status yet", nil
@@ -302,8 +302,8 @@ func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
 					msg := fmt.Sprintf("phase=%q target=%q reason=%q message=%q", pf.Phase, pf.TargetSite, plannedReason(pf), pf.Message)
-					if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed {
-						if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+					if pf.Phase != v1beta1.PlannedFailoverPhaseFailed {
+						if pf.Phase == v1beta1.PlannedFailoverPhaseSucceeded {
 							return false, msg, fmt.Errorf("planned failover to reader %q succeeded; role gate is broken", state.topo.reader)
 						}
 						return false, msg, nil
@@ -392,13 +392,13 @@ func s43VerifyErrantGtidBlocksConvergence(state *s43RunState) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"reader sourceConvergenceState=Blocked reason=GTIDDiverged",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					status := statusSiteByName(mfg, state.topo.reader)
 					if status == nil {
 						return false, "reader status missing", nil
 					}
 					msg := fmt.Sprintf("convergence=%s/%s replication=%s", status.SourceConvergenceState, status.SourceConvergenceReason, status.Replication)
-					done := status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked && status.SourceConvergenceReason == v1alpha1.SourceReasonGTIDDiverged
+					done := status.SourceConvergenceState == v1beta1.SourceConvergenceBlocked && status.SourceConvergenceReason == v1beta1.SourceReasonGTIDDiverged
 					return done, msg, nil
 				})
 			cancel()
@@ -496,7 +496,7 @@ func s43RecoverErrantReader(ctx context.Context, env *runner.Env, state *s43RunS
 	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 		"convergence invariant restarts the reconciled reader",
-		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 			status := statusSiteByName(mfg, state.topo.reader)
 			if status == nil {
 				return false, "reader status missing", nil

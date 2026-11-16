@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Hooks for the deterministic simulation of the paced rollout
@@ -17,7 +17,7 @@ import (
 // syncManagers does on every pass for a registered manager: the sites whose
 // Deployment differs from the running render become tm's drift, except
 // those the paced rollout holds (rolloutHoldsSite).
-func (r *TopologyManagerRunner) CheckSpecDriftForSim(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, tm *TopologyManager) {
+func (r *TopologyManagerRunner) CheckSpecDriftForSim(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, tm *TopologyManager) {
 	r.checkSpecDrift(ctx, fg, tm)
 }
 

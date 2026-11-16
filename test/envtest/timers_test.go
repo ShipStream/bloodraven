@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // E8 (A-34..A-39, A-41): timers are bounded Durations, a valid zero is kept,
@@ -24,9 +24,9 @@ import (
 
 // e8VerificationPointInTime is a valid pointInTime block for mode: Timestamp
 // carries a stopTime, Latest none.
-func e8VerificationPointInTime(mode v1alpha1.PointInTimeMode) *v1alpha1.PointInTimeVerificationSpec {
-	pit := &v1alpha1.PointInTimeVerificationSpec{Mode: mode}
-	if mode == v1alpha1.PointInTimeModeTimestamp {
+func e8VerificationPointInTime(mode v1beta1.PointInTimeMode) *v1beta1.PointInTimeVerificationSpec {
+	pit := &v1beta1.PointInTimeVerificationSpec{Mode: mode}
+	if mode == v1beta1.PointInTimeModeTimestamp {
 		pit.StopTime = &metav1.Time{Time: time.Date(2026, 4, 15, 9, 30, 0, 0, time.UTC)}
 	}
 	return pit
@@ -35,10 +35,10 @@ func e8VerificationPointInTime(mode v1alpha1.PointInTimeMode) *v1alpha1.PointInT
 func e8Duration(d time.Duration) *metav1.Duration { return &metav1.Duration{Duration: d} }
 
 // e8Verification is a minimal MysqlBackupVerification of group lion.
-func e8Verification(ns, name string) *v1alpha1.MysqlBackupVerification {
-	return &v1alpha1.MysqlBackupVerification{
+func e8Verification(ns, name string) *v1beta1.MysqlBackupVerification {
+	return &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 }
 
@@ -49,7 +49,7 @@ type e8Bound struct {
 	build    func(ns, name string, d time.Duration) client.Object
 }
 
-func e8FG(set func(*v1alpha1.MysqlFailoverGroup, time.Duration)) func(ns, name string, d time.Duration) client.Object {
+func e8FG(set func(*v1beta1.MysqlFailoverGroup, time.Duration)) func(ns, name string, d time.Duration) client.Object {
 	return func(ns, name string, d time.Duration) client.Object {
 		fg := newVerificationFG(ns)
 		fg.Name = name
@@ -65,59 +65,59 @@ func e8FG(set func(*v1alpha1.MysqlFailoverGroup, time.Duration)) func(ns, name s
 func TestEnvtest_DurationBounds(t *testing.T) {
 	ns := createNamespace(t, "e8-bounds")
 	bounds := []e8Bound{
-		{field: "pollInterval", min: time.Second, max: 5 * time.Minute, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
+		{field: "pollInterval", min: time.Second, max: 5 * time.Minute, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
 			fg.Spec.PollInterval = e8Duration(d)
 		})},
-		{field: "connectionDrainTimeout", min: time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
+		{field: "connectionDrainTimeout", min: time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
 			fg.Spec.ConnectionDrainTimeout = e8Duration(d)
 		})},
-		{field: "failoverCooldown", min: 30 * time.Second, max: 24 * time.Hour, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
+		{field: "failoverCooldown", min: 30 * time.Second, max: 24 * time.Hour, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
 			fg.Spec.FailoverCooldown = e8Duration(d)
 		})},
-		{field: "cloneTimeout", min: time.Minute, max: 24 * time.Hour, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
+		{field: "cloneTimeout", min: time.Minute, max: 24 * time.Hour, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
 			fg.Spec.CloneTimeout = e8Duration(d)
 		})},
-		{field: "sidecar.peerCheckInterval", min: time.Second, max: time.Minute, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
+		{field: "sidecar.peerCheckInterval", min: time.Second, max: time.Minute, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
 			// Keep the 3x lease rule satisfied at every probed value.
 			fg.Spec.Sidecar.LeaseTimeout = e8Duration(10 * time.Minute)
 			fg.Spec.Sidecar.PeerCheckInterval = e8Duration(d)
 		})},
-		{field: "sidecar.leaseTimeout", min: 3 * time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
+		{field: "sidecar.leaseTimeout", min: 3 * time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
 			fg.Spec.Sidecar.PeerCheckInterval = e8Duration(time.Second)
 			fg.Spec.Sidecar.LeaseTimeout = e8Duration(d)
 		})},
-		{field: "archivePollInterval", min: 5 * time.Second, max: time.Hour, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
-			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3", ArchivePollInterval: e8Duration(d)}
+		{field: "archivePollInterval", min: 5 * time.Second, max: time.Hour, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
+			fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3", ArchivePollInterval: e8Duration(d)}
 		})},
-		{field: "retry.initialBackoff", min: time.Second, max: time.Hour, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
-			fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 2, InitialBackoff: e8Duration(d), MaxBackoff: e8Duration(24 * time.Hour)}
+		{field: "retry.initialBackoff", min: time.Second, max: time.Hour, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
+			fg.Spec.Backup.Retry = &v1beta1.BackupRetrySpec{MaxAttempts: 2, InitialBackoff: e8Duration(d), MaxBackoff: e8Duration(24 * time.Hour)}
 		})},
-		{field: "retry.maxBackoff", min: time.Second, max: 24 * time.Hour, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
-			fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 2, InitialBackoff: e8Duration(time.Second), MaxBackoff: e8Duration(d)}
+		{field: "retry.maxBackoff", min: time.Second, max: 24 * time.Hour, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
+			fg.Spec.Backup.Retry = &v1beta1.BackupRetrySpec{MaxAttempts: 2, InitialBackoff: e8Duration(time.Second), MaxBackoff: e8Duration(d)}
 		})},
 		{field: "keyring.escrowTimeout", min: 30 * time.Second, max: time.Hour, build: func(ns, name string, d time.Duration) client.Object {
 			fg := newEncryptionFG(ns, name)
-			fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, Keyring: &v1alpha1.KeyringSpec{EscrowTimeout: e8Duration(d)}}
+			fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true, Keyring: &v1beta1.KeyringSpec{EscrowTimeout: e8Duration(d)}}
 			return fg
 		}},
-		{field: "plannedFailover.maxLagWait", min: v1alpha1.PlannedFailoverMaxLagWaitMin, max: v1alpha1.PlannedFailoverMaxLagWaitMax, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
-			fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{MaxLagWait: e8Duration(d)}
+		{field: "plannedFailover.maxLagWait", min: v1beta1.PlannedFailoverMaxLagWaitMin, max: v1beta1.PlannedFailoverMaxLagWaitMax, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
+			fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{MaxLagWait: e8Duration(d)}
 		})},
-		{field: "plannedFailover.drainTimeout", min: time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
-			fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{DrainTimeout: e8Duration(d)}
+		{field: "plannedFailover.drainTimeout", min: time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
+			fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{DrainTimeout: e8Duration(d)}
 		})},
-		{field: "dragonfly.plannedFailover.maxSyncWait", min: time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
-			fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0",
-				PlannedFailover: &v1alpha1.DragonflyPlannedFailoverSpec{MaxSyncWait: e8Duration(d)}}
+		{field: "dragonfly.plannedFailover.maxSyncWait", min: time.Second, max: 10 * time.Minute, build: e8FG(func(fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
+			fg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0",
+				PlannedFailover: &v1beta1.DragonflyPlannedFailoverSpec{MaxSyncWait: e8Duration(d)}}
 		})},
 		{field: "sanityCheck.timeout", min: time.Second, max: time.Hour, build: func(ns, name string, d time.Duration) client.Object {
 			v := e8Verification(ns, name)
-			v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1", Timeout: e8Duration(d)}
+			v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1", Timeout: e8Duration(d)}
 			return v
 		}},
 		{field: "discoveryInterval", min: 30 * time.Second, max: 24 * time.Hour, build: func(ns, name string, d time.Duration) client.Object {
 			sc := minimalEnvtestStandby(name, ns)
-			sc.Spec.Freshness = &v1alpha1.StandbyFreshnessSpec{DiscoveryInterval: e8Duration(d)}
+			sc.Spec.Freshness = &v1beta1.StandbyFreshnessSpec{DiscoveryInterval: e8Duration(d)}
 			return sc
 		}},
 	}
@@ -144,18 +144,18 @@ func TestEnvtest_DurationBounds(t *testing.T) {
 	// maxBackoff must not be shorter than initialBackoff.
 	fg := newVerificationFG(ns)
 	fg.Name = "retry-inverted"
-	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 2, InitialBackoff: e8Duration(10 * time.Minute), MaxBackoff: e8Duration(time.Minute)}
+	fg.Spec.Backup.Retry = &v1beta1.BackupRetrySpec{MaxAttempts: 2, InitialBackoff: e8Duration(10 * time.Minute), MaxBackoff: e8Duration(time.Minute)}
 	wantRefused(t, "maxBackoff < initialBackoff", k8sClient.Create(ctx, fg), "retry.maxBackoff must be at least retry.initialBackoff")
 
 	// An unset field takes the documented default.
 	fg = newVerificationFG(ns)
 	fg.Name = "defaults"
-	fg.Spec.Backup.Retry = &v1alpha1.BackupRetrySpec{MaxAttempts: 2}
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{}
+	fg.Spec.Backup.Retry = &v1beta1.BackupRetrySpec{MaxAttempts: 2}
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	got := &v1alpha1.MysqlFailoverGroup{}
+	got := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), got); err != nil {
 		t.Fatal(err)
 	}
@@ -184,13 +184,13 @@ func TestEnvtest_ZeroIsKept(t *testing.T) {
 	ns := createNamespace(t, "e8-zero")
 	fg := newVerificationFG(ns)
 	fg.Name = "zeros"
-	fg.Spec.Replication = &v1alpha1.ReplicationSpec{MaxLagSeconds: new(int64(0))}
+	fg.Spec.Replication = &v1beta1.ReplicationSpec{MaxLagSeconds: new(int64(0))}
 	fg.Spec.Backup.BackoffLimit = new(int32(0))
 	fg.Spec.Backup.MaxLagSecondsForSource = new(int64(0))
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	got := &v1alpha1.MysqlFailoverGroup{}
+	got := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), got); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestEnvtest_ZeroIsKept(t *testing.T) {
 
 	fg = newVerificationFG(ns)
 	fg.Name = "defaults"
-	fg.Spec.Replication = &v1alpha1.ReplicationSpec{}
+	fg.Spec.Replication = &v1beta1.ReplicationSpec{}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestEnvtest_ZeroIsKept(t *testing.T) {
 	}
 	fg = newVerificationFG(ns)
 	fg.Name = "profile-ttl"
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestEnvtest_NumericSigns(t *testing.T) {
 	} {
 		fg := newVerificationFG(ns)
 		fg.Name = fmt.Sprintf("mem-%d", i)
-		fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0"}
+		fg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0"}
 		u := inertFieldsObject(t, fg, "MysqlFailoverGroup")
 		inertFieldsSet(t, u, tc.mem, "spec", "dragonfly", "maxMemory")
 		err := k8sClient.Create(ctx, u)
@@ -280,34 +280,34 @@ func TestEnvtest_NumericSigns(t *testing.T) {
 	}
 	fg := newVerificationFG(ns)
 	fg.Name = "threads-zero"
-	fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0", ProactorThreads: new(int32(0))}
+	fg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0", ProactorThreads: new(int32(0))}
 	wantRefused(t, "proactorThreads=0", k8sClient.Create(ctx, fg), "proactorThreads")
 	fg = newVerificationFG(ns)
 	fg.Name = "threads-ok"
 	q := resource.MustParse("512Mi")
-	fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0", ProactorThreads: new(int32(1)), MaxMemory: &q}
+	fg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true, Image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.30.0", ProactorThreads: new(int32(1)), MaxMemory: &q}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("proactorThreads=1 maxMemory=512Mi: %v", err)
 	}
 
 	fg = newVerificationFG(ns)
 	fg.Name = "deadline-negative"
-	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *", StartingDeadlineSeconds: new(int64(-1))}}
+	fg.Spec.Backup.Schedules = []v1beta1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *", StartingDeadlineSeconds: new(int64(-1))}}
 	wantRefused(t, "schedules[].startingDeadlineSeconds=-1", k8sClient.Create(ctx, fg), "startingDeadlineSeconds")
 	fg = newVerificationFG(ns)
 	fg.Name = "verify-deadline-negative"
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *", StartingDeadlineSeconds: new(int64(-1))}
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *", StartingDeadlineSeconds: new(int64(-1))}
 	wantRefused(t, "verification.startingDeadlineSeconds=-1", k8sClient.Create(ctx, fg), "startingDeadlineSeconds")
 
 	v := e8Verification(ns, "min-result-negative")
-	v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1", MinResult: new(int64(-1))}
+	v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1", MinResult: new(int64(-1))}
 	wantRefused(t, "sanityCheck.minResult=-1", k8sClient.Create(ctx, v), "minResult")
 	v = e8Verification(ns, "sanity-default")
-	v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1"}
+	v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1"}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
 	}
-	gotV := &v1alpha1.MysqlBackupVerification{}
+	gotV := &v1beta1.MysqlBackupVerification{}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(v), gotV); err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestEnvtest_NumericSigns(t *testing.T) {
 	}
 
 	// status.sanityCheck.outcome is a closed enum.
-	gotV.Status.SanityCheck = &v1alpha1.SanityCheckResult{Outcome: "Ran"}
+	gotV.Status.SanityCheck = &v1beta1.SanityCheckResult{Outcome: "Ran"}
 	wantRefused(t, "status.sanityCheck.outcome=Ran", k8sClient.Status().Update(ctx, gotV), "outcome")
 }
 
@@ -353,7 +353,7 @@ func TestEnvtest_StopTimePattern(t *testing.T) {
 		{stop: "yesterday"},
 	} {
 		name := fmt.Sprintf("stop-%d", i)
-		fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: stop, ArchiveProfileName: "nightly-s3"})
+		fg := pitrRestoreFG(ns, &v1beta1.PointInTimeSpec{StopTime: stop, ArchiveProfileName: "nightly-s3"})
 		fg.Name = name
 		u := inertFieldsObject(t, fg, "MysqlFailoverGroup")
 		inertFieldsSet(t, u, tc.stop, "spec", "initFromBackup", "pointInTime", "stopTime")
@@ -366,7 +366,7 @@ func TestEnvtest_StopTimePattern(t *testing.T) {
 		}
 
 		v := e8Verification(ns, name)
-		v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop}
+		v.Spec.PointInTime = &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeTimestamp, StopTime: &stop}
 		uv := inertFieldsObject(t, v, "MysqlBackupVerification")
 		inertFieldsSet(t, uv, tc.stop, "spec", "pointInTime", "stopTime")
 		err = k8sClient.Create(ctx, uv)
@@ -379,15 +379,15 @@ func TestEnvtest_StopTimePattern(t *testing.T) {
 	}
 
 	// mode: Timestamp needs stopTime and mode: Latest forbids it.
-	for name, pit := range map[string]*v1alpha1.PointInTimeVerificationSpec{
-		"timestamp-without-stop": {Mode: v1alpha1.PointInTimeModeTimestamp},
-		"latest-with-stop":       {Mode: v1alpha1.PointInTimeModeLatest, StopTime: &stop},
+	for name, pit := range map[string]*v1beta1.PointInTimeVerificationSpec{
+		"timestamp-without-stop": {Mode: v1beta1.PointInTimeModeTimestamp},
+		"latest-with-stop":       {Mode: v1beta1.PointInTimeModeLatest, StopTime: &stop},
 	} {
 		v := e8Verification(ns, name)
 		v.Spec.PointInTime = pit
 		wantRefused(t, name, k8sClient.Create(ctx, v), "pointInTime.stopTime is required when mode is Timestamp and forbidden when mode is Latest")
 	}
-	for _, mode := range []v1alpha1.PointInTimeMode{v1alpha1.PointInTimeModeLatest, v1alpha1.PointInTimeModeTimestamp} {
+	for _, mode := range []v1beta1.PointInTimeMode{v1beta1.PointInTimeModeLatest, v1beta1.PointInTimeModeTimestamp} {
 		v := e8Verification(ns, "mode-"+strings.ToLower(string(mode)))
 		v.Spec.PointInTime = e8VerificationPointInTime(mode)
 		if err := k8sClient.Create(ctx, v); err != nil {
@@ -396,7 +396,7 @@ func TestEnvtest_StopTimePattern(t *testing.T) {
 	}
 
 	// The restore's stopTime is required.
-	fg := pitrRestoreFG(ns, &v1alpha1.PointInTimeSpec{StopTime: stop, ArchiveProfileName: "nightly-s3"})
+	fg := pitrRestoreFG(ns, &v1beta1.PointInTimeSpec{StopTime: stop, ArchiveProfileName: "nightly-s3"})
 	fg.Name = "restore-without-stop"
 	u := inertFieldsObject(t, fg, "MysqlFailoverGroup")
 	unstructured.RemoveNestedField(u.Object, "spec", "initFromBackup", "pointInTime", "stopTime")
@@ -408,22 +408,22 @@ func TestEnvtest_StopTimePattern(t *testing.T) {
 		{"mysqlbackupverifications.shipstream.io", "spec", "pointInTime", "stopTime"},
 	} {
 		prop := installedSchemaProperty(t, path[0], path[1:]...)
-		if prop.Pattern != v1alpha1StopTimePattern || prop.Type != "string" {
+		if prop.Pattern != v1beta1StopTimePattern || prop.Type != "string" {
 			t.Errorf("%s %v: type %q pattern %q", path[0], path[1:], prop.Type, prop.Pattern)
 		}
 	}
 }
 
-// v1alpha1StopTimePattern is A-39's RFC 3339 pattern, as both stopTime
+// v1beta1StopTimePattern is A-39's RFC 3339 pattern, as both stopTime
 // markers spell it.
-const v1alpha1StopTimePattern = `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`
+const v1beta1StopTimePattern = `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`
 
 // e8DecodesStopTime reads the stored stopTime string and decodes it the way
 // the typed client does.
 func e8DecodesStopTime(t *testing.T, kind, ns, name string, path ...string) {
 	t.Helper()
 	stored := &unstructured.Unstructured{}
-	stored.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind(kind))
+	stored.SetGroupVersionKind(v1beta1.GroupVersion.WithKind(kind))
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, stored); err != nil {
 		t.Fatal(err)
 	}

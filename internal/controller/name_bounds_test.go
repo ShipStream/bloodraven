@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // boundedName returns a DNS-1035 label of n characters.
@@ -22,8 +22,8 @@ func boundedName(n int, fill string) string {
 // MaxGroupAndSiteNameLength) is a valid object name of its kind, and the
 // group and site names are valid label values.
 func TestDerivedNamesFitNameBounds(t *testing.T) {
-	for siteLen := 1; siteLen <= v1alpha1.MaxSiteNameLength; siteLen++ {
-		group := boundedName(v1alpha1.MaxGroupAndSiteNameLength-siteLen, "g")
+	for siteLen := 1; siteLen <= v1beta1.MaxSiteNameLength; siteLen++ {
+		group := boundedName(v1beta1.MaxGroupAndSiteNameLength-siteLen, "g")
 		site := boundedName(siteLen, "s")
 		label := func(what, v string) {
 			t.Helper()
@@ -85,14 +85,14 @@ func TestDerivedNamesFitNameBounds(t *testing.T) {
 		subdomain("PITR key snapshot Secret", pitrKeySnapshotName(group, []byte("k"), "s3://bucket/prefix", []byte("p")))
 		subdomain("digest key Secret", digestKeySecretName(group))
 		subdomain("schedule trigger", scheduleTriggerName(group))
-		if key := v1alpha1.ReadOnlyTaintKey(boundedName(63, "n"), group); len(validation.IsQualifiedName(key)) > 0 {
+		if key := v1beta1.ReadOnlyTaintKey(boundedName(63, "n"), group); len(validation.IsQualifiedName(key)) > 0 {
 			t.Errorf("taint key %q: %v", key, validation.IsQualifiedName(key))
 		}
 	}
 
 	// MysqlBackup and MysqlBackupVerification names are label values.
-	run := boundedName(v1alpha1.MaxRunNameLength, "r")
-	backup := &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: run, UID: types.UID("6f1c2d3e-0000-4000-8000-000000000001")}}
+	run := boundedName(v1beta1.MaxRunNameLength, "r")
+	backup := &v1beta1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: run, UID: types.UID("6f1c2d3e-0000-4000-8000-000000000001")}}
 	for what, v := range map[string]string{
 		"backup Job":               backupJobName(run),
 		"cleanup Job":              cleanupJobName(run),
@@ -113,17 +113,17 @@ func TestDerivedNamesFitNameBounds(t *testing.T) {
 func TestNameBoundsMatchTheCRDs(t *testing.T) {
 	for path, root := range apiCRDRoots(t, "shipstream.io_mysqlfailovergroups.yaml") {
 		name, ok := root.at([]string{"spec", "sites", "[]", "name"})
-		if !ok || name.MaxLength == nil || *name.MaxLength != v1alpha1.MaxSiteNameLength {
-			t.Errorf("%s: spec.sites[].name maxLength = %v, want %d", path, name.MaxLength, v1alpha1.MaxSiteNameLength)
+		if !ok || name.MaxLength == nil || *name.MaxLength != v1beta1.MaxSiteNameLength {
+			t.Errorf("%s: spec.sites[].name maxLength = %v, want %d", path, name.MaxLength, v1beta1.MaxSiteNameLength)
 		}
 		if !hasRule(root, "size(self.metadata.name) + size(s.name) <= 41") {
-			t.Errorf("%s: no root rule bounding the group plus site name to %d", path, v1alpha1.MaxGroupAndSiteNameLength)
+			t.Errorf("%s: no root rule bounding the group plus site name to %d", path, v1beta1.MaxGroupAndSiteNameLength)
 		}
 	}
 	for _, file := range []string{"shipstream.io_mysqlbackups.yaml", "shipstream.io_mysqlbackupverifications.yaml"} {
 		for path, root := range apiCRDRoots(t, file) {
 			if !hasRule(root, "size(self.metadata.name) <= 63") {
-				t.Errorf("%s: no root rule bounding metadata.name to %d", path, v1alpha1.MaxRunNameLength)
+				t.Errorf("%s: no root rule bounding metadata.name to %d", path, v1beta1.MaxRunNameLength)
 			}
 		}
 	}

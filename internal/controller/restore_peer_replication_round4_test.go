@@ -13,14 +13,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Fourth review round for #212.
 
 // backdateGTIDReadFailure makes fg's settlement look as if its first GTID
 // read failed d ago.
-func backdateGTIDReadFailure(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, d time.Duration) {
+func backdateGTIDReadFailure(r *MysqlFailoverGroupReconciler, fg *v1beta1.MysqlFailoverGroup, d time.Duration) {
 	r.restoreGTIDReadFailedSince(fg)
 	nn := client.ObjectKeyFromObject(fg)
 	r.restorePeerStopMu.Lock()
@@ -42,7 +42,7 @@ func TestSettle_GTIDReadRetryCountsFromFirstFailure(t *testing.T) {
 	if err != nil || wait == 0 {
 		t.Fatalf("wait=%s err=%v, want a retry on the first failed read", wait, err)
 	}
-	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed {
+	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed {
 		t.Fatalf("queue = %+v, want still Armed", q)
 	}
 }
@@ -58,7 +58,7 @@ func TestSettle_MissingManagerWaits(t *testing.T) {
 	if err != nil || wait == 0 {
 		t.Fatalf("wait=%s err=%v, want a wait for the manager", wait, err)
 	}
-	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed {
+	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed {
 		t.Fatalf("queue = %+v, want still Armed", q)
 	}
 	late := jobLostFG(time.Now().Add(-restoreSettleBound - time.Minute))
@@ -67,7 +67,7 @@ func TestSettle_MissingManagerWaits(t *testing.T) {
 	if wait, err := r2.settleArmedRestoreReclones(context.Background(), late); err != nil || wait != 0 {
 		t.Fatalf("wait=%s err=%v past the bound, want a decision", wait, err)
 	}
-	if q := getFG(t, c2, late).Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld {
+	if q := getFG(t, c2, late).Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesHeld {
 		t.Fatalf("queue = %+v, want Held past the bound", q)
 	}
 }
@@ -80,7 +80,7 @@ func TestSettle_FailedDiscardWriteKeepsFence(t *testing.T) {
 	failing := true
 	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-			if m, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok && failing && m.Status.RestoreReclones == nil {
+			if m, ok := obj.(*v1beta1.MysqlFailoverGroup); ok && failing && m.Status.RestoreReclones == nil {
 				return errors.New("etcdserver: request timed out")
 			}
 			return cl.SubResource(sub).Update(ctx, obj, opts...)
@@ -112,9 +112,9 @@ func TestSettle_FailedDiscardWriteKeepsFence(t *testing.T) {
 // A peer added after acceptance ends the run before offline_mode goes up.
 func TestInPlaceFencing_PeerSetChangeCancelsBeforeOfflineFence(t *testing.T) {
 	r, c, fg, primary, _, _ := peerFencingRestore(t, peerGTID("1-10"))
-	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: fg.Status.RestoreInPlace.TargetSite, ConfirmToken: fg.Spec.RestoreInPlace.Confirm}
-	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
-		ConfirmToken: fg.Spec.RestoreInPlace.Confirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{fg.Spec.Sites[1].Name},
+	fg.Status.RestoreOfflineFence = &v1beta1.RestoreOfflineFenceStatus{Site: fg.Status.RestoreInPlace.TargetSite, ConfirmToken: fg.Spec.RestoreInPlace.Confirm}
+	fg.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{
+		ConfirmToken: fg.Spec.RestoreInPlace.Confirm, Phase: v1beta1.RestoreReclonesArmed, Pending: []string{fg.Spec.Sites[1].Name},
 	}
 	if err := c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestInPlaceFencing_PeerSetChangeCancelsBeforeOfflineFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	restorePass(t, r, c, fg)
-	if st := fg.Status.RestoreInPlace; st.Phase != v1alpha1.RestoreInPlaceFailed || !strings.Contains(st.Message, "peer set changed") {
+	if st := fg.Status.RestoreInPlace; st.Phase != v1beta1.RestoreInPlaceFailed || !strings.Contains(st.Message, "peer set changed") {
 		t.Fatalf("status %+v, want cancelled", st)
 	}
 	if primary.offlineMode || len(primary.offlineModeSets) != 0 || primary.evictCalls != 0 {
@@ -140,13 +140,13 @@ func TestInPlaceFencing_PeerSetChangeCancelsBeforeOfflineFence(t *testing.T) {
 // interleaving "snapshot read, EnforceRestoreOfflineFence, stale write".
 type interleavingReader struct {
 	client.Reader
-	view    *v1alpha1.MysqlFailoverGroup
+	view    *v1beta1.MysqlFailoverGroup
 	enforce func()
 	done    chan struct{}
 }
 
 func (i *interleavingReader) Get(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-	i.view.DeepCopyInto(obj.(*v1alpha1.MysqlFailoverGroup))
+	i.view.DeepCopyInto(obj.(*v1beta1.MysqlFailoverGroup))
 	if i.enforce != nil {
 		enforce := i.enforce
 		i.enforce = nil
@@ -165,9 +165,9 @@ func (i *interleavingReader) Get(_ context.Context, _ client.ObjectKey, obj clie
 // view is not cleared by that application.
 func TestApplyRestoreProtection_FenceArmedDuringReadIsKept(t *testing.T) {
 	running := fgThreeSiteRestore()
-	running.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing, TargetSite: "iad", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, RunID: "run-1"}
-	running.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"}}
-	running.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, RunID: "run-1"} // prior not yet recorded
+	running.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceFencing, TargetSite: "iad", Scope: &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull}, RunID: "run-1"}
+	running.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1beta1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"}}
+	running.Status.RestoreOfflineFence = &v1beta1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, RunID: "run-1"} // prior not yet recorded
 
 	tm, mocks := fenceTopologyManager(running)
 	reader := &interleavingReader{view: running, done: make(chan struct{})}

@@ -7,7 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -137,7 +137,7 @@ func s64ObserveDeferredByHold() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Deferred{DeploymentHold}",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					return s64DeferredByHold(currentPlannedRun(mfg, baseline))
 				})
 			if err != nil {
@@ -153,18 +153,18 @@ func s64ObserveDeferredByHold() runner.Step {
 // s64DeferredByHold classifies the current run while waiting for the hold to
 // defer it. Anything that owns sites or is terminal means the hold did not
 // stop admission.
-func s64DeferredByHold(pf *v1alpha1.PlannedFailoverStatus) (bool, string, error) {
+func s64DeferredByHold(pf *v1beta1.PlannedFailoverStatus) (bool, string, error) {
 	if pf == nil {
 		return false, "no new planned run yet", nil
 	}
 	msg := plannedRunSummary(pf)
-	if pf.Result != nil || plannedTerminal(pf.Phase) || plannedOwnsSites(pf.Phase) || pf.Phase == v1alpha1.PlannedFailoverPhasePublishing {
+	if pf.Result != nil || plannedTerminal(pf.Phase) || plannedOwnsSites(pf.Phase) || pf.Phase == v1beta1.PlannedFailoverPhasePublishing {
 		return false, msg, fmt.Errorf("planned run went past admission despite a live failover-hold: %s", msg)
 	}
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred {
+	if pf.Phase != v1beta1.PlannedFailoverPhaseDeferred {
 		return false, msg, nil
 	}
-	if pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold {
+	if pf.Admission == nil || pf.Admission.DeferReason != v1beta1.PlannedFailoverDeferDeploymentHold {
 		return false, msg, nil
 	}
 	return true, msg, nil
@@ -203,7 +203,7 @@ func s64ObserveEmergencyFailover() runner.Step {
 			defer cancel()
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite moves off %s within %s with the planned run pending", original, s64EmergencyWindow),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if pf := mfg.Status.PlannedFailover; pf != nil && pf.RunID == runID {
 						if plannedOwnsSites(pf.Phase) && pf.SourceSite == original {
 							return false, "", fmt.Errorf("pending planned run claimed the lost primary %s: %s", original, plannedRunSummary(pf))
@@ -249,7 +249,7 @@ func s64WaitLeasesRevoked(ctx context.Context, env *runner.Env, state *deploySce
 	state.leasesRevoked = true
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	_, err := waitForMFGEvent(waitCtx, env, env.StartTime, v1alpha1.EventDeploymentLeaseRevoked, "")
+	_, err := waitForMFGEvent(waitCtx, env, env.StartTime, v1beta1.EventDeploymentLeaseRevoked, "")
 	return err
 }
 
@@ -286,7 +286,7 @@ func s64ObservePlannedOutcome() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, s64OutcomeWindow)
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "planned run "+runID+" settles after the emergency failover",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					pf := mfg.Status.PlannedFailover
 					if pf == nil {
 						return false, "no plannedFailover status", nil
@@ -300,7 +300,7 @@ func s64ObservePlannedOutcome() runner.Step {
 				return err
 			}
 			pf := mfg.Status.PlannedFailover
-			if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeNotStarted && mfg.Status.ActiveSite != newPrimary {
+			if pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeNotStarted && mfg.Status.ActiveSite != newPrimary {
 				return fmt.Errorf("planned run refused AlreadyActive but status.activeSite=%q, want %q", mfg.Status.ActiveSite, newPrimary)
 			}
 			env.Capture.Note("planned run settled: " + plannedRunSummary(pf))
@@ -314,21 +314,21 @@ func s64ObservePlannedOutcome() runner.Step {
 // Failed{NotStarted, AlreadyActive}. A run that owns sites from anything but
 // the new primary (the lost original primary above all) fails at once; any
 // other terminal result fails.
-func s64ClassifyOutcome(pf *v1alpha1.PlannedFailoverStatus, original, newPrimary string) (bool, string, error) {
+func s64ClassifyOutcome(pf *v1beta1.PlannedFailoverStatus, original, newPrimary string) (bool, string, error) {
 	msg := plannedRunSummary(pf)
 	if pf.Result == nil {
 		if plannedTerminal(pf.Phase) {
 			return false, msg, fmt.Errorf("terminal phase %s without result: %s", pf.Phase, msg)
 		}
-		if (plannedOwnsSites(pf.Phase) || pf.Phase == v1alpha1.PlannedFailoverPhasePublishing) && pf.SourceSite != newPrimary {
+		if (plannedOwnsSites(pf.Phase) || pf.Phase == v1beta1.PlannedFailoverPhasePublishing) && pf.SourceSite != newPrimary {
 			return false, msg, fmt.Errorf("planned run owns sites with source %q (lost primary %s, new primary %s): %s",
 				pf.SourceSite, original, newPrimary, msg)
 		}
 		return false, msg, nil
 	}
 	switch {
-	case pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeNotStarted &&
-		pf.Result.Reason == v1alpha1.PlannedFailoverReasonAlreadyActive:
+	case pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeNotStarted &&
+		pf.Result.Reason == v1beta1.PlannedFailoverReasonAlreadyActive:
 		return true, msg, nil
 	}
 	return false, msg, fmt.Errorf("planned run ended %s/%s, want NotStarted/AlreadyActive (its target %s is the new primary): %s (%s)",

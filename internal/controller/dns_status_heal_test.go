@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -45,7 +45,7 @@ func TestUpdateCRStatus_DeniedWriteReturnsErrorThenHeals(t *testing.T) {
 	scheme := testScheme()
 	deny := true
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, underlying client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
@@ -80,7 +80,7 @@ func TestUpdateCRStatus_DeniedWriteReturnsErrorThenHeals(t *testing.T) {
 	if err := runner.updateCRStatus(context.Background(), nn, snap); err == nil {
 		t.Fatal("updateCRStatus must return an error when the /status write is denied")
 	}
-	var denied v1alpha1.MysqlFailoverGroup
+	var denied v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &denied); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestUpdateCRStatus_DeniedWriteReturnsErrorThenHeals(t *testing.T) {
 	if err := runner.updateCRStatus(context.Background(), nn, snap); err != nil {
 		t.Fatalf("updateCRStatus must succeed once the write is permitted, got %v", err)
 	}
-	var healed v1alpha1.MysqlFailoverGroup
+	var healed v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &healed); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestPoll_StatusRetryPreservesRejectedSnapshot(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		pollN(tm, 1)
 	}
-	want := TopologySnapshot{ActiveSite: "dc1", Alert: "full rejected alert", DegradedReason: v1alpha1.ReasonSiteUnhealthy}
+	want := TopologySnapshot{ActiveSite: "dc1", Alert: "full rejected alert", DegradedReason: v1beta1.ReasonSiteUnhealthy}
 	tm.mu.Lock()
 	tm.statusRetrySnapshot = &want
 	tm.statusWriteFailed = true

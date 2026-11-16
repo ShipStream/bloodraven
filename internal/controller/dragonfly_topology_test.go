@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 	"github.com/shipstream/bloodraven/internal/metrics"
 )
@@ -219,17 +219,17 @@ func (f *fakeConnector) connect(_ context.Context, addr, _ string) (DragonflyCon
 // fgWithDragonflyEnabledAndActive returns a baseline FG with Dragonfly
 // enabled and an explicit ActiveSite="dc1" so the manager has something
 // to align replication against.
-func fgWithDragonflyEnabledAndActive() *v1alpha1.MysqlFailoverGroup {
+func fgWithDragonflyEnabledAndActive() *v1beta1.MysqlFailoverGroup {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
 	return fg
 }
 
 // helpers for installing/getting the FG into a fake client.
-func newDragonflyFakeClient(fg *v1alpha1.MysqlFailoverGroup) (*fake.ClientBuilder, types.NamespacedName) {
+func newDragonflyFakeClient(fg *v1beta1.MysqlFailoverGroup) (*fake.ClientBuilder, types.NamespacedName) {
 	scheme := testScheme()
 	cb := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg, newTestSecret())
 	return cb, types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 }
@@ -262,7 +262,7 @@ func TestDragonflyManager_Tick_HappyPath(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -272,27 +272,27 @@ func TestDragonflyManager_Tick_HappyPath(t *testing.T) {
 	if got.Status.Dragonfly.ActiveSite != "dc1" {
 		t.Errorf("ActiveSite = %q, want dc1", got.Status.Dragonfly.ActiveSite)
 	}
-	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseReady {
+	if got.Status.Dragonfly.Phase != v1beta1.DragonflyPhaseReady {
 		t.Errorf("Phase = %q, want Ready", got.Status.Dragonfly.Phase)
 	}
 	if len(got.Status.Dragonfly.Sites) != 2 {
 		t.Fatalf("Sites len = %d, want 2", len(got.Status.Dragonfly.Sites))
 	}
-	gotRoles := map[string]v1alpha1.DragonflyRole{}
+	gotRoles := map[string]v1beta1.DragonflyRole{}
 	for _, s := range got.Status.Dragonfly.Sites {
 		gotRoles[s.Name] = s.Role
 	}
-	if gotRoles["dc1"] != v1alpha1.DragonflyRoleMaster {
+	if gotRoles["dc1"] != v1beta1.DragonflyRoleMaster {
 		t.Errorf("dc1 role = %q, want master", gotRoles["dc1"])
 	}
-	if gotRoles["dc2"] != v1alpha1.DragonflyRoleReplica {
+	if gotRoles["dc2"] != v1beta1.DragonflyRoleReplica {
 		t.Errorf("dc2 role = %q, want replica", gotRoles["dc2"])
 	}
 }
 
 func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{
 		ActiveSite: "dc1",
 	}
 	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
@@ -326,7 +326,7 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 		mgr.Tick(context.Background())
 	}
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -350,28 +350,28 @@ func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing
 	} else if err == nil {
 		t.Errorf("source pod still exists after takeover; want deleted to reset CrashLoopBackOff")
 	}
-	if gotTarget.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
-		t.Errorf("target role = %q, want master", gotTarget.Labels[v1alpha1.DragonflyRoleLabel])
+	if gotTarget.Labels[v1beta1.DragonflyRoleLabel] != "master" {
+		t.Errorf("target role = %q, want master", gotTarget.Labels[v1beta1.DragonflyRoleLabel])
 	}
 
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, v1alpha1.EventDragonflyPromotionStarted) {
-		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionStarted)
+	if !eventsContain(events, v1beta1.EventDragonflyPromotionStarted) {
+		t.Errorf("events = %v, want %s", events, v1beta1.EventDragonflyPromotionStarted)
 	}
 	// The old master is unreachable, so the promotion falls back to
 	// REPLICAOF NO ONE: one Warning, DragonflySessionsLost (A-75).
-	if !eventsContain(events, v1alpha1.EventDragonflySessionsLost) {
-		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflySessionsLost)
+	if !eventsContain(events, v1beta1.EventDragonflySessionsLost) {
+		t.Errorf("events = %v, want %s", events, v1beta1.EventDragonflySessionsLost)
 	}
-	if eventsContain(events, v1alpha1.EventDragonflyPromotionSucceeded) {
-		t.Errorf("events = %v, want no %s for a sessions-lost promotion", events, v1alpha1.EventDragonflyPromotionSucceeded)
+	if eventsContain(events, v1beta1.EventDragonflyPromotionSucceeded) {
+		t.Errorf("events = %v, want no %s for a sessions-lost promotion", events, v1beta1.EventDragonflyPromotionSucceeded)
 	}
 }
 
 func TestDragonflyManager_Tick_SelfHealsStaleDragonflyActiveSite(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{
 		ActiveSite: "dc1",
 	}
 	cb, key := newDragonflyFakeClient(fg)
@@ -395,7 +395,7 @@ func TestDragonflyManager_Tick_SelfHealsStaleDragonflyActiveSite(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestDragonflyManager_Tick_SelfHealsStaleDragonflyActiveSite(t *testing.T) {
 	if got.Status.Dragonfly.ActiveSite != "dc2" {
 		t.Errorf("dragonfly activeSite = %q, want observed raw master dc2", got.Status.Dragonfly.ActiveSite)
 	}
-	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseReady {
+	if got.Status.Dragonfly.Phase != v1beta1.DragonflyPhaseReady {
 		t.Errorf("phase = %q, want Ready", got.Status.Dragonfly.Phase)
 	}
 }
@@ -413,7 +413,7 @@ func TestDragonflyManager_Tick_SelfHealsStaleDragonflyActiveSite(t *testing.T) {
 func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{
 		ActiveSite: "dc2",
 	}
 	cb, key := newDragonflyFakeClient(fg)
@@ -441,7 +441,7 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -455,11 +455,11 @@ func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testin
 		t.Errorf("lastPromotionTarget = %q, want dc1", got.Status.Dragonfly.LastPromotionTarget)
 	}
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, v1alpha1.EventDragonflyPromotionStarted) {
-		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionStarted)
+	if !eventsContain(events, v1beta1.EventDragonflyPromotionStarted) {
+		t.Errorf("events = %v, want %s", events, v1beta1.EventDragonflyPromotionStarted)
 	}
-	if !eventsContain(events, v1alpha1.EventDragonflyPromotionSucceeded) {
-		t.Errorf("events = %v, want %s", events, v1alpha1.EventDragonflyPromotionSucceeded)
+	if !eventsContain(events, v1beta1.EventDragonflyPromotionSucceeded) {
+		t.Errorf("events = %v, want %s", events, v1beta1.EventDragonflyPromotionSucceeded)
 	}
 }
 
@@ -488,11 +488,11 @@ func TestDragonflyManager_Tick_ReplicaNeverSyncedNotReady(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
-	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseConfiguringReplication {
+	if got.Status.Dragonfly.Phase != v1beta1.DragonflyPhaseConfiguringReplication {
 		t.Errorf("Phase = %q, want ConfiguringReplication", got.Status.Dragonfly.Phase)
 	}
 	for _, s := range got.Status.Dragonfly.Sites {
@@ -528,11 +528,11 @@ func TestDragonflyManager_Tick_StaleMasterEmitsEvent(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
-	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseDegraded {
+	if got.Status.Dragonfly.Phase != v1beta1.DragonflyPhaseDegraded {
 		t.Errorf("Phase = %q, want Degraded", got.Status.Dragonfly.Phase)
 	}
 
@@ -540,10 +540,10 @@ func TestDragonflyManager_Tick_StaleMasterEmitsEvent(t *testing.T) {
 	foundStale := false
 	foundReconfigured := false
 	for _, ev := range events {
-		if contains(ev, v1alpha1.EventDragonflyStaleMasterDetected) {
+		if contains(ev, v1beta1.EventDragonflyStaleMasterDetected) {
 			foundStale = true
 		}
-		if contains(ev, v1alpha1.EventDragonflyOldSiteReconfigured) {
+		if contains(ev, v1beta1.EventDragonflyOldSiteReconfigured) {
 			foundReconfigured = true
 		}
 	}
@@ -587,7 +587,7 @@ func TestDragonflyManager_Tick_StaleMasterAutoReconfigures(t *testing.T) {
 	events := drainEventsCh(rec.Events, 8, 100*time.Millisecond)
 	foundReconfigured := false
 	for _, ev := range events {
-		if contains(ev, v1alpha1.EventDragonflyOldSiteReconfigured) {
+		if contains(ev, v1beta1.EventDragonflyOldSiteReconfigured) {
 			foundReconfigured = true
 		}
 	}
@@ -611,18 +611,18 @@ func TestDragonflyManager_Tick_DialFailureMarksUnreachable(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
-	roles := map[string]v1alpha1.DragonflyRole{}
+	roles := map[string]v1beta1.DragonflyRole{}
 	for _, s := range got.Status.Dragonfly.Sites {
 		roles[s.Name] = s.Role
 	}
-	if roles["dc2"] != v1alpha1.DragonflyRoleUnreachable {
+	if roles["dc2"] != v1beta1.DragonflyRoleUnreachable {
 		t.Errorf("dc2 role = %q, want unreachable", roles["dc2"])
 	}
-	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseDegraded {
+	if got.Status.Dragonfly.Phase != v1beta1.DragonflyPhaseDegraded {
 		t.Errorf("Phase = %q, want Degraded with one unreachable site", got.Status.Dragonfly.Phase)
 	}
 }
@@ -738,7 +738,7 @@ func TestDragonflyManager_TryEmergencyPromote_Success(t *testing.T) {
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -748,8 +748,8 @@ func TestDragonflyManager_TryEmergencyPromote_Success(t *testing.T) {
 
 	select {
 	case ev := <-rec.Events:
-		if !contains(ev, v1alpha1.EventDragonflyPromotionSucceeded) {
-			t.Errorf("event = %q, want %q", ev, v1alpha1.EventDragonflyPromotionSucceeded)
+		if !contains(ev, v1beta1.EventDragonflyPromotionSucceeded) {
+			t.Errorf("event = %q, want %q", ev, v1beta1.EventDragonflyPromotionSucceeded)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("no DragonflyPromotionSucceeded event emitted")
@@ -889,12 +889,12 @@ func TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTr
 	targetPod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
-					if pod.Labels[v1alpha1.DragonflyRoleLabel] == "replica" {
+					if pod.Labels[v1beta1.DragonflyRoleLabel] == "replica" {
 						return errors.New("simulated demote-patch failure")
 					}
 				}
@@ -919,8 +919,8 @@ func TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTr
 	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
 		t.Fatalf("get source: %v", err)
 	}
-	if _, has := gotSource.Labels[v1alpha1.DragonflyTrafficLabel]; has {
-		t.Errorf("emergency: source traffic label = %q, want absent (demote failed → must not restore traffic)", gotSource.Labels[v1alpha1.DragonflyTrafficLabel])
+	if _, has := gotSource.Labels[v1beta1.DragonflyTrafficLabel]; has {
+		t.Errorf("emergency: source traffic label = %q, want absent (demote failed → must not restore traffic)", gotSource.Labels[v1beta1.DragonflyTrafficLabel])
 	}
 }
 
@@ -947,7 +947,7 @@ func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T
 	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	targetPod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	cb := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg, newTestSecret(), sourcePod, targetPod)
 	c := cb.Build()
 	key := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -967,11 +967,11 @@ func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T
 	if err := c.Get(context.Background(), types.NamespacedName{Name: targetPod.Name, Namespace: targetPod.Namespace}, &gotTarget); err != nil {
 		t.Fatalf("get target: %v", err)
 	}
-	if gotTarget.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
-		t.Errorf("target role = %q, want master", gotTarget.Labels[v1alpha1.DragonflyRoleLabel])
+	if gotTarget.Labels[v1beta1.DragonflyRoleLabel] != "master" {
+		t.Errorf("target role = %q, want master", gotTarget.Labels[v1beta1.DragonflyRoleLabel])
 	}
-	if gotTarget.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
-		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[v1alpha1.DragonflyTrafficLabel])
+	if gotTarget.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[v1beta1.DragonflyTrafficLabel])
 	}
 	var gotSource corev1.Pod
 	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); client.IgnoreNotFound(err) != nil {
@@ -1159,7 +1159,7 @@ func TestDragonflyManager_Tick_DisabledIsNoOp(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}

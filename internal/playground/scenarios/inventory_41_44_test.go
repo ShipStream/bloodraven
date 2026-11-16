@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -39,21 +39,21 @@ func TestReaderScenarios41To44RegisteredAndProfiled(t *testing.T) {
 }
 
 func TestFindReadOnlyReaderSite(t *testing.T) {
-	readOnly := v1alpha1.SiteRoleReadOnly
-	candidate := v1alpha1.SiteRolePrimaryCandidate
-	mfg := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
+	readOnly := v1beta1.SiteRoleReadOnly
+	candidate := v1beta1.SiteRolePrimaryCandidate
+	mfg := &v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{
 		{Name: "iad", ServerID: 101, Role: candidate},
 		{Name: "pdx", ServerID: 102, Role: candidate},
 	}}}
 	if _, err := findReadOnlyReaderSite(mfg); err == nil {
 		t.Error("expected error with zero read-only sites")
 	}
-	mfg.Spec.Sites = append(mfg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: readOnly})
+	mfg.Spec.Sites = append(mfg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: readOnly})
 	reader, err := findReadOnlyReaderSite(mfg)
 	if err != nil || reader != "reader" {
 		t.Errorf("findReadOnlyReaderSite = %q, %v; want reader, nil", reader, err)
 	}
-	mfg.Spec.Sites = append(mfg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader2", ServerID: 104, Role: readOnly})
+	mfg.Spec.Sites = append(mfg.Spec.Sites, v1beta1.SiteSpec{Name: "reader2", ServerID: 104, Role: readOnly})
 	if _, err := findReadOnlyReaderSite(mfg); err == nil {
 		t.Error("expected error with two read-only sites")
 	}

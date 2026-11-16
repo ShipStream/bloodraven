@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -39,7 +39,7 @@ func TestBootstrapFailed_DegradedPersistsAndClearsOnRecovery(t *testing.T) {
 				{Name: "iad", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
 				pdx,
 			},
-			DegradedReason:     v1alpha1.ReasonHealthy,
+			DegradedReason:     v1beta1.ReasonHealthy,
 			BootstrapPhase:     string(phase),
 			BootstrapSource:    "reclone",
 			TopologyGeneration: fg.Status.TopologyGeneration,
@@ -55,34 +55,34 @@ func TestBootstrapFailed_DegradedPersistsAndClearsOnRecovery(t *testing.T) {
 	healthy := SiteSnapshot{Name: "pdx", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicaStatusRead: true, ReplicationHealthy: true,
 		Replication: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: &lag}, SourceConvergenceState: sourceConvergenceConverged}
 
-	write := func(snap TopologySnapshot) (*v1alpha1.MysqlFailoverGroup, *metav1.Condition, *metav1.Condition) {
+	write := func(snap TopologySnapshot) (*v1beta1.MysqlFailoverGroup, *metav1.Condition, *metav1.Condition) {
 		t.Helper()
 		if err := runner.updateCRStatus(ctx, nn, snap); err != nil {
 			t.Fatal(err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := m.client.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
-		return &got, apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionDegraded),
-			apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionBootstrapping)
+		return &got, apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionDegraded),
+			apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionBootstrapping)
 	}
 
 	// The failure holds across polls; it outranks the target's per-site
 	// replication reasons.
 	for poll := range 3 {
 		got, degraded, boot := write(snapshot(broken, BootstrapPhaseFailed))
-		if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != v1alpha1.ReasonBootstrapFailed {
+		if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != v1beta1.ReasonBootstrapFailed {
 			t.Fatalf("poll %d: Degraded = %+v, want True/BootstrapFailed", poll, degraded)
 		}
-		if boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1alpha1.ReasonBootstrapFailed {
+		if boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1beta1.ReasonBootstrapFailed {
 			t.Fatalf("poll %d: Bootstrapping = %+v, want False/BootstrapFailed", poll, boot)
 		}
-		if reason := DeploymentUnstableReason(got); reason != v1alpha1.ReasonBootstrapFailed {
+		if reason := DeploymentUnstableReason(got); reason != v1beta1.ReasonBootstrapFailed {
 			t.Fatalf("poll %d: unstableReason = %q, want BootstrapFailed", poll, reason)
 		}
 		_, err := m.Grant(ctx, got, "migration", "op1", "tenant", "tenant-ns", "deployer", 30)
-		if e := requireDeploymentError(t, err, 423, "unstable"); e.Reason != v1alpha1.ReasonBootstrapFailed {
+		if e := requireDeploymentError(t, err, 423, "unstable"); e.Reason != v1beta1.ReasonBootstrapFailed {
 			t.Fatalf("poll %d: refusal reason %q, want BootstrapFailed", poll, e.Reason)
 		}
 	}
@@ -91,10 +91,10 @@ func TestBootstrapFailed_DegradedPersistsAndClearsOnRecovery(t *testing.T) {
 	// clone, Bootstrapping keeps reporting the last clone's failure, and
 	// the group is stable again.
 	got, degraded, boot := write(snapshot(healthy, BootstrapPhaseFailed))
-	if degraded == nil || degraded.Status != metav1.ConditionFalse || degraded.Reason != v1alpha1.ReasonHealthy {
+	if degraded == nil || degraded.Status != metav1.ConditionFalse || degraded.Reason != v1beta1.ReasonHealthy {
 		t.Fatalf("after recovery Degraded = %+v, want False/Healthy", degraded)
 	}
-	if boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1alpha1.ReasonBootstrapFailed {
+	if boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1beta1.ReasonBootstrapFailed {
 		t.Fatalf("after recovery Bootstrapping = %+v, want False/BootstrapFailed (the last clone's outcome)", boot)
 	}
 	if reason := DeploymentUnstableReason(got); reason != "" {
@@ -108,25 +108,25 @@ func TestBootstrapFailed_DegradedPersistsAndClearsOnRecovery(t *testing.T) {
 	resolved := snapshot(broken, BootstrapPhaseFailed)
 	resolved.BootstrapFailureResolved = true
 	_, degraded, boot = write(resolved)
-	if degraded == nil || degraded.Reason == v1alpha1.ReasonBootstrapFailed {
+	if degraded == nil || degraded.Reason == v1beta1.ReasonBootstrapFailed {
 		t.Fatalf("recovered, then broken: Degraded = %+v resurrects the old clone failure", degraded)
 	}
-	if boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1alpha1.ReasonBootstrapFailed {
+	if boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1beta1.ReasonBootstrapFailed {
 		t.Fatalf("recovered, then broken: Bootstrapping = %+v, want False/BootstrapFailed (the last clone's outcome)", boot)
 	}
 
 	// A new clone ends the failure: Bootstrapping is True while it runs
 	// and Degraded no longer reports the old failure.
 	_, degraded, boot = write(snapshot(broken, BootstrapPhaseCloning))
-	if boot == nil || boot.Status != metav1.ConditionTrue || boot.Reason != v1alpha1.ReasonCloning {
+	if boot == nil || boot.Status != metav1.ConditionTrue || boot.Reason != v1beta1.ReasonCloning {
 		t.Fatalf("new clone: Bootstrapping = %+v, want True/Cloning", boot)
 	}
-	if degraded != nil && degraded.Reason == v1alpha1.ReasonBootstrapFailed {
+	if degraded != nil && degraded.Reason == v1beta1.ReasonBootstrapFailed {
 		t.Fatalf("new clone: Degraded = %+v still reports the previous failure", degraded)
 	}
 
 	// A finished clone is False/NotBootstrapping, never True.
-	if _, _, boot = write(snapshot(healthy, BootstrapPhaseDone)); boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1alpha1.ReasonNotBootstrapping {
+	if _, _, boot = write(snapshot(healthy, BootstrapPhaseDone)); boot == nil || boot.Status != metav1.ConditionFalse || boot.Reason != v1beta1.ReasonNotBootstrapping {
 		t.Fatalf("finished clone: Bootstrapping = %+v, want False/NotBootstrapping", boot)
 	}
 }
@@ -139,12 +139,12 @@ func TestDegradedReason_BootstrapFailedRank(t *testing.T) {
 			Sites: []SiteSnapshot{{Name: "iad", State: state.StateWritable}, {Name: "pdx", State: state.StateReadOnly}}}
 	}
 	for verdict, want := range map[string]string{
-		v1alpha1.ReasonHealthy:       v1alpha1.ReasonBootstrapFailed,
-		v1alpha1.ReasonSiteUnhealthy: v1alpha1.ReasonBootstrapFailed,
-		v1alpha1.ReasonSplitBrain:    v1alpha1.ReasonSplitBrain,
-		v1alpha1.ReasonNoPrimary:     v1alpha1.ReasonNoPrimary,
-		v1alpha1.ReasonTotalLoss:     v1alpha1.ReasonTotalLoss,
-		v1alpha1.ReasonInitializing:  v1alpha1.ReasonInitializing,
+		v1beta1.ReasonHealthy:       v1beta1.ReasonBootstrapFailed,
+		v1beta1.ReasonSiteUnhealthy: v1beta1.ReasonBootstrapFailed,
+		v1beta1.ReasonSplitBrain:    v1beta1.ReasonSplitBrain,
+		v1beta1.ReasonNoPrimary:     v1beta1.ReasonNoPrimary,
+		v1beta1.ReasonTotalLoss:     v1beta1.ReasonTotalLoss,
+		v1beta1.ReasonInitializing:  v1beta1.ReasonInitializing,
 	} {
 		if got := degradedReason(failed(verdict)); got != want {
 			t.Errorf("verdict %s with a standing clone failure: Degraded reason %s, want %s", verdict, got, want)
@@ -152,9 +152,9 @@ func TestDegradedReason_BootstrapFailedRank(t *testing.T) {
 	}
 	// A failure whose target is now the writable primary has nothing left
 	// to report.
-	snap := failed(v1alpha1.ReasonHealthy)
+	snap := failed(v1beta1.ReasonHealthy)
 	snap.BootstrapTarget = "iad"
-	if got := degradedReason(snap); got != v1alpha1.ReasonHealthy {
+	if got := degradedReason(snap); got != v1beta1.ReasonHealthy {
 		t.Errorf("target became the primary: Degraded reason %s, want Healthy", got)
 	}
 }

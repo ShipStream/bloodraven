@@ -9,7 +9,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -44,7 +44,7 @@ func mysqlPodSelector(fg, site string) metav1.LabelSelector {
 	return metav1.LabelSelector{MatchLabels: map[string]string{
 		"app.kubernetes.io/name":     "mysql",
 		"app.kubernetes.io/instance": fg,
-		v1alpha1.SiteLabel:           site,
+		v1beta1.SiteLabel:            site,
 	}}
 }
 
@@ -86,12 +86,12 @@ func repairDivergentSites(ctx context.Context, env *runner.Env, timeout time.Dur
 		}
 		// Bootstrapping is True only while a clone runs; a failed one is
 		// False/BootstrapFailed and does not block the next request.
-		cloning := bootstrapRunning(findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping))
-		_, pending := mfg.GetAnnotations()[v1alpha1.RecloneAnnotation]
+		cloning := bootstrapRunning(findCondition(mfg.Status.Conditions, v1beta1.ConditionBootstrapping))
+		_, pending := mfg.GetAnnotations()[v1beta1.RecloneAnnotation]
 		if !cloning && !pending && mfg.Status.ActiveSite != "" {
 			if site, value := nextBlockedSite(mfg, requested); site != "" {
 				if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-					v1alpha1.RecloneAnnotation, value); err != nil {
+					v1beta1.RecloneAnnotation, value); err != nil {
 					return fmt.Errorf("annotate repair reclone %s: %w", value, err)
 				}
 				requested[site] = true
@@ -109,13 +109,13 @@ func repairDivergentSites(ctx context.Context, env *runner.Env, timeout time.Dur
 	}
 }
 
-func nextBlockedSite(mfg *v1alpha1.MysqlFailoverGroup, requested map[string]bool) (site, annotation string) {
+func nextBlockedSite(mfg *v1beta1.MysqlFailoverGroup, requested map[string]bool) (site, annotation string) {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == mfg.Status.ActiveSite || requested[s.Name] {
 			continue
 		}
-		blocked := s.RecoveryState == v1alpha1.RecoveryStateBlocked ||
-			s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked
+		blocked := s.RecoveryState == v1beta1.RecoveryStateBlocked ||
+			s.SourceConvergenceState == v1beta1.SourceConvergenceBlocked
 		if !blocked {
 			continue
 		}

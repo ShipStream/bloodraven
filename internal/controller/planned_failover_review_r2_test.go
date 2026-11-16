@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -21,14 +21,14 @@ import (
 // opsOwnRecordGroup is fg with the run's own failover record durable: the
 // confirmed tail recorded and published the promotion, and the Publishing
 // write did not commit.
-func opsOwnRecordGroup(f *opsFixture, pf *v1alpha1.PlannedFailoverStatus) *v1alpha1.MysqlFailoverGroup {
+func opsOwnRecordGroup(f *opsFixture, pf *v1beta1.PlannedFailoverStatus) *v1beta1.MysqlFailoverGroup {
 	at := pf.Promotion.IntentTime.Add(2 * time.Second)
 	fg := opsReproveGroup(f, pf, at, "dc2")
 	fg.Annotations = map[string]string{
-		v1alpha1.LastFailoverAnnotation:             failoverStampFormat(at),
-		v1alpha1.LastFailoverTargetAnnotation:       "dc2",
-		v1alpha1.PromotionGtidExecutedAnnotation:    opsF,
-		v1alpha1.PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(at, "dc2"),
+		v1beta1.LastFailoverAnnotation:             failoverStampFormat(at),
+		v1beta1.LastFailoverTargetAnnotation:       "dc2",
+		v1beta1.PromotionGtidExecutedAnnotation:    opsF,
+		v1beta1.PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(at, "dc2"),
 	}
 	return fg
 }
@@ -43,7 +43,7 @@ func opsOwnRecordGroup(f *opsFixture, pf *v1alpha1.PlannedFailoverStatus) *v1alp
 // promotable peer answers read-only); without it the run holds.
 func TestReprove_ReplacedTargetNeedsTheRollingBackEvidence(t *testing.T) {
 	type want struct {
-		rollBack, hold v1alpha1.PlannedFailoverReason
+		rollBack, hold v1beta1.PlannedFailoverReason
 	}
 	replaced := func(f *opsFixture) { f.tgt.uuid = opsUUIDD }
 	regressed := func(f *opsFixture) { f.tgt.gtid = opsUUIDA + ":1-7" }
@@ -58,35 +58,35 @@ func TestReprove_ReplacedTargetNeedsTheRollingBackEvidence(t *testing.T) {
 	}{
 		{name: "the intent's server with the fenced set, a peer down",
 			prep: func(f *opsFixture) { f.third.down = true },
-			want: want{rollBack: v1alpha1.PlannedFailoverReasonPeerUnreadable}},
+			want: want{rollBack: v1beta1.PlannedFailoverReasonPeerUnreadable}},
 		{name: "another server, a promotable peer down",
 			prep: func(f *opsFixture) { replaced(f); f.third.down = true },
-			want: want{hold: v1alpha1.PlannedFailoverReasonExecuteFailed}},
+			want: want{hold: v1beta1.PlannedFailoverReasonExecuteFailed}},
 		{name: "an older copy of the intent's server, a promotable peer down",
 			prep: func(f *opsFixture) { regressed(f); f.third.down = true },
-			want: want{hold: v1alpha1.PlannedFailoverReasonExecuteFailed}},
+			want: want{hold: v1beta1.PlannedFailoverReasonExecuteFailed}},
 		{name: "another server, the run's record durable, a promotable peer down", durable: true,
 			prep: func(f *opsFixture) { replaced(f); f.third.down = true },
-			want: want{hold: v1alpha1.PlannedFailoverReasonExecuteFailed}},
+			want: want{hold: v1beta1.PlannedFailoverReasonExecuteFailed}},
 		{name: "another server, the source's fence gone",
 			prep: func(f *opsFixture) { replaced(f); f.src.sro = false },
-			want: want{hold: v1alpha1.PlannedFailoverReasonExecuteFailed}},
+			want: want{hold: v1beta1.PlannedFailoverReasonExecuteFailed}},
 		{name: "another server, a peer writable",
 			prep: func(f *opsFixture) { replaced(f); f.third.ro, f.third.sro = false, false },
-			want: want{hold: v1alpha1.PlannedFailoverReasonExecuteFailed}},
+			want: want{hold: v1beta1.PlannedFailoverReasonExecuteFailed}},
 		{name: "another server, a failover recorded during the run, the evidence complete", record: true,
 			prep: replaced,
-			want: want{rollBack: v1alpha1.PlannedFailoverReasonAuthorityChanged}},
+			want: want{rollBack: v1beta1.PlannedFailoverReasonAuthorityChanged}},
 		{name: "another server, a failover recorded during the run, a peer down", record: true,
 			prep: func(f *opsFixture) { replaced(f); f.third.down = true },
-			want: want{hold: v1alpha1.PlannedFailoverReasonAuthorityChanged}},
+			want: want{hold: v1beta1.PlannedFailoverReasonAuthorityChanged}},
 		{name: "an older copy, a failover recorded during the run, the evidence complete", record: true,
 			prep: regressed,
-			want: want{rollBack: v1alpha1.PlannedFailoverReasonAuthorityChanged}},
+			want: want{rollBack: v1beta1.PlannedFailoverReasonAuthorityChanged}},
 		// The process that knows it sent no clear needs no such evidence.
 		{name: "another server, this process sent no clear, a peer down",
 			prep: func(f *opsFixture) { replaced(f); f.third.down = true; f.topo.startPromoteMemo(f.ref.RunID) },
-			want: want{rollBack: v1alpha1.PlannedFailoverReasonPeerUnreadable}},
+			want: want{rollBack: v1beta1.PlannedFailoverReasonPeerUnreadable}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,7 +95,7 @@ func TestReprove_ReplacedTargetNeedsTheRollingBackEvidence(t *testing.T) {
 			f.fenced()
 			f.tgt.repl, f.tgt.sro = nil, false
 			tc.prep(f)
-			pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+			pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 			fg := opsGroup(pf)
 			switch {
 			case tc.durable:
@@ -155,8 +155,8 @@ func TestPromote_RegressedTargetTakesTheReplacedTargetRuling(t *testing.T) {
 			f.fenced()
 			f.tgt.repl, f.tgt.gtid = nil, opsUUIDA+":1-7"
 			tc.prep(f)
-			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-			if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1alpha1.PlannedFailoverReasonExecuteFailed {
+			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+			if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1beta1.PlannedFailoverReasonExecuteFailed {
 				t.Fatalf("Promote = %+v, %v; want Inconsistent{ExecuteFailed}", out, err)
 			}
 			if out.RollbackIfUnrecorded != tc.rollback {
@@ -175,8 +175,8 @@ func TestPromote_RegressedTargetTakesTheReplacedTargetRuling(t *testing.T) {
 		f.fenced()
 		f.tgt.repl, f.tgt.gtid = nil, opsUUIDA+":1-7"
 		f.topo.startPromoteMemo(f.ref.RunID)
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonTargetChanged {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonTargetChanged {
 			t.Fatalf("Promote = %+v, %v; want Aborted{TargetChanged}", out, err)
 		}
 	})
@@ -185,7 +185,7 @@ func TestPromote_RegressedTargetTakesTheReplacedTargetRuling(t *testing.T) {
 		f.hold(false)
 		f.fenced()
 		f.tgt.repl, f.tgt.gtid, f.tgt.ro, f.tgt.sro = nil, opsUUIDA+":1-7", false, false
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		if err != nil || out.Kind != PromoteInconsistent || out.RollbackIfUnrecorded {
 			t.Fatalf("Promote = %+v, %v; want Inconsistent without the rollback ruling", out, err)
 		}
@@ -222,11 +222,11 @@ func TestReprove_WritableSourceIsRememberedForTheConfirmation(t *testing.T) {
 	// The re-proof's identity read is the source's first read_only read;
 	// the confirmation's is the second.
 	f.tm.sites[0].mysql = &opsFailAfter{opsMySQL: f.src, n: 2}
-	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1alpha1.PlannedFailoverPhasePromoting)))
+	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1beta1.PlannedFailoverPhasePromoting)))
 	if err != nil || res.HandOff == nil {
 		t.Fatalf("Reprove = %+v, %v; want a hand-off to the confirmation", res, err)
 	}
-	if res.HandOff.Kind != PromoteInconsistent || res.HandOff.Reason != v1alpha1.PlannedFailoverReasonForeignWritable ||
+	if res.HandOff.Kind != PromoteInconsistent || res.HandOff.Reason != v1beta1.PlannedFailoverReasonForeignWritable ||
 		len(res.HandOff.Sites) != 1 || res.HandOff.Sites[0] != "dc1" {
 		t.Fatalf("hand-off = %+v; want Inconsistent{ForeignWritable} naming dc1, the writer the re-proof saw", *res.HandOff)
 	}
@@ -245,7 +245,7 @@ func TestConfirm_ReadOnlySourceIsRememberedForALaterConfirmation(t *testing.T) {
 	f.fenced()
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false // made writable by an earlier process
 	f.third.down = true
-	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+	pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 	out, err := f.topo.Promote(context.Background(), f.ref, pf)
 	if err != nil || out.Kind != PromoteUnconfirmed || len(out.Sites) != 1 || out.Sites[0] != "dc3" {
 		t.Fatalf("first Promote = %+v, %v; want Unconfirmed over dc3", out, err)
@@ -258,7 +258,7 @@ func TestConfirm_ReadOnlySourceIsRememberedForALaterConfirmation(t *testing.T) {
 	}
 	found := false
 	for _, w := range out.Warnings {
-		found = found || w == v1alpha1.PlannedFailoverWarningUnreachablePeers
+		found = found || w == v1beta1.PlannedFailoverWarningUnreachablePeers
 	}
 	if !found {
 		t.Fatalf("warnings = %v, want UnreachablePeers", out.Warnings)
@@ -286,8 +286,8 @@ func TestPF_WritableTargetWithChannelRecordSaysWhatIsKnown(t *testing.T) {
 			if tc.memo {
 				f.topo.startPromoteMemo(f.ref.RunID)
 			}
-			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-			if err != nil || out.Kind != PromoteAborted || out.Terminal != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+			if err != nil || out.Kind != PromoteAborted || out.Terminal != v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 				t.Fatalf("Promote = %+v, %v", out, err)
 			}
 			if out.ClearsUnknown != tc.unknown {
@@ -305,14 +305,14 @@ func TestPF_WritableTargetWithChannelRecordSaysWhatIsKnown(t *testing.T) {
 		{"known", false, "nothing was written to the target", "an earlier operator process"},
 	} {
 		t.Run("record/"+tc.name, func(t *testing.T) {
-			h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePromoting)
+			h := pfHarnessAt(t, v1beta1.PlannedFailoverPhasePromoting)
 			h.topo.promote = func(PlannedRunRef) (PromoteOutcome, error) {
-				return PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
-					Terminal: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, ClearsUnknown: tc.unknown}, nil
+				return PromoteOutcome{Kind: PromoteAborted, Reason: v1beta1.PlannedFailoverReasonForeignWritable,
+					Terminal: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, ClearsUnknown: tc.unknown}, nil
 			}
 			h.step()
 			pf := h.pf()
-			if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+			if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 				t.Fatalf("result = %+v", pf.Result)
 			}
 			if !strings.Contains(pf.Message, tc.want) || strings.Contains(pf.Message, tc.not) {
@@ -330,20 +330,20 @@ func TestPF_WritableTargetWithChannelRecordSaysWhatIsKnown(t *testing.T) {
 // names nothing.
 func TestPF_FenceIntentAloneNamesTheSource(t *testing.T) {
 	t.Run("the source lost before the fence was proven", func(t *testing.T) {
-		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseFencing)
+		h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseFencing)
 		h.topo.fence = func(PlannedRunRef) (FenceProof, error) {
-			return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+			return FenceProof{Kind: FenceSourceUnreachable, Reason: v1beta1.PlannedFailoverReasonSourceLost}, nil
 		}
 		h.topo.rollback = func(PlannedRunRef) (RollbackResult, error) {
-			return RollbackResult{Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced}, nil
+			return RollbackResult{Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced}, nil
 		}
-		h.stepUntil(40, func(fg *v1alpha1.MysqlFailoverGroup) bool { return fg.Status.PlannedFailover.Result != nil })
+		h.stepUntil(40, func(fg *v1beta1.MysqlFailoverGroup) bool { return fg.Status.PlannedFailover.Result != nil })
 		pf := h.pf()
-		if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
-			pf.Result.Reason != v1alpha1.PlannedFailoverReasonSourceLost {
+		if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced ||
+			pf.Result.Reason != v1beta1.PlannedFailoverReasonSourceLost {
 			t.Fatalf("result = %+v (phase %s, message %q)", pf.Result, pf.Phase, pf.Message)
 		}
-		if pf.Fence.State != v1alpha1.PlannedFailoverFenceIntended {
+		if pf.Fence.State != v1beta1.PlannedFailoverFenceIntended {
 			t.Fatalf("setup: fence state %s, want only the intent", pf.Fence.State)
 		}
 		if got := h.topo.named; len(got) != 1 || got[0] != "source:iad" {
@@ -357,18 +357,18 @@ func TestPF_FenceIntentAloneNamesTheSource(t *testing.T) {
 		}
 	})
 	t.Run("authority moved before the fence was applied", func(t *testing.T) {
-		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseFencing)
+		h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseFencing)
 		h.topo.needsProof = true
 		h.topo.reprove = func(PlannedRunRef) (ReproveResult, error) {
-			return ReproveResult{RollBack: reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged)}, nil
+			return ReproveResult{RollBack: reasonPtr(v1beta1.PlannedFailoverReasonAuthorityChanged)}, nil
 		}
 		h.topo.rollback = func(PlannedRunRef) (RollbackResult, error) {
-			return RollbackResult{Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced}, nil
+			return RollbackResult{Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced}, nil
 		}
-		h.stepUntil(40, func(fg *v1alpha1.MysqlFailoverGroup) bool { return fg.Status.PlannedFailover.Result != nil })
+		h.stepUntil(40, func(fg *v1beta1.MysqlFailoverGroup) bool { return fg.Status.PlannedFailover.Result != nil })
 		pf := h.pf()
-		if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
-			pf.Result.Reason != v1alpha1.PlannedFailoverReasonAuthorityChanged {
+		if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced ||
+			pf.Result.Reason != v1beta1.PlannedFailoverReasonAuthorityChanged {
 			t.Fatalf("result = %+v (phase %s, message %q)", pf.Result, pf.Phase, pf.Message)
 		}
 		if got := h.topo.named; len(got) != 0 {
@@ -381,11 +381,11 @@ func TestPF_FenceIntentAloneNamesTheSource(t *testing.T) {
 // assumes a fence. The record says whether the run proved one, sent one
 // without reading it back, sent none, or cannot know.
 func TestPF_SourceLeftRecordSaysWhatTheRunKnowsOfItsFence(t *testing.T) {
-	intended := &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, SourceServerUUID: "uuid-iad"}
-	applied := &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, SourceServerUUID: "uuid-iad"}
+	intended := &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceIntended, SourceServerUUID: "uuid-iad"}
+	applied := &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceApplied, SourceServerUUID: "uuid-iad"}
 	cases := []struct {
 		name  string
-		fence *v1alpha1.PlannedFailoverFenceRecord
+		fence *v1beta1.PlannedFailoverFenceRecord
 		memo  func(m *plannedRunMemo)
 		want  string
 	}{
@@ -397,8 +397,8 @@ func TestPF_SourceLeftRecordSaysWhatTheRunKnowsOfItsFence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseFencing)
-			pf := &v1alpha1.PlannedFailoverStatus{RunID: "run-x", SourceSite: "iad", Fence: tc.fence}
+			h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseFencing)
+			pf := &v1beta1.PlannedFailoverStatus{RunID: "run-x", SourceSite: "iad", Fence: tc.fence}
 			tc.memo(h.e.runMemo(pf.RunID))
 			if got := h.e.sourceLeftClause(pf); !strings.Contains(got, tc.want) {
 				t.Fatalf("clause %q, want %q", got, tc.want)
@@ -411,24 +411,24 @@ func TestPF_SourceLeftRecordSaysWhatTheRunKnowsOfItsFence(t *testing.T) {
 // becomes ManualRecoveryRequired with the hold, and the record names the
 // transactions the source lost.
 func TestPF_RollbackOverASourceThatLostTransactionsHolds(t *testing.T) {
-	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseRollingBack)
+	h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseRollingBack)
 	h.topo.rollback = func(PlannedRunRef) (RollbackResult, error) {
-		return RollbackResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonSourceUnfenced,
-			LostGtid: "uuid-iad:9-10", Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored}}, nil
+		return RollbackResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1beta1.PlannedFailoverReasonSourceUnfenced,
+			LostGtid: "uuid-iad:9-10", Warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningTargetReplicationNotRestored}}, nil
 	}
 	h.step()
 	pf := h.pf()
-	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired ||
-		pf.Result.Reason != v1alpha1.PlannedFailoverReasonSourceUnfenced {
+	if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeManualRecoveryRequired ||
+		pf.Result.Reason != v1beta1.PlannedFailoverReasonSourceUnfenced {
 		t.Fatalf("result = %+v (message %q)", pf.Result, pf.Message)
 	}
-	for _, want := range []string{"uuid-iad:9-10", "second history", v1alpha1.AcknowledgePlannedFailoverHoldAnnotation} {
+	for _, want := range []string{"uuid-iad:9-10", "second history", v1beta1.AcknowledgePlannedFailoverHoldAnnotation} {
 		if !strings.Contains(pf.Message, want) {
 			t.Fatalf("message %q lacks %q", pf.Message, want)
 		}
 	}
 	hold := PlannedHoldFrom(h.fg())
-	if hold == nil || hold.RunID != "run-1" || hold.Reason != v1alpha1.PlannedFailoverReasonSourceUnfenced {
+	if hold == nil || hold.RunID != "run-1" || hold.Reason != v1beta1.PlannedFailoverReasonSourceUnfenced {
 		t.Fatalf("hold = %+v", hold)
 	}
 	if held, ok := h.topo.HeldHoldClaim(h.nn); !ok || held != "run-1" {

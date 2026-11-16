@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
 	pgdragonfly "github.com/shipstream/bloodraven/internal/playground/dragonfly"
@@ -335,7 +335,7 @@ func waitForClusterReconverge(ctx context.Context, env *Env) error {
 func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor time.Duration) error {
 	var healthySince time.Time
 	_, err := env.Wait.UntilCR(ctx, env.Namespace, "cluster reconverged after chaos cleanup",
-		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+		func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 			ready := pgkube.ReadyCondition(mfg) == "True"
 			var bad []string
 			failoverRecord, _, failoverErr := brcontroller.EffectiveFailoverRecord(mfg, time.Now())
@@ -366,14 +366,14 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 					bad = append(bad, fmt.Sprintf("%s=no-status", s.Name))
 				}
 			}
-			if r := mfg.Status.Rollout; r != nil && r.Phase != "" && r.Phase != v1alpha1.RolloutPhaseComplete {
+			if r := mfg.Status.Rollout; r != nil && r.Phase != "" && r.Phase != v1beta1.RolloutPhaseComplete {
 				bad = append(bad, fmt.Sprintf("rollout=%s", r.Phase))
 			}
 			for _, s := range mfg.Status.Sites {
-				if s.State != v1alpha1.SiteStateWritable && s.State != v1alpha1.SiteStateReadOnly {
+				if s.State != v1beta1.SiteStateWritable && s.State != v1beta1.SiteStateReadOnly {
 					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
 				}
-				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+				if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
 				}
 				if s.Name != mfg.Status.ActiveSite && isPromotableStatusSite(mfg, s.Name) && !s.Replication.Running() {
@@ -411,10 +411,10 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 // gates: a run still in a non-terminal phase (its status publication may lag
 // the topology, which can already look healthy), and a standing automation
 // hold.
-func plannedReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
+func plannedReconvergeProblems(mfg *v1beta1.MysqlFailoverGroup) []string {
 	var bad []string
 	if pf := mfg.Status.PlannedFailover; pf != nil && pf.Phase != "" &&
-		pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded && pf.Phase != v1alpha1.PlannedFailoverPhaseFailed {
+		pf.Phase != v1beta1.PlannedFailoverPhaseSucceeded && pf.Phase != v1beta1.PlannedFailoverPhaseFailed {
 		bad = append(bad, fmt.Sprintf("plannedFailover.phase=%s", pf.Phase))
 	}
 	if hold := brcontroller.PlannedHoldFrom(mfg); hold != nil {
@@ -430,7 +430,7 @@ func emptyAs(s, alt string) string {
 	return s
 }
 
-func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
+func dragonflyReconvergeProblems(mfg *v1beta1.MysqlFailoverGroup) []string {
 	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
 		return nil
 	}
@@ -439,7 +439,7 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 		return []string{"dragonfly=status-missing"}
 	}
 	var bad []string
-	if df.Phase != v1alpha1.DragonflyPhaseReady {
+	if df.Phase != v1beta1.DragonflyPhaseReady {
 		bad = append(bad, fmt.Sprintf("dragonfly.phase=%s", df.Phase))
 	}
 	if df.ActiveSite == "" {
@@ -450,7 +450,7 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 	masters := 0
 	for _, s := range df.Sites {
 		switch s.Role {
-		case v1alpha1.DragonflyRoleMaster:
+		case v1beta1.DragonflyRoleMaster:
 			masters++
 			if s.Name != df.ActiveSite {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=master-active-mismatch", s.Name))
@@ -458,7 +458,7 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 			if !s.Ready || !s.Reachable {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=master-not-ready", s.Name))
 			}
-		case v1alpha1.DragonflyRoleReplica:
+		case v1beta1.DragonflyRoleReplica:
 			if !s.Ready || !s.Reachable {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=replica-not-ready", s.Name))
 			}
@@ -471,11 +471,11 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 			if s.LastIOSecondsAgo == nil || *s.LastIOSecondsAgo < 0 {
 				bad = append(bad, fmt.Sprintf("dragonfly.%s=never-synced", s.Name))
 			}
-		case v1alpha1.DragonflyRoleUnreachable:
+		case v1beta1.DragonflyRoleUnreachable:
 			bad = append(bad, fmt.Sprintf("dragonfly.%s=unreachable", s.Name))
-		case v1alpha1.DragonflyRoleStaleMaster:
+		case v1beta1.DragonflyRoleStaleMaster:
 			bad = append(bad, fmt.Sprintf("dragonfly.%s=stale-master", s.Name))
-		case v1alpha1.DragonflyRoleUnconfigured, v1alpha1.DragonflyRoleUnknown, "":
+		case v1beta1.DragonflyRoleUnconfigured, v1beta1.DragonflyRoleUnknown, "":
 			bad = append(bad, fmt.Sprintf("dragonfly.%s=%s", s.Name, s.Role))
 		}
 	}
@@ -485,7 +485,7 @@ func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
 	return bad
 }
 
-func isPromotableStatusSite(mfg *v1alpha1.MysqlFailoverGroup, siteName string) bool {
+func isPromotableStatusSite(mfg *v1beta1.MysqlFailoverGroup, siteName string) bool {
 	for _, site := range mfg.Spec.Sites {
 		if site.Name == siteName {
 			return site.IsPromotable()
@@ -586,7 +586,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 			if err != nil {
 				return nil, err
 			}
-			if !slices.ContainsFunc(mfg.Spec.Sites, func(s v1alpha1.SiteSpec) bool { return s.Name == site }) {
+			if !slices.ContainsFunc(mfg.Spec.Sites, func(s v1beta1.SiteSpec) bool { return s.Name == site }) {
 				return nil, fmt.Errorf("log component %q: the group has no site %q", component, site)
 			}
 		}

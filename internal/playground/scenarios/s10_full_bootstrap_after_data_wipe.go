@@ -8,7 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -69,7 +69,7 @@ func s10InjectWipeReplicaPVC() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == v1alpha1.SiteStateReadOnly {
+				if s.State == v1beta1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}
@@ -117,8 +117,8 @@ func s10ObserveBootstrapStarted() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"Bootstrapping condition Status=True",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+					c := findCondition(mfg.Status.Conditions, v1beta1.ConditionBootstrapping)
 					if c == nil {
 						return false, "no Bootstrapping condition yet", nil
 					}
@@ -154,8 +154,8 @@ func s10ObserveBootstrapDone() runner.Step {
 			defer cancel()
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				"Bootstrapping done",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+					c := findCondition(mfg.Status.Conditions, v1beta1.ConditionBootstrapping)
 					if bootstrapFailed(c) && !c.LastTransitionTime.Time.Before(since.Truncate(time.Second)) {
 						return false, c.Message, fmt.Errorf("bootstrap failed: %s", c.Message)
 					}
@@ -177,18 +177,18 @@ func s10ObserveClusterReconverged() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"sites: writable=1 read-only=N-1 divergent=0 blocked=0",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 						if s.DivergentGtid != "" {
@@ -220,7 +220,7 @@ func s10VerifyReplicaThreadsRunning() runner.Step {
 			if err != nil {
 				return err
 			}
-			var wipedState v1alpha1.SiteState
+			var wipedState v1beta1.SiteState
 			for _, s := range mfg.Status.Sites {
 				if s.Name == wiped {
 					wipedState = s.State
@@ -230,7 +230,7 @@ func s10VerifyReplicaThreadsRunning() runner.Step {
 			if wipedState == "" {
 				return fmt.Errorf("wiped site %q missing at verify time (sites=%+v)", wiped, mfg.Status.Sites)
 			}
-			if wipedState != v1alpha1.SiteStateReadOnly {
+			if wipedState != v1beta1.SiteStateReadOnly {
 				return fmt.Errorf("wiped site %s state=%q, want read-only replicating replica", wiped, wipedState)
 			}
 			env.Capture.Note(fmt.Sprintf("probing wiped read-only site %s", wiped))

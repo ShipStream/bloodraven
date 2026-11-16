@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
@@ -142,17 +142,17 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		}
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+		if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 			return fmt.Errorf("baseline unhealthy: site %s has RecoveryBlocked — run ./playground/reset-mysql.sh and retry", s.Name)
 		}
-		if s.State == "" || s.State == v1alpha1.SiteStateUnknown || s.State == v1alpha1.SiteStateUnreachable {
+		if s.State == "" || s.State == v1beta1.SiteStateUnknown || s.State == v1beta1.SiteStateUnreachable {
 			return fmt.Errorf("baseline unhealthy: site %s state=%q — wait for recovery or run ./playground/reset-mysql.sh", s.Name, s.State)
 		}
 	}
 
 	// A paced rollout that waits, rolls or is stalled restarts pods (or
 	// will) under whatever the scenario does next.
-	if r := mfg.Status.Rollout; r != nil && r.Phase != "" && r.Phase != v1alpha1.RolloutPhaseComplete {
+	if r := mfg.Status.Rollout; r != nil && r.Phase != "" && r.Phase != v1beta1.RolloutPhaseComplete {
 		return fmt.Errorf("baseline unhealthy: paced rollout in phase %q (%s) — wait for it to complete; kubectl -n %s get mysqlfailovergroup %s -o jsonpath='{.status.rollout}'",
 			r.Phase, emptyAsNone(r.Reason), namespace, fg)
 	}
@@ -200,7 +200,7 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 // (replica attachment / LOADING bug) and D9 (silent key loss) baseline
 // checks into the standard precheck rather than separate scenarios —
 // every Dragonfly chaos scenario inherits them.
-func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
+func assertDragonflyBaselineHealthy(mfg *v1beta1.MysqlFailoverGroup) error {
 	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
 		return nil
 	}
@@ -208,7 +208,7 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 	if dfStat == nil {
 		return fmt.Errorf("baseline unhealthy: spec.dragonfly enabled but status.dragonfly not yet populated (waiting for first reconcile)")
 	}
-	if dfStat.Phase != v1alpha1.DragonflyPhaseReady {
+	if dfStat.Phase != v1beta1.DragonflyPhaseReady {
 		return fmt.Errorf("baseline unhealthy: status.dragonfly.phase=%q (want Ready)", dfStat.Phase)
 	}
 	if dfStat.ActiveSite == "" {
@@ -221,13 +221,13 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 	masters := 0
 	for _, s := range dfStat.Sites {
 		switch s.Role {
-		case v1alpha1.DragonflyRoleMaster:
+		case v1beta1.DragonflyRoleMaster:
 			masters++
 			if s.Name != dfStat.ActiveSite {
 				return fmt.Errorf("baseline unhealthy: dragonfly site %q reports role=master but activeSite=%q (split-brain or stale-master)",
 					s.Name, dfStat.ActiveSite)
 			}
-		case v1alpha1.DragonflyRoleReplica:
+		case v1beta1.DragonflyRoleReplica:
 			if s.LinkStatus != "up" {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has linkStatus=%q (want up)", s.Name, s.LinkStatus)
 			}
@@ -237,7 +237,7 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 			if dragonflySyncing(s.SyncInProgress) {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has syncInProgress=true", s.Name)
 			}
-		case v1alpha1.DragonflyRoleUnreachable:
+		case v1beta1.DragonflyRoleUnreachable:
 			return fmt.Errorf("baseline unhealthy: dragonfly site %q is unreachable", s.Name)
 		}
 	}
@@ -252,19 +252,19 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 // state "read-only" with no writable site. This is the operator's
 // startup-state guard refusing to auto-elect — the cluster cannot
 // recover on its own, so the user has to intervene.
-func bothReadOnly(mfg *v1alpha1.MysqlFailoverGroup) bool {
+func bothReadOnly(mfg *v1beta1.MysqlFailoverGroup) bool {
 	if len(mfg.Status.Sites) == 0 {
 		return false
 	}
 	for _, s := range mfg.Status.Sites {
-		if s.State != v1alpha1.SiteStateReadOnly {
+		if s.State != v1beta1.SiteStateReadOnly {
 			return false
 		}
 	}
 	return true
 }
 
-func siteInSpec(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
+func siteInSpec(mfg *v1beta1.MysqlFailoverGroup, name string) bool {
 	for _, s := range mfg.Spec.Sites {
 		if s.Name == name {
 			return true
@@ -273,7 +273,7 @@ func siteInSpec(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 	return false
 }
 
-func siteInStatus(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
+func siteInStatus(mfg *v1beta1.MysqlFailoverGroup, name string) bool {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == name {
 			return true
@@ -282,7 +282,7 @@ func siteInStatus(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 	return false
 }
 
-func isPromotableSite(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
+func isPromotableSite(mfg *v1beta1.MysqlFailoverGroup, name string) bool {
 	for _, s := range mfg.Spec.Sites {
 		if s.Name == name {
 			return s.IsPromotable()
@@ -292,7 +292,7 @@ func isPromotableSite(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 }
 
 // failoverCooldown returns the configured cooldown or the operator default.
-func failoverCooldown(mfg *v1alpha1.MysqlFailoverGroup) time.Duration {
+func failoverCooldown(mfg *v1beta1.MysqlFailoverGroup) time.Duration {
 	if mfg.Spec.FailoverCooldown != nil && mfg.Spec.FailoverCooldown.Duration > 0 {
 		return mfg.Spec.FailoverCooldown.Duration
 	}
@@ -301,7 +301,7 @@ func failoverCooldown(mfg *v1alpha1.MysqlFailoverGroup) time.Duration {
 
 // plannedReason is the planned-failover run's reason: its result reason
 // once terminal, else its admission wait or defer reason.
-func plannedReason(pf *v1alpha1.PlannedFailoverStatus) string {
+func plannedReason(pf *v1beta1.PlannedFailoverStatus) string {
 	switch {
 	case pf == nil:
 		return ""
@@ -316,16 +316,16 @@ func plannedReason(pf *v1alpha1.PlannedFailoverStatus) string {
 }
 
 // plannedOutcome is the terminal run's outcome, or "".
-func plannedOutcome(pf *v1alpha1.PlannedFailoverStatus) v1alpha1.PlannedFailoverOutcome {
+func plannedOutcome(pf *v1beta1.PlannedFailoverStatus) v1beta1.PlannedFailoverOutcome {
 	if pf == nil || pf.Result == nil {
 		return ""
 	}
 	return pf.Result.Outcome
 }
 
-func plannedTerminal(p v1alpha1.PlannedFailoverPhase) bool {
+func plannedTerminal(p v1beta1.PlannedFailoverPhase) bool {
 	switch p {
-	case v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverPhaseFailed:
+	case v1beta1.PlannedFailoverPhaseSucceeded, v1beta1.PlannedFailoverPhaseFailed:
 		return true
 	default:
 		return false
@@ -334,7 +334,7 @@ func plannedTerminal(p v1alpha1.PlannedFailoverPhase) bool {
 
 // PrimaryCandidates returns the ordered list of primary-candidate
 // site names from spec.sites.
-func PrimaryCandidates(mfg *v1alpha1.MysqlFailoverGroup) []string {
+func PrimaryCandidates(mfg *v1beta1.MysqlFailoverGroup) []string {
 	var out []string
 	for _, s := range mfg.Spec.Sites {
 		if s.IsPromotable() {
@@ -347,7 +347,7 @@ func PrimaryCandidates(mfg *v1alpha1.MysqlFailoverGroup) []string {
 // PeerOf returns the first primary-candidate site name that is not
 // the active site. For the playground's 2-site topology this is the
 // failover target.
-func PeerOf(mfg *v1alpha1.MysqlFailoverGroup, site string) (string, error) {
+func PeerOf(mfg *v1beta1.MysqlFailoverGroup, site string) (string, error) {
 	for _, c := range PrimaryCandidates(mfg) {
 		if c != site {
 			return c, nil
@@ -412,7 +412,7 @@ func emptyAsNone(s string) string {
 
 // pitrSpecProfile is spec.backup.pitr.profileName while PITR is enabled,
 // else "". Status no longer echoes either.
-func pitrSpecProfile(mfg *v1alpha1.MysqlFailoverGroup) string {
+func pitrSpecProfile(mfg *v1beta1.MysqlFailoverGroup) string {
 	if mfg.Spec.Backup == nil || mfg.Spec.Backup.PITR == nil || !mfg.Spec.Backup.PITR.Enabled {
 		return ""
 	}
@@ -421,14 +421,14 @@ func pitrSpecProfile(mfg *v1alpha1.MysqlFailoverGroup) string {
 
 // encryptionAllSitesSealed reports EncryptionAtRestReady=True with reason
 // AllSitesSealed: every site's keyring is sealed.
-func encryptionAllSitesSealed(mfg *v1alpha1.MysqlFailoverGroup) bool {
-	c := apimeta.FindStatusCondition(mfg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
-	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == v1alpha1.ReasonAllSitesSealed
+func encryptionAllSitesSealed(mfg *v1beta1.MysqlFailoverGroup) bool {
+	c := apimeta.FindStatusCondition(mfg.Status.Conditions, v1beta1.ConditionEncryptionAtRestReady)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == v1beta1.ReasonAllSitesSealed
 }
 
 // restorePointInTime is status.restore.provenance.pointInTime, nil when
 // the restore recorded none.
-func restorePointInTime(rs *v1alpha1.RestoreStatus) *v1alpha1.PointInTimeResult {
+func restorePointInTime(rs *v1beta1.RestoreStatus) *v1beta1.PointInTimeResult {
 	if rs == nil || rs.Provenance == nil {
 		return nil
 	}

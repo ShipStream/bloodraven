@@ -15,7 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/util"
 )
 
@@ -49,7 +49,7 @@ func runTriggerBackup(args []string) {
 
 	scheme := k8sruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(v1beta1.AddToScheme(scheme))
 
 	cfg := ctrl.GetConfigOrDie()
 	cl, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -64,23 +64,23 @@ func runTriggerBackup(args []string) {
 	}
 
 	labels := map[string]string{
-		v1alpha1.FailoverGroupLabel:    *group,
-		v1alpha1.BackupProfileLabel:    *profile,
+		v1beta1.FailoverGroupLabel:     *group,
+		v1beta1.BackupProfileLabel:     *profile,
 		"app.kubernetes.io/managed-by": "bloodraven",
 	}
 	if *schedule != "" {
-		labels[v1alpha1.BackupScheduleLabel] = *schedule
+		labels[v1beta1.BackupScheduleLabel] = *schedule
 	}
 
-	backup := &v1alpha1.MysqlBackup{
+	backup := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-%s-", *group, *profile),
 			Namespace:    ns,
 			Labels:       labels,
-			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: trigger},
+			Annotations:  map[string]string{v1beta1.TriggeredByAnnotation: trigger},
 		},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: *group},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: *group},
 			ProfileName:      *profile,
 		},
 	}

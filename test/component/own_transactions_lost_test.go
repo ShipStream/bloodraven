@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -71,15 +71,15 @@ func newOwnLossFixture(t *testing.T) *ownLossFixture {
 		controller.BootstrapConfig{ReplUser: "repl", ReplPassword: "secret", CloneTimeout: 10 * time.Second},
 		newMockTainter(), platform.NewHub(logger), &mockDNS{}, logger, f.clk)
 
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
+		Spec:       v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
 	}
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	f.c = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(fg).WithObjects(fg).Build()
@@ -118,9 +118,9 @@ func (f *ownLossFixture) waitBootstrap() {
 	}
 }
 
-func (f *ownLossFixture) statusSite(name string) v1alpha1.SiteStatus {
+func (f *ownLossFixture) statusSite(name string) v1beta1.SiteStatus {
 	f.t.Helper()
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := f.c.Get(context.Background(), f.nn, &got); err != nil {
 		f.t.Fatal(err)
 	}
@@ -129,12 +129,12 @@ func (f *ownLossFixture) statusSite(name string) v1alpha1.SiteStatus {
 			return s
 		}
 	}
-	return v1alpha1.SiteStatus{}
+	return v1beta1.SiteStatus{}
 }
 
 func (f *ownLossFixture) condition(name string) metav1.Condition {
 	f.t.Helper()
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := f.c.Get(context.Background(), f.nn, &got); err != nil {
 		f.t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestOwnTransactionsLost_SiteStaysOutUntilAReclone(t *testing.T) {
 		t.Fatal("dc1 is not fenced")
 	}
 	site := f.statusSite("dc1")
-	if site.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || site.LostGtid != ownLossLost ||
+	if site.RecoveryState != v1beta1.RecoveryStateRecloneRequired || site.LostGtid != ownLossLost ||
 		site.LostTransactionCount == nil || *site.LostTransactionCount != 10 {
 		t.Fatalf("persisted dc1 status = %+v, want RecloneRequired with %s (10)", site, ownLossLost)
 	}
@@ -370,7 +370,7 @@ func TestOwnTransactionsLost_ReportSurvivesAnOperatorRestart(t *testing.T) {
 
 	// Before its first comparison the restored report already keeps the
 	// site's replication from being started.
-	if st := tm.Status().Sites[0]; st.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || st.LostGtid != ownLossLost {
+	if st := tm.Status().Sites[0]; st.RecoveryState != v1beta1.RecoveryStateRecloneRequired || st.LostGtid != ownLossLost {
 		t.Fatalf("restored dc1 status = %+v, want RecloneRequired with the lost set", st)
 	}
 

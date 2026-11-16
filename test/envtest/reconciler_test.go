@@ -16,26 +16,26 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
-func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func newTestFG(namespace string) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "lion",
 			Namespace: namespace,
 		},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
 			Image: "mysql:9.7",
-			Sites: []v1alpha1.SiteSpec{
+			Sites: []v1beta1.SiteSpec{
 				{
 					Name:              "dc1",
 					ServerID:          101,
 					Zone:              "lion-dc1",
 					LoadBalancerIP:    "203.0.113.1",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
-					Storage: v1alpha1.StorageSpec{
+					Storage: v1beta1.StorageSpec{
 						StorageClassName: "standard",
 						Size:             "10Gi",
 					},
@@ -46,14 +46,14 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 					Zone:              "lion-dc2",
 					LoadBalancerIP:    "203.0.113.2",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
-					Storage: v1alpha1.StorageSpec{
+					Storage: v1beta1.StorageSpec{
 						StorageClassName: "standard",
 						Size:             "10Gi",
 					},
 				},
 			},
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-			DNS: v1alpha1.DNSSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+			DNS: v1beta1.DNSSpec{
 				Hostname:   "lion.az.example.com",
 				TTLSeconds: 60,
 			},
@@ -103,7 +103,7 @@ func TestEnvtest_CRCreationAndSchemaAcceptance(t *testing.T) {
 	}
 
 	// Verify we can read it back
-	var fetched v1alpha1.MysqlFailoverGroup
+	var fetched v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lion", Namespace: ns}, &fetched); err != nil {
 		t.Fatalf("failed to get MysqlFailoverGroup: %v", err)
 	}
@@ -120,45 +120,45 @@ func TestEnvtest_CRCreationAndSchemaAcceptance(t *testing.T) {
 }
 
 func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
-	readerSite := func() v1alpha1.SiteSpec {
-		return v1alpha1.SiteSpec{
-			Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-			Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
+	readerSite := func() v1beta1.SiteSpec {
+		return v1beta1.SiteSpec{
+			Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly, Zone: "reader-zone",
+			Storage: v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
 		}
 	}
 	tests := []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlFailoverGroup)
+		mutate func(*v1beta1.MysqlFailoverGroup)
 		wantOK bool
 	}{
-		{name: "reader omits placement", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites = append(fg.Spec.Sites, readerSite()) }, wantOK: true},
-		{name: "reader accepts legacy placement", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "reader omits placement", mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites = append(fg.Spec.Sites, readerSite()) }, wantOK: true},
+		{name: "reader accepts legacy placement", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			r := readerSite()
 			r.LoadBalancerIP = "203.0.113.3"
 			r.TaintNodeSelector = map[string]string{"site": "reader"}
 			fg.Spec.Sites = append(fg.Spec.Sites, r)
 		}, wantOK: true},
-		{name: "candidate requires lb ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].LoadBalancerIP = "" }},
-		{name: "dr only requires selector", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Sites[0].Role = v1alpha1.SiteRoleDisasterRecovery
+		{name: "candidate requires lb ip", mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].LoadBalancerIP = "" }},
+		{name: "dr only requires selector", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Sites[0].Role = v1beta1.SiteRoleDisasterRecovery
 			fg.Spec.Sites[0].TaintNodeSelector = nil
 		}},
-		{name: "reader does not satisfy candidate minimum", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "reader does not satisfy candidate minimum", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Sites[1] = readerSite()
 		}},
-		{name: "reader rejected from priorities", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "reader rejected from priorities", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Sites = append(fg.Spec.Sites, readerSite())
-			fg.Spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: []string{"reader"}}
+			fg.Spec.SplitBrainPolicy = &v1beta1.SplitBrainPolicySpec{SitePriorities: []string{"reader"}}
 		}},
-		{name: "valid inherited service exposure", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.ServiceTemplate = &v1alpha1.ServiceTemplate{Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal}
+		{name: "valid inherited service exposure", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.ServiceTemplate = &v1beta1.ServiceTemplate{Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal}
 			r := readerSite()
-			r.ServiceTemplate = &v1alpha1.SiteServiceTemplate{NodePort: 31000}
+			r.ServiceTemplate = &v1beta1.SiteServiceTemplate{NodePort: 31000}
 			fg.Spec.Sites = append(fg.Spec.Sites, r)
 		}, wantOK: true},
-		{name: "node port rejected for cluster ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "node port rejected for cluster ip", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			r := readerSite()
-			r.ServiceTemplate = &v1alpha1.SiteServiceTemplate{NodePort: 31000}
+			r.ServiceTemplate = &v1beta1.SiteServiceTemplate{NodePort: 31000}
 			fg.Spec.Sites = append(fg.Spec.Sites, r)
 		}},
 	}
@@ -188,27 +188,27 @@ func TestEnvtest_ReadOnlyRoleTransitions(t *testing.T) {
 	ns := "reader-role-transitions"
 	ensureNamespace(t, ns)
 	fg := newTestFG(ns)
-	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{
-		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-		Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
+	fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{
+		Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly, Zone: "reader-zone",
+		Storage: v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
 	})
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDisasterRecovery
+	fg.Spec.Sites[2].Role = v1beta1.SiteRoleDisasterRecovery
 	if err := k8sClient.Update(ctx, fg); err == nil {
 		t.Fatal("reader to dr-only transition without placement was accepted")
 	}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: ns}, fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDisasterRecovery
+	fg.Spec.Sites[2].Role = v1beta1.SiteRoleDisasterRecovery
 	fg.Spec.Sites[2].LoadBalancerIP = "203.0.113.3"
 	fg.Spec.Sites[2].TaintNodeSelector = map[string]string{"site": "reader"}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatalf("reader to dr-only transition with placement rejected: %v", err)
 	}
-	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleReadOnly
+	fg.Spec.Sites[2].Role = v1beta1.SiteRoleReadOnly
 	fg.Spec.Sites[2].LoadBalancerIP = ""
 	fg.Spec.Sites[2].TaintNodeSelector = nil
 	if err := k8sClient.Update(ctx, fg); err != nil {
@@ -227,9 +227,9 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 
 	// Update status subresource
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: v1alpha1.SiteStateWritable},
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
+	fg.Status.Sites = []v1beta1.SiteStatus{
+		{Name: "dc1", State: v1beta1.SiteStateWritable},
+		{Name: "dc2", State: v1beta1.SiteStateReadOnly},
 	}
 	now := metav1.Now()
 	fg.Status.SetLastFailover(&now, "dc1", "")
@@ -239,7 +239,7 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	}
 
 	// Read back and verify
-	var fetched v1alpha1.MysqlFailoverGroup
+	var fetched v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lion", Namespace: ns}, &fetched); err != nil {
 		t.Fatalf("failed to get fg: %v", err)
 	}
@@ -247,10 +247,10 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	if fetched.Status.ActiveSite != "dc1" {
 		t.Errorf("expected ActiveSite 'dc1', got %q", fetched.Status.ActiveSite)
 	}
-	if fetched.Status.Sites[0].State != v1alpha1.SiteStateWritable {
+	if fetched.Status.Sites[0].State != v1beta1.SiteStateWritable {
 		t.Errorf("expected Sites[0] state 'writable', got %q", fetched.Status.Sites[0].State)
 	}
-	if fetched.Status.Sites[1].State != v1alpha1.SiteStateReadOnly {
+	if fetched.Status.Sites[1].State != v1beta1.SiteStateReadOnly {
 		t.Errorf("expected Sites[1] state 'read-only', got %q", fetched.Status.Sites[1].State)
 	}
 	if fetched.Status.LastFailoverTarget() != "dc1" {
@@ -263,10 +263,10 @@ func TestEnvtest_PlannedFailoverSpecAndStatus(t *testing.T) {
 	ensureNamespace(t, ns)
 
 	fg := newTestFG(ns)
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{
 		MaxLagWait:   &metav1.Duration{Duration: 2 * time.Minute},
 		DrainTimeout: &metav1.Duration{Duration: 10 * time.Second},
-		OnCooldown:   v1alpha1.PlannedFailoverCooldownDefer,
+		OnCooldown:   v1beta1.PlannedFailoverCooldownDefer,
 	}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("failed to create fg with spec.plannedFailover: %v", err)
@@ -275,37 +275,37 @@ func TestEnvtest_PlannedFailoverSpecAndStatus(t *testing.T) {
 	// Stamp a Deferred status with all the fields that need schema validation.
 	now := metav1.Now()
 	retry := metav1.NewTime(now.Add(2 * time.Minute))
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
 		RunID:      "run-1",
 		Revision:   1,
-		Phase:      v1alpha1.PlannedFailoverPhaseDeferred,
+		Phase:      v1beta1.PlannedFailoverPhaseDeferred,
 		TargetSite: "dc2",
 		StartTime:  now,
-		Settings: v1alpha1.PlannedFailoverSettings{
+		Settings: v1beta1.PlannedFailoverSettings{
 			MaxLagWait: metav1.Duration{Duration: 2 * time.Minute}, DrainTimeout: metav1.Duration{Duration: 10 * time.Second},
 		},
-		Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive, RetryTime: &retry},
+		Admission: &v1beta1.PlannedFailoverAdmission{DeferReason: v1beta1.PlannedFailoverDeferCooldownActive, RetryTime: &retry},
 		Message:   "cooldown active; retrying at " + retry.Format(time.RFC3339),
 	}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatalf("failed to update planned-failover status: %v", err)
 	}
 
-	var fetched v1alpha1.MysqlFailoverGroup
+	var fetched v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lion", Namespace: ns}, &fetched); err != nil {
 		t.Fatalf("failed to read back: %v", err)
 	}
 	if fetched.Spec.PlannedFailover == nil ||
-		fetched.Spec.PlannedFailover.OnCooldown != v1alpha1.PlannedFailoverCooldownDefer ||
+		fetched.Spec.PlannedFailover.OnCooldown != v1beta1.PlannedFailoverCooldownDefer ||
 		fetched.Spec.PlannedFailover.MaxLagWait.Duration != 2*time.Minute ||
 		fetched.Spec.PlannedFailover.DrainTimeout.Duration != 10*time.Second {
 		t.Errorf("spec.plannedFailover round-trip mismatch: %+v", fetched.Spec.PlannedFailover)
 	}
 	if fetched.Status.PlannedFailover == nil ||
-		fetched.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseDeferred {
+		fetched.Status.PlannedFailover.Phase != v1beta1.PlannedFailoverPhaseDeferred {
 		t.Fatalf("status.plannedFailover round-trip mismatch: %+v", fetched.Status.PlannedFailover)
 	}
-	if a := fetched.Status.PlannedFailover.Admission; a == nil || a.DeferReason != v1alpha1.PlannedFailoverDeferCooldownActive {
+	if a := fetched.Status.PlannedFailover.Admission; a == nil || a.DeferReason != v1beta1.PlannedFailoverDeferCooldownActive {
 		t.Errorf("admission = %+v, want deferReason CooldownActive", a)
 	}
 	if a := fetched.Status.PlannedFailover.Admission; a == nil || a.RetryTime == nil {
@@ -318,28 +318,28 @@ func TestEnvtest_PlannedFailoverOnCooldownEnumRejectsGarbage(t *testing.T) {
 	ensureNamespace(t, ns)
 
 	fg := newTestFG(ns)
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{
 		OnCooldown: "bogus",
 	}
 	err := k8sClient.Create(ctx, fg)
 	if err == nil {
 		t.Fatal("expected CRD enum validation to reject onCooldown=bogus")
 	}
-	// The v1alpha1 lower-case spelling is gone too.
+	// The v1beta1 lower-case spelling is gone too.
 	fg = newTestFG(ns)
 	fg.Name = "lower-case"
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: "defer"}
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{OnCooldown: "defer"}
 	if err := k8sClient.Create(ctx, fg); err == nil {
 		t.Fatal("expected CRD enum validation to reject onCooldown=defer")
 	}
 	// An omitted policy defaults to Reject.
 	fg = newTestFG(ns)
 	fg.Name = "defaulted"
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{}
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	if fg.Spec.PlannedFailover.OnCooldown != v1alpha1.PlannedFailoverCooldownReject {
+	if fg.Spec.PlannedFailover.OnCooldown != v1beta1.PlannedFailoverCooldownReject {
 		t.Fatalf("onCooldown defaulted to %q, want Reject", fg.Spec.PlannedFailover.OnCooldown)
 	}
 }
@@ -353,13 +353,13 @@ func TestEnvtest_PlannedFailoverPhaseEnumRejectsGarbage(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	now := metav1.Now()
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
 		RunID:      "run-1",
 		Revision:   1,
-		Phase:      v1alpha1.PlannedFailoverPhase("NotARealPhase"),
+		Phase:      v1beta1.PlannedFailoverPhase("NotARealPhase"),
 		TargetSite: "dc2",
 		StartTime:  now,
-		Settings:   v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute}},
+		Settings:   v1beta1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute}},
 	}
 	err := k8sClient.Status().Update(ctx, fg)
 	if err == nil {
@@ -541,7 +541,7 @@ func TestEnvtest_ReconcilerDefersExistingDeploymentSpecChange(t *testing.T) {
 	}
 
 	// Change the image.
-	var fetched v1alpha1.MysqlFailoverGroup
+	var fetched v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, nn, &fetched); err != nil {
 		t.Fatalf("failed to get fg: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
 		t.Fatalf("create control fg: %v", err)
 	}
 
-	var fetched v1alpha1.MysqlFailoverGroup
+	var fetched v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: invalid.Name, Namespace: nsInvalid}, &fetched); err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +649,7 @@ func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
 		t.Fatalf("invalid license must not change reconcile result: invalid=%+v none=%+v", invalidRes, noneRes)
 	}
 
-	var afterInvalid, afterNone v1alpha1.MysqlFailoverGroup
+	var afterInvalid, afterNone v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: invalid.Name, Namespace: nsInvalid}, &afterInvalid); err != nil {
 		t.Fatal(err)
 	}

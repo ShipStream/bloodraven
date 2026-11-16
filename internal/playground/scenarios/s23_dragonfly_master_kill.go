@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -122,7 +122,7 @@ func observeDragonflyActiveSiteFlipped() runner.Step {
 			var promoted string
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("status.dragonfly.activeSite moves off %s after master kill", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil {
 						return false, "no status.dragonfly", nil
 					}
@@ -203,7 +203,7 @@ func settleDragonflyOldMasterRejoinsAsReplica() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("dragonfly site %s rejoined as replica with link=up", oldMaster),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil {
 						return false, "no status.dragonfly", nil
 					}
@@ -211,7 +211,7 @@ func settleDragonflyOldMasterRejoinsAsReplica() runner.Step {
 						if s.Name == oldMaster {
 							msg := fmt.Sprintf("site %s role=%q linkStatus=%q reachable=%v sync=%s",
 								s.Name, s.Role, s.LinkStatus, s.Reachable, optionalBoolString(s.SyncInProgress))
-							done := s.Role == v1alpha1.DragonflyRoleReplica &&
+							done := s.Role == v1beta1.DragonflyRoleReplica &&
 								s.LinkStatus == "up" &&
 								!dragonflySyncing(s.SyncInProgress) &&
 								s.Reachable

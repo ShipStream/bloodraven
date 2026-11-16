@@ -10,21 +10,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
 // pfStoreFixture is the production store over a fake client with a fault
 // script, seeded with run-1 in WaitingForLag.
-func pfStoreFixture(t *testing.T) (*apiPlannedFailoverStore, *pfFaults, types.NamespacedName, func() *v1alpha1.MysqlFailoverGroup) {
+func pfStoreFixture(t *testing.T) (*apiPlannedFailoverStore, *pfFaults, types.NamespacedName, func() *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	fg := plannedFailoverFG("")
-	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, time.Now())
+	fg.Status.PlannedFailover = pfRunAt(v1beta1.PlannedFailoverPhaseWaitingForLag, time.Now())
 	faults := &pfFaults{}
 	c := newPFFakeClient(faults, fg)
 	nn := fgNN(fg)
 	store := newAPIPlannedFailoverStore(c, c, clock.NewFakeClock(time.Now()))
-	load := func() *v1alpha1.MysqlFailoverGroup {
+	load := func() *v1beta1.MysqlFailoverGroup {
 		t.Helper()
 		got, err := store.Load(context.Background(), nn)
 		if err != nil || got == nil {
@@ -35,7 +35,7 @@ func pfStoreFixture(t *testing.T) (*apiPlannedFailoverStore, *pfFaults, types.Na
 	return store, faults, nn, load
 }
 
-func pfNextRevision(base *v1alpha1.MysqlFailoverGroup) v1alpha1.PlannedFailoverStatus {
+func pfNextRevision(base *v1beta1.MysqlFailoverGroup) v1beta1.PlannedFailoverStatus {
 	next := base.Status.PlannedFailover.DeepCopy()
 	next.Revision++
 	next.Message = "next"
@@ -68,7 +68,7 @@ func TestStore_Settle_DroppedIsFencedNotCommitted(t *testing.T) {
 		t.Fatalf("Write = %s, want NotCommitted", out)
 	}
 	after := load()
-	if after.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] == "" || after.ResourceVersion == base.ResourceVersion {
+	if after.Annotations[v1beta1.PlannedFailoverStatusFenceAnnotation] == "" || after.ResourceVersion == base.ResourceVersion {
 		t.Fatalf("settlement did not fence: rv %s → %s, annotations %v", base.ResourceVersion, after.ResourceVersion, after.Annotations)
 	}
 	// The late commit of the lost write (conditioned on the old version).
@@ -93,7 +93,7 @@ func TestStore_Settle_MovedVersionIsNotCommitted(t *testing.T) {
 	if out != WriteNotCommitted {
 		t.Fatalf("Settle = %s, want NotCommitted", out)
 	}
-	if load().Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
+	if load().Annotations[v1beta1.PlannedFailoverStatusFenceAnnotation] != "" {
 		t.Error("a fence was written although the version had moved")
 	}
 }
@@ -139,7 +139,7 @@ func TestStore_Write_DefiniteOutcomes(t *testing.T) {
 		if out, _ := store.Write(context.Background(), base, pfNextRevision(base), nil); out != tc.want {
 			t.Errorf("fault %d: Write = %s, want %s", tc.fault, out, tc.want)
 		}
-		if tc.fault != pfWriteOK && load().Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
+		if tc.fault != pfWriteOK && load().Annotations[v1beta1.PlannedFailoverStatusFenceAnnotation] != "" {
 			t.Errorf("fault %d: a definite outcome was settled", tc.fault)
 		}
 	}
@@ -159,7 +159,7 @@ func TestStore_Write_DefiniteOutcomes(t *testing.T) {
 func TestStore_TerminalMarkerFencesLateCommit(t *testing.T) {
 	store, _, _, load := pfStoreFixture(t)
 	base := load()
-	m := TerminalMarker{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}
+	m := TerminalMarker{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1beta1.PlannedFailoverReasonStatusStalled}
 	if out, err := store.WriteTerminalMarker(context.Background(), base, m); out != WriteCommitted {
 		t.Fatalf("marker = %s, %v", out, err)
 	}
@@ -172,13 +172,13 @@ func TestStore_TerminalMarkerFencesLateCommit(t *testing.T) {
 	}
 	// A stale marker write conflicts too (conditioned metadata write).
 	if out, _ := store.WriteTerminalMarker(context.Background(), base, TerminalMarker{RunID: "run-1",
-		Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted}); out != WriteConflict {
+		Outcome: v1beta1.PlannedFailoverOutcomeNotStarted}); out != WriteConflict {
 		t.Errorf("stale marker write = %s, want Conflict", out)
 	}
-	if out, _ := store.ClearTerminalMarker(context.Background(), after, "run-2"); out != WriteCommitted || load().Annotations[v1alpha1.PlannedFailoverTerminalAnnotation] == "" {
+	if out, _ := store.ClearTerminalMarker(context.Background(), after, "run-2"); out != WriteCommitted || load().Annotations[v1beta1.PlannedFailoverTerminalAnnotation] == "" {
 		t.Error("a marker of run-1 was cleared for run-2")
 	}
-	if out, _ := store.ClearTerminalMarker(context.Background(), load(), "run-1"); out != WriteCommitted || load().Annotations[v1alpha1.PlannedFailoverTerminalAnnotation] != "" {
+	if out, _ := store.ClearTerminalMarker(context.Background(), load(), "run-1"); out != WriteCommitted || load().Annotations[v1beta1.PlannedFailoverTerminalAnnotation] != "" {
 		t.Error("run-1's marker not cleared")
 	}
 }
@@ -200,11 +200,11 @@ func TestStore_MarkDeadlineStartNeverMovesForward(t *testing.T) {
 		t.Errorf("another run's start = %s", other)
 	}
 	if out, _ := store.ClearDeadlineStart(context.Background(), load(), DeadlineStatusStall, "run-1"); out != WriteCommitted ||
-		load().Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation] == "" {
+		load().Annotations[v1beta1.PlannedFailoverStallSinceAnnotation] == "" {
 		t.Error("run-1's clear removed run-2's start")
 	}
 	if out, _ := store.ClearDeadlineStart(context.Background(), load(), DeadlineStatusStall, "run-2"); out != WriteCommitted ||
-		load().Annotations[v1alpha1.PlannedFailoverStallSinceAnnotation] != "" {
+		load().Annotations[v1beta1.PlannedFailoverStallSinceAnnotation] != "" {
 		t.Error("run-2's start not cleared")
 	}
 }
@@ -215,7 +215,7 @@ func TestStore_MarkDeadlineStartNeverMovesForward(t *testing.T) {
 func TestStore_ClearHold(t *testing.T) {
 	store, _, _, load := pfStoreFixture(t)
 	base := load()
-	setPlannedHold(&base.Status, v1alpha1.PlannedFailoverHold{RunID: "run-9", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+	setPlannedHold(&base.Status, v1beta1.PlannedFailoverHold{RunID: "run-9", Reason: v1beta1.PlannedFailoverReasonForeignWritable,
 		AmbiguousSites: []string{"pdx"}, HoldTime: metav1.Now()}, base.Generation)
 	if err := store.client.Status().Update(context.Background(), base); err != nil {
 		t.Fatal(err)
@@ -223,21 +223,21 @@ func TestStore_ClearHold(t *testing.T) {
 	if out, _ := store.ClearHold(context.Background(), load(), "run-1", nil); out != WriteCommitted {
 		t.Fatal(out)
 	}
-	if c := apimeta.FindStatusCondition(load().Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c == nil ||
+	if c := apimeta.FindStatusCondition(load().Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld); c == nil ||
 		c.Status != metav1.ConditionTrue || load().Status.PlannedFailoverHold == nil {
 		t.Fatal("the hold of another run was cleared")
 	}
 	cur := load()
 	final := cur.Status.PlannedFailover.DeepCopy()
-	final.RunID, final.Revision, final.Phase = "run-9", 1, v1alpha1.PlannedFailoverPhaseFailed
-	final.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, CompletionTime: metav1.Now()}
+	final.RunID, final.Revision, final.Phase = "run-9", 1, v1beta1.PlannedFailoverPhaseFailed
+	final.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, CompletionTime: metav1.Now()}
 	if out, _ := store.ClearHold(context.Background(), cur, "run-9", final); out != WriteCommitted {
 		t.Fatal(out)
 	}
 	got := load()
-	c := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
+	c := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld)
 	if got.Status.PlannedFailoverHold != nil || c == nil || c.Status != metav1.ConditionFalse ||
-		c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged || got.Status.PlannedFailover.RunID != "run-9" {
+		c.Reason != v1beta1.ReasonPlannedFailoverHoldAcknowledged || got.Status.PlannedFailover.RunID != "run-9" {
 		t.Fatalf("after ClearHold: hold %+v conditions %v block %+v", got.Status.PlannedFailoverHold, got.Status.Conditions, got.Status.PlannedFailover)
 	}
 }

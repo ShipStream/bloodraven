@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -218,7 +218,7 @@ func TestPacedReadGroupAndObserver(t *testing.T) {
 	for _, s := range []string{"iad", "pdx"} {
 		dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 			Namespace: env.Namespace, Name: pgkube.MysqlDeploymentName(env.FG, s),
-			Annotations: map[string]string{v1alpha1.RenderedByAnnotation: "r1", v1alpha1.SpecHashAnnotation: "h-" + s},
+			Annotations: map[string]string{v1beta1.RenderedByAnnotation: "r1", v1beta1.SpecHashAnnotation: "h-" + s},
 		}, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
 			{Name: "mysql", Image: "mysql:9.7"}, {Name: "sidecar", Image: "bloodraven-sidecar:playground"}}}}}}
 		if _, err := k8s.AppsV1().Deployments(env.Namespace).Create(ctx, dep, metav1.CreateOptions{}); err != nil {
@@ -226,7 +226,7 @@ func TestPacedReadGroupAndObserver(t *testing.T) {
 		}
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Namespace: env.Namespace, Name: "mysql-" + s, UID: types.UID("uid-" + s),
-			Labels: map[string]string{"app.kubernetes.io/name": "mysql", "app.kubernetes.io/instance": env.FG, v1alpha1.SiteLabel: s},
+			Labels: map[string]string{"app.kubernetes.io/name": "mysql", "app.kubernetes.io/instance": env.FG, v1beta1.SiteLabel: s},
 		}, Status: corev1.PodStatus{
 			Conditions:        []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 			ContainerStatuses: []corev1.ContainerStatus{{Name: "mysql", RestartCount: 1}, {Name: "sidecar", RestartCount: 2}},

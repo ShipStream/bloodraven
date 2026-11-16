@@ -14,19 +14,19 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
 // inFlightUpgradeFixture is a group with a run recorded at phase, both
 // sites' StatefulSets seeded (the active on the target image once the run
 // has moved it) and a Ready pod per site.
-func inFlightUpgradeFixture(t *testing.T, phase v1alpha1.DragonflyUpgradePhase) (*MysqlFailoverGroupReconciler, client.Client, *v1alpha1.MysqlFailoverGroup, *fakeDragonflyConn) {
+func inFlightUpgradeFixture(t *testing.T, phase v1beta1.DragonflyUpgradePhase) (*MysqlFailoverGroupReconciler, client.Client, *v1beta1.MysqlFailoverGroup, *fakeDragonflyConn) {
 	t.Helper()
 	ctx := context.Background()
 	fg := fgWithDragonflySnapshotUpgrade()
 	now := metav1.Now()
-	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
+	fg.Status.Dragonfly.Upgrade = &v1beta1.DragonflyUpgradeStatus{
 		Phase: phase, SourceImage: dfSourceImage, TargetImage: dfTargetImage, ActiveSite: "dc1",
 		SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly),
 		StartTime: &now, SnapshotTime: &now,
@@ -34,7 +34,7 @@ func inFlightUpgradeFixture(t *testing.T, phase v1alpha1.DragonflyUpgradePhase) 
 	r, c := newReconciler(fg)
 	r.Runner = NewTopologyManagerRunner(c, nil, nil, record.NewFakeRecorder(64), testLogger())
 	activeImage := dfSourceImage
-	if phase == v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore || phase == v1alpha1.DragonflyUpgradePhaseReattachingReplicas {
+	if phase == v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore || phase == v1beta1.DragonflyUpgradePhaseReattachingReplicas {
 		activeImage = dfTargetImage
 	}
 	seedDragonflyStatefulSets(t, r, c, fg, map[string]string{"dc1": activeImage, "dc2": dfSourceImage})
@@ -50,7 +50,7 @@ func inFlightUpgradeFixture(t *testing.T, phase v1alpha1.DragonflyUpgradePhase) 
 
 // deleteDragonflySite deletes site's StatefulSet and its pod, as a
 // cascading delete does.
-func deleteDragonflySite(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) {
+func deleteDragonflySite(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) {
 	t.Helper()
 	ctx := context.Background()
 	name := dragonflyStatefulSetName(fg.Name, site)
@@ -73,19 +73,19 @@ func TestDragonflySnapshotUpgrade_DeletedStatefulSetDoesNotWedge(t *testing.T) {
 		recreated outcome = iota
 		ended
 	)
-	phases := []v1alpha1.DragonflyUpgradePhase{
-		v1alpha1.DragonflyUpgradePhasePending,
-		v1alpha1.DragonflyUpgradePhaseSavingSnapshot,
-		v1alpha1.DragonflyUpgradePhaseUpdatingActive,
-		v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore,
-		v1alpha1.DragonflyUpgradePhaseReattachingReplicas,
+	phases := []v1beta1.DragonflyUpgradePhase{
+		v1beta1.DragonflyUpgradePhasePending,
+		v1beta1.DragonflyUpgradePhaseSavingSnapshot,
+		v1beta1.DragonflyUpgradePhaseUpdatingActive,
+		v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore,
+		v1beta1.DragonflyUpgradePhaseReattachingReplicas,
 	}
-	want := func(phase v1alpha1.DragonflyUpgradePhase, site string) outcome {
+	want := func(phase v1beta1.DragonflyUpgradePhase, site string) outcome {
 		if site == "dc2" {
 			return recreated
 		}
 		switch phase {
-		case v1alpha1.DragonflyUpgradePhaseUpdatingActive, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore:
+		case v1beta1.DragonflyUpgradePhaseUpdatingActive, v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore:
 			return recreated
 		}
 		return ended
@@ -104,7 +104,7 @@ func TestDragonflySnapshotUpgrade_DeletedStatefulSetDoesNotWedge(t *testing.T) {
 				up := upgradeRecord(t, c, fg)
 				switch want(phase, site) {
 				case ended:
-					if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonActiveWorkloadDeleted {
+					if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != v1beta1.DragonflyUpgradeReasonActiveWorkloadDeleted {
 						t.Fatalf("upgrade = %+v, want Failed/ActiveWorkloadDeleted", up)
 					}
 					if step.hold != 0 {
@@ -137,7 +137,7 @@ func TestDragonflySnapshotUpgrade_DeletedStatefulSetDoesNotWedge(t *testing.T) {
 // after the active restored. The active's own refusal still ends the run.
 func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing.T) {
 	ctx := context.Background()
-	r, c, fg, conn := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore)
+	r, c, fg, conn := inFlightUpgradeFixture(t, v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore)
 	conn.persist = dragonfly.PersistenceInfo{Loading: true}
 	// The run shed the active's traffic before restarting it.
 	if err := setDragonflyTrafficOnSite(ctx, c, fg, "dc1", false); err != nil {
@@ -151,17 +151,17 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 			t.Fatalf("pass %d while loading: step %+v err %v, want a hold", pass, step, err)
 		}
 	}
-	if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore {
+	if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore {
 		t.Fatalf("upgrade = %+v, want it still waiting for the active", up)
 	}
 	var active corev1.Pod
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, "dc1") + "-0"}, &active); err != nil {
 		t.Fatal(err)
 	}
-	if _, has := active.Labels[v1alpha1.DragonflyTrafficLabel]; has {
+	if _, has := active.Labels[v1beta1.DragonflyTrafficLabel]; has {
 		t.Fatal("traffic was given back to the active while it loads its snapshot")
 	}
-	if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1alpha1.ReasonWorkloadSelectorMismatch {
+	if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1beta1.ReasonWorkloadSelectorMismatch {
 		t.Fatalf("refusal = %q, want WorkloadSelectorMismatch recorded at once", reason)
 	}
 
@@ -174,7 +174,7 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 		}
 	}
 	up := upgradeRecord(t, c, fg)
-	if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
+	if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != v1beta1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
 		t.Fatalf("upgrade = %+v, want Failed/WorkloadSelectorMismatch at ReattachingReplicas", up)
 	}
 	if got := dragonflyStatefulSetResourceVersion(t, c, fg, "dc2"); got != rv {
@@ -187,7 +187,7 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 	// sweep does not run; once the active answers as loaded the run ends
 	// and its traffic returns.
 	t.Run("active refused", func(t *testing.T) {
-		r, c, fg, conn := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore)
+		r, c, fg, conn := inFlightUpgradeFixture(t, v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore)
 		conn.persist = dragonfly.PersistenceInfo{Loading: true}
 		_, rv := foreignSelectorDragonflySite(t, c, fg, "dc1")
 		// The replacement's pod carries the traffic label.
@@ -201,7 +201,7 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 			if err := c.Get(ctx, activeKey, &p); err != nil {
 				t.Fatal(err)
 			}
-			_, has := p.Labels[v1alpha1.DragonflyTrafficLabel]
+			_, has := p.Labels[v1beta1.DragonflyTrafficLabel]
 			return has
 		}
 
@@ -212,7 +212,7 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 			}
 		}
 		up := upgradeRecord(t, c, fg)
-		if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore {
+		if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore {
 			t.Fatalf("upgrade = %+v, want it still waiting for the active", up)
 		}
 		if !strings.Contains(up.Message, "WorkloadSelectorMismatch") || !strings.Contains(up.Message, "still loading") {
@@ -221,7 +221,7 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 		if activeTraffic() {
 			t.Fatal("a loading active kept its traffic label")
 		}
-		if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1alpha1.ReasonWorkloadSelectorMismatch {
+		if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1beta1.ReasonWorkloadSelectorMismatch {
 			t.Fatalf("refusal = %q, want WorkloadSelectorMismatch recorded at once", reason)
 		}
 		// An unanswered persistence probe is not "loaded" either.
@@ -239,7 +239,7 @@ func TestDragonflySnapshotUpgrade_ReplicaRefusalWaitsForActiveRestore(t *testing
 		if err != nil || step.hold != 0 {
 			t.Fatalf("after load: step %+v err %v, want the run ended without a hold", step, err)
 		}
-		if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
+		if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != v1beta1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
 			t.Fatalf("upgrade = %+v, want Failed/WorkloadSelectorMismatch", up)
 		}
 		if !activeTraffic() {

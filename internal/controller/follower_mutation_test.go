@@ -10,7 +10,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -37,7 +37,7 @@ func recoveringReplica(tm *TopologyManager) []*mysql.ReplicaStatus {
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
-	tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateInProgress}
+	tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateInProgress}
 	tm.lastFailoverTarget = "dc1"
 	tm.mu.Unlock()
 	return []*mysql.ReplicaStatus{nil, {IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"}}
@@ -63,7 +63,7 @@ func TestCheckRecovery_DefersDrainWhileTopologyHandoffInFlight(t *testing.T) {
 			tm.mu.RLock()
 			rec := tm.recovery["dc2"]
 			tm.mu.RUnlock()
-			if rec == nil || rec.state != v1alpha1.RecoveryStateInProgress {
+			if rec == nil || rec.state != v1beta1.RecoveryStateInProgress {
 				t.Fatalf("recovery record = %+v, want RecoveryInProgress kept", rec)
 			}
 

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -84,7 +84,7 @@ func observeFailoverFlip() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"activeSite changes",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite)
 					return mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original, msg, nil
 				},
@@ -126,15 +126,15 @@ func observeClusterReconvergence() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"sites: writable=1 read-only=N-1 divergent=0",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other []string
 					var divergent int64
 					var blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
@@ -142,7 +142,7 @@ func observeClusterReconvergence() runner.Step {
 						if s.DivergentTransactionCount != nil {
 							divergent += *s.DivergentTransactionCount
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}
@@ -200,7 +200,7 @@ func verifyReplicaThreadsRunning() runner.Step {
 			}
 			var replica string
 			for _, s := range mfg.Status.Sites {
-				if s.State == v1alpha1.SiteStateReadOnly {
+				if s.State == v1beta1.SiteStateReadOnly {
 					replica = s.Name
 					break
 				}

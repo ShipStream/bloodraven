@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -47,11 +47,11 @@ func TestScenarios6364RegisteredAndProfiled(t *testing.T) {
 }
 
 func TestCurrentPlannedRunIgnoresBaselineAndEmptyRunID(t *testing.T) {
-	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg := &v1beta1.MysqlFailoverGroup{}
 	if currentPlannedRun(mfg, "") != nil {
 		t.Fatal("no block must not be a current run")
 	}
-	mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDeferred}
+	mfg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDeferred}
 	if currentPlannedRun(mfg, "") != nil {
 		t.Fatal("a block without runId must not be a current run")
 	}
@@ -65,19 +65,19 @@ func TestCurrentPlannedRunIgnoresBaselineAndEmptyRunID(t *testing.T) {
 }
 
 func TestPlannedOwnsSitesMatchesSpecPhaseSet(t *testing.T) {
-	owns := map[v1alpha1.PlannedFailoverPhase]bool{
-		v1alpha1.PlannedFailoverPhaseAdmitting:               false,
-		v1alpha1.PlannedFailoverPhaseDeferred:                false,
-		v1alpha1.PlannedFailoverPhaseFencing:                 true,
-		v1alpha1.PlannedFailoverPhaseDraining:                true,
-		v1alpha1.PlannedFailoverPhaseWaitingForLag:           true,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync: true,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly:      true,
-		v1alpha1.PlannedFailoverPhasePromoting:               true,
-		v1alpha1.PlannedFailoverPhaseRollingBack:             true,
-		v1alpha1.PlannedFailoverPhasePublishing:              false,
-		v1alpha1.PlannedFailoverPhaseSucceeded:               false,
-		v1alpha1.PlannedFailoverPhaseFailed:                  false,
+	owns := map[v1beta1.PlannedFailoverPhase]bool{
+		v1beta1.PlannedFailoverPhaseAdmitting:               false,
+		v1beta1.PlannedFailoverPhaseDeferred:                false,
+		v1beta1.PlannedFailoverPhaseFencing:                 true,
+		v1beta1.PlannedFailoverPhaseDraining:                true,
+		v1beta1.PlannedFailoverPhaseWaitingForLag:           true,
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync: true,
+		v1beta1.PlannedFailoverPhasePromotingDragonfly:      true,
+		v1beta1.PlannedFailoverPhasePromoting:               true,
+		v1beta1.PlannedFailoverPhaseRollingBack:             true,
+		v1beta1.PlannedFailoverPhasePublishing:              false,
+		v1beta1.PlannedFailoverPhaseSucceeded:               false,
+		v1beta1.PlannedFailoverPhaseFailed:                  false,
 	}
 	for phase, want := range owns {
 		if got := plannedOwnsSites(phase); got != want {
@@ -87,24 +87,24 @@ func TestPlannedOwnsSitesMatchesSpecPhaseSet(t *testing.T) {
 }
 
 func TestS63HoldViolation(t *testing.T) {
-	held := func() *v1alpha1.MysqlFailoverGroup {
-		mfg := &v1alpha1.MysqlFailoverGroup{}
+	held := func() *v1beta1.MysqlFailoverGroup {
+		mfg := &v1beta1.MysqlFailoverGroup{}
 		mfg.Status.ActiveSite = ""
 		mfg.Status.SetLastFailover(mfg.Status.LastFailoverTime(), "iad", mfg.Status.PromotionGtidExecuted())
-		mfg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, TargetSite: "pdx"}
+		mfg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseWaitingForLag, TargetSite: "pdx"}
 		return mfg
 	}
 	if err := s63HoldViolation(held(), "r1", "pdx", "iad"); err != nil {
 		t.Fatalf("held run reported as violation: %v", err)
 	}
-	cases := map[string]func(*v1alpha1.MysqlFailoverGroup){
-		"block vanished": func(m *v1alpha1.MysqlFailoverGroup) { m.Status.PlannedFailover = nil },
-		"new runId":      func(m *v1alpha1.MysqlFailoverGroup) { m.Status.PlannedFailover.RunID = "r2" },
-		"phase advanced": func(m *v1alpha1.MysqlFailoverGroup) {
-			m.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromoting
+	cases := map[string]func(*v1beta1.MysqlFailoverGroup){
+		"block vanished": func(m *v1beta1.MysqlFailoverGroup) { m.Status.PlannedFailover = nil },
+		"new runId":      func(m *v1beta1.MysqlFailoverGroup) { m.Status.PlannedFailover.RunID = "r2" },
+		"phase advanced": func(m *v1beta1.MysqlFailoverGroup) {
+			m.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhasePromoting
 		},
-		"target promoted": func(m *v1alpha1.MysqlFailoverGroup) { m.Status.ActiveSite = "pdx" },
-		"failover recorded": func(m *v1alpha1.MysqlFailoverGroup) {
+		"target promoted": func(m *v1beta1.MysqlFailoverGroup) { m.Status.ActiveSite = "pdx" },
+		"failover recorded": func(m *v1beta1.MysqlFailoverGroup) {
 			m.Status.SetLastFailover(m.Status.LastFailoverTime(), "pdx", m.Status.PromotionGtidExecuted())
 		},
 	}
@@ -193,50 +193,50 @@ func TestS64DeferredByHold(t *testing.T) {
 	if done, _, err := s64DeferredByHold(nil); done || err != nil {
 		t.Fatalf("no run: done=%v err=%v", done, err)
 	}
-	pf := &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting}
+	pf := &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseAdmitting}
 	if done, _, err := s64DeferredByHold(pf); done || err != nil {
 		t.Fatalf("admitting: done=%v err=%v", done, err)
 	}
-	pf.Phase = v1alpha1.PlannedFailoverPhaseDeferred
-	pf.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive}
+	pf.Phase = v1beta1.PlannedFailoverPhaseDeferred
+	pf.Admission = &v1beta1.PlannedFailoverAdmission{DeferReason: v1beta1.PlannedFailoverDeferCooldownActive}
 	if done, _, err := s64DeferredByHold(pf); done || err != nil {
 		t.Fatalf("cooldown deferral: done=%v err=%v", done, err)
 	}
-	pf.Admission.DeferReason = v1alpha1.PlannedFailoverDeferDeploymentHold
+	pf.Admission.DeferReason = v1beta1.PlannedFailoverDeferDeploymentHold
 	if done, _, err := s64DeferredByHold(pf); !done || err != nil {
 		t.Fatalf("hold deferral: done=%v err=%v", done, err)
 	}
-	pf.Phase = v1alpha1.PlannedFailoverPhaseFencing
+	pf.Phase = v1beta1.PlannedFailoverPhaseFencing
 	if _, _, err := s64DeferredByHold(pf); err == nil {
 		t.Fatal("a run that owns sites under a live hold must fail the wait")
 	}
 }
 
 func TestS64ClassifyOutcome(t *testing.T) {
-	result := func(o v1alpha1.PlannedFailoverOutcome, r v1alpha1.PlannedFailoverReason) *v1alpha1.PlannedFailoverResult {
-		return &v1alpha1.PlannedFailoverResult{Outcome: o, Reason: r}
+	result := func(o v1beta1.PlannedFailoverOutcome, r v1beta1.PlannedFailoverReason) *v1beta1.PlannedFailoverResult {
+		return &v1beta1.PlannedFailoverResult{Outcome: o, Reason: r}
 	}
 	cases := []struct {
 		name    string
-		pf      v1alpha1.PlannedFailoverStatus
+		pf      v1beta1.PlannedFailoverStatus
 		done    bool
 		wantErr bool
 	}{
-		{"still deferred", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDeferred}, false, false},
-		{"admitting", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseAdmitting}, false, false},
-		{"claimed new primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining, SourceSite: "pdx"}, false, false},
-		{"claimed lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFencing, SourceSite: "iad"}, false, true},
-		{"already active", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed,
-			Result: result(v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAlreadyActive)}, true, false},
+		{"still deferred", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDeferred}, false, false},
+		{"admitting", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseAdmitting}, false, false},
+		{"claimed new primary", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDraining, SourceSite: "pdx"}, false, false},
+		{"claimed lost primary", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseFencing, SourceSite: "iad"}, false, true},
+		{"already active", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseFailed,
+			Result: result(v1beta1.PlannedFailoverOutcomeNotStarted, v1beta1.PlannedFailoverReasonAlreadyActive)}, true, false},
 		// The target is the emergency successor, so a success is impossible
 		// and means the run moved the primary off it.
-		{"succeeded from new primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourceSite: "pdx",
-			Result: result(v1alpha1.PlannedFailoverOutcomeSucceeded, "")}, false, true},
-		{"succeeded from lost primary", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, SourceSite: "iad",
-			Result: result(v1alpha1.PlannedFailoverOutcomeSucceeded, "")}, false, true},
-		{"admission timeout", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed,
-			Result: result(v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAdmissionTimeout)}, false, true},
-		{"terminal without result", v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed}, false, true},
+		{"succeeded from new primary", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseSucceeded, SourceSite: "pdx",
+			Result: result(v1beta1.PlannedFailoverOutcomeSucceeded, "")}, false, true},
+		{"succeeded from lost primary", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseSucceeded, SourceSite: "iad",
+			Result: result(v1beta1.PlannedFailoverOutcomeSucceeded, "")}, false, true},
+		{"admission timeout", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseFailed,
+			Result: result(v1beta1.PlannedFailoverOutcomeNotStarted, v1beta1.PlannedFailoverReasonAdmissionTimeout)}, false, true},
+		{"terminal without result", v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseFailed}, false, true},
 	}
 	for _, tc := range cases {
 		pf := tc.pf

@@ -14,7 +14,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -24,7 +24,7 @@ import (
 func readSpecField(t *testing.T, gvk, ns, name string, path ...string) (string, int64) {
 	t.Helper()
 	u := &unstructured.Unstructured{}
-	u.SetAPIVersion(v1alpha1.GroupVersion.String())
+	u.SetAPIVersion(v1beta1.GroupVersion.String())
 	u.SetKind(gvk)
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, u); err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func TestTypedUpdateCanonicalizesUserSpellings(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := &unstructured.Unstructured{Object: obj}
-	u.SetAPIVersion(v1alpha1.GroupVersion.String())
+	u.SetAPIVersion(v1beta1.GroupVersion.String())
 	u.SetKind("MysqlFailoverGroup")
 	u.SetAnnotations(map[string]string{"example.com/one-shot": "a", "example.com/other": "b"})
 	if err := unstructured.SetNestedField(u.Object, "2h", "spec", "cloneTimeout"); err != nil {
@@ -67,7 +67,7 @@ func TestTypedUpdateCanonicalizesUserSpellings(t *testing.T) {
 
 	// The merge patch the operator uses keeps the user's spelling and
 	// the generation.
-	var typed v1alpha1.MysqlFailoverGroup
+	var typed v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &typed); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestTypedUpdateCanonicalizesUserSpellings(t *testing.T) {
 func TestVerificationFinalizerKeepsUserSpellings(t *testing.T) {
 	ns := createNamespace(t, "canonical-verification")
 	u := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": v1alpha1.GroupVersion.String(),
+		"apiVersion": v1beta1.GroupVersion.String(),
 		"kind":       "MysqlBackupVerification",
 		"metadata":   map[string]any{"name": "spelled", "namespace": ns},
 		"spec": map[string]any{
@@ -114,7 +114,7 @@ func TestVerificationFinalizerKeepsUserSpellings(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		var v v1alpha1.MysqlBackupVerification
+		var v v1beta1.MysqlBackupVerification
 		if k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "spelled"}, &v) == nil {
 			base := v.DeepCopy()
 			v.Finalizers = nil
@@ -128,7 +128,7 @@ func TestVerificationFinalizerKeepsUserSpellings(t *testing.T) {
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "spelled"}}); err != nil {
 		t.Fatal(err)
 	}
-	var v v1alpha1.MysqlBackupVerification
+	var v v1beta1.MysqlBackupVerification
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "spelled"}, &v); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestFailoverGroupMetadataWritesKeepUserSpellings(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := &unstructured.Unstructured{Object: obj}
-	u.SetAPIVersion(v1alpha1.GroupVersion.String())
+	u.SetAPIVersion(v1beta1.GroupVersion.String())
 	u.SetKind("MysqlFailoverGroup")
 	spelled := map[string]string{"cloneTimeout": "2h", "failoverCooldown": "300s", "connectionDrainTimeout": "1m"}
 	for field, v := range spelled {
@@ -186,7 +186,7 @@ func TestFailoverGroupMetadataWritesKeepUserSpellings(t *testing.T) {
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatalf("first reconcile: %v", err)
 	}
-	var typed v1alpha1.MysqlFailoverGroup
+	var typed v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, key, &typed); err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestFailoverGroupMetadataWritesKeepUserSpellings(t *testing.T) {
 	// The action annotations, written the way a user writes them (a merge
 	// patch of metadata only).
 	annotate := client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"annotations":{"`+
-		v1alpha1.RecloneAnnotation+`":"dc2","`+v1alpha1.RotateKeyringAnnotation+`":"now"}}}`))
+		v1beta1.RecloneAnnotation+`":"dc2","`+v1beta1.RotateKeyringAnnotation+`":"now"}}}`))
 	if err := k8sClient.Patch(ctx, &typed, annotate); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestFailoverGroupMetadataWritesKeepUserSpellings(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, &typed); err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range []string{v1alpha1.RecloneAnnotation, v1alpha1.RotateKeyringAnnotation} {
+	for _, a := range []string{v1beta1.RecloneAnnotation, v1beta1.RotateKeyringAnnotation} {
 		if _, ok := typed.Annotations[a]; ok {
 			t.Fatalf("annotation %s was not removed", a)
 		}

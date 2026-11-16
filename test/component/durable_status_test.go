@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,12 +17,12 @@ import (
 // does and does not cause. The PITR archive bindings' case is
 // TestPITRBindingStatusWipeAndIntegrity.
 
-func durableTestGroup(annotations map[string]string) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func durableTestGroup(annotations map[string]string) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "default", UID: "lion-uid", Annotations: annotations},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
-			{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
-			{Name: "dc2", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
+		Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{
+			{Name: "dc1", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate},
+			{Name: "dc2", ServerID: 102, Role: v1beta1.SiteRolePrimaryCandidate},
 		}},
 	}
 }
@@ -91,7 +91,7 @@ func TestDurableStatus_LostStatusOnRunningGroup(t *testing.T) {
 // the runner's status write does, so a later manager can be restored from
 // what the first one wrote. Poll calls the callback synchronously; the
 // lock guards fg against a callback from a background goroutine.
-func publishStatus(tm *controller.TopologyManager, fg *v1alpha1.MysqlFailoverGroup, mu *sync.Mutex) {
+func publishStatus(tm *controller.TopologyManager, fg *v1beta1.MysqlFailoverGroup, mu *sync.Mutex) {
 	tm.StatusCallback = func(snap controller.TopologySnapshot) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -128,27 +128,27 @@ func TestDurableStatus_FreshDeployBootstraps(t *testing.T) {
 func TestDurableStatus_LostHoldKeptByTerminalMarker(t *testing.T) {
 	marker := controller.TerminalMarker{
 		RunID:   "6c1f3e8a-0d7b-4c41-9d25-6a1c2f6e9b10",
-		Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
-		Reason:  v1alpha1.PlannedFailoverReasonPromotionUnconfirmed,
+		Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired,
+		Reason:  v1beta1.PlannedFailoverReasonPromotionUnconfirmed,
 	}
-	fg := durableTestGroup(map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: marker.String()})
+	fg := durableTestGroup(map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: marker.String()})
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+	fg.Status.Sites = []v1beta1.SiteStatus{
+		{Name: "dc1", State: v1beta1.SiteStateWritable, Replication: v1beta1.SiteReplicationNotApplicable},
+		{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 	}
-	fg.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonHealthy}}
+	fg.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonHealthy}}
 
 	hold := controller.PlannedHoldFrom(fg)
 	if hold == nil || !hold.FromMarker || hold.RunID != marker.RunID {
 		t.Fatalf("the terminal marker did not keep the hold: %+v", hold)
 	}
 	leases := controller.NewDeploymentLeaseManager(nil, nil, nil)
-	if reason := leases.UnstableReason(fg); reason != v1alpha1.UnstableReasonAutomaticFailoverHeld {
+	if reason := leases.UnstableReason(fg); reason != v1beta1.UnstableReasonAutomaticFailoverHeld {
 		t.Fatalf("deployment leases are not fenced by a hold the marker keeps: unstable reason %q", reason)
 	}
 
-	delete(fg.Annotations, v1alpha1.PlannedFailoverTerminalAnnotation)
+	delete(fg.Annotations, v1beta1.PlannedFailoverTerminalAnnotation)
 	if hold := controller.PlannedHoldFrom(fg); hold != nil {
 		t.Fatalf("a hold survived losing every copy: %+v", hold)
 	}

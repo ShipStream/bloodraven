@@ -9,15 +9,15 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // apiEnumValues returns the +kubebuilder:validation:Enum values declared on
-// the api/v1alpha1 type typeName.
+// the api/v1beta1 type typeName.
 func apiEnumValues(t *testing.T, typeName string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "api", "v1alpha1", "*.go"))
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "api", "v1beta1", "*.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,11 +43,11 @@ func apiEnumValues(t *testing.T, typeName string) []string {
 						return strings.Split(v, ";")
 					}
 				}
-				t.Fatalf("api/v1alpha1.%s has no Enum marker", typeName)
+				t.Fatalf("api/v1beta1.%s has no Enum marker", typeName)
 			}
 		}
 	}
-	t.Fatalf("api/v1alpha1.%s not found", typeName)
+	t.Fatalf("api/v1beta1.%s not found", typeName)
 	return nil
 }
 
@@ -64,17 +64,17 @@ func TestEnumLabelValuesAreDocumented(t *testing.T) {
 		want     map[string]string
 		stateSet []string
 	}{
-		{"role (site gauges)", "SiteRole", func(v string) string { return Role(v1alpha1.SiteRole(v)) },
+		{"role (site gauges)", "SiteRole", func(v string) string { return Role(v1beta1.SiteRole(v)) },
 			map[string]string{"PrimaryCandidate": "primary-candidate", "DisasterRecovery": "disaster-recovery", "ReadOnly": "read-only"}, nil},
-		{"bloodraven_site_state{state}, bloodraven_state_transitions_total{from,to}", "SiteState", func(v string) string { return SiteState(v1alpha1.SiteState(v)) },
+		{"bloodraven_site_state{state}, bloodraven_state_transitions_total{from,to}", "SiteState", func(v string) string { return SiteState(v1beta1.SiteState(v)) },
 			map[string]string{"Writable": "writable", "ReadOnly": "read-only", "Unreachable": "unreachable", "Unknown": "unknown"}, SiteStates},
-		{"bloodraven_replication_source_state{state}", "SourceConvergenceState", func(v string) string { return SourceState(v1alpha1.SourceConvergenceState(v)) },
+		{"bloodraven_replication_source_state{state}", "SourceConvergenceState", func(v string) string { return SourceState(v1beta1.SourceConvergenceState(v)) },
 			map[string]string{"Converged": "converged", "Pending": "pending", "Blocked": "blocked"}, SourceStates},
-		{"bloodraven_keyring_phase{phase}", "SiteKeyringPhase", func(v string) string { return KeyringPhase(v1alpha1.SiteKeyringPhase(v)) },
+		{"bloodraven_keyring_phase{phase}", "SiteKeyringPhase", func(v string) string { return KeyringPhase(v1beta1.SiteKeyringPhase(v)) },
 			map[string]string{"Pending": "pending", "Unsealed": "unsealed", "Escrowed": "escrowed", "Sealed": "sealed", "Failed": "failed"}, KeyringPhases},
-		{"bloodraven_restore_reclone_pending{phase}", "RestoreReclonesPhase", func(v string) string { return RestoreReclonePhase(v1alpha1.RestoreReclonesPhase(v)) },
+		{"bloodraven_restore_reclone_pending{phase}", "RestoreReclonesPhase", func(v string) string { return RestoreReclonePhase(v1beta1.RestoreReclonesPhase(v)) },
 			map[string]string{"Armed": "armed", "Draining": "draining", "Held": "held"}, nil},
-		{"bloodraven_planned_failovers_total{result}", "PlannedFailoverOutcome", func(v string) string { return PlannedFailoverResult(v1alpha1.PlannedFailoverOutcome(v)) },
+		{"bloodraven_planned_failovers_total{result}", "PlannedFailoverOutcome", func(v string) string { return PlannedFailoverResult(v1beta1.PlannedFailoverOutcome(v)) },
 			map[string]string{"Succeeded": "succeeded", "NotStarted": "not-started", "RolledBack": "rolled-back", "SourceLeftFenced": "source-left-fenced",
 				"PromotedUnconfirmed": "promoted-unconfirmed", "ManualRecoveryRequired": "manual-recovery-required"}, nil},
 	} {

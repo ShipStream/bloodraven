@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,9 +37,9 @@ func TestEnvtest_ArtifactCleanupRetriesFailedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
-	backup.Status = v1alpha1.MysqlBackupStatus{
-		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &now,
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "lion/" + backup.Name, Bucket: "bloodraven"},
+	backup.Status = v1beta1.MysqlBackupStatus{
+		Phase: v1beta1.BackupPhaseSucceeded, CompletionTime: &now,
+		ArtifactStorage: &v1beta1.BackupArtifactStorage{Type: v1beta1.BackupStorageS3, Location: "lion/" + backup.Name, Bucket: "bloodraven"},
 	}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestEnvtest_ArtifactCleanupRetriesFailedJob(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	cond := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
+	cond := apiMeta.FindStatusCondition(backup.Status.Conditions, v1beta1.ConditionArtifactCleanup)
 	if cond == nil || cond.Reason != "CleanupFailed" {
 		t.Fatalf("ArtifactCleanup condition = %+v", cond)
 	}

@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/metrics/labels"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -68,18 +68,18 @@ var errRestorePeerStartBusy = errors.New("a replication start is in flight")
 // for a run past Fencing. An Armed queue in Preflight or Fencing is left
 // to stopRestorePeerReplication (it lets a running receiver catch up
 // first), and a Draining site is restarted by its own reclone.
-func restorePeerHoldFromStatus(fg *v1alpha1.MysqlFailoverGroup) (held, restop []string) {
+func restorePeerHoldFromStatus(fg *v1beta1.MysqlFailoverGroup) (held, restop []string) {
 	if fg == nil || fg.Status.RestoreReclones == nil {
 		return nil, nil
 	}
 	q := fg.Status.RestoreReclones
 	held = append([]string(nil), q.Pending...)
 	switch q.Phase {
-	case v1alpha1.RestoreReclonesHeld:
+	case v1beta1.RestoreReclonesHeld:
 		restop = append([]string(nil), q.Pending...)
-	case v1alpha1.RestoreReclonesArmed:
+	case v1beta1.RestoreReclonesArmed:
 		if rip := fg.Status.RestoreInPlace; rip == nil ||
-			(rip.Phase != v1alpha1.RestoreInPlacePreflight && rip.Phase != v1alpha1.RestoreInPlaceFencing) {
+			(rip.Phase != v1beta1.RestoreInPlacePreflight && rip.Phase != v1beta1.RestoreInPlaceFencing) {
 			restop = append([]string(nil), q.Pending...)
 		}
 	}
@@ -113,7 +113,7 @@ type restoreProtection struct {
 }
 
 // restoreProtectionFromStatus derives the protection from status.
-func restoreProtectionFromStatus(fg *v1alpha1.MysqlFailoverGroup) restoreProtection {
+func restoreProtectionFromStatus(fg *v1beta1.MysqlFailoverGroup) restoreProtection {
 	held, restop := restorePeerHoldFromStatus(fg)
 	fenceSite, fenceOwner := restoreOfflineFenceGuard(fg)
 	return restoreProtection{
@@ -135,7 +135,7 @@ func restoreProtectionFromStatus(fg *v1alpha1.MysqlFailoverGroup) restoreProtect
 // released in the same pass, and no longer re-asserted, so an
 // administrator who turns offline_mode OFF by hand after a failed release
 // is not overridden.
-func restoreOfflineFenceGuard(fg *v1alpha1.MysqlFailoverGroup) (site, owner string) {
+func restoreOfflineFenceGuard(fg *v1beta1.MysqlFailoverGroup) (site, owner string) {
 	if site, owner = restoreOfflineFenceSite(fg); site != "" {
 		return site, owner
 	}
@@ -143,7 +143,7 @@ func restoreOfflineFenceGuard(fg *v1alpha1.MysqlFailoverGroup) (site, owner stri
 	if q == nil || q.PriorOfflineMode == nil {
 		return "", ""
 	}
-	if rq := fg.Status.RestoreReclones; rq != nil && rq.Phase == v1alpha1.RestoreReclonesArmed {
+	if rq := fg.Status.RestoreReclones; rq != nil && rq.Phase == v1beta1.RestoreReclonesArmed {
 		return q.Site, fenceOwner(q)
 	}
 	return "", ""
@@ -556,7 +556,7 @@ func (r *TopologyManagerRunner) RestoreMutationInFlight(nn types.NamespacedName,
 // When the read fails the
 // change is only tightened and the error returned; the next sync retries.
 // Without an uncached reader (tests) fg is the only view there is.
-func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, written bool) error {
+func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1beta1.MysqlFailoverGroup, written bool) error {
 	if r == nil || tm == nil || fg == nil {
 		return nil
 	}
@@ -583,7 +583,7 @@ func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *
 			return nil
 		}
 	}
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := r.apiReader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
 		tm.tightenRestoreProtection(want)
 		r.logger.Warn("could not confirm a restore protection change; applying additions only", "fg", client.ObjectKeyFromObject(fg).String(), "error", err)
@@ -603,12 +603,12 @@ func (r *TopologyManagerRunner) applyRestoreProtection(ctx context.Context, tm *
 // retries). After start the guards change only through
 // applyRestoreProtection and the restore's own serialized writes (see
 // TopologyManager.restoreProtectionMu).
-func (r *TopologyManagerRunner) initRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, prev *managedTopology) error {
+func (r *TopologyManagerRunner) initRestoreProtection(ctx context.Context, tm *TopologyManager, fg *v1beta1.MysqlFailoverGroup, prev *managedTopology) error {
 	tm.restoreProtectionMu.Lock()
 	defer tm.restoreProtectionMu.Unlock()
 	view := fg
 	if r.apiReader != nil {
-		var fresh v1alpha1.MysqlFailoverGroup
+		var fresh v1beta1.MysqlFailoverGroup
 		if err := r.apiReader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil {
 			if prev == nil || prev.tm == nil {
 				return fmt.Errorf("read the group uncached to initialise its restore protection: %w", err)
@@ -628,7 +628,7 @@ func (r *TopologyManagerRunner) initRestoreProtection(ctx context.Context, tm *T
 
 // SetRestorePeerHold brings fg's running topology manager's restore
 // protection up to date after this operator wrote fg.
-func (r *TopologyManagerRunner) SetRestorePeerHold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) {
+func (r *TopologyManagerRunner) SetRestorePeerHold(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) {
 	if r == nil || fg == nil {
 		return
 	}
@@ -644,7 +644,7 @@ func (r *TopologyManagerRunner) SetRestorePeerHold(ctx context.Context, fg *v1al
 
 // emitRestoreReclonePendingMetric mirrors status.restoreReclones.pending
 // into bloodraven_restore_reclone_pending.
-func emitRestoreReclonePendingMetric(fg *v1alpha1.MysqlFailoverGroup) {
+func emitRestoreReclonePendingMetric(fg *v1beta1.MysqlFailoverGroup) {
 	if fg == nil {
 		return
 	}
@@ -667,7 +667,7 @@ type restorePeerStopWait struct {
 
 // restorePeerStopElapsed returns how long this process has been trying to
 // stop the peers' receivers for fg's run.
-func (r *MysqlFailoverGroupReconciler) restorePeerStopElapsed(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
+func (r *MysqlFailoverGroupReconciler) restorePeerStopElapsed(fg *v1beta1.MysqlFailoverGroup) time.Duration {
 	nn := client.ObjectKeyFromObject(fg)
 	runID := restoreRunOwner(fg)
 	r.restorePeerStopMu.Lock()
@@ -686,7 +686,7 @@ func (r *MysqlFailoverGroupReconciler) restorePeerStopElapsed(fg *v1alpha1.Mysql
 // restorePeerStopSitesMissingFromQueue lists the non-target sites in
 // spec.sites that the run's reclone queue does not cover: sites added
 // after the restore was accepted.
-func restorePeerStopSitesMissingFromQueue(fg *v1alpha1.MysqlFailoverGroup, target string) []string {
+func restorePeerStopSitesMissingFromQueue(fg *v1beta1.MysqlFailoverGroup, target string) []string {
 	var missing []string
 	q := fg.Status.RestoreReclones
 	for _, s := range fg.Spec.Sites {
@@ -705,7 +705,7 @@ func restorePeerStopSitesMissingFromQueue(fg *v1alpha1.MysqlFailoverGroup, targe
 // spec.sites names a non-target site its reclone queue does not cover: a
 // site added after the restore was accepted, whose replication nothing
 // would stop. It reports whether it ended the run.
-func (r *MysqlFailoverGroupReconciler) cancelOnPeerSetChange(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) bool {
+func (r *MysqlFailoverGroupReconciler) cancelOnPeerSetChange(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) bool {
 	cur := fg.Status.RestoreInPlace
 	added := restorePeerStopSitesMissingFromQueue(fg, cur.TargetSite)
 	if len(added) == 0 {
@@ -714,7 +714,7 @@ func (r *MysqlFailoverGroupReconciler) cancelOnPeerSetChange(ctx context.Context
 	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
 		fmt.Sprintf("cancelled: the peer set changed after the restore was accepted (%s not in status.restoreReclones.pending); nothing was restored. "+
 			"The restore re-runs with the current peers", strings.Join(added, ", ")),
-		v1alpha1.EventRestoreInPlaceCanceled)
+		v1beta1.EventRestoreInPlaceCanceled)
 	return true
 }
 
@@ -725,14 +725,14 @@ func (r *MysqlFailoverGroupReconciler) cancelOnPeerSetChange(ctx context.Context
 // waits for. It ends the run (errInPlaceRunEnded) when the peer set
 // changed since the restore was accepted, or when the peers cannot be
 // stopped within restorePeerStopTimeout.
-func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
+func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (string, error) {
 	cur := fg.Status.RestoreInPlace
 	spec := fg.Spec.RestoreInPlace
 	target := cur.TargetSite
 	nn := client.ObjectKeyFromObject(fg)
 
 	if len(restoreRecloneRecipients(fg, target)) > 0 {
-		if q := fg.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed {
+		if q := fg.Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed {
 			// A run accepted by an operator that predates the queue being
 			// armed at Preflight (or a queue lost to a status write): arm it
 			// now, with the confirm the Job will run under.
@@ -742,7 +742,7 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 			if err := r.armRestoreReclones(ctx, fg, target, inPlaceRunConfirm(cur, spec)); err != nil {
 				return "", fmt.Errorf("record in-place restore reclone queue: %w", err)
 			}
-			if q := fg.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed {
+			if q := fg.Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed {
 				return "recording the peer reclone queue", nil
 			}
 		}
@@ -768,7 +768,7 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 		} else if cur.RunConfirm != "" {
 			confirm = cur.RunConfirm
 		}
-		r.stampTerminalFailure(ctx, fg, target, cur.Scope, confirm, msg, v1alpha1.EventRestoreInPlacePeerStopFailed)
+		r.stampTerminalFailure(ctx, fg, target, cur.Scope, confirm, msg, v1beta1.EventRestoreInPlacePeerStopFailed)
 		return "", errInPlaceRunEnded
 	}
 
@@ -794,9 +794,9 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 			}
 			return wait, nil
 		}
-		if _, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
+		if _, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1beta1.MysqlFailoverGroup) bool {
 			fq := fresh.Status.RestoreReclones
-			if fq == nil || fq.Phase != v1alpha1.RestoreReclonesArmed || fq.FencedGtidExecuted != "" {
+			if fq == nil || fq.Phase != v1beta1.RestoreReclonesArmed || fq.FencedGtidExecuted != "" {
 				return false
 			}
 			fq.FencedGtidExecuted = gtid
@@ -837,11 +837,11 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 		return wait, nil
 	}
 	if len(incomplete) > 0 {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRestorePeerReplicationStoppedBehind,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventRestorePeerReplicationStoppedBehind,
 			"stopped the replication receiver of %s before it received every transaction the primary had committed before the fence; "+
 				"the peer keeps its pre-restore data without those transactions", strings.Join(incomplete, ", "))
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRestorePeerReplicationStopped,
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1beta1.EventRestorePeerReplicationStopped,
 		"stopped the replication receiver of %s; they keep their data until they are recloned from the restored primary",
 		strings.Join(stopped, ", "))
 	r.restorePeerStopMu.Lock()
@@ -855,7 +855,7 @@ func (r *MysqlFailoverGroupReconciler) stopRestorePeerReplication(ctx context.Co
 // missing privilege, or the error that kept the check from completing
 // (an unreachable peer, a checker without the capability), which makes
 // Preflight wait.
-func (r *MysqlFailoverGroupReconciler) inPlacePeerStopRejection(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string) (string, error) {
+func (r *MysqlFailoverGroupReconciler) inPlacePeerStopRejection(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, target string) (string, error) {
 	nn := client.ObjectKeyFromObject(fg)
 	for _, site := range restoreRecloneRecipients(fg, target) {
 		err := r.Runner.RestorePeerStopPrivileges(ctx, nn, site)

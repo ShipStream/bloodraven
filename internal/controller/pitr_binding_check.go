@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -49,7 +49,7 @@ type PITRArchiveCheckResult struct {
 	ArchiveID string
 	// Source is the descriptor's source, when a descriptor was read (also
 	// on ArchiveForeign, so the binding can name the owner).
-	Source v1alpha1.PITRArchiveSource
+	Source v1beta1.PITRArchiveSource
 	// DestinationDigest is PITRArchiveCheckDestinationDigest of the
 	// normalized destination probed. The controller compares it with the
 	// destination in the Job's own environment, which is immutable.
@@ -135,7 +135,7 @@ func parsePITRArchiveCheckLine(msg string) (PITRArchiveCheckResult, error) {
 	}
 	r := PITRArchiveCheckResult{
 		State: values[0], Reason: pitrarchive.Token(values[1]), ArchiveID: values[2],
-		Source:            v1alpha1.PITRArchiveSource{UID: types.UID(values[3]), Namespace: values[4], Name: values[5]},
+		Source:            v1beta1.PITRArchiveSource{UID: types.UID(values[3]), Namespace: values[4], Name: values[5]},
 		DestinationDigest: values[6],
 	}
 	switch r.State {
@@ -216,7 +216,7 @@ func pitrCheckRole(t *pitrBindingTarget) string {
 // (Δ26): the operator image, storage access only (S3 credentials or the
 // claim, read-only), no service account token, the group's read-only
 // tolerations. The candidate snapshot is mounted read-only, 0400, required.
-func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, target *pitrBindingTarget, candidate string) (*batchv1.Job, error) {
+func buildPITRArchiveCheckJob(fg *v1beta1.MysqlFailoverGroup, entry *v1beta1.PITRArchiveBinding, target *pitrBindingTarget, candidate string) (*batchv1.Job, error) {
 	if fg == nil || entry == nil || target == nil || target.profile == nil {
 		return nil, errors.New("check job: missing group, binding or target")
 	}
@@ -238,15 +238,15 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 	profile := target.profile
 
 	labels := map[string]string{
-		labelAppName:                appNameBackupJob,
-		labelInstance:               fg.Name,
-		v1alpha1.FailoverGroupLabel: fg.Name,
-		labelManagedBy:              managerName,
-		v1alpha1.ResourceLabel:      resourcePITRArchiveCheck,
-		v1alpha1.PITRBindingIDLabel: entry.ID,
+		labelAppName:               appNameBackupJob,
+		labelInstance:              fg.Name,
+		v1beta1.FailoverGroupLabel: fg.Name,
+		labelManagedBy:             managerName,
+		v1beta1.ResourceLabel:      resourcePITRArchiveCheck,
+		v1beta1.PITRBindingIDLabel: entry.ID,
 	}
 	if candidate != "" {
-		labels[v1alpha1.PITRKeySecretLabel] = candidate
+		labels[v1beta1.PITRKeySecretLabel] = candidate
 	}
 
 	env := []corev1.EnvVar{
@@ -264,11 +264,11 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 	switch dest.Kind {
 	case pitrarchive.DestinationS3:
 		s3 := profile.Storage.S3
-		if profile.Storage.Type != v1alpha1.BackupStorageS3 || s3 == nil {
+		if profile.Storage.Type != v1beta1.BackupStorageS3 || s3 == nil {
 			return nil, fmt.Errorf("check job: profile %q does not describe the S3 destination %s", profile.Name, dest)
 		}
 		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(v1alpha1.BackupStorageS3)},
+			corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(v1beta1.BackupStorageS3)},
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: literalArtifactEnvValue(dest.Bucket)},
 		)
 		if s3.EndpointURL != "" {
@@ -285,7 +285,7 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 			env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_AWS_CREDS_DIR", Value: pitrAWSCredsMountDir})
 		}
 	case pitrarchive.DestinationPVC:
-		if profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil {
+		if profile.Storage.Type != v1beta1.BackupStoragePVC || profile.Storage.PVC == nil {
 			return nil, fmt.Errorf("check job: profile %q does not describe the PVC destination %s", profile.Name, dest)
 		}
 		volumes = append(volumes, corev1.Volume{Name: "pitr-archive", VolumeSource: corev1.VolumeSource{
@@ -293,7 +293,7 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 		}})
 		mounts = append(mounts, corev1.VolumeMount{Name: "pitr-archive", MountPath: pitrCheckPVCMountPath, ReadOnly: true})
 		env = append(env,
-			corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(v1alpha1.BackupStoragePVC)},
+			corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(v1beta1.BackupStoragePVC)},
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_PVC_MOUNT_PATH", Value: pitrCheckPVCMountPath},
 		)
 	default:
@@ -333,7 +333,7 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 			Name:            pitrCheckJobName(fg.Name, entry.ID, candidate),
 			Namespace:       fg.Namespace,
 			Labels:          labels,
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(fg, v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(fg, v1beta1.GroupVersion.WithKind("MysqlFailoverGroup"))},
 		},
 		Spec: batchv1.JobSpec{
 			ActiveDeadlineSeconds: &deadline,
@@ -371,13 +371,13 @@ func buildPITRArchiveCheckJob(fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.P
 // the check is retried at once, which is harmless.
 var pitrCheckRetryGate sync.Map // key: fg UID + "/" + binding id → time.Time
 
-func pitrCheckRetryKey(fg *v1alpha1.MysqlFailoverGroup, id string) string {
+func pitrCheckRetryKey(fg *v1beta1.MysqlFailoverGroup, id string) string {
 	return string(fg.UID) + "/" + id
 }
 
 // pitrCheckRetryWait returns how long the binding's next check must still
 // wait (0: may start now).
-func pitrCheckRetryWait(fg *v1alpha1.MysqlFailoverGroup, id string, now time.Time) time.Duration {
+func pitrCheckRetryWait(fg *v1beta1.MysqlFailoverGroup, id string, now time.Time) time.Duration {
 	v, ok := pitrCheckRetryGate.Load(pitrCheckRetryKey(fg, id))
 	if !ok {
 		return 0
@@ -399,8 +399,8 @@ func pitrCheckRetryWait(fg *v1alpha1.MysqlFailoverGroup, id string, now time.Tim
 // cache never deletes a Job a fresher status records, U12), and the Job is
 // created on a later pass. job is nil while a leftover is being replaced.
 // A candidate snapshot is read uncached and its UID recorded on the Job
-// (v1alpha1.PITRKeySecretUIDAnnotation).
-func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, target *pitrBindingTarget, candidate string) (job, leftover *batchv1.Job, err error) {
+// (v1beta1.PITRKeySecretUIDAnnotation).
+func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, entry *v1beta1.PITRArchiveBinding, target *pitrBindingTarget, candidate string) (job, leftover *batchv1.Job, err error) {
 	name := pitrCheckJobName(fg.Name, entry.ID, candidate)
 	var existing batchv1.Job
 	err = r.bindingReader().Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &existing)
@@ -426,7 +426,7 @@ func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Contex
 		if built.Annotations == nil {
 			built.Annotations = map[string]string{}
 		}
-		built.Annotations[v1alpha1.PITRKeySecretUIDAnnotation] = string(snap.UID)
+		built.Annotations[v1beta1.PITRKeySecretUIDAnnotation] = string(snap.UID)
 	}
 	if err := r.Create(ctx, built); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -435,7 +435,7 @@ func (r *MysqlFailoverGroupReconciler) ensurePITRArchiveCheck(ctx context.Contex
 		}
 		return nil, nil, fmt.Errorf("create check job %s: %w", name, err)
 	}
-	entry.Check = &v1alpha1.PITRArchiveBindingCheck{JobName: built.Name, JobUID: built.UID}
+	entry.Check = &v1beta1.PITRArchiveBindingCheck{JobName: built.Name, JobUID: built.UID}
 	return built, nil, nil
 }
 
@@ -476,7 +476,7 @@ type pitrCheckOutcome struct {
 // Job and a finished Job without a parseable line are failures; a line
 // that is present but does not parse is reported with the parser's
 // reason (U43).
-func (r *MysqlFailoverGroupReconciler) observePITRArchiveCheck(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, entry *v1alpha1.PITRArchiveBinding, now time.Time) (pitrCheckOutcome, error) {
+func (r *MysqlFailoverGroupReconciler) observePITRArchiveCheck(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, entry *v1beta1.PITRArchiveBinding, now time.Time) (pitrCheckOutcome, error) {
 	if entry.Check == nil {
 		return pitrCheckOutcome{}, nil
 	}
@@ -506,12 +506,12 @@ func (r *MysqlFailoverGroupReconciler) observePITRArchiveCheck(ctx context.Conte
 	}
 	phase, detail := jobPhase(&job, "check")
 	switch phase {
-	case v1alpha1.BackupPhaseSucceeded:
+	case v1beta1.BackupPhaseSucceeded:
 		if perr != nil && !errors.Is(perr, errPITRCheckNoLine) {
 			return pitrCheckOutcome{done: true, job: &job, failure: fmt.Sprintf("check Job %s reported a verdict line that does not parse: %v", job.Name, perr)}, nil
 		}
 		return pitrCheckOutcome{done: true, job: &job, failure: fmt.Sprintf("check Job %s ended without a verdict line", job.Name)}, nil
-	case v1alpha1.BackupPhaseFailed:
+	case v1beta1.BackupPhaseFailed:
 		if terminated && message != "" {
 			detail = compactPITRCheckMessage(message)
 		}

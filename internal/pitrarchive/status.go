@@ -7,7 +7,7 @@ import (
 )
 
 // ObservedState is a consumer's view of its archive's descriptor. The API
-// mirrors it as v1alpha1.PITRArchiveObservedState.
+// mirrors it as v1beta1.PITRArchiveObservedState.
 type ObservedState string
 
 const (

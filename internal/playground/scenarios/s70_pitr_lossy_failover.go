@@ -10,7 +10,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -257,7 +257,7 @@ func s70LossyFailover() runner.Step {
 			}
 			foCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 			defer cancel()
-			if _, err := env.Wait.UntilCR(foCtx, env.Namespace, "failover to "+b, func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			if _, err := env.Wait.UntilCR(foCtx, env.Namespace, "failover to "+b, func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				return m.Status.ActiveSite == b, "active=" + m.Status.ActiveSite, nil
 			}); err != nil {
 				return err
@@ -336,7 +336,7 @@ func s70VerifyLatestLoss() runner.Step {
 			}
 			lost := ctxFetch(env, "lost")
 			if err := s70VerifyRefusedNamingL(ctx, env, "latest-lost", pitrExpectation{
-				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: flushed, Markers: []string{"baseline", "P"},
+				Backup: "b1", Mode: v1beta1.PointInTimeModeLatest, Fence: flushed, Markers: []string{"baseline", "P"},
 			}, lost); err != nil {
 				return err
 			}
@@ -345,7 +345,7 @@ func s70VerifyLatestLoss() runner.Step {
 			// latest-x asserts L through gtidExecuted = A-flush ∖ L exactly,
 			// which replays era P.
 			return pitrVerify(ctx, env, s70ID, s70DBName, "latest-x", pitrExpectation{
-				Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: flushed, Exclude: lost, Outcome: v1alpha1.PointInTimeArchiveHead,
+				Backup: "b1", Mode: v1beta1.PointInTimeModeLatest, Fence: flushed, Exclude: lost, Outcome: v1beta1.PointInTimeArchiveHead,
 				Markers: []string{"baseline", "P"},
 			})
 		},
@@ -369,11 +369,11 @@ func s70VerifyTimestampAfterLoss() runner.Step {
 				return err
 			}
 			lost := ctxFetch(env, "lost")
-			e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Markers: []string{"baseline", "P", "S"}}
+			e := pitrExpectation{Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Markers: []string{"baseline", "P", "S"}}
 			if err := s70VerifyRefusedNamingL(ctx, env, "ts-lost", e, lost); err != nil {
 				return err
 			}
-			e.Exclude, e.Outcome = lost, v1alpha1.PointInTimeTargetCovered
+			e.Exclude, e.Outcome = lost, v1beta1.PointInTimeTargetCovered
 			if err := pitrVerifyExcluded(ctx, env, "ts-x", e); err != nil {
 				return err
 			}
@@ -404,11 +404,11 @@ func s70Era(ctx context.Context, env *runner.Env, site string, id int, phase str
 // PITRArchiveDivergentHistory and print exactly L (as a GTID set), not just
 // a set of a's UUID.
 func s70VerifyRefusedNamingL(ctx context.Context, env *runner.Env, label string, e pitrExpectation, lost string) error {
-	v, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, label, e, string(v1alpha1.PITRTokenArchiveDivergentHistory), strings.SplitN(lost, ":", 2)[0])
+	v, err := pitrVerifyRefused(ctx, env, s70ID, s70DBName, label, e, string(v1beta1.PITRTokenArchiveDivergentHistory), strings.SplitN(lost, ":", 2)[0])
 	if err != nil {
 		return err
 	}
-	cond := findCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
+	cond := findCondition(v.Status.Conditions, v1beta1.ConditionVerified)
 	if err := refusalNamesExactly(cond.Message, lost); err != nil {
 		return fmt.Errorf("verification %s: %w", v.Name, err)
 	}
@@ -453,7 +453,7 @@ func s70VerifyBackupAfterLoss() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s70ID, s70DBName, "b2", pitrExpectation{
-				Backup: "b2", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b2", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Outcome: v1beta1.PointInTimeTargetCovered,
 				Markers: []string{"baseline", "P", "S", "Sb", "S2"},
 			})
 		},
@@ -483,10 +483,10 @@ func s70OldPrimaryReturns() runner.Step {
 			}
 			backCtx, cancel := context.WithTimeout(ctx, s70ReturnWait)
 			defer cancel()
-			if _, err := env.Wait.UntilCR(backCtx, env.Namespace, a+" back and read-only", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			if _, err := env.Wait.UntilCR(backCtx, env.Namespace, a+" back and read-only", func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				for _, st := range m.Status.Sites {
 					if st.Name == a {
-						return st.State == v1alpha1.SiteStateReadOnly, fmt.Sprintf("state=%s recovery=%q", st.State, st.RecoveryState), nil
+						return st.State == v1beta1.SiteStateReadOnly, fmt.Sprintf("state=%s recovery=%q", st.State, st.RecoveryState), nil
 					}
 				}
 				return false, "site not in status", nil
@@ -531,11 +531,11 @@ func s70OldPrimaryReturns() runner.Step {
 			}
 			// The same verification as ts-lost, which named L alone while
 			// a was down: the archive now holds L' as well.
-			e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Markers: []string{"baseline", "P", "S"}}
+			e := pitrExpectation{Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Markers: []string{"baseline", "P", "S"}}
 			if err := s70VerifyRefusedNamingL(ctx, env, "ts-lost-tail", e, lostAll); err != nil {
 				return err
 			}
-			e.Exclude, e.Outcome = lostAll, v1alpha1.PointInTimeTargetCovered
+			e.Exclude, e.Outcome = lostAll, v1beta1.PointInTimeTargetCovered
 			return pitrVerifyExcluded(ctx, env, "ts-x-tail", e)
 		},
 	}
@@ -684,14 +684,14 @@ func s70AssertNoReissueWarning(ctx context.Context, env *runner.Env, requested t
 		return ctx.Err()
 	case <-time.After(s70ReissueWarningWait):
 	}
-	ev, found, err := findMFGEvent(ctx, env, requested, v1alpha1.EventPITRArchiveReissueRiskDetected, "site "+site)
+	ev, found, err := findMFGEvent(ctx, env, requested, v1beta1.EventPITRArchiveReissueRiskDetected, "site "+site)
 	if err != nil {
 		return fmt.Errorf("list events after the failback to %s: %w", site, err)
 	}
 	if found {
 		return fmt.Errorf("the failback to the recloned %s raised %s although its server has a new server_uuid and can reissue nothing: %s", site, ev.Reason, ev.Message)
 	}
-	env.Capture.Note("failback to " + site + ": no " + v1alpha1.EventPITRArchiveReissueRiskDetected + " Event")
+	env.Capture.Note("failback to " + site + ": no " + v1beta1.EventPITRArchiveReissueRiskDetected + " Event")
 	return nil
 }
 
@@ -703,7 +703,7 @@ const s70OperatorPollWait = 2*pitrOperatorArchiverPollInterval + 10*time.Second
 // s70OperatorPollFailing reports whether status.pitr.message says the
 // operator's last poll of site failed, in which case its cached suspect-row
 // count may be stale.
-func s70OperatorPollFailing(pitr *v1alpha1.PITRStatus, site string) bool {
+func s70OperatorPollFailing(pitr *v1beta1.PITRStatus, site string) bool {
 	return pitr != nil && strings.Contains(pitr.Message, site+": archiver status unavailable")
 }
 
@@ -721,7 +721,7 @@ func s70WaitOperatorPolled(ctx context.Context, env *runner.Env, site string) er
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "operator polls "+site+" successfully", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "operator polls "+site+" successfully", func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		msg := "status.pitr unset"
 		if m.Status.PITR != nil {
 			msg = "status.pitr.message=" + m.Status.PITR.Message
@@ -794,7 +794,7 @@ func s70VerifyAfterFailback() runner.Step {
 			if err != nil {
 				return err
 			}
-			if cond := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveReady); cond == nil || cond.Status != metav1.ConditionTrue {
+			if cond := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveReady); cond == nil || cond.Status != metav1.ConditionTrue {
 				return fmt.Errorf("PITRArchiveReady is not True after the failback to the recloned old primary: %+v", cond)
 			}
 
@@ -804,18 +804,18 @@ func s70VerifyAfterFailback() runner.Step {
 			// era and a's new era. A PITRArchiveHistoryReset here would be
 			// a reissued GTID.
 			markers := []string{"baseline", "P", "S", "Sb", "S2", "S2b", "R"}
-			e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Markers: markers}
+			e := pitrExpectation{Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Markers: markers}
 			if err := s70VerifyRefusedNamingL(ctx, env, "fb-lost", e, lostAll); err != nil {
 				return err
 			}
-			e.Exclude, e.Outcome = lostAll, v1alpha1.PointInTimeTargetCovered
+			e.Exclude, e.Outcome = lostAll, v1beta1.PointInTimeTargetCovered
 			if err := pitrVerifyExcluded(ctx, env, "fb-x", e); err != nil {
 				return err
 			}
 			// The backup taken after the loss: every lost transaction was
 			// committed before its newest one, so none is in its window.
 			return pitrVerify(ctx, env, s70ID, s70DBName, "fb-b2", pitrExpectation{
-				Backup: "b2", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b2", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Outcome: v1beta1.PointInTimeTargetCovered,
 				Markers: markers,
 			})
 		},

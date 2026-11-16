@@ -10,7 +10,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -292,11 +292,11 @@ func (tm *TopologyManager) plannedClaimSlot() *PlannedClaimSlot {
 }
 
 // claimDecisionWait and claimDecisionReject build decisions.
-func claimDecisionWait(reason v1alpha1.PlannedFailoverWaitReason, format string, args ...any) PlannedClaimDecision {
+func claimDecisionWait(reason v1beta1.PlannedFailoverWaitReason, format string, args ...any) PlannedClaimDecision {
 	return PlannedClaimDecision{Kind: ClaimWait, WaitReason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
-func claimDecisionReject(reason v1alpha1.PlannedFailoverReason, format string, args ...any) PlannedClaimDecision {
+func claimDecisionReject(reason v1beta1.PlannedFailoverReason, format string, args ...any) PlannedClaimDecision {
 	return PlannedClaimDecision{Kind: ClaimReject, RejectReason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
@@ -313,13 +313,13 @@ func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d
 	if held, ok := tm.plannedSlot.snapshot(); ok {
 		switch {
 		case held.mode == claimModeHold:
-			return claimDecisionReject(v1alpha1.PlannedFailoverReasonManualRecoveryPending,
+			return claimDecisionReject(v1beta1.PlannedFailoverReasonManualRecoveryPending,
 				"automatic failover is held after planned failover run %s; acknowledge the hold first", held.runID), "", true
 		case held.runID != req.RunID:
-			return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld,
+			return claimDecisionWait(v1beta1.PlannedFailoverWaitClaimHeld,
 				"planned failover run %s holds the claim", held.runID), "", true
 		case held.target != req.Target:
-			return claimDecisionReject(v1alpha1.PlannedFailoverReasonInternalError,
+			return claimDecisionReject(v1beta1.PlannedFailoverReasonInternalError,
 				"run %s holds the claim for target %q, not %q", held.runID, held.target, req.Target), "", true
 		default:
 			return claimDecisionGranted(&held), held.source, true
@@ -328,49 +328,49 @@ func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d
 	target := tm.getSite(req.Target)
 	switch {
 	case target == nil:
-		return claimDecisionReject(v1alpha1.PlannedFailoverReasonUnknownSite, "site %q is not in the topology", req.Target), "", true
+		return claimDecisionReject(v1beta1.PlannedFailoverReasonUnknownSite, "site %q is not in the topology", req.Target), "", true
 	case !target.isPromotable():
-		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetNotPromotable,
+		return claimDecisionReject(v1beta1.PlannedFailoverReasonTargetNotPromotable,
 			"site %q has role %s; only PrimaryCandidate sites may be promoted", req.Target, APISiteRole(target.role)), "", true
 	case !tm.ready:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerNotReady, "the topology manager has not completed a poll"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitManagerNotReady, "the topology manager has not completed a poll"), "", true
 	case tm.retired:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerRetiring, "the topology manager is being replaced"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitManagerRetiring, "the topology manager is being replaced"), "", true
 	case tm.predecessorUpdateInFlight:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager's ordered update is still running"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager's ordered update is still running"), "", true
 	case tm.deploymentChanging > 0 || tm.promotionUnobservedLocked():
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPromotionInFlight, "a promotion is in flight or not yet observed"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitPromotionInFlight, "a promotion is in flight or not yet observed"), "", true
 	case tm.deploymentUpdateRunning:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitUpdateInFlight, "an ordered update holds the sites"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitUpdateInFlight, "an ordered update holds the sites"), "", true
 	case tm.topologyFrozen:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"), "", true
 	case tm.bootstrapBlocksCrossSiteLocked():
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitBootstrapInFlight, "a bootstrap of a promotable site is running"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitBootstrapInFlight, "a bootstrap of a promotable site is running"), "", true
 	case slices.Contains(tm.keyringRotationBlocked, req.Target):
-		return claimDecisionReject(v1alpha1.PlannedFailoverReasonKeyringRotation,
+		return claimDecisionReject(v1beta1.PlannedFailoverReasonKeyringRotation,
 			"site %q is mid-keyring-rotation; wait for it to be Sealed and re-annotate", req.Target), "", true
 	case slices.Contains(tm.keyringRotationReserved, req.Target):
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitKeyringRotation, "a keyring rotation of %q is being admitted", req.Target), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitKeyringRotation, "a keyring rotation of %q is being admitted", req.Target), "", true
 	}
-	if rec := tm.recovery[req.Target]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
-		return claimDecisionReject(v1alpha1.PlannedFailoverReasonDivergentTarget,
+	if rec := tm.recovery[req.Target]; rec != nil && rec.state == v1beta1.RecoveryStateBlocked {
+		return claimDecisionReject(v1beta1.PlannedFailoverReasonDivergentTarget,
 			"site %q has %d transactions the primary lacks (%s)", req.Target, rec.divergentCount, truncateGtidSet(rec.divergentGtid)), "", true
 	}
 	if tm.restoreReclonePendingLocked(req.Target) {
-		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetUnhealthy,
+		return claimDecisionReject(v1beta1.PlannedFailoverReasonTargetUnhealthy,
 			"site %q still awaits its post-restore reclone", req.Target), "", true
 	}
 	if rec := tm.ownLoss[req.Target]; rec != nil {
-		return claimDecisionReject(v1alpha1.PlannedFailoverReasonTargetUnhealthy,
+		return claimDecisionReject(v1beta1.PlannedFailoverReasonTargetUnhealthy,
 			"site %q lacks %d transactions it issued itself (%s): %s", req.Target, rec.lostCount, truncateGtidSet(rec.lostGtid),
 			tm.ownLossPromotionRemedyLocked(req.Target)), "", true
 	}
 	polled = tm.activeSiteLocked()
 	switch {
 	case polled == req.Target:
-		return claimDecisionReject(v1alpha1.PlannedFailoverReasonAlreadyActive, "site %q is already the active primary", req.Target), "", true
+		return claimDecisionReject(v1beta1.PlannedFailoverReasonAlreadyActive, "site %q is already the active primary", req.Target), "", true
 	case polled == "":
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "the topology manager names no unique writable primary"), "", true
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitAuthorityUnsettled, "the topology manager names no unique writable primary"), "", true
 	}
 	return PlannedClaimDecision{}, polled, false
 }
@@ -383,10 +383,10 @@ func (tm *TopologyManager) plannedClaimRefusalLocked(req PlannedClaimRequest) (d
 // takes r.mu while holding tm.mu, and holds no lock across a probe.
 func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req PlannedClaimRequest, hooks SimHooks) (PlannedClaimDecision, error) {
 	if tm.plannedClaimSlot() == nil {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerNotReady, "the topology manager is not wired to a claim slot"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitManagerNotReady, "the topology manager is not wired to a claim slot"), nil
 	}
 	if tm.predecessorMutating() {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager is still changing the sites"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager is still changing the sites"), nil
 	}
 	tm.mu.RLock()
 	d, polled, decided := tm.plannedClaimRefusalLocked(req)
@@ -403,7 +403,7 @@ func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req Planned
 		return *ev.wait, nil
 	}
 	if !sameFailoverRecord(inMemory, req.DurableBaseline) {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled,
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitAuthorityUnsettled,
 			"the durable failover record (%s) has not caught up with the topology manager's (%s)",
 			describeFailoverRecordRef(req.DurableBaseline), describeFailoverRecordRef(inMemory)), nil
 	}
@@ -414,7 +414,7 @@ func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req Planned
 	throttled := tm.plannedGateRunID == req.RunID && tm.clock.Since(tm.plannedGateAttemptAt) < plannedClaimGateInterval
 	tm.mu.RUnlock()
 	if throttled {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRecoveryInFlight, "a follower mutation was still running at the last gate attempt"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitRecoveryInFlight, "a follower mutation was still running at the last gate attempt"), nil
 	}
 
 	hooks.yield(YieldBeforePublishForSim)
@@ -426,7 +426,7 @@ func (tm *TopologyManager) claimPlannedFailover(ctx context.Context, req Planned
 		tm.mu.Lock()
 		tm.plannedGateRunID, tm.plannedGateAttemptAt = req.RunID, tm.clock.Now()
 		tm.mu.Unlock()
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRecoveryInFlight, "a recovery or source-convergence step is still running on the sites"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitRecoveryInFlight, "a recovery or source-convergence step is still running on the sites"), nil
 	}
 	hooks.yield(YieldAfterPublishForSim)
 	if out.Kind == ClaimGranted {
@@ -449,16 +449,16 @@ func (tm *TopologyManager) publishPlannedClaim(req PlannedClaimRequest, epoch ui
 	case decided:
 		return d
 	case tm.authorityEpoch != epoch || now != polled:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "authority moved while the claim was being decided")
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitAuthorityUnsettled, "authority moved while the claim was being decided")
 	case !sameFailoverRecord(newFailoverRecordRef(tm.lastFailover, tm.lastFailoverTarget), inMemory):
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "a failover was recorded while the claim was being decided")
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitAuthorityUnsettled, "a failover was recorded while the claim was being decided")
 	}
 	c := plannedClaim{
 		mode: claimModeRun, runID: req.RunID, source: polled, target: req.Target,
 		sourceUUID: sourceUUID, baseline: inMemory, provisional: true,
 	}
 	if !tm.plannedSlot.hydrate(c) {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld, "another run took the claim")
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitClaimHeld, "another run took the claim")
 	}
 	tm.authorityEpoch++
 	tm.crossSiteRetry = true
@@ -501,11 +501,11 @@ func (tm *TopologyManager) requireRunClaim(leader context.Context, ref PlannedRu
 // hydratedRunClaim builds the Run claim an owns-sites block hydrates to,
 // or ok=false when pf cannot be hydrated (no runId, no source, or a
 // phase that owns nothing).
-func hydratedRunClaim(pf *v1alpha1.PlannedFailoverStatus) (plannedClaim, bool) {
+func hydratedRunClaim(pf *v1beta1.PlannedFailoverStatus) (plannedClaim, bool) {
 	if pf == nil || pf.RunID == "" || pf.SourceSite == "" || pf.TargetSite == "" {
 		return plannedClaim{}, false
 	}
-	if !plannedFailoverOwnsSites(&v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{PlannedFailover: pf}}) {
+	if !plannedFailoverOwnsSites(&v1beta1.MysqlFailoverGroup{Status: v1beta1.MysqlFailoverGroupStatus{PlannedFailover: pf}}) {
 		return plannedClaim{}, false
 	}
 	return plannedClaim{
@@ -707,7 +707,7 @@ func (s promoteMemoStage) statement() string {
 }
 
 // plannedRunStartTime is when the run was accepted (zero if unknown).
-func plannedRunStartTime(pf *v1alpha1.PlannedFailoverStatus) time.Time {
+func plannedRunStartTime(pf *v1beta1.PlannedFailoverStatus) time.Time {
 	if !pf.StartTime.IsZero() {
 		return pf.StartTime.Time
 	}
@@ -725,8 +725,8 @@ func plannedRunStartTime(pf *v1alpha1.PlannedFailoverStatus) time.Time {
 // may be taken for the run's own: a rollback for AuthorityChanged or
 // LegacyRunRefused over a fence that was only intended does not become
 // attributable because the source stopped answering before the deadline.
-func plannedFenceAttributionReason(pf *v1alpha1.PlannedFailoverStatus, reason v1alpha1.PlannedFailoverReason) v1alpha1.PlannedFailoverReason {
-	if reason == v1alpha1.PlannedFailoverReasonSourceLost && pf != nil && pf.Rollback != nil && pf.Rollback.Reason != "" {
+func plannedFenceAttributionReason(pf *v1beta1.PlannedFailoverStatus, reason v1beta1.PlannedFailoverReason) v1beta1.PlannedFailoverReason {
+	if reason == v1beta1.PlannedFailoverReasonSourceLost && pf != nil && pf.Rollback != nil && pf.Rollback.Reason != "" {
 		return pf.Rollback.Reason
 	}
 	return reason
@@ -738,22 +738,22 @@ func plannedFenceAttributionReason(pf *v1alpha1.PlannedFailoverStatus, reason v1
 // (§6.5): the run's source is known, its fence was attributable, and the
 // fence was not refused (a legacy run) or never sent because authority had
 // already moved.
-func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.PlannedFailoverStatus, ok bool) {
+func plannedFenceAttributableEnd(fg *v1beta1.MysqlFailoverGroup) (pf *v1beta1.PlannedFailoverStatus, ok bool) {
 	pf, marked := plannedFailoverRun(fg)
 	if pf == nil || pf.RunID == "" || pf.SourceSite == "" || pf.Fence == nil {
 		return nil, false
 	}
-	var reason v1alpha1.PlannedFailoverReason
+	var reason v1beta1.PlannedFailoverReason
 	switch {
-	case pf.Result != nil && pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
-		if slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
+	case pf.Result != nil && pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSourceLeftFenced:
+		if slices.Contains(pf.Result.Warnings, v1beta1.PlannedFailoverWarningFenceNotAttributable) {
 			return nil, false
 		}
 		reason = pf.Result.Reason
 	case marked:
-		m, _ := ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
-		if m.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
-			slices.Contains(m.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
+		m, _ := ParseTerminalMarker(fg.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation])
+		if m.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced ||
+			slices.Contains(m.Warnings, v1beta1.PlannedFailoverWarningFenceNotAttributable) {
 			return nil, false
 		}
 		reason = m.Reason
@@ -762,9 +762,9 @@ func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.
 	}
 	reason = plannedFenceAttributionReason(pf, reason)
 	switch {
-	case reason == v1alpha1.PlannedFailoverReasonLegacyRunRefused:
+	case reason == v1beta1.PlannedFailoverReasonLegacyRunRefused:
 		return nil, false
-	case reason == v1alpha1.PlannedFailoverReasonAuthorityChanged && pf.Fence.State != v1alpha1.PlannedFailoverFenceApplied:
+	case reason == v1beta1.PlannedFailoverReasonAuthorityChanged && pf.Fence.State != v1beta1.PlannedFailoverFenceApplied:
 		return nil, false
 	}
 	return pf, true
@@ -778,7 +778,7 @@ func plannedFenceAttributableEnd(fg *v1alpha1.MysqlFailoverGroup) (pf *v1alpha1.
 //   - a run that ended SourceLeftFenced with its own, attributable fence
 //     names its source for re-assert (§6.5), unless a failover recorded
 //     after the run started has moved authority since.
-func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager, view *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) {
+func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager, view *v1beta1.MysqlFailoverGroup, nn types.NamespacedName) {
 	if view == nil {
 		return
 	}
@@ -788,15 +788,15 @@ func (r *TopologyManagerRunner) restorePlannedFailoverState(tm *TopologyManager,
 	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	confirmed := pf.Phase == v1alpha1.PlannedFailoverPhasePublishing ||
-		(pf.Result != nil && pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded)
+	confirmed := pf.Phase == v1beta1.PlannedFailoverPhasePublishing ||
+		(pf.Result != nil && pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded)
 	if confirmed && pf.Promotion != nil && pf.Promotion.ConfirmationTime != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
 		tm.applyPlannedPromotionLocked(pf.Promotion.ConfirmationTime.Time, pf.TargetSite, *pf.Fence.GtidSet)
-	} else if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && pf.Promotion != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
+	} else if pf.Phase == v1beta1.PlannedFailoverPhasePromoting && pf.Promotion != nil && pf.Fence != nil && pf.Fence.GtidSet != nil {
 		// A confirmed tail that released its claim before Publishing
 		// committed left its confirmation in the planned-failover-confirmed
 		// annotation (K014): the run's record may not be durable yet.
-		if at, ok := parseDeadlineStart(view.GetAnnotations()[v1alpha1.PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
+		if at, ok := parseDeadlineStart(view.GetAnnotations()[v1beta1.PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
 			tm.applyPlannedPromotionLocked(at, pf.TargetSite, *pf.Fence.GtidSet)
 		}
 	}
@@ -840,7 +840,7 @@ type plannedFencedSource struct {
 
 // plannedFenceGtidString is the run's fenced GTID set as recorded ("" when
 // the run has none).
-func plannedFenceGtidString(pf *v1alpha1.PlannedFailoverStatus) string {
+func plannedFenceGtidString(pf *v1beta1.PlannedFailoverStatus) string {
 	if pf == nil || pf.Fence == nil || pf.Fence.GtidSet == nil {
 		return ""
 	}
@@ -1005,12 +1005,12 @@ func (tm *TopologyManager) carryNamedActiveSite(old *TopologyManager) bool {
 // A read error fails the start unless the group's slot already holds a
 // claim or a predecessor of this process is being replaced: hydration
 // only ever fills an empty slot, and this process's runs hold theirs.
-func (r *TopologyManagerRunner) plannedFailoverView(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, prev *managedTopology) (*v1alpha1.MysqlFailoverGroup, error) {
+func (r *TopologyManagerRunner) plannedFailoverView(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, prev *managedTopology) (*v1beta1.MysqlFailoverGroup, error) {
 	if r.apiReader == nil {
 		return fg, nil
 	}
 	nn := FailoverGroupNamespacedName(fg)
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := r.apiReader.Get(ctx, nn, &fresh); err != nil {
 		if prev != nil || r.Slot(nn).Held() {
 			r.logger.Warn("could not read the group uncached; the new topology manager shares its predecessor's planned-failover claim",

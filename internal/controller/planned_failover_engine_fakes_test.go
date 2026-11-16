@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
@@ -44,7 +44,7 @@ type pfFakeTopology struct {
 	uuid       func(ref PlannedRunRef) (string, error)
 	promote    func(ref PlannedRunRef) (PromoteOutcome, error)
 	record     func(ref PlannedRunRef) error
-	dns        func(ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error)
+	dns        func(ref PlannedRunRef) (v1beta1.PlannedFailoverDNSState, error)
 	rollback   func(ref PlannedRunRef) (RollbackResult, error)
 	needsProof bool // the next mutating call returns errReproveRequired
 	// probeUnguarded makes ProbeLag a plain read, as in production (the
@@ -125,13 +125,13 @@ func (f *pfFakeTopology) ClaimPlannedFailover(_ context.Context, _ types.Namespa
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.heldRun != "" && f.heldRun != req.RunID {
-		return PlannedClaimDecision{Kind: ClaimWait, WaitReason: v1alpha1.PlannedFailoverWaitClaimHeld}, nil
+		return PlannedClaimDecision{Kind: ClaimWait, WaitReason: v1beta1.PlannedFailoverWaitClaimHeld}, nil
 	}
 	f.heldRun = req.RunID
 	return PlannedClaimDecision{Kind: ClaimGranted, Source: "iad", SourceServerUUID: "uuid-iad", Baseline: req.DurableBaseline}, nil
 }
 
-func (f *pfFakeTopology) EnsureClaim(_ context.Context, ref PlannedRunRef, _ *v1alpha1.MysqlFailoverGroup) (PlannedClaimDecision, error) {
+func (f *pfFakeTopology) EnsureClaim(_ context.Context, ref PlannedRunRef, _ *v1beta1.MysqlFailoverGroup) (PlannedClaimDecision, error) {
 	f.note("ensure")
 	if f.ensure != nil {
 		return f.ensure(ref)
@@ -141,12 +141,12 @@ func (f *pfFakeTopology) EnsureClaim(_ context.Context, ref PlannedRunRef, _ *v1
 	if f.heldRun == "" {
 		if f.hydrateHold != "" {
 			f.heldRun, f.holdMode = f.hydrateHold, true
-			return PlannedClaimDecision{Kind: ClaimReject, RejectReason: v1alpha1.PlannedFailoverReasonManualRecoveryPending}, nil
+			return PlannedClaimDecision{Kind: ClaimReject, RejectReason: v1beta1.PlannedFailoverReasonManualRecoveryPending}, nil
 		}
 		f.heldRun = ref.RunID
 	}
 	if f.heldRun != ref.RunID {
-		return PlannedClaimDecision{Kind: ClaimWait, WaitReason: v1alpha1.PlannedFailoverWaitClaimHeld}, nil
+		return PlannedClaimDecision{Kind: ClaimWait, WaitReason: v1beta1.PlannedFailoverWaitClaimHeld}, nil
 	}
 	return PlannedClaimDecision{Kind: ClaimGranted, Source: ref.Source}, nil
 }
@@ -216,7 +216,7 @@ func (f *pfFakeTopology) CheckRunClaim(ref PlannedRunRef) error {
 	return f.guard(ref)
 }
 
-func (f *pfFakeTopology) Reprove(_ context.Context, ref PlannedRunRef, _ *v1alpha1.MysqlFailoverGroup) (ReproveResult, error) {
+func (f *pfFakeTopology) Reprove(_ context.Context, ref PlannedRunRef, _ *v1beta1.MysqlFailoverGroup) (ReproveResult, error) {
 	f.note("reprove")
 	f.mu.Lock()
 	f.needsProof = false
@@ -238,7 +238,7 @@ func (f *pfFakeTopology) Fence(_ context.Context, ref PlannedRunRef, _ string) (
 	return FenceProof{Kind: FenceApplied, SourceServerUUID: "uuid-iad", GtidSet: "uuid-iad:1-10", Attribution: FenceByMemo}, nil
 }
 
-func (f *pfFakeTopology) ProveFence(_ context.Context, ref PlannedRunRef, _ v1alpha1.PlannedFailoverFenceRecord) (FenceProof, error) {
+func (f *pfFakeTopology) ProveFence(_ context.Context, ref PlannedRunRef, _ v1beta1.PlannedFailoverFenceRecord) (FenceProof, error) {
 	if err := f.guard(ref); err != nil {
 		return FenceProof{}, err
 	}
@@ -287,7 +287,7 @@ func (f *pfFakeTopology) ReadTargetServerUUID(_ context.Context, ref PlannedRunR
 	return "uuid-pdx", nil
 }
 
-func (f *pfFakeTopology) Promote(ctx context.Context, ref PlannedRunRef, _ *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error) {
+func (f *pfFakeTopology) Promote(ctx context.Context, ref PlannedRunRef, _ *v1beta1.PlannedFailoverStatus) (PromoteOutcome, error) {
 	if f.onCtx != nil {
 		f.onCtx("promote", ctx)
 	}
@@ -312,7 +312,7 @@ func (f *pfFakeTopology) RecordPlannedPromotion(_ context.Context, ref PlannedRu
 	return nil
 }
 
-func (f *pfFakeTopology) ApplyDNS(_ context.Context, ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error) {
+func (f *pfFakeTopology) ApplyDNS(_ context.Context, ref PlannedRunRef) (v1beta1.PlannedFailoverDNSState, error) {
 	if err := f.guard(ref); err != nil {
 		return "", err
 	}
@@ -320,7 +320,7 @@ func (f *pfFakeTopology) ApplyDNS(_ context.Context, ref PlannedRunRef) (v1alpha
 	if f.dns != nil {
 		return f.dns(ref)
 	}
-	return v1alpha1.PlannedFailoverDNSApplied, nil
+	return v1beta1.PlannedFailoverDNSApplied, nil
 }
 
 func (f *pfFakeTopology) NameUnconfirmedTarget(ref PlannedRunRef) error {
@@ -338,7 +338,7 @@ func (f *pfFakeTopology) NameFencedSource(ref PlannedRunRef, serverUUID, _ strin
 	return nil
 }
 
-func (f *pfFakeTopology) Rollback(_ context.Context, ref PlannedRunRef, _ *v1alpha1.PlannedFailoverStatus) (RollbackResult, error) {
+func (f *pfFakeTopology) Rollback(_ context.Context, ref PlannedRunRef, _ *v1beta1.PlannedFailoverStatus) (RollbackResult, error) {
 	if err := f.guard(ref); err != nil {
 		return RollbackResult{}, err
 	}
@@ -346,7 +346,7 @@ func (f *pfFakeTopology) Rollback(_ context.Context, ref PlannedRunRef, _ *v1alp
 	if f.rollback != nil {
 		return f.rollback(ref)
 	}
-	return RollbackResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack}, nil
+	return RollbackResult{Outcome: v1beta1.PlannedFailoverOutcomeRolledBack}, nil
 }
 
 func (f *pfFakeTopology) ActiveSite(types.NamespacedName) (string, bool) { return "", false }
@@ -358,20 +358,20 @@ var _ PlannedFailoverTopology = (*pfFakeTopology)(nil)
 type pfFakeSink struct {
 	mu        sync.Mutex
 	events    []string // "<type> <reason>: <message>"
-	terminals []v1alpha1.PlannedFailoverResult
+	terminals []v1beta1.PlannedFailoverResult
 	// terminalTargets is the target_site label of each RunTerminal.
 	terminalTargets []string
-	deferred        []v1alpha1.PlannedFailoverDeferReason
+	deferred        []v1beta1.PlannedFailoverDeferReason
 	lagWaits        int
 }
 
-func (s *pfFakeSink) Event(_ *v1alpha1.MysqlFailoverGroup, eventType, reason, message string) {
+func (s *pfFakeSink) Event(_ *v1beta1.MysqlFailoverGroup, eventType, reason, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, eventType+" "+reason+": "+message)
 }
 
-func (s *pfFakeSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
+func (s *pfFakeSink) RunTerminal(_ types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if pf != nil && pf.Result != nil {
@@ -386,7 +386,7 @@ func (s *pfFakeSink) LagWaitObserved(types.NamespacedName, string, time.Duration
 	s.lagWaits++
 }
 
-func (s *pfFakeSink) Deferred(_ types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason) {
+func (s *pfFakeSink) Deferred(_ types.NamespacedName, reason v1beta1.PlannedFailoverDeferReason) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deferred = append(s.deferred, reason)
@@ -494,7 +494,7 @@ func pfApplyFault(fault pfWriteFault, name string, do func() error) error {
 // newPFFakeClient builds a fake client over objs with the fault script.
 func newPFFakeClient(faults *pfFaults, objs ...client.Object) client.WithWatch {
 	return fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(objs...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
@@ -504,7 +504,7 @@ func newPFFakeClient(faults *pfFaults, objs ...client.Object) client.WithWatch {
 			},
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				var before map[string]string
-				var cur v1alpha1.MysqlFailoverGroup
+				var cur v1beta1.MysqlFailoverGroup
 				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &cur); err == nil {
 					before = cur.GetAnnotations()
 				}
@@ -531,7 +531,7 @@ type pfEngineHarness struct {
 	e      *PlannedFailoverEngine
 }
 
-func newPFEngineHarness(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) *pfEngineHarness {
+func newPFEngineHarness(t *testing.T, fg *v1beta1.MysqlFailoverGroup) *pfEngineHarness {
 	t.Helper()
 	h := &pfEngineHarness{
 		t:      t,
@@ -563,7 +563,7 @@ func (h *pfEngineHarness) step() time.Duration {
 
 // stepUntil steps (advancing the clock by each requeue) until done holds,
 // at most n times.
-func (h *pfEngineHarness) stepUntil(n int, done func(*v1alpha1.MysqlFailoverGroup) bool) {
+func (h *pfEngineHarness) stepUntil(n int, done func(*v1beta1.MysqlFailoverGroup) bool) {
 	h.t.Helper()
 	for i := 0; i < n; i++ {
 		if done(h.fg()) {
@@ -580,22 +580,22 @@ func (h *pfEngineHarness) stepUntil(n int, done func(*v1alpha1.MysqlFailoverGrou
 	}
 }
 
-func (h *pfEngineHarness) fg() *v1alpha1.MysqlFailoverGroup {
+func (h *pfEngineHarness) fg() *v1beta1.MysqlFailoverGroup {
 	h.t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := h.c.Get(context.Background(), h.nn, &fg); err != nil {
 		h.t.Fatalf("get: %v", err)
 	}
 	return &fg
 }
 
-func (h *pfEngineHarness) pf() *v1alpha1.PlannedFailoverStatus {
+func (h *pfEngineHarness) pf() *v1beta1.PlannedFailoverStatus {
 	h.t.Helper()
 	return h.fg().Status.PlannedFailover
 }
 
 // setBlock stores pf (and annotations, when non-nil) on the group.
-func (h *pfEngineHarness) setBlock(pf *v1alpha1.PlannedFailoverStatus) {
+func (h *pfEngineHarness) setBlock(pf *v1beta1.PlannedFailoverStatus) {
 	h.t.Helper()
 	fg := h.fg()
 	fg.Status.PlannedFailover = pf
@@ -624,19 +624,19 @@ func (h *pfEngineHarness) setAnnotation(key, value string) {
 
 // pfRunAt returns a block of run "run-1" in phase with the records a run in
 // that phase carries.
-func pfRunAt(phase v1alpha1.PlannedFailoverPhase, now time.Time) *v1alpha1.PlannedFailoverStatus {
+func pfRunAt(phase v1beta1.PlannedFailoverPhase, now time.Time) *v1beta1.PlannedFailoverStatus {
 	t := metav1.NewTime(now)
 	deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
 	f := "uuid-iad:1-10"
-	pf := &v1alpha1.PlannedFailoverStatus{
+	pf := &v1beta1.PlannedFailoverStatus{
 		RunID: "run-1", Revision: 1, Phase: phase, TargetSite: "pdx", StartTime: t,
-		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute},
+		Settings: v1beta1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute},
 			DrainTimeout: metav1.Duration{Duration: 5 * time.Second}},
-		Admission: &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline},
+		Admission: &v1beta1.PlannedFailoverAdmission{DeadlineTime: &deadline},
 	}
-	order := []v1alpha1.PlannedFailoverPhase{
-		v1alpha1.PlannedFailoverPhaseFencing, v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhasePromoting, v1alpha1.PlannedFailoverPhasePublishing,
+	order := []v1beta1.PlannedFailoverPhase{
+		v1beta1.PlannedFailoverPhaseFencing, v1beta1.PlannedFailoverPhaseDraining, v1beta1.PlannedFailoverPhaseWaitingForLag,
+		v1beta1.PlannedFailoverPhasePromoting, v1beta1.PlannedFailoverPhasePublishing,
 	}
 	idx := -1
 	for i, p := range order {
@@ -644,47 +644,47 @@ func pfRunAt(phase v1alpha1.PlannedFailoverPhase, now time.Time) *v1alpha1.Plann
 			idx = i
 		}
 	}
-	if phase == v1alpha1.PlannedFailoverPhaseRollingBack {
+	if phase == v1beta1.PlannedFailoverPhaseRollingBack {
 		idx = 2
 	}
 	if idx >= 0 {
 		pf.SourceSite = "iad"
 		pf.ClaimTime = &t
-		pf.ClaimBaseline = &v1alpha1.FailoverRecordRef{}
-		pf.Fence = &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, IntentTime: t, SourceServerUUID: "uuid-iad"}
+		pf.ClaimBaseline = &v1beta1.FailoverRecordRef{}
+		pf.Fence = &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceIntended, IntentTime: t, SourceServerUUID: "uuid-iad"}
 	}
 	if idx >= 1 {
-		pf.Fence.State = v1alpha1.PlannedFailoverFenceApplied
+		pf.Fence.State = v1beta1.PlannedFailoverFenceApplied
 		pf.Fence.ApplyTime = &t
 		pf.Fence.GtidSet = &f
-		pf.Drain = &v1alpha1.PlannedFailoverDrainRecord{StartTime: t}
+		pf.Drain = &v1beta1.PlannedFailoverDrainRecord{StartTime: t}
 	}
 	if idx >= 2 {
 		pf.Drain.CompletionTime = &t
-		pf.LagWait = &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: t}
+		pf.LagWait = &v1beta1.PlannedFailoverLagWaitRecord{StartTime: t}
 	}
 	if idx >= 3 {
 		pf.LagWait.CatchUpTime = &t
-		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, IntentTime: t, TargetServerUUID: "uuid-pdx"}
+		pf.Promotion = &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionIntended, IntentTime: t, TargetServerUUID: "uuid-pdx"}
 	}
 	if idx >= 4 {
-		pf.Promotion.State = v1alpha1.PlannedFailoverPromotionConfirmed
+		pf.Promotion.State = v1beta1.PlannedFailoverPromotionConfirmed
 		pf.Promotion.ConfirmationTime = &t
-		pf.DNS = &v1alpha1.PlannedFailoverDNSRecord{State: v1alpha1.PlannedFailoverDNSApplied, AttemptTime: t}
+		pf.DNS = &v1beta1.PlannedFailoverDNSRecord{State: v1beta1.PlannedFailoverDNSApplied, AttemptTime: t}
 	}
-	if phase == v1alpha1.PlannedFailoverPhaseRollingBack {
-		pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonLagTimeout, IntentTime: t}
+	if phase == v1beta1.PlannedFailoverPhaseRollingBack {
+		pf.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: v1beta1.PlannedFailoverReasonLagTimeout, IntentTime: t}
 	}
 	return pf
 }
 
 // pfHarnessAt seeds a harness with run-1 in phase, its claim held by the
 // topology fake.
-func pfHarnessAt(t *testing.T, phase v1alpha1.PlannedFailoverPhase) *pfEngineHarness {
+func pfHarnessAt(t *testing.T, phase v1beta1.PlannedFailoverPhase) *pfEngineHarness {
 	t.Helper()
 	h := newPFEngineHarness(t, plannedFailoverFG(""))
 	h.setBlock(pfRunAt(phase, h.clk.Now()))
-	if phase != v1alpha1.PlannedFailoverPhaseAdmitting && phase != v1alpha1.PlannedFailoverPhasePublishing {
+	if phase != v1beta1.PlannedFailoverPhaseAdmitting && phase != v1beta1.PlannedFailoverPhasePublishing {
 		h.topo.setHeld("run-1", false)
 	}
 	return h

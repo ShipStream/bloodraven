@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -48,7 +48,7 @@ func (f *pfEnvTopology) ClaimPlannedFailover(_ context.Context, _ types.Namespac
 	f.held = req.RunID
 	return controller.PlannedClaimDecision{Kind: controller.ClaimGranted, Source: "dc1", SourceServerUUID: "uuid-dc1", Baseline: req.DurableBaseline}, nil
 }
-func (f *pfEnvTopology) EnsureClaim(_ context.Context, ref controller.PlannedRunRef, _ *v1alpha1.MysqlFailoverGroup) (controller.PlannedClaimDecision, error) {
+func (f *pfEnvTopology) EnsureClaim(_ context.Context, ref controller.PlannedRunRef, _ *v1beta1.MysqlFailoverGroup) (controller.PlannedClaimDecision, error) {
 	f.note("ensure")
 	return controller.PlannedClaimDecision{Kind: controller.ClaimGranted, Source: ref.Source}, nil
 }
@@ -90,14 +90,14 @@ func (f *pfEnvTopology) PlannedClaimHeld(types.NamespacedName) bool {
 	return f.held != ""
 }
 func (f *pfEnvTopology) CheckRunClaim(controller.PlannedRunRef) error { return nil }
-func (f *pfEnvTopology) Reprove(context.Context, controller.PlannedRunRef, *v1alpha1.MysqlFailoverGroup) (controller.ReproveResult, error) {
+func (f *pfEnvTopology) Reprove(context.Context, controller.PlannedRunRef, *v1beta1.MysqlFailoverGroup) (controller.ReproveResult, error) {
 	return controller.ReproveResult{OK: true}, nil
 }
 func (f *pfEnvTopology) Fence(context.Context, controller.PlannedRunRef, string) (controller.FenceProof, error) {
 	f.note("fence")
 	return controller.FenceProof{Kind: controller.FenceApplied, SourceServerUUID: "uuid-dc1", GtidSet: "uuid-dc1:1-5"}, nil
 }
-func (f *pfEnvTopology) ProveFence(context.Context, controller.PlannedRunRef, v1alpha1.PlannedFailoverFenceRecord) (controller.FenceProof, error) {
+func (f *pfEnvTopology) ProveFence(context.Context, controller.PlannedRunRef, v1beta1.PlannedFailoverFenceRecord) (controller.FenceProof, error) {
 	return controller.FenceProof{Kind: controller.FenceApplied, SourceServerUUID: "uuid-dc1", GtidSet: "uuid-dc1:1-5"}, nil
 }
 func (f *pfEnvTopology) KillAppConnections(context.Context, controller.PlannedRunRef) (int32, error) {
@@ -109,7 +109,7 @@ func (f *pfEnvTopology) ProbeLag(context.Context, controller.PlannedRunRef, stri
 func (f *pfEnvTopology) ReadTargetServerUUID(context.Context, controller.PlannedRunRef) (string, error) {
 	return "uuid-dc2", nil
 }
-func (f *pfEnvTopology) Promote(context.Context, controller.PlannedRunRef, *v1alpha1.PlannedFailoverStatus) (controller.PromoteOutcome, error) {
+func (f *pfEnvTopology) Promote(context.Context, controller.PlannedRunRef, *v1beta1.PlannedFailoverStatus) (controller.PromoteOutcome, error) {
 	f.note("promote")
 	if f.promote != nil {
 		return f.promote(), nil
@@ -119,13 +119,13 @@ func (f *pfEnvTopology) Promote(context.Context, controller.PlannedRunRef, *v1al
 func (f *pfEnvTopology) RecordPlannedPromotion(context.Context, controller.PlannedRunRef, time.Time, string) error {
 	return nil
 }
-func (f *pfEnvTopology) ApplyDNS(context.Context, controller.PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error) {
-	return v1alpha1.PlannedFailoverDNSApplied, nil
+func (f *pfEnvTopology) ApplyDNS(context.Context, controller.PlannedRunRef) (v1beta1.PlannedFailoverDNSState, error) {
+	return v1beta1.PlannedFailoverDNSApplied, nil
 }
 func (f *pfEnvTopology) NameUnconfirmedTarget(controller.PlannedRunRef) error            { return nil }
 func (f *pfEnvTopology) NameFencedSource(controller.PlannedRunRef, string, string) error { return nil }
-func (f *pfEnvTopology) Rollback(context.Context, controller.PlannedRunRef, *v1alpha1.PlannedFailoverStatus) (controller.RollbackResult, error) {
-	return controller.RollbackResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack}, nil
+func (f *pfEnvTopology) Rollback(context.Context, controller.PlannedRunRef, *v1beta1.PlannedFailoverStatus) (controller.RollbackResult, error) {
+	return controller.RollbackResult{Outcome: v1beta1.PlannedFailoverOutcomeRolledBack}, nil
 }
 func (f *pfEnvTopology) ActiveSite(types.NamespacedName) (string, bool) { return "", false }
 
@@ -142,16 +142,16 @@ func pfEnvGroup(t *testing.T, prefix string, annotations map[string]string) type
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}, {Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	return client.ObjectKeyFromObject(fg)
 }
 
-func pfEnvGet(t *testing.T, nn types.NamespacedName) *v1alpha1.MysqlFailoverGroup {
+func pfEnvGet(t *testing.T, nn types.NamespacedName) *v1beta1.MysqlFailoverGroup {
 	t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, nn, &fg); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func pfEnvReconciler(topo controller.PlannedFailoverTopology) *controller.MysqlF
 }
 
 func pfEnvStepUntil(t *testing.T, r *controller.MysqlFailoverGroupReconciler, nn types.NamespacedName, n int,
-	done func(*v1alpha1.MysqlFailoverGroup) bool) {
+	done func(*v1beta1.MysqlFailoverGroup) bool) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		if done(pfEnvGet(t, nn)) {
@@ -184,7 +184,7 @@ func pfEnvStepUntil(t *testing.T, r *controller.MysqlFailoverGroupReconciler, nn
 // record committed, revisions strictly increasing, and the failover record
 // written with the terminal record.
 func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-e2e", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-e2e", map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"})
 	topo := &pfEnvTopology{}
 	r := pfEnvReconciler(topo)
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
@@ -192,10 +192,10 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 	}
 	fg := pfEnvGet(t, nn)
 	pf := fg.Status.PlannedFailover
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Revision != 1 {
+	if pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.Revision != 1 {
 		t.Fatalf("admitting record = %+v", pf)
 	}
-	if _, ok := fg.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := fg.Annotations[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("annotation kept after the Admitting record committed")
 	}
 	runID, rev := pf.RunID, pf.Revision
@@ -208,13 +208,13 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 			t.Fatalf("block regressed: run %s rev %d after rev %d", cur.RunID, cur.Revision, rev)
 		}
 		rev = cur.Revision
-		if cur.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+		if cur.Phase == v1beta1.PlannedFailoverPhaseSucceeded {
 			break
 		}
 	}
 	fg = pfEnvGet(t, nn)
 	pf = fg.Status.PlannedFailover
-	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
+	if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("final = %+v", pf)
 	}
 	if fg.Status.LastFailoverTarget() != "dc2" || fg.Status.PromotionGtidExecuted() != "uuid-dc1:1-5" || fg.Status.LastFailoverTime() == nil {
@@ -239,7 +239,7 @@ func TestEnvtest_PlannedFailoverEngine_EndToEnd(t *testing.T) {
 //   - A legacy terminal block is replaced by the next request's run.
 func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	upgradeScheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme, apiextensionsv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1beta1.AddToScheme, apiextensionsv1.AddToScheme} {
 		if err := add(upgradeScheme); err != nil {
 			t.Fatal(err)
 		}
@@ -286,7 +286,7 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 			t.Fatal(err)
 		}
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("MysqlFailoverGroup"))
 		if err := c.Get(ctx, client.ObjectKeyFromObject(fg), u); err != nil {
 			t.Fatal(err)
 		}
@@ -347,7 +347,7 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("MysqlFailoverGroup"))
 		if err := c.Get(ctx, finished, u); err != nil {
 			t.Fatal(err)
 		}
@@ -372,20 +372,20 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 	// the upgrade rewrites them too.
 	for _, nn := range []types.NamespacedName{midRun, finished, validating} {
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("MysqlFailoverGroup"))
 		if err := c.Get(ctx, nn, u); err != nil {
 			t.Fatal(err)
 		}
 		sites, _, _ := unstructured.NestedSlice(u.Object, "spec", "sites")
 		for i := range sites {
 			sites[i].(map[string]any)["serverID"] = int64(101 + i)
-			sites[i].(map[string]any)["role"] = string(v1alpha1.SiteRolePrimaryCandidate)
+			sites[i].(map[string]any)["role"] = string(v1beta1.SiteRolePrimaryCandidate)
 			sites[i].(map[string]any)["loadBalancerIP"] = fmt.Sprintf("203.0.113.%d", i+1)
 		}
 		if err := unstructured.SetNestedSlice(u.Object, sites, "spec", "sites"); err != nil {
 			t.Fatal(err)
 		}
-		if err := unstructured.SetNestedField(u.Object, map[string]any{"type": string(v1alpha1.UpdateStrategyOrderedUpdate)}, "spec", "updateStrategy"); err != nil {
+		if err := unstructured.SetNestedField(u.Object, map[string]any{"type": string(v1beta1.UpdateStrategyOrderedUpdate)}, "spec", "updateStrategy"); err != nil {
 			t.Fatal(err)
 		}
 		if err := unstructured.SetNestedField(u.Object, "mysql-credentials", "spec", "credentials", "operatorSecretName"); err != nil {
@@ -399,9 +399,9 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		}
 	}
 
-	get := func(nn types.NamespacedName) *v1alpha1.MysqlFailoverGroup {
+	get := func(nn types.NamespacedName) *v1beta1.MysqlFailoverGroup {
 		t.Helper()
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &fg); err != nil {
 			t.Fatal(err)
 		}
@@ -416,11 +416,11 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		fg.Status.UpdatePhase = ""
 		fg.Status.TopologyGeneration++
 		for i := range fg.Status.Sites {
-			fg.Status.Sites[i].State = v1alpha1.SiteStateReadOnly
-			fg.Status.Sites[i].Replication = v1alpha1.SiteReplicationHealthy
+			fg.Status.Sites[i].State = v1beta1.SiteStateReadOnly
+			fg.Status.Sites[i].Replication = v1beta1.SiteReplicationHealthy
 			if fg.Status.Sites[i].Name == "dc1" {
-				fg.Status.Sites[i].State = v1alpha1.SiteStateWritable
-				fg.Status.Sites[i].Replication = v1alpha1.SiteReplicationNotApplicable
+				fg.Status.Sites[i].State = v1beta1.SiteStateWritable
+				fg.Status.Sites[i].Replication = v1beta1.SiteReplicationNotApplicable
 			}
 		}
 		return c.Status().Update(ctx, fg)
@@ -448,16 +448,16 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		Recorder: record.NewFakeRecorder(256), PlannedTopology: topo}
 	for _, tc := range []struct {
 		nn      types.NamespacedName
-		outcome v1alpha1.PlannedFailoverOutcome
+		outcome v1beta1.PlannedFailoverOutcome
 	}{
-		{midRun, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{validating, v1alpha1.PlannedFailoverOutcomeNotStarted},
+		{midRun, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{validating, v1beta1.PlannedFailoverOutcomeNotStarted},
 	} {
 		if _, err := r.StepPlannedFailoverForTest(ctx, tc.nn); err != nil {
 			t.Fatal(err)
 		}
 		pf := get(tc.nn).Status.PlannedFailover
-		if pf.Result == nil || pf.Result.Outcome != tc.outcome || pf.Result.Reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused ||
+		if pf.Result == nil || pf.Result.Outcome != tc.outcome || pf.Result.Reason != v1beta1.PlannedFailoverReasonLegacyRunRefused ||
 			pf.RunID == "" || pf.Revision != 1 || pf.TargetSite != "unknown" {
 			t.Fatalf("%s: block = %+v", tc.nn.Name, pf)
 		}
@@ -484,14 +484,14 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 
 	// A legacy terminal block is history: a new request replaces it.
 	fg := get(finished)
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"}
 	if err := c.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.StepPlannedFailoverForTest(ctx, finished); err != nil {
 		t.Fatal(err)
 	}
-	if pf := get(finished).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" {
+	if pf := get(finished).Status.PlannedFailover; pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.RunID == "" {
 		t.Fatalf("new request over a legacy terminal block = %+v", pf)
 	}
 }
@@ -509,7 +509,7 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 	if noop.ResourceVersion != base.ResourceVersion {
 		t.Fatalf("a no-op status update moved resourceVersion %s → %s; the fence must change bytes", base.ResourceVersion, noop.ResourceVersion)
 	}
-	for _, key := range []string{v1alpha1.PlannedFailoverStatusFenceAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation} {
+	for _, key := range []string{v1beta1.PlannedFailoverStatusFenceAnnotation, v1beta1.PlannedFailoverTerminalAnnotation} {
 		cur := pfEnvGet(t, nn)
 		fenced := cur.DeepCopy()
 		if fenced.Annotations == nil {
@@ -520,7 +520,7 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 			t.Fatalf("%s: %v", key, err)
 		}
 		late := cur.DeepCopy()
-		late.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2"}
+		late.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 9, Phase: v1beta1.PlannedFailoverPhaseDraining, TargetSite: "dc2"}
 		if err := k8sClient.Status().Update(ctx, late); !apierrors.IsConflict(err) {
 			t.Fatalf("%s: late commit after the fence = %v, want a conflict", key, err)
 		}
@@ -530,20 +530,20 @@ func TestEnvtest_PlannedFailoverStatusFence_NoOpTrapAndLateCommit(t *testing.T) 
 // §10.5: the hold condition survives a runner status write, and the
 // acknowledgement clears it, releases the slot and deletes itself.
 func TestEnvtest_PlannedFailover_HoldSurvivesRunnerWriteAndAck(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-hold", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-hold", map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"})
 	topo := &pfEnvTopology{promote: func() controller.PromoteOutcome {
-		return controller.PromoteOutcome{Kind: controller.PromoteInconsistent, Reason: v1alpha1.PlannedFailoverReasonForeignWritable, MayHaveWritten: true}
+		return controller.PromoteOutcome{Kind: controller.PromoteInconsistent, Reason: v1beta1.PlannedFailoverReasonForeignWritable, MayHaveWritten: true}
 	}}
 	r := pfEnvReconciler(topo)
-	pfEnvStepUntil(t, r, nn, 20, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	pfEnvStepUntil(t, r, nn, 20, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		return fg.Status.PlannedFailover != nil && fg.Status.PlannedFailover.Result != nil
 	})
 	fg := pfEnvGet(t, nn)
 	pf := fg.Status.PlannedFailover
-	if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+	if pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 		t.Fatalf("result = %+v", pf.Result)
 	}
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c == nil || c.Status != metav1.ConditionTrue {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld); c == nil || c.Status != metav1.ConditionTrue {
 		t.Fatalf("hold condition = %+v", c)
 	}
 
@@ -552,26 +552,26 @@ func TestEnvtest_PlannedFailover_HoldSurvivesRunnerWriteAndAck(t *testing.T) {
 	if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
 		t.Fatal(err)
 	}
-	if got := pfEnvGet(t, nn); apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) == nil ||
+	if got := pfEnvGet(t, nn); apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld) == nil ||
 		got.Status.PlannedFailoverHold == nil || got.Status.PlannedFailoverHold.RunID != pf.RunID {
 		t.Fatalf("a runner status write dropped the hold: hold %+v", got.Status.PlannedFailoverHold)
 	}
 
 	fg = pfEnvGet(t, nn)
-	fg.Annotations = map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: pf.RunID}
+	fg.Annotations = map[string]string{v1beta1.AcknowledgePlannedFailoverHoldAnnotation: pf.RunID}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	pfEnvStepUntil(t, r, nn, 5, func(fg *v1alpha1.MysqlFailoverGroup) bool {
-		_, ack := fg.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]
+	pfEnvStepUntil(t, r, nn, 5, func(fg *v1beta1.MysqlFailoverGroup) bool {
+		_, ack := fg.Annotations[v1beta1.AcknowledgePlannedFailoverHoldAnnotation]
 		return !ack
 	})
 	fg = pfEnvGet(t, nn)
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); fg.Status.PlannedFailoverHold != nil ||
-		c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged ||
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld); fg.Status.PlannedFailoverHold != nil ||
+		c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1beta1.ReasonPlannedFailoverHoldAcknowledged ||
 		c.ObservedGeneration != fg.Generation {
 		t.Errorf("after the acknowledgement: hold %+v, condition %+v; want no hold and False/%s at the current generation",
-			fg.Status.PlannedFailoverHold, c, v1alpha1.ReasonPlannedFailoverHoldAcknowledged)
+			fg.Status.PlannedFailoverHold, c, v1beta1.ReasonPlannedFailoverHoldAcknowledged)
 	}
 	if topo.PlannedClaimHeld(nn) {
 		t.Error("slot still held after the acknowledgement")
@@ -586,12 +586,12 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 	fg := pfEnvGet(t, nn)
 	now := metav1.Now()
 	f := "uuid-dc1:1-5"
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag,
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 3, Phase: v1beta1.PlannedFailoverPhaseWaitingForLag,
 		TargetSite: "dc2", SourceSite: "dc1", StartTime: now,
-		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Hour}, DrainTimeout: metav1.Duration{Duration: time.Second}},
-		Fence: &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: now, SourceServerUUID: "uuid-dc1",
+		Settings: v1beta1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Hour}, DrainTimeout: metav1.Duration{Duration: time.Second}},
+		Fence: &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceApplied, IntentTime: now, SourceServerUUID: "uuid-dc1",
 			ApplyTime: &now, GtidSet: &f},
-		Drain: &v1alpha1.PlannedFailoverDrainRecord{StartTime: now, CompletionTime: &now}, LagWait: &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: now}}
+		Drain: &v1beta1.PlannedFailoverDrainRecord{StartTime: now, CompletionTime: &now}, LagWait: &v1beta1.PlannedFailoverLagWaitRecord{StartTime: now}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +602,7 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 		if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 			t.Fatal(err)
 		}
-		got := pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]
+		got := pfEnvGet(t, nn).Annotations[v1beta1.PlannedFailoverManagerAbsentSinceAnnotation]
 		if got == "" {
 			t.Fatal("no manager-absent-since annotation")
 		}
@@ -618,7 +618,7 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 		t.Fatal(err)
 	}
-	if v, ok := pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]; ok {
+	if v, ok := pfEnvGet(t, nn).Annotations[v1beta1.PlannedFailoverManagerAbsentSinceAnnotation]; ok {
 		t.Errorf("absent-since kept once a manager answered: %q", v)
 	}
 }
@@ -626,6 +626,6 @@ func TestEnvtest_PlannedFailover_DurableDeadlineAnnotations(t *testing.T) {
 // pfEnvAbsentTopology reports no registered manager.
 type pfEnvAbsentTopology struct{ *pfEnvTopology }
 
-func (f *pfEnvAbsentTopology) EnsureClaim(context.Context, controller.PlannedRunRef, *v1alpha1.MysqlFailoverGroup) (controller.PlannedClaimDecision, error) {
-	return controller.PlannedClaimDecision{Kind: controller.ClaimWait, WaitReason: v1alpha1.PlannedFailoverWaitManagerAbsent}, nil
+func (f *pfEnvAbsentTopology) EnsureClaim(context.Context, controller.PlannedRunRef, *v1beta1.MysqlFailoverGroup) (controller.PlannedClaimDecision, error) {
+	return controller.PlannedClaimDecision{Kind: controller.ClaimWait, WaitReason: v1beta1.PlannedFailoverWaitManagerAbsent}, nil
 }

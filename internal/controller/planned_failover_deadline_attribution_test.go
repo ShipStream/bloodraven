@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // A rollback for AuthorityChanged over a fence that was only intended is
@@ -17,28 +17,28 @@ import (
 func TestPlannedFailover_RollbackDeadlineKeepsTheAttributionOfItsReason(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		rollbackFor v1alpha1.PlannedFailoverReason
+		rollbackFor v1beta1.PlannedFailoverReason
 		unreachable bool
-		wantReason  v1alpha1.PlannedFailoverReason
+		wantReason  v1beta1.PlannedFailoverReason
 		wantNamed   bool
 	}{
-		{"AuthorityChanged, the unfence failed", v1alpha1.PlannedFailoverReasonAuthorityChanged, false,
-			v1alpha1.PlannedFailoverReasonAuthorityChanged, false},
-		{"AuthorityChanged, the source is unreachable", v1alpha1.PlannedFailoverReasonAuthorityChanged, true,
-			v1alpha1.PlannedFailoverReasonSourceLost, false},
-		{"LegacyRunRefused, the source is unreachable", v1alpha1.PlannedFailoverReasonLegacyRunRefused, true,
-			v1alpha1.PlannedFailoverReasonSourceLost, false},
+		{"AuthorityChanged, the unfence failed", v1beta1.PlannedFailoverReasonAuthorityChanged, false,
+			v1beta1.PlannedFailoverReasonAuthorityChanged, false},
+		{"AuthorityChanged, the source is unreachable", v1beta1.PlannedFailoverReasonAuthorityChanged, true,
+			v1beta1.PlannedFailoverReasonSourceLost, false},
+		{"LegacyRunRefused, the source is unreachable", v1beta1.PlannedFailoverReasonLegacyRunRefused, true,
+			v1beta1.PlannedFailoverReasonSourceLost, false},
 		// The control: a rollback for a reason that leaves the intent
 		// attributable still names the source.
-		{"LagTimeout, the source is unreachable", v1alpha1.PlannedFailoverReasonLagTimeout, true,
-			v1alpha1.PlannedFailoverReasonSourceLost, true},
-		{"SourceLost, the source is unreachable", v1alpha1.PlannedFailoverReasonSourceLost, true,
-			v1alpha1.PlannedFailoverReasonSourceLost, true},
+		{"LagTimeout, the source is unreachable", v1beta1.PlannedFailoverReasonLagTimeout, true,
+			v1beta1.PlannedFailoverReasonSourceLost, true},
+		{"SourceLost, the source is unreachable", v1beta1.PlannedFailoverReasonSourceLost, true,
+			v1beta1.PlannedFailoverReasonSourceLost, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseRollingBack)
+			h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseRollingBack)
 			pf := h.pf().DeepCopy()
-			pf.Fence.State = v1alpha1.PlannedFailoverFenceIntended
+			pf.Fence.State = v1beta1.PlannedFailoverFenceIntended
 			pf.Fence.ApplyTime, pf.Fence.GtidSet = nil, nil
 			pf.Rollback.Reason = tc.rollbackFor
 			h.setBlock(pf)
@@ -51,7 +51,7 @@ func TestPlannedFailover_RollbackDeadlineKeepsTheAttributionOfItsReason(t *testi
 			h.clk.Advance(plannedFailoverRollbackDeadline)
 			h.step()
 			got := h.pf()
-			if got.Result == nil || got.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced || got.Result.Reason != tc.wantReason {
+			if got.Result == nil || got.Result.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced || got.Result.Reason != tc.wantReason {
 				t.Fatalf("result = %+v, want SourceLeftFenced{%s}", got.Result, tc.wantReason)
 			}
 			if named := len(h.topo.named) > 0; named != tc.wantNamed {

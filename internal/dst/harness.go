@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -339,7 +339,7 @@ func (r *trialRunner) buildManager() bool {
 // the trial's current one. view is the start's uncached read of the group
 // (trials with actors; nil when that read failed and the start proceeds
 // without it).
-func (r *trialRunner) newManager(view *v1alpha1.MysqlFailoverGroup) *controller.TopologyManager {
+func (r *trialRunner) newManager(view *v1beta1.MysqlFailoverGroup) *controller.TopologyManager {
 	checkers := make([]mysql.Checker, len(r.trial.SiteNames))
 	for i, name := range r.trial.SiteNames {
 		checkers[i] = r.cluster.NewChecker(name)
@@ -884,10 +884,10 @@ func (r *trialRunner) checkBaseline(poll int, st controller.StatusResponse) {
 	ok := st.ActiveSite == r.trial.SiteNames[0]
 	for _, s := range st.Sites {
 		if s.Name == r.trial.SiteNames[0] {
-			if s.State != v1alpha1.SiteStateWritable {
+			if s.State != v1beta1.SiteStateWritable {
 				ok = false
 			}
-		} else if s.State != v1alpha1.SiteStateReadOnly {
+		} else if s.State != v1beta1.SiteStateReadOnly {
 			ok = false
 		}
 	}

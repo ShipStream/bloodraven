@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // D-10, Δ23 (row 40): a schedule of a read-only profile renders no CronJob
@@ -22,7 +22,7 @@ func TestScheduleOfReadOnlyProfileRefused(t *testing.T) {
 	ctx := context.Background()
 	fg := fgWithBackup()
 	fg.UID = "lion-uid"
-	fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
+	fg.Spec.Backup.Schedules = []v1beta1.BackupSchedule{{Name: "nightly", ProfileName: "nightly-s3", Schedule: "0 2 * * *"}}
 	r, c := newReconciler(fg)
 	rec := record.NewFakeRecorder(20)
 	r.Recorder = rec
@@ -38,7 +38,7 @@ func TestScheduleOfReadOnlyProfileRefused(t *testing.T) {
 	}
 
 	e := bindTestPITRArchive(t, fg, "nightly-s3")
-	e.State, e.Reason = v1alpha1.PITRArchiveBindingRefused, v1alpha1.PITRArchiveBindingReasonArchiveForeign
+	e.State, e.Reason = v1beta1.PITRArchiveBindingRefused, v1beta1.PITRArchiveBindingReasonArchiveForeign
 	for i := 0; i < 3; i++ {
 		if err := r.reconcileBackupSchedules(ctx, fg); err != nil {
 			t.Fatal(err)
@@ -47,8 +47,8 @@ func TestScheduleOfReadOnlyProfileRefused(t *testing.T) {
 	if cronJob() {
 		t.Fatal("read-only profile: CronJob kept")
 	}
-	if n := countEvents(rec, "Warning "+v1alpha1.EventBackupScheduleRefused); n != 1 {
-		t.Fatalf("%d %s Events, want one per change", n, v1alpha1.EventBackupScheduleRefused)
+	if n := countEvents(rec, "Warning "+v1beta1.EventBackupScheduleRefused); n != 1 {
+		t.Fatalf("%d %s Events, want one per change", n, v1beta1.EventBackupScheduleRefused)
 	}
 
 	fg.Status.PITRArchiveBindings = nil

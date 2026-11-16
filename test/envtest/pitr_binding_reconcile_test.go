@@ -17,7 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
@@ -33,20 +33,20 @@ const (
 	specHashKey      = "bloodraven.shipstream.io/spec-hash"
 )
 
-func bindingFG(ns string) *v1alpha1.MysqlFailoverGroup {
+func bindingFG(ns string) *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG(ns)
 	// Recreate: the reconciler itself patches existing Deployments, so a
 	// render change is visible without the ordered updater.
-	fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
-	s3 := func(prefix string) v1alpha1.BackupStorage {
-		return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "archive", Prefix: prefix, EndpointURL: "http://rustfs:9000", CredentialsSecretName: "s3-creds"}}
+	fg.Spec.UpdateStrategy = v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreate}
+	s3 := func(prefix string) v1beta1.BackupStorage {
+		return v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3, S3: &v1beta1.S3Storage{Bucket: "archive", Prefix: prefix, EndpointURL: "http://rustfs:9000", CredentialsSecretName: "s3-creds"}}
 	}
-	enc := func(secret string) *v1alpha1.BackupEncryptionSpec {
-		return &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secret}}
+	enc := func(secret string) *v1beta1.BackupEncryptionSpec {
+		return &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: secret}}
 	}
-	fg.Spec.Backup = &v1alpha1.BackupSpec{
-		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "a"},
-		Profiles: []v1alpha1.BackupProfile{
+	fg.Spec.Backup = &v1beta1.BackupSpec{
+		PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "a"},
+		Profiles: []v1beta1.BackupProfile{
 			{Name: "a", Storage: s3("p1"), Encryption: enc("key-a")},
 			{Name: "c", Storage: s3("p2"), Encryption: enc("key-c")},
 		},
@@ -86,9 +86,9 @@ func (h *bindingHarness) reconcile(times int) {
 	}
 }
 
-func (h *bindingHarness) fg() *v1alpha1.MysqlFailoverGroup {
+func (h *bindingHarness) fg() *v1beta1.MysqlFailoverGroup {
 	h.t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: h.ns, Name: "lion"}, &fg); err != nil {
 		h.t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func (h *bindingHarness) setSecret(name, key, value string) {
 	}
 }
 
-func (h *bindingHarness) binding(profile string) *v1alpha1.PITRArchiveBinding {
+func (h *bindingHarness) binding(profile string) *v1beta1.PITRArchiveBinding {
 	h.t.Helper()
 	fg := h.fg()
 	dest := h.dest(fg, profile)
@@ -136,7 +136,7 @@ func (h *bindingHarness) binding(profile string) *v1alpha1.PITRArchiveBinding {
 	return nil
 }
 
-func (h *bindingHarness) dest(fg *v1alpha1.MysqlFailoverGroup, profile string) pitrarchive.Destination {
+func (h *bindingHarness) dest(fg *v1beta1.MysqlFailoverGroup, profile string) pitrarchive.Destination {
 	h.t.Helper()
 	for i := range fg.Spec.Backup.Profiles {
 		p := &fg.Spec.Backup.Profiles[i]
@@ -159,9 +159,9 @@ func (h *bindingHarness) prove(profile, keyRevision string) {
 	fg := h.fg()
 	dest := h.dest(fg, profile)
 	now := metav1.NowMicro()
-	fg.Status.PITR = &v1alpha1.PITRStatus{Archive: &v1alpha1.PITRArchiveObservation{
-		Destination: dest.String(), ArchiveID: pitrarchive.CreateArchiveID(fg.UID, dest), State: v1alpha1.PITRArchiveVerified,
-		EncryptionMode: v1alpha1.EncryptionModePassphrase, KeyRevision: keyRevision, ObservedTime: &now,
+	fg.Status.PITR = &v1beta1.PITRStatus{Archive: &v1beta1.PITRArchiveObservation{
+		Destination: dest.String(), ArchiveID: pitrarchive.CreateArchiveID(fg.UID, dest), State: v1beta1.PITRArchiveVerified,
+		EncryptionMode: v1beta1.EncryptionModePassphrase, KeyRevision: keyRevision, ObservedTime: &now,
 	}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		h.t.Fatal(err)
@@ -224,7 +224,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 	// (optional mount, key revision), and the binding waits for proof.
 	h.reconcile(3)
 	entry := h.binding("a")
-	if entry == nil || entry.State != v1alpha1.PITRArchiveBindingPending || entry.Encryption.KeySecretName == "" {
+	if entry == nil || entry.State != v1beta1.PITRArchiveBindingPending || entry.Encryption.KeySecretName == "" {
 		t.Fatalf("fresh binding %+v, want Pending with a candidate snapshot", entry)
 	}
 	snapshot := entry.Encryption.KeySecretName
@@ -253,7 +253,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 	// snapshot.
 	h.prove("a", snapshot)
 	h.reconcile(2)
-	if entry = h.binding("a"); entry == nil || entry.State != v1alpha1.PITRArchiveBindingBound {
+	if entry = h.binding("a"); entry == nil || entry.State != v1beta1.PITRArchiveBindingBound {
 		t.Fatalf("after proof: %+v, want Bound", entry)
 	}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: snapshot}, &snap); err != nil {
@@ -298,7 +298,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.reconcile(2)
-	if entry = h.binding("a"); entry == nil || entry.State != v1alpha1.PITRArchiveBindingBound || entry.Encryption.KeySecretName != snapshot {
+	if entry = h.binding("a"); entry == nil || entry.State != v1beta1.PITRArchiveBindingBound || entry.Encryption.KeySecretName != snapshot {
 		t.Fatalf("after a status wipe: %+v, want Bound with %s", entry, snapshot)
 	}
 	if jobs := h.checkJobs(); len(jobs) != 0 {
@@ -316,7 +316,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.reconcile(2)
-	if entry = h.binding("a"); entry == nil || entry.State != v1alpha1.PITRArchiveBindingBound {
+	if entry = h.binding("a"); entry == nil || entry.State != v1beta1.PITRArchiveBindingBound {
 		t.Fatalf("disabled PITR dropped the binding: %+v", entry)
 	}
 	if vol := passphraseVolume(h.deploy("dc1")); vol != nil {
@@ -354,12 +354,12 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 		fg.Annotations = map[string]string{}
 	}
 	id := h.binding("a").ID
-	fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion:uid=" + string(fg.UID)
+	fg.Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation] = id + ":confirm=lion:uid=" + string(fg.UID)
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	h.reconcile(1)
-	if h.binding("a") == nil || h.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] == "" {
+	if h.binding("a") == nil || h.fg().Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation] == "" {
 		t.Fatal("a release of an in-use binding was not refused")
 	}
 
@@ -379,7 +379,7 @@ func TestEnvtest_PITRBindingLifecycle(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: snapshot}, &snap); err == nil {
 		t.Fatal("released snapshot not deleted")
 	}
-	if h.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] != "" {
+	if h.fg().Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation] != "" {
 		t.Fatal("release annotation kept after the release")
 	}
 }
@@ -435,7 +435,7 @@ func TestEnvtest_PITRBindingDefersPre203Deployment(t *testing.T) {
 	dest := h.dest(fg, "a")
 	line := controller.FormatPITRArchiveCheckLine(controller.PITRArchiveCheckResult{
 		State: controller.PITRArchiveCheckStateVerified, ArchiveID: pitrarchive.CreateArchiveID(fg.UID, dest),
-		Source: v1alpha1.PITRArchiveSource{Namespace: ns, Name: "lion", UID: fg.UID}, DestinationDigest: controller.PITRArchiveCheckDestinationDigest(dest.String()),
+		Source: v1beta1.PITRArchiveSource{Namespace: ns, Name: "lion", UID: fg.UID}, DestinationDigest: controller.PITRArchiveCheckDestinationDigest(dest.String()),
 	})
 	// The Job controller's pod: controlled by the Job (the verdict is read
 	// only from such a pod), with the check container.
@@ -454,7 +454,7 @@ func TestEnvtest_PITRBindingDefersPre203Deployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.reconcile(3)
-	if entry = h.binding("a"); entry == nil || entry.State != v1alpha1.PITRArchiveBindingBound {
+	if entry = h.binding("a"); entry == nil || entry.State != v1beta1.PITRArchiveBindingBound {
 		t.Fatalf("after a Verified check: %+v, want Bound", entry)
 	}
 	if d := h.deploy("dc1"); d.Annotations[pitrRenderKey] == "" || passphraseVolume(d) == nil {
@@ -477,13 +477,13 @@ func TestEnvtest_MysqlBackupDumpKeySnapshot(t *testing.T) {
 	}
 	fg = h.fg()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	mb := &v1alpha1.MysqlBackup{
+	mb := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "nightly-1"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "a"},
+		Spec:       v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "a"},
 	}
 	if err := k8sClient.Create(ctx, mb); err != nil {
 		t.Fatal(err)

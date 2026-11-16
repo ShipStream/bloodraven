@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -21,7 +21,7 @@ import (
 func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	fg := newTestFG()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 	rec := record.NewFakeRecorder(10)
 	runner := &TopologyManagerRunner{client: c, recorder: rec, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -32,14 +32,14 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	stalled := base
 	stalled.UpdateStalled = "site dc2 was updated but its pod mysql-lion-dc2-1 is not Ready (" + sidecarCrashLoop + ")"
 	running := base
-	running.UpdatePhase = v1alpha1.UpdatePhaseWaitReplica
+	running.UpdatePhase = v1beta1.UpdatePhaseWaitReplica
 
 	write := func(snap TopologySnapshot) (*metav1.Condition, []string) {
 		t.Helper()
 		if err := runner.updateCRStatus(context.Background(), nn, snap); err != nil {
 			t.Fatalf("updateCRStatus() error = %v", err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &got); err != nil {
 			t.Fatal(err)
 		}
@@ -49,8 +49,8 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	cond, events := write(stalled)
 	wantMsg := "Ordered update stalled: " + stalled.UpdateStalled +
 		". No other site is rolled and the active site is not handed off until that pod has been Ready for 30s; the update retries every 30s"
-	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != v1alpha1.ReasonOrderedUpdateStalled || cond.Message != wantMsg {
-		t.Fatalf("Updating = %+v, want True/%s %q", cond, v1alpha1.ReasonOrderedUpdateStalled, wantMsg)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != v1beta1.ReasonOrderedUpdateStalled || cond.Message != wantMsg {
+		t.Fatalf("Updating = %+v, want True/%s %q", cond, v1beta1.ReasonOrderedUpdateStalled, wantMsg)
 	}
 	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning OrderedUpdateStalled "+wantMsg) {
 		t.Fatalf("events = %q, want one OrderedUpdateStalled Warning", events)
@@ -61,7 +61,7 @@ func TestUpdateCRStatus_ReportsOrderedUpdateStall(t *testing.T) {
 	}
 
 	cond, events = write(running)
-	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(v1alpha1.UpdatePhaseWaitReplica) || len(events) != 0 {
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(v1beta1.UpdatePhaseWaitReplica) || len(events) != 0 {
 		t.Fatalf("Updating = %+v events %q while an attempt runs", cond, events)
 	}
 	if _, events = write(stalled); len(events) != 1 {

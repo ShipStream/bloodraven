@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -206,7 +206,7 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		// behavior. A failed fence that leaves two writable sites is still
 		// caught — by DualWritableUnresolved when it persists.
 		for _, s := range st.Sites {
-			if s.Name == target || s.State != v1alpha1.SiteStateWritable {
+			if s.Name == target || s.State != v1beta1.SiteStateWritable {
 				continue
 			}
 			fenced := false

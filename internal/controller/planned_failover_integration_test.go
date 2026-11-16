@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
@@ -21,13 +21,13 @@ import (
 func TestEngine_ZombieClearReleasesHydratedClaimNeverSeen(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		block *v1alpha1.PlannedFailoverStatus
+		block *v1beta1.PlannedFailoverStatus
 	}{
-		{"terminal block", &v1alpha1.PlannedFailoverStatus{RunID: "run-hydrated", Revision: 5, Phase: v1alpha1.PlannedFailoverPhaseFailed, TargetSite: "pdx",
-			Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, CompletionTime: metav1.Now()}}},
+		{"terminal block", &v1beta1.PlannedFailoverStatus{RunID: "run-hydrated", Revision: 5, Phase: v1beta1.PlannedFailoverPhaseFailed, TargetSite: "pdx",
+			Result: &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeRolledBack, CompletionTime: metav1.Now()}}},
 		{"absent block", nil},
-		{"another run's block", &v1alpha1.PlannedFailoverStatus{RunID: "run-other", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed, TargetSite: "pdx",
-			Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, CompletionTime: metav1.Now()}}},
+		{"another run's block", &v1beta1.PlannedFailoverStatus{RunID: "run-other", Revision: 1, Phase: v1beta1.PlannedFailoverPhaseFailed, TargetSite: "pdx",
+			Result: &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, CompletionTime: metav1.Now()}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPFEngineHarness(t, plannedFailoverFG(""))
@@ -44,8 +44,8 @@ func TestEngine_ZombieClearReleasesHydratedClaimNeverSeen(t *testing.T) {
 	}
 	t.Run("a hold is never a zombie", func(t *testing.T) {
 		fg := plannedFailoverFG("")
-		setPlannedHold(&fg.Status, v1alpha1.PlannedFailoverHold{RunID: "run-held",
-			Reason: v1alpha1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}, 1)
+		setPlannedHold(&fg.Status, v1beta1.PlannedFailoverHold{RunID: "run-held",
+			Reason: v1beta1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}, 1)
 		h := newPFEngineHarness(t, fg)
 		h.topo.setHeld("run-held", true)
 		h.step()
@@ -76,17 +76,17 @@ func TestEngine_SucceededWriteMergesManagerAuthority(t *testing.T) {
 		&pfFakeSink{}, clock.NewFakeClock(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)), SimHooks{})
 	confirmed := metav1.NewTime(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
 	gtid := "uuid-iad:1-10"
-	next := &v1alpha1.PlannedFailoverStatus{RunID: "run-1", TargetSite: "pdx",
-		Fence:     &v1alpha1.PlannedFailoverFenceRecord{GtidSet: &gtid},
-		Promotion: &v1alpha1.PlannedFailoverPromotionRecord{ConfirmationTime: &confirmed},
-		Result:    &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded}}
-	st := &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", TopologyGeneration: 7}
-	e.terminalMutate(&v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fg"}}, next, nil)(st)
+	next := &v1beta1.PlannedFailoverStatus{RunID: "run-1", TargetSite: "pdx",
+		Fence:     &v1beta1.PlannedFailoverFenceRecord{GtidSet: &gtid},
+		Promotion: &v1beta1.PlannedFailoverPromotionRecord{ConfirmationTime: &confirmed},
+		Result:    &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeSucceeded}}
+	st := &v1beta1.MysqlFailoverGroupStatus{ActiveSite: "iad", TopologyGeneration: 7}
+	e.terminalMutate(&v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fg"}}, next, nil)(st)
 	if st.ActiveSite != "pdx" || st.TopologyGeneration != 8 || st.LastFailoverTarget() != "pdx" || st.PromotionGtidExecuted() != gtid {
 		t.Fatalf("status = activeSite %q gen %d target %q watermark %q; want pdx/8/pdx/F",
 			st.ActiveSite, st.TopologyGeneration, st.LastFailoverTarget(), st.PromotionGtidExecuted())
 	}
-	stale := &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "pdx", TopologyGeneration: 9}
+	stale := &v1beta1.MysqlFailoverGroupStatus{ActiveSite: "pdx", TopologyGeneration: 9}
 	if MergePlannedAuthority(stale, PlannedAuthority{ActiveSite: "iad", TopologyGeneration: 8}) || stale.ActiveSite != "pdx" {
 		t.Fatal("an older manager generation moved status.activeSite")
 	}
@@ -99,26 +99,26 @@ func TestEngine_SucceededWriteMergesManagerAuthority(t *testing.T) {
 func TestPlannedFailover_EngineOverRealFacadeSucceeds(t *testing.T) {
 	f := newOpsFixture(t, "")
 	fg := newTestFG()
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"}
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}, {Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy}}
 	faults := &pfFaults{}
 	c := newPFFakeClient(faults, fg)
 	clk := clock.NewFakeClock(f.clk.Now())
 	e := NewPlannedFailoverEngine(newAPIPlannedFailoverStore(c, c, clk), f.topo, &pfFakeSink{}, clk, SimHooks{})
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	var last *v1alpha1.PlannedFailoverStatus
+	var last *v1beta1.PlannedFailoverStatus
 	for i := 0; i < 60; i++ {
 		d, err := e.Step(context.Background(), nn)
 		if err != nil {
 			t.Fatalf("step %d: %v", i, err)
 		}
-		var cur v1alpha1.MysqlFailoverGroup
+		var cur v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &cur); err != nil {
 			t.Fatal(err)
 		}
 		last = cur.Status.PlannedFailover
-		if last != nil && last.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+		if last != nil && last.Phase == v1beta1.PlannedFailoverPhaseSucceeded {
 			if cur.Status.ActiveSite != "dc2" || cur.Status.LastFailoverTarget() != "dc2" || cur.Status.PromotionGtidExecuted() != opsF {
 				t.Fatalf("status after Succeeded = activeSite %q lastFailoverTarget %q watermark %q",
 					cur.Status.ActiveSite, cur.Status.LastFailoverTarget(), cur.Status.PromotionGtidExecuted())

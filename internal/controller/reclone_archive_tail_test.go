@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
@@ -1092,7 +1092,7 @@ func TestArchiverPollerTailStatus(t *testing.T) {
 func TestEmitPITRArchiveTailNotArchived(t *testing.T) {
 	fg := pitrEnabledFG("default", "orders")
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	rec := record.NewFakeRecorder(4)
@@ -1105,7 +1105,7 @@ func TestEmitPITRArchiveTailNotArchived(t *testing.T) {
 	r.emitPITRArchiveTailNotArchived(context.Background(), nn, "dc2", "the site's sidecar did not answer: connection refused")
 	select {
 	case ev := <-rec.Events:
-		for _, want := range []string{"Warning " + v1alpha1.EventPITRArchiveTailNotArchived, "site dc2", "did not answer: connection refused", "PITRArchiveGap"} {
+		for _, want := range []string{"Warning " + v1beta1.EventPITRArchiveTailNotArchived, "site dc2", "did not answer: connection refused", "PITRArchiveGap"} {
 			if !strings.Contains(ev, want) {
 				t.Fatalf("event %q lacks %q", ev, want)
 			}

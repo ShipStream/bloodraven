@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -42,7 +42,7 @@ func planOnce(t *testing.T, now time.Time, identity string, cfg RolloutPacerConf
 	return actions, fleet
 }
 
-func recordOf(views []rolloutGroupView, name string) *v1alpha1.RolloutStatus {
+func recordOf(views []rolloutGroupView, name string) *v1beta1.RolloutStatus {
 	for i := range views {
 		if views[i].Key.Name == name {
 			return views[i].Record
@@ -51,7 +51,7 @@ func recordOf(views []rolloutGroupView, name string) *v1alpha1.RolloutStatus {
 	return nil
 }
 
-func requirePhase(t *testing.T, views []rolloutGroupView, name string, phase v1alpha1.RolloutPhase, reason string) {
+func requirePhase(t *testing.T, views []rolloutGroupView, name string, phase v1beta1.RolloutPhase, reason string) {
 	t.Helper()
 	r := recordOf(views, name)
 	if r == nil {
@@ -80,20 +80,20 @@ func eventReasons(actions []rolloutAction) map[string]string {
 func markStarted(views []rolloutGroupView, name string, at time.Time) {
 	r := recordOf(views, name)
 	r.StartedTime = &metav1.Time{Time: at}
-	r.Phase = v1alpha1.RolloutPhaseRolling
+	r.Phase = v1beta1.RolloutPhaseRolling
 }
 
 func TestPlanRollout_AdmitsOneGroupAtATime(t *testing.T) {
 	views := []rolloutGroupView{pendingView("tiger"), pendingView("lion"), pendingView("puma")}
 	actions, fleet := planOnce(t, rolloutT0, testRenderer, RolloutPacerConfig{}, views)
 
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
-	requirePhase(t, views, "puma", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
+	requirePhase(t, views, "puma", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
 	if fleet.Admitted != 1 || fleet.Pending != 2 {
 		t.Fatalf("fleet = %+v, want 1 admitted and 2 pending", fleet)
 	}
-	if got := eventReasons(actions); len(got) != 1 || got["lion"] != v1alpha1.EventRolloutAdmitted {
+	if got := eventReasons(actions); len(got) != 1 || got["lion"] != v1beta1.EventRolloutAdmitted {
 		t.Fatalf("events = %v, want one RolloutAdmitted for lion", got)
 	}
 	if r := recordOf(views, "lion"); r.Renderer != testRenderer || r.AdmittedTime == nil || r.StartedTime != nil {
@@ -116,13 +116,13 @@ func TestPlanRollout_StalledRollHaltsTheFleet(t *testing.T) {
 	markStarted(views, "lion", rolloutT0.Add(time.Second))
 	// The replica was rolled and is not Ready; the primary is not rolled.
 	views[0].State = rolloutGroupState{Pending: []string{"mysql/pdx"}, Incomplete: []string{"mysql/iad"}}
-	views[0].Unstable = v1alpha1.UnstableReasonOrderedUpdate
+	views[0].Unstable = v1beta1.UnstableReasonOrderedUpdate
 	views[0].UpdateStalled = "ordered update stalled: site iad was updated but its pod did not become Ready"
 
 	actions, fleet := planOnce(t, rolloutT0.Add(time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseStalled, rolloutReasonUpdateStalled)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonHalted)
-	if got := eventReasons(actions); got["lion"] != v1alpha1.EventRolloutStalled {
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseStalled, rolloutReasonUpdateStalled)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonHalted)
+	if got := eventReasons(actions); got["lion"] != v1beta1.EventRolloutStalled {
 		t.Fatalf("events = %v, want RolloutStalled for lion", got)
 	}
 	if fleet.Stalled != 1 || fleet.Pending != 1 {
@@ -139,10 +139,10 @@ func TestPlanRollout_StalledRollHaltsTheFleet(t *testing.T) {
 			t.Fatalf("pass %d wrote %+v, want nothing", i, actions)
 		}
 	}
-	if r := recordOf(views, "lion"); r.Phase != v1alpha1.RolloutPhaseStalled || !r.StalledTime.Time.Equal(stalledAt) || r.StartedTime == nil {
+	if r := recordOf(views, "lion"); r.Phase != v1beta1.RolloutPhaseStalled || !r.StalledTime.Time.Equal(stalledAt) || r.StartedTime == nil {
 		t.Fatalf("lion record after later passes = %+v, want the same stall", r)
 	}
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonHalted)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonHalted)
 }
 
 func TestPlanRollout_StallByTimeout(t *testing.T) {
@@ -156,7 +156,7 @@ func TestPlanRollout_StallByTimeout(t *testing.T) {
 		t.Fatalf("stalled before the timeout: %+v", actions)
 	}
 	planOnce(t, rolloutT0.Add(10*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseStalled, rolloutReasonStallTimeout)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseStalled, rolloutReasonStallTimeout)
 }
 
 // R-5: an operator upgrade mid-rollout (another renderer) continues with
@@ -168,18 +168,18 @@ func TestPlanRollout_SecondUpgradeKeepsHolderAndStall(t *testing.T) {
 	views[0].UpdateStalled = "pod not Ready"
 	views[0].State = rolloutGroupState{Pending: []string{"mysql/pdx"}, Incomplete: []string{"mysql/iad"}}
 	planOnce(t, rolloutT0.Add(time.Minute), "renderer-1", RolloutPacerConfig{}, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseStalled, "")
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseStalled, "")
 	before := recordOf(views, "lion").DeepCopy()
 
 	// The second release: every workload is pending again, lion's too.
 	views[0].State = rolloutGroupState{Pending: []string{"mysql/iad", "mysql/pdx"}, Incomplete: []string{"mysql/iad"}}
 	planOnce(t, rolloutT0.Add(2*time.Minute), "renderer-2", RolloutPacerConfig{}, views)
 	after := recordOf(views, "lion")
-	if after.Renderer != "renderer-2" || after.Phase != v1alpha1.RolloutPhaseStalled ||
+	if after.Renderer != "renderer-2" || after.Phase != v1beta1.RolloutPhaseStalled ||
 		!after.StartedTime.Equal(before.StartedTime) || !after.StalledTime.Equal(before.StalledTime) || !after.AdmittedTime.Equal(before.AdmittedTime) {
 		t.Fatalf("lion after the second upgrade = %+v, want the same admission retargeted to renderer-2", after)
 	}
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonHalted)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonHalted)
 	if r := recordOf(views, "tiger"); r.Renderer != "renderer-2" || r.InFlight() {
 		t.Fatalf("tiger = %+v, want pending for renderer-2", r)
 	}
@@ -190,16 +190,16 @@ func TestPlanRollout_SecondUpgradeKeepsHolderAndStall(t *testing.T) {
 func TestPlanRollout_UnstableGroupDoesNotBlockTheFleet(t *testing.T) {
 	cfg := RolloutPacerConfig{Soak: -1}
 	views := []rolloutGroupView{pendingView("lion"), pendingView("tiger")}
-	views[0].Unstable = v1alpha1.UnstableReasonRestoreInPlace
+	views[0].Unstable = v1beta1.UnstableReasonRestoreInPlace
 	planOnce(t, rolloutT0, testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhasePending, rolloutReasonGroupNotStable)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhasePending, rolloutReasonGroupNotStable)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
 
 	// lion's restore ends while tiger rolls: lion waits for the slot.
 	markStarted(views, "tiger", rolloutT0)
 	views[0].Unstable = ""
 	planOnce(t, rolloutT0.Add(time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
 	if recordOf(views, "lion").InFlight() {
 		t.Fatal("lion was admitted while tiger holds the slot")
 	}
@@ -207,9 +207,9 @@ func TestPlanRollout_UnstableGroupDoesNotBlockTheFleet(t *testing.T) {
 	// tiger completes; lion is next.
 	views[1].State = rolloutGroupState{}
 	planOnce(t, rolloutT0.Add(2*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseComplete, "")
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseComplete, "")
 	planOnce(t, rolloutT0.Add(2*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
 }
 
 // An admitted group that does not start (a migration lease, a hold that
@@ -219,7 +219,7 @@ func TestPlanRollout_DefersAdmissionThatDoesNotStart(t *testing.T) {
 	cfg := RolloutPacerConfig{StartGrace: 5 * time.Minute, Soak: -1}
 	views := []rolloutGroupView{pendingView("lion"), pendingView("puma"), pendingView("tiger")}
 	planOnce(t, rolloutT0, testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseAdmitted, "")
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseAdmitted, "")
 
 	if actions, _ := planOnce(t, rolloutT0.Add(4*time.Minute), testRenderer, cfg, views); len(actions) != 0 {
 		t.Fatalf("deferred before the grace: %+v", actions)
@@ -228,29 +228,29 @@ func TestPlanRollout_DefersAdmissionThatDoesNotStart(t *testing.T) {
 	// The slot a withdrawal gives back is given out by the next pass: the
 	// withdrawal is a conditional write that can lose to lion's start
 	// latch, and puma must not be admitted beside a lion that is rolling.
-	if got := eventReasons(actions); got["lion"] != v1alpha1.EventRolloutDeferred || got["puma"] != "" {
+	if got := eventReasons(actions); got["lion"] != v1beta1.EventRolloutDeferred || got["puma"] != "" {
 		t.Fatalf("events = %v, want lion deferred and nobody admitted in the same pass", got)
 	}
-	requirePhase(t, views, "puma", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhasePending, rolloutReasonNotStarted)
+	requirePhase(t, views, "puma", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhasePending, rolloutReasonNotStarted)
 	actions, _ = planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, cfg, views)
-	if got := eventReasons(actions); got["puma"] != v1alpha1.EventRolloutAdmitted {
+	if got := eventReasons(actions); got["puma"] != v1beta1.EventRolloutAdmitted {
 		t.Fatalf("events = %v, want puma admitted by the pass after the deferral", got)
 	}
-	requirePhase(t, views, "puma", v1alpha1.RolloutPhaseAdmitted, "")
+	requirePhase(t, views, "puma", v1beta1.RolloutPhaseAdmitted, "")
 
 	// puma completes: tiger goes before the deferred lion.
 	markStarted(views, "puma", rolloutT0.Add(5*time.Minute))
 	views[1].State = rolloutGroupState{}
 	planOnce(t, rolloutT0.Add(6*time.Minute), testRenderer, cfg, views)
 	planOnce(t, rolloutT0.Add(6*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, "")
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhasePending, "")
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseAdmitted, "")
+	requirePhase(t, views, "lion", v1beta1.RolloutPhasePending, "")
 
 	// A started roll is never deferred, however long it takes.
 	markStarted(views, "tiger", rolloutT0.Add(6*time.Minute))
 	planOnce(t, rolloutT0.Add(48*time.Hour), testRenderer, cfg, views)
-	if r := recordOf(views, "tiger"); !r.Started() || r.Phase != v1alpha1.RolloutPhaseStalled {
+	if r := recordOf(views, "tiger"); !r.Started() || r.Phase != v1beta1.RolloutPhaseStalled {
 		t.Fatalf("tiger = %+v, want it to keep the slot, stalled", r)
 	}
 }
@@ -263,13 +263,13 @@ func TestPlanRollout_SoakBetweenGroups(t *testing.T) {
 	views[0].State = rolloutGroupState{}
 	done := rolloutT0.Add(3 * time.Minute)
 	actions, _ := planOnce(t, done, testRenderer, cfg, views)
-	if got := eventReasons(actions); got["lion"] != v1alpha1.EventRolloutCompleted || got["tiger"] != "" {
+	if got := eventReasons(actions); got["lion"] != v1beta1.EventRolloutCompleted || got["tiger"] != "" {
 		t.Fatalf("events = %v, want only lion completed", got)
 	}
 	planOnce(t, done.Add(time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
 	planOnce(t, done.Add(2*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, "")
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseAdmitted, "")
 }
 
 // A started roll completes only when nothing is pending, every rollout
@@ -286,7 +286,7 @@ func TestPlanRollout_CompletionNeedsAStableGroup(t *testing.T) {
 	}{
 		{name: "a site not rolled", state: rolloutGroupState{Pending: []string{"mysql/pdx"}}},
 		{name: "a rollout not finished", state: rolloutGroupState{Incomplete: []string{"dragonfly/iad"}}},
-		{name: "group not stable", unst: v1alpha1.UnstableReasonReplicationNotRunning},
+		{name: "group not stable", unst: v1beta1.UnstableReasonReplicationNotRunning},
 		{name: "workloads unreadable", err: "get deployment: timeout"},
 	} {
 		views[0].State, views[0].StateErr, views[0].Unstable = tc.state, tc.err, tc.unst
@@ -297,7 +297,7 @@ func TestPlanRollout_CompletionNeedsAStableGroup(t *testing.T) {
 	}
 	views[0].State, views[0].StateErr, views[0].Unstable = rolloutGroupState{}, "", ""
 	planOnce(t, rolloutT0.Add(2*time.Minute), testRenderer, RolloutPacerConfig{}, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseComplete, "")
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseComplete, "")
 	if r := recordOf(views, "lion"); r.CompletedTime == nil || r.StartedTime == nil || r.InFlight() {
 		t.Fatalf("lion = %+v", r)
 	}
@@ -312,24 +312,24 @@ func TestPlanRollout_Annotations(t *testing.T) {
 	markStarted(views, "lion", rolloutT0)
 	views[0].UpdateStalled = "pod not Ready"
 	planOnce(t, rolloutT0.Add(time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "puma", v1alpha1.RolloutPhasePending, rolloutReasonHalted)
+	requirePhase(t, views, "puma", v1beta1.RolloutPhasePending, rolloutReasonHalted)
 
 	views[2].Admit = true
 	planOnce(t, rolloutT0.Add(2*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
-	requirePhase(t, views, "puma", v1alpha1.RolloutPhasePending, rolloutReasonHalted)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
+	requirePhase(t, views, "puma", v1beta1.RolloutPhasePending, rolloutReasonHalted)
 
 	// tiger completes; lion still holds the slot until it is released.
 	markStarted(views, "tiger", rolloutT0.Add(2*time.Minute))
 	views[2].State = rolloutGroupState{}
 	planOnce(t, rolloutT0.Add(3*time.Minute), testRenderer, cfg, views)
 	planOnce(t, rolloutT0.Add(3*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "puma", v1alpha1.RolloutPhasePending, rolloutReasonHalted)
+	requirePhase(t, views, "puma", v1beta1.RolloutPhasePending, rolloutReasonHalted)
 
 	views[0].ReleaseSlot = true
 	planOnce(t, rolloutT0.Add(4*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "puma", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseStalled, "")
+	requirePhase(t, views, "puma", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseStalled, "")
 }
 
 // A record is dropped when the group has nothing to roll any more (the
@@ -352,7 +352,7 @@ func TestPlanRollout_UnreadableGroup(t *testing.T) {
 	if recordOf(views, "lion") != nil {
 		t.Fatalf("lion = %+v, want no record", recordOf(views, "lion"))
 	}
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, "")
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseAdmitted, "")
 	views[1].StateErr = "list deployments: timeout"
 	if actions, _ := planOnce(t, rolloutT0.Add(4*time.Minute), testRenderer, RolloutPacerConfig{}, views); len(actions) != 0 {
 		t.Fatalf("an unreadable holder was changed: %+v", actions)
@@ -361,7 +361,7 @@ func TestPlanRollout_UnreadableGroup(t *testing.T) {
 	// admission is withdrawn after the grace, a started one is recorded as
 	// stalled after the stall timeout. Neither is ever completed unread.
 	planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, RolloutPacerConfig{}, views)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonNotStarted)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonNotStarted)
 
 	started := []rolloutGroupView{pendingView("puma")}
 	planOnce(t, rolloutT0, testRenderer, RolloutPacerConfig{}, started)
@@ -371,9 +371,9 @@ func TestPlanRollout_UnreadableGroup(t *testing.T) {
 		t.Fatalf("an unreadable started group was changed before the stall timeout: %+v", actions)
 	}
 	planOnce(t, rolloutT0.Add(30*time.Minute), testRenderer, RolloutPacerConfig{}, started)
-	requirePhase(t, started, "puma", v1alpha1.RolloutPhaseStalled, rolloutReasonStallTimeout)
+	requirePhase(t, started, "puma", v1beta1.RolloutPhaseStalled, rolloutReasonStallTimeout)
 	planOnce(t, rolloutT0.Add(time.Hour), testRenderer, RolloutPacerConfig{}, started)
-	requirePhase(t, started, "puma", v1alpha1.RolloutPhaseStalled, rolloutReasonStallTimeout)
+	requirePhase(t, started, "puma", v1beta1.RolloutPhaseStalled, rolloutReasonStallTimeout)
 }
 
 // A group admitted by the annotation is never deferred; when it does not
@@ -384,13 +384,13 @@ func TestPlanRollout_IdleAnnotatedGroupDoesNotHoldTheSlot(t *testing.T) {
 	views := []rolloutGroupView{pendingView("lion"), pendingView("tiger")}
 	views[0].Admit = true
 	planOnce(t, rolloutT0, testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
 	planOnce(t, rolloutT0.Add(4*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
 	planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, cfg, views)
-	requirePhase(t, views, "lion", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
-	requirePhase(t, views, "tiger", v1alpha1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
 }
 
 func TestRolloutPacerConfigDefaults(t *testing.T) {

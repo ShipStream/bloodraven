@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -91,14 +91,14 @@ func testVerdict(v verdictFields) string {
 	return strings.Join(lines, "\n")
 }
 
-func outcomeRestore(t *testing.T, pit v1alpha1.PointInTimeSpec) (*MysqlFailoverGroupReconciler, client.Client, *v1alpha1.MysqlFailoverGroup, *batchv1.Job) {
+func outcomeRestore(t *testing.T, pit v1beta1.PointInTimeSpec) (*MysqlFailoverGroupReconciler, client.Client, *v1beta1.MysqlFailoverGroup, *batchv1.Job) {
 	t.Helper()
 	fg := fgInitFromMysqlBackup()
 	seedPublished(fg)
 	seed := succeededSeedBackup()
 	seed.UID = "uid-seed"
 	seed.Status.FailoverGroupUID = outcomeSourceUID
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
+	fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
 	if pit.StopTime.IsZero() {
 		pit.StopTime = stopAt(outcomeStop)
 	}
@@ -162,23 +162,23 @@ func drainEventsMatching(rec *record.FakeRecorder, needle string) int {
 func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		pit      v1alpha1.PointInTimeSpec
+		pit      v1beta1.PointInTimeSpec
 		verdict  string
 		noPod    bool
 		podPhase corev1.PodPhase
 		reason   string
 		failed   bool
 		warnings []string
-		check    func(t *testing.T, res *v1alpha1.PointInTimeResult)
+		check    func(t *testing.T, res *v1beta1.PointInTimeResult)
 	}{
-		{name: "covered", verdict: testVerdict(verdictFields{}), check: func(t *testing.T, res *v1alpha1.PointInTimeResult) {
-			want := &v1alpha1.PointInTimeResult{
-				Mode: v1alpha1.PointInTimeModeTimestamp, Outcome: v1alpha1.PointInTimeTargetCovered,
+		{name: "covered", verdict: testVerdict(verdictFields{}), check: func(t *testing.T, res *v1beta1.PointInTimeResult) {
+			want := &v1beta1.PointInTimeResult{
+				Mode: v1beta1.PointInTimeModeTimestamp, Outcome: v1beta1.PointInTimeTargetCovered,
 				StopTime: &metav1.Time{Time: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
-				Archive: &v1alpha1.PITRArchiveIdentity{ArchiveID: outcomeArchiveID, Source: v1alpha1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: outcomeSourceUID},
-					EncryptionMode: v1alpha1.EncryptionModeNone},
+				Archive: &v1beta1.PITRArchiveIdentity{ArchiveID: outcomeArchiveID, Source: v1beta1.PITRArchiveSource{Namespace: "ns", Name: "src", UID: outcomeSourceUID},
+					EncryptionMode: v1beta1.EncryptionModeNone},
 				ReplaySites: []string{"dfw", "iad"}, SegmentCount: 2, ReplayedBinlogCount: 2,
-				LastReplayedBinlog:       &v1alpha1.ReplayedBinlogRef{Site: "iad", Name: "mysql-bin.000007"},
+				LastReplayedBinlog:       &v1beta1.ReplayedBinlogRef{Site: "iad", Name: "mysql-bin.000007"},
 				ReplayedTransactionCount: 32, NewestReplayedCommitTime: microPtr(time.Date(2029, 12, 31, 23, 59, 50, 123456000, time.UTC)),
 				GtidExecuted: outcomeExecuted, GtidExecutedSHA256: sha256Hex(outcomeExecuted),
 			}
@@ -194,28 +194,28 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 			}
 		}},
 		{name: "covered with no replay", verdict: testVerdict(verdictFields{noSegments: true})},
-		{name: "digest only", verdict: testVerdict(verdictFields{digestOnly: true}), check: func(t *testing.T, res *v1alpha1.PointInTimeResult) {
+		{name: "digest only", verdict: testVerdict(verdictFields{digestOnly: true}), check: func(t *testing.T, res *v1beta1.PointInTimeResult) {
 			if res.GtidExecuted != "" || res.GtidExecutedSHA256 != sha256Hex(outcomeExecuted) {
 				t.Fatalf("digest-only result: %+v", res)
 			}
 		}},
-		{name: "partial", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), warnings: []string{"Warning PITRReplayTruncated"}},
-		{name: "divergent and on-history exclusions", pit: v1alpha1.PointInTimeSpec{ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3"},
+		{name: "partial", pit: v1beta1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial"}), warnings: []string{"Warning PITRReplayTruncated"}},
+		{name: "divergent and on-history exclusions", pit: v1beta1.PointInTimeSpec{ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3"},
 			verdict:  testVerdict(verdictFields{divergent: 2, onHistory: 1, onHistorySet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:3"}),
 			warnings: []string{"Warning PITRDivergentHistoryExcluded replay excluded 2 transactions", "Warning PITROnHistoryTransactionsExcluded excluded 3e11fa47-71ca-11e1-9e33-c80aa9429562:3 precedes"},
-			check: func(t *testing.T, res *v1alpha1.PointInTimeResult) {
+			check: func(t *testing.T, res *v1beta1.PointInTimeResult) {
 				if res.ExcludedDivergentTransactionCount != 2 || res.OnHistoryExclusionCount != 1 || res.OnHistoryExclusions != "3e11fa47-71ca-11e1-9e33-c80aa9429562:3" {
 					t.Fatalf("exclusion counts: %+v", res)
 				}
 			}},
-		{name: "offset stop", pit: v1alpha1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:59:59+01:00")}, verdict: testVerdict(verdictFields{stop: "2029-12-31T23:59:59.000000Z"})},
+		{name: "offset stop", pit: v1beta1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:59:59+01:00")}, verdict: testVerdict(verdictFields{stop: "2029-12-31T23:59:59.000000Z"})},
 		{name: "missing verdict", verdict: "", reason: "PITRCoverageInvalid", failed: true},
 		{name: "version 1", verdict: testVerdict(verdictFields{version: "1"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "stop mismatch", verdict: testVerdict(verdictFields{stop: "2029-01-01T00:00:00.000000Z"}), reason: "PITRCoverageInvalid", failed: true},
-		{name: "fractional echo of a whole-second stop", pit: v1alpha1.PointInTimeSpec{StopTime: stopAt("2029-12-31T23:59:59Z")}, verdict: testVerdict(verdictFields{stop: "2029-12-31T23:59:59.500000Z"}), reason: "PITRCoverageInvalid", failed: true},
+		{name: "fractional echo of a whole-second stop", pit: v1beta1.PointInTimeSpec{StopTime: stopAt("2029-12-31T23:59:59Z")}, verdict: testVerdict(verdictFields{stop: "2029-12-31T23:59:59.500000Z"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "mode mismatch", verdict: testVerdict(verdictFields{mode: "latest"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "unauthorized partial", verdict: testVerdict(verdictFields{outcome: "Partial"}), reason: "PITRCoverageInvalid", failed: true},
-		{name: "partial without replay", pit: v1alpha1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial", noSegments: true}), reason: "PITRCoverageInvalid", failed: true},
+		{name: "partial without replay", pit: v1beta1.PointInTimeSpec{AllowPartial: true}, verdict: testVerdict(verdictFields{outcome: "Partial", noSegments: true}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "archive head in timestamp mode", verdict: testVerdict(verdictFields{outcome: "ArchiveHead"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "foreign source", verdict: testVerdict(verdictFields{sourceUID: "another-group"}), reason: "PITRCoverageInvalid", failed: true},
 		{name: "encryption mismatch", verdict: testVerdict(verdictFields{encryption: "Passphrase"}), reason: "PITRCoverageInvalid", failed: true},
@@ -249,7 +249,7 @@ func TestPITRRestoreVerdictOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			status := fg.Status.Restore
-			if (status.Phase == v1alpha1.BackupPhaseFailed) != tc.failed || string(status.Reason) != tc.reason {
+			if (status.Phase == v1beta1.BackupPhaseFailed) != tc.failed || string(status.Reason) != tc.reason {
 				t.Fatalf("outcome: %+v", status)
 			}
 			if tc.failed {
@@ -298,7 +298,7 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func equalResults(a, b *v1alpha1.PointInTimeResult) bool {
+func equalResults(a, b *v1beta1.PointInTimeResult) bool {
 	return apiequality.Semantic.DeepEqual(a, b)
 }
 
@@ -322,7 +322,7 @@ func TestPITRRestoreFailureDetail(t *testing.T) {
 		{name: "decrypt failure", init: []corev1.ContainerStatus{terminated(restorePITRInitContainerName, 0, `{"msg":"pitr-download complete"}`), terminated("decrypt-download", 1, "decrypt: authentication failed")}, want: "authentication failed", notWant: "pitr-download complete"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, c, fg, job := outcomeRestore(t, v1alpha1.PointInTimeSpec{})
+			r, c, fg, job := outcomeRestore(t, v1beta1.PointInTimeSpec{})
 			r.Clientset = nil
 			rec := record.NewFakeRecorder(30)
 			r.Recorder = rec
@@ -340,7 +340,7 @@ func TestPITRRestoreFailureDetail(t *testing.T) {
 				}
 			}
 			status := fg.Status.Restore
-			if status.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(status.Message, tc.want) || (tc.notWant != "" && strings.Contains(status.Message, tc.notWant)) || string(status.Reason) != tc.reason {
+			if status.Phase != v1beta1.BackupPhaseFailed || !strings.Contains(status.Message, tc.want) || (tc.notWant != "" && strings.Contains(status.Message, tc.notWant)) || string(status.Reason) != tc.reason {
 				t.Fatalf("failure detail: %+v", status)
 			}
 			if events := drainEventsMatching(rec, "RestoreFailed"); events != 1 {
@@ -353,7 +353,7 @@ func TestPITRRestoreFailureDetail(t *testing.T) {
 // A stale pod left by an earlier Job with the same name never supplies the
 // replacement Job's verdict.
 func TestPITRRestoreIgnoresStalePodOfSameName(t *testing.T) {
-	r, c, fg, job := outcomeRestore(t, v1alpha1.PointInTimeSpec{})
+	r, c, fg, job := outcomeRestore(t, v1beta1.PointInTimeSpec{})
 	finishJob(t, c, job, false)
 	stale := jobPodFor(job, "old-pod", corev1.PodSucceeded, nil)
 	stale.OwnerReferences[0].UID = "previous-job"
@@ -364,14 +364,14 @@ func TestPITRRestoreIgnoresStalePodOfSameName(t *testing.T) {
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if fg.Status.Restore.Phase != v1alpha1.BackupPhaseFailed || !strings.Contains(fg.Status.Restore.Message, "pod is gone") {
+	if fg.Status.Restore.Phase != v1beta1.BackupPhaseFailed || !strings.Contains(fg.Status.Restore.Message, "pod is gone") {
 		t.Fatalf("stale pod certified the replacement Job: %+v", fg.Status.Restore)
 	}
 }
 
 // A pod list error is transient: nothing terminal is recorded.
 func TestPITRRestorePodListErrorIsTransient(t *testing.T) {
-	r, c, fg, job := outcomeRestore(t, v1alpha1.PointInTimeSpec{})
+	r, c, fg, job := outcomeRestore(t, v1beta1.PointInTimeSpec{})
 	finishJob(t, c, job, false)
 	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 		if _, ok := list.(*corev1.PodList); ok {
@@ -382,7 +382,7 @@ func TestPITRRestorePodListErrorIsTransient(t *testing.T) {
 	if _, err := r.reconcileRestoreJob(context.Background(), fg); err == nil {
 		t.Fatal("pod list error was not surfaced")
 	}
-	if fg.Status.Restore != nil && (fg.Status.Restore.Phase == v1alpha1.BackupPhaseFailed || fg.Status.Restore.Phase == v1alpha1.BackupPhaseSucceeded) {
+	if fg.Status.Restore != nil && (fg.Status.Restore.Phase == v1beta1.BackupPhaseFailed || fg.Status.Restore.Phase == v1beta1.BackupPhaseSucceeded) {
 		t.Fatalf("transient error recorded a terminal outcome: %+v", fg.Status.Restore)
 	}
 }
@@ -393,36 +393,36 @@ func TestPITRRestorePodListErrorIsTransient(t *testing.T) {
 func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(fg *v1alpha1.MysqlFailoverGroup)
-		seed   func(mb *v1alpha1.MysqlBackup)
+		mutate func(fg *v1beta1.MysqlFailoverGroup)
+		seed   func(mb *v1beta1.MysqlBackup)
 		reason string
 	}{
 		// B4: a backup with no recorded source identity has no stamp;
 		// refuse before scheduling dump-meta.
-		{name: "backup without dump identity", mutate: func(*v1alpha1.MysqlFailoverGroup) {}, seed: func(mb *v1alpha1.MysqlBackup) {
+		{name: "backup without dump identity", mutate: func(*v1beta1.MysqlFailoverGroup) {}, seed: func(mb *v1beta1.MysqlBackup) {
 			mb.Status.FailoverGroupUID = ""
 		}, reason: "PITRBackupIdentityUnknown"},
-		{name: "archive profile missing", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "archive profile missing", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.ArchiveProfileName = ""
 		}, reason: "PITRTargetInvalid"},
-		{name: "archive profile unknown", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "archive profile unknown", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.ArchiveProfileName = "ghost"
 		}, reason: "PITRTargetInvalid"},
-		{name: "fractional target", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "fractional target", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.StopTime = stopAt("2030-01-01T00:00:00.1234567Z")
 		}, reason: "PITRTargetInvalid"},
-		{name: "missing target", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "missing target", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.StopTime = metav1.Time{}
 		}, reason: "PITRTargetInvalid"},
-		{name: "include filter", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.InitFromBackup.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{"app"}}
+		{name: "include filter", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup.LoadOptions = &v1beta1.LoadOptions{IncludeSchemas: []string{"app"}}
 		}, reason: "PITRBackupFiltered"},
-		{name: "exclude filter", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.InitFromBackup.LoadOptions = &v1alpha1.LoadOptions{ExcludeSchemas: []string{"audit"}}
+		{name: "exclude filter", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup.LoadOptions = &v1beta1.LoadOptions{ExcludeSchemas: []string{"audit"}}
 		}, reason: "PITRBackupFiltered"},
 		// A target before the backup is refused PITRBackupAfterTarget by
 		// dump-meta against the dump's serverClock.end, not here (F034).
-		{name: "shared destination", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "shared destination", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.ArchiveProfileName = fg.Spec.Backup.PITR.ProfileName
 		}, reason: "PITRArchiveDestinationShared"},
 	} {
@@ -430,8 +430,8 @@ func TestPITRRestoreBuildFailureKeepsReason(t *testing.T) {
 			fg := fgInitFromMysqlBackup()
 			seedPublished(fg)
 			seed := succeededSeedBackup()
-			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
-			fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt(outcomeStop), ArchiveProfileName: addSourceArchiveProfile(fg)}
+			fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: seed.Spec.ProfileName}
+			fg.Spec.InitFromBackup.PointInTime = &v1beta1.PointInTimeSpec{StopTime: stopAt(outcomeStop), ArchiveProfileName: addSourceArchiveProfile(fg)}
 			tc.mutate(fg)
 			if tc.seed != nil {
 				tc.seed(seed)
@@ -477,11 +477,11 @@ func TestPITRTarget(t *testing.T) {
 func TestPITRTargetNotBoundedByBackupCompletion(t *testing.T) {
 	completed := metav1.NewTime(time.Date(2030, 1, 1, 14, 0, 0, 0, time.UTC))
 	vfg := verifyFG()
-	vfg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	vfg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	backup.Status.CompletionTime = &completed
 	v := verifyCR("verify-before-completion", "lion", "nightly-s3")
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2030-01-01T13:00:00Z")}
+	v.Spec.PointInTime = &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2030-01-01T13:00:00Z")}
 	job, err := buildVerificationJob(verificationJobInputs{FailoverGroup: vfg, Profile: vfg.Spec.Backup.Profiles[0], Verification: v, Backup: backup, CredsSecretName: "c", ScriptsConfigMapName: "s"})
 	if err != nil {
 		t.Fatalf("target after the dump but before the upload finished refused: %v", err)
@@ -493,8 +493,8 @@ func TestPITRTargetNotBoundedByBackupCompletion(t *testing.T) {
 
 func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	fg := verifyFG()
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-	req, err := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:25Z"), AllowPartial: true, ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:9 "})
+	fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	req, err := pitrRequestFromSpec(&v1beta1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:25Z"), AllowPartial: true, ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:9 "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,10 +520,10 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	if frags.InitContainer.TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
 		t.Fatal("init refusals need a termination message")
 	}
-	for _, apiMode := range []v1alpha1.PointInTimeMode{v1alpha1.PointInTimeModeTimestamp, v1alpha1.PointInTimeModeLatest} {
+	for _, apiMode := range []v1beta1.PointInTimeMode{v1beta1.PointInTimeModeTimestamp, v1beta1.PointInTimeModeLatest} {
 		mode := wireModeOf(t, apiMode)
-		v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1alpha1.MysqlBackupVerificationSpec{PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: apiMode, ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}}}
-		if apiMode == v1alpha1.PointInTimeModeTimestamp {
+		v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"}, Spec: v1beta1.MysqlBackupVerificationSpec{PointInTime: &v1beta1.PointInTimeVerificationSpec{Mode: apiMode, ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1"}}}
+		if apiMode == v1beta1.PointInTimeModeTimestamp {
 			v.Spec.PointInTime.StopTime = stopAtPtr(outcomeStop)
 		}
 		backup := successfulBackup("seed", "lion", "nightly-s3")
@@ -553,15 +553,15 @@ func TestPITRRenderingCarriesPolicyAndExclusions(t *testing.T) {
 	}
 }
 
-func outcomeVerification(t *testing.T, mode string) (*MysqlBackupVerificationReconciler, client.Client, *v1alpha1.MysqlBackupVerification, *batchv1.Job) {
+func outcomeVerification(t *testing.T, mode string) (*MysqlBackupVerificationReconciler, client.Client, *v1beta1.MysqlBackupVerification, *batchv1.Job) {
 	t.Helper()
 	fg := verifyFG()
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 	backup := successfulBackup("seed", "lion", "nightly-s3")
 	backup.Status.FailoverGroupUID = outcomeSourceUID
 	v := verifyCR("verify-outcome", "lion", "nightly-s3")
-	v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: apiModeOf(t, mode)}
-	if v.Spec.PointInTime.Mode == v1alpha1.PointInTimeModeTimestamp {
+	v.Spec.PointInTime = &v1beta1.PointInTimeVerificationSpec{Mode: apiModeOf(t, mode)}
+	if v.Spec.PointInTime.Mode == v1beta1.PointInTimeModeTimestamp {
 		v.Spec.PointInTime.StopTime = stopAtPtr(outcomeStop)
 	}
 	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
@@ -576,9 +576,9 @@ func outcomeVerification(t *testing.T, mode string) (*MysqlBackupVerificationRec
 	return r, c, v, job
 }
 
-func verifiedReason(v *v1alpha1.MysqlBackupVerification) string {
+func verifiedReason(v *v1beta1.MysqlBackupVerification) string {
 	for _, cond := range v.Status.Conditions {
-		if cond.Type == v1alpha1.ConditionVerified {
+		if cond.Type == v1beta1.ConditionVerified {
 			return cond.Reason
 		}
 	}
@@ -617,7 +617,7 @@ func TestPITRVerificationVerdictOutcomes(t *testing.T) {
 			if tc.podFailed {
 				phase = corev1.PodFailed
 			}
-			pod := jobPodFor(job, "verify-pod", phase, map[string]string{v1alpha1.MysqlBackupVerificationLabel: v.Name})
+			pod := jobPodFor(job, "verify-pod", phase, map[string]string{v1beta1.MysqlBackupVerificationLabel: v.Name})
 			initCode, mainCode := int32(0), int32(0)
 			if tc.init != "" {
 				initCode = 2
@@ -641,7 +641,7 @@ func TestPITRVerificationVerdictOutcomes(t *testing.T) {
 			if _, err := r.observeVerificationJob(context.Background(), v, job); err != nil {
 				t.Fatal(err)
 			}
-			if (v.Status.Phase == v1alpha1.VerificationPhaseFailed) != tc.failed || verifiedReason(v) != tc.reason {
+			if (v.Status.Phase == v1beta1.VerificationPhaseFailed) != tc.failed || verifiedReason(v) != tc.reason {
 				t.Fatalf("verification outcome: %+v", v.Status)
 			}
 			if tc.failed {
@@ -653,9 +653,9 @@ func TestPITRVerificationVerdictOutcomes(t *testing.T) {
 				if res == nil || res.GtidExecuted != outcomeExecuted || res.Archive == nil || res.Archive.ArchiveID != outcomeArchiveID {
 					t.Fatalf("result: %+v", res)
 				}
-				wantMode := v1alpha1.PointInTimeModeTimestamp
+				wantMode := v1beta1.PointInTimeModeTimestamp
 				if tc.mode == "latest" {
-					wantMode = v1alpha1.PointInTimeModeLatest
+					wantMode = v1beta1.PointInTimeModeLatest
 				}
 				if res.Mode != wantMode || (res.StopTime == nil) != (tc.mode == "latest") {
 					t.Fatalf("result mode/stop: %+v", res)
@@ -692,7 +692,7 @@ func TestPITRVerificationPodListErrorIsTransient(t *testing.T) {
 	if _, err := r.observeVerificationJob(context.Background(), v, job); err == nil {
 		t.Fatal("pod list error was not surfaced")
 	}
-	if v.Status.Phase == v1alpha1.VerificationPhaseFailed || v.Status.Phase == v1alpha1.VerificationPhaseSucceeded {
+	if v.Status.Phase == v1beta1.VerificationPhaseFailed || v.Status.Phase == v1beta1.VerificationPhaseSucceeded {
 		t.Fatalf("transient error recorded a terminal outcome: %+v", v.Status)
 	}
 }
@@ -754,10 +754,10 @@ func TestPITRDownloadBudgetEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := verifyFG()
-			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 			fg.Spec.Backup.StagingVolumeSizeLimit = tc.staging
 			fg.Spec.Backup.Resources = tc.resources
-			req, err := pitrRequestFromSpec(&v1alpha1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:00Z")})
+			req, err := pitrRequestFromSpec(&v1beta1.PointInTimeSpec{StopTime: stopAt("2030-01-01T00:00:00Z")})
 			if err != nil {
 				t.Fatal(err)
 			}

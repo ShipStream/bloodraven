@@ -56,7 +56,7 @@ func IsIgnoredArchiveKey(key string) bool {
 }
 
 // EncryptionMode is an archive's encryption mode. The API mirrors it as
-// v1alpha1.EncryptionMode.
+// v1beta1.EncryptionMode.
 type EncryptionMode string
 
 const (
@@ -207,7 +207,7 @@ func IdentityEqual(a, b *Descriptor) bool {
 }
 
 // ValidateNames checks the source against the bounds of the API fields that
-// receive it (v1alpha1.PITRArchiveSource): the namespace is a DNS-1123
+// receive it (v1beta1.PITRArchiveSource): the namespace is a DNS-1123
 // label (at most 63 characters) and the name a DNS-1123 subdomain (at most
 // 253), as for every Kubernetes object. A descriptor that passed with a
 // longer name could never be written to status.

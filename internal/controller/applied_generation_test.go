@@ -9,7 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -17,11 +17,11 @@ import (
 // topologyConditionTypes are the conditions updateCRStatus owns; each is
 // stamped with the generation the topology manager applied (A-68).
 var topologyConditionTypes = []string{
-	v1alpha1.ConditionReady,
-	v1alpha1.ConditionDegraded,
-	v1alpha1.ConditionBootstrapping,
-	v1alpha1.ConditionUpdating,
-	v1alpha1.ConditionRecoveryPending,
+	v1beta1.ConditionReady,
+	v1beta1.ConditionDegraded,
+	v1beta1.ConditionBootstrapping,
+	v1beta1.ConditionUpdating,
+	v1beta1.ConditionRecoveryPending,
 }
 
 // TestUpdateCRStatus_StampsAppliedGeneration pins A-68: the topology
@@ -32,7 +32,7 @@ func TestUpdateCRStatus_StampsAppliedGeneration(t *testing.T) {
 	ctx := context.Background()
 	runner, c, fg, _ := lifecycleRunner(t)
 	nn := client.ObjectKeyFromObject(fg)
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
@@ -50,15 +50,15 @@ func TestUpdateCRStatus_StampsAppliedGeneration(t *testing.T) {
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, ReplicaStatusRead: true,
 				Replication: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: new(int64(0))}, SourceConvergenceState: sourceConvergenceConverged},
 		},
-		DegradedReason:    v1alpha1.ReasonHealthy,
+		DegradedReason:    v1beta1.ReasonHealthy,
 		AppliedGeneration: cur.Generation - 2,
 	}
-	write := func(s TopologySnapshot) v1alpha1.MysqlFailoverGroup {
+	write := func(s TopologySnapshot) v1beta1.MysqlFailoverGroup {
 		t.Helper()
 		if err := runner.updateCRStatus(ctx, nn, s); err != nil {
 			t.Fatal(err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
@@ -77,7 +77,7 @@ func TestUpdateCRStatus_StampsAppliedGeneration(t *testing.T) {
 			t.Errorf("%s.observedGeneration = %d, want the applied %d, not metadata.generation %d", typ, cond.ObservedGeneration, snap.AppliedGeneration, got.Generation)
 		}
 	}
-	if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady); ready.Status != metav1.ConditionTrue || ready.Reason != v1alpha1.ReasonHealthy {
+	if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady); ready.Status != metav1.ConditionTrue || ready.Reason != v1beta1.ReasonHealthy {
 		t.Fatalf("Ready = %+v, want True/Healthy", ready)
 	}
 
@@ -100,7 +100,7 @@ func TestSync_EqualConfigEditAdvancesObservedGeneration(t *testing.T) {
 	ctx := context.Background()
 	runner, c, fg, _ := lifecycleRunner(t)
 	nn := client.ObjectKeyFromObject(fg)
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
@@ -129,11 +129,11 @@ func TestSync_EqualConfigEditAdvancesObservedGeneration(t *testing.T) {
 
 	observed := func() (int64, int64, int64) {
 		t.Helper()
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
-		ready := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		ready := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady)
 		if ready == nil {
 			t.Fatal("no Ready condition")
 		}
@@ -160,7 +160,7 @@ func TestSync_EqualConfigEditAdvancesObservedGeneration(t *testing.T) {
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
-	cur.Spec.Backup = &v1alpha1.BackupSpec{Schedules: []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "s3", Schedule: "0 2 * * *"}}}
+	cur.Spec.Backup = &v1beta1.BackupSpec{Schedules: []v1beta1.BackupSchedule{{Name: "nightly", ProfileName: "s3", Schedule: "0 2 * * *"}}}
 	cur.Generation++
 	if err := c.Update(ctx, &cur); err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestUpdateCRStatus_OlderCallbackRetryDoesNotMoveGenerationBack(t *testing.T
 	ctx := context.Background()
 	runner, c, fg, _ := lifecycleRunner(t)
 	nn := client.ObjectKeyFromObject(fg)
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestUpdateCRStatus_OlderCallbackRetryDoesNotMoveGenerationBack(t *testing.T
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, ReplicaStatusRead: true,
 				Replication: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: new(int64(0))}, SourceConvergenceState: sourceConvergenceConverged},
 		},
-		DegradedReason:    v1alpha1.ReasonHealthy,
+		DegradedReason:    v1beta1.ReasonHealthy,
 		AppliedGeneration: 4,
 	}
 	// The newer callback's write lands between the older one's read and
@@ -219,14 +219,14 @@ func TestUpdateCRStatus_OlderCallbackRetryDoesNotMoveGenerationBack(t *testing.T
 		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			if !raced {
 				raced = true
-				var newer v1alpha1.MysqlFailoverGroup
+				var newer v1beta1.MysqlFailoverGroup
 				if err := cl.Get(ctx, nn, &newer); err != nil {
 					return err
 				}
 				newer.Status.ObservedGeneration = 5
 				newer.Status.TopologyGeneration = snap.TopologyGeneration
-				newer.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue,
-					Reason: v1alpha1.ReasonHealthy, ObservedGeneration: 5, LastTransitionTime: metav1.Now()}}
+				newer.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionReady, Status: metav1.ConditionTrue,
+					Reason: v1beta1.ReasonHealthy, ObservedGeneration: 5, LastTransitionTime: metav1.Now()}}
 				if err := cl.Status().Update(ctx, &newer); err != nil {
 					return err
 				}
@@ -240,14 +240,14 @@ func TestUpdateCRStatus_OlderCallbackRetryDoesNotMoveGenerationBack(t *testing.T
 	if !raced {
 		t.Fatal("the race was not staged")
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Status.ObservedGeneration != 5 {
 		t.Fatalf("status.observedGeneration = %d, want the newer write's 5", got.Status.ObservedGeneration)
 	}
-	if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady); ready == nil || ready.ObservedGeneration != 5 {
+	if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady); ready == nil || ready.ObservedGeneration != 5 {
 		t.Fatalf("Ready = %+v, want the newer write's generation 5", ready)
 	}
 }
@@ -261,7 +261,7 @@ func TestUpdateCRStatus_OlderCallbackAfterNewerWriteIsSuperseded(t *testing.T) {
 	ctx := context.Background()
 	runner, c, fg, _ := lifecycleRunner(t)
 	nn := client.ObjectKeyFromObject(fg)
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestUpdateCRStatus_OlderCallbackAfterNewerWriteIsSuperseded(t *testing.T) {
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, ReplicaStatusRead: true,
 				Replication: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SecondsBehindSource: new(int64(0))}, SourceConvergenceState: sourceConvergenceConverged},
 		},
-		DegradedReason: v1alpha1.ReasonHealthy,
+		DegradedReason: v1beta1.ReasonHealthy,
 	}
 	newer := snap
 	newer.AppliedGeneration = 5
@@ -288,14 +288,14 @@ func TestUpdateCRStatus_OlderCallbackAfterNewerWriteIsSuperseded(t *testing.T) {
 	if err := runner.updateCRStatus(ctx, nn, older); err != nil {
 		t.Fatal(err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Status.ObservedGeneration != 5 {
 		t.Fatalf("status.observedGeneration = %d, want the newer write's 5", got.Status.ObservedGeneration)
 	}
-	for _, typ := range []string{v1alpha1.ConditionReady, v1alpha1.ConditionDegraded} {
+	for _, typ := range []string{v1beta1.ConditionReady, v1beta1.ConditionDegraded} {
 		if cond := apimeta.FindStatusCondition(got.Status.Conditions, typ); cond == nil || cond.ObservedGeneration != 5 {
 			t.Fatalf("%s = %+v, want the newer write's generation 5", typ, cond)
 		}

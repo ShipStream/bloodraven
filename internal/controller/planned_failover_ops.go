@@ -11,7 +11,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -282,7 +282,7 @@ func (p *runnerPlannedTopology) ClaimPlannedFailover(ctx context.Context, nn typ
 	}
 	snap := p.reg.Snapshot(nn)
 	if snap.Current == nil {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerAbsent, "no topology manager is registered"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitManagerAbsent, "no topology manager is registered"), nil
 	}
 	if d, busy := retiringManagersBusy(snap); busy {
 		return d, nil
@@ -296,7 +296,7 @@ func (p *runnerPlannedTopology) ClaimPlannedFailover(ctx context.Context, nn typ
 func retiringManagersBusy(snap RegistrySnapshot) (PlannedClaimDecision, bool) {
 	for _, old := range snap.Retiring {
 		if old.changingSites() || old.orderedUpdateClaimed() {
-			return claimDecisionWait(v1alpha1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager is still changing the sites"), true
+			return claimDecisionWait(v1beta1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager is still changing the sites"), true
 		}
 	}
 	return PlannedClaimDecision{}, false
@@ -321,7 +321,7 @@ func retiringManagersBusy(snap RegistrySnapshot) (PlannedClaimDecision, bool) {
 // grant's refusals (unknown or unpromotable target, divergence, the
 // active site) are not repeated: the run is past its grant, and its
 // re-proof (§4.4) decides those before its next side effect.
-func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (PlannedClaimDecision, error) {
+func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunRef, fg *v1beta1.MysqlFailoverGroup) (PlannedClaimDecision, error) {
 	if l := p.leader(); l != nil && l.Err() != nil {
 		return PlannedClaimDecision{}, errLeaderLost
 	}
@@ -348,15 +348,15 @@ func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunR
 		if !ok && hydratable && slot != nil {
 			slot.hydrate(c)
 		}
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerAbsent, "no topology manager is registered"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitManagerAbsent, "no topology manager is registered"), nil
 	}
 	if ok {
 		switch {
 		case held.mode == claimModeHold:
-			return claimDecisionReject(v1alpha1.PlannedFailoverReasonManualRecoveryPending,
+			return claimDecisionReject(v1beta1.PlannedFailoverReasonManualRecoveryPending,
 				"automatic failover is held after planned failover run %s", held.runID), nil
 		case held.runID != ref.RunID:
-			return claimDecisionWait(v1alpha1.PlannedFailoverWaitClaimHeld, "planned failover run %s holds the claim", held.runID), nil
+			return claimDecisionWait(v1beta1.PlannedFailoverWaitClaimHeld, "planned failover run %s holds the claim", held.runID), nil
 		}
 		return claimDecisionGranted(&held), nil
 	}
@@ -367,7 +367,7 @@ func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunR
 		return d, nil
 	}
 	if tm.predecessorMutating() {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager is still changing the sites"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitPredecessorBusy, "a replaced topology manager is still changing the sites"), nil
 	}
 	var (
 		d              PlannedClaimDecision
@@ -376,7 +376,7 @@ func (p *runnerPlannedTopology) EnsureClaim(ctx context.Context, ref PlannedRunR
 	if err := tm.followerMutationGate.tryAdmit(ref.RunID, plannedClaimGateTTL, func() {
 		d, decided, raced = tm.hydratePlannedClaim(slot, c, ref.Target)
 	}); err != nil {
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRecoveryInFlight, "a recovery or source-convergence step is still running on the sites"), nil
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitRecoveryInFlight, "a recovery or source-convergence step is still running on the sites"), nil
 	}
 	if raced {
 		// Another claim landed between the check above and the lock;
@@ -398,19 +398,19 @@ func (tm *TopologyManager) hydratePlannedClaim(slot *PlannedClaimSlot, c planned
 	defer tm.mu.Unlock()
 	switch {
 	case tm.plannedSlot != slot:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerNotReady, "the topology manager is not wired to the group's claim slot"), true, false
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitManagerNotReady, "the topology manager is not wired to the group's claim slot"), true, false
 	case tm.retired:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitManagerRetiring, "the topology manager is being replaced"), true, false
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitManagerRetiring, "the topology manager is being replaced"), true, false
 	case tm.deploymentChanging > 0 || tm.promotionUnobservedLocked():
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitPromotionInFlight, "a promotion is in flight or not yet observed"), true, false
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitPromotionInFlight, "a promotion is in flight or not yet observed"), true, false
 	case tm.deploymentUpdateRunning || tm.predecessorUpdateInFlight:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitUpdateInFlight, "an ordered update holds the sites"), true, false
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitUpdateInFlight, "an ordered update holds the sites"), true, false
 	case tm.topologyFrozen:
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"), true, false
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"), true, false
 	case tm.bootstrapBlocksCrossSiteLocked():
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitBootstrapInFlight, "a bootstrap of a promotable site is running"), true, false
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitBootstrapInFlight, "a bootstrap of a promotable site is running"), true, false
 	case slices.Contains(tm.keyringRotationReserved, target):
-		return claimDecisionWait(v1alpha1.PlannedFailoverWaitKeyringRotation, "a keyring rotation of %q is being admitted", target), true, false
+		return claimDecisionWait(v1beta1.PlannedFailoverWaitKeyringRotation, "a keyring rotation of %q is being admitted", target), true, false
 	}
 	if !slot.hydrate(c) {
 		return PlannedClaimDecision{}, false, true
@@ -584,13 +584,13 @@ type plannedEvidence struct {
 // replica of the source, every other primary-candidate and dr-only site
 // positively read-only, and no reader writable. It owns nothing.
 func (tm *TopologyManager) plannedGrantEvidence(ctx context.Context, source, target string) plannedEvidence {
-	wait := func(reason v1alpha1.PlannedFailoverWaitReason, format string, args ...any) plannedEvidence {
+	wait := func(reason v1beta1.PlannedFailoverWaitReason, format string, args ...any) plannedEvidence {
 		d := claimDecisionWait(reason, format, args...)
 		return plannedEvidence{wait: &d}
 	}
 	src, tgt := tm.getSite(source), tm.getSite(target)
 	if src == nil || tgt == nil {
-		return wait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "source %q or target %q is not in the topology", source, target)
+		return wait(v1beta1.PlannedFailoverWaitAuthorityUnsettled, "source %q or target %q is not in the topology", source, target)
 	}
 	var (
 		wg      sync.WaitGroup
@@ -628,39 +628,39 @@ func (tm *TopologyManager) plannedGrantEvidence(ctx context.Context, source, tar
 		case source:
 			switch {
 			case pr.err != nil:
-				return wait(v1alpha1.PlannedFailoverWaitPeerUnreadable, "the source %q did not answer: %v", source, pr.err)
+				return wait(v1beta1.PlannedFailoverWaitPeerUnreadable, "the source %q did not answer: %v", source, pr.err)
 			case pr.readOnly:
-				return wait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "the source %q reads read-only", source)
+				return wait(v1beta1.PlannedFailoverWaitAuthorityUnsettled, "the source %q reads read-only", source)
 			}
 		case target:
 			switch {
 			case pr.err != nil:
-				return wait(v1alpha1.PlannedFailoverWaitTargetNotReady, "the target %q did not answer: %v", target, pr.err)
+				return wait(v1beta1.PlannedFailoverWaitTargetNotReady, "the target %q did not answer: %v", target, pr.err)
 			case !pr.readOnly:
-				return wait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "the target %q reads writable", target)
+				return wait(v1beta1.PlannedFailoverWaitAuthorityUnsettled, "the target %q reads writable", target)
 			}
 		default:
 			switch {
 			case pr.err == nil && !pr.readOnly:
-				return wait(v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "site %q reads writable beside the source", pr.name)
+				return wait(v1beta1.PlannedFailoverWaitAuthorityUnsettled, "site %q reads writable beside the source", pr.name)
 			case pr.err != nil && pr.role != state.SiteRoleReadOnly:
-				return wait(v1alpha1.PlannedFailoverWaitPeerUnreadable, "site %q did not answer: %v", pr.name, pr.err)
+				return wait(v1beta1.PlannedFailoverWaitPeerUnreadable, "site %q did not answer: %v", pr.name, pr.err)
 			}
 		}
 	}
 	switch {
 	case srcErr != nil || srcUUID == "":
-		return wait(v1alpha1.PlannedFailoverWaitPeerUnreadable, "could not read the source's server_uuid: %v", srcErr)
+		return wait(v1beta1.PlannedFailoverWaitPeerUnreadable, "could not read the source's server_uuid: %v", srcErr)
 	case replErr != nil:
-		return wait(v1alpha1.PlannedFailoverWaitTargetNotReady, "could not read the target's replication status: %v", replErr)
+		return wait(v1beta1.PlannedFailoverWaitTargetNotReady, "could not read the target's replication status: %v", replErr)
 	case repl == nil:
-		return wait(v1alpha1.PlannedFailoverWaitTargetNotReady, "the target %q has no replication channel", target)
+		return wait(v1beta1.PlannedFailoverWaitTargetNotReady, "the target %q has no replication channel", target)
 	case !repl.IORunning || !repl.SQLRunning:
-		return wait(v1alpha1.PlannedFailoverWaitTargetNotReady, "the target %q's replication threads are not both running", target)
+		return wait(v1beta1.PlannedFailoverWaitTargetNotReady, "the target %q's replication threads are not both running", target)
 	case repl.LastSQLError != "":
-		return wait(v1alpha1.PlannedFailoverWaitTargetNotReady, "the target %q's applier reports an error: %s", target, repl.LastSQLError)
+		return wait(v1beta1.PlannedFailoverWaitTargetNotReady, "the target %q's applier reports an error: %s", target, repl.LastSQLError)
 	case canonicalSourceHost(repl.SourceHost) != canonicalSourceHost(src.host):
-		return wait(v1alpha1.PlannedFailoverWaitTargetNotReady, "the target %q replicates from %q, not the source %q", target, repl.SourceHost, source)
+		return wait(v1beta1.PlannedFailoverWaitTargetNotReady, "the target %q replicates from %q, not the source %q", target, repl.SourceHost, source)
 	}
 	return plannedEvidence{sourceUUID: srcUUID}
 }
@@ -754,7 +754,7 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 	if src == nil {
 		return FenceProof{}, errSiteNotFound
 	}
-	intent := &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceIntended, SourceServerUUID: sourceServerUUID}
+	intent := &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceIntended, SourceServerUUID: sourceServerUUID}
 	// attributed decides a source found already fenced by §4.3's rule.
 	attributed := func(id sourceIdentity) (FenceProof, bool) {
 		if !id.readOnly || !id.superReadOnly {
@@ -762,7 +762,7 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 		}
 		by := p.fenceAttribution(ref.RunID, intent, id.uuid)
 		if by == FenceUnattributed {
-			return FenceProof{Kind: FenceNotAttributable, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, true
+			return FenceProof{Kind: FenceNotAttributable, Reason: v1beta1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, true
 		}
 		p.noteSourceNotSealed(tm, ref, by)
 		return p.postFenceProof(ctx, tm, ref, id, by), true
@@ -773,7 +773,7 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 	id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 	switch {
 	case err != nil && !errors.Is(err, mysql.ErrSessionUnsupported):
-		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1beta1.PlannedFailoverReasonSourceLost}, nil
 	case err == nil:
 		if proof, ok := attributed(id); ok {
 			return proof, nil
@@ -792,7 +792,7 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 		}
 	}
 	if srcProbe.err != nil {
-		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1beta1.PlannedFailoverReasonSourceLost}, nil
 	}
 	v := classifyPlannedPeers(others)
 	switch {
@@ -801,42 +801,42 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 		// reporting that nothing was sent.
 		id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 		if err != nil && !errors.Is(err, mysql.ErrSessionUnsupported) {
-			return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+			return FenceProof{Kind: FenceSourceUnreachable, Reason: v1beta1.PlannedFailoverReasonSourceLost}, nil
 		}
 		if err == nil {
 			if proof, ok := attributed(id); ok {
 				return proof, nil
 			}
 		}
-		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
+		return FenceProof{Kind: FenceNotSent, Reason: v1beta1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
 	case len(v.writable) > 0:
-		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceWritable: true}, nil
+		return FenceProof{Kind: FenceNotSent, Reason: v1beta1.PlannedFailoverReasonAuthorityChanged, SourceWritable: true}, nil
 	case len(v.unreadable) > 0:
 		// Strict evidence: an unreadable primary-candidate or dr-only
 		// peer may be a writable site the operator cannot see. Nothing
 		// is sent; the engine retries until fenceDeadline.
-		return FenceProof{Kind: FenceRetry, Reason: v1alpha1.PlannedFailoverReasonPeerUnreadable, UnreadablePeers: v.unreadable}, nil
+		return FenceProof{Kind: FenceRetry, Reason: v1beta1.PlannedFailoverReasonPeerUnreadable, UnreadablePeers: v.unreadable}, nil
 	}
 
 	sess, err := src.mysql.PinSession(ctx)
 	if err != nil {
-		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1beta1.PlannedFailoverReasonSourceLost}, nil
 	}
 	defer func() { _ = sess.Close() }()
 	id, err = readSourceIdentity(ctx, sess)
 	if err != nil {
-		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1beta1.PlannedFailoverReasonSourceLost}, nil
 	}
 	switch {
 	case id.uuid != sourceServerUUID:
 		// The source was replaced since the grant; it is untouched.
-		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged,
+		return FenceProof{Kind: FenceNotSent, Reason: v1beta1.PlannedFailoverReasonAuthorityChanged,
 			SourceWritable: !id.readOnly, SourceServerUUID: id.uuid}, nil
 	case id.readOnly:
 		if proof, ok := attributed(id); ok {
 			return proof, nil
 		}
-		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
+		return FenceProof{Kind: FenceNotSent, Reason: v1beta1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
 	}
 	if err := tm.requireRunClaim(p.leader(), ref, false); err != nil {
 		return FenceProof{}, err
@@ -848,11 +848,11 @@ func (p *runnerPlannedTopology) fence(ctx context.Context, ref PlannedRunRef, so
 	setErr := withMySQLSafetyTimeout(ctx, func(c context.Context) error { return sess.SetSuperReadOnly(c, true) })
 	p.hooks.stmt(false, ref.Source, "super_read_only=ON")
 	if setErr != nil {
-		return FenceProof{Kind: FenceRetry, Reason: v1alpha1.PlannedFailoverReasonFenceFailed, SourceServerUUID: id.uuid}, nil
+		return FenceProof{Kind: FenceRetry, Reason: v1beta1.PlannedFailoverReasonFenceFailed, SourceServerUUID: id.uuid}, nil
 	}
 	after, err := readSourceIdentity(ctx, sess)
 	if err != nil || !after.superReadOnly || after.uuid != id.uuid {
-		return FenceProof{Kind: FenceRetry, Reason: v1alpha1.PlannedFailoverReasonFenceFailed, SourceServerUUID: id.uuid}, nil
+		return FenceProof{Kind: FenceRetry, Reason: v1beta1.PlannedFailoverReasonFenceFailed, SourceServerUUID: id.uuid}, nil
 	}
 	p.sealFencedSource(ctx, tm, ref, src)
 	return p.postFenceProof(ctx, tm, ref, after, FenceByMemo), nil
@@ -956,7 +956,7 @@ func (p *runnerPlannedTopology) postFenceProof(ctx context.Context, tm *Topology
 	proof := FenceProof{Kind: FenceApplied, SourceServerUUID: id.uuid, GtidSet: id.gtid, Attribution: by, UnreadablePeers: v.allUnreadable()}
 	if len(v.writable) > 0 {
 		proof.Kind = FenceForeignWritable
-		proof.Reason = v1alpha1.PlannedFailoverReasonForeignWritable
+		proof.Reason = v1beta1.PlannedFailoverReasonForeignWritable
 	}
 	return proof
 }
@@ -968,7 +968,7 @@ func (p *runnerPlannedTopology) postFenceProof(ctx context.Context, tm *Topology
 // the server's @@server_uuid is the intent's. A writable source returns
 // FenceRetry with SourceWritable: the engine fences it again through Fence,
 // which re-proves authority first.
-func (p *runnerPlannedTopology) ProveFence(ctx context.Context, ref PlannedRunRef, fence v1alpha1.PlannedFailoverFenceRecord) (FenceProof, error) {
+func (p *runnerPlannedTopology) ProveFence(ctx context.Context, ref PlannedRunRef, fence v1beta1.PlannedFailoverFenceRecord) (FenceProof, error) {
 	proof, err := p.proveFence(ctx, ref, fence)
 	if _, ok := p.fenceMemoFor(ref.RunID); ok {
 		proof.Sent = true
@@ -976,7 +976,7 @@ func (p *runnerPlannedTopology) ProveFence(ctx context.Context, ref PlannedRunRe
 	return proof, err
 }
 
-func (p *runnerPlannedTopology) proveFence(ctx context.Context, ref PlannedRunRef, fence v1alpha1.PlannedFailoverFenceRecord) (FenceProof, error) {
+func (p *runnerPlannedTopology) proveFence(ctx context.Context, ref PlannedRunRef, fence v1beta1.PlannedFailoverFenceRecord) (FenceProof, error) {
 	if l := p.leader(); l != nil && l.Err() != nil {
 		return FenceProof{}, errLeaderLost
 	}
@@ -990,20 +990,20 @@ func (p *runnerPlannedTopology) proveFence(ctx context.Context, ref PlannedRunRe
 	}
 	id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 	if err != nil {
-		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1alpha1.PlannedFailoverReasonSourceLost}, nil
+		return FenceProof{Kind: FenceSourceUnreachable, Reason: v1beta1.PlannedFailoverReasonSourceLost}, nil
 	}
 	switch {
 	case !id.readOnly:
 		return FenceProof{Kind: FenceRetry, SourceWritable: true, SourceServerUUID: id.uuid}, nil
 	case !id.superReadOnly:
 		// mysqld's boot state: neither writable nor fenced by the run.
-		return FenceProof{Kind: FenceNotSent, Reason: v1alpha1.PlannedFailoverReasonSourceUnfenced, SourceServerUUID: id.uuid}, nil
+		return FenceProof{Kind: FenceNotSent, Reason: v1beta1.PlannedFailoverReasonSourceUnfenced, SourceServerUUID: id.uuid}, nil
 	}
 	by := p.fenceAttribution(ref.RunID, &fence, id.uuid)
 	if by == FenceUnattributed {
-		return FenceProof{Kind: FenceNotAttributable, Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
+		return FenceProof{Kind: FenceNotAttributable, Reason: v1beta1.PlannedFailoverReasonAuthorityChanged, SourceServerUUID: id.uuid}, nil
 	}
-	if fence.State == v1alpha1.PlannedFailoverFenceIntended {
+	if fence.State == v1beta1.PlannedFailoverFenceIntended {
 		// The fence's result is not recorded yet: this proof is the one
 		// that establishes it, in place of the pass that would have
 		// rotated the source. A later re-check of a recorded fence is not.
@@ -1014,7 +1014,7 @@ func (p *runnerPlannedTopology) proveFence(ctx context.Context, ref PlannedRunRe
 
 // fenceAttribution is §4.3's rule: the memo for this server, or a durable
 // intent naming this server's @@server_uuid.
-func (p *runnerPlannedTopology) fenceAttribution(runID string, fence *v1alpha1.PlannedFailoverFenceRecord, liveUUID string) FenceAttribution {
+func (p *runnerPlannedTopology) fenceAttribution(runID string, fence *v1beta1.PlannedFailoverFenceRecord, liveUUID string) FenceAttribution {
 	if m, ok := p.fenceMemoFor(runID); ok && m.uuid == liveUUID {
 		return FenceByMemo
 	}
@@ -1178,7 +1178,7 @@ func (tm *TopologyManager) recordPlannedPromotion(ctx context.Context, ref Plann
 }
 
 // ApplyDNS points DNS at the confirmed target while the claim is held.
-func (p *runnerPlannedTopology) ApplyDNS(ctx context.Context, ref PlannedRunRef) (v1alpha1.PlannedFailoverDNSState, error) {
+func (p *runnerPlannedTopology) ApplyDNS(ctx context.Context, ref PlannedRunRef) (v1beta1.PlannedFailoverDNSState, error) {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
 		return "", err
@@ -1191,7 +1191,7 @@ func (p *runnerPlannedTopology) ApplyDNS(ctx context.Context, ref PlannedRunRef)
 		return "", errSiteNotFound
 	}
 	if tm.dns == nil || tgt.lbIP == "" {
-		return v1alpha1.PlannedFailoverDNSSkipped, nil
+		return v1beta1.PlannedFailoverDNSSkipped, nil
 	}
 	dnsCtx, cancel := context.WithTimeout(ctx, plannedDNSBudget)
 	defer cancel()
@@ -1214,21 +1214,21 @@ func (p *runnerPlannedTopology) ApplyDNS(ctx context.Context, ref PlannedRunRef)
 			case <-t.C:
 			}
 			if err := tm.requireRunClaim(p.leader(), ref, false); err != nil {
-				return v1alpha1.PlannedFailoverDNSFailed, err
+				return v1beta1.PlannedFailoverDNSFailed, err
 			}
 		}
 		if dnsCtx.Err() != nil {
 			break
 		}
 		if last = tm.applyDNS(dnsCtx, ref.Target, tgt.lbIP); last == nil {
-			return v1alpha1.PlannedFailoverDNSApplied, nil
+			return v1beta1.PlannedFailoverDNSApplied, nil
 		}
 	}
 	if last == nil {
 		// The budget (or the pass) ran out before an attempt finished.
 		last = fmt.Errorf("planned failover: DNS update for %q not attempted: %w", ref.Target, context.Cause(dnsCtx))
 	}
-	return v1alpha1.PlannedFailoverDNSFailed, last
+	return v1beta1.PlannedFailoverDNSFailed, last
 }
 
 // NameUnconfirmedTarget names a target that may have taken writes but
@@ -1305,7 +1305,7 @@ func (p *runnerPlannedTopology) CheckRunClaim(ref PlannedRunRef) error {
 // copy of an earlier failover never decides for a newer status record;
 // only when the selected copy carries none is the other copy used, and
 // only if it describes the same event.
-func ownFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, rec FailoverRecord, pf *v1alpha1.PlannedFailoverStatus) bool {
+func ownFailoverRecord(fg *v1beta1.MysqlFailoverGroup, rec FailoverRecord, pf *v1beta1.PlannedFailoverStatus) bool {
 	if pf.Promotion == nil || pf.Fence == nil || pf.Fence.GtidSet == nil || rec.LastFailoverTarget != pf.TargetSite {
 		return false
 	}
@@ -1329,7 +1329,7 @@ func ownFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, rec FailoverRecord, pf *
 // runRecordDurable reports whether the run's own failover record
 // {confirmedAt, target, F} is the durable record of fg (read uncached):
 // the selected record is the same event and carries F.
-func runRecordDurable(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, confirmedAt time.Time, now time.Time) bool {
+func runRecordDurable(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus, confirmedAt time.Time, now time.Time) bool {
 	if fg == nil || pf == nil || confirmedAt.IsZero() {
 		return false
 	}
@@ -1352,11 +1352,11 @@ func sameGTIDText(a, b string) bool {
 }
 
 // phaseAfterFencing reports whether the run's fence must be in place.
-func phaseAfterFencing(phase v1alpha1.PlannedFailoverPhase) bool {
+func phaseAfterFencing(phase v1beta1.PlannedFailoverPhase) bool {
 	switch phase {
-	case v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting:
+	case v1beta1.PlannedFailoverPhaseDraining, v1beta1.PlannedFailoverPhaseWaitingForLag,
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync, v1beta1.PlannedFailoverPhasePromotingDragonfly,
+		v1beta1.PlannedFailoverPhasePromoting:
 		return true
 	}
 	return false
@@ -1368,7 +1368,7 @@ func phaseAfterFencing(phase v1alpha1.PlannedFailoverPhase) bool {
 // phase. A HandOff result also clears needsReprove: the engine then calls
 // Promote, whose pre-write gate and confirm apply the §7.2/§7.3 mappings,
 // so a lack of evidence never holds.
-func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, fg *v1alpha1.MysqlFailoverGroup) (ReproveResult, error) {
+func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, fg *v1beta1.MysqlFailoverGroup) (ReproveResult, error) {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
 		return ReproveResult{}, err
@@ -1388,7 +1388,7 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	}
 	clear := func() { tm.plannedSlot.update(ref.RunID, func(c *plannedClaim) { c.needsReprove = false }) }
 
-	if pf.Phase == v1alpha1.PlannedFailoverPhaseRollingBack {
+	if pf.Phase == v1beta1.PlannedFailoverPhaseRollingBack {
 		// Each rollback step is decided live under §9's stricter
 		// preconditions (no writable peer of any class, an attributable
 		// fence).
@@ -1398,31 +1398,31 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	F, ferr := plannedFenceGTIDSet(pf)
 
 	// Check 1: the durable record is the baseline, or the run's own.
-	var failed *v1alpha1.PlannedFailoverReason
+	var failed *v1beta1.PlannedFailoverReason
 	recordChanged := false
 	if !plannedRecordUnchanged(fg, pf, tm.clock.Now()) {
-		failed, recordChanged = reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged), true
+		failed, recordChanged = reasonPtr(v1beta1.PlannedFailoverReasonAuthorityChanged), true
 	}
 	// Check 2: the run's fence is intact, and the source's history has not
 	// moved past F under it (someone lifted the fence, wrote, and fenced
 	// again: same server, same super_read_only, more transactions).
 	lackOfEvidence, sourceWrote := false, false
-	var warnings []v1alpha1.PlannedFailoverWarning
+	var warnings []v1beta1.PlannedFailoverWarning
 	if failed == nil && phaseAfterFencing(pf.Phase) {
 		id, err := readSourceIdentity(ctx, pooledIdentity{src.mysql})
 		switch {
-		case err != nil && pf.Phase != v1alpha1.PlannedFailoverPhasePromoting:
+		case err != nil && pf.Phase != v1beta1.PlannedFailoverPhasePromoting:
 			// One failed read is no evidence of a lost source: the engine
 			// applies the source-loss window (§6.2) before rolling back.
 			return ReproveResult{SourceUnreachable: true}, nil
 		case err != nil:
-			failed, lackOfEvidence = reasonPtr(v1alpha1.PlannedFailoverReasonSourceLost), true
+			failed, lackOfEvidence = reasonPtr(v1beta1.PlannedFailoverReasonSourceLost), true
 		case !id.superReadOnly || pf.Fence == nil || id.uuid != pf.Fence.SourceServerUUID:
-			failed, lackOfEvidence = reasonPtr(v1alpha1.PlannedFailoverReasonSourceUnfenced), true
+			failed, lackOfEvidence = reasonPtr(v1beta1.PlannedFailoverReasonSourceUnfenced), true
 		case ferr == nil && sourceAdvancedPast(id, F, plannedPromotionUUID(pf)):
-			failed, sourceWrote = reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged), true
+			failed, sourceWrote = reasonPtr(v1beta1.PlannedFailoverReasonAuthorityChanged), true
 		}
-		if err == nil && pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && (!id.readOnly || sourceWrote) {
+		if err == nil && pf.Phase == v1beta1.PlannedFailoverPhasePromoting && (!id.readOnly || sourceWrote) {
 			// A second writer this process saw: a confirmation that later
 			// cannot read the source counts it as writable still (§7.3).
 			p.notePeerAnswer(ref.RunID, ref.Source, false)
@@ -1431,7 +1431,7 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	// Check 3: the probe set, with the source read-only.
 	v := classifyPlannedPeers(tm.plannedProbeSites(ctx, ref.Source, ref.Target))
 	foreignWritable := len(v.writable) > 0
-	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting {
+	if pf.Phase == v1beta1.PlannedFailoverPhasePromoting {
 		// Only the writable findings are recorded: a read-only answer here
 		// is not the pre-write gate's, and the confirmation's residual is
 		// for a site the gate or an earlier confirmation read (§7.3).
@@ -1440,18 +1440,18 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 		}
 	}
 	if failed == nil && foreignWritable {
-		failed = reasonPtr(v1alpha1.PlannedFailoverReasonForeignWritable)
+		failed = reasonPtr(v1beta1.PlannedFailoverReasonForeignWritable)
 	}
 	if len(v.allUnreadable()) > 0 {
-		warnings = append(warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
+		warnings = append(warnings, v1beta1.PlannedFailoverWarningUnreachablePeers)
 	}
-	if len(v.unreadable) > 0 && pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && failed == nil {
+	if len(v.unreadable) > 0 && pf.Phase == v1beta1.PlannedFailoverPhasePromoting && failed == nil {
 		// Only a promotable (primary-candidate or dr-only) peer is missing
 		// evidence; an unreadable reader is allowed by §4.1 and the gate.
 		lackOfEvidence = true
 	}
 
-	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+	if pf.Phase != v1beta1.PlannedFailoverPhasePromoting {
 		if failed != nil {
 			return ReproveResult{RollBack: failed}, nil
 		}
@@ -1480,9 +1480,9 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 					// the run holds, as that attempt would.
 					tm.logger.Warn("planned failover: the re-proof found the target replaced and cannot prove nothing was written; holding",
 						"runId", ref.RunID, "site", ref.Target, "targetServerUUID", live.uuid)
-					reason := v1alpha1.PlannedFailoverReasonExecuteFailed
+					reason := v1beta1.PlannedFailoverReasonExecuteFailed
 					if recordChanged {
-						reason = v1alpha1.PlannedFailoverReasonAuthorityChanged
+						reason = v1beta1.PlannedFailoverReasonAuthorityChanged
 					}
 					return ReproveResult{Hold: reasonPtr(reason)}, nil
 				}
@@ -1503,7 +1503,7 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 							"runId", ref.RunID, "site", ref.Target, "error", err.Error())
 					}
 				}
-				reason := v1alpha1.PlannedFailoverReasonPeerUnreadable
+				reason := v1beta1.PlannedFailoverReasonPeerUnreadable
 				if failed != nil {
 					reason = *failed
 				}
@@ -1513,9 +1513,9 @@ func (p *runnerPlannedTopology) Reprove(ctx context.Context, ref PlannedRunRef, 
 	}
 	switch {
 	case recordChanged:
-		return ReproveResult{Hold: reasonPtr(v1alpha1.PlannedFailoverReasonAuthorityChanged)}, nil
+		return ReproveResult{Hold: reasonPtr(v1beta1.PlannedFailoverReasonAuthorityChanged)}, nil
 	case foreignWritable, sourceWrote:
-		return ReproveResult{Hold: reasonPtr(v1alpha1.PlannedFailoverReasonForeignWritable)}, nil
+		return ReproveResult{Hold: reasonPtr(v1beta1.PlannedFailoverReasonForeignWritable)}, nil
 	}
 	// Only a lack of evidence: hand off to the §7.2/§7.3 mappings for the
 	// target's classified stage, run now rather than synthesised, so a
@@ -1551,7 +1551,7 @@ func sourceAdvancedPast(id sourceIdentity, F mysql.GTIDSet, U string) bool {
 }
 
 // plannedPromotionUUID is the Promoting intent's target @@server_uuid, or "".
-func plannedPromotionUUID(pf *v1alpha1.PlannedFailoverStatus) string {
+func plannedPromotionUUID(pf *v1beta1.PlannedFailoverStatus) string {
 	if pf.Promotion == nil {
 		return ""
 	}
@@ -1559,7 +1559,7 @@ func plannedPromotionUUID(pf *v1alpha1.PlannedFailoverStatus) string {
 }
 
 // plannedFenceGTIDSet parses the run's fenced set F.
-func plannedFenceGTIDSet(pf *v1alpha1.PlannedFailoverStatus) (mysql.GTIDSet, error) {
+func plannedFenceGTIDSet(pf *v1beta1.PlannedFailoverStatus) (mysql.GTIDSet, error) {
 	if pf.Fence == nil || pf.Fence.GtidSet == nil {
 		return nil, errors.New("the run has no fenced GTID set")
 	}
@@ -1571,7 +1571,7 @@ func plannedFenceGTIDSet(pf *v1alpha1.PlannedFailoverStatus) (mysql.GTIDSet, err
 // Rollback runs one idempotent pass of §9, every step decided live: the
 // hard preconditions, the target's channel, then the source. Outcome ""
 // means not finished: the engine retries until rollbackDeadline.
-func (p *runnerPlannedTopology) Rollback(ctx context.Context, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (RollbackResult, error) {
+func (p *runnerPlannedTopology) Rollback(ctx context.Context, ref PlannedRunRef, pf *v1beta1.PlannedFailoverStatus) (RollbackResult, error) {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
 		return RollbackResult{}, err
@@ -1582,8 +1582,8 @@ func (p *runnerPlannedTopology) Rollback(ctx context.Context, ref PlannedRunRef,
 	return tm.rollbackRun(ctx, p, ref, pf)
 }
 
-func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (RollbackResult, error) {
-	reason := v1alpha1.PlannedFailoverReasonInternalError
+func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1beta1.PlannedFailoverStatus) (RollbackResult, error) {
+	reason := v1beta1.PlannedFailoverReasonInternalError
 	var deadline time.Time
 	if pf.Rollback != nil {
 		reason = pf.Rollback.Reason
@@ -1609,11 +1609,11 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		switch {
 		case liveErr != nil:
 			if p.lossExpired(p.rollbackTargetLoss, ref.RunID, tm.clock.Now(), deadline) {
-				res.Outcome = v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed
+				res.Outcome = v1beta1.PlannedFailoverOutcomePromotedUnconfirmed
 			}
 			return res, nil
 		case fErr != nil || !live.gtid.Subtract(F).IsEmpty():
-			res.Outcome, res.Reason = v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed
+			res.Outcome, res.Reason = v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonExecuteFailed
 			return res, nil
 		}
 	}
@@ -1639,13 +1639,13 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 			tm.logger.Warn("planned failover: rollback found another writable site beside the source",
 				"runId", ref.RunID, "sites", strings.Join(peers.writable, ","))
 			if slices.Contains(peers.writable, ref.Target) && pf.Promotion != nil && !p.memoProvesNoWrite(ref.RunID) {
-				res.Outcome, res.Reason = v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonForeignWritable
+				res.Outcome, res.Reason = v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonForeignWritable
 				return res, nil
 			}
 		}
 		attributed := p.fenceAttribution(ref.RunID, pf.Fence, id.uuid) != FenceUnattributed
 		if !attributed && pf.Fence != nil && pf.Fence.SourceServerUUID != "" {
-			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
+			res.Warnings = append(res.Warnings, v1beta1.PlannedFailoverWarningSourceReplaced)
 		}
 		if lost := tm.plannedSourceLost(ref.Source, id.uuid, id.gtid, F, fErr, holders); !lost.IsEmpty() {
 			// Writable, and without transactions it held: it restarted on an
@@ -1677,9 +1677,9 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 			if deadline.IsZero() || tm.clock.Now().Add(plannedRequeuePoll).Before(deadline) {
 				return res, nil
 			}
-			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored,
-				v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored)
-			res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
+			res.Warnings = append(res.Warnings, v1beta1.PlannedFailoverWarningTargetSuperReadOnlyNotRestored,
+				v1beta1.PlannedFailoverWarningTargetReplicationNotRestored)
+			res.Outcome = v1beta1.PlannedFailoverOutcomeRolledBack
 			return res, nil
 		}
 		// The run's own server is not enough: it must also hold the fenced
@@ -1687,7 +1687,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		// at it (plannedSourceTrustFor).
 		trust := tm.plannedSourceTrustFor(ref.Source, attributed, id.uuid, id.gtid, F, fErr, live, liveErr, holders)
 		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
-		res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
+		res.Outcome = v1beta1.PlannedFailoverOutcomeRolledBack
 		return res, nil
 	}
 	// The target must read super_read_only=ON before its channel is
@@ -1712,9 +1712,9 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 		leftTrust = tm.plannedSourceTrustFor(ref.Source, false, id.uuid, id.gtid, F, fErr, live, liveErr, holders)
 	}
 	leftFenced := func() (RollbackResult, error) {
-		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
+		res.Outcome = v1beta1.PlannedFailoverOutcomeSourceLeftFenced
 		if unattributed {
-			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable)
+			res.Warnings = append(res.Warnings, v1beta1.PlannedFailoverWarningFenceNotAttributable)
 		}
 		// The target's channel is not re-pointed at a source whose
 		// identity cannot be verified; one this run removed is reported.
@@ -1724,7 +1724,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	if len(peers.writable) > 0 {
 		return leftFenced()
 	}
-	if reason == v1alpha1.PlannedFailoverReasonSourceLost {
+	if reason == v1beta1.PlannedFailoverReasonSourceLost {
 		// §9 step 3: no unfence retries for a lost source.
 		return leftFenced()
 	}
@@ -1759,8 +1759,8 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	_, pinnedSetErr := mysql.ParseGTIDSet(pinned.gtid)
 	switch {
 	case pinned.uuid != id.uuid:
-		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
-		res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable)
+		res.Outcome = v1beta1.PlannedFailoverOutcomeSourceLeftFenced
+		res.Warnings = append(res.Warnings, v1beta1.PlannedFailoverWarningFenceNotAttributable)
 		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 		return res, nil
 	case !lost.IsEmpty() && !pinned.readOnly:
@@ -1784,13 +1784,13 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 			"runId", ref.RunID, "site", ref.Source, "fenceGtid", truncateGtidSet(F.String()),
 			"sourceGtid", truncateGtidSet(pinned.gtid), "targetGtid", truncateGtidSet(live.gtidRaw),
 			"lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()))
-		res.Outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
+		res.Outcome = v1beta1.PlannedFailoverOutcomeSourceLeftFenced
 		tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 		return res, nil
 	}
 	tm.restorePlannedTargetChannel(ctx, p, ref, src, tgt, live, liveErr, F, fErr, trust, &res)
 	if !pinned.readOnly {
-		res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
+		res.Outcome = v1beta1.PlannedFailoverOutcomeRolledBack
 		return res, nil
 	}
 	if err := tm.requireRunClaim(p.leader(), ref, false); err != nil {
@@ -1812,7 +1812,7 @@ func (tm *TopologyManager) rollbackRun(ctx context.Context, p *runnerPlannedTopo
 	}); err != nil || ro {
 		return res, nil
 	}
-	res.Outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
+	res.Outcome = v1beta1.PlannedFailoverOutcomeRolledBack
 	return res, nil
 }
 
@@ -1980,10 +1980,10 @@ func (tm *TopologyManager) sourceLostTransactionsHold(ctx context.Context, p *ru
 	tm.logger.Error("planned failover: rollback found the source writable without transactions it held",
 		"runId", ref.RunID, "site", ref.Source, "lostTransactions", lost.TransactionCount(), "lostGtid", truncateGtidSet(lost.String()),
 		"fenceGtid", truncateGtidSet(fence), "sourceGtid", truncateGtidSet(id.gtid), "targetGtid", truncateGtidSet(live.gtidRaw))
-	res.Outcome, res.Reason = v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonSourceUnfenced
+	res.Outcome, res.Reason = v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonSourceUnfenced
 	res.LostGtid = lost.String()
 	if liveErr != nil || live.repl == nil || !live.repl.IORunning || !live.repl.SQLRunning {
-		res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored)
+		res.Warnings = append(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored)
 	}
 	return res, nil
 }
@@ -2013,8 +2013,8 @@ func (tm *TopologyManager) restorePlannedTargetChannel(ctx context.Context, p *r
 	live promotionLive, liveErr error, F mysql.GTIDSet, fErr error, trust plannedSourceTrust, res *RollbackResult) {
 	hooks := p.hooks
 	warn := func() {
-		if !slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
-			res.Warnings = append(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored)
+		if !slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored) {
+			res.Warnings = append(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored)
 		}
 	}
 	if liveErr != nil || fErr != nil || !live.readOnly {
@@ -2208,11 +2208,11 @@ func ownExtras(extra mysql.GTIDSet, u string) bool {
 //     no transaction. The writable target is the topology manager's to
 //     adopt, as after any external read_only=0.
 func classifyPromotionStage(live promotionLive, F mysql.GTIDSet, U string, memoNoWrite, haveMemo bool) (PromotionStage, *PromoteOutcome) {
-	abort := func(reason v1alpha1.PlannedFailoverReason, terminal v1alpha1.PlannedFailoverOutcome) (PromotionStage, *PromoteOutcome) {
+	abort := func(reason v1beta1.PlannedFailoverReason, terminal v1beta1.PlannedFailoverOutcome) (PromotionStage, *PromoteOutcome) {
 		return PromotionStageTargetReplaced, &PromoteOutcome{Kind: PromoteAborted, Stage: PromotionStageTargetReplaced, Reason: reason,
 			Terminal: terminal, TargetServerUUID: live.uuid, TargetReachable: true}
 	}
-	inconsistent := func(reason v1alpha1.PlannedFailoverReason) (PromotionStage, *PromoteOutcome) {
+	inconsistent := func(reason v1beta1.PlannedFailoverReason) (PromotionStage, *PromoteOutcome) {
 		return PromotionStageInconsistent, &PromoteOutcome{Kind: PromoteInconsistent, Stage: PromotionStageInconsistent, Reason: reason,
 			TargetServerUUID: live.uuid, TargetReachable: true, MayHaveWritten: true}
 	}
@@ -2222,29 +2222,29 @@ func classifyPromotionStage(live promotionLive, F mysql.GTIDSet, U string, memoN
 	switch {
 	case !strings.EqualFold(live.uuid, U):
 		if memoNoWrite {
-			return abort(v1alpha1.PlannedFailoverReasonTargetChanged, "")
+			return abort(v1beta1.PlannedFailoverReasonTargetChanged, "")
 		}
-		return inconsistent(v1alpha1.PlannedFailoverReasonExecuteFailed)
+		return inconsistent(v1beta1.PlannedFailoverReasonExecuteFailed)
 	case !live.readOnly && live.repl != nil:
 		if memoNoWrite || !haveMemo {
-			stage, out := abort(v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+			stage, out := abort(v1beta1.PlannedFailoverReasonForeignWritable, v1beta1.PlannedFailoverOutcomeSourceLeftFenced)
 			// Without a memo this process cannot rule out the second
 			// reading (an earlier process of the run cleared the flags and
 			// someone then configured the channel); the record says so.
 			out.ClearsUnknown = !memoNoWrite
 			return stage, out
 		}
-		return inconsistent(v1alpha1.PlannedFailoverReasonForeignWritable)
+		return inconsistent(v1beta1.PlannedFailoverReasonForeignWritable)
 	case !live.readOnly && memoNoWrite:
 		// Writable although this process never cleared super_read_only:
 		// someone else made it writable.
-		return abort(v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+		return abort(v1beta1.PlannedFailoverReasonForeignWritable, v1beta1.PlannedFailoverOutcomeSourceLeftFenced)
 	case !live.readOnly && !missing && own:
 		return PromotionStageWritable, nil
 	case !live.readOnly && missing:
-		return inconsistent(v1alpha1.PlannedFailoverReasonExecuteFailed)
+		return inconsistent(v1beta1.PlannedFailoverReasonExecuteFailed)
 	case !live.readOnly:
-		return inconsistent(v1alpha1.PlannedFailoverReasonForeignWritable)
+		return inconsistent(v1beta1.PlannedFailoverReasonForeignWritable)
 	case live.repl != nil && (live.repl.IORunning || live.repl.IOConnecting || live.repl.SQLRunning):
 		return PromotionStageNotStarted, nil
 	case live.repl != nil:
@@ -2253,16 +2253,16 @@ func classifyPromotionStage(live promotionLive, F mysql.GTIDSet, U string, memoN
 		return PromotionStageReplicaReset, nil
 	case !missing && own:
 		if memoNoWrite {
-			return abort(v1alpha1.PlannedFailoverReasonAuthorityChanged, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+			return abort(v1beta1.PlannedFailoverReasonAuthorityChanged, v1beta1.PlannedFailoverOutcomeSourceLeftFenced)
 		}
 		return PromotionStageWasWritable, nil
 	case missing && own:
 		if memoNoWrite {
-			return abort(v1alpha1.PlannedFailoverReasonTargetChanged, "")
+			return abort(v1beta1.PlannedFailoverReasonTargetChanged, "")
 		}
-		return inconsistent(v1alpha1.PlannedFailoverReasonExecuteFailed)
+		return inconsistent(v1beta1.PlannedFailoverReasonExecuteFailed)
 	}
-	return inconsistent(v1alpha1.PlannedFailoverReasonForeignWritable)
+	return inconsistent(v1beta1.PlannedFailoverReasonForeignWritable)
 }
 
 // plannedGateRefusal carries the outcome of a refused pre-write gate
@@ -2276,7 +2276,7 @@ func (e *plannedGateRefusal) Error() string {
 // Promote is §7: classify the target's stage on a pinned session, resume
 // the staged promotion from it with the pre-write gate immediately before
 // super_read_only=OFF, then confirm on the same session.
-func (p *runnerPlannedTopology) Promote(ctx context.Context, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error) {
+func (p *runnerPlannedTopology) Promote(ctx context.Context, ref PlannedRunRef, pf *v1beta1.PlannedFailoverStatus) (PromoteOutcome, error) {
 	tm, err := p.manager(ref.Group)
 	if err != nil {
 		return PromoteOutcome{}, err
@@ -2297,7 +2297,7 @@ func (tm *TopologyManager) beginPlannedPromotion() {
 	tm.deploymentTopologyPendingLocked()
 }
 
-func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus) (PromoteOutcome, error) {
+func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1beta1.PlannedFailoverStatus) (PromoteOutcome, error) {
 	tgt := tm.getSite(ref.Target)
 	if tgt == nil || tm.getSite(ref.Source) == nil {
 		return PromoteOutcome{}, errSiteNotFound
@@ -2308,7 +2308,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 	U := pf.Promotion.TargetServerUUID
 	F, err := plannedFenceGTIDSet(pf)
 	if err != nil {
-		return PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonInvalidGTID}, nil
+		return PromoteOutcome{Kind: PromoteAborted, Reason: v1beta1.PlannedFailoverReasonInvalidGTID}, nil
 	}
 	if !tgt.isPromotable() {
 		// The manager's configuration is the current spec: a claim that
@@ -2317,7 +2317,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		// before any statement, and again at the pre-write gate.
 		tm.logger.Warn("planned failover: the target is no longer a primary candidate; not promoting it",
 			"runId", ref.RunID, "site", ref.Target, "role", string(APISiteRole(tgt.role)))
-		return PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonTargetNotPromotable,
+		return PromoteOutcome{Kind: PromoteAborted, Reason: v1beta1.PlannedFailoverReasonTargetNotPromotable,
 			TargetServerUUID: U, TargetReachable: true, MayHaveWritten: !p.memoProvesNoWrite(ref.RunID)}, nil
 	}
 	tm.beginPlannedPromotion()
@@ -2335,13 +2335,13 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		}
 	}
 	defer closeSess()
-	unconfirmed := func(stage PromotionStage, warnings ...v1alpha1.PlannedFailoverWarning) PromoteOutcome {
+	unconfirmed := func(stage PromotionStage, warnings ...v1beta1.PlannedFailoverWarning) PromoteOutcome {
 		closeSess()
 		reachable := withMySQLSafetyTimeout(ctx, func(c context.Context) error {
 			_, err := tgt.mysql.CheckReadOnly(c)
 			return err
 		}) == nil
-		return PromoteOutcome{Kind: PromoteUnconfirmed, Stage: stage, Reason: v1alpha1.PlannedFailoverReasonPromotionUnconfirmed,
+		return PromoteOutcome{Kind: PromoteUnconfirmed, Stage: stage, Reason: v1beta1.PlannedFailoverReasonPromotionUnconfirmed,
 			Warnings: warnings, TargetServerUUID: U, TargetReachable: reachable, MayHaveWritten: !p.memoProvesNoWrite(ref.RunID)}
 	}
 
@@ -2388,7 +2388,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		}
 		return out, nil
 	}
-	var gateWarnings []v1alpha1.PlannedFailoverWarning
+	var gateWarnings []v1beta1.PlannedFailoverWarning
 	gateGtid := ""
 	lastStmt := ""
 	hooks := promoteHooks{
@@ -2450,7 +2450,7 @@ func (tm *TopologyManager) promotePlannedRun(ctx context.Context, p *runnerPlann
 		// (NotStarted, ReplicaStopped), before the gate and the SRO clear:
 		// the channel proved no SRO clear ever ran on this server (RESET
 		// REPLICA ALL precedes it), cross process too.
-		return PromoteOutcome{Kind: PromoteAborted, Stage: stage, Reason: v1alpha1.PlannedFailoverReasonTargetChanged,
+		return PromoteOutcome{Kind: PromoteAborted, Stage: stage, Reason: v1beta1.PlannedFailoverReasonTargetChanged,
 			TargetServerUUID: U, TargetReachable: true}, nil
 	case err != nil:
 		return unconfirmed(stage, gateWarnings...), nil
@@ -2498,7 +2498,7 @@ func (tm *TopologyManager) checkPlannedPromotionManager(p *runnerPlannedTopology
 		return errPlannedManagerReplaced
 	}
 	if tgt := tm.getSite(ref.Target); tgt == nil || !tgt.isPromotable() {
-		return &plannedGateRefusal{out: PromoteOutcome{Kind: PromoteAborted, Reason: v1alpha1.PlannedFailoverReasonTargetNotPromotable,
+		return &plannedGateRefusal{out: PromoteOutcome{Kind: PromoteAborted, Reason: v1beta1.PlannedFailoverReasonTargetNotPromotable,
 			TargetServerUUID: U, TargetReachable: true, MayHaveWritten: mayHaveWritten, Sites: []string{ref.Target}}}
 	}
 	return nil
@@ -2530,7 +2530,7 @@ func replacedTargetWithinFence(live promotionLive, F mysql.GTIDSet, U string) bo
 // @@server_uuid with super_read_only=ON) and holds all of F, and no other
 // site reads writable. The engine adds the durable-record half.
 func (tm *TopologyManager) replacedTargetRollbackSafe(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef,
-	pf *v1alpha1.PlannedFailoverStatus, F mysql.GTIDSet) bool {
+	pf *v1beta1.PlannedFailoverStatus, F mysql.GTIDSet) bool {
 	src := tm.getSite(ref.Source)
 	if src == nil {
 		return false
@@ -2551,7 +2551,7 @@ func (tm *TopologyManager) replacedTargetRollbackSafe(ctx context.Context, p *ru
 	return len(peers.writable) == 0 && len(peers.unreadable) == 0
 }
 
-func mergeWarnings(a, b []v1alpha1.PlannedFailoverWarning) []v1alpha1.PlannedFailoverWarning {
+func mergeWarnings(a, b []v1beta1.PlannedFailoverWarning) []v1beta1.PlannedFailoverWarning {
 	out := slices.Clone(a)
 	for _, w := range b {
 		if !slices.Contains(out, w) {
@@ -2568,12 +2568,12 @@ func mergeWarnings(a, b []v1alpha1.PlannedFailoverWarning) []v1alpha1.PlannedFai
 // promotion deadline). On success it also returns the GTID set it read on
 // sess, the set the clears are about to make writable.
 func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef,
-	pf *v1alpha1.PlannedFailoverStatus, sess mysql.Session, F mysql.GTIDSet, U string, wasWritable bool) ([]v1alpha1.PlannedFailoverWarning, string, error) {
+	pf *v1beta1.PlannedFailoverStatus, sess mysql.Session, F mysql.GTIDSet, U string, wasWritable bool) ([]v1beta1.PlannedFailoverWarning, string, error) {
 	// 1. Leader and claim.
 	if err := tm.requireRunClaim(p.leader(), ref, false); err != nil {
 		return nil, "", err
 	}
-	refuse := func(kind PromoteOutcomeKind, reason v1alpha1.PlannedFailoverReason, terminal v1alpha1.PlannedFailoverOutcome, sites []string) error {
+	refuse := func(kind PromoteOutcomeKind, reason v1beta1.PlannedFailoverReason, terminal v1beta1.PlannedFailoverOutcome, sites []string) error {
 		tm.logger.Warn("planned failover: pre-write gate refused", "runId", ref.RunID, "reason", string(reason), "sites", sites)
 		return &plannedGateRefusal{out: PromoteOutcome{Kind: kind, Reason: reason, Terminal: terminal, TargetServerUUID: U,
 			TargetReachable: true, MayHaveWritten: wasWritable, Sites: slices.Clone(sites)}}
@@ -2583,7 +2583,7 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 	if err := tm.checkPlannedPromotionManager(p, ref, U, wasWritable); err != nil {
 		var refusal *plannedGateRefusal
 		if errors.As(err, &refusal) {
-			return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonTargetNotPromotable, "", []string{ref.Target})
+			return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonTargetNotPromotable, "", []string{ref.Target})
 		}
 		return nil, "", err
 	}
@@ -2599,12 +2599,12 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 	}
 	if !live.readOnly || live.repl != nil || !strings.EqualFold(live.uuid, U) || !gtidOK {
 		if wasWritable {
-			return nil, "", refuse(PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, "", []string{ref.Target})
+			return nil, "", refuse(PromoteInconsistent, v1beta1.PlannedFailoverReasonExecuteFailed, "", []string{ref.Target})
 		}
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, "", []string{ref.Target})
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonTargetChanged, "", []string{ref.Target})
 	}
 	// 3. The source (pooled: it is not the server being written).
-	var warnings []v1alpha1.PlannedFailoverWarning
+	var warnings []v1beta1.PlannedFailoverWarning
 	src := tm.getSite(ref.Source)
 	if src == nil {
 		return nil, "", errSiteNotFound
@@ -2615,7 +2615,7 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 		// The target already holds the run's own committed writes, so a
 		// lost source is no reason to name the source: like an unreadable
 		// peer, the run ends PromotedUnconfirmed and names the target.
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonSourceLost, v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, []string{ref.Source})
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonSourceLost, v1beta1.PlannedFailoverOutcomePromotedUnconfirmed, []string{ref.Source})
 	case err != nil:
 		// One failed read is no evidence of a lost source (§6.2): retry
 		// within the loss window, then roll back with SourceLost, so §9
@@ -2623,26 +2623,26 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 		if !p.lossExpired(p.sourceLoss, ref.RunID, tm.clock.Now(), time.Time{}) {
 			return nil, "", fmt.Errorf("planned failover: the source %q did not answer at the pre-write gate: %w", ref.Source, err)
 		}
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonSourceLost, "", []string{ref.Source})
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonSourceLost, "", []string{ref.Source})
 	}
 	p.lossRecovered(p.sourceLoss, ref.RunID)
 	switch {
 	case wasWritable && !id.readOnly:
-		return nil, "", refuse(PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, "", []string{ref.Source})
+		return nil, "", refuse(PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable, "", []string{ref.Source})
 	case wasWritable && sourceAdvancedPast(id, F, U):
 		// Both the target (its own writes) and the source (transactions
 		// committed after the fence was lifted and set again) hold history
 		// the other lacks.
-		return nil, "", refuse(PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, "", []string{ref.Source})
+		return nil, "", refuse(PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable, "", []string{ref.Source})
 	case wasWritable && (pf.Fence == nil || id.uuid != pf.Fence.SourceServerUUID):
-		warnings = append(warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
+		warnings = append(warnings, v1beta1.PlannedFailoverWarningSourceReplaced)
 	case !wasWritable && (!id.superReadOnly || pf.Fence == nil || id.uuid != pf.Fence.SourceServerUUID):
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonSourceUnfenced, "", []string{ref.Source})
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonSourceUnfenced, "", []string{ref.Source})
 	case !wasWritable && sourceAdvancedPast(id, F, U):
 		// The source's fence was lifted and set again after F: promoting a
 		// target that holds only F would lose those transactions. Nothing
 		// was written to the target; the rollback catches it up.
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonAuthorityChanged, "", []string{ref.Source})
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonAuthorityChanged, "", []string{ref.Source})
 	}
 	// The source passed: it answered read-only with nothing past F. That
 	// answer, and the peers' below, are what a later confirmation falls back
@@ -2655,16 +2655,16 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 	p.hooks.yield(YieldGateProbeForSim)
 	switch {
 	case len(v.writable) > 0 && wasWritable:
-		return nil, "", refuse(PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, "", v.writable)
+		return nil, "", refuse(PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable, "", v.writable)
 	case len(v.writable) > 0:
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, "", v.writable)
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonForeignWritable, "", v.writable)
 	case len(v.unreadable) > 0 && wasWritable:
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonPeerUnreadable, v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v.unreadable)
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonPeerUnreadable, v1beta1.PlannedFailoverOutcomePromotedUnconfirmed, v.unreadable)
 	case len(v.unreadable) > 0:
-		return nil, "", refuse(PromoteAborted, v1alpha1.PlannedFailoverReasonPeerUnreadable, "", v.unreadable)
+		return nil, "", refuse(PromoteAborted, v1beta1.PlannedFailoverReasonPeerUnreadable, "", v.unreadable)
 	}
 	if len(v.unreadableReaders) > 0 {
-		warnings = append(warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
+		warnings = append(warnings, v1beta1.PlannedFailoverWarningUnreachablePeers)
 	}
 	return warnings, live.gtidRaw, nil
 }
@@ -2691,25 +2691,25 @@ func (tm *TopologyManager) plannedPreWriteGate(ctx context.Context, p *runnerPla
 //     evidence that the site is not the writer. Unconfirmed: the run stays
 //     Promoting and tries again, and ends PromotedUnconfirmed at the
 //     promotion deadline.
-func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1alpha1.PlannedFailoverStatus,
+func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, p *runnerPlannedTopology, ref PlannedRunRef, pf *v1beta1.PlannedFailoverStatus,
 	sess mysql.Session, F mysql.GTIDSet, U string) PromoteOutcome {
 	out := PromoteOutcome{TargetServerUUID: U, TargetReachable: true, MayHaveWritten: true}
 	live, err := readPromotionLive(ctx, sess)
 	if err != nil {
-		out.Kind, out.Reason, out.TargetReachable = PromoteUnconfirmed, v1alpha1.PlannedFailoverReasonPromotionUnconfirmed, false
+		out.Kind, out.Reason, out.TargetReachable = PromoteUnconfirmed, v1beta1.PlannedFailoverReasonPromotionUnconfirmed, false
 		return out
 	}
 	extra := live.gtid.Subtract(F)
 	switch {
 	case live.readOnly:
 		// Re-fenced or restarted after the clear: re-classify next pass.
-		out.Kind, out.Reason = PromoteUnconfirmed, v1alpha1.PlannedFailoverReasonPromotionUnconfirmed
+		out.Kind, out.Reason = PromoteUnconfirmed, v1beta1.PlannedFailoverReasonPromotionUnconfirmed
 		return out
 	case live.repl != nil || !live.gtid.Contains(F) || !ownExtras(extra, U):
-		out.Kind, out.Reason = PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable
+		out.Kind, out.Reason = PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable
 		return out
 	case !strings.EqualFold(live.uuid, U):
-		out.Kind, out.Reason = PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed
+		out.Kind, out.Reason = PromoteInconsistent, v1beta1.PlannedFailoverReasonExecuteFailed
 		return out
 	}
 	// lastWritable and neverRead are the promotable sites that did not
@@ -2736,12 +2736,12 @@ func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, p *runne
 			// A writable source, or one whose history moved past F after
 			// the fence: two sites hold history the other lacks.
 			p.notePeerAnswer(ref.RunID, ref.Source, false)
-			out.Kind, out.Reason = PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable
+			out.Kind, out.Reason = PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable
 			return out
 		default:
 			p.notePeerAnswer(ref.RunID, ref.Source, true)
 			if pf.Fence == nil || id.uuid != pf.Fence.SourceServerUUID {
-				out.Warnings = append(out.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced)
+				out.Warnings = append(out.Warnings, v1beta1.PlannedFailoverWarningSourceReplaced)
 			}
 		}
 	}
@@ -2750,7 +2750,7 @@ func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, p *runne
 	v := classifyPlannedPeers(probes)
 	p.hooks.yield(YieldConfirmProbeForSim)
 	if len(v.writable) > 0 {
-		out.Kind, out.Reason = PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable
+		out.Kind, out.Reason = PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable
 		return out
 	}
 	for _, site := range v.unreadable {
@@ -2767,16 +2767,16 @@ func (tm *TopologyManager) confirmPlannedPromotion(ctx context.Context, p *runne
 	case len(lastWritable) > 0:
 		tm.logger.Warn("planned failover: a site last seen writable did not answer at the confirmation",
 			"runId", ref.RunID, "sites", lastWritable)
-		out.Kind, out.Reason, out.Sites = PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, lastWritable
+		out.Kind, out.Reason, out.Sites = PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable, lastWritable
 		return out
 	case len(neverRead) > 0:
 		tm.logger.Warn("planned failover: promotion not confirmed; a site this process has not read did not answer",
 			"runId", ref.RunID, "sites", neverRead)
-		out.Kind, out.Reason, out.Sites = PromoteUnconfirmed, v1alpha1.PlannedFailoverReasonPromotionUnconfirmed, neverRead
+		out.Kind, out.Reason, out.Sites = PromoteUnconfirmed, v1beta1.PlannedFailoverReasonPromotionUnconfirmed, neverRead
 		return out
 	}
 	if residual || len(v.unreadableReaders) > 0 {
-		out.Warnings = append(out.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
+		out.Warnings = append(out.Warnings, v1beta1.PlannedFailoverWarningUnreachablePeers)
 	}
 	out.Kind, out.Reason = PromoteConfirmed, ""
 	return out

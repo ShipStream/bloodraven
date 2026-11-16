@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -34,7 +34,7 @@ import (
 // fake client rejects the poller's now-stale write with a conflict, which
 // is what drives it through RetryOnConflict and re-reads the object — the
 // same sequence a real API server produces.
-func concurrentEncryptionWriter(nn types.NamespacedName, desired *v1alpha1.EncryptionAtRestStatus) interceptor.Funcs {
+func concurrentEncryptionWriter(nn types.NamespacedName, desired *v1beta1.EncryptionAtRestStatus) interceptor.Funcs {
 	fired := false
 	return interceptor.Funcs{
 		SubResourceUpdate: func(
@@ -43,13 +43,13 @@ func concurrentEncryptionWriter(nn types.NamespacedName, desired *v1alpha1.Encry
 		) error {
 			if !fired {
 				fired = true
-				var latest v1alpha1.MysqlFailoverGroup
+				var latest v1beta1.MysqlFailoverGroup
 				if err := c.Get(ctx, nn, &latest); err != nil {
 					return err
 				}
 				latest.Status.EncryptionAtRest = desired.DeepCopy()
 				setCondition(&latest.Status.Conditions, metav1.Condition{
-					Type:               v1alpha1.ConditionEncryptionAtRestReady,
+					Type:               v1beta1.ConditionEncryptionAtRestReady,
 					Status:             metav1.ConditionTrue,
 					Reason:             "AllSitesSealed",
 					LastTransitionTime: metav1.Now(),
@@ -68,18 +68,18 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 	fg := encTestFG()
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	digest := keyringDigest([]byte("keyring"))
-	sealed := &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{
-			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+	sealed := &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
-			{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+			{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
 		},
 	}
 
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		WithInterceptorFuncs(concurrentEncryptionWriter(nn, sealed)).
 		Build()
@@ -100,7 +100,7 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 		t.Fatalf("updateCRStatus: %v", err)
 	}
 
-	var after v1alpha1.MysqlFailoverGroup
+	var after v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &after); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 	}
 	for _, name := range []string{"dc1", "dc2"} {
 		s := after.Status.EncryptionAtRest.SiteEncryptionStatusByName(name)
-		if s == nil || s.Phase != v1alpha1.KeyringPhaseSealed {
+		if s == nil || s.Phase != v1beta1.KeyringPhaseSealed {
 			t.Errorf("%s = %+v, want the concurrently-written Sealed phase", name, s)
 		}
 		if s != nil && s.KeyringSecret == "" {
@@ -127,9 +127,9 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 	if !after.SiteKeyringSealed("dc1") {
 		t.Error("dc1 would be re-rendered unsealed after a topology poll")
 	}
-	cond := findCondition(after.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
+	cond := findCondition(after.Status.Conditions, v1beta1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
-		t.Errorf("%s = %+v, want the concurrently-written True", v1alpha1.ConditionEncryptionAtRestReady, cond)
+		t.Errorf("%s = %+v, want the concurrently-written True", v1beta1.ConditionEncryptionAtRestReady, cond)
 	}
 }
 
@@ -140,15 +140,15 @@ func TestUpdateCRStatus_DoesNotClobberConcurrentEncryptionStatus(t *testing.T) {
 func TestUpdateCRStatus_DoesNotResurrectDeletedEncryptionStatus(t *testing.T) {
 	fg := encTestFG()
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{
-			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed, KeyringSecret: "mysql-lion-dc1-keyring-v1"},
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed, KeyringSecret: "mysql-lion-dc1-keyring-v1"},
 		},
 	}
 
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		WithInterceptorFuncs(concurrentEncryptionWriter(nn, nil)).
 		Build()
@@ -169,7 +169,7 @@ func TestUpdateCRStatus_DoesNotResurrectDeletedEncryptionStatus(t *testing.T) {
 		t.Fatalf("updateCRStatus: %v", err)
 	}
 
-	var after v1alpha1.MysqlFailoverGroup
+	var after v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &after); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}

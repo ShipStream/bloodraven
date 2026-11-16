@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/actionvalue"
 )
 
@@ -80,12 +80,12 @@ func parseRecloneAnnotation(raw string) RecloneRequest {
 
 // recloneFullForm is the value a request for site must have, for the
 // rejection message: the divergent form when divergentGtid is set.
-func recloneFullForm(fg *v1alpha1.MysqlFailoverGroup, site, divergentGtid string) string {
+func recloneFullForm(fg *v1beta1.MysqlFailoverGroup, site, divergentGtid string) string {
 	pairs := actionvalue.ConfirmPairs(fg.Name, string(fg.UID))
 	if divergentGtid != "" {
 		pairs = append(pairs, actionvalue.Pair{Key: "gtidPrefix", Value: truncateForHint(divergentGTIDSourceUUID(divergentGtid), minRecloneGtidPrefix)})
 	}
-	return v1alpha1.RecloneAnnotation + "=" + actionvalue.Format(site, pairs...)
+	return v1beta1.RecloneAnnotation + "=" + actionvalue.Format(site, pairs...)
 }
 
 // validateRecloneRequest enforces the safety interlock documented on
@@ -104,7 +104,7 @@ func recloneFullForm(fg *v1alpha1.MysqlFailoverGroup, site, divergentGtid string
 //     a prefix of the divergent GTID's source UUID. Without a recorded
 //     divergence gtidPrefix= is refused: the requester acted on a state
 //     that is not the current one.
-func validateRecloneRequest(fg *v1alpha1.MysqlFailoverGroup, req RecloneRequest) error {
+func validateRecloneRequest(fg *v1beta1.MysqlFailoverGroup, req RecloneRequest) error {
 	if req.Site == "" {
 		return fmt.Errorf("reclone annotation names no site; expected %s",
 			actionvalue.Format("<site>", actionvalue.Pair{Key: actionvalue.ConfirmKey, Value: fg.Name}, actionvalue.Pair{Key: actionvalue.UIDKey, Value: string(fg.UID)}))
@@ -199,7 +199,7 @@ func truncateForHint(s string, n int) string {
 // satisfies validateRecloneRequest for the site's current status:
 // confirm= and uid= always, plus gtidPrefix= with the source UUID of the
 // recorded divergent GTID set's first entry when there is one.
-func recloneAnnotationValue(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+func recloneAnnotationValue(fg *v1beta1.MysqlFailoverGroup, site string) string {
 	pairs := actionvalue.ConfirmPairs(fg.Name, string(fg.UID))
 	for _, s := range fg.Status.Sites {
 		if s.Name != site || s.DivergentGtid == "" {
@@ -213,13 +213,13 @@ func recloneAnnotationValue(fg *v1alpha1.MysqlFailoverGroup, site string) string
 
 // RecloneAnnotationValue is the value kubectl bloodraven reclone writes for
 // site: recloneAnnotationValue, the form the operator's own requests use.
-func RecloneAnnotationValue(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+func RecloneAnnotationValue(fg *v1beta1.MysqlFailoverGroup, site string) string {
 	return recloneAnnotationValue(fg, site)
 }
 
 // RecloneAnnotationValueWithPrefix is RecloneAnnotationValue with an
 // explicit gtidPrefix (kubectl bloodraven reclone --gtid-prefix).
-func RecloneAnnotationValueWithPrefix(fg *v1alpha1.MysqlFailoverGroup, site, gtidPrefix string) string {
+func RecloneAnnotationValueWithPrefix(fg *v1beta1.MysqlFailoverGroup, site, gtidPrefix string) string {
 	pairs := append(actionvalue.ConfirmPairs(fg.Name, string(fg.UID)), actionvalue.Pair{Key: "gtidPrefix", Value: gtidPrefix})
 	return actionvalue.Format(site, pairs...)
 }
@@ -227,6 +227,6 @@ func RecloneAnnotationValueWithPrefix(fg *v1alpha1.MysqlFailoverGroup, site, gti
 // ValidateRecloneAnnotation runs value through the operator's reclone
 // interlock against fg, so kubectl bloodraven reclone fails before it
 // writes a value the operator would reject.
-func ValidateRecloneAnnotation(fg *v1alpha1.MysqlFailoverGroup, value string) error {
+func ValidateRecloneAnnotation(fg *v1beta1.MysqlFailoverGroup, value string) error {
 	return validateRecloneRequest(fg, parseRecloneAnnotation(value))
 }

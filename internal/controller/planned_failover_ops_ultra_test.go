@@ -16,19 +16,19 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // opsUltraRollbackRun is the run's RollingBack block (with a Promoting
 // intent when promoting), its rollback intent at the fixture's now.
-func opsUltraRollbackRun(f *opsFixture, reason v1alpha1.PlannedFailoverReason, promoting bool) *v1alpha1.PlannedFailoverStatus {
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseRollingBack)
+func opsUltraRollbackRun(f *opsFixture, reason v1beta1.PlannedFailoverReason, promoting bool) *v1beta1.PlannedFailoverStatus {
+	pf := opsRun(v1beta1.PlannedFailoverPhaseRollingBack)
 	if promoting {
-		pf.Promotion = opsRun(v1alpha1.PlannedFailoverPhasePromoting).Promotion
+		pf.Promotion = opsRun(v1beta1.PlannedFailoverPhasePromoting).Promotion
 	}
-	pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: reason, IntentTime: metav1.NewTime(f.clk.Now())}
+	pf.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: reason, IntentTime: metav1.NewTime(f.clk.Now())}
 	return pf
 }
 
@@ -77,9 +77,9 @@ func TestPFUltra_K006_WasWritableSourceLostIsPromotedUnconfirmed(t *testing.T) {
 	f.tgt.repl, f.tgt.sro = nil, false
 	f.tgt.gtid = opsF + "," + opsUUIDB + ":1-3"
 	f.src.down = true
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-	if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonSourceLost ||
-		out.Terminal != v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed || !out.MayHaveWritten {
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+	if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonSourceLost ||
+		out.Terminal != v1beta1.PlannedFailoverOutcomePromotedUnconfirmed || !out.MayHaveWritten {
 		t.Fatalf("Promote = %+v, %v; want Aborted{SourceLost} -> PromotedUnconfirmed, MayHaveWritten", out, err)
 	}
 	if got := f.tgt.statements(); len(got) != 0 {
@@ -95,7 +95,7 @@ func TestPFUltra_K006_GateSourceProbeUsesLossWindow(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.hold(false)
 	f.fenced()
-	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+	pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 	f.src.down = true
 	out, err := f.topo.Promote(context.Background(), f.ref, pf)
 	if err != nil || out.Kind != PromoteUnconfirmed || out.MayHaveWritten {
@@ -121,12 +121,12 @@ func TestPFUltra_K006_GateSourceProbeUsesLossWindow(t *testing.T) {
 	}
 	g.clk.Advance(plannedFailoverLossWindow)
 	out, err = g.topo.Promote(context.Background(), g.ref, pf)
-	if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonSourceLost || out.Terminal != "" {
+	if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonSourceLost || out.Terminal != "" {
 		t.Fatalf("lost source: Promote = %+v, %v; want Aborted{SourceLost} into RollingBack", out, err)
 	}
-	res, err := g.topo.Rollback(context.Background(), g.ref, opsUltraRollbackRun(g, v1alpha1.PlannedFailoverReasonSourceLost, true))
-	if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
-		!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
+	res, err := g.topo.Rollback(context.Background(), g.ref, opsUltraRollbackRun(g, v1beta1.PlannedFailoverReasonSourceLost, true))
+	if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced ||
+		!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored) {
 		t.Fatalf("Rollback = %+v, %v; want SourceLeftFenced with TargetReplicationNotRestored", res, err)
 	}
 	if got := g.tgt.statements(); slices.ContainsFunc(got, func(s string) bool { return strings.HasPrefix(s, "change:") }) {
@@ -144,7 +144,7 @@ func TestPFUltra_K010_K072_RollbackRefencesTargetBeforeUnfence(t *testing.T) {
 		f.fenced()
 		f.tgt.repl, f.tgt.sro = nil, false
 		f.tgt.failStmt = map[string]error{"sro=ON": errors.New("lock wait timeout")}
-		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonPeerUnreadable, false))
+		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonPeerUnreadable, false))
 		if err != nil || res.Outcome != "" {
 			t.Fatalf("Rollback = %+v, %v; want a retry", res, err)
 		}
@@ -160,8 +160,8 @@ func TestPFUltra_K010_K072_RollbackRefencesTargetBeforeUnfence(t *testing.T) {
 		f.hold(false)
 		f.fenced()
 		f.tgt.repl, f.tgt.sro = nil, false
-		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonPeerUnreadable, false))
-		if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack {
+		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonPeerUnreadable, false))
+		if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack {
 			t.Fatalf("Rollback = %+v, %v; want RolledBack", res, err)
 		}
 		if got, want := f.tgt.statements(), []string{"sro=ON", "change:mysql-dc1", "start"}; !slices.Equal(got, want) {
@@ -181,12 +181,12 @@ func TestPFUltra_K010_K072_RollbackRefencesTargetBeforeUnfence(t *testing.T) {
 // never read and that does not answer does not (the re-proof is no pre-write
 // gate, so the peer is not the documented residual).
 func TestPFUltra_K052_ReproveLackOfEvidenceConfirmsLive(t *testing.T) {
-	setup := func(t *testing.T) (*opsFixture, *v1alpha1.PlannedFailoverStatus) {
+	setup := func(t *testing.T) (*opsFixture, *v1beta1.PlannedFailoverStatus) {
 		f := newOpsFixture(t, state.SiteRolePrimaryCandidate)
 		f.hold(true)
 		f.fenced()
 		f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
-		pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+		pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 		pf.Promotion.IntentTime = metav1.NewTime(f.clk.Now().Add(-3 * plannedFailoverPromotionDeadline))
 		return f, pf
 	}
@@ -225,7 +225,7 @@ func TestPFUltra_K053_RollbackTargetLossWindow(t *testing.T) {
 	f.fenced()
 	f.tgt.repl = nil
 	f.tgt.down = true
-	pf := opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonPeerUnreadable, true)
+	pf := opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonPeerUnreadable, true)
 	res, err := f.topo.Rollback(context.Background(), f.ref, pf)
 	if err != nil || res.Outcome != "" {
 		t.Fatalf("first failed read: Rollback = %+v, %v; want a retry", res, err)
@@ -235,7 +235,7 @@ func TestPFUltra_K053_RollbackTargetLossWindow(t *testing.T) {
 		t.Fatalf("inside the window: Rollback = %+v, %v; want a retry", res, err)
 	}
 	f.clk.Advance(plannedFailoverLossWindow / 2)
-	if res, err = f.topo.Rollback(context.Background(), f.ref, pf); err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed {
+	if res, err = f.topo.Rollback(context.Background(), f.ref, pf); err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomePromotedUnconfirmed {
 		t.Fatalf("window expired: Rollback = %+v, %v; want PromotedUnconfirmed", res, err)
 	}
 	if got := f.src.statements(); len(got) != 0 {
@@ -248,12 +248,12 @@ func TestPFUltra_K053_RollbackTargetLossWindow(t *testing.T) {
 	g.fenced()
 	g.tgt.repl = nil
 	g.tgt.down = true
-	pf = opsUltraRollbackRun(g, v1alpha1.PlannedFailoverReasonPeerUnreadable, true)
+	pf = opsUltraRollbackRun(g, v1beta1.PlannedFailoverReasonPeerUnreadable, true)
 	if res, err = g.topo.Rollback(context.Background(), g.ref, pf); err != nil || res.Outcome != "" {
 		t.Fatalf("Rollback = %+v, %v; want a retry", res, err)
 	}
 	g.tgt.down = false
-	if res, err = g.topo.Rollback(context.Background(), g.ref, pf); err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack {
+	if res, err = g.topo.Rollback(context.Background(), g.ref, pf); err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack {
 		t.Fatalf("target back: Rollback = %+v, %v; want RolledBack", res, err)
 	}
 
@@ -263,9 +263,9 @@ func TestPFUltra_K053_RollbackTargetLossWindow(t *testing.T) {
 	h.hold(false)
 	h.fenced()
 	h.tgt.down = true
-	pf = opsUltraRollbackRun(h, v1alpha1.PlannedFailoverReasonPeerUnreadable, true)
+	pf = opsUltraRollbackRun(h, v1beta1.PlannedFailoverReasonPeerUnreadable, true)
 	h.clk.Advance(plannedFailoverRollbackDeadline - plannedRequeuePoll)
-	if res, err = h.topo.Rollback(context.Background(), h.ref, pf); err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed {
+	if res, err = h.topo.Rollback(context.Background(), h.ref, pf); err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomePromotedUnconfirmed {
 		t.Fatalf("at the rollback deadline: Rollback = %+v, %v; want PromotedUnconfirmed", res, err)
 	}
 }
@@ -277,13 +277,13 @@ func TestPFUltra_K054_ConfiguredChannelProvesNoWrite(t *testing.T) {
 	f.hold(false)
 	f.fenced()
 	f.tgt.failStmt = map[string]error{"stop": errors.New("lock wait timeout")}
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if err != nil || out.Kind != PromoteUnconfirmed || out.MayHaveWritten {
 		t.Fatalf("Promote = %+v, %v; want Unconfirmed with MayHaveWritten=false", out, err)
 	}
 	// Once this process sends the clear, the memo no longer proves it.
 	f.tgt.failStmt = map[string]error{"ro=OFF": errors.New("lost reply")}
-	out, err = f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err = f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if err != nil || out.Kind != PromoteUnconfirmed || !out.MayHaveWritten {
 		t.Fatalf("after the SRO clear: Promote = %+v, %v; want Unconfirmed with MayHaveWritten", out, err)
 	}
@@ -299,7 +299,7 @@ func TestPFUltra_K055_CompletionLogOnResumedPromotions(t *testing.T) {
 		f.hold(false)
 		f.fenced()
 		f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		if err != nil || out.Kind != PromoteConfirmed || out.Stage != PromotionStageWritable {
 			t.Fatalf("Promote = %+v, %v; want Confirmed from Writable", out, err)
 		}
@@ -314,7 +314,7 @@ func TestPFUltra_K055_CompletionLogOnResumedPromotions(t *testing.T) {
 		f.fenced()
 		f.tgt.repl, f.tgt.sro = nil, false
 		f.tgt.gtid = opsF + "," + opsUUIDB + ":1-3"
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		if err != nil || out.Kind != PromoteConfirmed {
 			t.Fatalf("Promote = %+v, %v; want Confirmed", out, err)
 		}
@@ -331,8 +331,8 @@ func TestPFUltra_K056_WritableSourceBesideWritableTargetHolds(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.hold(false)
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
-	res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonPeerUnreadable, true))
-	if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired || res.Reason != v1alpha1.PlannedFailoverReasonForeignWritable {
+	res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonPeerUnreadable, true))
+	if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeManualRecoveryRequired || res.Reason != v1beta1.PlannedFailoverReasonForeignWritable {
 		t.Fatalf("Rollback = %+v, %v; want ManualRecoveryRequired{ForeignWritable}", res, err)
 	}
 	if got := f.tgt.statements(); len(got) != 0 {
@@ -342,8 +342,8 @@ func TestPFUltra_K056_WritableSourceBesideWritableTargetHolds(t *testing.T) {
 	g := newOpsFixture(t, "")
 	g.hold(false)
 	g.tgt.repl, g.tgt.ro, g.tgt.sro = nil, false, false
-	res, err = g.topo.Rollback(context.Background(), g.ref, opsUltraRollbackRun(g, v1alpha1.PlannedFailoverReasonPeerUnreadable, false))
-	if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack {
+	res, err = g.topo.Rollback(context.Background(), g.ref, opsUltraRollbackRun(g, v1beta1.PlannedFailoverReasonPeerUnreadable, false))
+	if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack {
 		t.Fatalf("no promotion intent: Rollback = %+v, %v; want RolledBack (the writer is not the run's)", res, err)
 	}
 }
@@ -394,8 +394,8 @@ func TestPFUltra_K073_SourceAdvancedPastF(t *testing.T) {
 		f.fenced()
 		f.tgt.repl = nil
 		f.src.gtid = advanced
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonAuthorityChanged {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonAuthorityChanged {
 			t.Fatalf("Promote = %+v, %v; want Aborted{AuthorityChanged}", out, err)
 		}
 		if got := f.tgt.statements(); len(got) != 0 {
@@ -409,8 +409,8 @@ func TestPFUltra_K073_SourceAdvancedPastF(t *testing.T) {
 		f.tgt.repl, f.tgt.sro = nil, false
 		f.tgt.gtid = opsF + "," + opsUUIDB + ":1"
 		f.src.gtid = advanced
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1alpha1.PlannedFailoverReasonForeignWritable {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1beta1.PlannedFailoverReasonForeignWritable {
 			t.Fatalf("Promote = %+v, %v; want Inconsistent{ForeignWritable}", out, err)
 		}
 	})
@@ -421,7 +421,7 @@ func TestPFUltra_K073_SourceAdvancedPastF(t *testing.T) {
 		f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
 		f.tgt.gtid = opsF + "," + opsUUIDB + ":1"
 		f.src.gtid = opsF + "," + opsUUIDB + ":1"
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		if err != nil || out.Kind != PromoteConfirmed {
 			t.Fatalf("Promote = %+v, %v; want Confirmed", out, err)
 		}
@@ -431,8 +431,8 @@ func TestPFUltra_K073_SourceAdvancedPastF(t *testing.T) {
 		f.hold(true)
 		f.fenced()
 		f.src.gtid = advanced
-		res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1alpha1.PlannedFailoverPhaseWaitingForLag)))
-		if err != nil || res.RollBack == nil || *res.RollBack != v1alpha1.PlannedFailoverReasonAuthorityChanged {
+		res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1beta1.PlannedFailoverPhaseWaitingForLag)))
+		if err != nil || res.RollBack == nil || *res.RollBack != v1beta1.PlannedFailoverReasonAuthorityChanged {
 			t.Fatalf("Reprove = %+v, %v; want RollBack{AuthorityChanged}", res, err)
 		}
 	})
@@ -460,10 +460,10 @@ func TestPFUltra_K163_RollbackVerifiesSourceBeforeChannel(t *testing.T) {
 		f.tgt.repl = nil
 		replacement := &opsMySQL{name: "dc1", uuid: "dddddddd-dddd-dddd-dddd-dddddddddddd", gtid: opsF, ro: true, sro: true}
 		opsUltraSetSite(f, "dc1", &opsUltraPinSwap{opsMySQL: f.src, pinTo: replacement})
-		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonLagTimeout, false))
-		if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced ||
-			!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) ||
-			!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
+		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonLagTimeout, false))
+		if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeSourceLeftFenced ||
+			!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningFenceNotAttributable) ||
+			!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored) {
 			t.Fatalf("Rollback = %+v, %v; want SourceLeftFenced with FenceNotAttributable and TargetReplicationNotRestored", res, err)
 		}
 		if got := f.tgt.statements(); len(got) != 0 {
@@ -475,10 +475,10 @@ func TestPFUltra_K163_RollbackVerifiesSourceBeforeChannel(t *testing.T) {
 		f.hold(false)
 		f.tgt.repl = nil
 		f.src.uuid = "dddddddd-dddd-dddd-dddd-dddddddddddd"
-		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonLagTimeout, false))
-		if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack ||
-			!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningSourceReplaced) ||
-			!slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
+		res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonLagTimeout, false))
+		if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack ||
+			!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningSourceReplaced) ||
+			!slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored) {
 			t.Fatalf("Rollback = %+v, %v; want RolledBack with SourceReplaced and TargetReplicationNotRestored", res, err)
 		}
 		if got := f.tgt.statements(); len(got) != 0 {
@@ -531,7 +531,7 @@ func TestPFUltra_K103_ApplyDNSBacksOff(t *testing.T) {
 	dns := &opsUltraDNS{}
 	f.tm.dns = dns
 	dnsState, err := f.topo.ApplyDNS(context.Background(), f.ref)
-	if dnsState != v1alpha1.PlannedFailoverDNSFailed || err == nil {
+	if dnsState != v1beta1.PlannedFailoverDNSFailed || err == nil {
 		t.Fatalf("ApplyDNS = %s, %v; want Failed with the provider error", dnsState, err)
 	}
 	if len(dns.times) != plannedDNSAttempts {
@@ -544,7 +544,7 @@ func TestPFUltra_K103_ApplyDNSBacksOff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	dnsState, err = f.topo.ApplyDNS(ctx, f.ref)
-	if dnsState != v1alpha1.PlannedFailoverDNSFailed || err == nil {
+	if dnsState != v1beta1.PlannedFailoverDNSFailed || err == nil {
 		t.Fatalf("expired context: ApplyDNS = %s, %v; want Failed with an error", dnsState, err)
 	}
 }
@@ -557,7 +557,7 @@ func TestPFUltra_K159_WritableStageAdvancesAuthority(t *testing.T) {
 	f.fenced()
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
 	f.third.ro, f.third.sro = false, false // the confirm finds a foreign writer
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if err != nil || out.Kind != PromoteInconsistent || out.Stage != PromotionStageWritable {
 		t.Fatalf("Promote = %+v, %v; want Inconsistent from Writable", out, err)
 	}
@@ -592,14 +592,14 @@ func TestPFUltra_K162_RestoreExistingTargetChannel(t *testing.T) {
 			if tc.startErr != nil {
 				f.tgt.failStmt = map[string]error{"start": tc.startErr}
 			}
-			res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1alpha1.PlannedFailoverReasonLagTimeout, false))
-			if err != nil || res.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack {
+			res, err := f.topo.Rollback(context.Background(), f.ref, opsUltraRollbackRun(f, v1beta1.PlannedFailoverReasonLagTimeout, false))
+			if err != nil || res.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack {
 				t.Fatalf("Rollback = %+v, %v; want RolledBack", res, err)
 			}
 			if got := f.tgt.statements(); !slices.Equal(got, tc.stmts) {
 				t.Fatalf("target statements = %v, want %v", got, tc.stmts)
 			}
-			if got := slices.Contains(res.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored); got != tc.warning {
+			if got := slices.Contains(res.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored); got != tc.warning {
 				t.Fatalf("warnings = %v; TargetReplicationNotRestored = %v, want %v", res.Warnings, got, tc.warning)
 			}
 		})

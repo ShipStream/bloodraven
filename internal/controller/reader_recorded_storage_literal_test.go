@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -42,7 +42,7 @@ func TestRecordedS3StorageReachesReadersLiterally(t *testing.T) {
 		endpoint    = "http://minio.example/$(BLOODRAVEN_STORAGE_TYPE)"
 		region      = "r-$(BLOODRAVEN_STORAGE_TYPE)"
 	)
-	fixture := testArtifactStorage(v1alpha1.BackupStorageS3, "lion/seed/")
+	fixture := testArtifactStorage(v1beta1.BackupStorageS3, "lion/seed/")
 	producer := &batchv1.Job{}
 	producer.Spec.Template.Spec.Containers = []corev1.Container{{Name: backupJobContainerName, Env: []corev1.EnvVar{
 		{Name: "BLOODRAVEN_STORAGE_TYPE", Value: "S3"},
@@ -104,11 +104,11 @@ func TestRecordedS3StorageReachesReadersLiterally(t *testing.T) {
 
 	t.Run("backupRef restore with dump-meta", func(t *testing.T) {
 		fg := fgWithBackup()
-		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		archive := addSourceArchiveProfile(fg)
-		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-			Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
-			PointInTime: &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: archive},
+		fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+			Source:      v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"}},
+			PointInTime: &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: archive},
 		}
 		seed := succeededSeedBackup()
 		seed.UID = "uid-seed"
@@ -135,7 +135,7 @@ func TestRecordedS3StorageReachesReadersLiterally(t *testing.T) {
 
 	t.Run("direct source keeps its one expansion", func(t *testing.T) {
 		fg := fgWithBackup()
-		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{S3: &v1alpha1.S3Storage{
+		fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{S3: &v1beta1.S3Storage{
 			Bucket: "direct", Prefix: "lion/seed", EndpointURL: rawEndpoint, Region: rawRegion, CredentialsSecretName: "aws",
 		}}}
 		r, _ := newReconciler(fg)

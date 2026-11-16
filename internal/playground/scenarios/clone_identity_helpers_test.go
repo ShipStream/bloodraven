@@ -11,7 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestCloneIdentityVerdict(t *testing.T) {
@@ -55,14 +55,14 @@ func TestCloneNotRotatedEventMatch(t *testing.T) {
 		ev   corev1.Event
 		want bool
 	}{
-		{"this site, after the clone", event(v1alpha1.EventCloneServerUUIDNotRotated, "lion", msg, since.Add(time.Minute)), true},
-		{"before the clone", event(v1alpha1.EventCloneServerUUIDNotRotated, "lion", msg, since.Add(-time.Minute)), false},
-		{"another site", event(v1alpha1.EventCloneServerUUIDNotRotated, "lion", strings.Replace(msg, "site iad ", "site iad2 ", 1), since.Add(time.Minute)), false},
-		{"another group", event(v1alpha1.EventCloneServerUUIDNotRotated, "tiger", msg, since.Add(time.Minute)), false},
-		{"another reason", event(v1alpha1.EventRecloneRequested, "lion", msg, since.Add(time.Minute)), false},
+		{"this site, after the clone", event(v1beta1.EventCloneServerUUIDNotRotated, "lion", msg, since.Add(time.Minute)), true},
+		{"before the clone", event(v1beta1.EventCloneServerUUIDNotRotated, "lion", msg, since.Add(-time.Minute)), false},
+		{"another site", event(v1beta1.EventCloneServerUUIDNotRotated, "lion", strings.Replace(msg, "site iad ", "site iad2 ", 1), since.Add(time.Minute)), false},
+		{"another group", event(v1beta1.EventCloneServerUUIDNotRotated, "tiger", msg, since.Add(time.Minute)), false},
+		{"another reason", event(v1beta1.EventRecloneRequested, "lion", msg, since.Add(time.Minute)), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := matchMFGEvent(tc.ev, "lion", since, v1alpha1.EventCloneServerUUIDNotRotated, snippet); got != tc.want {
+			if got := matchMFGEvent(tc.ev, "lion", since, v1beta1.EventCloneServerUUIDNotRotated, snippet); got != tc.want {
 				t.Fatalf("match = %v, want %v", got, tc.want)
 			}
 		})

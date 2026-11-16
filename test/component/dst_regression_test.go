@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -582,7 +582,7 @@ func TestDSTPF_CrossProcessReplacedTargetRuling(t *testing.T) {
 		h.tgt.replacePod(replaced)
 		h.third.setError(errors.New("dial tcp: i/o timeout"))
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonExecuteFailed)
 		if !h.holdCondition() || !h.src.isSuperReadOnly() || h.tgt.writableGrants() != 0 {
 			t.Fatalf("hold %v, source fenced %v, target grants %d; want the hold, the source fenced, nothing sent to the new pod",
 				h.holdCondition(), h.src.isSuperReadOnly(), h.tgt.writableGrants())
@@ -595,7 +595,7 @@ func TestDSTPF_CrossProcessReplacedTargetRuling(t *testing.T) {
 		h.newProcess() // the cross-process re-run: no promotion memo
 		h.tgt.replacePod(replaced)
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonTargetChanged)
 		if h.tgt.writableGrants() != 0 || h.src.isReadOnly() || h.holdCondition() {
 			t.Fatalf("target grants %d, source read-only %v, hold %v", h.tgt.writableGrants(), h.src.isReadOnly(), h.holdCondition())
 		}
@@ -603,12 +603,12 @@ func TestDSTPF_CrossProcessReplacedTargetRuling(t *testing.T) {
 	t.Run("recordDurableFinishes", func(t *testing.T) {
 		h := newPFHarness(t, pfOpts{})
 		h.request("dc2")
-		h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+		h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhasePromoting))
 		h.store.DenyStatus(1 << 20) // the Publishing write cannot land
 		for range 4 {
 			h.pass()
 		}
-		if h.tgt.isReadOnly() || h.pf().Phase != v1alpha1.PlannedFailoverPhasePromoting {
+		if h.tgt.isReadOnly() || h.pf().Phase != v1beta1.PlannedFailoverPhasePromoting {
 			t.Fatalf("setup: want dc2 promoted with only the Publishing write left (dc2 read-only %v, phase %s)",
 				h.tgt.isReadOnly(), h.pf().Phase)
 		}
@@ -620,7 +620,7 @@ func TestDSTPF_CrossProcessReplacedTargetRuling(t *testing.T) {
 		grants := h.tgt.writableGrants()
 		h.store.ClearFaults()
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 		if h.tgt.writableGrants() != grants || !h.src.isReadOnly() {
 			t.Fatalf("after the restart: target grants %d -> %d, source read-only %v",
 				grants, h.tgt.writableGrants(), h.src.isReadOnly())
@@ -639,10 +639,10 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // lags: the run holds the claim in WaitingForLag
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	h.setCurrent(nil)
 	h.pass()
-	start := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]
+	start := h.store.Object().GetAnnotations()[v1beta1.PlannedFailoverManagerAbsentSinceAnnotation]
 	if start == "" {
 		t.Fatal("no manager-absent-since annotation")
 	}
@@ -652,12 +652,12 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 		if pf := h.pf(); pf.Result != nil {
 			break
 		}
-		if got := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation]; got != start {
+		if got := h.store.Object().GetAnnotations()[v1beta1.PlannedFailoverManagerAbsentSinceAnnotation]; got != start {
 			t.Fatalf("the absent-since start moved: %q → %q", start, got)
 		}
 	}
 	pf := h.pf()
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonManagerUnavailable)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverReasonManagerUnavailable)
 }
 
 // TestDSTPF_ConfirmedRunReleasesBeforePublishing pins DST-4: the run
@@ -673,7 +673,7 @@ func TestDSTPF_ManagerAbsenceDeadlineRunsWhileSlotHeld(t *testing.T) {
 func TestDSTPF_ConfirmedRunReleasesBeforePublishing(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+	h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhasePromoting))
 	h.store.DenyStatus(1 << 20) // the Publishing write cannot land
 	for range 4 {
 		h.pass()
@@ -681,7 +681,7 @@ func TestDSTPF_ConfirmedRunReleasesBeforePublishing(t *testing.T) {
 	if h.tgt.isReadOnly() {
 		t.Fatal("setup: the target was not promoted")
 	}
-	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+	if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhasePromoting {
 		t.Fatalf("setup: the Publishing write landed: %+v", pf)
 	}
 	if run, _, ok := h.held(); ok {
@@ -706,7 +706,7 @@ func TestDSTPF_ConfirmedRunReleasesBeforePublishing(t *testing.T) {
 	}
 	h.store.ClearFaults()
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 }
 
 // TestDSTPF_RetiredManagerHandoffReachesReplacement pins DST-1: an ordered
@@ -795,7 +795,7 @@ func TestDSTPF_WritableTargetWithChannelLeavesSourceFenced(t *testing.T) {
 			h.tgt.setRO(false, false) // an external read_only=0; the channel is still configured
 			sent := len(h.tgt.statements())
 			pf := h.runUntil(20, terminal)
-			h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonForeignWritable)
+			h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverReasonForeignWritable)
 			if h.holdCondition() {
 				t.Fatal("the run set the automation hold over a target someone else made writable")
 			}
@@ -849,7 +849,7 @@ func TestDSTPF_ReplacedTargetAfterALostClearRollsBack(t *testing.T) {
 		if got := h.tgt.statements(); !slices.Equal(got, []string{"StopReplica", "ResetReplicaAll", "SetSuperReadOnly:off"}) {
 			t.Fatalf("setup: target statements %v", got)
 		}
-		if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+		if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhasePromoting {
 			t.Fatalf("setup: phase %s after the lost clear", pf.Phase)
 		}
 		return h
@@ -857,7 +857,7 @@ func TestDSTPF_ReplacedTargetAfterALostClearRollsBack(t *testing.T) {
 	t.Run("the ruling's evidence", func(t *testing.T) {
 		h := lostClear(t, pfOpts{}, podReplacement{serverUUID: replacement, gtidExecuted: &regressed}, nil)
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonTargetChanged)
 		if h.src.isReadOnly() || !h.tgt.isReadOnly() || h.holdCondition() {
 			t.Fatalf("source read-only %v, target read-only %v, hold %v; want the source writable again, the replacement read-only, no hold",
 				h.src.isReadOnly(), h.tgt.isReadOnly(), h.holdCondition())
@@ -870,7 +870,7 @@ func TestDSTPF_ReplacedTargetAfterALostClearRollsBack(t *testing.T) {
 		h := lostClear(t, pfOpts{third: state.SiteRolePrimaryCandidate}, podReplacement{serverUUID: replacement, gtidExecuted: &regressed},
 			func(h *pfHarness) { h.third.setError(errors.New("dial tcp: i/o timeout")) })
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonExecuteFailed)
 		if !h.holdCondition() || !h.src.isSuperReadOnly() {
 			t.Fatalf("hold %v, source fenced %v; want the hold and the source left fenced", h.holdCondition(), h.src.isSuperReadOnly())
 		}
@@ -881,7 +881,7 @@ func TestDSTPF_ReplacedTargetAfterALostClearRollsBack(t *testing.T) {
 		kept := pfF + "," + pfUUIDB + ":1"
 		h := lostClear(t, pfOpts{}, podReplacement{serverUUID: replacement, gtidExecuted: &kept}, nil)
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, "")
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, "")
 		if !h.holdCondition() || !h.src.isSuperReadOnly() {
 			t.Fatalf("hold %v, source fenced %v; want the hold and the source left fenced", h.holdCondition(), h.src.isSuperReadOnly())
 		}
@@ -915,7 +915,7 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 		h.store.DenyStatus(1 << 20) // the hold the run is about to decide cannot land
 		b := h.tgt.blockOn(t, "SetReadOnly", true)
 		h.passBlocked(b, func() { h.third.setRO(false, false) }) // after the gate read dc3 read-only
-		if h.tgt.isReadOnly() || h.holdCondition() || h.pf().Phase != v1alpha1.PlannedFailoverPhasePromoting {
+		if h.tgt.isReadOnly() || h.holdCondition() || h.pf().Phase != v1beta1.PlannedFailoverPhasePromoting {
 			t.Fatalf("setup: target read-only %v, hold %v, phase %s", h.tgt.isReadOnly(), h.holdCondition(), h.pf().Phase)
 		}
 		h.third.setError(down)
@@ -928,7 +928,7 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 		}
 		h.store.ClearFaults()
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonForeignWritable)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonForeignWritable)
 		hold := h.store.Object().Status.PlannedFailoverHold
 		if !h.holdCondition() || hold == nil || !slices.Contains(hold.AmbiguousSites, "dc3") {
 			t.Fatalf("hold condition %v, hold %+v; want the hold naming dc3", h.holdCondition(), hold)
@@ -954,7 +954,7 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 		for range 10 {
 			h.pass()
 			h.tick()
-			if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Promotion.State != v1alpha1.PlannedFailoverPromotionIntended {
+			if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhasePromoting || pf.Promotion.State != v1beta1.PlannedFailoverPromotionIntended {
 				t.Fatalf("the new process moved on beside a source it cannot read: phase %s, promotion %+v, result %+v",
 					pf.Phase, pf.Promotion, pf.Result)
 			}
@@ -968,7 +968,7 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 		h := newProcessBesideAnUnreadSource(t)
 		h.src.setError(nil)
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonForeignWritable)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonForeignWritable)
 		if !h.holdCondition() {
 			t.Fatal("no hold over two writable sites")
 		}
@@ -976,7 +976,7 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 	t.Run("a new process cannot read the source until the promotion deadline", func(t *testing.T) {
 		h := newProcessBesideAnUnreadSource(t)
 		pf := h.runUntil(200, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverReasonPromotionUnconfirmed)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomePromotedUnconfirmed, v1beta1.PlannedFailoverReasonPromotionUnconfirmed)
 		if h.holdCondition() {
 			t.Fatal("PromotedUnconfirmed set the hold")
 		}
@@ -988,8 +988,8 @@ func TestDSTPF_NoSuccessBesideAnUnreadWriter(t *testing.T) {
 		b := h.tgt.blockOn(t, "SetReadOnly", true)
 		h.passBlocked(b, func() { h.third.setError(down) }) // after the gate read dc3 read-only
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
-		if !slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers) {
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
+		if !slices.Contains(pf.Result.Warnings, v1beta1.PlannedFailoverWarningUnreachablePeers) {
 			t.Fatalf("warnings %v, want UnreachablePeers", pf.Result.Warnings)
 		}
 	})
@@ -1024,9 +1024,9 @@ func TestDSTPF_RollbackHoldsOverASourceThatLostTransactions(t *testing.T) {
 		h.src.setGtidExecuted(short)
 		h.src.respawn(false)
 	}
-	wantHold := func(t *testing.T, h *pfHarness, pf *v1alpha1.PlannedFailoverStatus, sentBefore int) {
+	wantHold := func(t *testing.T, h *pfHarness, pf *v1beta1.PlannedFailoverStatus, sentBefore int) {
 		t.Helper()
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonSourceUnfenced)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonSourceUnfenced)
 		if !h.holdCondition() {
 			t.Fatal("no automation hold over a source that began a second history")
 		}
@@ -1057,7 +1057,7 @@ func TestDSTPF_RollbackHoldsOverASourceThatLostTransactions(t *testing.T) {
 		regressSource(h)
 		pf := h.runUntil(40, terminal)
 		wantHold(t, h, pf, 2)
-		if !slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored) {
+		if !slices.Contains(pf.Result.Warnings, v1beta1.PlannedFailoverWarningTargetReplicationNotRestored) {
 			t.Fatalf("warnings %v, want TargetReplicationNotRestored", pf.Result.Warnings)
 		}
 	})
@@ -1065,7 +1065,7 @@ func TestDSTPF_RollbackHoldsOverASourceThatLostTransactions(t *testing.T) {
 		h := newPFHarness(t, pfOpts{})
 		h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // lags: the run waits, then rolls back
 		h.request("dc2")
-		h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+		h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 		regressSource(h)
 		pf := h.runUntil(60, terminal)
 		wantHold(t, h, pf, 0)
@@ -1078,7 +1078,7 @@ func TestDSTPF_RollbackHoldsOverASourceThatLostTransactions(t *testing.T) {
 		h.pass()
 		h.src.respawn(false) // restarted writable on its own data
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonSourceUnfenced)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonSourceUnfenced)
 		if h.holdCondition() {
 			t.Fatal("a hold over a source that lost nothing")
 		}
@@ -1109,10 +1109,10 @@ func TestDSTPF_FenceKnownOnlyByItsIntentIsHealed(t *testing.T) {
 	leftFenced := func(t *testing.T) *pfHarness {
 		h := newPFHarness(t, pfOpts{third: state.SiteRoleDROnly})
 		h.request("dc2")
-		h.runUntil(20, inPhase(v1alpha1.PlannedFailoverPhaseFencing))
+		h.runUntil(20, inPhase(v1beta1.PlannedFailoverPhaseFencing))
 		h.store.LoseWrites(1) // the Draining record
 		h.pass()
-		if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseFencing || pf.Fence.State != v1alpha1.PlannedFailoverFenceIntended ||
+		if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhaseFencing || pf.Fence.State != v1beta1.PlannedFailoverFenceIntended ||
 			!h.src.isSuperReadOnly() {
 			t.Fatalf("setup: phase %s, fence %s, dc1 fenced %v; want the fence landed and only its intent durable",
 				pf.Phase, pf.Fence.State, h.src.isSuperReadOnly())
@@ -1121,11 +1121,11 @@ func TestDSTPF_FenceKnownOnlyByItsIntentIsHealed(t *testing.T) {
 		h.tgt.setError(down)
 		h.newProcess()
 		pf := h.runUntil(60, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonSourceLost)
-		if pf.Fence.State != v1alpha1.PlannedFailoverFenceIntended {
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverReasonSourceLost)
+		if pf.Fence.State != v1beta1.PlannedFailoverFenceIntended {
 			t.Fatalf("setup: fence state %s at the end, want only the intent", pf.Fence.State)
 		}
-		if slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) || h.holdCondition() {
+		if slices.Contains(pf.Result.Warnings, v1beta1.PlannedFailoverWarningFenceNotAttributable) || h.holdCondition() {
 			t.Fatalf("warnings %v, hold %v", pf.Result.Warnings, h.holdCondition())
 		}
 		if !strings.Contains(pf.Message, "may or may not have sent") {
@@ -1199,7 +1199,7 @@ func TestDSTPF_RegressedTargetAfterAPossibleClearRollsBack(t *testing.T) {
 	t.Run("the ruling's evidence", func(t *testing.T) {
 		h := afterReset(t, pfOpts{})
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonTargetChanged)
 		if h.src.isReadOnly() || !h.tgt.isReadOnly() || h.holdCondition() || h.tgt.writableGrants() != 0 {
 			t.Fatalf("source read-only %v, target read-only %v, hold %v, target grants %d; want the source writable again and no hold",
 				h.src.isReadOnly(), h.tgt.isReadOnly(), h.holdCondition(), h.tgt.writableGrants())
@@ -1214,7 +1214,7 @@ func TestDSTPF_RegressedTargetAfterAPossibleClearRollsBack(t *testing.T) {
 		h := afterReset(t, pfOpts{third: state.SiteRoleDROnly})
 		h.third.setError(errors.New("dial tcp: i/o timeout"))
 		pf := h.runUntil(40, terminal)
-		h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, v1alpha1.PlannedFailoverReasonExecuteFailed)
+		h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, v1beta1.PlannedFailoverReasonExecuteFailed)
 		if !h.holdCondition() || !h.src.isSuperReadOnly() {
 			t.Fatalf("hold %v, source fenced %v; want the hold and the source left fenced", h.holdCondition(), h.src.isSuperReadOnly())
 		}
@@ -1238,21 +1238,21 @@ func TestDSTPF_RollbackThatCannotReachTheSourceDoesNotCallItFenced(t *testing.T)
 	h := newPFHarness(t, pfOpts{})
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // lags: the run waits, then rolls back
 	h.request("dc2")
-	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhaseRollingBack))
+	h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhaseRollingBack))
 	if h.src.isReadOnly() == false {
 		t.Fatal("setup: the source is writable before the rollback ran")
 	}
 	// The rollback pass unfences the source; its terminal record is lost.
 	h.store.LoseWrites(1)
 	h.pass()
-	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || h.src.isReadOnly() {
+	if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhaseRollingBack || h.src.isReadOnly() {
 		t.Fatalf("setup: phase %s, source read-only %v; want the source unfenced and the run still RollingBack", pf.Phase, h.src.isReadOnly())
 	}
 	reason := h.pf().Rollback.Reason
 	h.src.setError(errors.New("dial tcp: i/o timeout"))
 	h.newProcess()
 	pf := h.runUntil(90, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonSourceLost)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverReasonSourceLost)
 	if pf.Rollback == nil || pf.Rollback.Reason != reason {
 		t.Fatalf("rollback record %+v, want its reason %s kept", pf.Rollback, reason)
 	}

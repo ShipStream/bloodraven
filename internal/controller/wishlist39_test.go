@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // hasResourceRequests is a test-only helper that reports whether the
@@ -126,10 +126,10 @@ func TestBuildCleanupJob_AppliesBackupResourcesAndDropsSAToken(t *testing.T) {
 		},
 	}
 	profile := fg.Spec.Backup.Profiles[0]
-	backup := &v1alpha1.MysqlBackup{
+	backup := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-cleanup", Namespace: "ns"},
-		Status: v1alpha1.MysqlBackupStatus{
-			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/lion-cleanup/"),
+		Status: v1beta1.MysqlBackupStatus{
+			ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, "lion/lion-cleanup/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -154,20 +154,20 @@ func TestBuildCleanupJob_NilBackupSpec_UsesDefaultResources(t *testing.T) {
 	// Drop the BackupSpec to exercise the fallback path. Cleanup builder
 	// only consumes BackupSpec for ImagePullSecrets and SecurityContext.
 	fg.Spec.Backup = nil
-	profile := v1alpha1.BackupProfile{
+	profile := v1beta1.BackupProfile{
 		Name: "fallback",
-		Storage: v1alpha1.BackupStorage{
-			Type: v1alpha1.BackupStorageS3,
-			S3: &v1alpha1.S3Storage{
+		Storage: v1beta1.BackupStorage{
+			Type: v1beta1.BackupStorageS3,
+			S3: &v1beta1.S3Storage{
 				Bucket:                "bucket",
 				CredentialsSecretName: "s3-creds",
 			},
 		},
 	}
-	backup := &v1alpha1.MysqlBackup{
+	backup := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-cleanup", Namespace: "ns"},
-		Status: v1alpha1.MysqlBackupStatus{
-			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "bucket/key/"),
+		Status: v1beta1.MysqlBackupStatus{
+			ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, "bucket/key/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -186,10 +186,10 @@ func TestBuildCleanupJob_NilBackupSpec_UsesDefaultResources(t *testing.T) {
 func TestBuildCleanupJob_HardenedSecurityContextStillApplied(t *testing.T) {
 	fg := fgWithBackup()
 	profile := fg.Spec.Backup.Profiles[0]
-	backup := &v1alpha1.MysqlBackup{
+	backup := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-cleanup", Namespace: "ns"},
-		Status: v1alpha1.MysqlBackupStatus{
-			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/lion-cleanup/"),
+		Status: v1beta1.MysqlBackupStatus{
+			ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, "lion/lion-cleanup/"),
 		},
 	}
 	job, err := buildCleanupJob(cleanupTestInputs(t, fg, &profile, backup))
@@ -210,9 +210,9 @@ func TestBuildCleanupJob_HardenedSecurityContextStillApplied(t *testing.T) {
 
 func TestBuildBackupJob_AutomountServiceAccountToken_False(t *testing.T) {
 	fg := fgWithBackup()
-	mb := &v1alpha1.MysqlBackup{
+	mb := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion-nightly-abc", Namespace: "ns"},
-		Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+		Spec:       v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 	}
 	job, err := BuildBackupJob(BackupJobInputs{
 		DumpKeySecretName:    testDumpKeySecret,
@@ -237,10 +237,10 @@ func TestBuildBackupJob_AutomountServiceAccountToken_False(t *testing.T) {
 func TestBuildVerificationJob_AutomountServiceAccountToken_False(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("verify-amt", "lion", "nightly-s3")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-amt", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -267,13 +267,13 @@ func TestBuildVerificationJob_EncryptedSource_InitContainerCarriesResources(t *t
 
 	fg := fgWithEncryptedBackup()
 	backup := successfulBackup("verify-enc", "lion", "nightly-s3")
-	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	backup.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
 	recordTestDumpKey(backup)
 
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-enc", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -340,9 +340,9 @@ func TestBuildRestoreJob_NilBackupSpec_UsesDefaultResources(t *testing.T) {
 	fg := fgInitFromMysqlBackup()
 	// Replace the RestoreSource so the build path doesn't need
 	// fg.Spec.Backup at all. S3-direct source is the cleanest.
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			S3: &v1alpha1.S3Storage{
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			S3: &v1beta1.S3Storage{
 				Bucket:                "external",
 				Prefix:                "dumps/x",
 				CredentialsSecretName: "s3-creds",
@@ -370,22 +370,22 @@ func TestBuildRestoreJob_DecryptInitContainerCarriesResources(t *testing.T) {
 	defer SetOperatorImageDefaults("", "")
 
 	fg := fgWithEncryptedBackup()
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
-	seed := &v1alpha1.MysqlBackup{
+	seed := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{Name: "seed", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
-		Status: v1alpha1.MysqlBackupStatus{
-			Phase: v1alpha1.BackupPhaseSucceeded,
-			ArtifactStorage: testArtifactStorageWithKey(v1alpha1.BackupStorageS3, "lion/seed/",
-				&v1alpha1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"}),
-			Encryption: &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM},
+		Status: v1beta1.MysqlBackupStatus{
+			Phase: v1beta1.BackupPhaseSucceeded,
+			ArtifactStorage: testArtifactStorageWithKey(v1beta1.BackupStorageS3, "lion/seed/",
+				&v1beta1.SecretKeyRef{Name: "backup-passphrase", Key: "passphrase"}),
+			Encryption: &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM},
 		},
 	}
 	r, _ := newReconciler(fg, seed)
@@ -445,7 +445,7 @@ func TestReconcileVerificationSchedules_TriggerCronJob_LeavesAutomountUnset(t *t
 	fg := fgWithBackup()
 	// Enable verification on the first profile so reconcileVerificationSchedules
 	// renders a CronJob for it.
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{
 		Enabled:  true,
 		Schedule: "0 3 * * 0",
 	}
@@ -497,13 +497,13 @@ func TestReconcileDeployment_NilSecurityContext_PreservesLegacyShape(t *testing.
 
 func TestReconcileDeployment_PITRSidecarDefaultsToMysqlDataUser(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.Backup = &v1alpha1.BackupSpec{
-		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly"},
-		Profiles: []v1alpha1.BackupProfile{{
+	fg.Spec.Backup = &v1beta1.BackupSpec{
+		PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly"},
+		Profiles: []v1beta1.BackupProfile{{
 			Name: "nightly",
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3,
-				S3: &v1alpha1.S3Storage{
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStorageS3,
+				S3: &v1beta1.S3Storage{
 					Bucket:                "backups",
 					CredentialsSecretName: "aws-creds",
 				},
@@ -651,7 +651,7 @@ func TestReconcileDragonflyStatefulSet_AppliesSecurityContextVerbatim(t *testing
 		},
 	}
 
-	fg := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
+	fg := fgWithDragonfly(func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Dragonfly.PodSecurityContext = wantPod.DeepCopy()
 		fg.Spec.Dragonfly.ContainerSecurityContext = wantContainer.DeepCopy()
 	})
@@ -699,7 +699,7 @@ func TestDragonflyStatefulSetTemplateEqual_DetectsSecurityContextDrift(t *testin
 	}
 
 	// Render the "desired" STS at reconcile-B with podSecurityContext set.
-	fgB := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
+	fgB := fgWithDragonfly(func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Dragonfly.PodSecurityContext = &corev1.PodSecurityContext{
 			RunAsNonRoot: &t1,
 			RunAsUser:    &uid,
@@ -714,7 +714,7 @@ func TestDragonflyStatefulSetTemplateEqual_DetectsSecurityContextDrift(t *testin
 	}
 
 	// Render reconcile-C with containerSecurityContext set instead.
-	fgC := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
+	fgC := fgWithDragonfly(func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Dragonfly.ContainerSecurityContext = &corev1.SecurityContext{
 			RunAsUser:    &uid,
 			RunAsNonRoot: &t1,

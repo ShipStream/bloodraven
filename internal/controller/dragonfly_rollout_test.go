@@ -13,7 +13,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -145,7 +145,7 @@ type rolloutFixture struct {
 	t   *testing.T
 	r   *MysqlFailoverGroupReconciler
 	c   client.Client
-	fg  *v1alpha1.MysqlFailoverGroup
+	fg  *v1beta1.MysqlFailoverGroup
 	sim *rolloutSim
 	now time.Time
 	old string
@@ -160,7 +160,7 @@ func newRolloutFixture(t *testing.T, siteNames ...string) *rolloutFixture {
 		fg.Spec.Sites = append(fg.Spec.Sites, extra)
 	}
 	fg.Status.ActiveSite = siteNames[0]
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: siteNames[0], Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: siteNames[0], Phase: v1beta1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	r.Recorder = record.NewFakeRecorder(1024)
 	f := &rolloutFixture{t: t, r: r, c: c, sim: &rolloutSim{sites: map[string]*rolloutSimSite{}}, now: time.Now(), old: fg.Spec.Dragonfly.Image}
@@ -222,7 +222,7 @@ func (f *rolloutFixture) image(site string) string {
 
 func (f *rolloutFixture) inFlight(site string) bool {
 	f.t.Helper()
-	return f.sts(site).Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] != ""
+	return f.sts(site).Annotations[v1beta1.DragonflyRolloutInFlightAnnotation] != ""
 }
 
 // podNotReady makes site's StatefulSet look as it does while its pod is
@@ -262,7 +262,7 @@ func (f *rolloutFixture) events() []string {
 func rolloutStallEvents(events []string, state string) int {
 	n := 0
 	for _, ev := range events {
-		if strings.Contains(ev, v1alpha1.EventDragonflyRolloutStalled) && strings.Contains(ev, "("+state+")") {
+		if strings.Contains(ev, v1beta1.EventDragonflyRolloutStalled) && strings.Contains(ev, "("+state+")") {
 			n++
 		}
 	}
@@ -304,7 +304,7 @@ func TestDragonflyRollout_UnknownMasterChangesNoTemplate(t *testing.T) {
 			mend: func(f *rolloutFixture) {
 				fg := freshGroup(f.t, f.c, f.fg)
 				fg.Status.ActiveSite = "dc1"
-				fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+				fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 				if err := f.c.Status().Update(context.Background(), fg); err != nil {
 					f.t.Fatal(err)
 				}
@@ -465,7 +465,7 @@ func TestDragonflyRollout_NoPromotableReplicaWaitsForTheAdministrator(t *testing
 		if fg.Annotations == nil {
 			fg.Annotations = map[string]string{}
 		}
-		fg.Annotations[v1alpha1.DragonflyRestartInPlaceAnnotation] = site
+		fg.Annotations[v1beta1.DragonflyRestartInPlaceAnnotation] = site
 		if err := f.c.Update(context.Background(), fg); err != nil {
 			t.Fatal(err)
 		}
@@ -480,10 +480,10 @@ func TestDragonflyRollout_NoPromotableReplicaWaitsForTheAdministrator(t *testing
 	if !f.inFlight("dc1") {
 		t.Fatal("the in-place restart did not mark the site in flight")
 	}
-	if got := freshGroup(t, f.c, f.fg).Annotations[v1alpha1.DragonflyRestartInPlaceAnnotation]; got != "" {
+	if got := freshGroup(t, f.c, f.fg).Annotations[v1beta1.DragonflyRestartInPlaceAnnotation]; got != "" {
 		t.Fatalf("the annotation is still set (%q) after it was used", got)
 	}
-	if events := f.events(); !eventsContain(events, v1alpha1.EventDragonflyRestartedInPlace) {
+	if events := f.events(); !eventsContain(events, v1beta1.EventDragonflyRestartedInPlace) {
 		t.Fatalf("no DragonflyRestartedInPlace Event: %v", events)
 	}
 	if takeovers, noOnes := f.sim.counts(); takeovers != 0 || noOnes != 0 {
@@ -496,18 +496,18 @@ func TestDragonflyRollout_NoPromotableReplicaWaitsForTheAdministrator(t *testing
 func TestDragonflyRollout_RestartInPlaceAnnotationIsRemovedWhenNothingIsPending(t *testing.T) {
 	f := newRolloutFixture(t, "dc1", "dc2")
 	fg := freshGroup(t, f.c, f.fg)
-	fg.Annotations = map[string]string{v1alpha1.DragonflyRestartInPlaceAnnotation: "dc1"}
+	fg.Annotations = map[string]string{v1beta1.DragonflyRestartInPlaceAnnotation: "dc1"}
 	if err := f.c.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
 	if requeue := f.pass(); requeue != 0 {
 		t.Fatalf("requeue = %s with nothing to roll", requeue)
 	}
-	if got := freshGroup(t, f.c, f.fg).Annotations[v1alpha1.DragonflyRestartInPlaceAnnotation]; got != "" {
+	if got := freshGroup(t, f.c, f.fg).Annotations[v1beta1.DragonflyRestartInPlaceAnnotation]; got != "" {
 		t.Fatalf("the annotation stayed (%q) with no template pending", got)
 	}
 	f.wantImages("nothing pending")
-	if events := f.events(); eventsContain(events, v1alpha1.EventDragonflyRestartedInPlace) {
+	if events := f.events(); eventsContain(events, v1beta1.EventDragonflyRestartedInPlace) {
 		t.Fatalf("a restart was reported although nothing was restarted: %v", events)
 	}
 }
@@ -605,7 +605,7 @@ func TestDragonflyRollout_OneSiteAtATime(t *testing.T) {
 	if requeue := f.pass(); requeue != 0 {
 		t.Fatalf("requeue = %s after the rollout finished", requeue)
 	}
-	if events := f.events(); eventsContain(events, v1alpha1.EventDragonflyRolloutStalled) || eventsContain(events, v1alpha1.EventDragonflySessionsLost) {
+	if events := f.events(); eventsContain(events, v1beta1.EventDragonflyRolloutStalled) || eventsContain(events, v1beta1.EventDragonflySessionsLost) {
 		t.Fatalf("a rollout that never waited two minutes reported a stall or lost sessions: %v", events)
 	}
 }
@@ -616,7 +616,7 @@ func ageDragonflyStatefulSets(f *rolloutFixture) {
 	f.t.Helper()
 	for _, site := range f.fg.Spec.Sites {
 		sts := f.sts(site.Name)
-		delete(sts.Annotations, v1alpha1.RenderedByAnnotation)
+		delete(sts.Annotations, v1beta1.RenderedByAnnotation)
 		if err := f.c.Update(context.Background(), sts); err != nil {
 			f.t.Fatalf("age StatefulSet %s: %v", sts.Name, err)
 		}
@@ -639,7 +639,7 @@ func TestDragonflyRollout_PacedGateHoldsAnUnadmittedGroup(t *testing.T) {
 		f.wantImages("not admitted")
 	}
 	for _, site := range []string{"dc1", "dc2"} {
-		if sts := f.sts(site); sts.Annotations[v1alpha1.RenderedByAnnotation] != "" || f.inFlight(site) {
+		if sts := f.sts(site); sts.Annotations[v1beta1.RenderedByAnnotation] != "" || f.inFlight(site) {
 			t.Fatalf("held StatefulSet %s was annotated: %v", site, sts.Annotations)
 		}
 	}
@@ -653,7 +653,7 @@ func TestDragonflyRollout_PacedGateHoldsAnUnadmittedGroup(t *testing.T) {
 	admitGroup(t, f.c, f.fg)
 	f.pass()
 	f.wantImages("admitted: replica first", "dc2")
-	if got := f.sts("dc2").Annotations[v1alpha1.RenderedByAnnotation]; got != rendererIdentity() {
+	if got := f.sts("dc2").Annotations[v1beta1.RenderedByAnnotation]; got != rendererIdentity() {
 		t.Fatalf("rolled StatefulSet's renderer = %q, want %q", got, rendererIdentity())
 	}
 	if got := freshGroup(t, f.c, f.fg).Status.Rollout; got == nil || got.StartedTime == nil {
@@ -692,7 +692,7 @@ func TestDragonflyRollout_PacedAdmissionIsNotLatchedWhileTheRolloutWaits(t *test
 
 	fg = freshGroup(t, f.c, f.fg)
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	if err := f.c.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +724,7 @@ func TestDragonflyRollout_InFlightSiteKeepsTheGroupRollIncomplete(t *testing.T) 
 		t.Fatalf("settled group reports incomplete workloads: %v", st.Incomplete)
 	}
 	sts := f.sts("dc2")
-	sts.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] = f.now.UTC().Format(time.RFC3339)
+	sts.Annotations[v1beta1.DragonflyRolloutInFlightAnnotation] = f.now.UTC().Format(time.RFC3339)
 	if err := f.c.Update(context.Background(), sts); err != nil {
 		t.Fatal(err)
 	}
@@ -750,7 +750,7 @@ func TestDragonflyRollout_PacedGateRestampsAnEqualTemplate(t *testing.T) {
 	f.wantImages("restamp")
 	for _, site := range []string{"dc1", "dc2"} {
 		sts := f.sts(site)
-		if sts.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() {
+		if sts.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() {
 			t.Fatalf("StatefulSet %s was not restamped: %v", site, sts.Annotations)
 		}
 		if f.inFlight(site) {

@@ -9,7 +9,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -133,15 +133,15 @@ func TestCheckPoll_FenceAfterPromote(t *testing.T) {
 func TestRollbackClaimWithinDeadline(t *testing.T) {
 	r := handRunner(t, true)
 	pl := r.pl
-	block := func(phase v1alpha1.PlannedFailoverPhase, rev int64) v1alpha1.PlannedFailoverStatus {
-		pf := v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: rev, Phase: phase, TargetSite: "beta", SourceSite: "alpha"}
-		if phase == v1alpha1.PlannedFailoverPhaseRollingBack {
-			pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+	block := func(phase v1beta1.PlannedFailoverPhase, rev int64) v1beta1.PlannedFailoverStatus {
+		pf := v1beta1.PlannedFailoverStatus{RunID: "r1", Revision: rev, Phase: phase, TargetSite: "beta", SourceSite: "alpha"}
+		if phase == v1beta1.PlannedFailoverPhaseRollingBack {
+			pf.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: v1beta1.PlannedFailoverReasonForeignWritable,
 				IntentTime: metav1.NewTime(r.clk.Now())}
 		}
 		return pf
 	}
-	write := func(pf v1alpha1.PlannedFailoverStatus) {
+	write := func(pf v1beta1.PlannedFailoverStatus) {
 		t.Helper()
 		base, err := pl.store.Load(context.Background(), pl.nn)
 		if err != nil {
@@ -151,7 +151,7 @@ func TestRollbackClaimWithinDeadline(t *testing.T) {
 			t.Fatalf("write %s: %s %v", pf.Phase, out, err)
 		}
 	}
-	draining := block(v1alpha1.PlannedFailoverPhaseDraining, 1)
+	draining := block(v1beta1.PlannedFailoverPhaseDraining, 1)
 	write(draining)
 	pl.reg.register(r.newManager(nil), controller.ManagerWiring{HydrateFrom: &draining})
 	if id, hold, ok := pl.reg.Slot(pl.nn).HeldForSim(); !ok || hold || id != "r1" {
@@ -160,7 +160,7 @@ func TestRollbackClaimWithinDeadline(t *testing.T) {
 	if pl.rollbackClaimWithinDeadline() {
 		t.Fatal("a claim held in Draining is not a rollback: not exempt")
 	}
-	write(block(v1alpha1.PlannedFailoverPhaseRollingBack, 2))
+	write(block(v1beta1.PlannedFailoverPhaseRollingBack, 2))
 	if !pl.rollbackClaimWithinDeadline() {
 		t.Fatal("a run rolling back with the claim, inside its deadline: exempt")
 	}
@@ -174,10 +174,10 @@ func TestRollbackClaimWithinDeadline(t *testing.T) {
 // promotion statements on beta, as the planned path.
 func promoted(f *monFixture) *simChecker {
 	ctx := pfCtx()
-	f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+	f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 	_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 	fence := f.fenceSet()
-	f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+	f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 	b := f.pf("beta")
 	_ = b.StopReplica(ctx)
 	_ = b.ResetReplicaAll(ctx)
@@ -199,10 +199,10 @@ func TestPlannedInvariant_RotationOfAPromotedTarget(t *testing.T) {
 	ctx := pfCtx()
 	t.Run("externalWriterAfterTheClassification", func(t *testing.T) {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
 		_ = b.ResetReplicaAll(ctx)
@@ -258,12 +258,12 @@ func unconfirmedWithReader(t *testing.T) *monFixture {
 
 func unconfirmedIn(f *monFixture) *monFixture {
 	f.t.Helper()
-	f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
+	f.write(v1beta1.PlannedFailoverPhasePromoting, nil, nil)
 	_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
 	f.passGate()
 	_ = f.pf("beta").SetReadOnly(pfCtx(), false)
 	f.c.Crash("beta")
-	f.terminal(v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed)
+	f.terminal(v1beta1.PlannedFailoverOutcomePromotedUnconfirmed)
 	return f
 }
 
@@ -314,12 +314,12 @@ func TestPlannedInvariant_UnconfirmedBlocksEmergency_Window(t *testing.T) {
 	// and is gone a poll later: the window is open from the run's end.
 	t.Run("theTargetAnsweredWhenTheRunEnded", func(t *testing.T) {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
 		f.passGate()
 		f.c.AddFailMutations("beta", 1)
 		_ = f.pf("beta").SetReadOnly(pfCtx(), false) // sent, not applied: the target stays read-only
-		f.terminal(v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed)
+		f.terminal(v1beta1.PlannedFailoverOutcomePromotedUnconfirmed)
 		polls(f, 1, 1)
 		f.c.Crash("beta")
 		polls(f, 2, 1+unconfirmedGrace)
@@ -329,12 +329,12 @@ func TestPlannedInvariant_UnconfirmedBlocksEmergency_Window(t *testing.T) {
 	})
 	t.Run("theTargetAnsweredWhenTheRunEndedAndStillDoes", func(t *testing.T) {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
 		f.passGate()
 		f.c.AddFailMutations("beta", 1)
 		_ = f.pf("beta").SetReadOnly(pfCtx(), false)
-		f.terminal(v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed)
+		f.terminal(v1beta1.PlannedFailoverOutcomePromotedUnconfirmed)
 		polls(f, 1, 3*unconfirmedGrace)
 		f.want()
 	})
@@ -439,9 +439,9 @@ func TestPlannedInvariant_FencedSourceSuperseded(t *testing.T) {
 	// leftFenced ends run r1 SourceLeftFenced with its own fence on alpha.
 	leftFenced := func(t *testing.T, roles ...state.SiteRole) *monFixture {
 		f := newMonFixture(t, roles...)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSourceLeftFenced)
 		return f
 	}
 	settle := func(f *monFixture, from int) {
@@ -533,27 +533,27 @@ func TestPlannedInvariant_OutcomeHonesty_WhatTheRunRead(t *testing.T) {
 	ctx := pfCtx()
 	t.Run("rolledBackThenTheSourceWasFencedAgain", func(t *testing.T) {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		f.c.RogueWritable("alpha")
 		f.mon.onYield(YieldPeerProbe) // the rollback reads the source writable: no unfence is sent
 		_ = f.c.NewChecker("alpha").SetSuperReadOnly(WithActor(context.Background(), ActorSidecar), true)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		f.want()
 	})
 	t.Run("rolledBackOverASourceNeverWritable", func(t *testing.T) {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		f.mon.onYield(YieldPeerProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		f.want("OutcomeDishonest")
 	})
 	t.Run("rolledBackAfterAClearTheProcessDiedBeforeSending", func(t *testing.T) {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, nil, nil)
 		f.passGate()
 		if !f.c.ArmOperatorCrash(0, true) {
 			t.Fatal("could not arm the operator crash")
@@ -566,18 +566,18 @@ func TestPlannedInvariant_OutcomeHonesty_WhatTheRunRead(t *testing.T) {
 		}
 		f.c.ReviveOperator()
 		f.mon.noteRestart()
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		f.want()
 	})
 	// A read_only=OFF that reached the target is judged by what the target
 	// held when the rollback was decided, not by the statement.
 	clearThenRollBack := func(t *testing.T, between func(f *monFixture)) *monFixture {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
 		_ = b.ResetReplicaAll(ctx)
@@ -588,21 +588,21 @@ func TestPlannedInvariant_OutcomeHonesty_WhatTheRunRead(t *testing.T) {
 			t.Fatal("setup: the clears did not make the target writable")
 		}
 		between(f)
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		// The rollback finds the source already writable and sends no unfence.
 		f.c.RogueWritable("alpha")
 		f.mon.onYield(YieldPeerProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		return f
 	}
 	t.Run("rolledBackAfterAClearThatFailed", func(t *testing.T) {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, nil, nil)
 		f.passGate()
 		f.c.AddFailMutations("beta", 1)
 		_ = f.pf("beta").SetReadOnly(ctx, false) // sent, refused: the target stays read-only
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		f.want()
 	})
 	t.Run("rolledBackOverATargetWritableForAMomentThatTookNothing", func(t *testing.T) {
@@ -636,9 +636,9 @@ func TestPlannedInvariant_OutcomeHonesty_WhatTheRunRead(t *testing.T) {
 	// its peer probe.
 	fromFencing := func(t *testing.T, pass func(f *monFixture)) *monFixture {
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		pass(f)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		return f
 	}
 	sidecarFence := func(f *monFixture) {
@@ -672,8 +672,8 @@ func TestPlannedInvariant_OutcomeHonesty_WhatTheRunRead(t *testing.T) {
 	t.Run("sourceLeftFencedWithNoManager", func(t *testing.T) {
 		f := newMonFixture(t)
 		f.mon.noManager = func() bool { return true }
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSourceLeftFenced)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSourceLeftFenced)
 		f.want()
 	})
 }
@@ -697,7 +697,7 @@ func TestPlannedInvariant_UnreadableReader(t *testing.T) {
 	}
 	t.Run("fenceBesideAnUnreadableReader", func(t *testing.T) {
 		f := newMonFixture(t, reader...)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		rogueGamma(f, true)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		f.want()
@@ -707,23 +707,23 @@ func TestPlannedInvariant_UnreadableReader(t *testing.T) {
 	})
 	t.Run("fenceBesideAReadableReader", func(t *testing.T) {
 		f := newMonFixture(t, reader...)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		rogueGamma(f, false)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		f.want("PlannedFenceWithoutAuthority")
 	})
 	t.Run("fenceBesideAnUnreadableDROnlySite", func(t *testing.T) {
 		f := newMonFixture(t, drOnly...)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		rogueGamma(f, true)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		f.want("PlannedFenceWithoutAuthority")
 	})
 	promote := func(f *monFixture, partitioned bool) {
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
 		_ = b.ResetReplicaAll(ctx)
@@ -732,7 +732,7 @@ func TestPlannedInvariant_UnreadableReader(t *testing.T) {
 		_ = b.SetSuperReadOnly(ctx, false)
 		_ = b.SetReadOnly(ctx, false)
 		f.mon.onYield(YieldConfirmProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSucceeded)
 	}
 	t.Run("promoteAndSucceedBesideAnUnreadableReader", func(t *testing.T) {
 		f := newMonFixture(t, reader...)
@@ -754,17 +754,17 @@ func TestPlannedInvariant_HoldWithAnUnreadableTarget(t *testing.T) {
 	three := []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate}
 	setup := func(t *testing.T) *monFixture {
 		f := newMonFixture(t, three...)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(pfCtx(), true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		f.c.Crash("beta")
 		f.mon.noteRestart() // the re-proof after hydration decides, in a new process
 		return f
 	}
 	hold := func(f *monFixture) {
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 		}, setHold)
 	}
 	t.Run("besideAForeignWriter", func(t *testing.T) {
@@ -796,17 +796,17 @@ func TestFixedFindings_AreClassesOfTheirOwn(t *testing.T) {
 	three := []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate}
 	const betaUUID = "00000000-0000-0000-0000-000000000002"
 	promoting := func(f *monFixture) {
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) {
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) {
 			pf.Fence.GtidSet = &fence
-			pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
+			pf.Promotion = &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
 		}, nil)
 	}
 	hold := func(f *monFixture) {
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 		}, setHold)
 	}
 	t.Run("holdOverAWritableTargetWithItsChannel", func(t *testing.T) {
@@ -891,7 +891,7 @@ func TestFixedFindings_AreClassesOfTheirOwn(t *testing.T) {
 		}
 		f.c.RogueWritable("gamma")
 		f.mon.onYield(YieldConfirmProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSucceeded)
 		return fingerprint(f.mon.violations)
 	}
 	t.Run("succeededBesideAnUnreadableCandidate", func(t *testing.T) {
@@ -922,10 +922,10 @@ func TestPlannedInvariant_UnreadablePeerAtConfirm(t *testing.T) {
 	// promote runs r1 up to its clears, through a gate probe that reads
 	// every site read-only.
 	promote := func(f *monFixture) {
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
 		_ = b.ResetReplicaAll(ctx)
@@ -939,7 +939,7 @@ func TestPlannedInvariant_UnreadablePeerAtConfirm(t *testing.T) {
 	}
 	confirm := func(f *monFixture) string {
 		f.mon.onYield(YieldConfirmProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSucceeded)
 		return fingerprint(f.mon.violations)
 	}
 	t.Run("readOnlyAtTheGateThenUnreadable", func(t *testing.T) {
@@ -992,10 +992,10 @@ func TestPlannedInvariant_UnreadablePeerAtConfirm(t *testing.T) {
 		// the run: no clear was sent) and confirms beside a source it
 		// cannot read.
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
 		_ = b.ResetReplicaAll(ctx)
@@ -1020,10 +1020,10 @@ func TestPlannedInvariant_UnreadablePeerAtConfirm(t *testing.T) {
 		// gamma was already out of reach and writable at the gate: no
 		// probe ever read it.
 		f := newMonFixture(t, three...)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
 		_ = b.ResetReplicaAll(ctx)
@@ -1033,7 +1033,7 @@ func TestPlannedInvariant_UnreadablePeerAtConfirm(t *testing.T) {
 		_ = b.SetSuperReadOnly(ctx, false)
 		_ = b.SetReadOnly(ctx, false)
 		f.mon.onYield(YieldConfirmProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSucceeded)
 		if got := f.names(); !slices.Contains(got, "OutcomeDishonest") || !slices.Contains(got, "SucceededBesideWritable") {
 			t.Fatalf("violations %v, want OutcomeDishonest and SucceededBesideWritable among them", f.mon.violations)
 		}
@@ -1047,7 +1047,7 @@ func TestPlannedInvariant_UnreadablePeerAtConfirm(t *testing.T) {
 		_ = f.c.NewChecker("gamma").SetReadOnly(context.Background(), false) // the topology manager
 		f.c.SetOperatorLink("gamma", true)
 		f.mon.onYield(YieldConfirmProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSucceeded)
 		if got := f.names(); !slices.Contains(got, "OutcomeDishonest") || !slices.Contains(got, "SucceededBesideWritable") {
 			t.Fatalf("violations %v, want OutcomeDishonest and SucceededBesideWritable among them", f.mon.violations)
 		}
@@ -1083,12 +1083,12 @@ func TestPlannedInvariant_RolledBackOverAReplacedTarget(t *testing.T) {
 		for range 3 {
 			f.c.Tick() // history, so the replacement pod can come up regressed
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) {
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) {
 			pf.Fence.GtidSet = &fence
-			pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
+			pf.Promotion = &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
 		}, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
@@ -1111,7 +1111,7 @@ func TestPlannedInvariant_RolledBackOverAReplacedTarget(t *testing.T) {
 		if replaceBefore {
 			replace()
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		// The rollback finds the source already writable and sends no
 		// unfence.
 		f.c.RogueWritable("alpha")
@@ -1122,7 +1122,7 @@ func TestPlannedInvariant_RolledBackOverAReplacedTarget(t *testing.T) {
 		if replaceAfter {
 			replace()
 		}
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		return f
 	}
 	flagged := func(t *testing.T, f *monFixture) {
@@ -1163,19 +1163,19 @@ func TestPlannedInvariant_ReplacedTargetHoldBesideAnUnreadableReader(t *testing.
 		for range 3 {
 			f.c.Tick()
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) {
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) {
 			pf.Fence.GtidSet = &fence
-			pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
+			pf.Promotion = &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
 		}, nil)
 		f.passGate()
 		_ = f.pf("beta").SetSuperReadOnly(ctx, false)
 		f.c.ReplacePod("beta", 1)
 		f.c.SetOperatorLink("gamma", true) // out of the operator's reach
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 		}, setHold)
 		return f
 	}
@@ -1205,10 +1205,10 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 		for range 4 {
 			f.c.Tick()
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhaseWaitingForLag, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhaseWaitingForLag, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		for range 3 {
 			f.c.Tick() // beta applies the fenced set
 		}
@@ -1222,10 +1222,10 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 			f.c.Recover("alpha", false, false)
 		}
 		f.c.RogueWritable("alpha")
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		f.mon.onYield(YieldPeerProbe) // the rollback's probe, the source writable
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 		}, setHold)
 		return f
 	}
@@ -1252,7 +1252,7 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 			t.Fatal("setup: the source did not regress")
 		}
 		f.c.Recover("alpha", false, true) // boots writable
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
 		src, tgt := truthNamed(f.c.Truth(), "alpha"), truthNamed(f.c.Truth(), "beta")
@@ -1260,12 +1260,12 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 			t.Fatalf("setup: source %s, target %s, fence %s; want the source to hold the fenced set and lack what the target holds of its stream",
 				src.Executed, tgt.Executed, fence)
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseWaitingForLag, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhaseWaitingForLag, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		f.c.RogueWritable("alpha")
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		f.mon.onYield(YieldPeerProbe)
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 		}, setHold)
 		f.want()
 		if f.mon.stats.SourceLostHold != 1 {
@@ -1285,7 +1285,7 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 			t.Fatal("setup: the source did not regress")
 		}
 		f.c.Recover("alpha", false, true)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
 		f.c.SetOperatorLink("beta", true)
@@ -1297,12 +1297,12 @@ func TestPlannedInvariant_HoldOverASourceThatLostTransactions(t *testing.T) {
 			t.Fatalf("setup: source %s, fence %s, gamma readable %v; want the source to hold the fenced set and gamma to be the only evidence",
 				src.Executed, fence, gammaReadable)
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseWaitingForLag, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhaseWaitingForLag, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 		f.c.RogueWritable("alpha")
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		f.mon.onYield(YieldPeerProbe)
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 		}, setHold)
 		return f
 	}
@@ -1377,15 +1377,15 @@ func TestPlannedInvariant_HoldOverARegressedTarget(t *testing.T) {
 		for range 4 {
 			f.c.Tick()
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		for range 3 {
 			f.c.Tick() // beta applies the fenced set
 		}
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) {
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) {
 			pf.Fence.GtidSet = &fence
-			pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
+			pf.Promotion = &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionIntended, TargetServerUUID: betaUUID}
 		}, nil)
 		b := f.pf("beta")
 		_ = b.StopReplica(ctx)
@@ -1402,8 +1402,8 @@ func TestPlannedInvariant_HoldOverARegressedTarget(t *testing.T) {
 		if sourceDown {
 			f.c.SetOperatorLink("alpha", true)
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 		}, setHold)
 		return f
 	}
@@ -1434,10 +1434,10 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		for range 3 {
 			f.c.Tick() // history, so a replacement pod can come up regressed
 		}
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
 		fence := f.fenceSet()
-		f.write(v1alpha1.PlannedFailoverPhasePromoting, func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
+		f.write(v1beta1.PlannedFailoverPhasePromoting, func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.GtidSet = &fence }, nil)
 	}
 	clears := func(f *monFixture) {
 		b := f.pf("beta")
@@ -1471,7 +1471,7 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 			if containsSet(truthNamed(f.c.Truth(), "beta"), f.mon.runs["r1"].fenceSet) {
 				t.Fatalf("setup (%s): the target still holds the fenced set", lose.name)
 			}
-			f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+			f.terminal(v1beta1.PlannedFailoverOutcomeSucceeded)
 			if fp := fingerprint(f.mon.violations); fp != "" {
 				t.Fatalf("%s: fingerprint %s: %v", lose.name, fp, f.mon.violations)
 			}
@@ -1487,7 +1487,7 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		f.c.Recover("beta", false, false)
 		f.c.RogueWritable("beta")
 		f.mon.onYield(YieldConfirmProbe) // the run confirms over the short target
-		f.terminal(v1alpha1.PlannedFailoverOutcomeSucceeded)
+		f.terminal(v1beta1.PlannedFailoverOutcomeSucceeded)
 		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(targetLacksFencedSet)" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
@@ -1500,9 +1500,9 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		promoting(f)
 		clears(f)
 		f.c.RogueFence("beta")
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		_ = f.pf("alpha").SetReadOnly(ctx, false)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		if fp := fingerprint(f.mon.violations); fp != "" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
@@ -1511,10 +1511,10 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		f := newMonFixture(t)
 		promoting(f)
 		clears(f)
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
 		f.c.RogueWritable("alpha") // found writable: the rollback sends no unfence
 		f.mon.onYield(YieldPeerProbe)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackAfterClear)" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
@@ -1524,10 +1524,10 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		// the run reads the source writable beside another writer, and the
 		// source's sidecar fences it before the record commits.
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		f.mon.onYield(YieldPeerProbe)
 		_ = f.c.NewChecker("alpha").SetSuperReadOnly(WithActor(context.Background(), ActorSidecar), true)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		if fp := fingerprint(f.mon.violations); fp != "" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
@@ -1535,8 +1535,8 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 	t.Run("rolledBackOverAReadOnlySource", func(t *testing.T) {
 		f := newMonFixture(t)
 		promoting(f)
-		f.write(v1alpha1.PlannedFailoverPhaseRollingBack, nil, nil)
-		f.terminal(v1alpha1.PlannedFailoverOutcomeRolledBack)
+		f.write(v1beta1.PlannedFailoverPhaseRollingBack, nil, nil)
+		f.terminal(v1beta1.PlannedFailoverOutcomeRolledBack)
 		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackFencedSource)" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
@@ -1544,9 +1544,9 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 	// A run ended by a status stall reads nothing. Its RolledBack says
 	// that the process which granted the claim sent no fence, and is
 	// judged by that.
-	stalled := func(f *monFixture, reason v1alpha1.PlannedFailoverReason) {
-		f.write(v1alpha1.PlannedFailoverPhaseFailed, func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, Reason: reason}
+	stalled := func(f *monFixture, reason v1beta1.PlannedFailoverReason) {
+		f.write(v1beta1.PlannedFailoverPhaseFailed, func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeRolledBack, Reason: reason}
 		}, nil)
 	}
 	t.Run("stalledBeforeTheFenceOverASourceItsSidecarFenced", func(t *testing.T) {
@@ -1554,9 +1554,9 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		// and its sidecar fences it; no pass reads it writable; status
 		// writes stall and the run ends "the source is untouched".
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.c.NewChecker("alpha").SetSuperReadOnly(WithActor(context.Background(), ActorSidecar), true)
-		stalled(f, v1alpha1.PlannedFailoverReasonStatusStalled)
+		stalled(f, v1beta1.PlannedFailoverReasonStatusStalled)
 		if fp := fingerprint(f.mon.violations); fp != "" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
@@ -1568,9 +1568,9 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 		// The run fenced the source: "untouched" is false, whatever the
 		// reason says.
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.pf("alpha").SetSuperReadOnly(ctx, true)
-		stalled(f, v1alpha1.PlannedFailoverReasonStatusStalled)
+		stalled(f, v1beta1.PlannedFailoverReasonStatusStalled)
 		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackFencedSource)" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}
@@ -1578,9 +1578,9 @@ func TestOutcomeFindings_AreClassesOfTheirOwn(t *testing.T) {
 	t.Run("notStalledOverASourceItsSidecarFenced", func(t *testing.T) {
 		// Any other RolledBack claims a source the run read writable.
 		f := newMonFixture(t)
-		f.write(v1alpha1.PlannedFailoverPhaseFencing, nil, nil)
+		f.write(v1beta1.PlannedFailoverPhaseFencing, nil, nil)
 		_ = f.c.NewChecker("alpha").SetSuperReadOnly(WithActor(context.Background(), ActorSidecar), true)
-		stalled(f, v1alpha1.PlannedFailoverReasonAuthorityChanged)
+		stalled(f, v1beta1.PlannedFailoverReasonAuthorityChanged)
 		if fp := fingerprint(f.mon.violations); fp != "OutcomeDishonest(rolledBackFencedSource)" {
 			t.Fatalf("fingerprint %s: %v", fp, f.mon.violations)
 		}

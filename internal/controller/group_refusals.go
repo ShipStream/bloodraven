@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // A group refusal is something the operator refuses to act on for a
@@ -33,14 +33,14 @@ type groupRefusal struct {
 // condition: a workload the operator cannot update outranks a payload it
 // cannot read.
 var refusalReasonRank = []string{
-	v1alpha1.ReasonWorkloadSelectorMismatch,
-	v1alpha1.ReasonMetadataVersionUnsupported,
+	v1beta1.ReasonWorkloadSelectorMismatch,
+	v1beta1.ReasonMetadataVersionUnsupported,
 }
 
 // SetGroupRefusal records the refusal key of fg. A new refusal, or one
 // whose reason or message changed, emits a Warning Event and asks the
 // group's topology manager for a status write.
-func (r *TopologyManagerRunner) SetGroupRefusal(fg *v1alpha1.MysqlFailoverGroup, key, reason, message string) {
+func (r *TopologyManagerRunner) SetGroupRefusal(fg *v1beta1.MysqlFailoverGroup, key, reason, message string) {
 	if r == nil || fg == nil {
 		return
 	}
@@ -127,10 +127,10 @@ func (r *TopologyManagerRunner) requestStatusRefresh(nn types.NamespacedName) {
 // reason it mirrors.
 func refusalEventReason(reason string) string {
 	switch reason {
-	case v1alpha1.ReasonWorkloadSelectorMismatch:
-		return v1alpha1.EventWorkloadSelectorMismatch
+	case v1beta1.ReasonWorkloadSelectorMismatch:
+		return v1beta1.EventWorkloadSelectorMismatch
 	default:
-		return v1alpha1.EventMetadataVersionUnsupported
+		return v1beta1.EventMetadataVersionUnsupported
 	}
 }
 
@@ -168,19 +168,19 @@ func (r *TopologyManagerRunner) refusalDegraded(nn types.NamespacedName) (reason
 // stay. It runs after the per-site replication reasons, so a refusal
 // outranks them; the divergence block, set after it, still wins.
 func (r *TopologyManagerRunner) setRefusalDegraded(conds *[]metav1.Condition, nn types.NamespacedName, topologyReason string, gen int64, now metav1.Time) {
-	if topologyReason != v1alpha1.ReasonHealthy && topologyReason != v1alpha1.ReasonInitializing {
+	if topologyReason != v1beta1.ReasonHealthy && topologyReason != v1beta1.ReasonInitializing {
 		return
 	}
 	reason, message := r.refusalDegraded(nn)
 	if reason == "" {
 		return
 	}
-	if c := apimeta.FindStatusCondition(*conds, v1alpha1.ConditionDegraded); c != nil && c.Status == metav1.ConditionTrue &&
+	if c := apimeta.FindStatusCondition(*conds, v1beta1.ConditionDegraded); c != nil && c.Status == metav1.ConditionTrue &&
 		!slices.Contains(refusalOverrides, c.Reason) {
 		return
 	}
 	setCondition(conds, metav1.Condition{
-		Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
+		Type: v1beta1.ConditionDegraded, Status: metav1.ConditionTrue,
 		ObservedGeneration: gen, LastTransitionTime: now,
 		Reason: reason, Message: message,
 	})
@@ -196,7 +196,7 @@ func (r *TopologyManagerRunner) appendRefusalDetail(conds *[]metav1.Condition, n
 	if reason == "" {
 		return
 	}
-	c := apimeta.FindStatusCondition(*conds, v1alpha1.ConditionDegraded)
+	c := apimeta.FindStatusCondition(*conds, v1beta1.ConditionDegraded)
 	if c == nil || c.Status != metav1.ConditionTrue || c.Reason == reason || strings.Contains(c.Message, message) {
 		return
 	}
@@ -208,16 +208,16 @@ func (r *TopologyManagerRunner) appendRefusalDetail(conds *[]metav1.Condition, n
 // payload it cannot read usually explains. Healthy and Initializing set
 // Degraded False or Unknown, which a refusal replaces too.
 var refusalOverrides = []string{
-	v1alpha1.ReasonReplicationBroken,
-	v1alpha1.ReasonReplicationError,
-	v1alpha1.ReasonReplicationLagging,
-	v1alpha1.ReasonReplicationSourceMismatch,
-	v1alpha1.ReasonRestoreReclonePending,
+	v1beta1.ReasonReplicationBroken,
+	v1beta1.ReasonReplicationError,
+	v1beta1.ReasonReplicationLagging,
+	v1beta1.ReasonReplicationSourceMismatch,
+	v1beta1.ReasonRestoreReclonePending,
 }
 
 // terminalMarkerRefusalKey is the refusal key of an unreadable
 // planned-failover terminal marker.
-const terminalMarkerRefusalKey = "annotation/" + v1alpha1.PlannedFailoverTerminalAnnotation
+const terminalMarkerRefusalKey = "annotation/" + v1beta1.PlannedFailoverTerminalAnnotation
 
 // terminalMarkerVersionProblem returns the refusal message for fg's
 // planned-failover terminal marker when it is a JSON object whose
@@ -228,8 +228,8 @@ const terminalMarkerRefusalKey = "annotation/" + v1alpha1.PlannedFailoverTermina
 // version 0. A marker that is not a JSON object, or whose schemaVersion
 // is not an integer, is malformed rather than of an unknown version and
 // is not reported here.
-func terminalMarkerVersionProblem(fg *v1alpha1.MysqlFailoverGroup) string {
-	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]
+func terminalMarkerVersionProblem(fg *v1beta1.MysqlFailoverGroup) string {
+	raw, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]
 	if !ok {
 		return ""
 	}
@@ -240,10 +240,10 @@ func terminalMarkerVersionProblem(fg *v1alpha1.MysqlFailoverGroup) string {
 	effect := "it proves no outcome and is ignored"
 	if m, holds := parseHoldMarker(raw); holds {
 		effect = fmt.Sprintf("it names run %s with outcome ManualRecoveryRequired, so automatic failover stays held; "+
-			"resolve the run, then annotate %s=%s", m.RunID, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, m.RunID)
+			"resolve the run, then annotate %s=%s", m.RunID, v1beta1.AcknowledgePlannedFailoverHoldAnnotation, m.RunID)
 	}
 	return fmt.Sprintf("annotation %s has schemaVersion %d, which this operator does not know (it reads %d): %s",
-		v1alpha1.PlannedFailoverTerminalAnnotation, version, TerminalMarkerSchemaVersion, effect)
+		v1beta1.PlannedFailoverTerminalAnnotation, version, TerminalMarkerSchemaVersion, effect)
 }
 
 // payloadSchemaVersion reads the schemaVersion member of a JSON object

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -23,15 +23,15 @@ import (
 
 // status.rollout.reason values.
 const (
-	rolloutReasonWaitingForSlot       = string(v1alpha1.RolloutReasonWaitingForSlot)
-	rolloutReasonHalted               = string(v1alpha1.RolloutReasonHalted)
-	rolloutReasonGroupNotStable       = string(v1alpha1.RolloutReasonGroupNotStable)
-	rolloutReasonNotStarted           = string(v1alpha1.RolloutReasonNotStarted)
-	rolloutReasonAdmitted             = string(v1alpha1.RolloutReasonAdmitted)
-	rolloutReasonAdmittedByAnnotation = string(v1alpha1.RolloutReasonAdmittedByAnnotation)
-	rolloutReasonStarted              = string(v1alpha1.RolloutReasonStarted)
-	rolloutReasonStallTimeout         = string(v1alpha1.RolloutReasonStallTimeout)
-	rolloutReasonUpdateStalled        = v1alpha1.ReasonOrderedUpdateStalled
+	rolloutReasonWaitingForSlot       = string(v1beta1.RolloutReasonWaitingForSlot)
+	rolloutReasonHalted               = string(v1beta1.RolloutReasonHalted)
+	rolloutReasonGroupNotStable       = string(v1beta1.RolloutReasonGroupNotStable)
+	rolloutReasonNotStarted           = string(v1beta1.RolloutReasonNotStarted)
+	rolloutReasonAdmitted             = string(v1beta1.RolloutReasonAdmitted)
+	rolloutReasonAdmittedByAnnotation = string(v1beta1.RolloutReasonAdmittedByAnnotation)
+	rolloutReasonStarted              = string(v1beta1.RolloutReasonStarted)
+	rolloutReasonStallTimeout         = string(v1beta1.RolloutReasonStallTimeout)
+	rolloutReasonUpdateStalled        = v1beta1.ReasonOrderedUpdateStalled
 )
 
 // RolloutPacerConfig tunes the pacer. Zero values take the defaults.
@@ -78,7 +78,7 @@ func (c RolloutPacerConfig) withDefaults() RolloutPacerConfig {
 // rolloutGroupView is one group as the planner sees it.
 type rolloutGroupView struct {
 	Key    types.NamespacedName
-	Record *v1alpha1.RolloutStatus
+	Record *v1beta1.RolloutStatus
 	// State is the group's workloads; StateErr is set instead when they
 	// could not be read. A group that cannot be read is never admitted,
 	// never completed and never deferred.
@@ -98,9 +98,9 @@ type rolloutAction struct {
 	Key types.NamespacedName
 	// From is the record the decision was taken on; the write is skipped
 	// when the stored record is another one by then.
-	From *v1alpha1.RolloutStatus
+	From *v1beta1.RolloutStatus
 	// To is the new record; nil clears it.
-	To *v1alpha1.RolloutStatus
+	To *v1beta1.RolloutStatus
 	// Event, when set, is emitted after the write.
 	EventType, EventReason, EventMessage string
 }
@@ -109,7 +109,7 @@ type rolloutAction struct {
 type rolloutFleet struct {
 	Pending, Admitted, Rolling, Stalled int
 	// Phases is each group's phase after the decisions ("" for none).
-	Phases map[types.NamespacedName]v1alpha1.RolloutPhase
+	Phases map[types.NamespacedName]v1beta1.RolloutPhase
 }
 
 func rolloutTime(t time.Time) *metav1.Time {
@@ -134,27 +134,27 @@ func rolloutTime(t time.Time) *metav1.Time {
 //     name.
 func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views []rolloutGroupView) ([]rolloutAction, rolloutFleet) {
 	cfg = cfg.withDefaults()
-	fleet := rolloutFleet{Phases: make(map[types.NamespacedName]v1alpha1.RolloutPhase, len(views))}
+	fleet := rolloutFleet{Phases: make(map[types.NamespacedName]v1beta1.RolloutPhase, len(views))}
 	var actions []rolloutAction
-	emit := func(v rolloutGroupView, to *v1alpha1.RolloutStatus, eventType, reason, msg string) {
+	emit := func(v rolloutGroupView, to *v1beta1.RolloutStatus, eventType, reason, msg string) {
 		if equality.Semantic.DeepEqual(v.Record, to) {
 			return
 		}
 		actions = append(actions, rolloutAction{Key: v.Key, From: v.Record, To: to, EventType: eventType, EventReason: reason, EventMessage: msg})
 	}
-	count := func(key types.NamespacedName, rec *v1alpha1.RolloutStatus) {
+	count := func(key types.NamespacedName, rec *v1beta1.RolloutStatus) {
 		if rec == nil {
 			return
 		}
 		fleet.Phases[key] = rec.Phase
 		switch rec.Phase {
-		case v1alpha1.RolloutPhasePending:
+		case v1beta1.RolloutPhasePending:
 			fleet.Pending++
-		case v1alpha1.RolloutPhaseAdmitted:
+		case v1beta1.RolloutPhaseAdmitted:
 			fleet.Admitted++
-		case v1alpha1.RolloutPhaseRolling:
+		case v1beta1.RolloutPhaseRolling:
 			fleet.Rolling++
-		case v1alpha1.RolloutPhaseStalled:
+		case v1beta1.RolloutPhaseStalled:
 			fleet.Stalled++
 		}
 	}
@@ -203,23 +203,23 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 			if why == "" {
 				why = "no workload was changed"
 			}
-			deferred := &v1alpha1.RolloutStatus{
+			deferred := &v1beta1.RolloutStatus{
 				Renderer:     identity,
-				Phase:        v1alpha1.RolloutPhasePending,
+				Phase:        v1beta1.RolloutPhasePending,
 				Reason:       rolloutReasonNotStarted,
 				Message:      fmt.Sprintf("admitted at %s but the roll did not start within %s (%s); the group keeps its pods and waits for the slot again", rec.AdmittedTime.UTC().Format(time.RFC3339), cfg.StartGrace, why),
 				DeferredTime: rolloutTime(now),
 			}
-			emit(v, deferred, corev1.EventTypeWarning, v1alpha1.EventRolloutDeferred, deferred.Message)
+			emit(v, deferred, corev1.EventTypeWarning, v1beta1.EventRolloutDeferred, deferred.Message)
 			count(v.Key, deferred)
 			released = true
 			continue
 		case v.StateErr == "" && rec.StartedTime != nil && len(v.State.Pending) == 0 && len(v.State.Incomplete) == 0 && v.Unstable == "":
 			rec.CompletedTime = rolloutTime(now)
 			rec.StalledTime = nil
-			rec.Phase = v1alpha1.RolloutPhaseComplete
+			rec.Phase = v1beta1.RolloutPhaseComplete
 			rec.Reason, rec.Message = "", ""
-			emit(v, rec, corev1.EventTypeNormal, v1alpha1.EventRolloutCompleted,
+			emit(v, rec, corev1.EventTypeNormal, v1beta1.EventRolloutCompleted,
 				fmt.Sprintf("every workload runs the pod template of renderer %s and the group is stable", identity))
 			lastCompleted = now
 			count(v.Key, rec)
@@ -227,7 +227,7 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 			continue
 		case rec.StartedTime != nil && rec.StalledTime == nil && (v.UpdateStalled != "" || stallTimeout):
 			rec.StalledTime = rolloutTime(now)
-			rec.Phase = v1alpha1.RolloutPhaseStalled
+			rec.Phase = v1beta1.RolloutPhaseStalled
 			if v.UpdateStalled != "" {
 				rec.Reason, rec.Message = rolloutReasonUpdateStalled, v.UpdateStalled
 			} else {
@@ -235,7 +235,7 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 				rec.Message = fmt.Sprintf("the roll started at %s and has not completed within %s: %s",
 					rec.StartedTime.UTC().Format(time.RFC3339), cfg.StallAfter, rolloutOutstanding(v))
 			}
-			eventType, eventReason = corev1.EventTypeWarning, v1alpha1.EventRolloutStalled
+			eventType, eventReason = corev1.EventTypeWarning, v1beta1.EventRolloutStalled
 			eventMsg = rec.Message + "; no other group is rolled until this one completes"
 		}
 		emit(v, rec, eventType, eventReason, eventMsg)
@@ -259,7 +259,7 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 	var candidates []candidate
 	for _, v := range waiting {
 		if v.StateErr == "" && len(v.State.Pending) == 0 {
-			if v.Record != nil && v.Record.Phase == v1alpha1.RolloutPhasePending {
+			if v.Record != nil && v.Record.Phase == v1beta1.RolloutPhasePending {
 				emit(v, nil, "", "", "")
 			} else {
 				count(v.Key, v.Record)
@@ -271,15 +271,15 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 			continue
 		}
 		if v.Admit && v.StateErr == "" {
-			rec := &v1alpha1.RolloutStatus{
+			rec := &v1beta1.RolloutStatus{
 				Renderer:     identity,
-				Phase:        v1alpha1.RolloutPhaseAdmitted,
+				Phase:        v1beta1.RolloutPhaseAdmitted,
 				Reason:       rolloutReasonAdmittedByAnnotation,
-				Message:      fmt.Sprintf("admitted by the %s annotation, outside the queue", v1alpha1.RolloutAdmitAnnotation),
+				Message:      fmt.Sprintf("admitted by the %s annotation, outside the queue", v1beta1.RolloutAdmitAnnotation),
 				AdmittedTime: rolloutTime(now),
 			}
-			emit(v, rec, corev1.EventTypeNormal, v1alpha1.EventRolloutAdmitted,
-				fmt.Sprintf("admitted to roll the pod template of renderer %s by the %s annotation", identity, v1alpha1.RolloutAdmitAnnotation))
+			emit(v, rec, corev1.EventTypeNormal, v1beta1.EventRolloutAdmitted,
+				fmt.Sprintf("admitted to roll the pod template of renderer %s by the %s annotation", identity, v1beta1.RolloutAdmitAnnotation))
 			count(v.Key, rec)
 			if !v.ReleaseSlot && holder == nil {
 				vv := v
@@ -313,14 +313,14 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 	for _, c := range candidates {
 		v := c.view
 		if slotFree && c.eligible {
-			rec := &v1alpha1.RolloutStatus{
+			rec := &v1beta1.RolloutStatus{
 				Renderer:     identity,
-				Phase:        v1alpha1.RolloutPhaseAdmitted,
+				Phase:        v1beta1.RolloutPhaseAdmitted,
 				Reason:       rolloutReasonAdmitted,
 				Message:      "the group holds the rollout slot",
 				AdmittedTime: rolloutTime(now),
 			}
-			emit(v, rec, corev1.EventTypeNormal, v1alpha1.EventRolloutAdmitted,
+			emit(v, rec, corev1.EventTypeNormal, v1beta1.EventRolloutAdmitted,
 				fmt.Sprintf("admitted to roll the pod template of renderer %s", identity))
 			count(v.Key, rec)
 			slotFree = false
@@ -328,7 +328,7 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 			holder = &vv
 			continue
 		}
-		rec := &v1alpha1.RolloutStatus{Renderer: identity, Phase: v1alpha1.RolloutPhasePending}
+		rec := &v1beta1.RolloutStatus{Renderer: identity, Phase: v1beta1.RolloutPhasePending}
 		if v.Record != nil {
 			rec.DeferredTime = v.Record.DeferredTime
 		}
@@ -353,7 +353,7 @@ func planRollout(now time.Time, identity string, cfg RolloutPacerConfig, views [
 			rec.Message = fmt.Sprintf("the slot is free again at %s (soak after the last completed roll)", soakUntil.UTC().Format(time.RFC3339))
 		}
 		// A deferral's own message stays until something else is to say.
-		if r := v.Record; r != nil && r.Phase == v1alpha1.RolloutPhasePending && r.Reason == rolloutReasonNotStarted &&
+		if r := v.Record; r != nil && r.Phase == v1beta1.RolloutPhasePending && r.Reason == rolloutReasonNotStarted &&
 			r.Renderer == identity && rec.Reason == rolloutReasonGroupNotStable {
 			rec.Reason, rec.Message = r.Reason, r.Message
 		}
@@ -387,7 +387,7 @@ func rolloutOutstanding(v rolloutGroupView) string {
 // rolloutStateSource classifies a group's workloads for the pacer; the
 // group reconciler implements it.
 type rolloutStateSource interface {
-	RolloutGroupState(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (rolloutGroupState, error)
+	RolloutGroupState(ctx context.Context, reader client.Reader, fg *v1beta1.MysqlFailoverGroup) (rolloutGroupState, error)
 }
 
 // RolloutPacer admits failover groups, one at a time, to roll a pod change
@@ -403,7 +403,7 @@ type RolloutPacer struct {
 	states   rolloutStateSource
 	// unstable is the group stability check (DeploymentLeaseManager's
 	// UnstableReason, which also knows a held planned-failover claim).
-	unstable func(*v1alpha1.MysqlFailoverGroup) string
+	unstable func(*v1beta1.MysqlFailoverGroup) string
 	cfg      RolloutPacerConfig
 	now      func() time.Time
 
@@ -412,13 +412,13 @@ type RolloutPacer struct {
 	// Event is emitted once.
 	notStored map[types.NamespacedName]bool
 	// reported is the label sets last written to the per-group gauge.
-	reported map[types.NamespacedName]v1alpha1.RolloutPhase
+	reported map[types.NamespacedName]v1beta1.RolloutPhase
 }
 
 // NewRolloutPacer builds the pacer. reader must be uncached: admission is
 // decided on it.
 func NewRolloutPacer(c client.Client, reader client.Reader, recorder record.EventRecorder, logger *slog.Logger,
-	states rolloutStateSource, unstable func(*v1alpha1.MysqlFailoverGroup) string, cfg RolloutPacerConfig) *RolloutPacer {
+	states rolloutStateSource, unstable func(*v1beta1.MysqlFailoverGroup) string, cfg RolloutPacerConfig) *RolloutPacer {
 	if unstable == nil {
 		unstable = DeploymentUnstableReason
 	}
@@ -426,7 +426,7 @@ func NewRolloutPacer(c client.Client, reader client.Reader, recorder record.Even
 		client: c, reader: reader, recorder: recorder, logger: logger, states: states, unstable: unstable,
 		cfg: cfg.withDefaults(), now: time.Now,
 		notStored: make(map[types.NamespacedName]bool),
-		reported:  make(map[types.NamespacedName]v1alpha1.RolloutPhase),
+		reported:  make(map[types.NamespacedName]v1beta1.RolloutPhase),
 	}
 }
 
@@ -457,7 +457,7 @@ func (p *RolloutPacer) Start(ctx context.Context) error {
 
 // Tick runs one pass: read the fleet, decide, write.
 func (p *RolloutPacer) Tick(ctx context.Context) error {
-	var groups v1alpha1.MysqlFailoverGroupList
+	var groups v1beta1.MysqlFailoverGroupList
 	if err := p.reader.List(ctx, &groups); err != nil {
 		return fmt.Errorf("list MysqlFailoverGroups: %w", err)
 	}
@@ -483,17 +483,17 @@ func (p *RolloutPacer) Tick(ctx context.Context) error {
 // view reads one group for the planner. A group that holds an admission is
 // read uncached, workloads included: its completion must not be decided on
 // a cached Deployment status from before the template write.
-func (p *RolloutPacer) view(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) rolloutGroupView {
+func (p *RolloutPacer) view(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) rolloutGroupView {
 	v := rolloutGroupView{
 		Key:      types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name},
 		Record:   fg.Status.Rollout.DeepCopy(),
 		Unstable: p.unstable(fg),
 	}
 	// Only "true" arms an annotation: "false" must not admit a group.
-	v.Admit = fg.Annotations[v1alpha1.RolloutAdmitAnnotation] == "true"
-	v.ReleaseSlot = fg.Annotations[v1alpha1.RolloutReleaseSlotAnnotation] == "true"
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating); c != nil &&
-		c.Status == metav1.ConditionTrue && c.Reason == v1alpha1.ReasonOrderedUpdateStalled {
+	v.Admit = fg.Annotations[v1beta1.RolloutAdmitAnnotation] == "true"
+	v.ReleaseSlot = fg.Annotations[v1beta1.RolloutReleaseSlotAnnotation] == "true"
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionUpdating); c != nil &&
+		c.Status == metav1.ConditionTrue && c.Reason == v1beta1.ReasonOrderedUpdateStalled {
 		v.UpdateStalled = c.Message
 	}
 	reader := client.Reader(p.client)
@@ -510,7 +510,7 @@ func (p *RolloutPacer) view(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup
 
 // apply writes one decision, conditional on the record it was taken on.
 func (p *RolloutPacer) apply(ctx context.Context, a rolloutAction) error {
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := p.reader.Get(ctx, a.Key, &fresh); err != nil {
 		return client.IgnoreNotFound(err)
 	}
@@ -546,13 +546,13 @@ func (p *RolloutPacer) apply(ctx context.Context, a rolloutAction) error {
 	p.logger.Info("paced rollout: "+a.EventReason, "fg", a.Key, "renderer", rendererIdentity(), "detail", a.EventMessage)
 	p.recordEvent(&fresh, a)
 	switch a.EventReason {
-	case v1alpha1.EventRolloutAdmitted:
+	case v1beta1.EventRolloutAdmitted:
 		metrics.RolloutAdmissionsTotal.WithLabelValues(a.To.Reason).Inc()
-	case v1alpha1.EventRolloutDeferred:
+	case v1beta1.EventRolloutDeferred:
 		metrics.RolloutDeferralsTotal.Inc()
-	case v1alpha1.EventRolloutStalled:
+	case v1beta1.EventRolloutStalled:
 		metrics.RolloutStallsTotal.WithLabelValues(a.To.Reason).Inc()
-	case v1alpha1.EventRolloutCompleted:
+	case v1beta1.EventRolloutCompleted:
 		metrics.RolloutCompletionsTotal.Inc()
 	}
 	return nil
@@ -561,24 +561,24 @@ func (p *RolloutPacer) apply(ctx context.Context, a rolloutAction) error {
 // recordEvent emits a decision's Event. Each reason is spelled with its one
 // Event type here, so the Event reference (internal/apiregistry) can pair
 // them; the planner sets the same type on the action.
-func (p *RolloutPacer) recordEvent(fg *v1alpha1.MysqlFailoverGroup, a rolloutAction) {
+func (p *RolloutPacer) recordEvent(fg *v1beta1.MysqlFailoverGroup, a rolloutAction) {
 	if p.recorder == nil {
 		return
 	}
 	switch a.EventReason {
-	case v1alpha1.EventRolloutAdmitted:
-		p.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRolloutAdmitted, "%s", a.EventMessage)
-	case v1alpha1.EventRolloutDeferred:
-		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRolloutDeferred, "%s", a.EventMessage)
-	case v1alpha1.EventRolloutStalled:
-		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRolloutStalled, "%s", a.EventMessage)
-	case v1alpha1.EventRolloutCompleted:
-		p.recorder.Eventf(fg, corev1.EventTypeNormal, v1alpha1.EventRolloutCompleted, "%s", a.EventMessage)
+	case v1beta1.EventRolloutAdmitted:
+		p.recorder.Eventf(fg, corev1.EventTypeNormal, v1beta1.EventRolloutAdmitted, "%s", a.EventMessage)
+	case v1beta1.EventRolloutDeferred:
+		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventRolloutDeferred, "%s", a.EventMessage)
+	case v1beta1.EventRolloutStalled:
+		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventRolloutStalled, "%s", a.EventMessage)
+	case v1beta1.EventRolloutCompleted:
+		p.recorder.Eventf(fg, corev1.EventTypeNormal, v1beta1.EventRolloutCompleted, "%s", a.EventMessage)
 	}
 }
 
 // noteNotStored reports, once per group, that the CRD pruned the record.
-func (p *RolloutPacer) noteNotStored(fg *v1alpha1.MysqlFailoverGroup) {
+func (p *RolloutPacer) noteNotStored(fg *v1beta1.MysqlFailoverGroup) {
 	key := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	p.mu.Lock()
 	seen := p.notStored[key]
@@ -591,7 +591,7 @@ func (p *RolloutPacer) noteNotStored(fg *v1alpha1.MysqlFailoverGroup) {
 		"No group is rolled to this release's pod template until the release's CRDs are applied"
 	p.logger.Error("paced rollout: record not stored", "fg", key, "remedy", "apply the CRDs of this release (helm does not upgrade the crds/ of a chart)")
 	if p.recorder != nil {
-		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventRolloutRecordNotStored, "%s", msg)
+		p.recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventRolloutRecordNotStored, "%s", msg)
 	}
 }
 
@@ -611,7 +611,7 @@ func (p *RolloutPacer) report(fleet rolloutFleet) {
 		}
 	}
 	for key, phase := range fleet.Phases {
-		if phase == "" || phase == v1alpha1.RolloutPhaseComplete {
+		if phase == "" || phase == v1beta1.RolloutPhaseComplete {
 			continue
 		}
 		metrics.RolloutGroupPhase.WithLabelValues(key.Namespace, key.Name, strings.ToLower(string(phase))).Set(1)

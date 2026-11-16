@@ -1,4 +1,4 @@
-package v1alpha1
+package v1beta1
 
 // Event reasons. Every reason an Event is recorded with is declared here,
 // one const block per section of the generated Event reference in

@@ -8,7 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -307,13 +307,13 @@ func TestInvariant_CooldownSurvivesOperatorRestart(t *testing.T) {
 	// 30 minutes ago. Rehydrate the effective record exactly as the runner
 	// does and verify that the out-of-band winner enforces the cooldown.
 	statusStamp := metav1.NewTime(start.Add(-2 * time.Hour))
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			v1alpha1.LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
-			v1alpha1.LastFailoverTargetAnnotation: "dc2",
+			v1beta1.LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
+			v1beta1.LastFailoverTargetAnnotation: "dc2",
 		}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &statusStamp, Target: "dc1"}}},
+		Status: v1beta1.MysqlFailoverGroupStatus{LastFailover: &v1beta1.FailoverRecord{FailoverRecordRef: v1beta1.FailoverRecordRef{Time: &statusStamp, Target: "dc1"}}},
 	}
 	record, fromAnnotations, err := EffectiveFailoverRecord(fg, start)
 	if err != nil {

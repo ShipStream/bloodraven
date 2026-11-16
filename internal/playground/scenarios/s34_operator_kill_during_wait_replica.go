@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -101,7 +101,7 @@ func s34InjectPatchHoldAndKill() runner.Step {
 			defer cancel()
 			observedWaitReplica := false
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace, "status.updatePhase reaches WaitReplica (or any non-empty phase)",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					ph := mfg.Status.UpdatePhase
 					if ph == "WaitReplica" {
 						observedWaitReplica = true
@@ -168,18 +168,18 @@ func s34ObserveReplacementCompletes() runner.Step {
 			}
 			var zeroSince time.Time
 			_, err = env.Wait.UntilCR(doneCtx, env.Namespace, "updatePhase empty, 1 writable + 1 read-only, deployments at new memory",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during update", s.Name)
 						}
 					}
@@ -234,14 +234,14 @@ const s34MaxNoWritable = 60 * time.Second
 //   - an operator start (Ready=Unknown, reason Initializing): the primary is
 //     Unknown until it was read writable recoveryThreshold times. Status
 //     cannot tell, so the servers are asked.
-func s34NoWritableWindow(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (string, error) {
-	if mfg.Status.UpdatePhase == v1alpha1.UpdatePhaseFailover {
+func s34NoWritableWindow(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup) (string, error) {
+	if mfg.Status.UpdatePhase == v1beta1.UpdatePhaseFailover {
 		return "handoff write pause", nil
 	}
 	if s34ActiveAwaitingConfirmation(mfg) {
 		return fmt.Sprintf("promoted %s awaits writable confirmation", mfg.Status.ActiveSite), nil
 	}
-	if c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady); c != nil && c.Reason == v1alpha1.ReasonInitializing {
+	if c := findCondition(mfg.Status.Conditions, v1beta1.ConditionReady); c != nil && c.Reason == v1beta1.ReasonInitializing {
 		msg, err := s34WritableWhileInitializing(ctx, env, mfg)
 		if err != nil {
 			return "", err
@@ -256,13 +256,13 @@ func s34NoWritableWindow(ctx context.Context, env *runner.Env, mfg *v1alpha1.Mys
 // site it just promoted (the handoff of the ordered update) as the active
 // site while its tracker still debounces the writable answers. A site the
 // operator cannot reach is not such a site.
-func s34ActiveAwaitingConfirmation(mfg *v1alpha1.MysqlFailoverGroup) bool {
+func s34ActiveAwaitingConfirmation(mfg *v1beta1.MysqlFailoverGroup) bool {
 	if mfg.Status.ActiveSite == "" {
 		return false
 	}
 	for _, s := range mfg.Status.Sites {
 		if s.Name == mfg.Status.ActiveSite {
-			return s.State == v1alpha1.SiteStateReadOnly
+			return s.State == v1beta1.SiteStateReadOnly
 		}
 	}
 	return false
@@ -274,10 +274,10 @@ func s34ActiveAwaitingConfirmation(mfg *v1alpha1.MysqlFailoverGroup) bool {
 // answers read-only (no writable site, the TOTAL LOSS window the scenario
 // guards against) or when more than one answers writable; a site that does
 // not answer leaves the sample undecided, as does status.
-func s34WritableWhileInitializing(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (string, error) {
+func s34WritableWhileInitializing(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup) (string, error) {
 	var writable, readOnly, unanswered []string
 	for _, s := range mfg.Status.Sites {
-		if s.State != v1alpha1.SiteStateUnknown || !isPromotableSite(mfg, s.Name) {
+		if s.State != v1beta1.SiteStateUnknown || !isPromotableSite(mfg, s.Name) {
 			continue
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -306,7 +306,7 @@ func s34WritableWhileInitializing(ctx context.Context, env *runner.Env, mfg *v1a
 // memory request. Returns a message for progress logging. Takes the caller's
 // context so the polling predicate stops issuing API calls when the step's
 // wait is cancelled or times out.
-func s34DeploymentsAt(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, want resource.Quantity) (bool, string) {
+func s34DeploymentsAt(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup, want resource.Quantity) (bool, string) {
 	allOK := true
 	msg := ""
 	for _, s := range mfg.Spec.Sites {
@@ -372,16 +372,16 @@ func s34RestoreMemory() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "revert roll settles: updatePhase empty, 1 writable, every other site read-only",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					writable, readOnly := 0, 0
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable++
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly++
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							return false, "", fmt.Errorf("site %s RecoveryBlocked during revert roll", s.Name)
 						}
 					}

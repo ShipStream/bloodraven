@@ -10,13 +10,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func newEscrowStore(objs ...client.Object) (*keyringEscrowStore, client.Client) {
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(objs...).Build()
 	return &keyringEscrowStore{client: c, scheme: scheme}, c
 }
@@ -49,8 +49,8 @@ func TestEscrowStore_PutCreatesVersionOne(t *testing.T) {
 	if sec.Immutable == nil || !*sec.Immutable {
 		t.Error("escrow Secret must be immutable")
 	}
-	if string(sec.Data[v1alpha1.KeyringDataFileName]) != "keyring-bytes" {
-		t.Errorf("stored bytes = %q", sec.Data[v1alpha1.KeyringDataFileName])
+	if string(sec.Data[v1beta1.KeyringDataFileName]) != "keyring-bytes" {
+		t.Errorf("stored bytes = %q", sec.Data[v1beta1.KeyringDataFileName])
 	}
 	if len(sec.OwnerReferences) == 0 {
 		t.Error("escrow Secret must be owned by the failover group so it is garbage-collected with it")
@@ -141,7 +141,7 @@ func TestEscrowStore_VersionsAreSiteScoped(t *testing.T) {
 
 func TestEscrowStore_Prune(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{RetainVersions: 2}
+	fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{RetainVersions: 2}
 	store, c := newEscrowStore(fg)
 	ctx := context.Background()
 
@@ -178,7 +178,7 @@ func TestEscrowStore_PruneNeverDeletesTheInUseVersion(t *testing.T) {
 	// Deleting the Secret a live MySQL is sealed against would make that
 	// site unrecoverable on its next pod restart.
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{RetainVersions: 2}
+	fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{RetainVersions: 2}
 	store, c := newEscrowStore(fg)
 	ctx := context.Background()
 
@@ -207,11 +207,11 @@ func TestEscrowStore_SkipsSecretsWithoutKeyringData(t *testing.T) {
 			Name:      "mysql-lion-dc1-keyring-v7",
 			Namespace: fg.Namespace,
 			Labels: map[string]string{
-				labelAppName:                 "mysql-keyring",
-				v1alpha1.FailoverGroupLabel:  fg.Name,
-				v1alpha1.SiteLabel:           "dc1",
-				labelManagedBy:               managerName,
-				v1alpha1.KeyringVersionLabel: "7",
+				labelAppName:                "mysql-keyring",
+				v1beta1.FailoverGroupLabel:  fg.Name,
+				v1beta1.SiteLabel:           "dc1",
+				labelManagedBy:              managerName,
+				v1beta1.KeyringVersionLabel: "7",
 			},
 		},
 		Data: map[string][]byte{},
@@ -240,11 +240,11 @@ func TestEnsureEscrowToken_MintsAndIsStable(t *testing.T) {
 		t.Fatalf("ensure: %v", err)
 	}
 	var sec corev1.Secret
-	name := v1alpha1.KeyringTokenSecretName(fg.Name, "dc1")
+	name := v1beta1.KeyringTokenSecretName(fg.Name, "dc1")
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &sec); err != nil {
 		t.Fatalf("token not created: %v", err)
 	}
-	first := string(sec.Data[v1alpha1.KeyringTokenKey])
+	first := string(sec.Data[v1beta1.KeyringTokenKey])
 	if len(first) < 32 {
 		t.Errorf("token too short: %d bytes", len(first))
 	}
@@ -255,7 +255,7 @@ func TestEnsureEscrowToken_MintsAndIsStable(t *testing.T) {
 		t.Fatalf("ensure again: %v", err)
 	}
 	_ = c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &sec)
-	if string(sec.Data[v1alpha1.KeyringTokenKey]) != first {
+	if string(sec.Data[v1beta1.KeyringTokenKey]) != first {
 		t.Error("token must be stable across reconciles")
 	}
 }
@@ -264,10 +264,10 @@ func TestEnsureEscrowToken_ReplacesTruncatedToken(t *testing.T) {
 	fg := encTestFG()
 	bad := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
+			Name:      v1beta1.KeyringTokenSecretName(fg.Name, "dc1"),
 			Namespace: fg.Namespace,
 		},
-		Data: map[string][]byte{v1alpha1.KeyringTokenKey: []byte("short")},
+		Data: map[string][]byte{v1beta1.KeyringTokenKey: []byte("short")},
 	}
 	r, c := newReconciler(fg, bad)
 	ctx := context.Background()
@@ -277,9 +277,9 @@ func TestEnsureEscrowToken_ReplacesTruncatedToken(t *testing.T) {
 	}
 	var sec corev1.Secret
 	_ = c.Get(ctx, types.NamespacedName{
-		Namespace: fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
+		Namespace: fg.Namespace, Name: v1beta1.KeyringTokenSecretName(fg.Name, "dc1"),
 	}, &sec)
-	if len(sec.Data[v1alpha1.KeyringTokenKey]) < 32 {
+	if len(sec.Data[v1beta1.KeyringTokenKey]) < 32 {
 		t.Error("a malformed token must be re-minted, not left in place")
 	}
 }
@@ -293,9 +293,9 @@ func TestVerifyEscrowToken(t *testing.T) {
 	}
 	var sec corev1.Secret
 	_ = c.Get(ctx, types.NamespacedName{
-		Namespace: fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
+		Namespace: fg.Namespace, Name: v1beta1.KeyringTokenSecretName(fg.Name, "dc1"),
 	}, &sec)
-	good := string(sec.Data[v1alpha1.KeyringTokenKey])
+	good := string(sec.Data[v1beta1.KeyringTokenKey])
 
 	if err := verifyEscrowToken(ctx, c, fg.Namespace, fg.Name, "dc1", good); err != nil {
 		t.Errorf("valid token rejected: %v", err)

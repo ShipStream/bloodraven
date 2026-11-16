@@ -10,7 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestVerificationTTLNilKeepsZeroCleans (A-37, F-54): an unset
@@ -22,17 +22,17 @@ func TestVerificationTTLNilKeepsZeroCleans(t *testing.T) {
 	no := false
 	for _, tc := range []struct {
 		name        string
-		phase       v1alpha1.VerificationPhase
+		phase       v1beta1.VerificationPhase
 		ttl         *int32
 		keep        *bool
 		wantDeleted bool
 		wantRequeue bool
 	}{
-		{name: "succeeded unset", phase: v1alpha1.VerificationPhaseSucceeded},
-		{name: "succeeded zero", phase: v1alpha1.VerificationPhaseSucceeded, ttl: new(int32(0)), wantDeleted: true},
-		{name: "succeeded pending ttl", phase: v1alpha1.VerificationPhaseSucceeded, ttl: new(int32(3600)), wantRequeue: true},
-		{name: "failed kept", phase: v1alpha1.VerificationPhaseFailed, ttl: new(int32(0))},
-		{name: "failed not kept unset", phase: v1alpha1.VerificationPhaseFailed, keep: &no, wantDeleted: true},
+		{name: "succeeded unset", phase: v1beta1.VerificationPhaseSucceeded},
+		{name: "succeeded zero", phase: v1beta1.VerificationPhaseSucceeded, ttl: new(int32(0)), wantDeleted: true},
+		{name: "succeeded pending ttl", phase: v1beta1.VerificationPhaseSucceeded, ttl: new(int32(3600)), wantRequeue: true},
+		{name: "failed kept", phase: v1beta1.VerificationPhaseFailed, ttl: new(int32(0))},
+		{name: "failed not kept unset", phase: v1beta1.VerificationPhaseFailed, keep: &no, wantDeleted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := verifyCR("ttl", "lion", "nightly-s3")

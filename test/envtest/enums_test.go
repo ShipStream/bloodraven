@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // The A-27/A-28/A-29/A-30/A-32/A-33 enums at admission: the CamelCase
@@ -56,23 +56,23 @@ func TestEnvtest_SpecEnumsRefuseReleasedSpellings(t *testing.T) {
 	fg := newTestFG(ns)
 	fg.Name = "roles-ok"
 	third := fg.Spec.Sites[1]
-	third.Name, third.ServerID, third.Role = "dr", 103, v1alpha1.SiteRoleDisasterRecovery
+	third.Name, third.ServerID, third.Role = "dr", 103, v1beta1.SiteRoleDisasterRecovery
 	reader := fg.Spec.Sites[1]
-	reader.Name, reader.ServerID, reader.Role, reader.TaintNodeSelector, reader.LoadBalancerIP = "reader", 104, v1alpha1.SiteRoleReadOnly, nil, ""
+	reader.Name, reader.ServerID, reader.Role, reader.TaintNodeSelector, reader.LoadBalancerIP = "reader", 104, v1beta1.SiteRoleReadOnly, nil, ""
 	fg.Spec.Sites = append(fg.Spec.Sites, third, reader)
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("CamelCase roles: %v", err)
 	}
-	if fg.Spec.Sites[0].Role != v1alpha1.SiteRolePrimaryCandidate {
+	if fg.Spec.Sites[0].Role != v1beta1.SiteRolePrimaryCandidate {
 		t.Errorf("role defaulted to %q, want PrimaryCandidate", fg.Spec.Sites[0].Role)
 	}
-	if fg.Spec.UpdateStrategy.Type != v1alpha1.UpdateStrategyOrderedUpdate {
+	if fg.Spec.UpdateStrategy.Type != v1beta1.UpdateStrategyOrderedUpdate {
 		t.Errorf("updateStrategy defaulted to %+v, want {type: OrderedUpdate}", fg.Spec.UpdateStrategy)
 	}
 	// Only one PrimaryCandidate left: the quorum rule compares the new value.
 	fg = newTestFG(ns)
 	fg.Name = "one-candidate"
-	fg.Spec.Sites[1].Role = v1alpha1.SiteRoleDisasterRecovery
+	fg.Spec.Sites[1].Role = v1beta1.SiteRoleDisasterRecovery
 	wantRefused(t, "one PrimaryCandidate", k8sClient.Create(ctx, fg), "PrimaryCandidate")
 
 	// updateStrategy is an object.
@@ -87,17 +87,17 @@ func TestEnvtest_SpecEnumsRefuseReleasedSpellings(t *testing.T) {
 	wantRefused(t, "updateStrategy.type=recreate", k8sClient.Create(ctx, fg), "updateStrategy")
 	fg = newTestFG(ns)
 	fg.Name = "strategy-recreate"
-	fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("updateStrategy.type=Recreate: %v", err)
 	}
 
 	// MysqlBackupVerification pointInTime.mode: Latest|Timestamp, required.
 	for i, mode := range []string{"none", "latest", "timestamp", ""} {
-		v := &v1alpha1.MysqlBackupVerification{
+		v := &v1beta1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: "mode-" + string(rune('a'+i)), Namespace: ns},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
-				PointInTime: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest}},
+			Spec: v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
+				PointInTime: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest}},
 		}
 		u := enumsObject(t, v, "MysqlBackupVerification")
 		if mode == "" {
@@ -107,10 +107,10 @@ func TestEnvtest_SpecEnumsRefuseReleasedSpellings(t *testing.T) {
 		}
 		wantRefused(t, "pointInTime.mode="+mode, k8sClient.Create(ctx, u), "mode")
 	}
-	for i, mode := range []v1alpha1.PointInTimeMode{v1alpha1.PointInTimeModeLatest, v1alpha1.PointInTimeModeTimestamp} {
-		v := &v1alpha1.MysqlBackupVerification{
+	for i, mode := range []v1beta1.PointInTimeMode{v1beta1.PointInTimeModeLatest, v1beta1.PointInTimeModeTimestamp} {
+		v := &v1beta1.MysqlBackupVerification{
 			ObjectMeta: metav1.ObjectMeta{Name: "mode-ok-" + string(rune('a'+i)), Namespace: ns},
-			Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
+			Spec: v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3",
 				PointInTime: e8VerificationPointInTime(mode)},
 		}
 		if err := k8sClient.Create(ctx, v); err != nil {
@@ -129,7 +129,7 @@ func TestEnvtest_StatusEnumsRefuseReleasedSpellings(t *testing.T) {
 	statusWrite := func(t *testing.T, mutate func(u *unstructured.Unstructured)) error {
 		t.Helper()
 		u := &unstructured.Unstructured{}
-		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+		u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("MysqlFailoverGroup"))
 		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), u); err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +185,7 @@ func TestEnvtest_StatusEnumsRefuseReleasedSpellings(t *testing.T) {
 		at(map[string]any{"phase": "Ready", "sites": []any{map[string]any{"name": "dc1", "role": "StaleMaster"}},
 			"upgrade": map[string]any{"phase": "Failed", "reason": "DragonflySnapshotSaveFailed"}}, "dragonfly")(u)
 		at(map[string]any{"phase": "Succeeded", "scope": map[string]any{"type": "Schema", "schema": "orders"}}, "restoreInPlace")(u)
-		at(map[string]any{"phase": "Failed", "reason": string(v1alpha1.PITRTokenReplayFailed)}, "restore")(u)
+		at(map[string]any{"phase": "Failed", "reason": string(v1beta1.PITRTokenReplayFailed)}, "restore")(u)
 		at([]any{map[string]any{"name": "nightly", "lastBackupPhase": "Succeeded"}}, "backupSchedules")(u)
 	})
 	if err != nil {
@@ -205,7 +205,7 @@ func TestEnvtest_MysqlDatabasePhaseApplying(t *testing.T) {
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(db), db); err != nil {
 		t.Fatal(err)
 	}
-	db.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
+	db.Status.Phase = v1beta1.MysqlDatabasePhaseApplying
 	if err := k8sClient.Status().Update(ctx, db); err != nil {
 		t.Fatalf("phase=Applying: %v", err)
 	}

@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -29,23 +29,23 @@ const (
 // SnapshotRestore whose spec.dragonfly.image is dfTargetImage. Seed its
 // StatefulSets on another image (seedDragonflyStatefulSets) to give it
 // drift.
-func fgWithDragonflySnapshotUpgrade() *v1alpha1.MysqlFailoverGroup {
-	fg := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
+func fgWithDragonflySnapshotUpgrade() *v1beta1.MysqlFailoverGroup {
+	fg := fgWithDragonfly(func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Dragonfly.Image = dfTargetImage
-		fg.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategySnapshotRestore
-		fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{
+		fg.Spec.Dragonfly.UpgradeStrategy = v1beta1.DragonflyUpgradeStrategySnapshotRestore
+		fg.Spec.Dragonfly.Snapshot = &v1beta1.DragonflySnapshotSpec{
 			Dir:                "s3://tenant-dragonfly/orders/prod",
 			ServiceAccountName: "dragonfly-backup",
 		}
 	})
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1", Phase: v1beta1.DragonflyPhaseReady}
 	return fg
 }
 
 // seedDragonflyStatefulSets creates each named site's StatefulSet as the
 // render would, running the given image, with its template rolled out.
-func seedDragonflyStatefulSets(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1alpha1.MysqlFailoverGroup, images map[string]string) {
+func seedDragonflyStatefulSets(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1beta1.MysqlFailoverGroup, images map[string]string) {
 	t.Helper()
 	for _, site := range fg.Spec.Sites {
 		img, ok := images[site.Name]
@@ -67,7 +67,7 @@ func seedDragonflyStatefulSets(t *testing.T, r *MysqlFailoverGroupReconciler, c 
 // renderDragonflyRolledOut applies the ordinary render to every site's
 // StatefulSet, as reconcileDragonflyResources would, and marks each one
 // rolled out.
-func renderDragonflyRolledOut(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1alpha1.MysqlFailoverGroup) {
+func renderDragonflyRolledOut(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	ctx := context.Background()
 	for _, site := range fg.Spec.Sites {
@@ -79,7 +79,7 @@ func renderDragonflyRolledOut(t *testing.T, r *MysqlFailoverGroupReconciler, c c
 }
 
 // setDragonflyStatefulSetStatus rewrites site's StatefulSet status.
-func setDragonflyStatefulSetStatus(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string, mutate func(*appsv1.StatefulSet)) {
+func setDragonflyStatefulSetStatus(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string, mutate func(*appsv1.StatefulSet)) {
 	t.Helper()
 	var sts appsv1.StatefulSet
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}, &sts); err != nil {
@@ -100,7 +100,7 @@ func rolledOutDragonflyStatus(sts *appsv1.StatefulSet) appsv1.StatefulSetStatus 
 	}
 }
 
-func liveDragonflyImage(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) string {
+func liveDragonflyImage(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) string {
 	t.Helper()
 	var sts appsv1.StatefulSet
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}, &sts); err != nil {
@@ -109,7 +109,7 @@ func liveDragonflyImage(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailove
 	return dragonflyTemplateImage(&sts)
 }
 
-func upgradeRecord(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.DragonflyUpgradeStatus {
+func upgradeRecord(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup) *v1beta1.DragonflyUpgradeStatus {
 	t.Helper()
 	return dragonflyUpgradeStatus(getFGByKey(t, c, fgNN(fg)))
 }
@@ -139,7 +139,7 @@ func TestDragonflySnapshotUpgrade_SpecDriftStartsRun(t *testing.T) {
 		t.Fatalf("spec.dragonfly.image changed: %q", got.Spec.Dragonfly.Image)
 	}
 	up := dragonflyUpgradeStatus(got)
-	if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhasePending {
+	if up == nil || up.Phase != v1beta1.DragonflyUpgradePhasePending {
 		t.Fatalf("upgrade = %+v, want Pending", up)
 	}
 	if up.SourceImage != "dragonfly:active-live" || up.TargetImage != dfTargetImage {
@@ -159,16 +159,16 @@ func TestDragonflySnapshotUpgrade_SpecDriftStartsRun(t *testing.T) {
 func TestDragonflySnapshotUpgrade_NoRunWithoutKnownDrift(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlFailoverGroup)
+		mutate func(*v1beta1.MysqlFailoverGroup)
 		live   map[string]string
 	}{
 		{name: "no StatefulSets", live: nil},
 		{name: "active site's StatefulSet missing", live: map[string]string{"dc2": dfSourceImage}},
 		{name: "no drift", live: bothSites(dfTargetImage)},
-		{name: "Rolling strategy", live: bothSites(dfSourceImage), mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+		{name: "Rolling strategy", live: bothSites(dfSourceImage), mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Dragonfly.UpgradeStrategy = v1beta1.DragonflyUpgradeStrategyRolling
 		}},
-		{name: "Dragonfly disabled", live: bothSites(dfSourceImage), mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "Dragonfly disabled", live: bothSites(dfSourceImage), mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Dragonfly.Enabled = false
 		}},
 	} {
@@ -192,7 +192,7 @@ func TestDragonflySnapshotUpgrade_NoRunWithoutKnownDrift(t *testing.T) {
 
 // failingSaveFixture is a group with drift on both sites whose active
 // Dragonfly answers SAVE with an error.
-func failingSaveFixture(t *testing.T) (*MysqlFailoverGroupReconciler, client.Client, *v1alpha1.MysqlFailoverGroup, *fakeDragonflyConn, *record.FakeRecorder) {
+func failingSaveFixture(t *testing.T) (*MysqlFailoverGroupReconciler, client.Client, *v1beta1.MysqlFailoverGroup, *fakeDragonflyConn, *record.FakeRecorder) {
 	t.Helper()
 	fg := fgWithDragonflySnapshotUpgrade()
 	r, c := newReconciler(fg)
@@ -210,13 +210,13 @@ func failingSaveFixture(t *testing.T) (*MysqlFailoverGroupReconciler, client.Cli
 }
 
 // driveToFailure runs the upgrade until its record is Failed.
-func driveToFailure(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.DragonflyUpgradeStatus {
+func driveToFailure(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Client, fg *v1beta1.MysqlFailoverGroup) *v1beta1.DragonflyUpgradeStatus {
 	t.Helper()
 	for i := 0; i < 5; i++ {
 		if _, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, fgNN(fg))); err != nil {
 			t.Fatal(err)
 		}
-		if up := upgradeRecord(t, c, fg); up != nil && up.Phase == v1alpha1.DragonflyUpgradePhaseFailed {
+		if up := upgradeRecord(t, c, fg); up != nil && up.Phase == v1beta1.DragonflyUpgradePhaseFailed {
 			return up
 		}
 	}
@@ -241,8 +241,8 @@ func TestDragonflySnapshotUpgrade_FailedSaveIsTerminal(t *testing.T) {
 	ctx := context.Background()
 	r, c, fg, conn, rec := failingSaveFixture(t)
 	failed := driveToFailure(t, r, c, fg)
-	if failed.Reason != v1alpha1.DragonflyUpgradeReasonSnapshotSaveFailed {
-		t.Fatalf("reason = %q, want %s", failed.Reason, v1alpha1.DragonflyUpgradeReasonSnapshotSaveFailed)
+	if failed.Reason != v1beta1.DragonflyUpgradeReasonSnapshotSaveFailed {
+		t.Fatalf("reason = %q, want %s", failed.Reason, v1beta1.DragonflyUpgradeReasonSnapshotSaveFailed)
 	}
 	if n := countMatching(drainEvents(rec), "Warning DragonflyUpgradeFailed"); n != 1 {
 		t.Fatalf("%d DragonflyUpgradeFailed events, want 1", n)
@@ -259,7 +259,7 @@ func TestDragonflySnapshotUpgrade_FailedSaveIsTerminal(t *testing.T) {
 		}
 	}
 	up := upgradeRecord(t, c, fg)
-	if up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || !up.StartTime.Equal(failed.StartTime) {
+	if up.Phase != v1beta1.DragonflyUpgradePhaseFailed || !up.StartTime.Equal(failed.StartTime) {
 		t.Fatalf("record = %+v, want the same Failed run", up)
 	}
 	if conn.saveCalls != 1 {
@@ -310,7 +310,7 @@ func TestDragonflySnapshotUpgrade_SpecChangeRearms(t *testing.T) {
 		t.Fatalf("SAVE ran %d times before the new run reached it, want once (the failed run)", conn.saveCalls)
 	}
 	up := upgradeRecord(t, c, fg)
-	if up.Phase != v1alpha1.DragonflyUpgradePhasePending || up.SpecDigest == failed.SpecDigest ||
+	if up.Phase != v1beta1.DragonflyUpgradePhasePending || up.SpecDigest == failed.SpecDigest ||
 		up.SnapshotDir != "s3://tenant-dragonfly/orders/fixed" {
 		t.Fatalf("record = %+v, want a new Pending run on the changed spec", up)
 	}
@@ -342,7 +342,7 @@ func TestDragonflySnapshotUpgrade_TwoStepRetry(t *testing.T) {
 	if err != nil || step.hold == 0 {
 		t.Fatalf("= (%+v, %v), want a new run", step, err)
 	}
-	if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1alpha1.DragonflyUpgradePhasePending {
+	if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1beta1.DragonflyUpgradePhasePending {
 		t.Fatalf("record = %+v, want Pending", up)
 	}
 }
@@ -354,23 +354,23 @@ func TestDragonflySnapshotUpgrade_TwoStepRetry(t *testing.T) {
 func TestDragonflySnapshotUpgrade_BlockedRunWaitsWithoutMovingSites(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
-		block, unlock func(*v1alpha1.MysqlFailoverGroup)
+		block, unlock func(*v1beta1.MysqlFailoverGroup)
 	}{
 		{name: "no activeSite",
-			block:  func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.ActiveSite = "" },
-			unlock: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.ActiveSite = "dc1" }},
+			block:  func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.ActiveSite = "" },
+			unlock: func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.ActiveSite = "dc1" }},
 		{name: "planned failover hold",
-			block: func(fg *v1alpha1.MysqlFailoverGroup) {
-				setPlannedHold(&fg.Status, v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonAuthorityChanged,
+			block: func(fg *v1beta1.MysqlFailoverGroup) {
+				setPlannedHold(&fg.Status, v1beta1.PlannedFailoverHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonAuthorityChanged,
 					SourceSite: "dc1", TargetSite: "dc2", HoldTime: metav1.Now()}, fg.Generation)
 			},
-			unlock: func(fg *v1alpha1.MysqlFailoverGroup) {
+			unlock: func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Status.PlannedFailoverHold = nil
 				fg.Status.Conditions = nil
 			}},
 		{name: "Dragonfly master elsewhere",
-			block:  func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Dragonfly.ActiveSite = "dc2" },
-			unlock: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Dragonfly.ActiveSite = "dc1" }},
+			block:  func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.Dragonfly.ActiveSite = "dc2" },
+			unlock: func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.Dragonfly.ActiveSite = "dc1" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -412,7 +412,7 @@ func TestDragonflySnapshotUpgrade_BlockedRunWaitsWithoutMovingSites(t *testing.T
 			if err != nil || step.hold == 0 {
 				t.Fatalf("after the blocker cleared = (%+v, %v), want a started run", step, err)
 			}
-			if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1alpha1.DragonflyUpgradePhasePending {
+			if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1beta1.DragonflyUpgradePhasePending {
 				t.Fatalf("record = %+v, want Pending", up)
 			}
 		})
@@ -441,7 +441,7 @@ func TestDragonflyRender_SnapshotRestoreKeepsLiveImage(t *testing.T) {
 	}
 
 	live := getFGByKey(t, c, fgNN(fg))
-	live.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+	live.Spec.Dragonfly.UpgradeStrategy = v1beta1.DragonflyUpgradeStrategyRolling
 	desired, err := r.desiredDragonflyStatefulSet(live, live.Spec.Sites[0], nil)
 	if err != nil {
 		t.Fatal(err)
@@ -467,8 +467,8 @@ func TestDragonflySnapshotUpgrade_ResumesAfterRestart(t *testing.T) {
 			fg := fgWithDragonflySnapshotUpgrade()
 			if tc.record {
 				start := metav1.Now()
-				fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
-					Phase: v1alpha1.DragonflyUpgradePhaseReattachingReplicas, SourceImage: dfSourceImage, TargetImage: dfTargetImage,
+				fg.Status.Dragonfly.Upgrade = &v1beta1.DragonflyUpgradeStatus{
+					Phase: v1beta1.DragonflyUpgradePhaseReattachingReplicas, SourceImage: dfSourceImage, TargetImage: dfTargetImage,
 					SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), ActiveSite: "dc1", SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, StartTime: &start,
 				}
 			}
@@ -491,7 +491,7 @@ func TestDragonflySnapshotUpgrade_ResumesAfterRestart(t *testing.T) {
 				}
 			}
 			up := upgradeRecord(t, c, fg)
-			if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseReattachingReplicas {
+			if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseReattachingReplicas {
 				t.Fatalf("record = %+v, want a run reattaching the replicas", up)
 			}
 			if !tc.record && (up.SourceImage != dfSourceImage || up.TargetImage != dfTargetImage) {
@@ -518,11 +518,11 @@ func TestDragonflySnapshotUpgrade_NeverWritesSpec(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
 	specWrites := 0
 	countSpecWrite := func(obj client.Object) {
-		if _, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+		if _, ok := obj.(*v1beta1.MysqlFailoverGroup); ok {
 			specWrites++
 		}
 	}
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).WithInterceptorFuncs(interceptor.Funcs{
 		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 			countSpecWrite(obj)
@@ -571,12 +571,12 @@ func TestDragonflySnapshotUpgrade_NeverWritesSpec(t *testing.T) {
 			t.Fatal(err)
 		}
 		recreatePods()
-		if up := upgradeRecord(t, c, fg); up != nil && up.Phase == v1alpha1.DragonflyUpgradePhaseSucceeded {
+		if up := upgradeRecord(t, c, fg); up != nil && up.Phase == v1beta1.DragonflyUpgradePhaseSucceeded {
 			break
 		}
 	}
 	up := upgradeRecord(t, c, fg)
-	if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseSucceeded {
+	if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseSucceeded {
 		t.Fatalf("record = %+v, want Succeeded", up)
 	}
 	if specWrites != 0 {
@@ -603,8 +603,8 @@ func TestDragonflySnapshotUpgrade_SaveThenUpdateActive(t *testing.T) {
 	ctx := context.Background()
 	fg := fgWithDragonflySnapshotUpgrade()
 	now := metav1.Now()
-	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
-		Phase:       v1alpha1.DragonflyUpgradePhasePending,
+	fg.Status.Dragonfly.Upgrade = &v1beta1.DragonflyUpgradeStatus{
+		Phase:       v1beta1.DragonflyUpgradePhasePending,
 		SourceImage: dfSourceImage,
 		TargetImage: dfTargetImage,
 		ActiveSite:  "dc1",
@@ -628,7 +628,7 @@ func TestDragonflySnapshotUpgrade_SaveThenUpdateActive(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, fg); err != nil {
 		t.Fatal(err)
 	}
-	if fg.Status.Dragonfly.Upgrade.Phase != v1alpha1.DragonflyUpgradePhaseSavingSnapshot {
+	if fg.Status.Dragonfly.Upgrade.Phase != v1beta1.DragonflyUpgradePhaseSavingSnapshot {
 		t.Fatalf("phase=%q want SavingSnapshot", fg.Status.Dragonfly.Upgrade.Phase)
 	}
 
@@ -642,7 +642,7 @@ func TestDragonflySnapshotUpgrade_SaveThenUpdateActive(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, fg); err != nil {
 		t.Fatal(err)
 	}
-	if fg.Status.Dragonfly.Upgrade.Phase != v1alpha1.DragonflyUpgradePhaseUpdatingActive {
+	if fg.Status.Dragonfly.Upgrade.Phase != v1beta1.DragonflyUpgradePhaseUpdatingActive {
 		t.Fatalf("phase=%q want UpdatingActive", fg.Status.Dragonfly.Upgrade.Phase)
 	}
 
@@ -659,12 +659,12 @@ func TestDragonflySnapshotUpgrade_SaveThenUpdateActive(t *testing.T) {
 	}
 }
 
-func dragonflyPodForTest(fg *v1alpha1.MysqlFailoverGroup, site, image string, ready bool) *corev1.Pod {
+func dragonflyPodForTest(fg *v1beta1.MysqlFailoverGroup, site, image string, ready bool) *corev1.Pod {
 	labels := dragonflyCommonLabels(fg.Name, site)
-	labels[v1alpha1.DragonflyRoleLabel] = "replica"
-	labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
+	labels[v1beta1.DragonflyRoleLabel] = "replica"
+	labels[v1beta1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 	if site == fg.Status.ActiveSite {
-		labels[v1alpha1.DragonflyRoleLabel] = "master"
+		labels[v1beta1.DragonflyRoleLabel] = "master"
 	}
 	status := corev1.PodStatus{}
 	if ready {
@@ -685,10 +685,10 @@ func TestDragonflyUpgradeInFlight(t *testing.T) {
 	if dragonflyUpgradeInFlight(nil) {
 		t.Fatal("nil status is not in-flight")
 	}
-	if !dragonflyUpgradeInFlight(&v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseSavingSnapshot}) {
+	if !dragonflyUpgradeInFlight(&v1beta1.DragonflyUpgradeStatus{Phase: v1beta1.DragonflyUpgradePhaseSavingSnapshot}) {
 		t.Fatal("SavingSnapshot should be in-flight")
 	}
-	if dragonflyUpgradeInFlight(&v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseSucceeded}) {
+	if dragonflyUpgradeInFlight(&v1beta1.DragonflyUpgradeStatus{Phase: v1beta1.DragonflyUpgradePhaseSucceeded}) {
 		t.Fatal("Succeeded should be terminal")
 	}
 }
@@ -696,7 +696,7 @@ func TestDragonflyUpgradeInFlight(t *testing.T) {
 // foreignSelectorDragonflySite gives site's seeded StatefulSet an extra
 // immutable selector label, as a StatefulSet created by hand or by
 // another release would carry, and returns its resourceVersion.
-func foreignSelectorDragonflySite(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) (string, string) {
+func foreignSelectorDragonflySite(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}
@@ -714,7 +714,7 @@ func foreignSelectorDragonflySite(t *testing.T, c client.Client, fg *v1alpha1.My
 	return key.Name, sts.ResourceVersion
 }
 
-func dragonflyStatefulSetResourceVersion(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) string {
+func dragonflyStatefulSetResourceVersion(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) string {
 	t.Helper()
 	var sts appsv1.StatefulSet
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}, &sts); err != nil {
@@ -759,31 +759,31 @@ func TestDragonflySnapshotUpgrade_HonoursSelectorRefusal(t *testing.T) {
 			if conn.saveCalls != 0 {
 				t.Fatalf("SAVE ran %d times", conn.saveCalls)
 			}
-			if reason, msg := r.Runner.refusalDegraded(fgNN(fg)); reason != v1alpha1.ReasonWorkloadSelectorMismatch || !strings.Contains(msg, name) {
+			if reason, msg := r.Runner.refusalDegraded(fgNN(fg)); reason != v1beta1.ReasonWorkloadSelectorMismatch || !strings.Contains(msg, name) {
 				t.Fatalf("refusal = %s %q, want WorkloadSelectorMismatch naming %s", reason, msg, name)
 			}
 			events := drainEventReasons(rec)
-			if n := countMatching(events, v1alpha1.EventWorkloadSelectorMismatch); n != 1 {
+			if n := countMatching(events, v1beta1.EventWorkloadSelectorMismatch); n != 1 {
 				t.Fatalf("%d WorkloadSelectorMismatch Events (%v), want 1", n, events)
 			}
-			if n := countMatching(events, v1alpha1.EventDragonflyUpgradeDeferred); n != 1 {
+			if n := countMatching(events, v1beta1.EventDragonflyUpgradeDeferred); n != 1 {
 				t.Fatalf("%d DragonflyUpgradeDeferred Events (%v), want 1", n, events)
 			}
 		})
 	}
 
-	for _, phase := range []v1alpha1.DragonflyUpgradePhase{
-		v1alpha1.DragonflyUpgradePhasePending,
-		v1alpha1.DragonflyUpgradePhaseSavingSnapshot,
-		v1alpha1.DragonflyUpgradePhaseUpdatingActive,
-		v1alpha1.DragonflyUpgradePhaseReattachingReplicas,
+	for _, phase := range []v1beta1.DragonflyUpgradePhase{
+		v1beta1.DragonflyUpgradePhasePending,
+		v1beta1.DragonflyUpgradePhaseSavingSnapshot,
+		v1beta1.DragonflyUpgradePhaseUpdatingActive,
+		v1beta1.DragonflyUpgradePhaseReattachingReplicas,
 	} {
 		for _, refusedSite := range []string{"dc1", "dc2"} {
 			t.Run("inFlight/"+string(phase)+"/"+refusedSite, func(t *testing.T) {
 				ctx := context.Background()
 				fg := fgWithDragonflySnapshotUpgrade()
 				now := metav1.Now()
-				fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
+				fg.Status.Dragonfly.Upgrade = &v1beta1.DragonflyUpgradeStatus{
 					Phase: phase, SourceImage: dfSourceImage, TargetImage: dfTargetImage, ActiveSite: "dc1",
 					SnapshotDir: fg.Spec.Dragonfly.Snapshot.Dir, SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), StartTime: &now,
 				}
@@ -806,7 +806,7 @@ func TestDragonflySnapshotUpgrade_HonoursSelectorRefusal(t *testing.T) {
 					t.Fatal(err)
 				}
 				up := upgradeRecord(t, c, fg)
-				if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
+				if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != v1beta1.DragonflyUpgradeReasonWorkloadSelectorMismatch {
 					t.Fatalf("upgrade = %+v, want Failed/WorkloadSelectorMismatch", up)
 				}
 				if got := dragonflyStatefulSetResourceVersion(t, c, fg, refusedSite); got != rv {
@@ -826,7 +826,7 @@ func TestDragonflySnapshotUpgrade_HonoursSelectorRefusal(t *testing.T) {
 				if conn.saveCalls != 0 {
 					t.Fatalf("SAVE ran %d times", conn.saveCalls)
 				}
-				if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1alpha1.ReasonWorkloadSelectorMismatch {
+				if reason, _ := r.Runner.refusalDegraded(fgNN(fg)); reason != v1beta1.ReasonWorkloadSelectorMismatch {
 					t.Fatalf("refusal = %q, want WorkloadSelectorMismatch", reason)
 				}
 			})

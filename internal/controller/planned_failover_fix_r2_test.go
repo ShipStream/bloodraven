@@ -9,11 +9,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // setStatus applies mut to the stored group's status.
-func (h *pfEngineHarness) setStatus(mut func(*v1alpha1.MysqlFailoverGroupStatus)) {
+func (h *pfEngineHarness) setStatus(mut func(*v1beta1.MysqlFailoverGroupStatus)) {
 	h.t.Helper()
 	fg := h.fg()
 	mut(&fg.Status)
@@ -25,23 +25,23 @@ func (h *pfEngineHarness) setStatus(mut func(*v1alpha1.MysqlFailoverGroupStatus)
 // midEmergencyFailover is the status an emergency failover promoting pdx
 // publishes before activeSite (scenario 64): no active site, the record
 // naming pdx, pdx read-only and no longer replicating.
-func midEmergencyFailover(at time.Time) func(*v1alpha1.MysqlFailoverGroupStatus) {
-	return func(st *v1alpha1.MysqlFailoverGroupStatus) {
+func midEmergencyFailover(at time.Time) func(*v1beta1.MysqlFailoverGroupStatus) {
+	return func(st *v1beta1.MysqlFailoverGroupStatus) {
 		rec := metav1.NewTime(at)
 		st.ActiveSite = ""
 		st.SetLastFailover(&rec, "pdx", st.PromotionGtidExecuted())
-		st.Sites = []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateUnreachable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationBroken},
+		st.Sites = []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateUnreachable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationBroken},
 		}
 	}
 }
 
-func publishedPDX(st *v1alpha1.MysqlFailoverGroupStatus) {
+func publishedPDX(st *v1beta1.MysqlFailoverGroupStatus) {
 	st.ActiveSite = "pdx"
-	st.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: v1alpha1.SiteStateUnreachable},
-		{Name: "pdx", State: v1alpha1.SiteStateWritable},
+	st.Sites = []v1beta1.SiteStatus{
+		{Name: "iad", State: v1beta1.SiteStateUnreachable},
+		{Name: "pdx", State: v1beta1.SiteStateWritable},
 	}
 }
 
@@ -53,8 +53,8 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 	assertWaiting := func(t *testing.T, h *pfEngineHarness, runID string) {
 		t.Helper()
 		pf := h.pf()
-		if pf == nil || pf.Result != nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
-			pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitAuthorityUnsettled || pf.Admission.DeadlineTime == nil {
+		if pf == nil || pf.Result != nil || pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
+			pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitAuthorityUnsettled || pf.Admission.DeadlineTime == nil {
 			t.Fatalf("block = %+v (admission %+v), want Admitting{AuthorityUnsettled} with a deadline", pf, pf.Admission)
 		}
 		if runID != "" && pf.RunID != runID {
@@ -67,16 +67,16 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 	assertAlreadyActive := func(t *testing.T, h *pfEngineHarness) {
 		t.Helper()
 		pf := h.pf()
-		if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeNotStarted ||
-			pf.Result.Reason != v1alpha1.PlannedFailoverReasonAlreadyActive {
+		if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeNotStarted ||
+			pf.Result.Reason != v1beta1.PlannedFailoverReasonAlreadyActive {
 			t.Fatalf("block = %+v, want NotStarted/AlreadyActive", pf)
 		}
 	}
 
 	t.Run("deferred", func(t *testing.T) {
 		h := newPFEngineHarness(t, plannedFailoverFG("pdx"))
-		pf := pfRunAt(v1alpha1.PlannedFailoverPhaseDeferred, h.clk.Now())
-		pf.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferDeploymentHold}
+		pf := pfRunAt(v1beta1.PlannedFailoverPhaseDeferred, h.clk.Now())
+		pf.Admission = &v1beta1.PlannedFailoverAdmission{DeferReason: v1beta1.PlannedFailoverDeferDeploymentHold}
 		h.setBlock(pf)
 		h.clk.Advance(10 * time.Second)
 		h.setStatus(midEmergencyFailover(h.clk.Now()))
@@ -94,7 +94,7 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 	})
 
 	t.Run("admitting", func(t *testing.T) {
-		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseAdmitting)
+		h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseAdmitting)
 		h.clk.Advance(10 * time.Second)
 		h.setStatus(midEmergencyFailover(h.clk.Now()))
 		h.step()
@@ -111,22 +111,22 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 		assertWaiting(t, h, "")
 		// The request stays until the Admitting run's validation decides
 		// it, so a cooldown deferral can still retain it (ultra K050).
-		if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; !ok {
+		if _, ok := h.fg().Annotations[v1beta1.PlannedFailoverAnnotation]; !ok {
 			t.Error("request annotation consumed before the Admitting run validated it")
 		}
 		h.setStatus(publishedPDX)
 		h.step()
 		assertAlreadyActive(t, h)
-		if _, ok := h.fg().Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
+		if _, ok := h.fg().Annotations[v1beta1.PlannedFailoverAnnotation]; ok {
 			t.Error("request annotation kept after the run ended")
 		}
 	})
 
 	// The record is published but activeSite still names the old primary.
 	t.Run("record newer than the run", func(t *testing.T) {
-		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseAdmitting)
+		h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseAdmitting)
 		h.clk.Advance(10 * time.Second)
-		h.setStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		h.setStatus(func(st *v1beta1.MysqlFailoverGroupStatus) {
 			midEmergencyFailover(h.clk.Now())(st)
 			st.ActiveSite = "iad"
 		})
@@ -136,13 +136,13 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 
 	// The wait is bounded by the admission deadline.
 	t.Run("deadline", func(t *testing.T) {
-		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseAdmitting)
+		h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseAdmitting)
 		h.setStatus(midEmergencyFailover(h.clk.Now().Add(time.Second)))
 		h.step()
 		assertWaiting(t, h, "run-1")
 		h.clk.Advance(plannedFailoverAdmissionTimeout)
 		h.step()
-		if pf := h.pf(); pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonAdmissionTimeout {
+		if pf := h.pf(); pf.Result == nil || pf.Result.Reason != v1beta1.PlannedFailoverReasonAdmissionTimeout {
 			t.Fatalf("block = %+v, want NotStarted/AdmissionTimeout", pf)
 		}
 	})
@@ -152,20 +152,20 @@ func TestFixR2_AdmissionWaitsWhileAuthorityUnsettled(t *testing.T) {
 		h := newPFEngineHarness(t, plannedFailoverFG("nowhere"))
 		h.setStatus(midEmergencyFailover(h.clk.Now()))
 		h.step()
-		if pf := h.pf(); pf == nil || pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonUnknownSite {
+		if pf := h.pf(); pf == nil || pf.Result == nil || pf.Result.Reason != v1beta1.PlannedFailoverReasonUnknownSite {
 			t.Fatalf("block = %+v, want NotStarted/UnknownSite", pf)
 		}
 	})
 
 	// An old record naming another site does not hold a new run.
 	t.Run("record older than the run", func(t *testing.T) {
-		h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhaseAdmitting)
-		h.setStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		h := pfHarnessAt(t, v1beta1.PlannedFailoverPhaseAdmitting)
+		h.setStatus(func(st *v1beta1.MysqlFailoverGroupStatus) {
 			rec := metav1.NewTime(h.clk.Now().Add(-time.Hour))
 			st.SetLastFailover(&rec, "pdx", st.PromotionGtidExecuted())
 		})
 		h.step()
-		if pf := h.pf(); pf.Admission != nil && pf.Admission.WaitReason == v1alpha1.PlannedFailoverWaitAuthorityUnsettled {
+		if pf := h.pf(); pf.Admission != nil && pf.Admission.WaitReason == v1beta1.PlannedFailoverWaitAuthorityUnsettled {
 			t.Fatalf("block = %+v: an hour-old record held admission", pf)
 		}
 	})
@@ -181,10 +181,10 @@ func TestFixR2_DragonflyFollowUpRunsAfterRelease(t *testing.T) {
 		fg := fgWithDragonflyEnabledAndActive()
 		now := metav1.NewTime(time.Now().Add(-time.Minute)) // the run was claimed before the request
 		f := "uuid-dc1:1-10"
-		fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 7, Phase: v1alpha1.PlannedFailoverPhasePromoting,
+		fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 7, Phase: v1beta1.PlannedFailoverPhasePromoting,
 			SourceSite: "dc1", TargetSite: "dc2", StartTime: now, ClaimTime: &now,
-			Fence:     &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: now, GtidSet: &f},
-			Promotion: &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, IntentTime: now}}
+			Fence:     &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceApplied, IntentTime: now, GtidSet: &f},
+			Promotion: &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionIntended, IntentTime: now}}
 		cb, key := newDragonflyFakeClient(fg)
 		mgr := NewDragonflyManager(cb.Build(), record.NewFakeRecorder(32), slog.Default(), key, 50*time.Millisecond)
 		shrinkEmergencyWaits(mgr)
@@ -226,7 +226,7 @@ func TestFixR2_DragonflyFollowUpRunsAfterRelease(t *testing.T) {
 func TestFixR2_ReconcilerDragonflyOwnershipUsesSlot(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	now := metav1.Now()
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 7, Phase: v1alpha1.PlannedFailoverPhasePromoting,
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 7, Phase: v1beta1.PlannedFailoverPhasePromoting,
 		SourceSite: "dc1", TargetSite: "dc2", StartTime: now}
 	nn := fgNN(fg)
 	runner := NewTopologyManagerRunner(nil, nil, nil, record.NewFakeRecorder(8), slog.Default())

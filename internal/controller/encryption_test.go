@@ -8,23 +8,23 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // encTestFG returns the standard two-site fixture with encryption and
 // TLS enabled (encryption requires TLS).
-func encTestFG() *v1alpha1.MysqlFailoverGroup {
+func encTestFG() *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG()
-	fg.Spec.TLS = &v1alpha1.TLSSpec{
+	fg.Spec.TLS = &v1beta1.TLSSpec{
 		SecretName: "mysql-tls",
 	}
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 	return fg
 }
 
-func setSitePhase(fg *v1alpha1.MysqlFailoverGroup, site string, phase v1alpha1.SiteKeyringPhase, secret string) {
+func setSitePhase(fg *v1beta1.MysqlFailoverGroup, site string, phase v1beta1.SiteKeyringPhase, secret string) {
 	if fg.Status.EncryptionAtRest == nil {
-		fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{}
+		fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{}
 	}
 	st := fg.Status.EncryptionAtRest
 	for i := range st.Sites {
@@ -34,7 +34,7 @@ func setSitePhase(fg *v1alpha1.MysqlFailoverGroup, site string, phase v1alpha1.S
 			return
 		}
 	}
-	st.Sites = append(st.Sites, v1alpha1.SiteEncryptionStatus{
+	st.Sites = append(st.Sites, v1beta1.SiteEncryptionStatus{
 		Name: site, Phase: phase, KeyringSecret: secret,
 	})
 }
@@ -64,7 +64,7 @@ func TestEncryptionMySQLSettings_Coverage(t *testing.T) {
 	}
 
 	off := false
-	fg.Spec.EncryptionAtRest.Coverage = &v1alpha1.EncryptionCoverageSpec{RedoLog: &off}
+	fg.Spec.EncryptionAtRest.Coverage = &v1beta1.EncryptionCoverageSpec{RedoLog: &off}
 	got = encryptionMySQLSettings(fg)
 	if got["innodb-redo-log-encrypt"] != "OFF" {
 		t.Errorf("redo log = %q, want OFF", got["innodb-redo-log-encrypt"])
@@ -79,7 +79,7 @@ func TestEncryptionMySQLSettings_Coverage(t *testing.T) {
 // so a spec.mysqlConf entry naming the same key must not win.
 func TestEncryptionSettingsOverrideUserConf(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{
+	fg.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{
 		"innodb_redo_log_encrypt":  "OFF",
 		"binlog-encryption":        "OFF",
 		"default_table_encryption": "OFF",
@@ -102,14 +102,14 @@ func TestEncryptionSettingsOverrideUserConf(t *testing.T) {
 // break in a value, which would write a directive of its own.
 func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{
+	fg.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{
 		"loose_innodb_redo_log_encrypt":        "OFF",
 		"skip-binlog-encryption":               "",
 		"disable-default-table-encryption":     "",
 		"max_connections":                      "777\ninnodb-undo-log-encrypt=OFF",
 		"x\n[mysqld]\ninnodb-undo-log-encrypt": "OFF",
 	}
-	fg.Spec.Sites[0].MysqlConf = map[string]v1alpha1.MysqlConfValue{"loose-skip-binlog-encryption": ""}
+	fg.Spec.Sites[0].MysqlConf = map[string]v1beta1.MysqlConfValue{"loose-skip-binlog-encryption": ""}
 	cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 	for _, forbidden := range []string{
 		"loose-innodb-redo-log-encrypt", "skip-binlog-encryption", "disable-default-table-encryption",
@@ -138,7 +138,7 @@ func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
 // group uses to load extra plugins must survive next to mysql_clone.so.
 func TestGenerateMyCnf_KeepsLoosePluginLoadAdd(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"loose_plugin_load_add": "auth_socket.so"}
+	fg.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{"loose_plugin_load_add": "auth_socket.so"}
 	cnf := generateMyCnf(fg, pitrEnabled(fg), fg.Spec.Sites[0])
 	for _, want := range []string{"loose-plugin-load-add=auth_socket.so\n", "plugin-load-add=mysql_clone.so\n"} {
 		if !strings.Contains(cnf, want) {
@@ -454,7 +454,7 @@ func TestBuildEncryptionFragments_UnsealedFresh(t *testing.T) {
 
 func TestBuildEncryptionFragments_DoesNotInterpolateKeyringPathIntoShell(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{DataFileDir: `/run/$(touch injected)`}
+	fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{DataFileDir: `/run/$(touch injected)`}
 	frags := buildEncryptionFragments(fg, fg.Spec.Sites[0], false, "", false)
 	init := frags.InitContainers[0]
 	if strings.Contains(init.Args[0], "touch injected") {
@@ -493,7 +493,7 @@ func TestBuildEncryptionFragments_UnsealedSeeded(t *testing.T) {
 
 func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{
+	fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{
 		MysqldDir: "/opt/mysql/bin",
 		PluginDir: "/opt/mysql/lib/plugin",
 	}
@@ -558,11 +558,11 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// the pod and the site would sit "sealed" in status while still
 	// running a writable keyring.
 	base := encTestFG()
-	setSitePhase(base, "dc1", v1alpha1.KeyringPhaseUnsealed, "")
+	setSitePhase(base, "dc1", v1beta1.KeyringPhaseUnsealed, "")
 	unsealed := ComputeSpecHash(base, base.Spec.Sites[0], "", testPITRRender(base))
 
 	sealed := encTestFG()
-	setSitePhase(sealed, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v1")
+	setSitePhase(sealed, "dc1", v1beta1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v1")
 	sealedHash := ComputeSpecHash(sealed, sealed.Spec.Sites[0], "", testPITRRender(sealed))
 
 	if unsealed == sealedHash {
@@ -572,7 +572,7 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// A new escrow version (rotation) must also roll the pod, otherwise
 	// the pod keeps projecting the old Secret.
 	v2 := encTestFG()
-	setSitePhase(v2, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v2")
+	setSitePhase(v2, "dc1", v1beta1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v2")
 	if ComputeSpecHash(v2, v2.Spec.Sites[0], "", testPITRRender(v2)) == sealedHash {
 		t.Fatal("spec hash must change when the escrow version changes")
 	}

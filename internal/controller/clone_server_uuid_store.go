@@ -10,7 +10,7 @@ import (
 	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // groupCloneIdentityStore keeps the pre-clone server_uuids of a group's
@@ -46,7 +46,7 @@ func (s *groupCloneIdentityStore) parseCloneIdentities(raw string) map[string]Cl
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("ignoring an undecodable clone server_uuid record", "fg", s.nn,
-				"annotation", v1alpha1.CloneServerUUIDAnnotation, "error", err)
+				"annotation", v1beta1.CloneServerUUIDAnnotation, "error", err)
 		}
 		return map[string]CloneIdentity{}
 	}
@@ -63,11 +63,11 @@ func (s *groupCloneIdentityStore) Load(ctx context.Context) (map[string]CloneIde
 	if reader == nil {
 		reader = s.client
 	}
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := reader.Get(ctx, s.nn, &fg); err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
-	return s.parseCloneIdentities(fg.Annotations[v1alpha1.CloneServerUUIDAnnotation]), nil
+	return s.parseCloneIdentities(fg.Annotations[v1beta1.CloneServerUUIDAnnotation]), nil
 }
 
 // mutate applies change to the stored records with a write conditioned on
@@ -76,7 +76,7 @@ func (s *groupCloneIdentityStore) Load(ctx context.Context) (map[string]CloneIde
 // timeline, by the same write, the server_uuid it names.
 func (s *groupCloneIdentityStore) mutate(ctx context.Context, recipient [2]string, change func(map[string]CloneIdentity) bool) error {
 	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-		var fresh v1alpha1.MysqlFailoverGroup
+		var fresh v1beta1.MysqlFailoverGroup
 		if err := s.client.Get(ctx, s.nn, &fresh); err != nil {
 			return err
 		}
@@ -89,7 +89,7 @@ func (s *groupCloneIdentityStore) mutate(ctx context.Context, recipient [2]strin
 			}
 			historyChanged = changed
 		}
-		records := s.parseCloneIdentities(fresh.Annotations[v1alpha1.CloneServerUUIDAnnotation])
+		records := s.parseCloneIdentities(fresh.Annotations[v1beta1.CloneServerUUIDAnnotation])
 		if !change(records) {
 			if !historyChanged {
 				return nil
@@ -98,7 +98,7 @@ func (s *groupCloneIdentityStore) mutate(ctx context.Context, recipient [2]strin
 		}
 		annotations := fresh.GetAnnotations()
 		if len(records) == 0 {
-			delete(annotations, v1alpha1.CloneServerUUIDAnnotation)
+			delete(annotations, v1beta1.CloneServerUUIDAnnotation)
 		} else {
 			raw, err := json.Marshal(records)
 			if err != nil {
@@ -107,7 +107,7 @@ func (s *groupCloneIdentityStore) mutate(ctx context.Context, recipient [2]strin
 			if annotations == nil {
 				annotations = map[string]string{}
 			}
-			annotations[v1alpha1.CloneServerUUIDAnnotation] = string(raw)
+			annotations[v1beta1.CloneServerUUIDAnnotation] = string(raw)
 		}
 		fresh.SetAnnotations(annotations)
 		return s.client.Patch(ctx, &fresh, metadataPatch(base))

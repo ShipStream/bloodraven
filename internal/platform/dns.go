@@ -78,7 +78,7 @@ func NewDNSEndpointUpdater(c client.Client, ownerName, ownerUID, namespace, fgNa
 		hostname:  hostname,
 		ttl:       ttl,
 		ownerRef: metav1.OwnerReference{
-			APIVersion:         "shipstream.io/v1alpha1",
+			APIVersion:         "shipstream.io/v1beta1",
 			Kind:               "MysqlFailoverGroup",
 			Name:               ownerName,
 			UID:                types.UID(ownerUID),

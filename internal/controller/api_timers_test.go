@@ -17,7 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // apiCRDSchema is the subset of a CRD property the timer tests read.
@@ -40,7 +40,7 @@ type apiCRDSchema struct {
 	} `json:"x-kubernetes-validations"`
 }
 
-// apiCRDRoot loads the v1alpha1 openAPIV3Schema of a generated CRD file and
+// apiCRDRoot loads the v1beta1 openAPIV3Schema of a generated CRD file and
 // of its chart copy.
 func apiCRDRoots(t *testing.T, file string) map[string]apiCRDSchema {
 	t.Helper()
@@ -65,12 +65,12 @@ func apiCRDRoots(t *testing.T, file string) map[string]apiCRDSchema {
 			t.Fatal(err)
 		}
 		for _, v := range crd.Spec.Versions {
-			if v.Name == "v1alpha1" {
+			if v.Name == "v1beta1" {
 				out[path] = v.Schema.OpenAPIV3Schema
 			}
 		}
 		if _, ok := out[path]; !ok {
-			t.Fatalf("%s: no v1alpha1 schema", path)
+			t.Fatalf("%s: no v1beta1 schema", path)
 		}
 	}
 	return out
@@ -96,7 +96,7 @@ func (s apiCRDSchema) at(path []string) (apiCRDSchema, bool) {
 
 var durationType = reflect.TypeFor[metav1.Duration]()
 
-// apiDurationPaths walks t (a v1alpha1 type) and returns the JSON path of
+// apiDurationPaths walks t (a v1beta1 type) and returns the JSON path of
 // every metav1.Duration or *metav1.Duration field, "[]" marking a list item.
 func apiDurationPaths(t reflect.Type, prefix []string, out *[][]string) {
 	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
@@ -109,7 +109,7 @@ func apiDurationPaths(t reflect.Type, prefix []string, out *[][]string) {
 		*out = append(*out, prefix)
 		return
 	}
-	if t.Kind() != reflect.Struct || t.PkgPath() != reflect.TypeFor[v1alpha1.MysqlFailoverGroup]().PkgPath() {
+	if t.Kind() != reflect.Struct || t.PkgPath() != reflect.TypeFor[v1beta1.MysqlFailoverGroup]().PkgPath() {
 		return
 	}
 	for i := range t.NumField() {
@@ -149,11 +149,11 @@ var (
 // metav1.Duration marshals it.
 func TestDurationFieldsCarryCELBounds(t *testing.T) {
 	kinds := map[string]reflect.Type{
-		"shipstream.io_mysqlfailovergroups.yaml":      reflect.TypeFor[v1alpha1.MysqlFailoverGroup](),
-		"shipstream.io_mysqlbackups.yaml":             reflect.TypeFor[v1alpha1.MysqlBackup](),
-		"shipstream.io_mysqlbackupverifications.yaml": reflect.TypeFor[v1alpha1.MysqlBackupVerification](),
-		"shipstream.io_mysqldatabases.yaml":           reflect.TypeFor[v1alpha1.MysqlDatabase](),
-		"shipstream.io_mysqlstandbyclusters.yaml":     reflect.TypeFor[v1alpha1.MysqlStandbyCluster](),
+		"shipstream.io_mysqlfailovergroups.yaml":      reflect.TypeFor[v1beta1.MysqlFailoverGroup](),
+		"shipstream.io_mysqlbackups.yaml":             reflect.TypeFor[v1beta1.MysqlBackup](),
+		"shipstream.io_mysqlbackupverifications.yaml": reflect.TypeFor[v1beta1.MysqlBackupVerification](),
+		"shipstream.io_mysqldatabases.yaml":           reflect.TypeFor[v1beta1.MysqlDatabase](),
+		"shipstream.io_mysqlstandbyclusters.yaml":     reflect.TypeFor[v1beta1.MysqlStandbyCluster](),
 	}
 	exemptSeen := map[string]bool{}
 	total := 0
@@ -219,7 +219,7 @@ func TestDurationFieldsCarryCELBounds(t *testing.T) {
 // constant pair.
 func TestPlannedMaxLagWaitBoundsShared(t *testing.T) {
 	want := fmt.Sprintf("duration(self) >= duration('%s') && duration(self) <= duration('%s')",
-		compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMin), compactDuration(v1alpha1.PlannedFailoverMaxLagWaitMax))
+		compactDuration(v1beta1.PlannedFailoverMaxLagWaitMin), compactDuration(v1beta1.PlannedFailoverMaxLagWaitMax))
 	for path, schema := range apiCRDRoots(t, "shipstream.io_mysqlfailovergroups.yaml") {
 		prop, _ := schema.at([]string{"spec", "plannedFailover", "maxLagWait"})
 		if len(prop.Validations) != 1 || prop.Validations[0].Rule != want {
@@ -230,10 +230,10 @@ func TestPlannedMaxLagWaitBoundsShared(t *testing.T) {
 		d  time.Duration
 		ok bool
 	}{
-		{d: v1alpha1.PlannedFailoverMaxLagWaitMin, ok: true},
-		{d: v1alpha1.PlannedFailoverMaxLagWaitMax, ok: true},
-		{d: v1alpha1.PlannedFailoverMaxLagWaitMin - time.Millisecond},
-		{d: v1alpha1.PlannedFailoverMaxLagWaitMax + time.Second},
+		{d: v1beta1.PlannedFailoverMaxLagWaitMin, ok: true},
+		{d: v1beta1.PlannedFailoverMaxLagWaitMax, ok: true},
+		{d: v1beta1.PlannedFailoverMaxLagWaitMin - time.Millisecond},
+		{d: v1beta1.PlannedFailoverMaxLagWaitMax + time.Second},
 		{d: 24 * time.Hour},
 	} {
 		_, err := parsePlannedFailoverAnnotation("dc2:maxLagWait=" + tc.d.String())
@@ -297,7 +297,7 @@ func TestStopTimeCarriesRFC3339Pattern(t *testing.T) {
 // build.
 func TestAPIHasNoPlatformSizedInt(t *testing.T) {
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("../../api/v1alpha1/*.go")
+	files, err := filepath.Glob("../../api/v1beta1/*.go")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("glob api: %v", err)
 	}
