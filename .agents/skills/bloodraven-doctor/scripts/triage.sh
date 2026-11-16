@@ -304,6 +304,9 @@ echo "Degraded: ${DEGRADED:-unavailable}"
 if [[ "$DEGRADED" == *Initializing* ]]; then
     echo "  The operator just started and has not classified every PrimaryCandidate site yet; this is not an outage. Re-run in a few seconds; a site still unclassified after failureThreshold+recoveryThreshold probes is reported as NoPrimary instead."
 fi
+if [[ "$DEGRADED" == *PlannedWritePause* ]]; then
+    echo "  The operator paused writes itself (a maintenance handoff of an ordered update, or a planned failover); this is not an outage and ends without action. If the operation ends with no writable site, the group reports NoPrimary instead."
+fi
 if [[ "$DEGRADED" == *BootstrapFailed* ]]; then
     echo "  The last clone (bootstrap, reclone or auto-clone) failed and its target does not replicate; deployment leases are refused until it replicates or a new clone starts. Fix the cause in the message, then reclone it: see the BootstrapFailed row of the alert matrix."
 fi

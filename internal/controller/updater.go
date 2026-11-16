@@ -54,6 +54,8 @@ type UpdateController struct {
 	mu       sync.Mutex
 	phase    UpdatePhase
 	updating bool
+	// handoffs counts the entries into the Failover phase (HandoffPhase).
+	handoffs uint64
 	// onPhase, when set (tests), sees every phase setPhase stores.
 	onPhase func(UpdatePhase)
 
@@ -847,8 +849,21 @@ func (u *UpdateController) rolloutError(ctx context.Context, target UpdateTarget
 	return &PodNotReadyError{Site: target.Name, Pod: pr.Pod, Reason: pr.Reason, Rolled: true, Err: err}
 }
 
+// HandoffPhase reports whether the update is in its maintenance handoff
+// (the Failover phase, in which it fences the active site and promotes the
+// standby), and how many handoffs it has entered. Two readings with the
+// same count and both false have no handoff between them.
+func (u *UpdateController) HandoffPhase() (active bool, entered uint64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.phase == v1alpha1.UpdatePhaseFailover, u.handoffs
+}
+
 func (u *UpdateController) setPhase(p UpdatePhase) {
 	u.mu.Lock()
+	if p == v1alpha1.UpdatePhaseFailover && u.phase != p {
+		u.handoffs++
+	}
 	u.phase = p
 	observe := u.onPhase
 	u.mu.Unlock()

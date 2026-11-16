@@ -15,6 +15,8 @@ const (
 	//
 	// MysqlFailoverGroup: True/Healthy when a site is writable and
 	// replication is healthy; False/NoWritablePrimary,
+	// False/PlannedWritePause while the operator itself has paused writes
+	// (the handoff of an ordered update, a planned failover),
 	// False/ReplicationUnhealthy, or False/InitFromBackupInProgress or
 	// False/InitFromBackupFailed while the spec.initFromBackup restore has
 	// not succeeded; Unknown/Initializing until the sites are classified
@@ -62,7 +64,9 @@ const (
 	// sets Degraded=True/BootstrapFailed until the site replicates or a
 	// new clone starts.
 	ConditionBootstrapping = "Bootstrapping"
-	// ConditionDegraded is False/Healthy, Unknown/Initializing, or True
+	// ConditionDegraded is False/Healthy, False/PlannedWritePause (no site
+	// is writable because the operator paused writes itself),
+	// Unknown/Initializing, or True
 	// with the most important problem: a cross-site alert (SplitBrain,
 	// NoPrimary, TotalLoss, CrossSiteAlert), BootstrapFailed, a site that
 	// is not healthy (SiteUnhealthy), DivergentTransactions, something the
@@ -235,6 +239,14 @@ const (
 	// Warning Event reason, for an ordered update stopped on a site whose pod
 	// is not Ready.
 	ReasonOrderedUpdateStalled = "OrderedUpdateStalled"
+	// ReasonPlannedWritePause is the Ready and Degraded reason (both False)
+	// while no site is writable because the operator paused writes itself:
+	// the maintenance handoff of an ordered update has fenced the active
+	// site and not promoted the standby yet, or a planned failover has
+	// fenced its source and not promoted its target yet. The pause is
+	// bounded and ends without anyone acting; the message names the
+	// operation. The same topology from any other cause is NoPrimary.
+	ReasonPlannedWritePause = "PlannedWritePause"
 	// ReasonOwnTransactionsLost is the RecoveryPending and Degraded reason,
 	// and the Warning Event reason, for a site that lacks transactions it
 	// issued itself (status.sites[].lostGtid).

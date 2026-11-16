@@ -1956,6 +1956,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// consumers from reading every operator start as an outage.
 		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, v1alpha1.ReasonInitializing, initializingMessage(snap)
 		degradedStatus, degradedMessage = metav1.ConditionUnknown, readyMessage
+	case v1alpha1.ReasonPlannedWritePause:
+		// No site is writable, and the operator knows why: it paused
+		// writes itself and will end the pause itself. Ready is False (the
+		// group takes no writes) with that reason; nothing is degraded.
+		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, v1alpha1.ReasonPlannedWritePause, snap.WritePause
+		degradedStatus, degradedMessage = metav1.ConditionFalse, snap.WritePause
 	case v1alpha1.ReasonBootstrapFailed:
 		degradedMessage = bootstrapFailedMessage(snap, &freshFG)
 	}
@@ -2063,7 +2069,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// persisted status, not a topology observation, so it is known before
 	// the topology is classified, and True keeps the deployment API
 	// refusing leases while peers are held.
-	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonInitializing) {
+	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && noTopologyAlert(reason) {
 		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, v1alpha1.ConditionDegraded); degraded == nil || degraded.Status != metav1.ConditionTrue {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
@@ -2087,7 +2093,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// (split brain, no primary, total loss) still win; Initializing is not
 	// an alert and does not. Ready is untouched: the group serves, and Ready
 	// gates application rollouts.
-	if reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonInitializing {
+	if noTopologyAlert(reason) {
 		if msg := divergenceDegradedMessage(snap); msg != "" {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue,
@@ -3082,10 +3088,12 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	}
 
 	newReason := degradedReason(snap)
-	if newReason == v1alpha1.ReasonInitializing {
+	if newReason == v1alpha1.ReasonInitializing || newReason == v1alpha1.ReasonPlannedWritePause {
 		// Not a topology verdict: neither raise an event nor record it, so
 		// the first real verdict compares against what came before (no
-		// SiteRecovered for a group that was never reported degraded).
+		// SiteRecovered for a group that was never reported degraded, none
+		// after a write pause the operator opened and closed itself, and a
+		// NoPrimaryDetected when such a pause ends with no writable site).
 		return
 	}
 
@@ -3127,6 +3135,15 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	}
 
 	mt.lastTopologyDegradedReason = newReason
+}
+
+// noTopologyAlert reports whether a topology verdict leaves the Degraded
+// condition to the problems ranked below the cross-site alerts (a refusal,
+// a divergence block, a pending post-restore reclone): the group is
+// healthy, not classified yet, or in a write pause the operator opened
+// itself.
+func noTopologyAlert(reason string) bool {
+	return reason == v1alpha1.ReasonHealthy || reason == v1alpha1.ReasonInitializing || reason == v1alpha1.ReasonPlannedWritePause
 }
 
 // degradedReason returns the Degraded condition reason for a topology

@@ -37,6 +37,7 @@ func scenario02PlannedSwitchover() runner.Scenario {
 			verifyFollowersDirectlyFollowNewPrimary(),
 			verifyPlannedFailoverWatermark(),
 			verifyPlannedFailoverMetric(),
+			verifyNoPrimaryNotReported(),
 		},
 	}
 }
