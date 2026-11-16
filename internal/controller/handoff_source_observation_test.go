@@ -126,6 +126,101 @@ func TestRecordedPromotion_FirstWritablePollIsNotDebounced(t *testing.T) {
 	}
 }
 
+// A poll that could not read the promoted target says nothing about the
+// promotion. The marker used to end with it, so a timeout on the first poll
+// brought back the window it removes: the writable answers that followed
+// were debounced and status read NoPrimary for recoveryThreshold polls.
+func TestRecordedPromotion_UnreadPollKeepsTheMarker(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false}
+	dc2 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(dc1, dc2)
+	setRecoveredTopology(tm)
+	ctx := context.Background()
+
+	dc1.mu.Lock()
+	dc1.readOnly = true
+	dc1.mu.Unlock()
+	dc2.mu.Lock()
+	dc2.readOnly, dc2.err = false, errors.New("i/o timeout")
+	dc2.mu.Unlock()
+	tm.recordFailover(ctx, tm.clock.Now(), "dc2", "")
+	tm.Poll(ctx) // the probe of dc2 times out
+
+	dc2.mu.Lock()
+	dc2.err = nil
+	dc2.mu.Unlock()
+	tm.Poll(ctx)
+	tm.mu.RLock()
+	dc2State, marker := tm.sites[1].state, tm.promotionAwaitingPoll
+	tm.mu.RUnlock()
+	if dc2State != state.StateWritable {
+		t.Fatalf("promoted dc2 state = %s at the first poll that read it writable, want Writable", dc2State)
+	}
+	if marker != "" {
+		t.Fatalf("marker = %q after a poll read the target, want it consumed", marker)
+	}
+}
+
+// The marker does not outlive the promotion: a read-only answer ends it,
+// and so does the target being declared Unreachable. What the site answers
+// later is debounced like any answer nobody here caused.
+func TestRecordedPromotion_MarkerEndsWithAnAnswerOrUnreachable(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(tm *TopologyManager, dc2 *mockMySQL)
+	}{
+		{"read-only answer", func(tm *TopologyManager, dc2 *mockMySQL) {
+			dc2.mu.Lock()
+			dc2.readOnly = true
+			dc2.mu.Unlock()
+			tm.Poll(context.Background())
+		}},
+		{"declared unreachable", func(tm *TopologyManager, dc2 *mockMySQL) {
+			dc2.mu.Lock()
+			dc2.err = errors.New("dial tcp: connection refused")
+			dc2.mu.Unlock()
+			pollN(tm, tm.cfg.FailureThreshold)
+			tm.mu.RLock()
+			st := tm.sites[1].state
+			tm.mu.RUnlock()
+			if st != state.StateUnreachable {
+				t.Fatalf("dc2 state = %s after FailureThreshold failed probes, want Unreachable", st)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dc1 := &mockMySQL{readOnly: false}
+			dc2 := &mockMySQL{readOnly: true}
+			tm, _, _ := newTestTopologyManager(dc1, dc2)
+			setRecoveredTopology(tm)
+			ctx := context.Background()
+
+			dc1.mu.Lock()
+			dc1.readOnly = true
+			dc1.mu.Unlock()
+			tm.recordFailover(ctx, tm.clock.Now(), "dc2", "")
+			tc.after(tm, dc2)
+			tm.mu.RLock()
+			marker := tm.promotionAwaitingPoll
+			tm.mu.RUnlock()
+			if marker != "" {
+				t.Fatalf("marker = %q, want it ended", marker)
+			}
+
+			dc2.mu.Lock()
+			dc2.readOnly, dc2.err = false, nil
+			dc2.mu.Unlock()
+			tm.Poll(ctx)
+			tm.mu.RLock()
+			st := tm.sites[1].state
+			tm.mu.RUnlock()
+			if st == state.StateWritable {
+				t.Fatal("a writable answer after the marker ended skipped the recoveryThreshold debounce")
+			}
+		})
+	}
+}
+
 // firstProbeBlocks blocks the first CheckReadOnly until release is closed,
 // after the read it returns was taken.
 type firstProbeBlocks struct {

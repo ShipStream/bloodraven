@@ -836,9 +836,9 @@ type TopologyManager struct {
 	// the first poll that started after it consumes it
 	// (recordHandoffPromotion).
 	handoffFencedSource string
-	// promotionAwaitingPoll names the target of a promotion this process
-	// recorded (recordFailover) until the first poll that started after
-	// it consumes it.
+	// promotionAwaitingPoll names the target of a promotion or primary
+	// re-assert this process recorded, until a poll that started after it
+	// reads the target or declares it Unreachable (see poll).
 	promotionAwaitingPoll string
 
 	// specDriftSites lists site names whose Deployment spec-hash differs
@@ -1674,16 +1674,30 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	}
 	// The target of a promotion this process made was read writable when
 	// the promotion was confirmed. The first poll after it that reads the
-	// target writable takes it as Writable without the recoveryThreshold
-	// debounce, which is for answers nobody here caused: otherwise status
-	// reads "No site is writable" (NoPrimary, a NoPrimaryDetected Warning)
-	// for recoveryThreshold polls after every promotion.
+	// target takes a writable answer as Writable without the
+	// recoveryThreshold debounce, which is for answers nobody here caused:
+	// otherwise status reads "No site is writable" (NoPrimary, a
+	// NoPrimaryDetected Warning) for recoveryThreshold polls after every
+	// promotion. A poll that could not read the target (a timeout, a probe
+	// in backoff) says nothing about the promotion and leaves the marker for
+	// the next one. It ends with the first answer, whichever it is, or when
+	// the target is declared Unreachable: what the site answers once it is
+	// back is not this promotion's doing.
 	if promoted := tm.promotionAwaitingPoll; promoted != "" {
-		tm.promotionAwaitingPoll = ""
+		keep := false
 		for i := range tm.sites {
-			if tm.sites[i].name == promoted && results[i].err == nil && !results[i].readOnly {
+			if tm.sites[i].name != promoted {
+				continue
+			}
+			switch {
+			case results[i].err != nil:
+				keep = newStates[i] != state.StateUnreachable
+			case !results[i].readOnly:
 				newStates[i] = state.StateWritable
 			}
+		}
+		if !keep {
+			tm.promotionAwaitingPoll = ""
 		}
 	}
 	prevStates := make([]state.SiteState, len(tm.sites))
