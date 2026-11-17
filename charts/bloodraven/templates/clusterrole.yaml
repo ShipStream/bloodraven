@@ -5,6 +5,18 @@ metadata:
   labels:
     {{- include "bloodraven.labels" . | nindent 4 }}
 rules:
+  # The check at operator start reads the five Bloodraven CRDs by name. The
+  # operator never writes a CustomResourceDefinition: storage migration is
+  # run by an administrator (kubectl bloodraven migrate-storage).
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    resourceNames:
+      - mysqlbackups.shipstream.io
+      - mysqlbackupverifications.shipstream.io
+      - mysqldatabases.shipstream.io
+      - mysqlfailovergroups.shipstream.io
+      - mysqlstandbyclusters.shipstream.io
+    verbs: [get]
   # Core resources managed by the reconciler
   - apiGroups: [""]
     resources: [configmaps, persistentvolumeclaims, services]

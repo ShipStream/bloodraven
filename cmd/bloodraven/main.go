@@ -122,6 +122,7 @@ func main() {
 	fs := flag.NewFlagSet("bloodraven", flag.ExitOnError)
 	leaderElect := fs.Bool("leader-elect", true, "enable manager leader election")
 	licenseToken := fs.String("license", os.Getenv("BLOODRAVEN_LICENSE"), "optional organization license JWT (public assertion, not a secret)")
+	crdCheck := fs.String("crd-check", crdCheckEnforce, `what to do when the installed CRDs are older than this operator needs or a stored object does not fit them: "enforce" (exit) or "warn" (log and start; break-glass only)`)
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "parse flags: %v\n", err)
 		os.Exit(2)
@@ -136,6 +137,17 @@ func main() {
 	utilruntime.Must(v1beta1.AddToScheme(scheme))
 
 	restConfig := ctrl.GetConfigOrDie()
+
+	// Before any controller, and on every replica: the leader may be
+	// writing while a standby replica checks, and the check only reads.
+	// One handler for the whole process: SetupSignalHandler may be called
+	// once.
+	signalCtx := ctrl.SetupSignalHandler()
+	newerCRDs, err := runCRDCheck(signalCtx, restConfig, *crdCheck, logger)
+	if err != nil {
+		logger.Error("refusing to start", "error", err.Error())
+		os.Exit(1)
+	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
@@ -197,6 +209,7 @@ func main() {
 		Clientset:       clientset,
 		Logger:          logger,
 		OperatorLicense: *licenseToken,
+		NewerCRDs:       newerCRDs,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "error", err)
@@ -428,7 +441,7 @@ func main() {
 	}
 
 	logger.Info("starting bloodraven manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(signalCtx); err != nil {
 		logger.Error("manager exited with error", "error", err)
 		os.Exit(1)
 	}

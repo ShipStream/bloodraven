@@ -12,9 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
@@ -44,12 +42,10 @@ func TestPacedRolloutScenarioObjectsAdmitted(t *testing.T) {
 //   - after this build's CRD is applied over it, the objects are still
 //     there and status.rollout is stored.
 func TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170(t *testing.T) {
-	upgradeScheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1beta1.AddToScheme, apiextensionsv1.AddToScheme} {
-		if err := add(upgradeScheme); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// v1.7.0 serves shipstream.io/v1alpha1 only, and the scenario's runner
+	// talks that version until the end (kube.apiGroupVersion). v1.8.0
+	// keeps serving it with the schema of v1beta1.
+	upgradeScheme := schemeAt(t, v1beta1.DeprecatedGroupVersion)
 	oldEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("testdata", "crd-v1.7.0")},
 		ErrorIfCRDPathMissing: true,

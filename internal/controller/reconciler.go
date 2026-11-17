@@ -183,6 +183,14 @@ type MysqlFailoverGroupReconciler struct {
 	// OperatorLicense is the optional operator-level JWT (flag/env).
 	OperatorLicense string
 
+	// NewerCRDs is what the startup check found in the installed CRDs
+	// that this build does not know (crd_notice.go). Empty when the CRDs
+	// are the ones the operator was built with.
+	NewerCRDs string
+	// newerCRDsNoted remembers the groups the notice was recorded on.
+	newerCRDsNotedMu sync.Mutex
+	newerCRDsNoted   map[types.NamespacedName]bool
+
 	// LicenseKeys overrides the production trust store. Nil uses
 	// license.ProductionKey.
 	LicenseKeys license.KeyLookup
@@ -370,6 +378,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// License observation is advisory only. It never returns an error
 	// and must not change the rest of reconcile.
 	r.observeLicense(&fg)
+	r.noteNewerCRDs(&fg)
 
 	image := fg.Spec.Image
 	if image == "" {

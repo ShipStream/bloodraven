@@ -1,0 +1,36 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlDatabase
+metadata:
+  annotations: {}
+  finalizers:
+    - bloodraven.shipstream.io/mysqldatabase
+  name: upgrade-e2e
+spec:
+  characterSet: utf8mb4
+  databaseName: upgrade_e2e
+  deletionPolicy: Retain
+  failoverGroupRef:
+    name: playground
+  owner:
+    privileges:
+      - ALL PRIVILEGES
+    secretName: upgrade-e2e-tenant-owner
+status:
+  activeSite: iad
+  appliedGrants:
+    - upgrade_e2e
+  conditions:
+    - lastTransitionTime: "2026-11-16T23:34:05Z"
+      message: database upgrade_e2e ready on site iad
+      observedGeneration: 1
+      reason: DatabaseReconciled
+      status: "True"
+      type: Ready
+  databaseCreated: true
+  lastAppliedHash: 4d2c6cfa57cf4980
+  message: database upgrade_e2e ready on site iad
+  observedGeneration: 1
+  ownerHosts:
+    - '%'
+  ownerUser: upgrade_e2e
+  phase: Ready

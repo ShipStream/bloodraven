@@ -27,15 +27,17 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/yaml"
+
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
-const (
+var (
 	// storageVersion is the version controller-gen generates and the API
 	// server stores.
-	storageVersion = "v1beta1"
+	storageVersion = v1beta1.GroupVersion.Version
 	// deprecatedVersion is served with the same schema and marked
 	// deprecated.
-	deprecatedVersion = "v1alpha1"
+	deprecatedVersion = v1beta1.DeprecatedGroupVersion.Version
 )
 
 func deprecationWarning(kind string) string {

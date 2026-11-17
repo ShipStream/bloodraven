@@ -1,0 +1,8 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackup
+metadata:
+  name: orders-adhoc
+spec:
+  failoverGroupRef:
+    name: orders
+  profileName: s3-daily

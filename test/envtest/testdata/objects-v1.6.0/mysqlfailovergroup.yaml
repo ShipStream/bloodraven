@@ -1,0 +1,37 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+spec:
+  image: mysql:9.7
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:1.6.0
+  credentials:
+    operatorSecret: orders-mysql-operator
+    appSecret: orders-mysql-app
+  dns:
+    hostname: orders.az.example.com
+    ttl: 60
+  replication:
+    maxLagSeconds: 300
+    readOnlyMaxLagSeconds: 30
+  serviceTemplate:
+    type: ClusterIP
+  sites:
+    - name: iad
+      zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
+      lbIP: 10.0.1.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+    - name: pdx
+      zone: us-west-2a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
+      lbIP: 10.0.2.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi

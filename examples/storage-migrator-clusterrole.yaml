@@ -1,0 +1,48 @@
+# The permissions `kubectl bloodraven migrate-storage` needs, and nothing
+# else. The operator does not hold them: it never writes a
+# CustomResourceDefinition.
+#
+# Bind it to the administrator or the pipeline account that runs the command,
+# for the time of the migration:
+#
+#   kubectl create clusterrolebinding bloodraven-storage-migrator \
+#     --clusterrole=bloodraven-storage-migrator --user=<account>
+#   kubectl bloodraven migrate-storage
+#   kubectl delete clusterrolebinding bloodraven-storage-migrator
+#
+# The command reads and rewrites every object of the five kinds in every
+# namespace, so the rules cannot be narrowed to one namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bloodraven-storage-migrator
+rules:
+  # Read every object, and write each one back unchanged.
+  - apiGroups: [shipstream.io]
+    resources:
+      - mysqlfailovergroups
+      - mysqldatabases
+      - mysqlbackups
+      - mysqlbackupverifications
+      - mysqlstandbyclusters
+    verbs: [get, list, update]
+  # Read the CRDs' storage version and stored versions.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    resourceNames:
+      - mysqlfailovergroups.shipstream.io
+      - mysqldatabases.shipstream.io
+      - mysqlbackups.shipstream.io
+      - mysqlbackupverifications.shipstream.io
+      - mysqlstandbyclusters.shipstream.io
+    verbs: [get]
+  # Set status.storedVersions once every object is rewritten.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions/status]
+    resourceNames:
+      - mysqlfailovergroups.shipstream.io
+      - mysqldatabases.shipstream.io
+      - mysqlbackups.shipstream.io
+      - mysqlbackupverifications.shipstream.io
+      - mysqlstandbyclusters.shipstream.io
+    verbs: [update]

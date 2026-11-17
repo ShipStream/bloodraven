@@ -1,0 +1,239 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  annotations:
+    bloodraven.shipstream.io/credential-hash: 9bfec56a77af8627
+    bloodraven.shipstream.io/last-failover: "2026-11-16T23:32:29Z"
+    bloodraven.shipstream.io/last-failover-target: iad
+    bloodraven.shipstream.io/promotion-gtid-executed: f792da05-e215-11f1-b2b4-eea4c82fa102:1-13
+    bloodraven.shipstream.io/promotion-gtid-executed-for: 2026-11-16T23:32:29Z iad
+    bloodraven.shipstream.io/system-schema-restriction: 9bfec56a77af8627
+  finalizers:
+    - bloodraven.shipstream.io/failover-group
+  name: playground
+spec:
+  backup:
+    activeDeadlineSeconds: 7200
+    backoffLimit: 2
+    image: container-registry.oracle.com/mysql/community-server:9.7
+    maxLagSecondsForSource: 300
+    profiles:
+      - name: rustfs
+        retention:
+          keepFailed: 10
+          keepLast: 7
+        storage:
+          s3:
+            bucket: bloodraven
+            credentialsSecretName: dragonfly-s3-credentials
+            endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
+            prefix: playground
+            region: us-east-1
+          type: S3
+  cloneTimeout: 1h0m0s
+  connectionDrainTimeout: 30s
+  credentials:
+    operatorSecretName: mysql-credentials
+  dns:
+    hostname: playground-db.example.local
+    ttlSeconds: 10
+  dragonfly:
+    adminPort: 9999
+    enabled: true
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0
+    maxMemory: 256Mi
+    plannedFailover:
+      maxSyncWait: 30s
+      onSyncTimeout: Proceed
+    port: 6379
+    proactorThreads: 1
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    upgradeStrategy: Rolling
+  failoverCooldown: 30s
+  failureThreshold: 3
+  image: mysql:9.7
+  pollInterval: 2s
+  recoveryThreshold: 2
+  replication:
+    maxLagSeconds: 30
+    readOnlyMaxLagSeconds: 10
+  sidecar:
+    leaseTimeout: 20s
+    peerCheckInterval: 5s
+  sites:
+    - loadBalancerIP: 10.96.100.10
+      name: iad
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 100m
+          memory: 384Mi
+      role: PrimaryCandidate
+      serverID: 101
+      storage:
+        size: 1Gi
+        storageClassName: playground-fast
+      taintNodeSelector:
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: iad
+      zone: zone-iad
+    - loadBalancerIP: 10.96.100.20
+      name: pdx
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 100m
+          memory: 384Mi
+      role: PrimaryCandidate
+      serverID: 102
+      storage:
+        size: 1Gi
+        storageClassName: playground-fast
+      taintNodeSelector:
+        bloodraven.shipstream.io/failover-group.playground: "true"
+        bloodraven.shipstream.io/site.playground: pdx
+      zone: zone-pdx
+    - mysqlConf:
+        max-connections: "150"
+      name: reader
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 100m
+          memory: 384Mi
+      role: ReadOnly
+      serverID: 103
+      serviceTemplate:
+        annotations:
+          playground.bloodraven.shipstream.io/purpose: site-local-reads
+        externalTrafficPolicy: Local
+        nodePort: 30306
+        type: NodePort
+      storage:
+        size: 1Gi
+        storageClassName: playground-fast
+      zone: zone-reader
+  splitBrainPolicy:
+    sitePriorities:
+      - iad
+      - pdx
+  terminationGracePeriodSeconds: 60
+  updateStrategy:
+    type: OrderedUpdate
+status:
+  activeSite: iad
+  conditions:
+    - lastTransitionTime: "2026-11-16T23:32:51Z"
+      message: At least one site is writable and replication is healthy
+      observedGeneration: 2
+      reason: Healthy
+      status: "True"
+      type: Ready
+    - lastTransitionTime: "2026-11-16T23:32:49Z"
+      message: No cross-site alerts
+      observedGeneration: 2
+      reason: Healthy
+      status: "False"
+      type: Degraded
+    - lastTransitionTime: "2026-11-16T23:32:56Z"
+      message: Auto-clone completed successfully
+      observedGeneration: 2
+      reason: NotBootstrapping
+      status: "False"
+      type: Bootstrapping
+    - lastTransitionTime: "2026-11-16T23:32:23Z"
+      message: No update in progress
+      observedGeneration: 2
+      reason: NotUpdating
+      status: "False"
+      type: Updating
+    - lastTransitionTime: "2026-11-16T23:32:23Z"
+      message: No old primary recovery pending
+      observedGeneration: 2
+      reason: NoRecoveryPending
+      status: "False"
+      type: RecoveryPending
+    - lastTransitionTime: "2026-11-16T23:34:04Z"
+      message: every S3 credentialsSecretName has AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+      observedGeneration: 2
+      reason: CredentialsComplete
+      status: "True"
+      type: S3CredentialsReady
+  dragonfly:
+    activeSite: iad
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0
+    lastPromotionTarget: iad
+    lastPromotionTime: "2026-11-16T23:32:29Z"
+    message: all sites ready
+    phase: Ready
+    replTakeoverProbeTime: "2026-11-16T23:32:19Z"
+    replTakeoverSupported: true
+    sites:
+      - message: serving writes
+        name: iad
+        reachable: true
+        ready: true
+        replicationState: master
+        role: Master
+        serviceName: playground-dragonfly-iad
+      - lastIOSecondsAgo: 0
+        linkStatus: up
+        message: replicating from active master
+        name: pdx
+        reachable: true
+        ready: true
+        replicationState: slave
+        role: Replica
+        serviceName: playground-dragonfly-pdx
+        syncInProgress: false
+      - lastIOSecondsAgo: 0
+        linkStatus: up
+        message: replicating from active master
+        name: reader
+        reachable: true
+        ready: true
+        replicationState: slave
+        role: Replica
+        serviceName: playground-dragonfly-reader
+        syncInProgress: false
+  lastFailover:
+    promotionGtidExecuted: f792da05-e215-11f1-b2b4-eea4c82fa102:1-13
+    target: iad
+    time: "2026-11-16T23:32:29Z"
+  observedGeneration: 2
+  sites:
+    - lastSeenTime: "2026-11-16T23:34:20Z"
+      name: iad
+      replication: NotApplicable
+      state: Writable
+    - gtidExecuted: f792da05-e215-11f1-b2b4-eea4c82fa102:1-25
+      lastSeenTime: "2026-11-16T23:34:20Z"
+      name: pdx
+      replication: Healthy
+      secondsBehindSource: 0
+      sourceConvergenceReason: DirectSource
+      sourceConvergenceState: Converged
+      sourceHost: mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local
+      state: ReadOnly
+    - gtidExecuted: f792da05-e215-11f1-b2b4-eea4c82fa102:1-25
+      lastSeenTime: "2026-11-16T23:34:20Z"
+      name: reader
+      replication: Healthy
+      secondsBehindSource: 0
+      sourceConvergenceReason: DirectSource
+      sourceConvergenceState: Converged
+      sourceHost: mysql-playground-iad-internal.bloodraven-playground.svc.cluster.local
+      state: ReadOnly
+  topologyGeneration: 1

@@ -245,8 +245,8 @@ func TestEnvtest_PlannedFailover_LegacyRefusedAfterUpgrade(t *testing.T) {
 		}
 	}
 	oldEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("testdata", "crd-pre-235")},
-		Scheme:            upgradeScheme,
+		CRDs:   olderSchemaCRDs(t, "crd-pre-235"),
+		Scheme: upgradeScheme,
 	}
 	oldCfg, err := oldEnv.Start()
 	if err != nil {

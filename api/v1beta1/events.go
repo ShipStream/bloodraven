@@ -1060,6 +1060,13 @@ const (
 	// A presented token failed offline verification. Operator behavior is
 	// unchanged.
 	EventLicenseInvalid = "LicenseInvalid"
+	// The installed CRDs have fields or values this operator does not
+	// know: they are from a newer release. Expected between the two steps
+	// of an upgrade (CRDs first, then the chart) and after a rollback of
+	// the operator alone; the message lists what differs. Recorded once
+	// per group for each operator start. See
+	// [The operator's check at start](/docs/operations/upgrade-policy#the-operators-check-at-start).
+	EventNewerCRDDetected = "NewerCRDDetected"
 )
 
 // Events: Backup lifecycle. On: MysqlBackup.

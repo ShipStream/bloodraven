@@ -63,6 +63,18 @@ rules:
   - patch
   - update
 - apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - mysqlbackups.shipstream.io
+  - mysqlbackupverifications.shipstream.io
+  - mysqldatabases.shipstream.io
+  - mysqlfailovergroups.shipstream.io
+  - mysqlstandbyclusters.shipstream.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
   - apps
   resources:
   - deployments

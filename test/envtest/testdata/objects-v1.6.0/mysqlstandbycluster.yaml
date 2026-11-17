@@ -1,0 +1,49 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlStandbyCluster
+metadata:
+  name: orders-east-from-west
+spec:
+  transport: ObjectStore
+  source:
+    failoverGroupName: orders
+    namespace: orders
+    cluster: us-west-prod
+    profileName: nightly-s3
+    storage:
+      type: S3
+      s3:
+        bucket: example-backups
+        prefix: orders/west
+        region: us-west-2
+        credentialsSecret: s3-dr-readonly-creds
+  template:
+    name: orders
+    spec:
+      image: mysql:9.7
+      credentials:
+        operatorSecret: orders-mysql-operator
+        appSecret: orders-mysql-app
+      dns:
+        hostname: orders-east.example.com
+        ttl: 60
+      sites:
+        - name: east-az1
+          role: primary-candidate
+          zone: us-east-1a
+          taintNodeSelector:
+            shipstream.io/failover-group.orders: "true"
+            shipstream.io/site.orders: east-az1
+          lbIP: 10.0.1.1
+          storage:
+            storageClassName: fast-ssd
+            size: 100Gi
+        - name: east-az2
+          role: primary-candidate
+          zone: us-east-1b
+          taintNodeSelector:
+            shipstream.io/failover-group.orders: "true"
+            shipstream.io/site.orders: east-az2
+          lbIP: 10.0.2.1
+          storage:
+            storageClassName: fast-ssd
+            size: 100Gi

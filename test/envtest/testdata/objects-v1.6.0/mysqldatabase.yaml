@@ -1,0 +1,11 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlDatabase
+metadata:
+  name: tenant-acme
+spec:
+  groupRef:
+    name: orders
+  databaseName: acme_wms
+  owner:
+    secretName: acme-mysql-owner
+    privileges: [ALL PRIVILEGES]

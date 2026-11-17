@@ -5,7 +5,6 @@ package envtest
 import (
 	"bytes"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -43,8 +42,8 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 		}
 	}
 	oldEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("testdata", "crd-pre-own-loss")},
-		Scheme:            oldScheme,
+		CRDs:   olderSchemaCRDs(t, "crd-pre-own-loss"),
+		Scheme: oldScheme,
 	}
 	oldCfg, err := oldEnv.Start()
 	if err != nil {
@@ -204,8 +203,8 @@ func TestEnvtest_StatusWrite_OlderCRDPrunesLostGtid(t *testing.T) {
 		}
 	}
 	oldEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("testdata", "crd-pre-own-loss")},
-		Scheme:            oldScheme,
+		CRDs:   olderSchemaCRDs(t, "crd-pre-own-loss"),
+		Scheme: oldScheme,
 	}
 	oldCfg, err := oldEnv.Start()
 	if err != nil {
