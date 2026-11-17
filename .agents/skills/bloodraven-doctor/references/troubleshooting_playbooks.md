@@ -1793,3 +1793,47 @@ Do not:
 - Delete pods to make them pick up the release: a pod is recreated from the Deployment's template, which has not changed.
 - Use `rollout-release-slot` or `rollout.pacing=false` while it is unknown why the first group stalled. If the release is the cause, the next groups fail the same way.
 - Switch a group to `Recreate` to get it past a stall: every site then restarts together.
+
+## 51. The operator does not start: the CRD check refuses, or objects still need the storage migration
+
+### Symptoms
+- The operator pod is in `CrashLoopBackOff` right after a chart upgrade, and its log ends with ERROR `refusing to start`.
+- `kubectl get` on a Bloodraven kind prints `Warning: shipstream.io/v1alpha1 … is deprecated`.
+- A CRD update is refused with `status.storedVersions[…]: Invalid value: "v1alpha1": must appear in spec.versions`.
+- Groups carry a `NewerCRDDetected` Warning Event.
+
+### Cause
+From v1.8.0 on every Bloodraven CRD serves `shipstream.io/v1beta1` (stored) and the deprecated `v1alpha1`, with one schema. Before it starts any controller, the operator compares the installed CRDs with the ones it was built with and validates every object of the five kinds against the installed schema:
+
+- A CRD that is missing or **older** than the operator needs refuses the start. This is a chart-only `helm upgrade`: Helm does not upgrade a chart's `crds/`.
+- A stored object that does not have the shape the schema describes refuses the start. It was stored by v1.6.0 or earlier.
+- A CRD that is **newer** only warns (`NewerCRDDetected`): the operator was rolled back, or the upgrade is between its two steps.
+
+While the operator refuses, no operator runs and nothing fails over automatically.
+
+Separately, objects created before the upgrade to v1.8.0 stay encoded as `v1alpha1` until `kubectl bloodraven migrate-storage` rewrites them, and `status.storedVersions` of each CRD lists both versions until then.
+
+### Diagnostic steps
+1. Read what the check found. Each problem is one line:
+   ```bash
+   kubectl logs -n <operator-ns> deploy/bloodraven --previous | jq -c 'select(.msg | startswith("CRD check") or . == "refusing to start")'
+   ```
+   `subject` is a CRD name or `<Kind> <namespace>/<name>`; `detail` says what is missing or wrong.
+2. See what each CRD serves and stores:
+   ```bash
+   kubectl get crd -o custom-columns='NAME:.metadata.name,VERSIONS:.spec.versions[*].name,STORED:.status.storedVersions' | grep shipstream.io
+   ```
+   No `v1beta1` under `VERSIONS` with a v1.8.0 operator: the CRDs are v1.7.0's. `STORED` with both versions: the storage migration has not run.
+3. For a refused object, do **not** read it for old field names: the API server no longer shows them. The check's `detail` names the paths that are missing or of the wrong type.
+
+### Safe remediation
+- **CRD older than the operator**: apply the CRDs of the release the operator runs, with server-side apply. The operator starts at its next restart. If the CRDs cannot be applied now, roll the chart back; the previous operator starts again.
+- **A stored object does not fit**: the object is from v1.6.0 or earlier, and there is no in-place upgrade from v1.6.0. Scale the operator to 0, write no Bloodraven object, and follow "Upgrading from v1.6.0 to v1.7.0" in the upgrade policy, including its part on new CRDs applied to an old cluster by mistake.
+- **`NewerCRDDetected`**: finish the upgrade (upgrade the chart), or roll forward again after a rollback. The operator runs meanwhile, without the fields it does not know.
+- **`storedVersions` lists `v1alpha1`**: run `kubectl bloodraven migrate-storage --dry-run`, then without `--dry-run`, with an account bound to `examples/storage-migrator-clusterrole.yaml`. It lists objects that do not conform and missing permissions before it writes anything, and it can be run again.
+- **Deprecation warnings**: change `apiVersion` to `shipstream.io/v1beta1` in the manifests and scripts that still say `v1alpha1`. Nothing else changes.
+
+Do not:
+- Set `crdCheck: warn` to get past an older CRD or a refused object. It makes the operator run against a schema that drops what it writes, or against objects it cannot decode.
+- Re-apply the previous release's CRDs. Once `status.storedVersions` lists `v1beta1` the API server refuses them.
+- Edit `status.storedVersions` by hand, or delete and recreate an object to "migrate" it: a `MysqlFailoverGroup` owns its data volumes.

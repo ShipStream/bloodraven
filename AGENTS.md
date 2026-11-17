@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Primary code lives in the root Go module. `cmd/bloodraven` is the Kubernetes operator entrypoint; `cmd/sidecar` is the per-MySQL sidecar; `cmd/kubectl-bloodraven` is the day-2 `kubectl` plugin (status / promote / reclone / backup / verify-backup, built via `make build-kubectl-plugin`). API types live in `api/v1beta1`, controller logic in `internal/controller`, and supporting packages in `internal/mysql`, `internal/platform`, `internal/sidecar`, `internal/state`, and `internal/metrics`. Real-cluster scenario tests live under `internal/playground/scenarios` and run through `cmd/playground-chaos`; faster cross-component tests live under `test/component`, with API-server/envtest coverage under `test/envtest`. Treat `bitpoke/` and `orchestrator/` as bundled upstream references, not the default place for new feature work.
+Primary code lives in the root Go module. `cmd/bloodraven` is the Kubernetes operator entrypoint; `cmd/sidecar` is the per-MySQL sidecar; `cmd/kubectl-bloodraven` is the day-2 `kubectl` plugin (status / promote / reclone / backup / verify-backup / migrate-storage, built via `make build-kubectl-plugin`). API types live in `api/v1beta1`, controller logic in `internal/controller`, and supporting packages in `internal/mysql`, `internal/platform`, `internal/sidecar`, `internal/state`, and `internal/metrics`. Real-cluster scenario tests live under `internal/playground/scenarios` and run through `cmd/playground-chaos`; faster cross-component tests live under `test/component`, with API-server/envtest coverage under `test/envtest`. Treat `bitpoke/` and `orchestrator/` as bundled upstream references, not the default place for new feature work.
 
 ## Build, Test, and Development Commands
 Run commands from the repository root:
@@ -15,7 +15,7 @@ Run commands from the repository root:
 - `make vet` runs `go vet ./...`.
 - `make lint` runs `./bin/golangci-lint run ./...`. Install it with `make install-lint`, which builds golangci-lint v2 at the version pinned in `Makefile` into ignored `bin/` using the active Go toolchain (Go 1.27). Re-run installation after upgrading Go. CI and the release gate use the same install and lint targets, so local and CI use the same linter and configuration.
 - `make generate` refreshes API deep-copy code in `api/v1beta1`.
-- `make manifests` generates CRD and RBAC output under `config/`.
+- `make manifests` generates CRD and RBAC output under `config/`, adds the deprecated `v1alpha1` version to each CRD (`hack/crd-served-versions`) and copies the CRDs to `charts/bloodraven/crds/`.
 - `docker build --target bloodraven -t bloodraven .` and `docker build --target sidecar -t bloodraven-sidecar .` build container images. Podman works too (substitute `podman` for `docker`), but docker is preferred because k3d's podman support is experimental.
 
 ## Coding Style & Naming Conventions
@@ -28,6 +28,15 @@ Use standard Go formatting: run `gofmt` on changed files and keep imports organi
 Structured-log `msg` strings and field names listed in `site/content/docs/8.observability/7.log-schema.md` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `site/content/docs/8.observability/7.log-schema.md` in the same PR, call out the break in the PR description (the immediate record), and record it in the GitHub release notes when the change ships. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
 
 The deployment API request log (`msg="deploy api"`) explicitly uses `duration_ms` as a contract exception to camelCase; preserve that spelling and the documented `handler`, `group`, `instance`, `namespace`, `operationId`, and `status` fields.
+
+## API versions
+The Go types live in `api/v1beta1` only (`shipstream.io/v1beta1`, the storage version). Every CRD also serves the deprecated `shipstream.io/v1alpha1` with the same schema and conversion strategy `None`; `hack/crd-served-versions` writes that version as a copy when `make manifests` runs, so never edit a CRD file by hand and never add a field to one version. The contract is in `site/content/docs/4.configuration/3.crd-versioning.md`, the design in section 5 of `proposals/20-api-v1beta1.md`.
+
+- `internal/crdcompat` holds the D1 invariant tests (`TestServedVersionsShareOneSchema`, the 900 KB limit), the schema comparison and the object check that the operator's check at start (`cmd/bloodraven/crd_check.go`) and `kubectl bloodraven migrate-storage` (`internal/storagemigration`) share. It validates with the API server's own libraries, as a create, because an update ratchets schema errors away.
+- `test/fixtures/v1alpha1` holds one real object per kind as the published v1.7.0 stored it. They are frozen: do not edit or regenerate them to make a test pass. A failure there means a schema change breaks objects that clusters hold.
+- `test/envtest/testdata/crd-v1.6.0` and `crd-v1.7.0` are the published CRDs of those releases, and `objects-v1.6.0` objects in v1.6.0's shape, for the upgrade and refusal envtests (`storage_migration_test.go`, `served_versions_test.go`).
+- A change that removes or renames a field, changes a type, or makes the two versions differ needs a conversion webhook first. Adding an optional field is fine. Tightening a validation rule is allowed, with a release note.
+- `v1beta1.AddToSchemeAt` registers the Go types at `v1alpha1` for clients that must talk to a cluster from before v1.8.0 (the chaos runner in the upgrade E2E) and for tests. The operator and the plugin use `AddToScheme`.
 
 ## Testing Guidelines
 Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/component`, API-server/controller-runtime tests in `test/envtest`, and real-cluster playground scenarios in `internal/playground/scenarios` through `cmd/playground-chaos`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
@@ -52,7 +61,7 @@ Before pushing a branch that opens or updates a PR, run all of the following fro
 3. `make lint` — install `golangci-lint` if missing (see Build section). Staticcheck findings like `SA9003` (empty branches), `SA1019` (deprecation), and `errcheck` are all enforced here and will block the Lint CI job.
 4. `make test` (unit, including `cmd/` and the chart render tests with `helm` on `PATH`, plus component). Run `make test-envtest` too when you touch anything that interacts with the API server (CRD validation, Owns/Watches wiring, status subresource writes). CI runs the whole envtest suite twice: on the current Kubernetes and on the 1.31 floor (A-115), where status-subresource writes are validated without ratcheting (ratcheting of status writes arrived in 1.33). When you change admission, list semantics or status writes, also run it with `KUBEBUILDER_ASSETS` pointing at 1.31 assets.
 5. When you modify kubebuilder RBAC markers on a reconciler, also update `charts/bloodraven/templates/clusterrole.yaml` to mirror them — the Helm chart RBAC is hand-maintained and drifts silently from `config/rbac/role.yaml`.
-6. When you add or modify a CRD, copy the regenerated file(s) from `config/crd/bases/` to `charts/bloodraven/crds/` so Helm installs ship the same schema.
+6. When you add or modify a CRD, commit both `config/crd/bases/` and `charts/bloodraven/crds/`: `make manifests` writes the second from the first, and `TestChartCRDsMatchTheBuild` fails when they differ.
 
 ## Commit & Pull Request Guidelines
 Recent history uses short, imperative subjects such as `Upgrade mysql-watcher to Bloodraven MySQL operator`. Keep commit titles concise and action-oriented. PRs should explain the operational impact, note any CRD, failover, or sidecar behavior changes, link the relevant issue, and include logs, manifests, or screenshots when changing observable cluster behavior.

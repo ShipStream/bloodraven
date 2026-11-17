@@ -153,7 +153,7 @@ const sections: Section[] = [
         'n|Closed source',
       ] },
       { label: 'API version', cells: [
-        'b|v1alpha1, no conversion webhook yet',
+        'p|v1beta1 since v1.8.0',
         'g|v2',
         'g|v1',
         'p|v1; async mode in tech preview',
@@ -778,7 +778,7 @@ function cell(raw: string | undefined): { tone: Tone, html: string } {
         </p>
         <p>
           <strong>Where Bloodraven is behind:</strong> it is new, with one primary
-          maintainer and a v1alpha1 API. It runs MySQL 9.7 only, takes logical
+          maintainer and a v1beta1 API. It runs MySQL 9.7 only, takes logical
           backups only, has no proxy, and cannot promote while the operator itself
           is down. Companies over $1M revenue pay for production use. Two failure
           scenarios are open known failures; see
