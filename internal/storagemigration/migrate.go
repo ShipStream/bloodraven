@@ -15,10 +15,12 @@
 //     installed schema as a create would be (internal/crdcompat). An object
 //     that does not conform is listed and nothing is written: rewriting it
 //     would persist what the API server pruned from it.
-//  4. Rewrite. Each object is written back as it was read. The API server
-//     encodes it at the storage version. A conflict (the operator writes
-//     status all the time) is retried on a fresh read. Objects are never
-//     deleted or recreated.
+//  4. Rewrite. Each object is written back unchanged, with an empty merge
+//     patch that the API server applies to the object it holds and encodes
+//     at the storage version. Because the patch carries no
+//     resourceVersion, a concurrent writer (the operator writes status all
+//     the time) cannot make it fail; the server retries it on the fresh
+//     object. Objects are never deleted or recreated.
 //  5. Trim. status.storedVersions of a CRD is set to the storage version
 //     only after every object of its kind was rewritten. From the moment
 //     the CRDs were applied the API server writes that version only, so an
@@ -43,6 +45,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -98,8 +101,8 @@ func (p Permission) String() string {
 func RequiredPermissions() []Permission {
 	var out []Permission
 	for _, r := range crdcompat.Resources {
-		for _, verb := range []string{"get", "list", "update"} {
-			out = append(out, Permission{Group: crdcompat.Group, Resource: r.Plural, Verb: verb, Write: verb == "update"})
+		for _, verb := range []string{"get", "list", "patch"} {
+			out = append(out, Permission{Group: crdcompat.Group, Resource: r.Plural, Verb: verb, Write: verb == "patch"})
 		}
 	}
 	for _, r := range crdcompat.Resources {
@@ -307,15 +310,24 @@ func missingPermissions(ctx context.Context, c client.Client, dryRun bool) ([]Pe
 	return missing, nil
 }
 
-// rewriteAll writes every object of r back as it was read. It returns how
-// many were written and one line per object that could not be.
+// rewriteAll writes every object of r back unchanged. It returns how many
+// were written and one line per object that could not be.
+//
+// The write is an empty merge patch without a resourceVersion: the API
+// server applies it to the object it holds at that moment and encodes the
+// result at the storage version, so the object is stored again exactly as
+// it is, status included. A read-modify-write (Get, then Update with the
+// read resourceVersion) loses to a writer that updates the object more
+// often than one round trip, and the operator's status writes can; the
+// server retries a patch against the fresh object itself. An object that
+// is already stored at the storage version encodes to the same bytes, and
+// the API server then writes nothing.
 func rewriteAll(ctx context.Context, o Options, list crdcompat.Lister, r crdcompat.Resource) (rewritten int, failed []string, err error) {
 	res := o.Dynamic.Resource(r.GVR(crdcompat.StorageVersion))
 	err = crdcompat.EachObject(ctx, list, r, func(obj *unstructured.Unstructured) error {
 		ns, name := obj.GetNamespace(), obj.GetName()
-		current := obj
 		for attempt := 0; ; attempt++ {
-			_, werr := res.Namespace(ns).Update(ctx, current, metav1.UpdateOptions{})
+			_, werr := res.Namespace(ns).Patch(ctx, name, types.MergePatchType, []byte("{}"), metav1.PatchOptions{})
 			switch {
 			case werr == nil:
 				rewritten++
@@ -324,23 +336,15 @@ func rewriteAll(ctx context.Context, o Options, list crdcompat.Lister, r crdcomp
 				// Deleted since it was listed: nothing is stored.
 				return nil
 			case apierrors.IsConflict(werr) && attempt < o.conflictRetries:
-				// Someone else wrote it (the operator's status writes).
-				// That write was already encoded at the storage version,
-				// but only a write of our own proves it: read and retry.
+				// The API server gave up its own retries against another
+				// writer (the operator's status writes). That write was
+				// already encoded at the storage version, but only a write
+				// of our own proves it: retry.
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-time.After(o.conflictBackoff):
 				}
-				fresh, gerr := res.Namespace(ns).Get(ctx, name, metav1.GetOptions{})
-				if apierrors.IsNotFound(gerr) {
-					return nil
-				}
-				if gerr != nil {
-					failed = append(failed, fmt.Sprintf("%s %s/%s: read after a conflict failed, retry later: %v", r.Kind, ns, name, gerr))
-					return nil
-				}
-				current = fresh
 			case apierrors.IsConflict(werr):
 				failed = append(failed, fmt.Sprintf("%s %s/%s: still changing after %d attempts (another writer keeps updating it); this is not a schema problem, run the command again",
 					r.Kind, ns, name, attempt+1))

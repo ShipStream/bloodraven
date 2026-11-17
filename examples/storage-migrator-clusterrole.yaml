@@ -25,7 +25,7 @@ rules:
       - mysqlbackups
       - mysqlbackupverifications
       - mysqlstandbyclusters
-    verbs: [get, list, update]
+    verbs: [get, list, patch]
   # Read the CRDs' storage version and stored versions.
   - apiGroups: [apiextensions.k8s.io]
     resources: [customresourcedefinitions]

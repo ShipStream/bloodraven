@@ -106,9 +106,9 @@ func TestRun_MigratesEveryKind(t *testing.T) {
 	updates := 0
 	for _, a := range dyn.Actions() {
 		switch a.GetVerb() {
-		case "update":
+		case "patch":
 			updates++
-		case "delete", "create", "patch", "delete-collection":
+		case "delete", "create", "update", "delete-collection":
 			t.Errorf("the migration made a %s of %s: it only ever writes an object back", a.GetVerb(), a.GetResource().Resource)
 		}
 	}
@@ -124,7 +124,7 @@ func TestRun_PersistentConflictIsTransient(t *testing.T) {
 	c, dyn := fakeCluster(t)
 	busy := crdcompat.Resources[0]
 	attempts := 0
-	dyn.PrependReactor("update", busy.Plural, func(clienttesting.Action) (bool, runtime.Object, error) {
+	dyn.PrependReactor("patch", busy.Plural, func(clienttesting.Action) (bool, runtime.Object, error) {
 		attempts++
 		return true, nil, apierrors.NewConflict(schema.GroupResource{Group: crdcompat.Group, Resource: busy.Plural}, "playground", errors.New("the object has been modified"))
 	})
@@ -165,7 +165,7 @@ func TestRun_PersistentConflictIsTransient(t *testing.T) {
 func TestRun_RefusedWriteKeepsStoredVersions(t *testing.T) {
 	c, dyn := fakeCluster(t)
 	kind := crdcompat.Resources[1]
-	dyn.PrependReactor("update", kind.Plural, func(clienttesting.Action) (bool, runtime.Object, error) {
+	dyn.PrependReactor("patch", kind.Plural, func(clienttesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: crdcompat.Group, Resource: kind.Plural}, "upgrade-e2e", errors.New("denied by a policy"))
 	})
 	var out bytes.Buffer

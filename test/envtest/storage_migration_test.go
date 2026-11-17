@@ -549,8 +549,9 @@ func TestStoredVersionsGuardTheDeprecatedVersion(t *testing.T) {
 }
 
 // U-12: the operator writes status on every poll while migrate-storage
-// runs. A rewrite that loses to such a write is retried on a fresh read,
-// and the migration still completes.
+// runs, here as fast as the API server takes them. The rewrite is a patch
+// the server applies to the object it holds, so such a writer cannot make
+// it lose, and the migration completes in one run.
 func TestMigrateStorage_ConcurrentStatusWriter(t *testing.T) {
 	e := startUpgradeEnv(t, "crd-v1.7.0")
 	ns := e.namespace("busy")

@@ -41,7 +41,7 @@ Nothing is written unless steps 1 to 3 pass for the whole cluster. Objects
 are never deleted or recreated, and MySQL is not touched. Running it again
 is safe: a kind that is already migrated is skipped.
 
-The account needs get, list and update on the five kinds in every
+The account needs get, list and patch on the five kinds in every
 namespace, get on their CustomResourceDefinitions and update on
 customresourcedefinitions/status. examples/storage-migrator-clusterrole.yaml
 is a ClusterRole with exactly that.
