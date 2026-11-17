@@ -666,3 +666,50 @@ func TestInitFromBackup_OperatorRestartAfterPartialLoad(t *testing.T) {
 		})
 	}
 }
+
+// TestFreshDeploy_InitFromBackupSeedAnswersLate: the pods of a new group do
+// not start together. Here the seed dc1 has not answered when dc2 already
+// reads read-only, which looks like "the primary is unreachable and a
+// candidate is ready". Nothing may be promoted on that: the group has had
+// no primary, and a promotion records a failover, which ends the seed step
+// for good. Once dc1 answers, the seed step makes it the writable,
+// published site the restore loads into, and dc2 stays fenced.
+//
+// Found by the end-to-end run of the move off v1.6.0 (#243): dc2 was
+// promoted, its sidecar's startup safety net fenced it again because no
+// active site was published yet, the re-assert refused the seed over the
+// first-boot transactions each fresh server holds, and the restore waited
+// for a seed that never came.
+func TestFreshDeploy_InitFromBackupSeedAnswersLate(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc1.setError(errDown)
+	h := newBootstrapHarness(t, dc1, dc2)
+	h.tm.SetAutoBootstrapSuppressed(true)
+
+	h.pollN(8)
+	if !seedFenced(dc2) {
+		t.Fatal("dc2 was made writable while the seed had not answered yet")
+	}
+	if got := h.tm.Status().ActiveSite; got != "" {
+		t.Fatalf("active site = %q before the seed answered, want none", got)
+	}
+
+	// The seed's pod is up.
+	dc1.mu.Lock()
+	dc1.err = nil
+	dc1.mu.Unlock()
+	h.pollN(8)
+	if seedFenced(dc1) {
+		t.Fatal("seed dc1 is still fenced after it answered: the restore has no writable target")
+	}
+	if got := h.tm.Status().ActiveSite; got != "dc1" {
+		t.Fatalf("active site = %q, want the seed dc1", got)
+	}
+	if !seedFenced(dc2) {
+		t.Fatal("non-seed dc2 must stay fenced")
+	}
+	if n := h.dns.getCalls(); n != 0 {
+		t.Fatalf("DNS written %d times while the restore was in flight", n)
+	}
+}

@@ -2956,6 +2956,23 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.logger.Error("promotion requested for unknown site", "site", promote)
 			return
 		}
+		// A group created with initFromBackup gets its first writable site
+		// from the seed step (maybeStartFreshDeployBootstrap), which runs
+		// once every site answers, fences the other sites and publishes
+		// the seed for the sidecars. Until then nothing is promoted: a
+		// candidate that merely answered before the others (their pods
+		// were still starting) is not the survivor of a failed primary.
+		// Promoting it recorded a failover, which ends the seed step for
+		// good; its sidecar's startup safety net fenced it again at once,
+		// because no active site was published yet; and the re-assert then
+		// refused the seed over the first-boot transactions each fresh
+		// server holds under its own server_uuid. The group stayed without
+		// a writable site and its restore never started.
+		if tm.initRestoreUnseeded() {
+			tm.logger.Warn("promotion refused: the initFromBackup restore has not succeeded and its seed is not published yet",
+				"site", candidate.name)
+			return
+		}
 		// Nothing is cloned while an initFromBackup restore has not
 		// succeeded, so only its seed holds the restored data. Promoting
 		// any other site would record it as the failover target, and once
@@ -3632,6 +3649,15 @@ func (tm *TopologyManager) SetInitRestoreSeed(site string) {
 		return
 	}
 	tm.initRestoreSeed = site
+}
+
+// initRestoreUnseeded reports whether an initFromBackup restore is
+// unfinished and no seed is known for it yet: neither published by this
+// process (seedFreshDeploy) nor recorded in status (SetInitRestoreSeed).
+func (tm *TopologyManager) initRestoreUnseeded() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.autoBootstrapSuppressed && tm.initRestoreSeed == ""
 }
 
 // initRestoreSeedSite returns the seed of an unfinished initFromBackup

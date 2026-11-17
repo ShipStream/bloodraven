@@ -144,3 +144,44 @@ func TestPromotion_RefusedForNonSeedDuringInitRestore(t *testing.T) {
 		})
 	}
 }
+
+// TestPromotion_RefusedBeforeTheInitRestoreSeedIsPublished: in a group
+// created with initFromBackup the pods of the sites do not start together.
+// A site that answers read-only while the others have not answered yet is
+// not promoted: the seed step publishes the first writable site once every
+// site answers. Promoting it recorded a failover, which ends the seed step
+// for good, and the group never got a writable site (found by the
+// end-to-end run of the move off v1.6.0, #243).
+func TestPromotion_RefusedBeforeTheInitRestoreSeedIsPublished(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		restore     bool
+		wantPromote bool
+	}{
+		{name: "restore unfinished, no seed yet", restore: true},
+		{name: "no restore (control)", wantPromote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// dc1, the default seed, has not answered yet; dc2 has.
+			slow := &mockMySQL{readOnly: true, err: errors.New("connection refused")}
+			early := &mockMySQL{readOnly: true}
+			tm, _, _ := newTestTopologyManager(slow, early)
+			if tc.restore {
+				tm.SetAutoBootstrapSuppressed(true)
+			}
+			pollN(tm, 8)
+			early.mu.Lock()
+			promoted := !early.readOnly
+			early.mu.Unlock()
+			if promoted != tc.wantPromote {
+				t.Fatalf("the site that answered first was promoted = %v, want %v", promoted, tc.wantPromote)
+			}
+			tm.mu.RLock()
+			target := tm.lastFailoverTarget
+			tm.mu.RUnlock()
+			if !tc.wantPromote && target != "" {
+				t.Fatalf("lastFailoverTarget = %q recorded before the seed was published: the seed step never runs again", target)
+			}
+		})
+	}
+}

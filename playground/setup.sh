@@ -499,10 +499,26 @@ info "Creating replication user on every MySQL site..."
 REPL_USER=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_USER}' | base64 -d)
 REPL_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_PASSWORD}' | base64 -d)
 ROOT_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
+# replication_user_ready SITE: the replication user and the clone plugin
+# both exist on the site.
+replication_user_ready() {
+  kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$1" -c mysql -- \
+    env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT CONCAT(user_exists, ':', clone_loaded) FROM (SELECT COUNT(*) AS user_exists FROM mysql.user WHERE user='${REPL_USER}' AND host='%') u CROSS JOIN (SELECT COUNT(*) AS clone_loaded FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone') p" 2>/dev/null | grep -q '^1:1$'
+}
 for site in "${SITE_NAMES[@]}"; do
   CREATED=false
   LAST_ERR=""
   for attempt in $(seq 1 12); do
+    # The operator's init script creates this user and installs the clone
+    # plugin at a site's first boot. Then there is nothing to do, and
+    # nothing must be done: the statements below switch read_only off and
+    # back to what it was a moment earlier, which re-fences a site the
+    # operator promoted in between and leaves the group without a primary.
+    if replication_user_ready "$site"; then
+      ok "Replication user and clone plugin exist on $site"
+      CREATED=true
+      break
+    fi
     READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
       env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT @@global.read_only" 2>/dev/null || echo 0)
     SUPER_READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
@@ -529,10 +545,8 @@ for site in "${SITE_NAMES[@]}"; do
       break
     fi
 
-    # The operator init script also creates this user. If our explicit setup
-    # races with early bootstrap but the user is already present, keep going.
-    if kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
-      env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT CONCAT(user_exists, ':', clone_loaded) FROM (SELECT COUNT(*) AS user_exists FROM mysql.user WHERE user='${REPL_USER}' AND host='%') u CROSS JOIN (SELECT COUNT(*) AS clone_loaded FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone') p" 2>/dev/null | grep -q '^1:1$'; then
+    # The init script may have finished while the statements above failed.
+    if replication_user_ready "$site"; then
       ok "Replication user and clone plugin already exist on $site"
       CREATED=true
       break
