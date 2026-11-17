@@ -1,0 +1,12 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: bloodraven
+  generation: 5
+status:
+  observedGeneration: 5
+  activeSite: ""
+  conditions:
+  - {type: Ready, status: "False", reason: PlannedWritePause, observedGeneration: 5, message: "Writes are paused by planned failover r1 from iad to pdx: iad is fenced until pdx is promoted or the run is rolled back"}
+  - {type: Degraded, status: "False", reason: PlannedWritePause, observedGeneration: 5, message: "Writes are paused by planned failover r1 from iad to pdx: iad is fenced until pdx is promoted or the run is rolled back"}

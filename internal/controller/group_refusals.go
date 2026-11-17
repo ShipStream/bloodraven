@@ -168,7 +168,7 @@ func (r *TopologyManagerRunner) refusalDegraded(nn types.NamespacedName) (reason
 // stay. It runs after the per-site replication reasons, so a refusal
 // outranks them; the divergence block, set after it, still wins.
 func (r *TopologyManagerRunner) setRefusalDegraded(conds *[]metav1.Condition, nn types.NamespacedName, topologyReason string, gen int64, now metav1.Time) {
-	if topologyReason != v1alpha1.ReasonHealthy && topologyReason != v1alpha1.ReasonInitializing {
+	if !noTopologyAlert(topologyReason) {
 		return
 	}
 	reason, message := r.refusalDegraded(nn)

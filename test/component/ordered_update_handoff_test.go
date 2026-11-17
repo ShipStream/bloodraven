@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -421,4 +422,129 @@ func TestOrderedUpdate_DriftOnRecoveringOldPrimaryDoesNotStarveRecovery(t *testi
 		defer mu.Unlock()
 		return slices.Contains(applied, "iad")
 	})
+}
+
+// gatedReceiver is a direct replica that receives the fenced source's last
+// transactions only once the test releases it, so the handoff stays in its
+// fenced window for as long as the test wants to look at it.
+type gatedReceiver struct {
+	*mockMySQL
+	source  *mockMySQL
+	release chan struct{}
+}
+
+func (r *gatedReceiver) GetGtidExecuted(ctx context.Context) (string, error) {
+	if r.source.isSuperReadOnly() {
+		select {
+		case <-r.release:
+			r.setGtidExecuted(handoffFenced)
+		default:
+		}
+	}
+	return r.mockMySQL.GetGtidExecuted(ctx)
+}
+
+// Issue #291: the maintenance handoff fences the active site before it
+// promotes the standby. A poll inside that window reads every site
+// read-only. The operator opened the window itself, so status reports a
+// planned write pause there (no alert, no active site) and never NoPrimary,
+// from the fence until the promoted standby is the active site.
+func TestOrderedUpdate_HandoffFencedWindowIsAPlannedWritePause(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	pdxHost := "mysql-lion-pdx.default.svc.cluster.local"
+	iadHost := "mysql-lion-iad.default.svc.cluster.local"
+	pdx := &mockMySQL{readOnly: false, gtidExecuted: handoffPreFence}
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: handoffPreFence,
+		replicaStatus: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: pdxHost}}
+	sites := []controller.SiteTopologyConfig{
+		{Name: "pdx", Zone: "zone-pdx", LoadBalancerIP: "10.0.0.2", Role: state.SiteRolePrimaryCandidate, Host: pdxHost},
+		{Name: "iad", Zone: "zone-iad", LoadBalancerIP: "10.0.0.1", Role: state.SiteRolePrimaryCandidate, Host: iadHost},
+	}
+	release := make(chan struct{})
+	fc := controller.NewFailoverController(logger)
+	tm := controller.NewTopologyManagerWithClock(
+		controller.TopologyConfig{Name: "lion", Sites: sites, FailureThreshold: 3, RecoveryThreshold: 2},
+		[]mysql.Checker{commitsUntilFenced{pdx}, &gatedReceiver{mockMySQL: iad, source: pdx, release: release}},
+		fc, controller.NewUpdateController(fc, logger), nil,
+		controller.BootstrapConfig{ReplUser: "repl", ReplPassword: "secret"},
+		newMockTainter(), platform.NewHub(logger), &mockDNS{}, logger,
+		clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)),
+	)
+	var mu sync.Mutex
+	var applied []string
+	var snaps []controller.TopologySnapshot
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		mu.Lock()
+		applied = append(applied, site)
+		mu.Unlock()
+		return nil
+	}
+	tm.StatusCallback = func(s controller.TopologySnapshot) {
+		mu.Lock()
+		snaps = append(snaps, s)
+		mu.Unlock()
+	}
+	last := func() controller.TopologySnapshot {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(snaps) == 0 {
+			return controller.TopologySnapshot{}
+		}
+		return snaps[len(snaps)-1]
+	}
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	for i := 0; i < 4; i++ {
+		tm.Poll(context.Background())
+	}
+	if s := last(); s.ActiveSite != "pdx" || s.DegradedReason != "Healthy" {
+		t.Fatalf("setup: active=%q reason=%q, want pdx and Healthy", s.ActiveSite, s.DegradedReason)
+	}
+
+	tm.SetSpecDriftSites([]string{"pdx"})
+	tm.Poll(context.Background())
+	waitFor("the handoff to fence pdx", pdx.isSuperReadOnly)
+
+	// Inside the fenced window: pdx is fenced, iad is not promoted.
+	for i := 0; i < 3; i++ {
+		tm.Poll(context.Background())
+		s := last()
+		if s.DegradedReason != "PlannedWritePause" || s.Alert != "" || s.ActiveSite != "" {
+			t.Fatalf("poll %d in the fenced window: reason=%q alert=%q active=%q, want PlannedWritePause with no alert and no active site",
+				i, s.DegradedReason, s.Alert, s.ActiveSite)
+		}
+		if s.WritePause == "" {
+			t.Fatalf("poll %d in the fenced window: the write pause has no message", i)
+		}
+	}
+
+	close(release)
+	waitFor("the old active's Deployment update", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(applied, "pdx")
+	})
+	for i := 0; i < 3; i++ {
+		tm.Poll(context.Background())
+	}
+	if s := last(); s.ActiveSite != "iad" {
+		t.Fatalf("after the handoff: active=%q reason=%q alert=%q, want iad active", s.ActiveSite, s.DegradedReason, s.Alert)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, s := range snaps {
+		if s.DegradedReason == "NoPrimary" || strings.Contains(s.Alert, "NO PRIMARY") {
+			t.Fatalf("snapshot %d of %d reported the handoff's own write pause as an outage: reason=%q alert=%q",
+				i, len(snaps), s.DegradedReason, s.Alert)
+		}
+	}
 }

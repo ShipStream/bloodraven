@@ -148,8 +148,10 @@ jobs:
       label: planned-failover
       # Ordered least- to most-destructive: switchovers and rollbacks first,
       # the operator restarts next, then 64 (holds the primary down), 23 (an
-      # emergency failover plus restart) and 53 (lease expiry) last.
-      scenario: 02-planned-switchover,35-planned-switchover-lag-timeout-rollback,22-planned-dragonfly-switchover,26-planned-dragonfly-sync-timeout-proceed,25-operator-restart-mid-dragonfly-failover,63-planned-failover-operator-restart-mid-lag,64-emergency-failover-during-planned-admission,23-failover-state-durability,53-deployment-hold-expiry
+      # emergency failover plus restart) and 53 (lease expiry) last. 12 is
+      # the other planned write pause, an ordered update's handoff (#291):
+      # it is in the full profile only, which a PR never runs.
+      scenario: 02-planned-switchover,12-rolling-update-healthy-state,35-planned-switchover-lag-timeout-rollback,22-planned-dragonfly-switchover,26-planned-dragonfly-sync-timeout-proceed,25-operator-restart-mid-dragonfly-failover,63-planned-failover-operator-restart-mid-lag,64-emergency-failover-during-planned-admission,23-failover-state-durability,53-deployment-hold-expiry
       timeout-minutes: 120
       images-artifact: e2e-images
 

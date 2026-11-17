@@ -23,8 +23,12 @@ type TopologyMessage struct {
 	Sites        []TopologySite  `json:"sites"`
 	LastFailover *FailoverRecord `json:"lastFailover,omitempty"`
 	Alert        string          `json:"alert,omitempty"`
-	UpdatePhase  string          `json:"updatePhase,omitempty"`
-	PollTime     string          `json:"pollTime"`
+	// WritePause is set while no site is writable because the operator
+	// paused writes itself (a maintenance handoff, a planned failover): it
+	// names the operation. Alert is empty then.
+	WritePause  string `json:"writePause,omitempty"`
+	UpdatePhase string `json:"updatePhase,omitempty"`
+	PollTime    string `json:"pollTime"`
 }
 
 // FailoverRecord is the most recent failover, in the shape of the CR's

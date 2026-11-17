@@ -227,14 +227,20 @@ const s34MaxNoWritable = 60 * time.Second
 // or returns an error when it is none of the windows the operator reports
 // that way by design:
 //
-//   - the handoff's write pause (updatePhase Failover): the source is fenced
-//     and the standby not yet promoted;
+//   - the handoff's write pause: the source is fenced and the standby not
+//     yet promoted. The operator that runs the handoff reports it as
+//     Ready=False/PlannedWritePause (#291); after this scenario's kill the
+//     new operator does not know the handoff, and only the updatePhase the
+//     dead one left (Failover) says so;
 //   - a promotion awaiting confirmation: status names the promoted site
 //     active while its tracker debounces the writable answers;
 //   - an operator start (Ready=Unknown, reason Initializing): the primary is
 //     Unknown until it was read writable recoveryThreshold times. Status
 //     cannot tell, so the servers are asked.
 func s34NoWritableWindow(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (string, error) {
+	if c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady); c != nil && c.Reason == v1alpha1.ReasonPlannedWritePause {
+		return "planned write pause: " + c.Message, nil
+	}
 	if mfg.Status.UpdatePhase == v1alpha1.UpdatePhaseFailover {
 		return "handoff write pause", nil
 	}

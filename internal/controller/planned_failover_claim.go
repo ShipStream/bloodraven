@@ -46,6 +46,8 @@ type PlannedClaimSlot struct {
 	// release does not hydrate that run's claim back (K004).
 	releaseGen uint64
 	recent     [8]releasedRun
+	// runGen counts the Run-mode claims the slot has taken (RunClaim).
+	runGen uint64
 	// releases is instrumentation (tests and DST): runId, why. It keeps
 	// the newest maxClaimReleaseNotes; the simulator drains it each step.
 	releases []ClaimReleaseNote
@@ -210,7 +212,24 @@ func (s *PlannedClaimSlot) hydrate(c plannedClaim) bool {
 		return false
 	}
 	s.held = &c
+	if c.mode == claimModeRun {
+		s.runGen++
+	}
 	return true
+}
+
+// RunClaim returns the run that holds the slot (a hold is not a run), and
+// how many Run-mode claims the slot has taken. Two readings with the same
+// count and both ok=false have no run's claim between them.
+func (s *PlannedClaimSlot) RunClaim() (v PlannedClaimView, ok bool, taken uint64) {
+	if s == nil {
+		return PlannedClaimView{}, false, 0
+	}
+	v, held := s.View()
+	s.mu.Lock()
+	taken = s.runGen
+	s.mu.Unlock()
+	return v, held && v.Mode == claimModeRun.String(), taken
 }
 
 // update applies fn to the held claim if it is runID's Run-mode claim.
