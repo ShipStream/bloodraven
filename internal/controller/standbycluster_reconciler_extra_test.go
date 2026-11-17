@@ -754,3 +754,55 @@ func TestStandbyCluster_ManifestRefusalsAndMarks(t *testing.T) {
 		})
 	}
 }
+
+// With the chart's read-only root filesystem and no writable /tmp, staging
+// the bucket's credentials fails. The condition message must be the same on
+// every attempt: it used to carry the temporary directory's random name, so
+// every reconcile changed status, every status write woke the reconciler
+// again, and the operator ran some hundred reconciles a second (found by
+// the upgrade E2E, which creates a MysqlStandbyCluster).
+func TestStandbyCluster_UnwritableTempDirIsAStableConfigError(t *testing.T) {
+	const secretName = "my-s3-creds-readonly"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+		Data:       map[string][]byte{"AWS_ACCESS_KEY_ID": []byte("AKID"), "AWS_SECRET_ACCESS_KEY": []byte("SKEY")},
+	}
+	cr := standbyCRWithCredsSecret("test-sc", "default", secretName)
+	storeFunc := func(context.Context, *sidecar.PITRConfig) (sidecar.ArchiveStore, error) {
+		t.Error("the store was built although the credentials could not be staged")
+		return nil, errors.New("unexpected call")
+	}
+	r, _ := newTestReconcilerWithSecret(t, []client.Object{cr, secret}, storeFunc)
+	c := r.Client
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	ctx := context.Background()
+	read := func() (string, string) {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, controllerRequestFor("test-sc", "default")); err != nil {
+			t.Fatalf("reconcile error: %v", err)
+		}
+		var got v1beta1.MysqlStandbyCluster
+		if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-sc"}, &got); err != nil {
+			t.Fatal(err)
+		}
+		cond := findCondition(got.Status.Conditions, v1beta1.StandbyConditionBucketReadable)
+		if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != v1beta1.ReasonConfigError {
+			t.Fatalf("BucketReadable = %+v, want False/ConfigError", cond)
+		}
+		return cond.Message, got.ResourceVersion
+	}
+	firstMessage, firstVersion := read()
+	if strings.Contains(firstMessage, "bloodraven-standby-creds-") || !strings.Contains(firstMessage, "no writable temporary directory") {
+		t.Fatalf("message = %q, want it to say that no temporary directory is writable, without a random name", firstMessage)
+	}
+	// The fake client counts every patch as a write, so the message is
+	// what can be compared here; the envtest
+	// TestMysqlStandbyCluster_StatusWritesDoNotWakeTheReconciler runs the
+	// controller against a real API server.
+	secondMessage, _ := read()
+	if secondMessage != firstMessage {
+		t.Fatalf("the message changed between two attempts:\n%s\n%s", firstMessage, secondMessage)
+	}
+	_ = firstVersion
+}

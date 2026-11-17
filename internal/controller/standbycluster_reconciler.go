@@ -22,8 +22,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
@@ -404,8 +406,13 @@ func (r *MysqlStandbyClusterReconciler) SetNewStoreFunc(
 
 // SetupWithManager registers the reconciler with the manager.
 func (r *MysqlStandbyClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Only a change of the spec (or a deletion) wakes the reconciler; the
+	// discovery loop is driven by RequeueAfter. Its own status writes must
+	// not: a failure message that differs on every attempt (an S3 error
+	// carries its request ID) is a status change on every attempt, and
+	// reacting to it would rescan the bucket as fast as it answers.
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1beta1.MysqlStandbyCluster{}).
+		For(&v1beta1.MysqlStandbyCluster{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }
 
@@ -569,7 +576,7 @@ func (r *MysqlStandbyClusterReconciler) resolvePassphraseToFile(ctx context.Cont
 
 	if dir == "" {
 		var err error
-		dir, err = os.MkdirTemp("", "bloodraven-standby-creds-*")
+		dir, err = standbyTempDir()
 		if err != nil {
 			return "", "", fmt.Errorf("create passphrase tempdir: %w", err)
 		}
@@ -618,11 +625,30 @@ func (r *MysqlStandbyClusterReconciler) resolveS3CredsToDir(ctx context.Context,
 	return dir, nil
 }
 
+// standbyTempDir creates the directory a reconcile stages a bucket's
+// credentials and passphrase in. Its error never carries the directory's
+// random name: the error becomes a condition message, a message that
+// differs on every attempt is a status change on every attempt, and each
+// status write wakes the reconciler again at once (the operator ran some
+// hundred reconciles a second against a read-only /tmp).
+func standbyTempDir() (string, error) {
+	dir, err := os.MkdirTemp("", "bloodraven-standby-creds-*")
+	if err != nil {
+		cause := err
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			cause = pathErr.Err
+		}
+		return "", fmt.Errorf("no writable temporary directory under %s: %w", os.TempDir(), cause)
+	}
+	return dir, nil
+}
+
 // standbyCreds writes AWS credentials to a temporary directory in the same
 // layout that sidecar.newS3Store expects (one file per env-var key). Returns
 // the tempdir path. The caller must os.RemoveAll the returned dir when done.
 func standbyCreds(accessKey, secretKey, sessionToken, region string) (string, error) {
-	dir, err := os.MkdirTemp("", "bloodraven-standby-creds-*")
+	dir, err := standbyTempDir()
 	if err != nil {
 		return "", err
 	}

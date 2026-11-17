@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
@@ -467,5 +471,82 @@ func TestMysqlStandbyCluster_EnvtestCreate_RejectsNonHTTPEndpoint(t *testing.T) 
 		if !strings.Contains(err.Error(), "endpointURL") {
 			t.Errorf("endpointURL %q rejected for the wrong reason: %v", bad, err)
 		}
+	}
+}
+
+// The reconciler's own status writes must not wake it. A scan that fails
+// with a message that differs on every attempt (an S3 error carries its
+// request ID) changes status on every attempt; a controller that reacts to
+// that rescans the bucket as fast as it answers. Only a spec change wakes
+// it between two discovery intervals.
+func TestMysqlStandbyCluster_StatusWritesDoNotWakeTheReconciler(t *testing.T) {
+	ns := createNamespace(t, "standby-wake")
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
+
+	skip := true
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+		Controller:             ctrlconfig.Controller{SkipNameValidation: &skip},
+		Cache:                  cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scans atomic.Int64
+	r := &controller.MysqlStandbyClusterReconciler{Client: mgr.GetClient(), Scheme: scheme, Recorder: record.NewFakeRecorder(1024)}
+	r.SetNewStoreFunc(func(context.Context, *sidecar.PITRConfig) (sidecar.ArchiveStore, error) {
+		n := scans.Add(1)
+		return &envtestFakeStore{Objects: map[string][]byte{}, ListErr: fmt.Errorf("bucket not found, RequestID: %d", n)}, nil
+	})
+	if err := r.SetupWithManager(mgr); err != nil {
+		t.Fatal(err)
+	}
+	mgrCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- mgr.Start(mgrCtx) }()
+	t.Cleanup(func() {
+		stop()
+		<-done
+	})
+
+	cr := minimalEnvtestStandby("wake", ns)
+	if err := k8sClient.Create(ctx, cr); err != nil {
+		t.Fatal(err)
+	}
+	key := types.NamespacedName{Name: cr.Name, Namespace: ns}
+	deadline := time.Now().Add(30 * time.Second)
+	for scans.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the standby cluster was never reconciled")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Each failed scan wrote a new message. Give a loop time to show.
+	time.Sleep(3 * time.Second)
+	if n := scans.Load(); n > 2 {
+		t.Fatalf("the bucket was scanned %d times within 3s of one create: the reconciler reacts to its own status writes", n)
+	}
+	var got v1beta1.MysqlStandbyCluster
+	if err := k8sClient.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := envtestStandbyFindCondition(&got, v1beta1.StandbyConditionBucketReadable); c == nil || !strings.Contains(c.Message, "RequestID") {
+		t.Fatalf("BucketReadable = %+v, want the scan's failure", c)
+	}
+
+	// A spec change still wakes it at once.
+	before := scans.Load()
+	got.Spec.Source.S3.Prefix = "orders-moved"
+	if err := k8sClient.Update(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for scans.Load() == before {
+		if time.Now().After(deadline) {
+			t.Fatal("a spec change did not wake the reconciler")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
