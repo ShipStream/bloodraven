@@ -224,6 +224,10 @@ type TopologySnapshot struct {
 	BootstrapPhase     string              // non-empty if a fresh-deploy bootstrap is in progress or finished
 	BootstrapError     string              // non-empty if bootstrap failed
 	BootstrapSource    string              // "fresh-deploy", "auto-clone", or "reclone"
+	// WritePause says which operation of the operator's own has paused
+	// writes, when DegradedReason is PlannedWritePause (see
+	// TopologyManager.plannedWritePause). Empty otherwise.
+	WritePause string
 	// BootstrapTarget is the site the failed bootstrap was cloning into, or
 	// "" when it failed before choosing one. Set only while BootstrapPhase
 	// is Failed.
@@ -840,6 +844,15 @@ type TopologyManager struct {
 	// re-assert this process recorded, until a poll that started after it
 	// reads the target or declares it Unreachable (see poll).
 	promotionAwaitingPoll string
+	// writePause is set by the poll while the operator's own handoff or
+	// planned failover explains a topology with no writable site: the
+	// message for status. See plannedWritePause.
+	writePause string
+	// promotionEndedWritePause says the promotion promotionAwaitingPoll
+	// names followed a fence the operator set itself (a handoff or a
+	// planned failover), so the wait for its first read is the tail of
+	// that pause. An emergency failover fences nothing and sets false.
+	promotionEndedWritePause bool
 
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
@@ -1159,6 +1172,7 @@ func (tm *TopologyManager) recordPromotion(ctx context.Context, now time.Time, t
 	tm.promotedSite = target
 	tm.promotedAt = now
 	tm.promotionAwaitingPoll = target
+	tm.promotionEndedWritePause = fencedSource != ""
 	// A promotion observed by this process supersedes restored state even if
 	// the wall clock moved backward. Thereafter, only advance the anti-flap
 	// pair: the ordered-update and poll goroutines sample `now` before this
@@ -1593,6 +1607,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	tm.mu.RLock()
 	pollAuthorityEpoch := tm.authorityEpoch
 	tm.mu.RUnlock()
+	pauseBefore := tm.sampleOwnWritePause()
 
 	// The sites' recorded server_uuids are loaded when the manager starts;
 	// a load that failed then is retried off the poll loop.
@@ -1700,6 +1715,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 			tm.promotionAwaitingPoll = ""
 		}
 	}
+	tm.writePause = tm.ownWritePauseLocked(pauseBefore, tm.sampleOwnWritePauseLocked())
 	prevStates := make([]state.SiteState, len(tm.sites))
 	// classificationLapsed records that a site ran out of its probe budget
 	// while still unclassified. That changes the cross-site verdict
@@ -1782,6 +1798,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	retryDeferred := tm.crossSiteRetryReady()
 	action := state.EvalCrossSite(tm.observations(), tm.cfg.SitePriorities)
 	alertMsg := action.Alert
+	if tm.plannedWritePause(action) != "" {
+		alertMsg = ""
+	}
 	if anyTransition || blockedSetChanged || retryDeferred || classificationLapsed {
 		tm.clearCrossSiteRetry()
 		tm.applyCrossSiteAction(ctx, action)
@@ -2410,6 +2429,10 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	// trackers every time so those callbacks cannot clear persistent alerts.
 	action := state.EvalCrossSite(tm.observations(), tm.cfg.SitePriorities)
 	alert, degradedReason := action.Alert, action.Reason
+	writePause := tm.plannedWritePause(action)
+	if writePause != "" {
+		alert, degradedReason = "", v1beta1.ReasonPlannedWritePause
+	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.deploymentChanging == 0 && !tm.deploymentAwaitingObservation {
@@ -2480,6 +2503,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		ObservedAt:              tm.clock.Now(),
 		Alert:                   alert,
 		DegradedReason:          degradedReason,
+		WritePause:              writePause,
 		UpdatePhase:             updatePhase,
 		UpdateStalled:           tm.updateStall,
 		BootstrapPhase:          string(tm.bootstrapPhase),
@@ -2613,6 +2637,9 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 	if tm.updater != nil {
 		msg.UpdatePhase = string(tm.updater.Phase())
 	}
+	if alertMsg == "" && msg.ActiveSite == "" {
+		msg.WritePause = tm.writePause
+	}
 	return msg
 }
 
@@ -2742,7 +2769,9 @@ func (tm *TopologyManager) fenceWritableNonPromotableSites(ctx context.Context) 
 }
 
 func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action state.CrossSiteAction) {
-	if action.Alert != "" {
+	// A write pause the operator opened itself is not an alert; the
+	// deferrals below still apply to the action as it is.
+	if action.Alert != "" && tm.plannedWritePause(action) == "" {
 		tm.logger.Warn("ALERT", "message", action.Alert)
 	}
 

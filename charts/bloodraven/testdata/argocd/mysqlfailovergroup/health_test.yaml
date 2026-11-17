@@ -27,6 +27,8 @@ tests:
   healthStatus: {status: Degraded, message: "RecoveryPending: Old primary pdx is being reconfigured as a replica"}
 - inputPath: initializing.yaml
   healthStatus: {status: Progressing, message: "Waiting for the first classification of iad, pdx"}
+- inputPath: planned-write-pause.yaml
+  healthStatus: {status: Progressing, message: "Writes are paused by planned failover r1 from iad to pdx: iad is fenced until pdx is promoted or the run is rolled back"}
 - inputPath: no-writable-primary.yaml
   healthStatus: {status: Degraded, message: "NoPrimary: both sites are read-only"}
 - inputPath: spec-not-applied-degraded.yaml

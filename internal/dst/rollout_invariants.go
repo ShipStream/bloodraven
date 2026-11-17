@@ -29,6 +29,32 @@ func (s *rolloutSim) admits(rec *v1beta1.RolloutStatus) bool {
 	return rec.InFlight() && rec.Renderer == s.identity
 }
 
+// holdsSlot reports whether g's unfinished admission keeps the queue from
+// admitting another group. Two things end that without ending the
+// admission, and both are the administrator's annotations:
+//
+//   - rollout-release-slot;
+//   - rollout-admit on an admission that has not started within the start
+//     grace. Such an admission is never withdrawn while the annotation
+//     stands, so it stops holding the slot instead: the queue must not
+//     wait, without a halt, behind a group that may never start (#295; the
+//     upgrade policy's "Admit a group by hand"). Once the annotation is
+//     removed the pacer withdraws the admission in the same pass, and a
+//     started roll holds the slot whatever the annotation says.
+//
+// Callers hold s.mu.
+func (s *rolloutSim) holdsSlot(g *rolloutGroupSim) bool {
+	return slotHeld(g.rec, g.admitAnno, g.releaseAnno, s.clk.Now(), time.Duration(s.plan.StartGraceSteps)*rolloutStep)
+}
+
+func slotHeld(rec *v1beta1.RolloutStatus, admitAnno, releaseAnno bool, now time.Time, startGrace time.Duration) bool {
+	if !rec.InFlight() || releaseAnno {
+		return false
+	}
+	idleAnnotated := admitAnno && rec.StartedTime == nil && rec.AdmittedTime != nil && now.Sub(rec.AdmittedTime.Time) >= startGrace
+	return !idleAnnotated
+}
+
 // aged reports whether a spec hash or a renderer name is one a release
 // left behind (release).
 func aged(v string) bool { return strings.HasPrefix(v, "release-") }
@@ -62,7 +88,7 @@ func (s *rolloutSim) observeRecord(g *rolloutGroupSim, was, now *v1beta1.Rollout
 				if o == g {
 					continue
 				}
-				if rec := o.rec; rec.InFlight() && !o.releaseAnno {
+				if rec := o.rec; s.holdsSlot(o) {
 					s.violate("SecondAdmission", fmt.Sprintf("%s was admitted while %s holds the slot (%s)", name, o.spec.Name, recordString(rec)))
 				}
 			}

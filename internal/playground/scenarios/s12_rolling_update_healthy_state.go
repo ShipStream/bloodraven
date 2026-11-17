@@ -62,6 +62,7 @@ func scenario12RollingUpdateHealthyState() runner.Scenario {
 			s12VerifyDeploymentsRolled(),
 			s12VerifyClusterHealthy(),
 			s12VerifyNoTotalLoss(),
+			verifyNoPrimaryNotReported(),
 		},
 	}
 }

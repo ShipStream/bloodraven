@@ -8,6 +8,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/shipstream/bloodraven/api/v1beta1"
+	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -79,5 +81,35 @@ func waitForMFGEvent(ctx context.Context, env *runner.Env, notBefore time.Time, 
 				return ev, nil
 			}
 		}
+	}
+}
+
+// verifyNoPrimaryNotReported is the negative assertion of #291 for a
+// scenario whose only write pause is one the operator opens itself (the
+// handoff of an ordered update, a planned failover): the pause is reported
+// as PlannedWritePause, so the run leaves no NoPrimaryDetected Event on the
+// group and no "NO PRIMARY" ALERT line in the operator log.
+func verifyNoPrimaryNotReported() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseVerify,
+		Name:  "the planned write pause was not reported as NoPrimary (no Event, no ALERT)",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			ev, found, err := findMFGEvent(ctx, env, env.StartTime, v1beta1.EventNoPrimaryDetected, "")
+			if err != nil {
+				return err
+			}
+			if found {
+				return fmt.Errorf("%s Event during a planned write pause: %s", v1beta1.EventNoPrimaryDetected, ev.Message)
+			}
+			tail, err := env.Logs("operator")
+			if err != nil {
+				return err
+			}
+			if matched, line := firstMatchSince(tail, env.StartTime, pglogs.Substring("NO PRIMARY")); matched {
+				return fmt.Errorf("the operator logged a NO PRIMARY alert during a planned write pause: %s", line)
+			}
+			env.Capture.Note("no NoPrimaryDetected Event and no NO PRIMARY alert since the scenario started")
+			return nil
+		},
 	}
 }

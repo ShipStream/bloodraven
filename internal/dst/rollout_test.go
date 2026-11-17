@@ -11,6 +11,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // rolloutSweepSeeds is the quick sweep's seed range, shared by the tests
@@ -355,5 +360,39 @@ func TestRollout_OperatorRestartDuringRecreateRollNeedsAHuman(t *testing.T) {
 	if healed.Failed() || len(healed.Rollout.NeedsHuman) > 0 || healed.Rollout.Completed != 2 {
 		t.Fatalf("without the second restart: violations %v, NeedsHuman %v, completed %d\n%s",
 			healed.Violations, healed.Rollout.NeedsHuman, healed.Rollout.Completed, strings.Join(healed.Rollout.Log, "\n"))
+	}
+}
+
+// TestSlotHeld pins which unfinished admissions keep the queue waiting
+// (SecondAdmission). Seed 5093 (#295) was an admission from the queue next
+// to an annotation's admission that had not started within the grace: the
+// documented rule, which the invariant did not model.
+func TestSlotHeld(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const grace = 20 * time.Second
+	at := func(d time.Duration) *metav1.Time { mt := metav1.NewTime(t0.Add(d)); return &mt }
+	admitted := &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseAdmitted, AdmittedTime: at(0)}
+	started := &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseRolling, AdmittedTime: at(0), StartedTime: at(5 * time.Second)}
+	completed := &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseComplete, AdmittedTime: at(0), StartedTime: at(5 * time.Second), CompletedTime: at(10 * time.Second)}
+	for _, tc := range []struct {
+		name                   string
+		rec                    *v1beta1.RolloutStatus
+		admitAnno, releaseAnno bool
+		after                  time.Duration
+		want                   bool
+	}{
+		{name: "no record", rec: nil, after: time.Hour, want: false},
+		{name: "completed", rec: completed, after: time.Hour, want: false},
+		{name: "admitted from the queue", rec: admitted, after: grace, want: true},
+		{name: "released by annotation", rec: admitted, releaseAnno: true, want: false},
+		{name: "annotated, inside the grace", rec: admitted, admitAnno: true, after: grace - time.Second, want: true},
+		{name: "annotated, not started within the grace", rec: admitted, admitAnno: true, after: grace, want: false},
+		{name: "annotation removed after the grace", rec: admitted, after: 2 * grace, want: true},
+		{name: "annotated and started", rec: started, admitAnno: true, after: time.Hour, want: true},
+		{name: "started and released", rec: started, releaseAnno: true, after: time.Hour, want: false},
+	} {
+		if got := slotHeld(tc.rec, tc.admitAnno, tc.releaseAnno, t0.Add(tc.after), grace); got != tc.want {
+			t.Errorf("%s: slotHeld = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

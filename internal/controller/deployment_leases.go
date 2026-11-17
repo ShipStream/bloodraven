@@ -477,10 +477,18 @@ func DeploymentUnstableReason(fg *v1beta1.MysqlFailoverGroup) string {
 		return v1beta1.UnstableReasonDeploymentRevocationPending
 	}
 	if fg.Status.ActiveSite == "" {
-		if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionReady); c != nil && c.Reason == v1beta1.ReasonInitializing {
+		ready := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionReady)
+		switch {
+		case ready != nil && ready.Reason == v1beta1.ReasonInitializing:
 			return v1beta1.UnstableReasonInitializing
+		case ready != nil && ready.Reason == v1beta1.ReasonPlannedWritePause:
+			// The operator paused writes itself. The operation that did it
+			// is the reason, as it is before and after the pause:
+			// PlannedFailover or OrderedUpdate below, or NotReady when
+			// status no longer shows either.
+		default:
+			return v1beta1.UnstableReasonNoPrimary
 		}
-		return v1beta1.UnstableReasonNoPrimary
 	}
 	if plannedFailoverActive(fg) {
 		return v1beta1.UnstableReasonPlannedFailover

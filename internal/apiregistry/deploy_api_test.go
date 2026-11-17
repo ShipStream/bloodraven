@@ -224,7 +224,10 @@ func conditionReasonsOf(t *testing.T, a *analysis, typ string, status metav1.Con
 					t.Errorf("%s reason: %s", typ, strings.ReplaceAll(prob, a.root, ""))
 				}
 				for _, o := range fl.values {
-					if o.value != "" && o.value != "Healthy" && o.value != "Initializing" {
+					// Healthy, Initializing and PlannedWritePause reach the
+					// Degraded literal through a status variable; the
+					// operator writes them with False or Unknown only.
+					if o.value != "" && o.value != "Healthy" && o.value != "Initializing" && o.value != "PlannedWritePause" {
 						out[o.value] = true
 					}
 				}

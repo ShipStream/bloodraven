@@ -106,8 +106,10 @@ const (
 	EventSplitBrainDetected = "SplitBrainDetected"
 	// Both sites are read-only (no primary). Not emitted when the cause is
 	// a mid-rotation or pending-reclone promotion refusal (that is
-	// `KeyringPromotionRefused` or `PromotionRefusedReclonePending`), or
-	// while the group is `Initializing` after an operator start.
+	// `KeyringPromotionRefused` or `PromotionRefusedReclonePending`),
+	// while the group is `Initializing` after an operator start, or while
+	// the operator itself has paused writes for a maintenance handoff or a
+	// planned failover (`PlannedWritePause`).
 	EventNoPrimaryDetected = "NoPrimaryDetected"
 	// Both sites are unreachable.
 	EventTotalLossDetected = "TotalLossDetected"

@@ -393,6 +393,30 @@ func TestPlanRollout_IdleAnnotatedGroupDoesNotHoldTheSlot(t *testing.T) {
 	requirePhase(t, views, "tiger", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
 }
 
+// The shape of DST seed 5093 (#295): the annotated group cannot start (a
+// site is down), the queue moves on after the grace, and the annotation is
+// then removed. The admission that never started is withdrawn in that
+// pass, so it cannot start beside the group the queue admitted, and it
+// gives out no second admission.
+func TestPlanRollout_IdleAnnotatedGroupIsWithdrawnWithItsAnnotation(t *testing.T) {
+	cfg := RolloutPacerConfig{StartGrace: 5 * time.Minute, Soak: -1}
+	views := []rolloutGroupView{pendingView("lion"), pendingView("puma"), pendingView("tiger")}
+	views[0].Admit = true
+	views[0].Unstable = "SiteUnhealthy"
+	planOnce(t, rolloutT0, testRenderer, cfg, views)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
+	planOnce(t, rolloutT0.Add(5*time.Minute), testRenderer, cfg, views)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmittedByAnnotation)
+	requirePhase(t, views, "puma", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+
+	views[0].Admit = false
+	planOnce(t, rolloutT0.Add(6*time.Minute), testRenderer, cfg, views)
+	requirePhase(t, views, "lion", v1beta1.RolloutPhasePending, rolloutReasonNotStarted)
+	requirePhase(t, views, "puma", v1beta1.RolloutPhaseAdmitted, rolloutReasonAdmitted)
+	requirePhase(t, views, "tiger", v1beta1.RolloutPhasePending, rolloutReasonWaitingForSlot)
+}
+
 func TestRolloutPacerConfigDefaults(t *testing.T) {
 	c := RolloutPacerConfig{}.withDefaults().withDefaults()
 	if c.Interval != defaultRolloutPacerInterval || c.Soak != defaultRolloutSoak || c.StallAfter != defaultRolloutStallAfter || c.StartGrace != defaultRolloutStartGrace {

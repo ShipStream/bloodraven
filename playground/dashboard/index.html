@@ -162,6 +162,12 @@ function renderSites(msg) {
     // confirmed yet (that site's state is still Unknown).
     healthClass = 'critical';
     healthText = 'SPLIT BRAIN \u2014 multiple sites writable';
+  } else if (writableCount === 0 && msg.writePause) {
+    // The operator fenced the active site itself (a maintenance handoff or
+    // a planned failover) and has not promoted the other one yet. It
+    // reports PlannedWritePause, not NoPrimary, and sends no alert.
+    healthClass = 'warning';
+    healthText = 'WRITES PAUSED \u2014 handoff or planned failover in progress';
   } else if (writableCount === 0 && !alert && sites.some(s => (s.state || 'Unknown') === 'Unknown' && (s.role || 'PrimaryCandidate') === 'PrimaryCandidate')) {
     // The operator reports Initializing, not NoPrimary, until it has
     // classified every PrimaryCandidate site since it started. Initializing
