@@ -89,6 +89,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `73-paced-rollout-bad-build-halt` ([§73](#73-paced-rollout-bad-build-halt); release profile and the e2e `paced-rollout` job; a release-driven pod change across two auxiliary groups: one is admitted, a release whose pods cannot become Ready stalls it before its primary is touched and the other group keeps its pods, across an operator restart too; a release that works then completes the first group before the second is admitted; the playground group, pinned to its sidecar image, is never rolled)
 - `76-dragonfly-blackhole-mysql-failover` ([§76](#76-blackholed-dragonfly-master-during-a-mysql-failover); full profile; the Dragonfly master's pod is blackholed and the MySQL primary on its site scaled to 0, with one tagged-GTID transaction on both sites: MySQL fails over, the Dragonfly target is stamped master within the bound derived from the emergency budgets (14s) of the MySQL promotion with REPLTAKEOVER skipped, the new primary holds the tagged transaction, and both old masters rejoin as replicas, #199)
 - `74-upgrade-paced-rollout` ([§74](#74-upgrade-paced-rollout); quarantined: needs a cluster installed at the published v1.7.0 with a spare node, run by the e2e `upgrade` job after `./playground/upgrade-e2e.sh install`; the upgrade to the build under test rolls every MySQL pod of three groups, one group at a time)
+- `78-upgrade-storage-migration` ([§78](#78-upgrade-storage-migration); quarantined: needs the cluster scenario 74 leaves, run by the e2e `upgrade` job after it; `kubectl bloodraven migrate-storage` moves every object the previous release stored to `shipstream.io/v1beta1` beside the running operator, and `storedVersions` ends `[v1beta1]`)
 - `77-pitr-archive-store-init-failure` ([§77](#77-pitr-archive-store-init-failure); full profile; encrypted PITR enabled while RustFS is scaled to 0: the ordered update finishes, every pod stays Ready, nothing fails over, and the group reports `PITRArchiveReady=False/ArchiveStoreInitFailed`; once RustFS is back the same pods create the archive and archive a sealed binlog as BRV1, issue #214 item 5)
 
 Scenarios `32`–`36`, `38` and `39` (seven scenarios) are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. Scenario `37` is not among them: #206 replaced it with `37-pitr-planned-failback-no-reclone`, which is in the `release` profile and has no live-pass history yet. As of 2026-07-11 the seven full-only scenarios and the retired original scenario 37 (`37-pitr-archive-handoff-across-failover`) had passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Those passes belong to the retired scenario 37, not to its replacement. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). The seven remain full-profile-only while this new, high-risk coverage matures. Scenarios `36`, `37`, `68`, `69` and `70` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
@@ -1758,6 +1759,25 @@ Before the archiver could decrypt, this stopped at the archiver's readiness: not
 **Scope**: v1.7.0 is the last release without paced rollouts, and the precheck requires workloads without `rendered-by`. This is the gate for the release that introduces pacing, not a rolling check of "the previous release": an upgrade between two releases that both pace may change no pod template at all.
 
 **Status**: not run on a cluster yet (written 2026-11-12). Checked without a cluster: the v1.7.0 chart and both images pull anonymously, the v1.7.0 chart renders with the values `setup.sh` passes, the checkout's chart renders over v1.7.0's values (`TestRolloutValuesChart`), and the auxiliary groups are admitted by the published v1.7.0 CRD and survive this build's CRD being applied over it, after which `status.rollout` is stored (`TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170`, envtest). The e2e `upgrade` job is its first run.
+
+### 78. Storage Migration After the Upgrade {#78-upgrade-storage-migration}
+**Category**: Upgrade, API versions (C-8 in `proposals/20-api-v1beta1.md`) | **Risk**: Low | **Automated**: `78-upgrade-storage-migration` (quarantined: needs the cluster scenario 74 leaves, run by the e2e `upgrade` job after it)
+
+**Hypothesis**: The previous release stores `shipstream.io/v1alpha1`; this build's CRDs store `v1beta1` and serve both with one schema. After the upgrade every object from before it is still encoded as `v1alpha1`. `kubectl bloodraven migrate-storage` rewrites each one beside the running operator and sets `status.storedVersions` to `[v1beta1]`, without deleting, recreating or changing any object.
+
+**Setup**: `./playground/upgrade-e2e.sh install` creates one object of every kind through `v1alpha1` while v1.7.0 runs: the playground group, a `MysqlDatabase`, a `MysqlBackup` that succeeds, a `MysqlBackupVerification` of it and a `MysqlStandbyCluster` (`playground/manifests/upgrade-e2e-objects.yaml`). Scenario 74 then upgrades the cluster.
+
+**Injection**: `go run ./cmd/kubectl-bloodraven migrate-storage --dry-run`, then without `--dry-run`, with the operator running and writing status.
+
+**Verify**:
+
+- The upgraded operator logged `CRD check passed` and no refusal: its check at start accepted the objects v1.7.0 stored.
+- The dry run reports that every object conforms and leaves `storedVersions` as it was.
+- After the real run `storedVersions` is `[v1beta1]` on all five CRDs. Every object from before has the same `uid` and `generation` and a new `resourceVersion`, and an object of every kind is left.
+- A second run reports that nothing is left to do.
+- The group is `Ready` with an active site. The job then runs `01-clean-primary-kill`: a failover works on the migrated objects.
+
+**Cleanup**: None. The migration is one-way.
 
 ### 75. Full-Instance Restore: Sessions, Spec Removal, Reclones {#75-full-instance-restore-sessions-spec-removal}
 **Category**: Backup/restore | **Risk**: High | **Automated**: `75-full-restore-three-site-sessions-spec-removal` (full profile, `ResetBeforeRunAll`)

@@ -24,6 +24,13 @@
 #       BLOODRAVEN_SETUP_OPERATOR_IMAGE_REPOSITORY  BLOODRAVEN_SETUP_OPERATOR_IMAGE_TAG
 #       BLOODRAVEN_SETUP_OPERATOR_PULL_POLICY       (default Never: the image is loaded)
 #       BLOODRAVEN_SETUP_SIDECAR_IMAGE_REPOSITORY   BLOODRAVEN_SETUP_SIDECAR_IMAGE_TAG
+#       BLOODRAVEN_SETUP_FAILOVERGROUP_MANIFEST     manifest of the playground
+#                                                   group to apply instead of
+#                                                   the topology's own
+#       BLOODRAVEN_SETUP_API_VERSION                version of shipstream.io the
+#                                                   group is created at (default
+#                                                   v1beta1; a release before
+#                                                   v1.8.0 serves v1alpha1 only)
 #
 # Cluster setup (do once, before running this script):
 #
@@ -75,6 +82,11 @@ case "${BLOODRAVEN_SETUP_TOPOLOGY:-default}" in
     ;;
 esac
 EXPECTED_SITE_COUNT=${#SITE_NAMES[@]}
+# BLOODRAVEN_SETUP_FAILOVERGROUP_MANIFEST replaces the group's manifest with
+# one of the same name, namespace and sites: the v1.6.0 migration test
+# creates the group with spec.initFromBackup, which is fixed at creation.
+FAILOVERGROUP_MANIFEST="${BLOODRAVEN_SETUP_FAILOVERGROUP_MANIFEST:-$FAILOVERGROUP_MANIFEST}"
+[[ -f "$FAILOVERGROUP_MANIFEST" ]] || { echo "group manifest $FAILOVERGROUP_MANIFEST not found" >&2; exit 1; }
 
 info()  { echo -e "\033[1;34m==>\033[0m $*"; }
 ok()    { echo -e "\033[1;32m OK\033[0m $*"; }
@@ -155,6 +167,11 @@ OPERATOR_IMAGE_TAG="${BLOODRAVEN_SETUP_OPERATOR_IMAGE_TAG:-playground}"
 OPERATOR_PULL_POLICY="${BLOODRAVEN_SETUP_OPERATOR_PULL_POLICY:-Never}"
 SIDECAR_IMAGE_REPOSITORY="${BLOODRAVEN_SETUP_SIDECAR_IMAGE_REPOSITORY:-${IMG_PREFIX}bloodraven-sidecar}"
 SIDECAR_IMAGE_TAG="${BLOODRAVEN_SETUP_SIDECAR_IMAGE_TAG:-playground}"
+SETUP_API_VERSION="${BLOODRAVEN_SETUP_API_VERSION:-v1beta1}"
+case "$SETUP_API_VERSION" in
+  v1beta1|v1alpha1) ;;
+  *) fail "BLOODRAVEN_SETUP_API_VERSION must be v1beta1 or v1alpha1, got '$SETUP_API_VERSION'" ;;
+esac
 
 kubectl cluster-info >/dev/null 2>&1 || fail "No Kubernetes cluster reachable. Set up a cluster first (see script header)."
 
@@ -397,7 +414,13 @@ ok "Operator deployed"
 # MySQL TLS must be present on the first observed generation. Adding it
 # later would make old pods and freshly rendered configuration disagree
 # about their connection contract during an ordered rollout.
-info "Creating MysqlFailoverGroup CR..."
+info "Creating MysqlFailoverGroup CR (shipstream.io/$SETUP_API_VERSION)..."
+# The manifests are written at v1beta1. The two served versions have one
+# schema, so only the apiVersion line differs for a release that serves
+# v1alpha1 alone.
+failovergroup_manifest() {
+  sed "s|^apiVersion: shipstream.io/v1beta1\$|apiVersion: shipstream.io/$SETUP_API_VERSION|" "$FAILOVERGROUP_MANIFEST"
+}
 if [[ "$SETUP_TLS" == "true" ]]; then
   {
     while IFS= read -r line; do
@@ -405,10 +428,10 @@ if [[ "$SETUP_TLS" == "true" ]]; then
       if [[ "$line" == "    operatorSecretName: mysql-credentials" ]]; then
         printf '  tls:\n    secretName: mysql-playground-tls\n'
       fi
-    done <"$FAILOVERGROUP_MANIFEST"
+    done < <(failovergroup_manifest)
   } | kubectl apply -f -
 else
-  kubectl apply -f "$FAILOVERGROUP_MANIFEST"
+  failovergroup_manifest | kubectl apply -f -
 fi
 
 info "Seeding DNSEndpoint CR (so external-dns chain works immediately)..."

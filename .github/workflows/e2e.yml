@@ -173,7 +173,10 @@ jobs:
   # groups, upgrades to this build (its CRDs first, then the chart with the
   # operator and sidecar.image.{repository,tag} set to the build) and
   # checks that every MySQL pod of the three groups rolls, one group at a
-  # time. 01 then proves that a failover still works on the upgraded build.
+  # time. The install also creates one object of every kind through
+  # v1alpha1; scenario 78 then runs `kubectl bloodraven migrate-storage` and
+  # requires storedVersions == [v1beta1] with every object intact. 01 then
+  # proves that a failover still works on the upgraded, migrated cluster.
   #
   # upgrade-from is the last release without paced rollouts. Scenario 74's
   # precheck requires workloads without the rendered-by annotation, so it
@@ -187,7 +190,8 @@ jobs:
       upgrade-from: "1.7.0"
       # A fourth worker for the two auxiliary groups (see the file).
       kind-config: .github/kind/e2e-upgrade.yaml
-      scenario: 74-upgrade-paced-rollout,01-clean-primary-kill
-      # Scenario Timeouts 45m + 01's, plus the v1.7.0 install.
-      timeout-minutes: 90
+      scenario: 74-upgrade-paced-rollout,78-upgrade-storage-migration,01-clean-primary-kill
+      # Scenario Timeouts 45m + 15m + 01's, plus the v1.7.0 install with a
+      # backup and its verification.
+      timeout-minutes: 110
       images-artifact: e2e-images
