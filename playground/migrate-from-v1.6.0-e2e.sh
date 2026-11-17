@@ -582,8 +582,12 @@ step_teardown() {
   if [[ -d "$OLD_SRC" ]]; then
     git -C "$PROJECT_ROOT" worktree remove --force "$OLD_SRC" 2>/dev/null || true
   fi
+  local app
+  for app in counter dashboard dns-webhook; do
+    docker rmi "bloodraven-$app:v${FROM//./}" >/dev/null 2>&1 || true
+  done
   rm -rf "$STATE"
-  ok "Clusters and state removed"
+  ok "Clusters, the v$FROM playground images and state removed"
 }
 
 case "${1:-}" in

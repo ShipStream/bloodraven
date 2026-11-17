@@ -3651,13 +3651,17 @@ func (tm *TopologyManager) SetInitRestoreSeed(site string) {
 	tm.initRestoreSeed = site
 }
 
-// initRestoreUnseeded reports whether an initFromBackup restore is
-// unfinished and no seed is known for it yet: neither published by this
-// process (seedFreshDeploy) nor recorded in status (SetInitRestoreSeed).
+// initRestoreUnseeded reports whether the group is a new one that waits
+// for its initFromBackup restore and has never had a writable site: the
+// restore is unfinished, no seed is known for it (neither published by
+// this process in seedFreshDeploy nor recorded in status,
+// SetInitRestoreSeed), no failover is on record and no active site was
+// ever named. A group that has had a primary is not in that state,
+// whatever its restore record says, and fails over as usual.
 func (tm *TopologyManager) initRestoreUnseeded() bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	return tm.autoBootstrapSuppressed && tm.initRestoreSeed == ""
+	return tm.autoBootstrapSuppressed && tm.initRestoreSeed == "" && tm.lastFailoverTarget == "" && tm.lastActiveSite == ""
 }
 
 // initRestoreSeedSite returns the seed of an unfinished initFromBackup
