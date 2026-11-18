@@ -9580,6 +9580,102 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              storage:
+                description: |-
+                  Storage is the observed state of each site's data volume against
+                  spec.sites[].storage.size: the size asked for, what the claim
+                  requests, what the volume holds and whether growth is progressing.
+                  Written by the group reconciler. Absent until the first
+                  observation.
+                properties:
+                  sites:
+                    description: Sites holds one entry per site of spec.sites.
+                    items:
+                      description: SiteStorageStatus is the observed state of one
+                        site's data PVC.
+                      properties:
+                        capacity:
+                          description: |-
+                            Capacity is the claim's status.capacity.storage: the size of the
+                            bound volume. Empty while the claim is not bound.
+                          type: string
+                        claimName:
+                          description: ClaimName is the site's data PersistentVolumeClaim.
+                          type: string
+                        claimUID:
+                          description: |-
+                            ClaimUID is the UID of the claim observed. A replacement claim has
+                            another one.
+                          type: string
+                        desiredSize:
+                          description: |-
+                            DesiredSize is spec.sites[].storage.size as written in the spec this
+                            observation was made against.
+                          type: string
+                        lastTransitionTime:
+                          description: LastTransitionTime is when Phase last changed.
+                          format: date-time
+                          type: string
+                        message:
+                          description: |-
+                            Message says what the phase means for this site and, when an
+                            administrator has to act, what to do.
+                          type: string
+                        name:
+                          description: Name is the site, the key of the list.
+                          minLength: 1
+                          type: string
+                        phase:
+                          description: |-
+                            Phase summarizes the volume against the desired size:
+                              - Satisfied: the claim requests at least the desired size and the
+                                volume holds what it requests.
+                              - Pending: the claim is not bound yet (or does not exist); growth
+                                is not requested until it is.
+                              - Expanding: the claim requests the desired size and the storage
+                                driver is growing the volume.
+                              - FileSystemResizePending: the volume has grown and the file
+                                system on it grows when the node next mounts it; on a driver
+                                without online expansion that needs a restart of the site's pod.
+                              - Underspecified: the claim requests more than the desired size
+                                (it was expanded directly). The claim is kept, but a replacement
+                                would be created at the smaller desired size: raise
+                                spec.sites[].storage.size to at least the claim's request.
+                              - Unsupported: the desired size is larger than the claim and the
+                                claim's StorageClass does not allow volume expansion (or the
+                                claim has no class, or the class is gone).
+                              - Failed: the operator's request was refused or the storage
+                                driver reports the expansion infeasible; Message says why.
+                              - Retrying: a transient error prevented the observation or the
+                                request; the operator retries.
+                          enum:
+                          - Satisfied
+                          - Pending
+                          - Expanding
+                          - FileSystemResizePending
+                          - Underspecified
+                          - Unsupported
+                          - Failed
+                          - Retrying
+                          type: string
+                        requestedSize:
+                          description: RequestedSize is the claim's spec.resources.requests.storage.
+                          type: string
+                        storageClassName:
+                          description: |-
+                            StorageClassName is the class the claim was created with, read from
+                            the claim itself.
+                          type: string
+                      required:
+                      - name
+                      - phase
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
               topologyGeneration:
                 description: |-
                   TopologyGeneration increments whenever the authoritative active site changes
@@ -19286,6 +19382,102 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              storage:
+                description: |-
+                  Storage is the observed state of each site's data volume against
+                  spec.sites[].storage.size: the size asked for, what the claim
+                  requests, what the volume holds and whether growth is progressing.
+                  Written by the group reconciler. Absent until the first
+                  observation.
+                properties:
+                  sites:
+                    description: Sites holds one entry per site of spec.sites.
+                    items:
+                      description: SiteStorageStatus is the observed state of one
+                        site's data PVC.
+                      properties:
+                        capacity:
+                          description: |-
+                            Capacity is the claim's status.capacity.storage: the size of the
+                            bound volume. Empty while the claim is not bound.
+                          type: string
+                        claimName:
+                          description: ClaimName is the site's data PersistentVolumeClaim.
+                          type: string
+                        claimUID:
+                          description: |-
+                            ClaimUID is the UID of the claim observed. A replacement claim has
+                            another one.
+                          type: string
+                        desiredSize:
+                          description: |-
+                            DesiredSize is spec.sites[].storage.size as written in the spec this
+                            observation was made against.
+                          type: string
+                        lastTransitionTime:
+                          description: LastTransitionTime is when Phase last changed.
+                          format: date-time
+                          type: string
+                        message:
+                          description: |-
+                            Message says what the phase means for this site and, when an
+                            administrator has to act, what to do.
+                          type: string
+                        name:
+                          description: Name is the site, the key of the list.
+                          minLength: 1
+                          type: string
+                        phase:
+                          description: |-
+                            Phase summarizes the volume against the desired size:
+                              - Satisfied: the claim requests at least the desired size and the
+                                volume holds what it requests.
+                              - Pending: the claim is not bound yet (or does not exist); growth
+                                is not requested until it is.
+                              - Expanding: the claim requests the desired size and the storage
+                                driver is growing the volume.
+                              - FileSystemResizePending: the volume has grown and the file
+                                system on it grows when the node next mounts it; on a driver
+                                without online expansion that needs a restart of the site's pod.
+                              - Underspecified: the claim requests more than the desired size
+                                (it was expanded directly). The claim is kept, but a replacement
+                                would be created at the smaller desired size: raise
+                                spec.sites[].storage.size to at least the claim's request.
+                              - Unsupported: the desired size is larger than the claim and the
+                                claim's StorageClass does not allow volume expansion (or the
+                                claim has no class, or the class is gone).
+                              - Failed: the operator's request was refused or the storage
+                                driver reports the expansion infeasible; Message says why.
+                              - Retrying: a transient error prevented the observation or the
+                                request; the operator retries.
+                          enum:
+                          - Satisfied
+                          - Pending
+                          - Expanding
+                          - FileSystemResizePending
+                          - Underspecified
+                          - Unsupported
+                          - Failed
+                          - Retrying
+                          type: string
+                        requestedSize:
+                          description: RequestedSize is the claim's spec.resources.requests.storage.
+                          type: string
+                        storageClassName:
+                          description: |-
+                            StorageClassName is the class the claim was created with, read from
+                            the claim itself.
+                          type: string
+                      required:
+                      - name
+                      - phase
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
               topologyGeneration:
                 description: |-
                   TopologyGeneration increments whenever the authoritative active site changes

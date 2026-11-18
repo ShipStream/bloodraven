@@ -2305,6 +2305,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// Δ13): a stale copy would undo a Bound transition or resurrect a
 		// released entry.
 		pitrBindings := fresh.Status.PITRArchiveBindings
+		// status.storage is the group reconciler's too (#302): a stale
+		// copy would report a finished expansion as still running, or
+		// drop the observation of a replacement claim.
+		siteStorage := fresh.Status.Storage
 		reconcilerConds := make([]*metav1.Condition, len(reconcilerOwnedConditions))
 		for i, t := range reconcilerOwnedConditions {
 			reconcilerConds[i] = apimeta.FindStatusCondition(fresh.Status.Conditions, t)
@@ -2354,6 +2358,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		fresh.Status.RestoreOfflineFence = offlineFence
 		fresh.Status.EncryptionAtRest = encryption
 		fresh.Status.PITRArchiveBindings = pitrBindings
+		fresh.Status.Storage = siteStorage
 		fresh.Status.Dragonfly = dragonfly
 		fresh.Status.Rollout = rollout
 		for i, c := range reconcilerConds {

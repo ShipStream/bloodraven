@@ -921,6 +921,14 @@ type MysqlFailoverGroupStatus struct {
 	// +listMapKey=id
 	// +kubebuilder:validation:MaxItems=16
 	PITRArchiveBindings []PITRArchiveBinding `json:"pitrArchiveBindings,omitempty"`
+
+	// Storage is the observed state of each site's data volume against
+	// spec.sites[].storage.size: the size asked for, what the claim
+	// requests, what the volume holds and whether growth is progressing.
+	// Written by the group reconciler. Absent until the first
+	// observation.
+	// +optional
+	Storage *StorageStatus `json:"storage,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.
