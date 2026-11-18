@@ -1809,7 +1809,7 @@ From v1.8.0 on every Bloodraven CRD serves `shipstream.io/v1beta1` (stored) and 
 - A stored object that does not have the shape the schema describes refuses the start. It was stored by v1.6.0 or earlier.
 - A CRD that is **newer** only warns (`NewerCRDDetected`): the operator was rolled back, or the upgrade is between its two steps.
 
-While the operator refuses, no operator runs and nothing fails over automatically.
+During a chart upgrade the previous operator pod keeps running and keeps the leader lease while the new pod refuses (the Deployment is a rolling update with `maxUnavailable: 0`), so failover stays automatic: `kubectl get pods` shows one Running pod and one in `CrashLoopBackOff`, and `kubectl get lease bloodraven.shipstream.io` names the Running one. No operator runs, and nothing fails over automatically, when no previous pod is left: the only pod restarted for another reason, or `leaderElection.enabled: false` (`Recreate`).
 
 Separately, objects created before the upgrade to v1.8.0 stay encoded as `v1alpha1` until `kubectl bloodraven migrate-storage` rewrites them, and `status.storedVersions` of each CRD lists both versions until then.
 

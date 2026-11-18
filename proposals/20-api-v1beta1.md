@@ -3281,9 +3281,15 @@ Decisions:
 5. **`crdCheck: warn`** (chart value, `--crd-check=warn`) starts the operator despite a refusal. It is a
    break-glass for a wrong check. Rejected: no override, because a false refusal would leave every group without
    failover until a patch release.
-6. **A refused operator is no operator.** The Deployment's strategy is `Recreate`, so on a chart-only upgrade
-   the previous operator is gone before the new one refuses. The docs say so. Changing the strategy, or a
-   pre-upgrade hook that runs the check, is left for a follow-up.
+6. **A refused operator leaves the previous one running (#299, revised before v1.8.0).** As first built, the
+   Deployment's strategy was `Recreate`, so on a chart-only upgrade the previous operator was gone before the
+   new one refused. With leader election the chart now uses `RollingUpdate` (`maxSurge: 1`,
+   `maxUnavailable: 0`): the check runs before the manager serves the readiness endpoint, so a refusing pod
+   never becomes Ready and the previous pod keeps the lease. `Recreate` stays for
+   `leaderElection.enabled: false`. Cost: on every upgrade a pod of each version runs for a few seconds, both
+   answering the auxiliary endpoints, as two replicas already do. Rejected: a Helm `pre-upgrade` hook that runs
+   the check (its own ServiceAccount and RBAC as hook resources, and a hook that cannot pull its image blocks
+   every upgrade). The upgrade E2E makes the mistake first and checks the lease.
 7. **Owner references are not migrated.** Workloads created before the upgrade name their owner as
    `shipstream.io/v1alpha1`. That works while `v1alpha1` is served. The release that removes `v1alpha1` must
    rewrite them first, or the garbage collector can no longer resolve the owners.

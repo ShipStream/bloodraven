@@ -120,7 +120,10 @@ crdCheck: enforce
 
 # Leader election ensures safe single-writer semantics.
 leaderElection:
-  # -- Enable leader election (strongly recommended)
+  # -- Enable leader election (strongly recommended). With it the Deployment
+  # replaces the operator pod with a rolling update, so a new pod that
+  # refuses to start (CRDs older than it needs) leaves the previous operator
+  # running. Without it the strategy is Recreate.
   enabled: true
 
 metrics:
