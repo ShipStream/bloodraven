@@ -399,6 +399,48 @@ func TestKeyringAgent_PushesAgainWhenKeyringChanges(t *testing.T) {
 	}
 }
 
+// The digest /keyring/status reports is the file as it is now, not as the
+// last tick read it. A clone recipient's post-clone restart writes a new
+// binary log key; the operator compares this digest with the escrowed copy
+// to decide to seal, and sealing on the escrow from before the restart
+// left mysqld unable to open its relay log (scenario 51).
+func TestKeyringAgent_SnapshotReadsTheKeyringNow(t *testing.T) {
+	f := newAgentFixture(t, nil)
+	before := []byte("keyring before the post-clone restart")
+	if err := os.WriteFile(f.keyring, before, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+	if got := f.agent.Snapshot(); got.Digest != digestOf(before) || got.EscrowedDigest != digestOf(before) {
+		t.Fatalf("status after the first tick = %+v", got)
+	}
+
+	after := []byte("keyring with the new binary log key")
+	if err := os.WriteFile(f.keyring, after, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := f.agent.Snapshot()
+	if got.Digest != digestOf(after) {
+		t.Fatalf("digest = %q before the next tick, want the file's %q: a stale digest matches the old escrow", got.Digest, digestOf(after))
+	}
+	if got.Size != int64(len(after)) || !got.Present {
+		t.Errorf("status = %+v", got)
+	}
+	if got.EscrowedDigest != digestOf(before) {
+		t.Errorf("escrowed digest = %q, want the old escrow until a tick pushes the new file", got.EscrowedDigest)
+	}
+	if received, _ := f.escrow.snapshot(); len(received) != 1 {
+		t.Errorf("Snapshot pushed: %d pushes, want 1", len(received))
+	}
+
+	if err := os.Remove(f.keyring); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.agent.Snapshot(); got.Present || got.Digest != "" || got.LastError != "" {
+		t.Errorf("status with the file gone = %+v", got)
+	}
+}
+
 // TestKeyringAgent_RetriesWhenOperatorEchoesWrongDigest is the sidecar
 // half of the escrow gate: if the operator did not store exactly what
 // was sent, the agent must not record the push as durable, or the

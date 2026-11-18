@@ -258,11 +258,45 @@ func newEscrowHTTPClient(rawURL, caFile string) (*http.Client, error) {
 	}, nil
 }
 
-// Snapshot returns the current status for /keyring/status.
+// Snapshot returns the current status for /keyring/status. The keyring
+// file is read again for it: the operator seals a site against the
+// escrowed copy once the digest reported here matches it, and a digest
+// left over from the last tick (up to PollInterval old) can predate a
+// change MySQL just made. A clone recipient's post-clone restart stores a
+// new binary log key; sealing on the pre-restart digest leaves mysqld
+// unable to open its own binary and relay logs on the sealed restart.
 func (a *KeyringAgent) Snapshot() KeyringStatus {
+	raw, err := os.ReadFile(a.cfg.Path)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.observeKeyringFileLocked(raw, err)
 	return a.status
+}
+
+// observeKeyringFileLocked records the result of reading the keyring file
+// and returns its digest ("" when there is none or it holds no keys).
+// Callers hold a.mu.
+func (a *KeyringAgent) observeKeyringFileLocked(raw []byte, err error) string {
+	if err != nil {
+		a.status.Present = false
+		a.status.Size = 0
+		a.status.Digest = ""
+		if !errors.Is(err, os.ErrNotExist) {
+			a.status.LastError = fmt.Sprintf("read keyring: %v", err)
+		} else {
+			a.status.LastError = ""
+		}
+		return ""
+	}
+	digest := ""
+	if len(raw) > 0 && !emptyKeyringDocument(raw) {
+		sum := sha256.Sum256(raw)
+		digest = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	a.status.Present = true
+	a.status.Size = int64(len(raw))
+	a.status.Digest = digest
+	return digest
 }
 
 // Run drives the agent until ctx is cancelled.
@@ -321,32 +355,13 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 	viewErr := a.refreshMySQLView(ctx)
 
 	raw, err := os.ReadFile(a.cfg.Path)
-	if err != nil {
-		a.mu.Lock()
-		a.status.Present = false
-		a.status.Size = 0
-		a.status.Digest = ""
-		if !errors.Is(err, os.ErrNotExist) {
-			a.status.LastError = fmt.Sprintf("read keyring: %v", err)
-		} else {
-			a.status.LastError = ""
-		}
-		a.mu.Unlock()
-		return
-	}
-
-	digest := ""
-	if len(raw) > 0 && !emptyKeyringDocument(raw) {
-		sum := sha256.Sum256(raw)
-		digest = "sha256:" + hex.EncodeToString(sum[:])
-	}
-
 	a.mu.Lock()
-	a.status.Present = true
-	a.status.Size = int64(len(raw))
-	a.status.Digest = digest
+	digest := a.observeKeyringFileLocked(raw, err)
 	alreadyEscrowed := a.status.EscrowedDigest == digest && digest != ""
 	a.mu.Unlock()
+	if err != nil {
+		return
+	}
 
 	if !a.cfg.EscrowArmed || digest == "" || alreadyEscrowed {
 		a.setOperationalError(viewErr)
