@@ -78,6 +78,7 @@ Grafana dashboards shipped as ConfigMaps (label {{ .Values.grafanaDashboards.lab
   - Bloodraven — Replication & Recovery (uid bloodraven-replication)
   - Bloodraven — Backups & Verification (uid bloodraven-backups)
   - Bloodraven — PITR Archiver         (uid bloodraven-archiver)
+  - Bloodraven — MySQL Workload        (uid bloodraven-mysql-workload, optional exporter)
 Folder: {{ .Values.grafanaDashboards.folder | default "Bloodraven" }}.
 {{- else }}
 

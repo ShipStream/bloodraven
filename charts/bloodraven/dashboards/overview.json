@@ -3,7 +3,7 @@
   "uid": "bloodraven-overview",
   "tags": ["bloodraven", "mysql", "failover"],
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "timezone": "",
   "refresh": "30s",
@@ -14,7 +14,8 @@
     {"title": "Failover & Topology", "type": "link", "url": "/d/bloodraven-failover", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
     {"title": "Replication & Recovery", "type": "link", "url": "/d/bloodraven-replication", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
     {"title": "Backups", "type": "link", "url": "/d/bloodraven-backups", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
-    {"title": "PITR Archiver", "type": "link", "url": "/d/bloodraven-archiver", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true}
+    {"title": "PITR Archiver", "type": "link", "url": "/d/bloodraven-archiver", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
+    {"title": "MySQL Workload", "type": "link", "url": "/d/bloodraven-mysql-workload", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true}
   ],
   "templating": {
     "list": [

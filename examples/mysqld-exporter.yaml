@@ -1,0 +1,211 @@
+# Opt-in mysqld_exporter for one Bloodraven failover group.
+#
+# Contract of this example (adjust the names to your group):
+#   namespace      warehouse
+#   group          orders (MysqlFailoverGroup "orders", sites "iad" and "pdx")
+#   credentials    spec.credentials.monitorSecretName: orders-mysql-monitor
+#                  (keys "username" and "password"; the Secret is not part of
+#                  this file and no credential appears in it)
+#   exporter       prom/mysqld-exporter v0.21.0, one Deployment and one
+#                  ClusterIP Service, both named orders-mysqld-exporter
+#
+# One exporter scrapes every site of the group in multi-target mode: Prometheus
+# calls /probe?target=<host:port> and the exporter dials that address with the
+# monitor account. The matching Prometheus configuration is
+# examples/mysqld-exporter-scrape.yaml.
+#
+# The exporter dials whatever "target" a request names, with the monitor
+# password, and has no authentication of its own. The NetworkPolicy restricts
+# the exporter to Prometheus ingress and MySQL and DNS egress. Apply it where
+# NetworkPolicy is enforced and tune its selectors for your cluster.
+#
+# MySQL TLS: when the group sets spec.tls, MySQL runs with
+# require_secure_transport=ON and the exporter must use TLS. Uncomment the
+# blocks marked "TLS" in the ConfigMap and the Deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-mysqld-exporter
+  namespace: warehouse
+  labels:
+    app.kubernetes.io/name: mysqld-exporter
+    app.kubernetes.io/instance: orders
+data:
+  # mysqld_exporter expands ${NAME} from its environment when it reads this
+  # file. The Deployment sets both variables from the monitor Secret.
+  exporter.cnf: |
+    [client]
+    user = ${MYSQL_MONITOR_USERNAME}
+    password = ${MYSQL_MONITOR_PASSWORD}
+    # TLS: verify the MySQL server certificate against the group's CA.
+    # The per-site -internal Service name is not in the certificate, so the
+    # name to verify is set explicitly. The Secret's certificate covers the
+    # -primary Service, which every site's certificate shares.
+    # ssl-ca = /etc/mysql/tls/ca.crt
+    # tls-server-name = mysql-orders-primary.warehouse.svc.cluster.local
+    # tls-min-version = TLSv1.2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-mysqld-exporter
+  namespace: warehouse
+  labels:
+    app.kubernetes.io/name: mysqld-exporter
+    app.kubernetes.io/instance: orders
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysqld-exporter
+      app.kubernetes.io/instance: orders
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysqld-exporter
+        app.kubernetes.io/instance: orders
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mysqld-exporter
+          image: prom/mysqld-exporter:v0.21.0@sha256:afad0c59a154fea24ca5ea0e6f95f2b0b168601b111266963dc8a347715b5318
+          args:
+            - --config.my-cnf=/etc/mysqld-exporter/exporter.cnf
+            - --web.listen-address=:9104
+            # Only global_status and global_variables run. These four are
+            # enabled by default in v0.21.0; every other collector is off.
+            - --no-collect.slave_status
+            - --no-collect.info_schema.innodb_cmp
+            - --no-collect.info_schema.innodb_cmpmem
+            - --no-collect.info_schema.query_response_time
+          env:
+            - name: MYSQL_MONITOR_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: orders-mysql-monitor
+                  key: username
+            - name: MYSQL_MONITOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: orders-mysql-monitor
+                  key: password
+          ports:
+            - name: metrics
+              containerPort: 9104
+          # "/" is the landing page. Do not probe /metrics: without a target
+          # it dials localhost:3306 and always reports mysql_up 0.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mysqld-exporter
+              readOnly: true
+            # TLS:
+            # - name: mysql-tls-ca
+            #   mountPath: /etc/mysql/tls
+            #   readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: orders-mysqld-exporter
+        # TLS: mount only ca.crt of the group's spec.tls Secret, never tls.key.
+        # - name: mysql-tls-ca
+        #   secret:
+        #     secretName: orders-mysql-tls
+        #     items:
+        #       - key: ca.crt
+        #         path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-mysqld-exporter
+  namespace: warehouse
+  labels:
+    app.kubernetes.io/name: mysqld-exporter
+    app.kubernetes.io/instance: orders
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mysqld-exporter
+    app.kubernetes.io/instance: orders
+  ports:
+    - name: metrics
+      port: 9104
+      targetPort: metrics
+---
+# Ingress to the exporter: Prometheus only. Egress from it: the MySQL pods of
+# this group on 3306, and cluster DNS. Adjust the Prometheus namespace and pod
+# labels (these match kube-prometheus-stack in "monitoring") and the DNS labels
+# (these match CoreDNS) to your cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-mysqld-exporter
+  namespace: warehouse
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mysqld-exporter
+      app.kubernetes.io/instance: orders
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9104
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mysql
+              app.kubernetes.io/managed-by: bloodraven
+              bloodraven.shipstream.io/failover-group: orders
+      ports:
+        - protocol: TCP
+          port: 3306
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
