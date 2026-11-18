@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Classify changed paths into Go, site, course, PITR-native and
-# Dragonfly-native jobs; uncertainty selects all.
+# Dragonfly-native, and MySQL workload jobs; uncertainty selects all.
 #
 # pitr gates test-pitr-native: the replay code paths (pitr-download,
 # the planner, the sidecar binlog reader, restore.py, verify_script.sh), the
@@ -22,10 +22,12 @@
 # rollout and upgrade paths, the planned failover's Dragonfly phase, which
 # also render the flags the servers are started with), and the files that
 # name the Dragonfly image the playground and the CRD examples pin.
+# workload gates the native dashboard test against the example scrape config,
+# the default MySQL image, and the monitor account's provisioning.
 set -euo pipefail
 
-go=false site=false course=false pitr=false dragonfly=false any=false
-all() { go=true; site=true; course=true; pitr=true; dragonfly=true; }
+go=false site=false course=false pitr=false dragonfly=false workload=false any=false
+all() { go=true; site=true; course=true; pitr=true; dragonfly=true; workload=true; }
 while IFS= read -r f || [ -n "$f" ]; do
   [ -n "$f" ] || continue
   any=true
@@ -35,6 +37,9 @@ while IFS= read -r f || [ -n "$f" ]; do
   esac
   case "$f" in
     internal/dragonfly/*|internal/controller/dragonfly_*.go|internal/controller/planned_failover_df*.go|api/v1beta1/dragonfly_types.go|playground/manifests/failovergroup.yaml|go.mod|go.sum) dragonfly=true ;;
+  esac
+  case "$f" in
+    charts/bloodraven/dashboards/mysql-workload.json|examples/mysqld-exporter*.yaml|internal/controller/mysql_workload_native_test.go|internal/controller/own_transactions_lost_native_test.go|internal/controller/reconciler.go|internal/controller/credentials.go|internal/controller/init_users.go|internal/mysql/*|go.mod|go.sum) workload=true ;;
   esac
   case "$f" in
     .github/workflows/ci.yml|.github/actions/*|.github/scripts/*|Makefile|.gitignore) all ;;
@@ -54,4 +59,4 @@ while IFS= read -r f || [ -n "$f" ]; do
   esac
 done
 $any || all
-printf 'go=%s\nsite=%s\ncourse=%s\npitr=%s\ndragonfly=%s\n' "$go" "$site" "$course" "$pitr" "$dragonfly"
+printf 'go=%s\nsite=%s\ncourse=%s\npitr=%s\ndragonfly=%s\nworkload=%s\n' "$go" "$site" "$course" "$pitr" "$dragonfly" "$workload"
