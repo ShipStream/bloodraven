@@ -899,30 +899,32 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1beta1.
 	// Deployment in one pass. Never let a partial or transient drift snapshot
 	// route this strategy back through the ordered updater.
 	if fg.Spec.UpdateStrategy.EffectiveType() == v1beta1.UpdateStrategyRecreate {
+		tm.SetSpecRemountOnlySites(nil)
 		tm.SetSpecDriftSites(nil)
 		return
 	}
 
-	driftSites, refused, held, ok := r.specDriftView(ctx, r.client, fg)
+	view, ok := r.specDriftDetail(ctx, r.client, fg)
 	if !ok {
 		return
 	}
-	if len(driftSites) > 0 && r.apiReader != nil {
+	if len(view.drift) > 0 && r.apiReader != nil {
 		var fresh v1beta1.MysqlFailoverGroup
 		if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &fresh); err != nil {
 			r.logger.Warn("failed to confirm spec drift with an uncached read; preserving current drift set", "error", err)
 			return
 		}
-		confirmed, confirmedRefused, confirmedHeld, ok := r.specDriftView(ctx, r.apiReader, &fresh)
+		confirmed, ok := r.specDriftDetail(ctx, r.apiReader, &fresh)
 		if !ok {
 			return
 		}
-		driftSites, refused, held = confirmed, confirmedRefused, confirmedHeld
+		view = confirmed
 	}
 
-	tm.SetSpecRefusedSites(refused)
-	tm.SetSpecHeldSites(held)
-	tm.SetSpecDriftSites(driftSites)
+	tm.SetSpecRefusedSites(view.refused)
+	tm.SetSpecHeldSites(view.held)
+	tm.SetSpecRemountOnlySites(view.remountOnly)
+	tm.SetSpecDriftSites(view.drift)
 }
 
 // specDriftSites returns the sites of fg whose Deployment (read through
@@ -941,13 +943,26 @@ func (r *TopologyManagerRunner) specDriftSites(ctx context.Context, reader clien
 // not drift, so no ordered update starts for them; the write path refuses
 // the same sites by the same record.
 func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client.Reader, fg *v1beta1.MysqlFailoverGroup) (drift, refused, held []string, ok bool) {
+	view, ok := r.specDriftDetail(ctx, reader, fg)
+	return view.drift, view.refused, view.held, ok
+}
+
+// specDriftSnapshot is specDriftView's result. remountOnly lists the drift
+// sites whose only difference is an administrator's storage remount
+// request: their pods get the same render when they roll, so they are not
+// awaiting a rollout of it (SitesAwaitingRollout).
+type specDriftSnapshot struct {
+	drift, refused, held, remountOnly []string
+}
+
+func (r *TopologyManagerRunner) specDriftDetail(ctx context.Context, reader client.Reader, fg *v1beta1.MysqlFailoverGroup) (view specDriftSnapshot, ok bool) {
 	// With no sidecar image to render (no pin and no operator default)
 	// every site would hash as drift the render then refuses to apply,
 	// and the ordered updater would retry it for ever. Keep the current
 	// set; the reconcile reports the refusal.
 	if _, err := effectiveSidecarImage(fg); err != nil {
 		r.logger.Warn("cannot render the group's Deployments; preserving current drift set", "fg", client.ObjectKeyFromObject(fg), "error", err)
-		return nil, nil, nil, false
+		return specDriftSnapshot{}, false
 	}
 	// The reconciler creates the digest key before the first Deployment;
 	// until it exists no live hash can match, so keep the current set.
@@ -956,18 +971,18 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 		if err != errDigestKeyMissing {
 			r.logger.Warn("failed to read secret digest key; preserving current drift set", "error", err)
 		}
-		return nil, nil, nil, false
+		return specDriftSnapshot{}, false
 	}
 	secretInputs, err := specSecretInputs(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to read spec secrets; preserving current drift set", "error", err)
-		return nil, nil, nil, false
+		return specDriftSnapshot{}, false
 	}
 	secretDigest := secretContentDigest(digestKey, secretInputs)
 	deploys, err := listPITRSiteDeployments(ctx, reader, fg)
 	if err != nil {
 		r.logger.Warn("failed to list site deployments; preserving current drift set", "error", err)
-		return nil, nil, nil, false
+		return specDriftSnapshot{}, false
 	}
 	pitr, action := resolvePITRRender(fg, deploys)
 	byName := make(map[string]*appsv1.Deployment, len(deploys))
@@ -987,7 +1002,7 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 					continue // Deployment doesn't exist yet — reconciler will create it
 				}
 				r.logger.Warn("failed to inspect deployment spec drift; preserving current drift set", "site", site.Name, "error", err)
-				return nil, nil, nil, false
+				return specDriftSnapshot{}, false
 			}
 			deploy = &d
 		}
@@ -998,7 +1013,7 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 		// updated (workload_selector.go): it is not drift the ordered
 		// updater could roll.
 		if deploymentSelectorMismatch(deploy, fg, site.Name) != nil {
-			refused = append(refused, site.Name)
+			view.refused = append(view.refused, site.Name)
 			continue
 		}
 		// The render annotation is repaired on its own (U08): with a
@@ -1008,19 +1023,23 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 		restart, err := requestedStorageRestart(ctx, reader, fg, site)
 		if err != nil {
 			r.logger.Warn("could not check storage restart request", "site", site.Name, "error", err)
-			return nil, nil, nil, false
+			return specDriftSnapshot{}, false
 		}
-		if deploy.Annotations[v1beta1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
-			deploy.Annotations[v1beta1.PITRRenderAnnotation] != pitr.Canonical() ||
-			(restart != "" && restart != deploy.Spec.Template.Annotations[v1beta1.StorageRestartAnnotation]) {
+		renderDrift := deploy.Annotations[v1beta1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
+			deploy.Annotations[v1beta1.PITRRenderAnnotation] != pitr.Canonical()
+		remount := restart != "" && restart != deploy.Spec.Template.Annotations[v1beta1.StorageRestartAnnotation]
+		if renderDrift || remount {
 			if rolloutHoldsSite(r.rolloutPacing, fg, site.Name, deploy) {
-				held = append(held, site.Name)
+				view.held = append(view.held, site.Name)
 				continue
 			}
-			drift = append(drift, site.Name)
+			view.drift = append(view.drift, site.Name)
+			if !renderDrift {
+				view.remountOnly = append(view.remountOnly, site.Name)
+			}
 		}
 	}
-	return drift, refused, held, true
+	return view, true
 }
 
 // activeSiteNeedsUpdate rechecks the primary just before an ordered handoff.

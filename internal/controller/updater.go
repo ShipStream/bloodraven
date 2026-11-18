@@ -334,7 +334,9 @@ func (u *UpdateController) Execute(ctx context.Context,
 
 // ExecuteTargets updates every drifted follower sequentially, then updates the
 // active site only after handing authority to a healthy promotable standby.
-// The returned names completed successfully and may be removed from drift.
+// The returned names completed successfully and may be removed from drift;
+// they include an active site whose recheck before the handoff found it
+// no longer differs.
 //
 // A rolled site counts as done only once its MySQL replicates directly from
 // the primary and its new pod is Ready, which the probe reports only for a
@@ -463,8 +465,14 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 
 	if u.confirmActiveDrift != nil {
 		needed, err := u.confirmActiveDrift(ctx, active.Name)
-		if err != nil || !needed {
+		if err != nil {
 			return processed, err
+		}
+		if !needed {
+			// Nothing is left to apply to it, so it leaves the drift set
+			// with the followers instead of starting the next attempt.
+			u.logger.Info("ordered update: active site no longer needs an update; skipping its handoff", "site", active.Name)
+			return append(processed, active.Name), nil
 		}
 	}
 	u.setPhase(v1beta1.UpdatePhaseFailover)

@@ -77,7 +77,9 @@ type storageClassVerdicts struct {
 type storageClassVerdict struct {
 	found  bool
 	allows bool
-	at     time.Time
+	// err is a read the API server refused (not transient).
+	err error
+	at  time.Time
 }
 
 // siteStorageResult is one site's observation and when to look again.
@@ -138,8 +140,10 @@ func siteFileSystemResizePending(pvc *corev1.PersistentVolumeClaim) (pending boo
 // observeSiteClaim classifies a site's claim against the desired size. It
 // is pure (no reads): grow reports that the claim is bound, requests less
 // than desired, and nothing rules a request out, so the caller checks the
-// class and raises the request.
-func observeSiteClaim(siteName, desiredRaw string, desired resource.Quantity, pvc *corev1.PersistentVolumeClaim) (st v1beta1.SiteStorageStatus, grow bool) {
+// class and raises the request. prev is the site's stored observation, or
+// nil; it carries a size the claim's request was lowered from
+// (abandonedGrowth).
+func observeSiteClaim(siteName, desiredRaw string, desired resource.Quantity, pvc *corev1.PersistentVolumeClaim, prev *v1beta1.SiteStorageStatus) (st v1beta1.SiteStorageStatus, grow bool) {
 	st = v1beta1.SiteStorageStatus{
 		Name:        siteName,
 		ClaimName:   pvc.Name,
@@ -189,6 +193,13 @@ func observeSiteClaim(siteName, desiredRaw string, desired resource.Quantity, pv
 	}
 
 	if !hasRequest || requested.Cmp(desired) < 0 {
+		if hasRequest && abandonedGrowth(prev, pvc.UID, requested, desired) {
+			st.AbandonedSize = desiredRaw
+			st.Phase = v1beta1.SiteStorageFailed
+			st.Message = fmt.Sprintf("the request of claim %s was lowered to %s after it had requested at least %s, as when recovering from a failed expansion; the operator does not raise it to %s again. A replacement claim would still be created at %s: raise spec.sites[%s].storage.size to retry growth",
+				pvc.Name, st.RequestedSize, desiredRaw, desiredRaw, desiredRaw, siteName)
+			return st, false
+		}
 		// The caller decides: the class may not allow it.
 		st.Phase = v1beta1.SiteStorageExpanding
 		return st, true
@@ -201,7 +212,7 @@ func observeSiteClaim(siteName, desiredRaw string, desired resource.Quantity, pv
 	}
 	if failure := pvcResizeErrorSuffix(pvc); failure != "" {
 		st.Phase = v1beta1.SiteStorageFailed
-		st.Message = fmt.Sprintf("the storage driver reported an error expanding claim %s%s; check the PVC events and driver before requesting a remount", pvc.Name, failure)
+		st.Message = fmt.Sprintf("the storage driver reported an error expanding claim %s%s; check the PVC events and the driver. A remount request is accepted only once the error clears and the file system resize is pending", pvc.Name, failure)
 		return st, false
 	}
 	if !hasCapacity || capacity.Cmp(requested) < 0 ||
@@ -215,6 +226,24 @@ func observeSiteClaim(siteName, desiredRaw string, desired resource.Quantity, pv
 	}
 	st.Phase = v1beta1.SiteStorageSatisfied
 	return st, false
+}
+
+// abandonedGrowth reports whether growth of the claim to desired was given
+// up: the stored observation of the same claim records it (AbandonedSize,
+// at the same desired size), or requested at least desired while the
+// claim now requests less. The operator never lowers a request, so a
+// lower one is an administrator's recovery from a failed expansion, which
+// raising it again would undo.
+func abandonedGrowth(prev *v1beta1.SiteStorageStatus, uid types.UID, requested, desired resource.Quantity) bool {
+	if prev == nil || prev.ClaimUID == "" || prev.ClaimUID != uid || requested.Cmp(desired) >= 0 {
+		return false
+	}
+	if prev.AbandonedSize != "" {
+		abandoned, err := resource.ParseQuantity(prev.AbandonedSize)
+		return err == nil && abandoned.Equal(desired)
+	}
+	before, err := resource.ParseQuantity(prev.RequestedSize)
+	return err == nil && before.Cmp(desired) >= 0
 }
 
 // pvcResizeErrorSuffix quotes the resizer's last error, if any.
@@ -239,7 +268,7 @@ func (r *MysqlFailoverGroupReconciler) storageClassAllowsExpansion(ctx context.C
 	v.mu.Lock()
 	if e, ok := v.entries[name]; ok && now.Sub(e.at) < storageClassVerdictTTL && !now.Before(e.at) {
 		v.mu.Unlock()
-		return e.found, e.allows, nil
+		return e.found, e.allows, e.err
 	}
 	v.mu.Unlock()
 
@@ -249,10 +278,15 @@ func (r *MysqlFailoverGroupReconciler) storageClassAllowsExpansion(ctx context.C
 	}
 	var sc storagev1.StorageClass
 	err = reader.Get(ctx, types.NamespacedName{Name: name}, &sc)
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !apierrors.IsNotFound(err) && storageErrorTransient(err) {
 		return false, false, err
 	}
 	verdict := storageClassVerdict{at: now, found: err == nil, allows: sc.AllowVolumeExpansion != nil && *sc.AllowVolumeExpansion}
+	if err != nil && !apierrors.IsNotFound(err) {
+		// A refusal (a missing permission) does not heal by retrying: it
+		// is kept like a verdict, so every reconcile does not repeat it.
+		verdict = storageClassVerdict{at: now, err: err}
+	}
 	v.mu.Lock()
 	if v.entries == nil {
 		v.entries = map[string]storageClassVerdict{}
@@ -264,7 +298,7 @@ func (r *MysqlFailoverGroupReconciler) storageClassAllowsExpansion(ctx context.C
 	}
 	v.entries[name] = verdict
 	v.mu.Unlock()
-	return verdict.found, verdict.allows, nil
+	return verdict.found, verdict.allows, verdict.err
 }
 
 // storageErrorTransient reports whether a failed read or request is worth
@@ -297,9 +331,19 @@ func (r *MysqlFailoverGroupReconciler) growSiteClaim(ctx context.Context, fg *v1
 	}
 	found, allows, err := r.storageClassAllowsExpansion(ctx, st.StorageClassName)
 	if err != nil {
-		st.Phase = v1beta1.SiteStorageRetrying
-		st.Message = fmt.Sprintf("could not read StorageClass %s to grow claim %s to %s; retrying: %v", st.StorageClassName, pvc.Name, st.DesiredSize, err)
-		return siteStorageResult{status: st, requeue: storageRetryInterval}
+		if storageErrorTransient(err) {
+			st.Phase = v1beta1.SiteStorageRetrying
+			st.Message = fmt.Sprintf("could not read StorageClass %s to grow claim %s to %s; retrying: %v", st.StorageClassName, pvc.Name, st.DesiredSize, err)
+			return siteStorageResult{status: st, requeue: storageRetryInterval}
+		}
+		hint := ""
+		if apierrors.IsForbidden(err) {
+			hint = "; the operator's role needs get on storageclasses (storage.k8s.io)"
+		}
+		st.Phase = v1beta1.SiteStorageFailed
+		st.Message = fmt.Sprintf("the API server refused reading StorageClass %s to grow claim %s to %s%s; the operator tries again: %v",
+			st.StorageClassName, pvc.Name, st.DesiredSize, hint, err)
+		return siteStorageResult{status: st, requeue: storageRecheckInterval}
 	}
 	if !found || !allows {
 		why := "does not allow volume expansion (allowVolumeExpansion is not true)"
@@ -323,6 +367,16 @@ func (r *MysqlFailoverGroupReconciler) growSiteClaim(ctx context.Context, fg *v1
 	// the capacity when recovering from a failed expansion).
 	if err := r.Patch(ctx, pvc, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		*pvc = *base
+		if apierrors.IsConflict(err) {
+			// The claim read may be an older copy than the one stored, as
+			// after this operator's own growth patch when the cache has not
+			// caught up: report the stored claim when it already requests
+			// the desired size, instead of a retry it does not need.
+			if fresh, ok := r.freshClaimAtLeast(ctx, pvc, desired); ok {
+				after, _ := observeSiteClaim(st.Name, st.DesiredSize, desired, fresh, nil)
+				return siteStorageResult{status: after}
+			}
+		}
 		if storageErrorTransient(err) {
 			st.Phase = v1beta1.SiteStorageRetrying
 			st.Message = fmt.Sprintf("could not raise the request of claim %s from %s to %s; retrying: %v", pvc.Name, from, st.DesiredSize, err)
@@ -337,8 +391,26 @@ func (r *MysqlFailoverGroupReconciler) growSiteClaim(ctx context.Context, fg *v1
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, v1beta1.EventStorageExpansionRequested,
 		"raised the request of claim %s (site %s) from %s to %s", pvc.Name, st.Name, from, st.DesiredSize)
 	// The claim as patched: the driver has not acted on it yet.
-	after, _ := observeSiteClaim(st.Name, st.DesiredSize, desired, pvc)
+	after, _ := observeSiteClaim(st.Name, st.DesiredSize, desired, pvc, nil)
 	return siteStorageResult{status: after}
+}
+
+// freshClaimAtLeast reads the claim uncached and returns it when it is the
+// same claim and already requests at least desired.
+func (r *MysqlFailoverGroupReconciler) freshClaimAtLeast(ctx context.Context, pvc *corev1.PersistentVolumeClaim, desired resource.Quantity) (*corev1.PersistentVolumeClaim, bool) {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	var fresh corev1.PersistentVolumeClaim
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(pvc), &fresh); err != nil || fresh.UID != pvc.UID {
+		return nil, false
+	}
+	requested, ok := pvcStorageRequest(&fresh)
+	if !ok || requested.Cmp(desired) < 0 {
+		return nil, false
+	}
+	return &fresh, true
 }
 
 // buildStorageStatus orders the observations as spec.sites and carries

@@ -1465,18 +1465,17 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1b
 	if err != nil {
 		return siteStorageResult{}, err
 	}
-	st, grow := observeSiteClaim(site.Name, string(site.Storage.Size), size, pvc)
-	if grow {
-		return r.growSiteClaim(ctx, fg, st, size, pvc), nil
-	}
-	if st.Phase == v1beta1.SiteStorageFileSystemResizePending {
-		r.describeStorageRestart(ctx, fg, &st)
-	}
+	st, grow := observeSiteClaim(site.Name, string(site.Storage.Size), size, pvc, fg.Status.SiteStorage(site.Name))
 	res := siteStorageResult{status: st}
-	if st.Phase == v1beta1.SiteStorageFailed {
+	if grow {
+		res = r.growSiteClaim(ctx, fg, st, size, pvc)
+	} else if st.Phase == v1beta1.SiteStorageFailed {
 		// A driver that reports the expansion infeasible says so on the
 		// claim, and a change there wakes the reconcile; this is a backstop.
 		res.requeue = storageRecheckInterval
+	}
+	if res.status.Phase == v1beta1.SiteStorageFileSystemResizePending {
+		r.describeStorageRestart(ctx, fg, &res.status)
 	}
 	return res, nil
 }

@@ -51,6 +51,15 @@ type SiteStorageStatus struct {
 	// +optional
 	Capacity string `json:"capacity,omitempty"`
 
+	// AbandonedSize is a desired size the operator no longer raises this
+	// claim to: the claim's request was lowered below it after it had
+	// requested at least that size, which is how an administrator recovers
+	// from a failed expansion. It is kept while the claim and the desired
+	// size stay the same; raising spec.sites[].storage.size above it
+	// resumes growth.
+	// +optional
+	AbandonedSize string `json:"abandonedSize,omitempty"`
+
 	// Phase summarizes the volume against the desired size:
 	//   - Satisfied: the claim requests at least the desired size and the
 	//     volume holds what it requests.
@@ -68,8 +77,11 @@ type SiteStorageStatus struct {
 	//   - Unsupported: the desired size is larger than the claim and the
 	//     claim's StorageClass does not allow volume expansion (or the
 	//     claim has no class, or the class is gone).
-	//   - Failed: the operator's request was refused or the storage
-	//     driver reports the expansion infeasible; Message says why.
+	//   - Failed: the operator's request or its read of the claim's
+	//     StorageClass was refused, the storage driver reports the expansion
+	//     infeasible or reports a resize error on the claim, or the claim's
+	//     request was lowered below the desired size after a failed
+	//     expansion (AbandonedSize); Message says why.
 	//   - Retrying: a transient error prevented the observation or the
 	//     request; the operator retries.
 	// +required

@@ -306,13 +306,16 @@ func (a *Actions) LabelNode(ctx context.Context, name string, labels map[string]
 // readonly taint is per-FG, and it's applied to every non-writable
 // site's node. The replica node usually carries it, and the
 // local-path-provisioner helper that fulfills a PVC does not tolerate
-// it. Clearing it on every node is cheap, idempotent, and side-effect-
-// free — the operator re-applies the taint on its next reconcile after
-// the bootstrap is complete and the site is back in `read-only`.
+// it. Clearing it on every node is cheap and idempotent.
 //
-// No taint reverter is pushed: the operator owns the taint lifecycle
-// and will re-establish it once the cluster is healthy. Same for the
-// PVC: the operator's reconcilePVC re-creates it.
+// The operator taints a node only when its site loses writability
+// (state.EvalPerSiteTransition): a replica that goes read-only →
+// unreachable → read-only gets no taint back from a running operator,
+// only from a failover or an operator restart. No taint reverter is
+// pushed: the playground reset restarts the operator, which taints the
+// read-only sites again, and a scenario that asserts the taint after a
+// wipe must restore it itself. The PVC is the operator's: reconcilePVC
+// re-creates it.
 func (a *Actions) WipeSiteData(ctx context.Context, site, fgGroup string) error {
 	dep := pgkube.MysqlDeploymentName(a.FG, site)
 	pvc := pgkube.MysqlPVCName(a.FG, site)

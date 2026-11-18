@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
@@ -127,11 +129,31 @@ func TestCompletedOnlineResizeSkipsPrimaryHandoff(t *testing.T) {
 	updater.confirmActiveDrift = func(context.Context, string) (bool, error) { checked = true; return false, nil }
 	primary := &testutil.FakeMySQL{}
 	standby := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "primary"}}
-	_, err := updater.ExecuteTargets(t.Context(), UpdateTarget{Name: "primary", Checker: primary, Drifted: true},
+	processed, err := updater.ExecuteTargets(t.Context(), UpdateTarget{Name: "primary", Checker: primary, Drifted: true},
 		[]UpdateTarget{{Name: "standby", Host: "standby", ExpectedSource: "primary", Checker: standby, Promotable: true}},
 		func(context.Context, string) error { t.Fatal("applied obsolete update"); return nil }, nil)
 	if !checked || err != nil || primary.ReadOnlyVal || !standby.ReadOnlyVal {
 		t.Fatalf("recheck=%v err=%v primaryReadOnly=%v standbyReadOnly=%v", checked, err, primary.ReadOnlyVal, standby.ReadOnlyVal)
+	}
+	// Reported done, so startUpdate drops it from the drift set instead of
+	// re-admitting the same update on every poll.
+	if !slices.Equal(processed, []string{"primary"}) {
+		t.Fatalf("processed = %v, want the rechecked active site", processed)
+	}
+}
+
+// A failed recheck keeps the active site queued.
+func TestActiveDriftRecheckErrorKeepsSiteQueued(t *testing.T) {
+	logger := testLogger()
+	updater := NewUpdateController(NewFailoverController(logger), logger)
+	updater.confirmActiveDrift = func(context.Context, string) (bool, error) { return false, errors.New("api down") }
+	primary := &testutil.FakeMySQL{}
+	standby := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "primary"}}
+	processed, err := updater.ExecuteTargets(t.Context(), UpdateTarget{Name: "primary", Checker: primary, Drifted: true},
+		[]UpdateTarget{{Name: "standby", Host: "standby", ExpectedSource: "primary", Checker: standby, Promotable: true}},
+		func(context.Context, string) error { t.Fatal("applied update after a failed recheck"); return nil }, nil)
+	if err == nil || slices.Contains(processed, "primary") {
+		t.Fatalf("processed=%v err=%v; want an error and the primary still queued", processed, err)
 	}
 }
 
@@ -147,5 +169,55 @@ func TestStrategyChangeRetainsInFlightPrimaryConfigDrift(t *testing.T) {
 	needed, err := r.activeSiteNeedsUpdate(t.Context(), client.ObjectKeyFromObject(fg), fg.UID, fg.Spec.Sites[0].Name)
 	if err != nil || !needed {
 		t.Fatalf("switching strategy lost the in-flight primary update: needed=%v err=%v", needed, err)
+	}
+}
+
+// A remount requested for a replica whose replication is broken names that
+// blocker: the ordered updater does not restart such a replica.
+func TestDescribeStorageRestartNamesBrokenReplication(t *testing.T) {
+	fg := newTestFG()
+	site := fg.Spec.Sites[1].Name
+	st := v1beta1.SiteStorageStatus{Name: site, ClaimUID: "uid-1", RequestedSize: "100Gi"}
+	fg.Annotations = map[string]string{v1beta1.StorageRestartAnnotation: storageRestartToken(site, "uid-1", "100Gi")}
+	r := &MysqlFailoverGroupReconciler{Client: fake.NewClientBuilder().WithScheme(testScheme()).Build()}
+
+	healthy := st
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: site, Replication: v1beta1.SiteReplicationHealthy}}
+	r.describeStorageRestart(t.Context(), fg, &healthy)
+	if !strings.Contains(healthy.Message, "Restart requested") || strings.Contains(healthy.Message, "broken") {
+		t.Fatalf("healthy replica message = %q", healthy.Message)
+	}
+
+	broken := st
+	fg.Status.Sites[0].Replication = v1beta1.SiteReplicationBroken
+	r.describeStorageRestart(t.Context(), fg, &broken)
+	if !strings.Contains(broken.Message, "replication is broken") || !strings.Contains(broken.Message, "storage runbook") {
+		t.Fatalf("broken replica message = %q", broken.Message)
+	}
+}
+
+// A site whose only difference is a remount request is drift for the
+// ordered updater, but not a site awaiting a new render: the archiver's
+// state there is reported as it is.
+func TestRemountOnlyDriftIsNotAwaitingRollout(t *testing.T) {
+	ctx := t.Context()
+	fg := newTestFG()
+	site := fg.Spec.Sites[0]
+	pvc := sgSiteClaim(site.Name, site.Storage.StorageClassName, "100Gi", "50Gi")
+	pvc.Status.Conditions = []corev1.PersistentVolumeClaimCondition{{Type: corev1.PersistentVolumeClaimFileSystemResizePending, Status: corev1.ConditionTrue}}
+	fg.Annotations = map[string]string{v1beta1.StorageRestartAnnotation: storageRestartToken(site.Name, string(pvc.UID), "100Gi")}
+	f := newSGFixture(t, fg, pvc)
+	f.reconcile(t)
+	runner := &TopologyManagerRunner{client: f.c, logger: testLogger()}
+	view, ok := runner.specDriftDetail(ctx, f.c, f.group(t))
+	if !ok || !slices.Equal(view.drift, []string{site.Name}) || !slices.Equal(view.remountOnly, []string{site.Name}) {
+		t.Fatalf("drift=%v remountOnly=%v ok=%t", view.drift, view.remountOnly, ok)
+	}
+
+	tm := &TopologyManager{}
+	tm.SetSpecDriftSites([]string{site.Name, "other"})
+	tm.SetSpecRemountOnlySites(view.remountOnly)
+	if got := tm.SitesAwaitingRollout(); !slices.Equal(got, []string{"other"}) {
+		t.Fatalf("SitesAwaitingRollout = %v, want only the site with a render change", got)
 	}
 }

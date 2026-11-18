@@ -64,6 +64,11 @@ func (r *MysqlFailoverGroupReconciler) describeStorageRestart(ctx context.Contex
 	}
 	if fg.Annotations[v1beta1.StorageRestartAnnotation] == token {
 		st.Message += ". Restart requested; waiting for the ordered updater and a safe site to restart"
+		for _, site := range fg.Status.Sites {
+			if site.Name == st.Name && site.Replication == v1beta1.SiteReplicationBroken {
+				st.Message += fmt.Sprintf(". Site %s's replication is broken, and the ordered updater restarts a replica only while it replicates from the primary: repair replication, or restart the replica by hand as the storage runbook describes", st.Name)
+			}
+		}
 	} else {
 		st.Message += fmt.Sprintf(". If the driver requires a remount, set the group annotation %s=%s", v1beta1.StorageRestartAnnotation, token)
 	}

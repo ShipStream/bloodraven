@@ -87,7 +87,7 @@ func TestObserveSiteClaim(t *testing.T) {
 		{"node infeasible", withResize(sgClaim("c", "100Gi", "50Gi", true), corev1.PersistentVolumeClaimNodeResizeInfeasible), v1beta1.SiteStorageFailed, false, "NodeResizeInfeasible"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, grow := observeSiteClaim("dc1", "100Gi", desired, tc.pvc)
+			st, grow := observeSiteClaim("dc1", "100Gi", desired, tc.pvc, nil)
 			if st.Phase != tc.phase || grow != tc.grow {
 				t.Fatalf("phase, grow = %s, %v, want %s, %v (%s)", st.Phase, grow, tc.phase, tc.grow, st.Message)
 			}
@@ -494,10 +494,12 @@ func TestReconcilePVC_GrowthPatchIsOptimisticallyLocked(t *testing.T) {
 	if err := f.c.Update(context.Background(), pvc); err != nil {
 		t.Fatal(err)
 	}
-	st, _ := observeSiteClaim("dc1", "200Gi", resource.MustParse("200Gi"), stale)
+	st, _ := observeSiteClaim("dc1", "200Gi", resource.MustParse("200Gi"), stale, nil)
 	res := f.r.growSiteClaim(context.Background(), fg, st, resource.MustParse("200Gi"), stale)
-	if res.status.Phase != v1beta1.SiteStorageRetrying {
-		t.Fatalf("stale growth = %+v, want Retrying", res.status)
+	// The conflict is answered from the stored claim, which already
+	// requests more than the spec.
+	if res.status.Phase != v1beta1.SiteStorageUnderspecified || res.status.RequestedSize != "500Gi" {
+		t.Fatalf("stale growth = %+v, want the stored claim's Underspecified", res.status)
 	}
 	if q := f.claim(t, "dc1").Spec.Resources.Requests[corev1.ResourceStorage]; q.Cmp(resource.MustParse("500Gi")) != 0 {
 		t.Fatalf("the newer 500Gi request was replaced by %s", q.String())
@@ -640,5 +642,143 @@ func TestMissingPVCRefusesStaleGroupAtCreation(t *testing.T) {
 	}
 	if got := pvc.Spec.Resources.Requests.Storage().String(); got != "200Gi" {
 		t.Errorf("replacement requests %s", got)
+	}
+}
+
+// The operator's own patch can be followed by a pass on a cached copy of
+// the claim from before it: the conflict that pass gets is answered from
+// the stored claim, not reported as a retry.
+func TestGrowSiteClaim_ConflictAfterOwnPatchReportsTheStoredClaim(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.Sites[0].Storage.Size = "200Gi"
+	allow := true
+	f := newSGFixture(t, fg, sgSiteClaim("dc1", "local-dc1", "100Gi", "100Gi"), sgSiteClaim("dc2", "local-dc2", "100Gi", "100Gi"), sgClass("local-dc1", &allow))
+	pvc := f.claim(t, "dc1")
+	stale := pvc.DeepCopy()
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("200Gi")
+	if err := f.c.Update(context.Background(), pvc); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := observeSiteClaim("dc1", "200Gi", resource.MustParse("200Gi"), stale, nil)
+	res := f.r.growSiteClaim(context.Background(), fg, st, resource.MustParse("200Gi"), stale)
+	if res.status.Phase != v1beta1.SiteStorageExpanding || res.status.RequestedSize != "200Gi" || res.requeue != 0 {
+		t.Fatalf("growth after the own patch = %+v (requeue %v), want Expanding at 200Gi", res.status, res.requeue)
+	}
+}
+
+// An administrator who lowers the claim's request after a failed
+// expansion (the Kubernetes recovery) is not undone: the operator stops
+// growing the claim to that size until the spec asks for more.
+func TestReconcilePVC_LoweredRequestIsNotRaisedAgain(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.Sites[0].Storage.Size = "200Gi"
+	allow := true
+	f := newSGFixture(t, fg,
+		sgSiteClaim("dc1", "local-dc1", "100Gi", "100Gi"), sgSiteClaim("dc2", "local-dc2", "100Gi", "100Gi"),
+		sgClass("local-dc1", &allow))
+	f.reconcile(t)
+	if f.pvcPatches["mysql-lion-dc1-data"] != 1 {
+		t.Fatalf("claim patches = %v, want the growth", f.pvcPatches)
+	}
+	f.events()
+
+	pvc := f.claim(t, "dc1")
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse("150Gi")
+	if err := f.c.Update(context.Background(), pvc); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		res := f.reconcile(t)
+		if f.pvcPatches["mysql-lion-dc1-data"] != 1 {
+			t.Fatalf("the lowered request was raised again (%d patches)", f.pvcPatches["mysql-lion-dc1-data"])
+		}
+		st := sgPhase(t, f.group(t), "dc1")
+		if st.Phase != v1beta1.SiteStorageFailed || st.AbandonedSize != "200Gi" || st.RequestedSize != "150Gi" || !strings.Contains(st.Message, "does not raise it to 200Gi again") {
+			t.Fatalf("dc1 storage = %+v", st)
+		}
+		if res.RequeueAfter <= 0 || res.RequeueAfter > storageRecheckInterval {
+			t.Fatalf("requeue = %v", res.RequeueAfter)
+		}
+	}
+	n := 0
+	for _, e := range f.events() {
+		if strings.Contains(e, v1beta1.EventStorageExpansionFailed) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d %s events, want one on the transition", n, v1beta1.EventStorageExpansionFailed)
+	}
+
+	// A larger size is a new request: growth resumes and the record goes.
+	live := f.group(t)
+	live.Spec.Sites[0].Storage.Size = "300Gi"
+	live.Generation++
+	if err := f.c.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	f.reconcile(t)
+	if q := f.claim(t, "dc1").Spec.Resources.Requests[corev1.ResourceStorage]; q.Cmp(resource.MustParse("300Gi")) != 0 {
+		t.Fatalf("dc1 request = %s, want 300Gi", q.String())
+	}
+	if st := sgPhase(t, f.group(t), "dc1"); st.Phase != v1beta1.SiteStorageExpanding || st.AbandonedSize != "" {
+		t.Fatalf("dc1 storage = %+v", st)
+	}
+}
+
+func TestAbandonedGrowth(t *testing.T) {
+	d := resource.MustParse("200Gi")
+	for _, tc := range []struct {
+		name      string
+		prev      *v1beta1.SiteStorageStatus
+		requested string
+		want      bool
+	}{
+		{"no record", nil, "100Gi", false},
+		{"growing from below", &v1beta1.SiteStorageStatus{ClaimUID: "u", RequestedSize: "100Gi"}, "100Gi", false},
+		{"lowered after the raise", &v1beta1.SiteStorageStatus{ClaimUID: "u", RequestedSize: "200Gi"}, "150Gi", true},
+		{"lowered from a larger manual request", &v1beta1.SiteStorageStatus{ClaimUID: "u", RequestedSize: "204800Mi"}, "150Gi", true},
+		{"another claim", &v1beta1.SiteStorageStatus{ClaimUID: "old", RequestedSize: "200Gi"}, "150Gi", false},
+		{"recorded at this size", &v1beta1.SiteStorageStatus{ClaimUID: "u", RequestedSize: "150Gi", AbandonedSize: "200Gi"}, "150Gi", true},
+		{"recorded at a smaller size", &v1beta1.SiteStorageStatus{ClaimUID: "u", RequestedSize: "150Gi", AbandonedSize: "180Gi"}, "150Gi", false},
+		{"request back at the size", &v1beta1.SiteStorageStatus{ClaimUID: "u", RequestedSize: "150Gi", AbandonedSize: "200Gi"}, "200Gi", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := abandonedGrowth(tc.prev, "u", resource.MustParse(tc.requested), d); got != tc.want {
+				t.Fatalf("abandonedGrowth = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A StorageClass read the API server refuses (the operator's role lacks
+// get on storageclasses) is a failure with a cause, not a retry for ever,
+// and is not repeated on every reconcile.
+func TestReconcilePVC_RefusedClassReadIsFailedAndNotRepeated(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.Sites[0].Storage.Size = "200Gi"
+	allow := true
+	f := newSGFixture(t, fg,
+		sgSiteClaim("dc1", "local-dc1", "100Gi", "100Gi"), sgSiteClaim("dc2", "local-dc2", "100Gi", "100Gi"),
+		sgClass("local-dc1", &allow))
+	f.failClassGet["local-dc1"] = apierrors.NewForbidden(schema.GroupResource{Group: "storage.k8s.io", Resource: "storageclasses"}, "local-dc1", stringError("no rule"))
+	res := f.reconcile(t)
+	st := sgPhase(t, f.group(t), "dc1")
+	if st.Phase != v1beta1.SiteStorageFailed || !strings.Contains(st.Message, "needs get on storageclasses") {
+		t.Fatalf("dc1 storage = %+v", st)
+	}
+	if res.RequeueAfter <= storageRetryInterval || res.RequeueAfter > storageRecheckInterval {
+		t.Fatalf("requeue = %v, want the recheck", res.RequeueAfter)
+	}
+	if ev := strings.Join(f.events(), "\n"); !strings.Contains(ev, v1beta1.EventStorageExpansionFailed) {
+		t.Fatalf("no %s event: %s", v1beta1.EventStorageExpansionFailed, ev)
+	}
+	gets := f.classGets
+	f.reconcile(t)
+	if f.classGets != gets {
+		t.Fatalf("the refused read was repeated inside its TTL (%d -> %d)", gets, f.classGets)
+	}
+	if f.pvcPatches["mysql-lion-dc1-data"] != 0 {
+		t.Fatal("the claim was raised without its class being read")
 	}
 }

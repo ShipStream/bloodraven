@@ -395,9 +395,12 @@ const (
 	// grow: its StorageClass does not allow volume expansion, is gone, or
 	// the claim has no class. The claim is kept as it is.
 	EventStorageExpansionUnsupported = "StorageExpansionUnsupported"
-	// The API server refused the operator's request to grow a site's
-	// claim, or the storage driver reports the expansion infeasible. The
-	// message has the error.
+	// A site's claim cannot reach the group's storage size: the API
+	// server refused the operator's request to grow it or its read of the
+	// claim's StorageClass, the storage driver reports the expansion
+	// infeasible or a resize error on the claim, or the claim's request was
+	// lowered below the size after a failed expansion. The message has the
+	// cause.
 	EventStorageExpansionFailed = "StorageExpansionFailed"
 	// A site's claim requests more than the group's storage size (it was
 	// expanded directly). The claim is kept, but a replacement would be

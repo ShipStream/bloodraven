@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,6 +25,10 @@ import (
 const (
 	s79OldSize = "1Mi"
 	s79Size    = "1Gi"
+	// s79FixtureLabel marks the fixture ConfigMap that owns the scenario's
+	// group and claims, so a later run's cleanup finds what a killed run
+	// left behind: the stash does not outlive the process.
+	s79FixtureLabel = "playground.bloodraven.shipstream.io/s79-fixture"
 )
 
 func init() {
@@ -53,7 +58,7 @@ func s79Prepare(ctx context.Context, env *runner.Env) error {
 	}
 	// A namespaced owner also collects pre-created claims if group creation fails.
 	fixture, err := env.Kube.Kubernetes.CoreV1().ConfigMaps(env.Namespace).Create(ctx, &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{GenerateName: "s79-"},
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "s79-", Labels: map[string]string{s79FixtureLabel: "true"}},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		return err
@@ -65,6 +70,8 @@ func s79Prepare(ctx context.Context, env *runner.Env) error {
 	if err != nil {
 		return err
 	}
+	// Not a paced-rollout auxiliary group: the fixture owns it, and the
+	// fixture's label is what cleanup looks for.
 	fg.Labels = nil
 	fg.OwnerReferences = owner
 	for i := range fg.Spec.Sites {
@@ -256,22 +263,36 @@ func s79CheckOtherGroup(ctx context.Context, env *runner.Env) error {
 }
 
 func s79Cleanup(ctx context.Context, env *runner.Env) error {
-	name := stashGet(env, "s79Group")
-	if name == "" {
-		return nil
-	}
 	fixtures := env.Kube.Kubernetes.CoreV1().ConfigMaps(env.Namespace)
-	uid := types.UID(stashGet(env, "s79FixtureUID"))
-	if err := fixtures.Delete(ctx, name, metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &uid}, PropagationPolicy: new(metav1.DeletePropagationForeground),
-	}); err != nil && !apierrors.IsNotFound(err) {
+	// Every labelled fixture, not only this run's: one a killed run left
+	// has no stash entry to name it.
+	list, err := fixtures.List(ctx, metav1.ListOptions{LabelSelector: s79FixtureLabel + "=true"})
+	if err != nil {
 		return err
 	}
-	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
-		_, err := fixtures.Get(ctx, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return true, nil
+	targets := list.Items
+	if name := stashGet(env, "s79Group"); name != "" && !slices.ContainsFunc(targets, func(cm corev1.ConfigMap) bool { return cm.Name == name }) {
+		// A fixture from before the label still goes by its recorded UID.
+		targets = append(targets, corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(stashGet(env, "s79FixtureUID"))}})
+	}
+	for _, fixture := range targets {
+		uid := fixture.UID
+		// Foreground deletion removes the group and the pre-created claims
+		// the fixture owns before the fixture itself goes.
+		if err := fixtures.Delete(ctx, fixture.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid}, PropagationPolicy: new(metav1.DeletePropagationForeground),
+		}); err != nil && !apierrors.IsNotFound(err) {
+			return err
 		}
-		return false, err
-	})
+		if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+			_, err := fixtures.Get(ctx, fixture.Name, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return true, nil
+			}
+			return false, err
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
