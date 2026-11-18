@@ -91,6 +91,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `74-upgrade-paced-rollout` ([§74](#74-upgrade-paced-rollout); quarantined: needs a cluster installed at the published v1.7.0 with a spare node, run by the e2e `upgrade` job after `./playground/upgrade-e2e.sh install`; the upgrade to the build under test rolls every MySQL pod of three groups, one group at a time)
 - `78-upgrade-storage-migration` ([§78](#78-upgrade-storage-migration); quarantined: needs the cluster scenario 74 leaves, run by the e2e `upgrade` job after it; `kubectl bloodraven migrate-storage` moves every object the previous release stored to `shipstream.io/v1beta1` beside the running operator, and `storedVersions` ends `[v1beta1]`)
 - `77-pitr-archive-store-init-failure` ([§77](#77-pitr-archive-store-init-failure); full profile; encrypted PITR enabled while RustFS is scaled to 0: the ordered update finishes, every pod stays Ready, nothing fails over, and the group reports `PITRArchiveReady=False/ArchiveStoreInitFailed`; once RustFS is back the same pods create the archive and archive a sealed binlog as BRV1, issue #214 item 5)
+- `79-expanded-replica-claim-loss` ([§79](#79-expanded-replica-claim-loss); full profile; an auxiliary group adopts claims an administrator expanded earlier, the replica's `storage.size` is raised to match, and after the replica claim is lost the replacement is created at that size and recloned with a payload larger than the original request, while the same operator process keeps reconciling another group, #302)
 
 Scenarios `32`–`36`, `38` and `39` (seven scenarios) are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. Scenario `37` is not among them: #206 replaced it with `37-pitr-planned-failback-no-reclone`, which is in the `release` profile and has no live-pass history yet. As of 2026-07-11 the seven full-only scenarios and the retired original scenario 37 (`37-pitr-archive-handoff-across-failover`) had passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Those passes belong to the retired scenario 37, not to its replacement. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). The seven remain full-profile-only while this new, high-risk coverage matures. Scenarios `36`, `37`, `68`, `69` and `70` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
@@ -1897,3 +1898,21 @@ Every run skipped REPLTAKEOVER. The picker's log line showed the tagged set pars
 7. **Between scenarios**: `./playground/chaos.sh status` to confirm clean state; `./playground/reset-mysql.sh` if topology is broken
 8. **For each scenario**: Document actual vs. expected, note timing and any bugs
 9. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
+
+### 79. Expanded Replica Claim Loss {#79-expanded-replica-claim-loss}
+**Category**: Storage (#302) | **Risk**: High | **Automated**: `79-expanded-replica-claim-loss` (full profile)
+
+**Hypothesis**: Raising a site's `storage.size` to match a claim an administrator expanded earlier preserves that size through claim loss and a fresh clone. The operator keeps running throughout and keeps reconciling other groups.
+
+**Setup**: An auxiliary group requesting 1 MiB per site, whose site claims are pre-created at 1 GiB to model claims expanded before the group recorded it (the local-path provisioner has no resizer). A ConfigMap labelled `playground.bloodraven.shipstream.io/s79-fixture=true` owns the group and the claims.
+
+**Injection**: The replica's size is raised to 1 GiB, a random 2 MiB payload is written on the primary and replicated, then the replica's claim is wiped (`WipeSiteData`). While the replica is down, a label on the playground group's site Service is changed.
+
+**Verify**:
+
+- The operator restores the other group's Service label within 45 seconds and the baseline stays healthy.
+- The replacement claim has a new UID and volume, is controlled by the group, requests 1 GiB and reports at least that capacity.
+- The replica's `clone_status` is `Completed`, it holds the payload with its SHA-256, both replication threads run, and a row written after the clone reaches it.
+- The operator pod and container are the same before and after.
+
+**Cleanup**: Deletes the fixture ConfigMap in the foreground, which removes the group and its claims. A run whose process has no record of the fixture deletes every labelled one, so a killed run's group does not linger.

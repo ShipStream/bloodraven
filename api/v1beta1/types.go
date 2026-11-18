@@ -523,9 +523,7 @@ func (s SiteSpec) IsPromotable() bool {
 	return s.EffectiveRole() == SiteRolePrimaryCandidate
 }
 
-// StorageSpec defines PVC storage configuration. It is applied only when
-// the site's PVC is created, so it cannot change afterwards: the operator
-// does not resize or move a site's volume.
+// StorageSpec defines the class and requested size of the site's data PVC.
 type StorageSpec struct {
 	// StorageClassName is the name of the StorageClass, a DNS-1123
 	// subdomain as the PVC requires. Immutable.
@@ -536,9 +534,10 @@ type StorageSpec struct {
 	// +required
 	StorageClassName string `json:"storageClassName"`
 
-	// Size is the requested storage size, such as "100Gi". Immutable; it is
-	// compared by value, so 1Gi and 1024Mi are the same size.
-	// +kubebuilder:validation:XValidation:rule="quantity(self).compareTo(quantity(oldSelf)) == 0",message="size is immutable: the operator does not resize a site's volume; expand the PVC itself, or see the site-replacement procedure"
+	// Size is the storage requested for the site's data PVC, including a
+	// replacement after PVC loss. It can increase. Sizes are compared by
+	// quantity, so 1Gi and 1024Mi are equivalent.
+	// +kubebuilder:validation:XValidation:rule="quantity(self).compareTo(quantity(oldSelf)) >= 0",message="storage size cannot decrease"
 	// +required
 	Size StorageQuantity `json:"size"`
 }
@@ -922,6 +921,14 @@ type MysqlFailoverGroupStatus struct {
 	// +listMapKey=id
 	// +kubebuilder:validation:MaxItems=16
 	PITRArchiveBindings []PITRArchiveBinding `json:"pitrArchiveBindings,omitempty"`
+
+	// Storage is the observed state of each site's data volume against
+	// spec.sites[].storage.size: the size asked for, what the claim
+	// requests, what the volume holds and whether growth is progressing.
+	// Written by the group reconciler. Absent until the first
+	// observation.
+	// +optional
+	Storage *StorageStatus `json:"storage,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.

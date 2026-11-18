@@ -373,7 +373,7 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1beta1.SiteSpec)
 func mfgStatusFieldsToClear(keepEncryption bool) []string {
 	fields := []string{"activeSite", "sites", "conditions", "lastFailover", "plannedFailover", "plannedFailoverHold", "updatePhase", "dragonfly"}
 	if !keepEncryption {
-		fields = append(fields, "encryptionAtRest", "pitrArchiveBindings")
+		fields = append(fields, "encryptionAtRest", "pitrArchiveBindings", "storage")
 	}
 	return fields
 }

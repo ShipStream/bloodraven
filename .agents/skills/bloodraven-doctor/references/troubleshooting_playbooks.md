@@ -1837,3 +1837,17 @@ Do not:
 - Set `crdCheck: warn` to get past an older CRD or a refused object. It makes the operator run against a schema that drops what it writes, or against objects it cannot decode.
 - Re-apply the previous release's CRDs. Once `status.storedVersions` lists `v1beta1` the API server refuses them.
 - Edit `status.storedVersions` by hand, or delete and recreate an object to "migrate" it: a `MysqlFailoverGroup` owns its data volumes.
+
+## 52. Site storage growth
+
+Compare the group's desired size with the PVC request and capacity.
+
+```bash
+kubectl -n "$NAMESPACE" get mysqlfailovergroup "$MFG_NAME" \
+  -o jsonpath='{range .status.storage.sites[*]}{.name}{" "}{.phase}{" desired="}{.desiredSize}{" requested="}{.requestedSize}{" capacity="}{.capacity}{" "}{.message}{"\n"}{end}'
+```
+
+- **Underspecified.** A live claim requests more than the group records. Raise that site's group request to match before a claim is lost.
+- **Unsupported.** Read the live claim's StorageClass and its `allowVolumeExpansion` setting. For storage that cannot expand in place, plan a storage migration.
+- **Failed or Retrying.** Inspect the site's message, PVC events, quota, the operator's `get` on `storageclasses`, and driver health. Keep the source data until the underlying issue is resolved. The group's size cannot be lowered, and the operator raises a lowered PVC request again unless it records the lowering: after a failed expansion, lower the PVC request (the Kubernetes recovery) and confirm the site shows `abandonedSize`, as in [Recovering from a failed expansion](https://bloodraven.dev/docs/operations/operations#recovering-from-a-failed-expansion).
+- **FileSystemResizePending.** Check whether the driver expands a mounted filesystem online. If it requires a remount, follow the [storage procedure](https://bloodraven.dev/docs/operations/operations#scaling-storage). Monitor MySQL disk space until the reported capacity reaches the request.

@@ -383,6 +383,31 @@ const (
 	EventRolloutRecordNotStored = "RolloutRecordNotStored"
 )
 
+// Events: Site storage. On: MysqlFailoverGroup.
+//
+// The operator grows a site's data claim to spec.sites[].storage.size and
+// reports its progress in status.storage.sites.
+const (
+	// The operator raised a site's claim request to the group's storage
+	// size. The message names the claim and both sizes.
+	EventStorageExpansionRequested = "StorageExpansionRequested"
+	// A site's claim is smaller than the group's storage size and cannot
+	// grow: its StorageClass does not allow volume expansion, is gone, or
+	// the claim has no class. The claim is kept as it is.
+	EventStorageExpansionUnsupported = "StorageExpansionUnsupported"
+	// A site's claim cannot reach the group's storage size: the API
+	// server refused the operator's request to grow it or its read of the
+	// claim's StorageClass, the storage driver reports the expansion
+	// infeasible or a resize error on the claim, or the claim's request was
+	// lowered below the size after a failed expansion. The message has the
+	// cause.
+	EventStorageExpansionFailed = "StorageExpansionFailed"
+	// A site's claim requests more than the group's storage size (it was
+	// expanded directly). The claim is kept, but a replacement would be
+	// created at the smaller size: raise spec.sites[].storage.size.
+	EventStorageSizeUnderspecified = "StorageSizeUnderspecified"
+)
+
 // Events: Dragonfly. On: MysqlFailoverGroup.
 const (
 	// The operator is promoting a Dragonfly replica: in a planned

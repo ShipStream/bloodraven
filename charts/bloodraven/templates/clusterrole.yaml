@@ -21,6 +21,11 @@ rules:
   - apiGroups: [""]
     resources: [configmaps, persistentvolumeclaims, services]
     verbs: [create, delete, get, list, patch, update, watch]
+  # The class of a site's data claim is read by name before the claim is
+  # grown (allowVolumeExpansion); never listed or written.
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

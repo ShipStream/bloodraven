@@ -865,6 +865,10 @@ type TopologyManager struct {
 	// desired render but waits for the paced rollout (rollout.go): no
 	// ordered update starts for them. Protected by mu.
 	specHeldSites []string
+	// specRemountOnlySites lists the drift sites whose only difference is
+	// a storage remount request (runner.go specDriftSnapshot). Protected
+	// by mu.
+	specRemountOnlySites []string
 	// specDriftKnown is set once the runner has computed specDriftSites.
 	specDriftKnown bool
 
@@ -4503,13 +4507,28 @@ func (tm *TopologyManager) SetSpecHeldSites(sites []string) {
 	tm.specHeldSites = sites
 }
 
+// SetSpecRemountOnlySites records which drift sites differ only by a
+// storage remount request.
+func (tm *TopologyManager) SetSpecRemountOnlySites(sites []string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.specRemountOnlySites = sites
+}
+
 // SitesAwaitingRollout returns the sites whose pods do not run the desired
 // render yet: those an ordered update is still to process, and those held
-// for the paced rollout.
+// for the paced rollout. A site waiting only for a storage remount runs
+// the desired render already and is not listed: its archiver's state is
+// what its pods will keep after the restart.
 func (tm *TopologyManager) SitesAwaitingRollout() []string {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	sites := append([]string(nil), tm.specDriftSites...)
+	sites := make([]string, 0, len(tm.specDriftSites)+len(tm.specHeldSites))
+	for _, name := range tm.specDriftSites {
+		if !slices.Contains(tm.specRemountOnlySites, name) {
+			sites = append(sites, name)
+		}
+	}
 	for _, name := range tm.specHeldSites {
 		if !slices.Contains(sites, name) {
 			sites = append(sites, name)

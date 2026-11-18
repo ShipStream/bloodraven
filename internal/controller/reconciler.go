@@ -129,6 +129,10 @@ type MysqlFailoverGroupReconciler struct {
 	rolloutTemplatePendingMu sync.Mutex
 	rolloutTemplatePending   map[string]bool
 
+	// storageClasses caches StorageClass expansion verdicts and records a
+	// CRD that prunes status.storage (storage_growth.go).
+	storageClasses storageClassVerdicts
+
 	// rolloutPollInterval overrides the production-default 2s cadence used by
 	// waitForDeploymentRollout. Tests set this to a small value so the timeout
 	// path exercises the ticker quickly.
@@ -290,6 +294,9 @@ type dragonflyRolloutState struct {
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+// The class of a site's data claim is read (uncached, by name) to check
+// allowVolumeExpansion before the claim's request is raised (#302).
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get
 // Leader-election lease. The operator runs a single-replica deployment
 // today but still uses leader election so a fresh pod doesn't step on
 // a not-yet-drained predecessor. Without this marker,
@@ -488,15 +495,20 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	r.pruneRemovedSiteSelectorRefusals(&fg)
 
 	// Reconcile per-site resources
+	storageSites := make([]v1beta1.SiteStorageStatus, 0, len(fg.Spec.Sites))
+	var storageRequeue time.Duration
 	for _, site := range fg.Spec.Sites {
 		serverID, err := site.MySQLServerID()
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 
-		if err := r.reconcilePVC(ctx, &fg, site); err != nil {
+		storage, err := r.reconcilePVC(ctx, &fg, site)
+		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", site.Name, err)
 		}
+		storageSites = append(storageSites, storage.status)
+		storageRequeue = minPositiveDuration(storageRequeue, storage.requeue)
 		if !orderedUpdateActive {
 			deferDeployment := !recreateUpdates
 			var existing appsv1.Deployment
@@ -539,6 +551,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, fmt.Errorf("reconcile internal site service %s: %w", site.Name, err)
 		}
 	}
+	// Storage status is reported, never a reason to stop: a failed write
+	// is retried with the observations of a later pass.
+	if err := r.writeStorageStatus(ctx, &fg, storageSites); err != nil {
+		logger.Error(err, "site storage status not written; retrying")
+		storageRequeue = minPositiveDuration(storageRequeue, storageRetryInterval)
+	}
 	if err := r.cleanupObsoleteSiteConfigMaps(ctx, &fg, pitrRender.inputs); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleanup obsolete site configmaps: %w", err)
 	}
@@ -572,7 +590,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
 	// any previously managed Dragonfly resources so MySQL-only deployments are
 	// unaffected.
-	deferredRequeue := minPositiveDuration(bindingRequeue, dfUpgrade.wait)
+	deferredRequeue := minPositiveDuration(minPositiveDuration(bindingRequeue, dfUpgrade.wait), storageRequeue)
 	if dragonflyRequeue, err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
 	} else if dragonflyRequeue > 0 {
@@ -1394,10 +1412,15 @@ func generateMyCnf(fg *v1beta1.MysqlFailoverGroup, pitrOn bool, sites ...v1beta1
 	return b.String()
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) error {
+// reconcilePVC creates the site's data claim at spec.sites[].storage.size
+// when it is missing, keeps its owner and labels, and grows a bound claim
+// that requests less than that size (storage_growth.go). The error is for
+// the claim's creation or metadata only; growth is reported in the
+// returned observation, never as an error.
+func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) (siteStorageResult, error) {
 	size, err := site.Storage.Size.Quantity()
 	if err != nil {
-		return fmt.Errorf("site %s: storage.size: %w", site.Name, err)
+		return siteStorageResult{}, fmt.Errorf("site %s: storage.size: %w", site.Name, err)
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1412,8 +1435,21 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1b
 		}
 		pvc.Labels = commonLabels(fg.Name, site.Name)
 
-		// Only set spec fields on creation (PVC spec is largely immutable)
-		if pvc.CreationTimestamp.IsZero() {
+		// Spec fields are set on creation only; a bound claim's request is
+		// raised below, after its class is checked.
+		if pvc.ResourceVersion == "" {
+			// Loss of a manually expanded claim may immediately follow a
+			// size edit. A stale reconcile must not win the create at the
+			// original size on a class that cannot expand in place.
+			if r.APIReader != nil {
+				var live v1beta1.MysqlFailoverGroup
+				if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(fg), &live); err != nil {
+					return err
+				}
+				if live.UID != fg.UID || live.Generation != fg.Generation || live.DeletionTimestamp != nil {
+					return fmt.Errorf("group changed before creating data claim %s; retry with the current spec", pvc.Name)
+				}
+			}
 			pvc.Spec = corev1.PersistentVolumeClaimSpec{
 				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				StorageClassName: &site.Storage.StorageClassName,
@@ -1426,10 +1462,31 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1b
 		}
 		return nil
 	})
-	return err
+	if err != nil {
+		return siteStorageResult{}, err
+	}
+	st, grow := observeSiteClaim(site.Name, string(site.Storage.Size), size, pvc, fg.Status.SiteStorage(site.Name))
+	res := siteStorageResult{status: st}
+	if grow {
+		res = r.growSiteClaim(ctx, fg, st, size, pvc)
+	} else if st.Phase == v1beta1.SiteStorageFailed {
+		// A driver that reports the expansion infeasible says so on the
+		// claim, and a change there wakes the reconcile; this is a backstop.
+		res.requeue = storageRecheckInterval
+	}
+	if res.status.Phase == v1beta1.SiteStorageFileSystemResizePending {
+		r.describeStorageRestart(ctx, fg, &res.status)
+	}
+	return res, nil
 }
 
 func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, serverID uint32, image string, pitr groupPITRRender) error {
+	return r.renderSiteDeployment(ctx, fg, site, serverID, image, pitr, "")
+}
+
+// Only the ordered updater supplies a new storage restart token. Ordinary
+// renders carry the existing pod-template annotation forward.
+func (r *MysqlFailoverGroupReconciler) renderSiteDeployment(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, serverID uint32, image string, pitr groupPITRRender, storageRestart string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name),
@@ -1881,9 +1938,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 
 		podAnnotations := make(map[string]string)
 		for k, v := range fg.Spec.PodAnnotations {
-			podAnnotations[k] = v
+			if k != v1beta1.StorageRestartAnnotation {
+				podAnnotations[k] = v
+			}
 		}
 		// Operator annotations take precedence over user-supplied annotations.
+		if storageRestart != "" {
+			podAnnotations[v1beta1.StorageRestartAnnotation] = storageRestart
+		} else if applied := deploy.Spec.Template.Annotations[v1beta1.StorageRestartAnnotation]; applied != "" {
+			podAnnotations[v1beta1.StorageRestartAnnotation] = applied
+		}
 		podAnnotations[v1beta1.SpecHashAnnotation] = specHash
 
 		deploy.Spec.Template = corev1.PodTemplateSpec{
@@ -1948,7 +2012,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 	}
 	// A Deployment another operator release rendered is written only once
 	// the group is admitted to the paced rollout (rollout.go).
-	if done, err := r.gateDeploymentRollout(ctx, fg, site, deploy, mutate, specHash, pitrCanonical, pitr); err != nil || done {
+	if done, err := r.gateDeploymentRollout(ctx, fg, site, deploy, mutate, specHash, pitrCanonical, pitr, storageRestart); err != nil || done {
 		return err
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, mutate)
@@ -2845,7 +2909,11 @@ func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, 
 			if err != nil {
 				return err
 			}
-			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender); err != nil {
+			restart, err := requestedStorageRestart(ctx, reader, &fg, site)
+			if err != nil {
+				return fmt.Errorf("confirm storage restart for %s: %w", siteName, err)
+			}
+			if err := r.renderSiteDeployment(ctx, &fg, site, serverID, image, pitrRender, restart); err != nil {
 				return err
 			}
 			break
