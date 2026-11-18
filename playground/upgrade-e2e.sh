@@ -13,7 +13,11 @@
 #                                         MysqlBackupVerification and
 #                                         MysqlStandbyCluster, created through
 #                                         the version that release serves
-#   ./playground/upgrade-e2e.sh upgrade   apply this checkout's CRDs, then
+#   ./playground/upgrade-e2e.sh upgrade   first `helm upgrade` without the
+#                                         CRDs and check that the new operator
+#                                         refuses to start while the previous
+#                                         one keeps the lease (#299); then
+#                                         apply this checkout's CRDs and
 #                                         `helm upgrade` to its chart and the
 #                                         locally built images
 #   ./playground/upgrade-e2e.sh run       install, then run scenario
@@ -194,30 +198,103 @@ upgrade_to_checkout() {
   helm ${hctx[@]+"${hctx[@]}"} status bloodraven -n "$NAMESPACE" >/dev/null 2>&1 \
     || fail "no Helm release bloodraven in $NAMESPACE: run ./playground/upgrade-e2e.sh install first"
 
-  # Helm installs crds/ on the first install only and never upgrades them,
-  # so the release's CRDs are applied first, as the upgrade guide says.
-  # Without them the API server prunes status.rollout and nothing rolls.
-  info "Applying this checkout's CRDs..."
-  kubectl ${kctx[@]+"${kctx[@]}"} apply --server-side --force-conflicts -f "$PROJECT_ROOT/charts/bloodraven/crds/"
-
   local prefix
   prefix=$(image_prefix)
   # --reuse-values on purpose: it is the upgrade the operations guide and
   # the chart's NOTES.txt show, and it renders the new templates over the
   # old release's values, which have no `rollout` key.
-  info "helm upgrade to this checkout's chart (operator ${prefix}bloodraven:playground, sidecar ${prefix}bloodraven-sidecar:playground, rollout.soak=$ROLLOUT_SOAK)..."
-  helm ${hctx[@]+"${hctx[@]}"} upgrade bloodraven "$PROJECT_ROOT/charts/bloodraven" \
-    --namespace "$NAMESPACE" \
-    --reuse-values \
-    --set image.repository="${prefix}bloodraven" \
-    --set image.tag=playground \
-    --set image.pullPolicy=Never \
-    --set sidecar.image.repository="${prefix}bloodraven-sidecar" \
-    --set sidecar.image.tag=playground \
-    --set rollout.soak="$ROLLOUT_SOAK" \
+  local upgrade_args=(
+    upgrade bloodraven "$PROJECT_ROOT/charts/bloodraven"
+    --namespace "$NAMESPACE"
+    --reuse-values
+    --set "image.repository=${prefix}bloodraven"
+    --set image.tag=playground
+    --set image.pullPolicy=Never
+    --set "sidecar.image.repository=${prefix}bloodraven-sidecar"
+    --set sidecar.image.tag=playground
+    --set "rollout.soak=$ROLLOUT_SOAK"
     --timeout=180s
-  kubectl ${kctx[@]+"${kctx[@]}"} -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=180s
+  )
+
+  # The mistake first (#299): the chart without its CRDs. Only while the
+  # installed CRDs are older than this build needs, which is the case when
+  # they do not serve v1beta1 yet.
+  local served
+  served=$(kubectl ${kctx[@]+"${kctx[@]}"} get crd mysqlfailovergroups.shipstream.io -o jsonpath='{.spec.versions[*].name}')
+  if [[ " $served " != *" v1beta1 "* ]]; then
+    chart_only_upgrade_is_refused
+  fi
+
+  # Helm installs crds/ on the first install only and never upgrades them,
+  # so the release's CRDs are applied before the chart, as the upgrade guide
+  # says. Without them the API server prunes status.rollout and nothing rolls.
+  info "Applying this checkout's CRDs..."
+  kubectl ${kctx[@]+"${kctx[@]}"} apply --server-side --force-conflicts -f "$PROJECT_ROOT/charts/bloodraven/crds/"
+
+  info "helm upgrade to this checkout's chart (operator ${prefix}bloodraven:playground, sidecar ${prefix}bloodraven-sidecar:playground, rollout.soak=$ROLLOUT_SOAK)..."
+  helm ${hctx[@]+"${hctx[@]}"} "${upgrade_args[@]}"
+  # A pod that refused in the step above starts at its next restart, which
+  # the kubelet delays by its crash back-off.
+  kubectl ${kctx[@]+"${kctx[@]}"} -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=300s
   ok "Operator upgraded"
+}
+
+# chart_only_upgrade_is_refused upgrades the chart while the previous
+# release's CRDs are still installed and checks what the upgrade guide
+# promises for that mistake: the new operator refuses to start, and the
+# previous operator keeps running and keeps the leader lease. It uses kctx,
+# hctx and upgrade_args of upgrade_to_checkout (bash's dynamic scope).
+chart_only_upgrade_is_refused() {
+  local selector="app.kubernetes.io/name=bloodraven,app.kubernetes.io/instance=bloodraven"
+  local lease="bloodraven.shipstream.io"
+  local refusal="CRD check: the operator must not start"
+  local k=(kubectl ${kctx[@]+"${kctx[@]}"} -n "$NAMESPACE")
+
+  local previous
+  previous=$("${k[@]}" get pods -l "$selector" -o jsonpath='{.items[*].metadata.name}')
+  [[ -n "$previous" && "$previous" != *" "* ]] \
+    || fail "expected one operator pod before the upgrade, found: '${previous}'"
+  local holder
+  holder=$("${k[@]}" get lease "$lease" -o jsonpath='{.spec.holderIdentity}')
+  [[ "$holder" == "${previous}_"* ]] \
+    || fail "the operator pod $previous does not hold the lease $lease before the upgrade (holder: '$holder')"
+
+  info "Chart-only helm upgrade (the CRDs of v$FROM stay): the new operator must refuse to start..."
+  helm ${hctx[@]+"${hctx[@]}"} "${upgrade_args[@]}"
+
+  local deadline=$((SECONDS + 180)) refused="" pod logs
+  while [[ -z "$refused" ]]; do
+    (( SECONDS < deadline )) || fail "no new operator pod logged '$refusal' within 180s of the chart-only upgrade"
+    for pod in $("${k[@]}" get pods -l "$selector" -o jsonpath='{.items[*].metadata.name}'); do
+      [[ "$pod" == "$previous" ]] && continue
+      # A pod in its crash back-off has the line in its previous container.
+      logs=$("${k[@]}" logs "$pod" --tail=200 2>/dev/null || true; "${k[@]}" logs "$pod" --previous --tail=200 2>/dev/null || true)
+      if [[ "$logs" == *"$refusal"* ]]; then
+        refused="$pod"
+        break
+      fi
+    done
+    [[ -n "$refused" ]] || sleep 3
+  done
+  ok "The new operator pod $refused refused to start"
+
+  # The previous operator: still there, not being deleted, Ready, and
+  # renewing the lease it held before the upgrade.
+  local deleting ready renewed_before renewed_after
+  deleting=$("${k[@]}" get pod "$previous" -o jsonpath='{.metadata.deletionTimestamp}') \
+    || fail "the previous operator pod $previous is gone after the chart-only upgrade"
+  [[ -z "$deleting" ]] || fail "the previous operator pod $previous is being deleted (since $deleting) although the new one refused"
+  ready=$("${k[@]}" get pod "$previous" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+  [[ "$ready" == "True" ]] || fail "the previous operator pod $previous is not Ready (Ready=$ready)"
+  renewed_before=$("${k[@]}" get lease "$lease" -o jsonpath='{.spec.renewTime}')
+  sleep 20
+  holder=$("${k[@]}" get lease "$lease" -o jsonpath='{.spec.holderIdentity}')
+  renewed_after=$("${k[@]}" get lease "$lease" -o jsonpath='{.spec.renewTime}')
+  [[ "$holder" == "${previous}_"* ]] \
+    || fail "the lease $lease moved away from the previous operator $previous (holder: '$holder')"
+  [[ "$renewed_after" != "$renewed_before" ]] \
+    || fail "the previous operator $previous stopped renewing the lease $lease (renewTime $renewed_before for 20s)"
+  ok "The previous operator $previous still runs and leads"
 }
 
 run_all() {

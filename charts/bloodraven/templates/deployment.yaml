@@ -14,7 +14,22 @@ metadata:
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
+    {{- if .Values.leaderElection.enabled }}
+    # The new pod checks the installed CRDs before it starts its manager,
+    # and its readiness endpoint is served by that manager. A pod that
+    # refuses to start (CRDs older than it needs: a chart-only upgrade)
+    # therefore never becomes Ready, and with maxUnavailable 0 the previous
+    # operator keeps running and keeps the lease. Leader election keeps the
+    # two pods of a successful upgrade from acting together.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- else }}
+    # Without leader election two pods would both act, so the previous pod
+    # must be gone before the new one starts.
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "bloodraven.selectorLabels" . | nindent 6 }}
