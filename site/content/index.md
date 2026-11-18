@@ -40,10 +40,10 @@ items:
     label: to declare a site unreachable (3 failed 2s polls)
   - value: "RPO 0"
     label: on a planned switchover, by construction
-  - value: "60+"
+  - value: "70+"
     label: scripted chaos scenarios run in CI
   - value: "1"
-    label: CRD, one controller, one reconcile loop
+    label: manifest per failover group, one reconcile loop
 ---
 ::
 
@@ -152,17 +152,45 @@ cards:
       as the primary moves.
     detail: OrderedUpdate · standby first · placement contract
     to: /docs/operations/upgrade-policy
+  - token: PLAN
+    title: Planned switchover with nothing lost
+    description: >-
+      Move the primary with one annotation or kubectl bloodraven promote. The operator
+      fences the source, waits until the target has applied every transaction, then
+      promotes it. If the target cannot catch up in time, the source takes writes again.
+      Status reports the short write pause as planned, not as an outage.
+    detail: RPO 0 · durable claim · PlannedWritePause
+    to: /docs/operations/planned-failover
+  - token: PACE
+    title: Operator upgrades, one group at a time
+    description: >-
+      A new operator release can change every MySQL pod at once. Bloodraven rolls that
+      change through one failover group at a time and lets it soak. A group that cannot
+      finish keeps the only slot, so a bad release stops at the first group it reaches
+      and every other group keeps the pods it had.
+    detail: rollout.pacing · soak · RolloutStalled
+    to: /docs/operations/upgrade-policy#paced-rollouts
+  - token: OPS
+    title: Day-2 tooling in the box
+    description: >-
+      kubectl bloodraven shows status and drives promotion, reclone, backup and
+      verification without hand-written annotations. The chart ships six Grafana
+      dashboards, from failover and replication to a per-site MySQL workload view, and
+      every alert maps to a runbook.
+    detail: kubectl plugin · 6 dashboards · alert runbook map
+    to: /docs/operations/kubectl-plugin
 ---
 ::
 
 ::home-data
 ---
-kicker: Bootstrap, scale out, encrypt, provision, back up
+kicker: Bootstrap, scale out, encrypt, provision, grow, recover, back up
 title: Data that looks
 title-two: after itself.
 lede: >-
-  Bootstrap, read scale-out, encryption, tenant provisioning and backup are part of the
-  operator, not five more systems you have to wire together.
+  Bootstrap, read scale-out, encryption, tenant provisioning, storage growth, disaster
+  recovery and backup are part of the operator, not seven more systems you have to wire
+  together.
 cards:
   - token: CLONE
     title: Clone-based bootstrap
@@ -218,6 +246,34 @@ cards:
           hosts: [35.1.2.3, 35.4.5.6]
           resourceLimits:
             maxUserConnections: 5
+  - token: GROW
+    title: Storage that grows in place
+    description: >-
+      Raise a site's storage size in the group and the operator grows the live volume on
+      an expandable StorageClass, then reports the capacity each site observes. The
+      request is kept, so a site that loses its claim comes back at the size you asked
+      for. Sizes only go up; admission refuses a shrink.
+    to: /docs/operations/operations#scaling-storage
+    code: |-
+      sites:
+        - name: iad
+          storage:
+            size: 200Gi   # was 100Gi
+  - token: DR
+    title: Recovery into another cluster
+    description: >-
+      The object store is the only link a second cluster needs. A MysqlStandbyCluster
+      there watches the source's dumps and binlog archive and reports how fresh they
+      are, and a documented runbook restores a new group from them to a point in time
+      when the source cluster is gone.
+    to: /docs/architecture/multi-cluster-dr
+    code: |-
+      kind: MysqlStandbyCluster
+      spec:
+        source:
+          s3:
+            bucket: backups
+            prefix: orders/west
 backup-title: Backup and restore.
 backup-title-two: The whole nine yards.
 backup-to: /docs/backup-and-restore/backup-overview
@@ -229,7 +285,7 @@ backup-points:
   - S3 or PVC — object storage for durability, PVC for labs
   - Scheduled and on-demand — a MysqlBackup whenever you need one
   - Structured retention — plus exponential-backoff retries on failure
-  - Point-in-time recovery — binlog archiving between full dumps
+  - Point-in-time recovery — archived binlogs, across failovers and with encryption at rest
   - Encrypted artifacts — application-level, independent of the store
   - Prometheus metrics — every run, every failure, every sweep
   - Automatic cleanup — deleting the object removes its artifacts
@@ -254,7 +310,7 @@ flow:
 ::home-control-plane
 ---
 kicker: No quorum. No coordinator.
-title: One controller. One CRD.
+title: One controller. One manifest.
 title-two: One loop.
 lede: >-
   There is no distributed consensus in Bloodraven, no coordinator to keep quorum, and no
@@ -279,6 +335,14 @@ points:
     description: >-
       A documented matrix of faults, what the operator does, how long it takes, and what
       it costs you.
+  - title: A versioned API
+    description: >-
+      The API is shipstream.io/v1beta1. Older manifests keep working through the
+      deprecated version, and kubectl bloodraven migrate-storage moves stored objects.
+  - title: Upgrades check themselves
+    description: >-
+      Before it starts, a new operator compares the installed CRDs with the ones it
+      needs. If they are older it refuses, and the previous operator keeps running.
 yaml: |-
   apiVersion: shipstream.io/v1beta1
   kind: MysqlFailoverGroup
@@ -402,8 +466,8 @@ chaos-label: Chaos-tested in CI
 chaos-title: Primary kills. Partitions. Self-fencing. GTID divergence. Data wipes.
 chaos-to: /docs/get-started/playground#automated-chaos-suite
 chaos-description: >-
-  60+ scripted chaos scenarios, including operator crashes mid-failover, rolling updates,
-  Dragonfly failover, and backup and PITR verification. Each one states a hypothesis,
+  70+ scripted chaos scenarios, including operator crashes mid-failover, rolling updates,
+  release upgrades, Dragonfly failover, and backup and PITR verification. Each one states a hypothesis,
   injects a real fault, asserts on operator behaviour and captures full forensics when it
   fails. A smoke subset gates every release before artifacts are published.
 chaos-commands:
