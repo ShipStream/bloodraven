@@ -168,8 +168,11 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 	if !slices.Contains(wipe, "pitrArchiveBindings") || slices.Contains(normalize, "pitrArchiveBindings") {
 		t.Fatalf("only the wipe pass (fields %v, not %v) clears pitrArchiveBindings: it also deletes the snapshots they name", wipe, normalize)
 	}
-	if len(wipe) != len(normalize)+2 {
-		t.Fatalf("normalization fields %v must be the wipe fields %v minus encryptionAtRest and pitrArchiveBindings", normalize, wipe)
+	if !slices.Contains(wipe, "storage") || slices.Contains(normalize, "storage") {
+		t.Fatal("only a wipe removes the claims described by storage status")
+	}
+	if len(wipe) != len(normalize)+3 {
+		t.Fatalf("normalization fields %v must be the wipe fields %v minus encryptionAtRest, pitrArchiveBindings and storage", normalize, wipe)
 	}
 
 	// Every top-level status field the failover and planned-failover
@@ -194,6 +197,7 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 		"backupSchedules":     "backup scheduling state",
 		"lastBackupTime":      "backup scheduling state",
 		"pitr":                "backup/PITR state",
+		"storage":             "cleared on wipe because the claim UIDs and capacities describe the removed volumes",
 		"encryptionAtRest":    "cleared by the wipe pass only (asserted above)",
 		"pitrArchiveBindings": "cleared by the wipe pass only (asserted above)",
 		"rollout":             "the paced-rollout record of the group's workloads, which the reset keeps; the pacer re-derives it every pass",
