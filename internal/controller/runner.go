@@ -1005,8 +1005,14 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 		// missing or edited one the site's writer would count as a
 		// disagreement (backup stamps, retention) forever, even when the
 		// hash matches.
+		restart, err := requestedStorageRestart(ctx, reader, fg, site)
+		if err != nil {
+			r.logger.Warn("could not check storage restart request", "site", site.Name, "error", err)
+			return nil, nil, nil, false
+		}
 		if deploy.Annotations[v1beta1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
-			deploy.Annotations[v1beta1.PITRRenderAnnotation] != pitr.Canonical() {
+			deploy.Annotations[v1beta1.PITRRenderAnnotation] != pitr.Canonical() ||
+			(restart != "" && restart != deploy.Spec.Template.Annotations[v1beta1.StorageRestartAnnotation]) {
 			if rolloutHoldsSite(r.rolloutPacing, fg, site.Name, deploy) {
 				held = append(held, site.Name)
 				continue
@@ -1254,6 +1260,24 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1beta1.My
 	// Wire the ordered update callbacks so the UpdateController can reconcile
 	// one site's Deployment at a time and wait for its pod to be Ready.
 	if r.deployReconciler != nil {
+		updateCtl.confirmActiveDrift = func(ctx context.Context, site string) (bool, error) {
+			reader := client.Reader(r.apiReader)
+			if reader == nil {
+				reader = r.client
+			}
+			var fresh v1beta1.MysqlFailoverGroup
+			if err := reader.Get(ctx, nn, &fresh); err != nil {
+				return false, err
+			}
+			if fresh.UID != fg.UID || fresh.DeletionTimestamp != nil {
+				return false, nil
+			}
+			sites, ok := r.specDriftSites(ctx, reader, &fresh)
+			if !ok {
+				return false, errors.New("could not confirm the active site still needs an update")
+			}
+			return slices.Contains(sites, site), nil
+		}
 		tm.ApplyUpdate = func(applyCtx context.Context, siteName string) error {
 			return r.deployReconciler.ReconcileSiteDeployment(applyCtx, nn, siteName)
 		}

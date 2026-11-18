@@ -29,6 +29,10 @@ type UpdateController struct {
 	failover *FailoverController
 	logger   *slog.Logger
 
+	// Recheck the active site's live drift before fencing it. An online
+	// filesystem expansion can finish while followers are being rolled.
+	confirmActiveDrift func(context.Context, string) (bool, error)
+
 	// tickInterval controls how often waitForReplicaReady / waitForSiteReady poll.
 	// Exposed for tests; production code uses 5s.
 	tickInterval time.Duration
@@ -457,6 +461,12 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		return processed, fmt.Errorf("promotable standby %s has no replication host", handoff.Name)
 	}
 
+	if u.confirmActiveDrift != nil {
+		needed, err := u.confirmActiveDrift(ctx, active.Name)
+		if err != nil || !needed {
+			return processed, err
+		}
+	}
 	u.setPhase(v1beta1.UpdatePhaseFailover)
 	// The active site is healthy, so this is a maintenance handoff, not an
 	// emergency: promote only a standby that provably holds every

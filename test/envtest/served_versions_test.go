@@ -95,6 +95,11 @@ func TestServedVersions_SpecAndStatusThroughBoth(t *testing.T) {
 				{Name: "dc1", State: v1beta1.SiteStateWritable, Replication: v1beta1.SiteReplicationNotApplicable},
 				{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 			}
+			storage := &v1beta1.StorageStatus{Sites: []v1beta1.SiteStorageStatus{{
+				Name: "dc2", ClaimName: "mysql-orders-dc2-data", ClaimUID: "volume-uid", StorageClassName: "fast",
+				DesiredSize: "20Gi", RequestedSize: "20Gi", Capacity: "10Gi", Phase: v1beta1.SiteStorageFileSystemResizePending,
+			}}}
+			written.Status.Storage = storage.DeepCopy()
 			written.Status.Rollout = &v1beta1.RolloutStatus{Renderer: "0123456789abcdef", Phase: v1beta1.RolloutPhaseAdmitted, Reason: "Admitted", AdmittedTime: &now}
 			written.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonHealthy,
 				Message: "ok", LastTransitionTime: now, ObservedGeneration: written.Generation}}
@@ -111,6 +116,9 @@ func TestServedVersions_SpecAndStatusThroughBoth(t *testing.T) {
 			}
 			if !equality.Semantic.DeepEqual(written.Spec, read.Spec) {
 				t.Fatalf("the spec written through %s differs through %s", writer.Version, reader.Version)
+			}
+			if !equality.Semantic.DeepEqual(storage, read.Status.Storage) {
+				t.Fatalf("storage observation was pruned through %s: %+v", reader.Version, read.Status.Storage)
 			}
 			if !equality.Semantic.DeepEqual(written.Status, read.Status) {
 				t.Fatalf("the status written through %s differs through %s:\n%+v\n%+v", writer.Version, reader.Version, written.Status, read.Status)

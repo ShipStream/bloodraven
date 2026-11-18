@@ -1469,6 +1469,9 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1b
 	if grow {
 		return r.growSiteClaim(ctx, fg, st, size, pvc), nil
 	}
+	if st.Phase == v1beta1.SiteStorageFileSystemResizePending {
+		r.describeStorageRestart(ctx, fg, &st)
+	}
 	res := siteStorageResult{status: st}
 	if st.Phase == v1beta1.SiteStorageFailed {
 		// A driver that reports the expansion infeasible says so on the
@@ -1479,6 +1482,12 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1b
 }
 
 func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, serverID uint32, image string, pitr groupPITRRender) error {
+	return r.renderSiteDeployment(ctx, fg, site, serverID, image, pitr, "")
+}
+
+// Only the ordered updater supplies a new storage restart token. Ordinary
+// renders carry the existing pod-template annotation forward.
+func (r *MysqlFailoverGroupReconciler) renderSiteDeployment(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, serverID uint32, image string, pitr groupPITRRender, storageRestart string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name),
@@ -1930,9 +1939,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 
 		podAnnotations := make(map[string]string)
 		for k, v := range fg.Spec.PodAnnotations {
-			podAnnotations[k] = v
+			if k != v1beta1.StorageRestartAnnotation {
+				podAnnotations[k] = v
+			}
 		}
 		// Operator annotations take precedence over user-supplied annotations.
+		if storageRestart != "" {
+			podAnnotations[v1beta1.StorageRestartAnnotation] = storageRestart
+		} else if applied := deploy.Spec.Template.Annotations[v1beta1.StorageRestartAnnotation]; applied != "" {
+			podAnnotations[v1beta1.StorageRestartAnnotation] = applied
+		}
 		podAnnotations[v1beta1.SpecHashAnnotation] = specHash
 
 		deploy.Spec.Template = corev1.PodTemplateSpec{
@@ -1997,7 +2013,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 	}
 	// A Deployment another operator release rendered is written only once
 	// the group is admitted to the paced rollout (rollout.go).
-	if done, err := r.gateDeploymentRollout(ctx, fg, site, deploy, mutate, specHash, pitrCanonical, pitr); err != nil || done {
+	if done, err := r.gateDeploymentRollout(ctx, fg, site, deploy, mutate, specHash, pitrCanonical, pitr, storageRestart); err != nil || done {
 		return err
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, mutate)
@@ -2894,7 +2910,11 @@ func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, 
 			if err != nil {
 				return err
 			}
-			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender); err != nil {
+			restart, err := requestedStorageRestart(ctx, reader, &fg, site)
+			if err != nil {
+				return fmt.Errorf("confirm storage restart for %s: %w", siteName, err)
+			}
+			if err := r.renderSiteDeployment(ctx, &fg, site, serverID, image, pitrRender, restart); err != nil {
 				return err
 			}
 			break

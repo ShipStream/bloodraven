@@ -202,7 +202,7 @@ func (r *MysqlFailoverGroupReconciler) restampWorkload(ctx context.Context, obj 
 // release that changes an unhashed part of the template is paced too.
 // deploy and mutate are reconcileDeployment's: mutate renders into deploy.
 func (r *MysqlFailoverGroupReconciler) gateDeploymentRollout(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec,
-	deploy *appsv1.Deployment, mutate func() error, specHash, pitrCanonical string, pitr groupPITRRender) (done bool, err error) {
+	deploy *appsv1.Deployment, mutate func() error, specHash, pitrCanonical string, pitr groupPITRRender, storageRestart string) (done bool, err error) {
 	if !r.RolloutPacing {
 		return false, nil
 	}
@@ -232,6 +232,11 @@ func (r *MysqlFailoverGroupReconciler) gateDeploymentRollout(ctx context.Context
 		pending = templateOnly
 	}
 	r.noteRolloutTemplatePending(nn, site.Name, templateOnly)
+	if !pending && storageRestart != "" {
+		// The release has no template change. The ordered worker may apply
+		// the administrator's site-specific remount and stamp this renderer.
+		return false, nil
+	}
 	if !pending {
 		return true, r.restampWorkload(ctx, &live)
 	}

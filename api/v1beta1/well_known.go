@@ -469,6 +469,15 @@ const (
 	// Stability: Internal (may change).
 	SpecHashAnnotation = "bloodraven.shipstream.io/spec-hash"
 
+	// StorageRestartAnnotation requests one ordered remount for a site's
+	// filesystem expansion. A matching pod template records the applied request.
+	//
+	// On: MysqlFailoverGroup and site MySQL pod templates.
+	// Writer: administrator (group), operator (template).
+	// Value: `<site>/<PVC UID>/<canonical storage request>`, e.g. `iad/<uid>/200Gi`.
+	// Stability: Public.
+	StorageRestartAnnotation = "bloodraven.shipstream.io/storage-restart"
+
 	// RenderedByAnnotation names the operator release (its renderer
 	// identity) that last wrote the workload's pod template. A workload
 	// that carries another value, or none, and whose template the running
