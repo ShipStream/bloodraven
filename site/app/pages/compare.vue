@@ -466,7 +466,7 @@ const sections: Section[] = [
         'p|S3, folder',
       ] },
       { label: 'Point-in-time recovery', cells: [
-        `p|Yes, into a new group; refuses to replay across sites after a failover (${gh('ShipStream/bloodraven', 206)})`,
+        'p|Yes, into a new group, not in place; replays in order across sites after a failover. <a href="/docs/backup-and-restore/backup-restore#point-in-time-recovery-pitr">Point-in-time recovery</a>',
         'b|Enterprise only',
         'g|Yes',
         'p|Tech preview',
@@ -538,7 +538,7 @@ const sections: Section[] = [
         'g|Yes', 'g|Yes, without restart where possible', 'g|Yes', 'g|Yes', 'g|Yes', 'g|Yes', 'g|Yes', 'g|Yes', 'g|Yes',
       ] },
       { label: 'Command-line tool', cells: [
-        'g|<code>kubectl bloodraven</code> for status, promote, reclone, backup and verify. <a href="/docs/operations/kubectl-plugin">kubectl plugin</a>',
+        'g|<code>kubectl bloodraven</code> for status, promote, reclone, backup, verify and storage migration. <a href="/docs/operations/kubectl-plugin">kubectl plugin</a>',
         'b|MySQL Shell only',
         'p|None; GUI through OpenEverest',
         'b|None',
@@ -622,7 +622,7 @@ const sections: Section[] = [
         'n|Not documented',
       ] },
       { label: 'Dashboards and alerts shipped', cells: [
-        'p|5 Grafana dashboards; alert rules as an example file. <a href="/docs/observability/alert-runbook-map">Alert runbook map</a>',
+        'p|6 Grafana dashboards; alert rules as an example file. <a href="/docs/observability/alert-runbook-map">Alert runbook map</a>',
         'b|None',
         'p|Through PMM',
         'p|Through PMM',
@@ -653,7 +653,7 @@ const sections: Section[] = [
     title: 'Failure testing',
     rows: [
       { label: 'Real-cluster test scenarios', cells: [
-        'g|62 chaos scenarios. <a href="/docs/get-started/playground#automated-chaos-suite">Chaos suite</a>',
+        'g|74 chaos scenarios. <a href="/docs/get-started/playground#automated-chaos-suite">Chaos suite</a>',
         'p|51 suites',
         'g|70 suites',
         'g|65 suites',
@@ -687,7 +687,7 @@ const sections: Section[] = [
         'b|No', 'b|No', 'b|No', 'b|No', 'b|No', 'b|No', 'b|No', 'b|No', 'b|No', 'b|No',
       ] },
       { label: 'Where the tests run', cells: [
-        'p|Public GitHub Actions on kind: a smoke set gates every release, 28 scenarios nightly, the full set on demand',
+        'p|Public GitHub Actions on kind: a smoke set gates every release, 29 scenarios nightly, the full set on demand',
         'b|Internal CI, results not public',
         'g|GKE on every PR; failure tests at release on six platforms',
         'g|GKE on every PR, failure tests included; six platforms at release',
@@ -886,7 +886,7 @@ function cell(raw: string | undefined): { tone: Tone, html: string } {
           count.
         </p>
         <ul class="method">
-          <li><strong>Bloodraven:</strong> 62 registered scenarios. Four need the encryption setup and run in their own CI jobs; two are open known failures, kept quarantined. Every PR runs 190 component tests, 57 envtest tests and a 400-seed deterministic simulation sweep.</li>
+          <li><strong>Bloodraven:</strong> 74 registered scenarios. Five need the encryption setup and two an installed previous release; those run in their own CI jobs. Two are open known failures, kept quarantined. Every PR runs 320 component tests, 171 envtest tests and a 400-seed deterministic simulation sweep.</li>
           <li><strong>Oracle:</strong> 51 end-to-end files, of which about 13 tests crash a process or delete a pod. No partition or node-loss tests. CI is internal.</li>
           <li><strong>Percona PXC:</strong> 70 end-to-end tests; 3 chaos-mesh suites plus 6 with kill or delete steps. Chaos suites run at release time.</li>
           <li><strong>Percona PS:</strong> 65 kuttl suites, including Group Replication self-healing and async failover with a killed primary; these run on every PR.</li>

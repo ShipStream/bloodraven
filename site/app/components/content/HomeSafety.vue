@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * The three promises the operator makes on a bad day. Numbered cards that
+ * What the operator promises on a bad day and on a maintenance day. Numbered cards that
  * invert to ink on hover -- the hover state is the "lights out" reading of the
  * same card.
  */
