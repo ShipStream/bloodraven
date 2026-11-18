@@ -134,3 +134,18 @@ func TestCompletedOnlineResizeSkipsPrimaryHandoff(t *testing.T) {
 		t.Fatalf("recheck=%v err=%v primaryReadOnly=%v standbyReadOnly=%v", checked, err, primary.ReadOnlyVal, standby.ReadOnlyVal)
 	}
 }
+
+func TestStrategyChangeRetainsInFlightPrimaryConfigDrift(t *testing.T) {
+	fg := pitrRolloutFG(false)
+	objs := driftFixture(t, fg, true)
+	live := fg.DeepCopy()
+	live.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
+	live.Spec.Image = "mysql:new-image"
+	objs[0] = live
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(objs...).Build()
+	r := &TopologyManagerRunner{apiReader: c, logger: testLogger()}
+	needed, err := r.activeSiteNeedsUpdate(t.Context(), client.ObjectKeyFromObject(fg), fg.UID, fg.Spec.Sites[0].Name)
+	if err != nil || !needed {
+		t.Fatalf("switching strategy lost the in-flight primary update: needed=%v err=%v", needed, err)
+	}
+}

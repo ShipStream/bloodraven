@@ -1023,6 +1023,28 @@ func (r *TopologyManagerRunner) specDriftView(ctx context.Context, reader client
 	return drift, refused, held, true
 }
 
+// activeSiteNeedsUpdate rechecks the primary just before an ordered handoff.
+// Switching to Recreate cancels a remount request, but an ordinary template
+// change already in flight must still finish under the ordered worker.
+func (r *TopologyManagerRunner) activeSiteNeedsUpdate(ctx context.Context, nn types.NamespacedName, uid types.UID, site string) (bool, error) {
+	reader := r.apiReader
+	if reader == nil {
+		reader = r.client
+	}
+	var fresh v1beta1.MysqlFailoverGroup
+	if err := reader.Get(ctx, nn, &fresh); err != nil {
+		return false, err
+	}
+	if fresh.UID != uid || fresh.DeletionTimestamp != nil {
+		return false, nil
+	}
+	sites, ok := r.specDriftSites(ctx, reader, &fresh)
+	if !ok {
+		return false, errors.New("could not confirm the active site still needs an update")
+	}
+	return slices.Contains(sites, site), nil
+}
+
 // startManager creates and starts a TopologyManager for a single
 // MysqlFailoverGroup. prev is the manager it replaces, already stopped,
 // or nil.
@@ -1260,23 +1282,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1beta1.My
 	// Wire the ordered update callbacks so the UpdateController can reconcile
 	// one site's Deployment at a time and wait for its pod to be Ready.
 	if r.deployReconciler != nil {
+		groupUID := fg.UID
 		updateCtl.confirmActiveDrift = func(ctx context.Context, site string) (bool, error) {
-			reader := client.Reader(r.apiReader)
-			if reader == nil {
-				reader = r.client
-			}
-			var fresh v1beta1.MysqlFailoverGroup
-			if err := reader.Get(ctx, nn, &fresh); err != nil {
-				return false, err
-			}
-			if fresh.UID != fg.UID || fresh.DeletionTimestamp != nil {
-				return false, nil
-			}
-			sites, ok := r.specDriftSites(ctx, reader, &fresh)
-			if !ok {
-				return false, errors.New("could not confirm the active site still needs an update")
-			}
-			return slices.Contains(sites, site), nil
+			return r.activeSiteNeedsUpdate(ctx, nn, groupUID, site)
 		}
 		tm.ApplyUpdate = func(applyCtx context.Context, siteName string) error {
 			return r.deployReconciler.ReconcileSiteDeployment(applyCtx, nn, siteName)
