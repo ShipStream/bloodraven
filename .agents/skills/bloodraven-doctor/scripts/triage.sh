@@ -99,6 +99,10 @@ echo "Spec generation:     ${SPEC_GENERATION:-unavailable} (applied by the topol
 if [[ "$SPEC_GENERATION" =~ ^[0-9]+$ && "${OBSERVED_GENERATION:-0}" =~ ^[0-9]+$ && "${OBSERVED_GENERATION:-0}" -lt "$SPEC_GENERATION" ]]; then
     echo "  The topology manager has not applied the latest spec yet; Ready, Degraded, Bootstrapping and Updating describe generation ${OBSERVED_GENERATION:-<none>}. Re-run in a few seconds; a gap that stays usually means no topology manager runs for this group (playbook 24)."
 fi
+SITE_STORAGE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.storage.sites[*]}{.name}{" "}{.phase}{" desired="}{.desiredSize}{" requested="}{.requestedSize}{" capacity="}{.capacity}{" "}{.message}{"\n"}{end}' 2>/dev/null || true)
+if [[ -n "$SITE_STORAGE" ]]; then
+    printf 'Site storage:\n%s\n' "$SITE_STORAGE"
+fi
 RESTORE_STATUS=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restore.phase}{" reason="}{.status.restore.reason}{" job="}{.status.restore.jobName}{" message="}{.status.restore.message}' 2>/dev/null || true)
 if [[ -n "$RESTORE_STATUS" && "$RESTORE_STATUS" != " reason= job= message=" ]]; then
     echo "Restore status:      $RESTORE_STATUS"
