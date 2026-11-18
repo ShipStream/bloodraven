@@ -48,7 +48,7 @@ emit_verification_manifest() {
   local profile="$1"
   local name_stem="${GROUP}-${profile}-verify-"
   cat <<YAML
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlBackupVerification
 metadata:
   generateName: ${name_stem}

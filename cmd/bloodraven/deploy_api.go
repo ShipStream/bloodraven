@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	authv1 "k8s.io/api/authentication/v1"
@@ -207,7 +207,7 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Resolve the namespace through authorization, never through group existence.
-	var databases v1alpha1.MysqlDatabaseList
+	var databases v1beta1.MysqlDatabaseList
 	if err := h.reader.List(ctx, &databases); err != nil {
 		deployError(w, err)
 		return
@@ -235,11 +235,11 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		deployJSON(w, 403, map[string]string{"error": "forbidden"})
 		return
 	}
-	var fg *v1alpha1.MysqlFailoverGroup
+	var fg *v1beta1.MysqlFailoverGroup
 	groupNamespace := ""
 	if len(namespaces) == 1 {
 		groupNamespace = namespaces[0]
-		fg = &v1alpha1.MysqlFailoverGroup{}
+		fg = &v1beta1.MysqlFailoverGroup{}
 		if err := h.reader.Get(ctx, types.NamespacedName{Namespace: groupNamespace, Name: group}, fg); err != nil {
 			deployError(w, err)
 			return
@@ -248,7 +248,7 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A MysqlDatabase can name any group, so a database in a namespace
 		// without that group must not make the caller's real one ambiguous.
 		for _, ns := range namespaces {
-			candidate := &v1alpha1.MysqlFailoverGroup{}
+			candidate := &v1beta1.MysqlFailoverGroup{}
 			if err := h.reader.Get(ctx, types.NamespacedName{Namespace: ns, Name: group}, candidate); apierrors.IsNotFound(err) {
 				continue
 			} else if err != nil {
@@ -328,17 +328,17 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.DeploymentLeaseView, reason string) map[string]any {
-	ready := apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1alpha1.ConditionReady)
+func deployGroupResponse(fg *v1beta1.MysqlFailoverGroup, leases []controller.DeploymentLeaseView, reason string) map[string]any {
+	ready := apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1beta1.ConditionReady)
 	degraded := ""
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionDegraded); c != nil && c.Status == metav1.ConditionTrue {
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionDegraded); c != nil && c.Status == metav1.ConditionTrue {
 		degraded = c.Reason
 	}
 	// replicationRunning: every non-active spec site has a status entry
 	// whose replication is Healthy or Lagging (and no other non-active
 	// entry reports otherwise). Lag is reported separately.
-	replicating, recovery, lag := true, apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1alpha1.ConditionRecoveryPending), int64(0)
-	statusByName := make(map[string]v1alpha1.SiteStatus, len(fg.Status.Sites))
+	replicating, recovery, lag := true, apimeta.IsStatusConditionTrue(fg.Status.Conditions, v1beta1.ConditionRecoveryPending), int64(0)
+	statusByName := make(map[string]v1beta1.SiteStatus, len(fg.Status.Sites))
 	for _, s := range fg.Status.Sites {
 		statusByName[s.Name] = s
 		if s.Name != fg.Status.ActiveSite {
@@ -347,7 +347,7 @@ func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.De
 				lag = max(lag, *s.SecondsBehindSource)
 			}
 		}
-		recovery = recovery || s.RecoveryState != "" || s.SourceConvergenceState == v1alpha1.SourceConvergencePending || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked
+		recovery = recovery || s.RecoveryState != "" || s.SourceConvergenceState == v1beta1.SourceConvergencePending || s.SourceConvergenceState == v1beta1.SourceConvergenceBlocked
 	}
 	for _, site := range fg.Spec.Sites {
 		if site.Name == fg.Status.ActiveSite {
@@ -377,31 +377,31 @@ func deployGroupResponse(fg *v1alpha1.MysqlFailoverGroup, leases []controller.De
 // a terminal run reports its result reason (empty when it has none, never an
 // earlier admission reason), Admitting its latest wait reason, Deferred its
 // defer reason, and any other live phase no reason.
-func plannedFailoverOperation(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
+func plannedFailoverOperation(fg *v1beta1.MysqlFailoverGroup) map[string]string {
 	out := map[string]string{"phase": "", "outcome": "", "reason": ""}
 	p := fg.Status.PlannedFailover
 	if p == nil {
 		return out
 	}
-	if m, ok := controller.ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && p.RunID != "" && m.RunID == p.RunID {
-		out["phase"] = string(v1alpha1.PlannedFailoverPhaseFailed)
-		if m.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
-			out["phase"] = string(v1alpha1.PlannedFailoverPhaseSucceeded)
+	if m, ok := controller.ParseTerminalMarker(fg.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]); ok && p.RunID != "" && m.RunID == p.RunID {
+		out["phase"] = string(v1beta1.PlannedFailoverPhaseFailed)
+		if m.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded {
+			out["phase"] = string(v1beta1.PlannedFailoverPhaseSucceeded)
 		}
 		out["outcome"], out["reason"] = string(m.Outcome), string(m.Reason)
 		return out
 	}
 	out["phase"] = string(p.Phase)
 	switch p.Phase {
-	case v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverPhaseFailed:
+	case v1beta1.PlannedFailoverPhaseSucceeded, v1beta1.PlannedFailoverPhaseFailed:
 		if p.Result != nil {
 			out["outcome"], out["reason"] = string(p.Result.Outcome), string(p.Result.Reason)
 		}
-	case v1alpha1.PlannedFailoverPhaseAdmitting:
+	case v1beta1.PlannedFailoverPhaseAdmitting:
 		if p.Admission != nil {
 			out["reason"] = string(p.Admission.WaitReason)
 		}
-	case v1alpha1.PlannedFailoverPhaseDeferred:
+	case v1beta1.PlannedFailoverPhaseDeferred:
 		if p.Admission != nil {
 			out["reason"] = string(p.Admission.DeferReason)
 		}

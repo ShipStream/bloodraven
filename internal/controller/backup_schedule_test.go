@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestReconcileBackupSchedules_CreatesCronJob(t *testing.T) {
@@ -75,8 +75,8 @@ func TestReconcileBackupSchedules_PrunesOrphanCronJobs(t *testing.T) {
 			Name:      scheduleCronJobName("lion", "gone"),
 			Namespace: "ns",
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel: "lion",
-				v1alpha1.ResourceLabel:      "backup-schedule",
+				v1beta1.FailoverGroupLabel: "lion",
+				v1beta1.ResourceLabel:      "backup-schedule",
 			},
 		},
 		Spec: batchv1.CronJobSpec{
@@ -135,9 +135,9 @@ func TestReconcileBackupAssets_CreatesScriptsWhenOnlyInitFromBackup(t *testing.T
 	// is nil. Regression test for Copilot review comment on reconciler.go.
 	fg := fgWithBackup()
 	fg.Spec.Backup = nil
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			S3: &v1alpha1.S3Storage{Bucket: "b", CredentialsSecretName: "s3-creds"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			S3: &v1beta1.S3Storage{Bucket: "b", CredentialsSecretName: "s3-creds"},
 		},
 	}
 	r, c := newReconciler(fg)

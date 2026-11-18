@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -25,7 +25,7 @@ const reasonAdmittedByAnnotation = "AdmittedByAnnotation"
 
 // admits reports whether rec admits its group to roll the running
 // renderer's templates.
-func (s *rolloutSim) admits(rec *v1alpha1.RolloutStatus) bool {
+func (s *rolloutSim) admits(rec *v1beta1.RolloutStatus) bool {
 	return rec.InFlight() && rec.Renderer == s.identity
 }
 
@@ -47,7 +47,7 @@ func (s *rolloutSim) holdsSlot(g *rolloutGroupSim) bool {
 	return slotHeld(g.rec, g.admitAnno, g.releaseAnno, s.clk.Now(), time.Duration(s.plan.StartGraceSteps)*rolloutStep)
 }
 
-func slotHeld(rec *v1alpha1.RolloutStatus, admitAnno, releaseAnno bool, now time.Time, startGrace time.Duration) bool {
+func slotHeld(rec *v1beta1.RolloutStatus, admitAnno, releaseAnno bool, now time.Time, startGrace time.Duration) bool {
 	if !rec.InFlight() || releaseAnno {
 		return false
 	}
@@ -61,7 +61,7 @@ func aged(v string) bool { return strings.HasPrefix(v, "release-") }
 
 // observeRecord judges one committed change of a group's status.rollout.
 // Callers hold s.mu.
-func (s *rolloutSim) observeRecord(g *rolloutGroupSim, was, now *v1alpha1.RolloutStatus) {
+func (s *rolloutSim) observeRecord(g *rolloutGroupSim, was, now *v1beta1.RolloutStatus) {
 	if equality.Semantic.DeepEqual(was, now) {
 		return
 	}
@@ -78,7 +78,7 @@ func (s *rolloutSim) observeRecord(g *rolloutGroupSim, was, now *v1alpha1.Rollou
 			note("admitByAnnotation")
 			if !g.admitAnno {
 				s.violate("AdmittedByAnnotationWithoutIt", fmt.Sprintf("%s was admitted with reason %s but carries no %s annotation",
-					name, now.Reason, v1alpha1.RolloutAdmitAnnotation))
+					name, now.Reason, v1beta1.RolloutAdmitAnnotation))
 			}
 		} else {
 			note("admit")
@@ -179,14 +179,14 @@ func (s *rolloutSim) observeRecord(g *rolloutGroupSim, was, now *v1alpha1.Rollou
 	}
 }
 
-func recordPhase(r *v1alpha1.RolloutStatus) string {
+func recordPhase(r *v1beta1.RolloutStatus) string {
 	if r == nil {
 		return "-"
 	}
 	return string(r.Phase)
 }
 
-func recordString(r *v1alpha1.RolloutStatus) string {
+func recordString(r *v1beta1.RolloutStatus) string {
 	if r == nil {
 		return "<none>"
 	}
@@ -224,12 +224,12 @@ func (s *rolloutSim) notRolled(g *rolloutGroupSim) string {
 
 func (s *rolloutSim) deploymentNotRolled(d *appsv1.Deployment) string {
 	switch {
-	case d.Annotations[v1alpha1.RenderedByAnnotation] != s.identity:
-		return fmt.Sprintf("was rendered by %q", d.Annotations[v1alpha1.RenderedByAnnotation])
-	case aged(d.Annotations[v1alpha1.SpecHashAnnotation]):
-		return fmt.Sprintf("carries the running renderer's name over the spec hash %q of an earlier release", d.Annotations[v1alpha1.SpecHashAnnotation])
-	case aged(d.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation]):
-		return fmt.Sprintf("has a pod template with the spec hash %q of an earlier release", d.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation])
+	case d.Annotations[v1beta1.RenderedByAnnotation] != s.identity:
+		return fmt.Sprintf("was rendered by %q", d.Annotations[v1beta1.RenderedByAnnotation])
+	case aged(d.Annotations[v1beta1.SpecHashAnnotation]):
+		return fmt.Sprintf("carries the running renderer's name over the spec hash %q of an earlier release", d.Annotations[v1beta1.SpecHashAnnotation])
+	case aged(d.Spec.Template.Annotations[v1beta1.SpecHashAnnotation]):
+		return fmt.Sprintf("has a pod template with the spec hash %q of an earlier release", d.Spec.Template.Annotations[v1beta1.SpecHashAnnotation])
 	}
 	return ""
 }
@@ -239,13 +239,13 @@ func (s *rolloutSim) deploymentNotRolled(d *appsv1.Deployment) string {
 func (s *rolloutSim) checkTemplateWrite(g *rolloutGroupSim, site string, old, now *appsv1.Deployment) {
 	name := g.spec.Name + "/" + site
 	rec := g.rec
-	if old.Annotations[v1alpha1.RenderedByAnnotation] != s.identity {
+	if old.Annotations[v1beta1.RenderedByAnnotation] != s.identity {
 		// A release-driven change: the group is admitted for the running
 		// renderer and the start of its roll was latched before this write.
 		switch {
 		case !s.admits(rec):
 			s.violate("TemplateWrittenOutsideSlot", fmt.Sprintf("the pod template of %s (rendered by %q) was changed while the group's record is %s",
-				name, old.Annotations[v1alpha1.RenderedByAnnotation], recordString(rec)))
+				name, old.Annotations[v1beta1.RenderedByAnnotation], recordString(rec)))
 		case rec.StartedTime == nil:
 			s.violate("TemplateWrittenBeforeLatch", fmt.Sprintf("the pod template of %s was changed before status.rollout.startedTime was set (%s)",
 				name, recordString(rec)))
@@ -270,9 +270,9 @@ func (s *rolloutSim) checkTemplateWrite(g *rolloutGroupSim, site string, old, no
 // renderer only on a workload whose template it would not change, and no
 // trial has such a workload after a release.
 func (s *rolloutSim) checkRestamp(g *rolloutGroupSim, site string, old, now *appsv1.Deployment) {
-	if old.Annotations[v1alpha1.RenderedByAnnotation] != s.identity && now.Annotations[v1alpha1.RenderedByAnnotation] == s.identity {
+	if old.Annotations[v1beta1.RenderedByAnnotation] != s.identity && now.Annotations[v1beta1.RenderedByAnnotation] == s.identity {
 		s.violate("RestampedPendingWorkload", fmt.Sprintf("%s/%s (rendered by %q, spec hash %q) was stamped with the running renderer without a template write",
-			g.spec.Name, site, old.Annotations[v1alpha1.RenderedByAnnotation], old.Annotations[v1alpha1.SpecHashAnnotation]))
+			g.spec.Name, site, old.Annotations[v1beta1.RenderedByAnnotation], old.Annotations[v1beta1.SpecHashAnnotation]))
 	}
 }
 
@@ -295,7 +295,7 @@ func (s *rolloutSim) noteApply(g *rolloutGroupSim, site string) {
 
 // checkHeldDrift judges the drift check's result (invariant 2): a group
 // that is not admitted has no drift, so no ordered update starts for it.
-func (s *rolloutSim) checkHeldDrift(g *rolloutGroupSim, fg *v1alpha1.MysqlFailoverGroup) {
+func (s *rolloutSim) checkHeldDrift(g *rolloutGroupSim, fg *v1beta1.MysqlFailoverGroup) {
 	if drift := g.tm.SpecDriftSites(); len(drift) > 0 && !s.admits(fg.Status.Rollout) {
 		s.violate("DriftOutsideSlot", fmt.Sprintf("the drift check of %s reported %v while the group's record is %s",
 			g.spec.Name, drift, recordString(fg.Status.Rollout)))
@@ -371,7 +371,7 @@ func (s *rolloutSim) checkStep(p int) {
 // status then names no active site until the operator has re-asserted it;
 // an operator that restarts in between has no authority left on record.
 // The failover trials excuse the same state (checkWedge: no history).
-func (s *rolloutSim) needsHuman(g *rolloutGroupSim, fg *v1alpha1.MysqlFailoverGroup) bool {
+func (s *rolloutSim) needsHuman(g *rolloutGroupSim, fg *v1beta1.MysqlFailoverGroup) bool {
 	for _, t := range g.cluster.Truth() {
 		if t.Crashed || !t.ReadOnly || t.SuperReadOnly {
 			return false
@@ -391,7 +391,7 @@ func (s *rolloutSim) checkEnd() []Violation {
 	add := func(invariant, detail string) {
 		out = append(out, Violation{Invariant: invariant, Poll: last, Detail: detail})
 	}
-	fgs := map[*rolloutGroupSim]*v1alpha1.MysqlFailoverGroup{}
+	fgs := map[*rolloutGroupSim]*v1beta1.MysqlFailoverGroup{}
 	halted := false
 	for _, g := range s.groups {
 		fg := s.group(g)

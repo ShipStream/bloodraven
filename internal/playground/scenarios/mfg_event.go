@@ -8,7 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -94,12 +94,12 @@ func verifyNoPrimaryNotReported() runner.Step {
 		Phase: runner.PhaseVerify,
 		Name:  "the planned write pause was not reported as NoPrimary (no Event, no ALERT)",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			ev, found, err := findMFGEvent(ctx, env, env.StartTime, v1alpha1.EventNoPrimaryDetected, "")
+			ev, found, err := findMFGEvent(ctx, env, env.StartTime, v1beta1.EventNoPrimaryDetected, "")
 			if err != nil {
 				return err
 			}
 			if found {
-				return fmt.Errorf("%s Event during a planned write pause: %s", v1alpha1.EventNoPrimaryDetected, ev.Message)
+				return fmt.Errorf("%s Event during a planned write pause: %s", v1beta1.EventNoPrimaryDetected, ev.Message)
 			}
 			tail, err := env.Logs("operator")
 			if err != nil {

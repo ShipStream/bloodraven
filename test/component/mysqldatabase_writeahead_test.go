@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // These tests pin the write-ahead invariant: a status record may name
@@ -43,10 +43,10 @@ func userSecretFor(name, username, password string) *corev1.Secret {
 	}
 }
 
-func selectUserEntry(secretName string, hosts ...string) v1alpha1.MysqlDatabaseUser {
-	return v1alpha1.MysqlDatabaseUser{
+func selectUserEntry(secretName string, hosts ...string) v1beta1.MysqlDatabaseUser {
+	return v1beta1.MysqlDatabaseUser{
 		SecretName: secretName,
-		Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+		Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
 		Hosts:      hosts,
 	}
 }
@@ -95,9 +95,9 @@ func (h *mdbHarness) requireNoStatementNaming(n int, prefix, username string) {
 // rolled back only the refused one, and the next reconcile — after the first
 // entry was removed — adopted the second through its surviving record.
 func TestMysqlDatabaseRefusedUsersThenRemovedNeverAdopts(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
-		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("a-mysql"), selectUserEntry("b-mysql")}
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
+		m.Spec.Users = []v1beta1.MysqlDatabaseUser{selectUserEntry("a-mysql"), selectUserEntry("b-mysql")}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(),
 		userSecretFor("a-mysql", "foreign_a", "attacker-a"), userSecretFor("b-mysql", "victim_b", "attacker-b"))
@@ -116,7 +116,7 @@ func TestMysqlDatabaseRefusedUsersThenRemovedNeverAdopts(t *testing.T) {
 		t.Fatalf("a refused apply executed %d statements: %v", n, h.server.statementsSince(0))
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users = m.Spec.Users[1:] })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users = m.Spec.Users[1:] })
 	h.reconcile()
 	mdb = h.get()
 	requireFailed(t, mdb, "PreExistingUser")
@@ -145,7 +145,7 @@ func TestMysqlDatabasePreflightQueryFailureStampsNothing(t *testing.T) {
 
 	h.reconcile()
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q (message %q), want Pending", mdb.Status.Phase, mdb.Status.Message)
 	}
 	if mdb.Status.DatabaseCreated || mdb.Status.OwnerUser != "" || len(mdb.Status.OwnerHosts) != 0 || len(mdb.Status.AppliedUsers) != 0 {
@@ -167,14 +167,14 @@ func TestMysqlDatabasePreflightQueryFailureStampsNothing(t *testing.T) {
 // statement created and are withdrawn — so a foreign account created with
 // that name afterwards is refused, not adopted, and never dropped.
 func TestMysqlDatabaseOwnerStatementRefusedWithdrawsUnexecutedRecords(t *testing.T) {
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
 		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
 
 	h.reconcile()
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q (message %q), want Pending", mdb.Status.Phase, mdb.Status.Message)
 	}
 	if !mdb.Status.DatabaseCreated {
@@ -208,7 +208,7 @@ func TestMysqlDatabaseAmbiguousOwnerFailureKeepsRecord(t *testing.T) {
 
 	h.reconcile()
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q (message %q), want Pending", mdb.Status.Phase, mdb.Status.Message)
 	}
 	if !h.server.hasAccount(mdbOwnerUser, "%") {
@@ -231,7 +231,7 @@ func TestMysqlDatabaseAmbiguousOwnerFailureKeepsRecord(t *testing.T) {
 // status.pendingOwnerUser, or a foreign account created under that name later
 // would be adopted by the retry and dropped by Delete.
 func TestMysqlDatabaseRefusedRotationStatementWithdrawsPendingOwner(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 	h.reconcile()
 	h.requireReady()
@@ -268,13 +268,13 @@ func TestMysqlDatabaseRefusedRotationStatementWithdrawsPendingOwner(t *testing.T
 // does not make a foreign X@H2 this CR's — for the owner or a users[] entry.
 func TestMysqlDatabaseHostAdditionOverForeignAccountRefused(t *testing.T) {
 	t.Run("owner", func(t *testing.T) {
-		cr := mdbCR(withOwnerHosts(hostA), func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+		cr := mdbCR(withOwnerHosts(hostA), func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 		h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 		h.reconcile()
 		h.requireReady()
 
 		h.server.addAccount(mdbOwnerUser, hostB, "foreign-password")
-		h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Hosts = []string{hostA, hostB} })
+		h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Owner.Hosts = []string{hostA, hostB} })
 		h.reconcile()
 		mdb := h.get()
 		requireFailed(t, mdb, "PreExistingOwnerUser")
@@ -292,13 +292,13 @@ func TestMysqlDatabaseHostAdditionOverForeignAccountRefused(t *testing.T) {
 	})
 
 	t.Run("users", func(t *testing.T) {
-		cr := mdbCR(withSupportUser, withSupportHosts(hostA), func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+		cr := mdbCR(withSupportUser, withSupportHosts(hostA), func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 		h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 		h.reconcile()
 		h.requireReady()
 
 		h.server.addAccount(mdbSupportUser, hostB, "foreign-password")
-		h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].Hosts = []string{hostA, hostB} })
+		h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users[0].Hosts = []string{hostA, hostB} })
 		h.reconcile()
 		mdb := h.get()
 		requireFailed(t, mdb, "PreExistingUser")
@@ -329,7 +329,7 @@ func TestMysqlDatabaseRotationWithHostChangeDropsOnlyRecordedHosts(t *testing.T)
 
 		h.server.addAccount(mdbOwnerUser, hostB, "foreign-password")
 		h.setOwnerUsername("acme_app_v2", "owner-pw-2")
-		h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Hosts = []string{hostB} })
+		h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Owner.Hosts = []string{hostB} })
 		before := h.server.statementCount()
 		h.reconcile()
 		mdb := h.requireReady()
@@ -364,7 +364,7 @@ func TestMysqlDatabaseRotationWithHostChangeDropsOnlyRecordedHosts(t *testing.T)
 			s.Data["username"] = []byte("acme_support_v2")
 			s.Data["password"] = []byte("support-pw-2")
 		})
-		h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].Hosts = []string{hostB} })
+		h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users[0].Hosts = []string{hostB} })
 		h.reconcile()
 		h.requireReady()
 
@@ -387,7 +387,7 @@ func TestMysqlDatabaseStalePendingTargetDropsOnlyItsHosts(t *testing.T) {
 	)
 
 	t.Run("owner", func(t *testing.T) {
-		cr := mdbCR(withOwnerHosts(hostC), func(m *v1alpha1.MysqlDatabase) {
+		cr := mdbCR(withOwnerHosts(hostC), func(m *v1beta1.MysqlDatabase) {
 			m.Status.DatabaseCreated = true
 			m.Status.OwnerUser, m.Status.OwnerHosts = prev, []string{hostA}
 			m.Status.PendingOwnerUser, m.Status.PendingOwnerHosts = stale, []string{hostB}
@@ -417,10 +417,10 @@ func TestMysqlDatabaseStalePendingTargetDropsOnlyItsHosts(t *testing.T) {
 	})
 
 	t.Run("users", func(t *testing.T) {
-		cr := mdbCR(withSupportUser, withSupportHosts(hostC), func(m *v1alpha1.MysqlDatabase) {
+		cr := mdbCR(withSupportUser, withSupportHosts(hostC), func(m *v1beta1.MysqlDatabase) {
 			m.Status.DatabaseCreated = true
 			m.Status.OwnerUser = mdbOwnerUser
-			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
+			m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{{
 				SecretName: mdbSupportSecretName,
 				Username:   prev, Hosts: []string{hostA},
 				PendingUsername: stale, PendingHosts: []string{hostB},
@@ -458,9 +458,9 @@ func TestMysqlDatabaseStalePendingTargetDropsOnlyItsHosts(t *testing.T) {
 // shared hosts record the previous operator wrote and converges.
 func TestMysqlDatabaseLegacyPendingWithoutPendingHosts(t *testing.T) {
 	const next = "acme_app_v2"
-	cr := mdbCR(withOwnerHosts(hostB), func(m *v1alpha1.MysqlDatabase) {
+	cr := mdbCR(withOwnerHosts(hostB), func(m *v1beta1.MysqlDatabase) {
 		m.Status.DatabaseCreated = true
-		m.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
+		m.Status.Phase = v1beta1.MysqlDatabasePhaseApplying
 		m.Status.OwnerUser = mdbOwnerUser
 		m.Status.OwnerHosts = []string{hostA, hostB}
 		m.Status.PendingOwnerUser = next
@@ -490,15 +490,15 @@ func TestMysqlDatabaseLegacyPendingWithoutPendingHosts(t *testing.T) {
 // staleOwnerTargetCR is a CR whose owner rotation acme_app → acme_app_v2
 // failed after creating acme_app_v2, with the owner Secret since moved on to
 // acme_app_v3.
-func staleOwnerTargetCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
-	return mdbCR(append([]func(*v1alpha1.MysqlDatabase){func(m *v1alpha1.MysqlDatabase) {
+func staleOwnerTargetCR(mutate ...func(*v1beta1.MysqlDatabase)) *v1beta1.MysqlDatabase {
+	return mdbCR(append([]func(*v1beta1.MysqlDatabase){func(m *v1beta1.MysqlDatabase) {
 		m.Status.DatabaseCreated = true
 		m.Status.OwnerUser, m.Status.OwnerHosts = mdbOwnerUser, []string{"%"}
 		m.Status.PendingOwnerUser, m.Status.PendingOwnerHosts = "acme_app_v2", []string{"%"}
 	}}, mutate...)...)
 }
 
-func staleOwnerTargetHarness(t *testing.T, cr *v1alpha1.MysqlDatabase, extra ...*corev1.Secret) *mdbHarness {
+func staleOwnerTargetHarness(t *testing.T, cr *v1beta1.MysqlDatabase, extra ...*corev1.Secret) *mdbHarness {
 	t.Helper()
 	owner := mdbOwnerSecret()
 	owner.Data["username"] = []byte("acme_app_v3")
@@ -514,8 +514,8 @@ func staleOwnerTargetHarness(t *testing.T, cr *v1alpha1.MysqlDatabase, extra ...
 
 func TestMysqlDatabaseStaleOwnerTargetStillClaimed(t *testing.T) {
 	t.Run("by this CR's users[]", func(t *testing.T) {
-		cr := staleOwnerTargetCR(func(m *v1alpha1.MysqlDatabase) {
-			m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("moved-mysql")}
+		cr := staleOwnerTargetCR(func(m *v1beta1.MysqlDatabase) {
+			m.Spec.Users = []v1beta1.MysqlDatabaseUser{selectUserEntry("moved-mysql")}
 		})
 		h := staleOwnerTargetHarness(t, cr, userSecretFor("moved-mysql", "acme_app_v2", "moved-pw"))
 
@@ -532,9 +532,9 @@ func TestMysqlDatabaseStaleOwnerTargetStillClaimed(t *testing.T) {
 	})
 
 	t.Run("by this CR's users[] on different hosts", func(t *testing.T) {
-		cr := staleOwnerTargetCR(func(m *v1alpha1.MysqlDatabase) {
+		cr := staleOwnerTargetCR(func(m *v1beta1.MysqlDatabase) {
 			m.Status.PendingOwnerHosts = []string{hostB}
-			m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("moved-mysql", hostC)}
+			m.Spec.Users = []v1beta1.MysqlDatabaseUser{selectUserEntry("moved-mysql", hostC)}
 		})
 		h := staleOwnerTargetHarness(t, cr, userSecretFor("moved-mysql", "acme_app_v2", "moved-pw"))
 		h.server.removeUser("acme_app_v2")
@@ -557,8 +557,8 @@ func TestMysqlDatabaseStaleOwnerTargetStillClaimed(t *testing.T) {
 	})
 
 	t.Run("by this CR's grants[]", func(t *testing.T) {
-		cr := staleOwnerTargetCR(func(m *v1alpha1.MysqlDatabase) {
-			m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "acme_app_v2", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+		cr := staleOwnerTargetCR(func(m *v1beta1.MysqlDatabase) {
+			m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "acme_app_v2", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 		})
 		h := staleOwnerTargetHarness(t, cr)
 
@@ -576,15 +576,15 @@ func TestMysqlDatabaseStaleOwnerTargetStillClaimed(t *testing.T) {
 
 	for _, tc := range []struct {
 		name    string
-		sibling func(*v1alpha1.MysqlDatabase)
+		sibling func(*v1beta1.MysqlDatabase)
 	}{
-		{name: "by a sibling's owner record", sibling: func(m *v1alpha1.MysqlDatabase) { m.Status.OwnerUser = "acme_app_v2" }},
-		{name: "by a sibling's users ledger", sibling: func(m *v1alpha1.MysqlDatabase) {
-			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{SecretName: "sibling-support", Username: "acme_app_v2"}}
+		{name: "by a sibling's owner record", sibling: func(m *v1beta1.MysqlDatabase) { m.Status.OwnerUser = "acme_app_v2" }},
+		{name: "by a sibling's users ledger", sibling: func(m *v1beta1.MysqlDatabase) {
+			m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{{SecretName: "sibling-support", Username: "acme_app_v2"}}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sibling := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+			sibling := mdbCR(func(m *v1beta1.MysqlDatabase) {
 				m.Name = "tenant-sibling"
 				m.Spec.DatabaseName = "sibling_wms"
 				m.Spec.Owner.SecretName = "sibling-owner"
@@ -609,11 +609,11 @@ func TestMysqlDatabaseStaleOwnerTargetStillClaimed(t *testing.T) {
 // staleUsersTargetCR is a CR whose support entry's rotation acme_support →
 // acme_app_v2 failed after creating acme_app_v2, with the support Secret
 // since moved on to acme_support_v3.
-func staleUsersTargetCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
-	return mdbCR(append([]func(*v1alpha1.MysqlDatabase){withSupportUser, func(m *v1alpha1.MysqlDatabase) {
+func staleUsersTargetCR(mutate ...func(*v1beta1.MysqlDatabase)) *v1beta1.MysqlDatabase {
+	return mdbCR(append([]func(*v1beta1.MysqlDatabase){withSupportUser, func(m *v1beta1.MysqlDatabase) {
 		m.Status.DatabaseCreated = true
 		m.Status.OwnerUser, m.Status.OwnerHosts = mdbOwnerUser, []string{"%"}
-		m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
+		m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{{
 			SecretName: mdbSupportSecretName,
 			Username:   mdbSupportUser, Hosts: []string{"%"},
 			PendingUsername: "acme_app_v2", PendingHosts: []string{"%"},
@@ -648,8 +648,8 @@ func TestMysqlDatabaseStaleUsersTargetStillClaimed(t *testing.T) {
 	t.Run("by this CR's grants[]", func(t *testing.T) {
 		support := mdbSupportSecret()
 		support.Data["username"] = []byte("acme_support_v3")
-		cr := staleUsersTargetCR(func(m *v1alpha1.MysqlDatabase) {
-			m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "acme_app_v2", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+		cr := staleUsersTargetCR(func(m *v1beta1.MysqlDatabase) {
+			m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "acme_app_v2", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 		})
 		h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), support)
 		h.server.addUser(mdbOwnerUser, mdbOwnerPass)
@@ -674,9 +674,9 @@ func TestMysqlDatabaseRemovedUserMovedToGrantsKept(t *testing.T) {
 	h.reconcile()
 	h.requireReady()
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
+	h.update(func(m *v1beta1.MysqlDatabase) {
 		m.Spec.Users = nil
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: mdbSupportUser, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: mdbSupportUser, Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 	})
 	before := h.server.statementCount()
 	h.reconcile()
@@ -706,11 +706,11 @@ func TestMysqlDatabaseRemovedUserMovedToGrantsKept(t *testing.T) {
 // dropped a foreign B@H2 the CR never created.
 func TestMysqlDatabaseLegacyPendingHostsSurviveSharedHostEdit(t *testing.T) {
 	const moved = "acme_moved"
-	cr := mdbCR(withOwnerHosts(hostA, hostB), func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("moved-mysql", hostA)}
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+	cr := mdbCR(withOwnerHosts(hostA, hostB), func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Users = []v1beta1.MysqlDatabaseUser{selectUserEntry("moved-mysql", hostA)}
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "ghost", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 		m.Status.DatabaseCreated = true
-		m.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
+		m.Status.Phase = v1beta1.MysqlDatabasePhaseApplying
 		m.Status.OwnerUser, m.Status.OwnerHosts = mdbOwnerUser, []string{hostA}
 		m.Status.PendingOwnerUser = moved // legacy: no pendingOwnerHosts
 	})
@@ -738,7 +738,7 @@ func TestMysqlDatabaseLegacyPendingHostsSurviveSharedHostEdit(t *testing.T) {
 
 // pendingHostsOf mirrors the reconciler's legacy fallback for the owner
 // rotation target's hosts.
-func pendingHostsOf(st *v1alpha1.MysqlDatabaseStatus) []string {
+func pendingHostsOf(st *v1beta1.MysqlDatabaseStatus) []string {
 	if len(st.PendingOwnerHosts) > 0 {
 		return st.PendingOwnerHosts
 	}
@@ -751,8 +751,8 @@ func pendingHostsOf(st *v1alpha1.MysqlDatabaseStatus) []string {
 // removed grant on G@'%'.
 func TestMysqlDatabaseGrantMovedToUsersOnOtherHostRevokesPercentAccount(t *testing.T) {
 	const shared = "maester"
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: shared, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: shared, Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), userSecretFor("maester-mysql", shared, "maester-tenant-pw"))
 	h.server.addUser(shared, "maester-pw")
@@ -762,9 +762,9 @@ func TestMysqlDatabaseGrantMovedToUsersOnOtherHostRevokesPercentAccount(t *testi
 		t.Fatal("test premise broken: maester@% not granted")
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
+	h.update(func(m *v1beta1.MysqlDatabase) {
 		m.Spec.Grants = nil
-		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("maester-mysql", hostA)}
+		m.Spec.Users = []v1beta1.MysqlDatabaseUser{selectUserEntry("maester-mysql", hostA)}
 	})
 	h.reconcile()
 	h.requireReady()
@@ -787,13 +787,13 @@ func TestMysqlDatabaseWithdrawalPatchFailureDoesNotAdopt(t *testing.T) {
 	failNextPending.Store(true)
 	funcs := interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			if mdb, ok := obj.(*v1alpha1.MysqlDatabase); ok && mdb.Status.Phase == v1alpha1.MysqlDatabasePhasePending && failNextPending.CompareAndSwap(true, false) {
+			if mdb, ok := obj.(*v1beta1.MysqlDatabase); ok && mdb.Status.Phase == v1beta1.MysqlDatabasePhasePending && failNextPending.CompareAndSwap(true, false) {
 				return errors.New("injected status patch failure")
 			}
 			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	}
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
 		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
@@ -808,7 +808,7 @@ func TestMysqlDatabaseWithdrawalPatchFailureDoesNotAdopt(t *testing.T) {
 
 	h.reconcile()
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q (message %q), want Pending", mdb.Status.Phase, mdb.Status.Message)
 	}
 	if mdb.Status.OwnerUser != "" || len(mdb.Status.AppliedUsers) != 0 {
@@ -863,7 +863,7 @@ func TestMysqlDatabaseOwnerUsersSwapConverges(t *testing.T) {
 // username through its users[] ledger.
 func (h *mdbHarness) siblingClaiming(username string) {
 	h.t.Helper()
-	sibling := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+	sibling := mdbCR(func(m *v1beta1.MysqlDatabase) {
 		m.Name = "tenant-sibling"
 		m.Spec.DatabaseName = "sibling_wms"
 		m.Spec.Owner.SecretName = "sibling-owner"
@@ -871,7 +871,7 @@ func (h *mdbHarness) siblingClaiming(username string) {
 	if err := h.client.Create(context.Background(), sibling); err != nil {
 		h.t.Fatalf("create sibling: %v", err)
 	}
-	sibling.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{SecretName: "sibling-support", Username: username}}
+	sibling.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{{SecretName: "sibling-support", Username: username}}
 	if err := h.client.Status().Update(context.Background(), sibling); err != nil {
 		h.t.Fatalf("stamp sibling claim: %v", err)
 	}
@@ -908,7 +908,7 @@ func TestMysqlDatabaseUndeclaredHostDropIsVetted(t *testing.T) {
 	h.requireReady()
 
 	h.siblingClaiming(mdbOwnerUser)
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Hosts = []string{hostA} })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Owner.Hosts = []string{hostA} })
 	h.reconcile()
 	mdb := h.requireReady()
 
@@ -941,7 +941,7 @@ func TestMysqlDatabaseFailedApplyWithdrawsInThePhasePatch(t *testing.T) {
 
 	h.reconcile()
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending || mdb.Status.OwnerUser != "" || len(mdb.Status.AppliedUsers) != 0 {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending || mdb.Status.OwnerUser != "" || len(mdb.Status.AppliedUsers) != 0 {
 		t.Fatalf("phase %q owner %q users %+v, want Pending with records withdrawn", mdb.Status.Phase, mdb.Status.OwnerUser, mdb.Status.AppliedUsers)
 	}
 	if n := patches.Load(); n != 2 {
@@ -958,7 +958,7 @@ func TestMysqlDatabaseFailedApplyWithdrawsInThePhasePatch(t *testing.T) {
 // path's retirePrincipal applies. The pre-fix delete path only checked
 // sibling CRs' grants[] and dropped its own.
 func TestMysqlDatabaseDeleteKeepsPrincipalMovedToOwnGrants(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 	h.reconcile()
 	h.requireReady()
@@ -966,9 +966,9 @@ func TestMysqlDatabaseDeleteKeepsPrincipalMovedToOwnGrants(t *testing.T) {
 	// One edit hands the owner account over to grants[] and points the
 	// owner Secret at a new name; the CR is deleted before it reconciles.
 	h.setOwnerUsername("acme_app_v2", "owner-pw-2")
-	h.update(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: mdbOwnerUser, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	h.update(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: mdbOwnerUser, Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 		}
 	})
 
@@ -1002,13 +1002,13 @@ func TestMysqlDatabaseRemovedEntryWithdrawsStaleLedgerRecord(t *testing.T) {
 	failNextPending.Store(true)
 	funcs := interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			if mdb, ok := obj.(*v1alpha1.MysqlDatabase); ok && mdb.Status.Phase == v1alpha1.MysqlDatabasePhasePending && failNextPending.CompareAndSwap(true, false) {
+			if mdb, ok := obj.(*v1beta1.MysqlDatabase); ok && mdb.Status.Phase == v1beta1.MysqlDatabasePhasePending && failNextPending.CompareAndSwap(true, false) {
 				return errors.New("injected status patch failure")
 			}
 			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	}
-	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
 		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
@@ -1023,11 +1023,11 @@ func TestMysqlDatabaseRemovedEntryWithdrawsStaleLedgerRecord(t *testing.T) {
 
 	// The entry leaves the spec before the retry, so the current users[]
 	// slice no longer mentions the record at all.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users = nil })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Users = nil })
 	before := h.server.statementCount()
 	h.reconcile()
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q (message %q), want Pending", mdb.Status.Phase, mdb.Status.Message)
 	}
 	if len(mdb.Status.AppliedUsers) != 0 {

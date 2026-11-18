@@ -8,7 +8,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestParseS75ClientLog(t *testing.T) {
@@ -103,7 +103,7 @@ func TestS75RestoreJobReadsReadOnlyPVC(t *testing.T) {
 func TestPVCBackupProfileSpec(t *testing.T) {
 	spec := pvcBackupProfileSpec("p", "playground-fast", "1Gi", "secret")
 	p := spec.Profiles[0]
-	if p.Storage.Type != v1alpha1.BackupStoragePVC || p.Storage.PVC == nil || p.Storage.PVC.Provisioned == nil ||
+	if p.Storage.Type != v1beta1.BackupStoragePVC || p.Storage.PVC == nil || p.Storage.PVC.Provisioned == nil ||
 		*p.Storage.PVC.Provisioned.StorageClassName != "playground-fast" || p.Storage.PVC.Provisioned.Size != "1Gi" {
 		t.Fatalf("storage = %+v", p.Storage)
 	}

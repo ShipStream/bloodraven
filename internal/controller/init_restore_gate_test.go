@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -25,22 +25,22 @@ import (
 // published as the writable active site and the other sites healthy: the
 // state that would label dc1 primary and every site healthy without the
 // restore.
-func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup {
+func initRestoreGateFG(phase v1beta1.BackupPhase) *v1beta1.MysqlFailoverGroup {
 	lag0 := int64(0)
 	fg := newTestFG()
-	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
+	fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly})
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"}},
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: v1alpha1.SiteStateWritable},
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
-		{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
-			SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
+	fg.Status.Sites = []v1beta1.SiteStatus{
+		{Name: "dc1", State: v1beta1.SiteStateWritable},
+		{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
+		{Name: "reader", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, SourceHost: internalSiteServiceHost(fg.Name, "dc1", fg.Namespace),
+			SourceConvergenceState: v1beta1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 	}
 	if phase != "" {
-		fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: phase, TargetSite: "dc1", JobName: "restore-lion-dc1"}
+		fg.Status.Restore = &v1beta1.RestoreStatus{Phase: phase, TargetSite: "dc1", JobName: "restore-lion-dc1"}
 	}
 	return fg
 }
@@ -48,9 +48,9 @@ func initRestoreGateFG(phase v1alpha1.BackupPhase) *v1alpha1.MysqlFailoverGroup 
 // sitePod is a MySQL pod of site already labelled as a serving primary
 // (role=primary, healthy=true), so a gate that fails to strip the labels
 // shows up as an endpoint.
-func sitePod(fg *v1alpha1.MysqlFailoverGroup, site string) *corev1.Pod {
+func sitePod(fg *v1beta1.MysqlFailoverGroup, site string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: site + "-pod", Namespace: fg.Namespace, Labels: map[string]string{
-		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: site, v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
+		labelAppName: "mysql", labelInstance: fg.Name, v1beta1.SiteLabel: site, v1beta1.RoleLabel: "primary", v1beta1.HealthyLabel: v1beta1.LabelValueTrue,
 	}}}
 }
 
@@ -82,14 +82,14 @@ func serviceEndpoints(t *testing.T, c client.Client, ns, name string) []string {
 // keeps reaching it. Once the restore succeeds the normal labels return.
 func TestInitRestore_ApplicationServicesWithheldUntilSucceeded(t *testing.T) {
 	for _, tc := range []struct {
-		phase    v1alpha1.BackupPhase
+		phase    v1beta1.BackupPhase
 		withheld bool
 	}{
 		{"", true},
-		{v1alpha1.BackupPhasePending, true},
-		{v1alpha1.BackupPhaseRunning, true},
-		{v1alpha1.BackupPhaseFailed, true},
-		{v1alpha1.BackupPhaseSucceeded, false},
+		{v1beta1.BackupPhasePending, true},
+		{v1beta1.BackupPhaseRunning, true},
+		{v1beta1.BackupPhaseFailed, true},
+		{v1beta1.BackupPhaseSucceeded, false},
 	} {
 		name := string(tc.phase)
 		if name == "" {
@@ -145,7 +145,7 @@ func TestInitRestore_ApplicationServicesWithheldUntilSucceeded(t *testing.T) {
 func TestInitRestoreSeedSite(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		restore *v1alpha1.RestoreStatus
+		restore *v1beta1.RestoreStatus
 		spec    bool
 		active  string
 		want    string
@@ -153,20 +153,20 @@ func TestInitRestoreSeedSite(t *testing.T) {
 		{name: "no initFromBackup", spec: false, active: "dc1", want: ""},
 		{name: "not seeded", spec: true, want: ""},
 		{name: "seeded, Job not created", spec: true, active: "dc1",
-			restore: &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhasePending, TargetSite: "dc1"}, want: "dc1"},
+			restore: &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhasePending, TargetSite: "dc1"}, want: "dc1"},
 		{name: "running, active site cleared by the fence", spec: true,
-			restore: &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "j", TargetSite: "dc1"}, want: "dc1"},
+			restore: &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning, JobName: "j", TargetSite: "dc1"}, want: "dc1"},
 		{name: "Job target outranks active site", spec: true, active: "dc2",
-			restore: &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "j", TargetSite: "dc1"}, want: "dc1"},
+			restore: &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning, JobName: "j", TargetSite: "dc1"}, want: "dc1"},
 		{name: "failed", spec: true,
-			restore: &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseFailed, JobName: "j", TargetSite: "dc1"}, want: "dc1"},
+			restore: &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseFailed, JobName: "j", TargetSite: "dc1"}, want: "dc1"},
 		{name: "succeeded", spec: true, active: "dc1",
-			restore: &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded, JobName: "j", TargetSite: "dc1"}, want: ""},
+			restore: &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseSucceeded, JobName: "j", TargetSite: "dc1"}, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := newTestFG()
 			if tc.spec {
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
 			}
 			fg.Status.ActiveSite = tc.active
 			fg.Status.Restore = tc.restore
@@ -183,21 +183,21 @@ func TestInitRestoreSeedSite(t *testing.T) {
 // condition carries the recovery procedure.
 func TestUpdateCRStatus_ReadyFalseUntilInitRestoreSucceeds(t *testing.T) {
 	for _, tc := range []struct {
-		phase      v1alpha1.BackupPhase
+		phase      v1beta1.BackupPhase
 		wantStatus metav1.ConditionStatus
 		wantReason string
 		wantText   string
 	}{
-		{v1alpha1.BackupPhaseRunning, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupInProgress, "applications are kept off the group"},
-		{v1alpha1.BackupPhaseFailed, metav1.ConditionFalse, v1alpha1.ReasonInitFromBackupFailed, "delete the restore Job"},
-		{v1alpha1.BackupPhaseSucceeded, metav1.ConditionTrue, v1alpha1.ReasonHealthy, ""},
+		{v1beta1.BackupPhaseRunning, metav1.ConditionFalse, v1beta1.ReasonInitFromBackupInProgress, "applications are kept off the group"},
+		{v1beta1.BackupPhaseFailed, metav1.ConditionFalse, v1beta1.ReasonInitFromBackupFailed, "delete the restore Job"},
+		{v1beta1.BackupPhaseSucceeded, metav1.ConditionTrue, v1beta1.ReasonHealthy, ""},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			fg := newTestFG()
 			fg.Spec.Sites = fg.Spec.Sites[:1]
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
-			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: tc.phase, JobName: "restore-lion-dc1", TargetSite: "dc1", Message: "load failed"}
-			c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
+			fg.Status.Restore = &v1beta1.RestoreStatus{Phase: tc.phase, JobName: "restore-lion-dc1", TargetSite: "dc1", Message: "load failed"}
+			c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 			runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
 			nn := client.ObjectKeyFromObject(fg)
 			if err := runner.updateCRStatus(context.Background(), nn, TopologySnapshot{
@@ -206,7 +206,7 @@ func TestUpdateCRStatus_ReadyFalseUntilInitRestoreSucceeds(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			var got v1alpha1.MysqlFailoverGroup
+			var got v1beta1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &got); err != nil {
 				t.Fatal(err)
 			}
@@ -273,9 +273,9 @@ func TestReconcileRestoreJob_FailedEventCarriesRecovery(t *testing.T) {
 func TestStartManager_HydratesInitRestoreSeedBeforeRun(t *testing.T) {
 	r, _, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
 	fg.Status.ActiveSite = ""
-	fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: "restore-lion-dc1", TargetSite: "dc1"}
+	fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning, JobName: "restore-lion-dc1", TargetSite: "dc1"}
 
 	if err := r.startManager(context.Background(), fg, mustTopologyConfig(fg), nil); err != nil {
 		t.Fatalf("startManager: %v", err)

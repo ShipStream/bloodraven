@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/testutil"
 )
@@ -562,10 +562,10 @@ func TestUpdateController_PhaseProgression(t *testing.T) {
 	if len(phases) != 2 {
 		t.Fatalf("expected 2 phase captures, got %d: %v", len(phases), phases)
 	}
-	if phases[0] != v1alpha1.UpdatePhaseUpdateReplica {
+	if phases[0] != v1beta1.UpdatePhaseUpdateReplica {
 		t.Errorf("first apply should be in UpdateReplica phase, got %s", phases[0])
 	}
-	if phases[1] != v1alpha1.UpdatePhaseUpdateOldPrimary {
+	if phases[1] != v1beta1.UpdatePhaseUpdateOldPrimary {
 		t.Errorf("second apply should be in UpdateOldPrimary phase, got %s", phases[1])
 	}
 

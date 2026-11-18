@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -140,7 +140,7 @@ func TestS40ObserveOnceIgnoresTerminatingServingEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusSiteByName(mfg, "reader").Replication = v1alpha1.SiteReplicationBroken
+	statusSiteByName(mfg, "reader").Replication = v1beta1.SiteReplicationBroken
 	if err := env.Kube.Controller.Update(context.Background(), mfg); err != nil {
 		t.Fatal(err)
 	}
@@ -175,28 +175,28 @@ func TestS40ObserveReadErrorIgnoresOnlyObserverCancellation(t *testing.T) {
 func s40ObserverTestEnv(t *testing.T, clientset *k8sfake.Clientset) (*runner.Env, *s40RunState) {
 	t.Helper()
 	lag := int64(0)
-	mfg := &v1alpha1.MysqlFailoverGroup{
+	mfg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: pgkube.FailoverGroupName, Namespace: pgkube.PlaygroundNamespace},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{
-				{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Sites: []v1beta1.SiteSpec{
+				{Name: "iad", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate},
+				{Name: "pdx", ServerID: 102, Role: v1beta1.SiteRolePrimaryCandidate},
+				{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly},
 			},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 				{
 					Name:                   "reader",
-					State:                  v1alpha1.SiteStateReadOnly,
-					Replication:            v1alpha1.SiteReplicationHealthy,
+					State:                  v1beta1.SiteStateReadOnly,
+					Replication:            v1beta1.SiteReplicationHealthy,
 					SecondsBehindSource:    &lag,
 					SourceHost:             playgroundInternalSiteHost(pgkube.FailoverGroupName, "iad", pgkube.PlaygroundNamespace),
-					SourceConvergenceState: v1alpha1.SourceConvergenceConverged,
+					SourceConvergenceState: v1beta1.SourceConvergenceConverged,
 				},
 			},
 		},

@@ -11,14 +11,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // reconcileVerificationSchedules materializes one CronJob per profile
 // whose spec.backup.profiles[].verification.enabled=true, and prunes
 // CronJobs that belonged to profiles whose verification was removed or
 // disabled. Mirrors reconcileBackupSchedules.
-func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	desired := map[string]struct{}{}
 
 	if fg.Spec.Backup != nil {
@@ -27,7 +27,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx contex
 				continue
 			}
 			if profile.Verification.Schedule == "" {
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventVerificationScheduleInvalid,
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventVerificationScheduleInvalid,
 					"profile %q has verification.enabled=true but verification.schedule is empty", profile.Name)
 				continue
 			}
@@ -44,8 +44,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx contex
 	if err := r.List(ctx, &existing,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			v1alpha1.FailoverGroupLabel: fg.Name,
-			v1alpha1.ResourceLabel:      verificationResourceKindCJ,
+			v1beta1.FailoverGroupLabel: fg.Name,
+			v1beta1.ResourceLabel:      verificationResourceKindCJ,
 		},
 	); err != nil {
 		return fmt.Errorf("list verification cronjobs: %w", err)
@@ -67,7 +67,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx contex
 // `bloodraven trigger-verification` under the group's schedule trigger
 // ServiceAccount (see reconcileScheduleTriggerRBAC), which may read the
 // group and create MysqlBackupVerification CRs.
-func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.BackupProfile) error {
+func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, profile v1beta1.BackupProfile) error {
 	v := profile.Verification
 
 	image := operatorImageFromEnv
@@ -91,13 +91,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx cont
 			return err
 		}
 		labels := map[string]string{
-			labelAppName:                       "mysql-verify",
-			labelInstance:                      fg.Name,
-			v1alpha1.FailoverGroupLabel:        fg.Name,
-			v1alpha1.BackupProfileLabel:        profile.Name,
-			v1alpha1.VerificationScheduleLabel: profile.Name,
-			v1alpha1.ResourceLabel:             verificationResourceKindCJ,
-			labelManagedBy:                     managerName,
+			labelAppName:                      "mysql-verify",
+			labelInstance:                     fg.Name,
+			v1beta1.FailoverGroupLabel:        fg.Name,
+			v1beta1.BackupProfileLabel:        profile.Name,
+			v1beta1.VerificationScheduleLabel: profile.Name,
+			v1beta1.ResourceLabel:             verificationResourceKindCJ,
+			labelManagedBy:                    managerName,
 		}
 		cj.Labels = labels
 

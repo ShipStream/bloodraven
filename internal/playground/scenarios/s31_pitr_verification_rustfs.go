@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -97,8 +97,8 @@ func s31WaitArchiverReady() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR spec rollout", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR spec rollout", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1beta1.ConditionReady, mfg.Generation)
 				pitrSpec := mfg.Spec.Backup != nil && mfg.Spec.Backup.PITR != nil && mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile
 				return pitrSpec && ready && mfg.Status.UpdatePhase == "" && mfg.Status.ActiveSite != "", fmt.Sprintf("pitrSpec=%v ready=%v updatePhase=%q active=%q", pitrSpec, ready, mfg.Status.UpdatePhase, mfg.Status.ActiveSite), nil
 			})
@@ -151,7 +151,7 @@ func waitForActiveArchiverReady(ctx context.Context, env *runner.Env, wantPrefix
 					last = fmt.Sprintf("active=%s: %v", active, statusErr)
 				} else {
 					last = fmt.Sprintf("active=%s %s", active, archiverSummary(st))
-					if st.Enabled && st.Primary && st.StorageType == string(v1alpha1.BackupStorageS3) && strings.Trim(st.ManifestPrefix, "/") == strings.Trim(wantPrefix, "/") && st.LastError == "" && !st.LastScanAt.IsZero() {
+					if st.Enabled && st.Primary && st.StorageType == string(v1beta1.BackupStorageS3) && strings.Trim(st.ManifestPrefix, "/") == strings.Trim(wantPrefix, "/") && st.LastError == "" && !st.LastScanAt.IsZero() {
 						return active, st, nil
 					}
 				}
@@ -180,7 +180,7 @@ func waitForArchiverReady(ctx context.Context, env *runner.Env, site, wantPrefix
 				last = err.Error()
 			} else {
 				last = archiverSummary(st)
-				if st.Enabled && st.Primary && st.StorageType == string(v1alpha1.BackupStorageS3) && strings.Trim(st.ManifestPrefix, "/") == strings.Trim(wantPrefix, "/") && st.LastError == "" && !st.LastScanAt.IsZero() {
+				if st.Enabled && st.Primary && st.StorageType == string(v1beta1.BackupStorageS3) && strings.Trim(st.ManifestPrefix, "/") == strings.Trim(wantPrefix, "/") && st.LastError == "" && !st.LastScanAt.IsZero() {
 					return st, nil
 				}
 			}
@@ -253,7 +253,7 @@ func s31WaitBackupSucceeded() runner.Step {
 			prefix := ctxFetch(env, "backupPrefix")
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			b, err := waitForBackupPhase(waitCtx, env, name, v1alpha1.BackupPhaseSucceeded)
+			b, err := waitForBackupPhase(waitCtx, env, name, v1beta1.BackupPhaseSucceeded)
 			if err != nil {
 				return err
 			}
@@ -265,7 +265,7 @@ func s31WaitBackupSucceeded() runner.Step {
 			if storage.Location != wantLocation {
 				return fmt.Errorf("backup artifactStorage.location %q, want %q", storage.Location, wantLocation)
 			}
-			if storage.Type != v1alpha1.BackupStorageS3 {
+			if storage.Type != v1beta1.BackupStorageS3 {
 				return fmt.Errorf("backup artifactStorage.type=%q, want S3", storage.Type)
 			}
 			if b.Status.JobName == "" {
@@ -377,7 +377,7 @@ func s31ForceBinlogArchive() runner.Step {
 			env.Capture.Note("post-flush archiver: " + archiverSummary(st))
 			statusCtx, statusCancel := context.WithTimeout(ctx, 20*time.Second)
 			defer statusCancel()
-			mfg, err := env.Wait.UntilCR(statusCtx, env.Namespace, "PITR status archive coverage", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			mfg, err := env.Wait.UntilCR(statusCtx, env.Namespace, "PITR status archive coverage", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				if mfg.Status.PITR == nil {
 					return false, "status.pitr is nil", nil
 				}
@@ -437,7 +437,7 @@ func s31CreateVerification() runner.Step {
 			if err != nil {
 				return err
 			}
-			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: &stop}
+			pit := &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeTimestamp, StopTime: &stop}
 			return createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), s31ID, pit, query, 1)
 		},
 	}
@@ -453,7 +453,7 @@ func s31WaitVerificationSucceeded() runner.Step {
 			backupUID := ctxFetch(env, "backupUID")
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			v, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseSucceeded)
+			v, err := waitForVerificationPhase(waitCtx, env, name, v1beta1.VerificationPhaseSucceeded)
 			if err != nil {
 				return err
 			}
@@ -463,13 +463,13 @@ func s31WaitVerificationSucceeded() runner.Step {
 			if backupUID != "" && v.Status.BackupRef.UID != "" && v.Status.BackupRef.UID != backupUID {
 				return fmt.Errorf("verification backupRef UID=%q, want %q", v.Status.BackupRef.UID, backupUID)
 			}
-			if v.Status.SanityCheck == nil || v.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || v.Status.SanityCheck.Result != "1" {
+			if v.Status.SanityCheck == nil || v.Status.SanityCheck.Outcome != v1beta1.SanityCheckOutcomePassed || v.Status.SanityCheck.Result != "1" {
 				return fmt.Errorf("verification sanity=%v, want outcome=Passed result=1", v.Status.SanityCheck)
 			}
 			if v.Status.PointInTime == nil || v.Status.PointInTime.NewestReplayedCommitTime == nil {
 				return fmt.Errorf("verification pointInTime.newestReplayedCommitTime is unset for a PITR run")
 			}
-			if !conditionTrue(v.Status.Conditions, v1alpha1.ConditionVerified) {
+			if !conditionTrue(v.Status.Conditions, v1beta1.ConditionVerified) {
 				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(v.Status.Conditions))
 			}
 			env.Capture.Note("PITR verification succeeded: " + verificationStatusSummary(v))
@@ -489,7 +489,7 @@ func s31Cleanup(ctx context.Context, env *runner.Env) error {
 	if err := restoreOriginalBackupSpec(ctx, env); err != nil {
 		errs = append(errs, err)
 	}
-	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s31 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s31 cleanup healthy baseline", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		wantPITR, wantProfile, err := originalPITRExpected(env)
 		if err != nil {
 			return false, "", err

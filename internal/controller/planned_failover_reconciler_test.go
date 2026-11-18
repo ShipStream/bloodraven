@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
@@ -18,40 +18,40 @@ import (
 // pdx as a healthy replicating read-only replica, and an annotation
 // requesting failover to pdx. Tests may further mutate status before
 // calling into the reconciler.
-func plannedFailoverFG(annotationValue string) *v1alpha1.MysqlFailoverGroup {
+func plannedFailoverFG(annotationValue string) *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG()
 	fg.Spec.Sites[0].Name = "iad"
 	fg.Spec.Sites[1].Name = "pdx"
 	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: 5 * time.Minute}
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
-		{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+	fg.Status.Sites = []v1beta1.SiteStatus{
+		{Name: "iad", State: v1beta1.SiteStateWritable, Replication: v1beta1.SiteReplicationNotApplicable},
+		{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 	}
 	if annotationValue != "" {
 		fg.SetAnnotations(map[string]string{
-			v1alpha1.PlannedFailoverAnnotation: annotationValue,
+			v1beta1.PlannedFailoverAnnotation: annotationValue,
 		})
 	}
 	return fg
 }
 
-func fetchFG(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) *v1alpha1.MysqlFailoverGroup {
+func fetchFG(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) *v1beta1.MysqlFailoverGroup {
 	t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := r.Get(context.Background(), nn, &fg); err != nil {
 		t.Fatalf("fetch fg: %v", err)
 	}
 	return &fg
 }
 
-func fgNN(fg *v1alpha1.MysqlFailoverGroup) types.NamespacedName {
+func fgNN(fg *v1beta1.MysqlFailoverGroup) types.NamespacedName {
 	return types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 }
 
 // pfReconciler returns a reconciler over fg with a scripted topology facade
 // and a fake clock.
-func pfReconciler(t *testing.T, fg *v1alpha1.MysqlFailoverGroup) (*MysqlFailoverGroupReconciler, *pfFakeTopology) {
+func pfReconciler(t *testing.T, fg *v1beta1.MysqlFailoverGroup) (*MysqlFailoverGroupReconciler, *pfFakeTopology) {
 	t.Helper()
 	r, _ := newReconciler(fg)
 	r.Recorder = record.NewFakeRecorder(64)
@@ -81,8 +81,8 @@ func TestReconcilePlannedFailover_NoopWhenIdle(t *testing.T) {
 func TestReconcilePlannedFailover_NoopTerminalStatusWithoutAnnotation(t *testing.T) {
 	fg := plannedFailoverFG("")
 	now := metav1.Now()
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
-		TargetSite: "pdx", StartTime: now, Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: now}}
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1beta1.PlannedFailoverPhaseSucceeded,
+		TargetSite: "pdx", StartTime: now, Result: &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeSucceeded, CompletionTime: now}}
 	r, _ := pfReconciler(t, fg)
 	if plannedFailoverPassDue(fg) {
 		t.Fatal("a terminal block with no annotation needs no pass")
@@ -105,12 +105,12 @@ func TestReconcilePlannedFailover_AcceptStampsAdmitting(t *testing.T) {
 	}
 	got := fetchFG(t, r, fgNN(fg))
 	pf := got.Status.PlannedFailover
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.TargetSite != "pdx" ||
+	if pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.RunID == "" || pf.TargetSite != "pdx" ||
 		pf.Settings.MaxLagWait.Duration != 30*time.Second ||
 		pf.Settings.DrainTimeout.Duration != defaultPlannedFailoverDrainTimeout || pf.Admission == nil || pf.Admission.DeadlineTime == nil {
 		t.Fatalf("admitting record = %+v", pf)
 	}
-	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation not removed after the Admitting write")
 	}
 	select {
@@ -138,7 +138,7 @@ func TestReconcilePlannedFailover_EndToEndWithInjectedFacade(t *testing.T) {
 		}
 	}
 	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
+	if pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("final = %+v", pf)
 	}
 	if topo.count("fence") != 1 || topo.count("promote") != 1 {
@@ -153,11 +153,11 @@ func TestReconcilePlannedFailover_RejectUnknownSite(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := fetchFG(t, r, fgNN(fg))
-	if pf := got.Status.PlannedFailover; pf == nil || pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeNotStarted ||
-		pf.Result.Reason != v1alpha1.PlannedFailoverReasonUnknownSite {
+	if pf := got.Status.PlannedFailover; pf == nil || pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeNotStarted ||
+		pf.Result.Reason != v1beta1.PlannedFailoverReasonUnknownSite {
 		t.Fatalf("block = %+v", pf)
 	}
-	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Error("rejected annotation not removed")
 	}
 }
@@ -170,7 +170,7 @@ func TestReconcilePlannedFailover_CooldownRejectDefault(t *testing.T) {
 	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover; pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonCooldownActive {
+	if pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover; pf.Result == nil || pf.Result.Reason != v1beta1.PlannedFailoverReasonCooldownActive {
 		t.Fatalf("block = %+v", pf)
 	}
 }
@@ -179,7 +179,7 @@ func TestReconcilePlannedFailover_CooldownRejectDefault(t *testing.T) {
 // Warning and removed.
 func TestReconcilePlannedFailover_StaleAnnotationDuringRunCleared(t *testing.T) {
 	fg := plannedFailoverFG("iad")
-	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseWaitingForLag, time.Now())
+	fg.Status.PlannedFailover = pfRunAt(v1beta1.PlannedFailoverPhaseWaitingForLag, time.Now())
 	r, topo := pfReconciler(t, fg)
 	topo.setHeld("run-1", false)
 	topo.probe = func(PlannedRunRef) (LagProbe, error) {
@@ -188,7 +188,7 @@ func TestReconcilePlannedFailover_StaleAnnotationDuringRunCleared(t *testing.T) 
 	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := fetchFG(t, r, fgNN(fg)).Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := fetchFG(t, r, fgNN(fg)).Annotations[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Error("stale annotation kept during a run")
 	}
 	ev := <-r.Recorder.(*record.FakeRecorder).Events
@@ -200,16 +200,16 @@ func TestReconcilePlannedFailover_StaleAnnotationDuringRunCleared(t *testing.T) 
 // A Deferred request edited to the active site resolves as a no-op.
 func TestReconcilePlannedFailover_DeferredAnnotationEditedToActiveIsSkipped(t *testing.T) {
 	fg := plannedFailoverFG("iad")
-	fg.Status.PlannedFailover = pfRunAt(v1alpha1.PlannedFailoverPhaseDeferred, time.Now())
+	fg.Status.PlannedFailover = pfRunAt(v1beta1.PlannedFailoverPhaseDeferred, time.Now())
 	r, _ := pfReconciler(t, fg)
 	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
 	got := fetchFG(t, r, fgNN(fg))
-	if pf := got.Status.PlannedFailover; pf.Result == nil || pf.Result.Reason != v1alpha1.PlannedFailoverReasonAlreadyActive {
+	if pf := got.Status.PlannedFailover; pf.Result == nil || pf.Result.Reason != v1beta1.PlannedFailoverReasonAlreadyActive {
 		t.Fatalf("block = %+v", pf)
 	}
-	if _, ok := got.Annotations[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := got.Annotations[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Error("annotation kept")
 	}
 }
@@ -228,7 +228,7 @@ func TestReconcilePlannedFailover_PendingRunnerFacadeSendsNothing(t *testing.T) 
 		}
 	}
 	pf := fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitManagerAbsent {
+	if pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitManagerAbsent {
 		t.Fatalf("block = %+v", pf)
 	}
 }
@@ -236,11 +236,11 @@ func TestReconcilePlannedFailover_PendingRunnerFacadeSendsNothing(t *testing.T) 
 // --- helpers --------------------------------------------------------------
 
 func TestEffectiveDrainTimeout(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{}
+	fg := &v1beta1.MysqlFailoverGroup{}
 	if got := effectiveDrainTimeout(fg); got != defaultPlannedFailoverDrainTimeout {
 		t.Errorf("default: got %s, want %s", got, defaultPlannedFailoverDrainTimeout)
 	}
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{
 		DrainTimeout: &metav1.Duration{Duration: 10 * time.Second},
 	}
 	if got := effectiveDrainTimeout(fg); got != 10*time.Second {
@@ -249,19 +249,19 @@ func TestEffectiveDrainTimeout(t *testing.T) {
 }
 
 func TestEffectiveOnCooldown(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{}
-	if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownReject {
+	fg := &v1beta1.MysqlFailoverGroup{}
+	if got := effectiveOnCooldown(fg); got != v1beta1.PlannedFailoverCooldownReject {
 		t.Errorf("default: got %q, want Reject", got)
 	}
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{OnCooldown: v1alpha1.PlannedFailoverCooldownDefer}
-	if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownDefer {
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{OnCooldown: v1beta1.PlannedFailoverCooldownDefer}
+	if got := effectiveOnCooldown(fg); got != v1beta1.PlannedFailoverCooldownDefer {
 		t.Errorf("Defer: got %q, want Defer", got)
 	}
 	// Malformed values, including the pre-v1beta1 lower-case spelling
 	// (no longer read), fall back to Reject.
-	for _, v := range []v1alpha1.PlannedFailoverCooldownPolicy{"defer", "DEFER", "skip", "reject", "Reject", ""} {
+	for _, v := range []v1beta1.PlannedFailoverCooldownPolicy{"defer", "DEFER", "skip", "reject", "Reject", ""} {
 		fg.Spec.PlannedFailover.OnCooldown = v
-		if got := effectiveOnCooldown(fg); got != v1alpha1.PlannedFailoverCooldownReject {
+		if got := effectiveOnCooldown(fg); got != v1beta1.PlannedFailoverCooldownReject {
 			t.Errorf("%q: got %q, want Reject fallback", v, got)
 		}
 	}
@@ -272,22 +272,22 @@ func TestEffectiveOnCooldown(t *testing.T) {
 // lower-case spelling, is the Proceed default.
 func TestDragonflyOnSyncTimeoutExactValues(t *testing.T) {
 	for _, tc := range []struct {
-		in   v1alpha1.DragonflySyncTimeoutPolicy
-		want v1alpha1.DragonflySyncTimeoutPolicy
+		in   v1beta1.DragonflySyncTimeoutPolicy
+		want v1beta1.DragonflySyncTimeoutPolicy
 	}{
-		{"Fail", v1alpha1.DragonflySyncTimeoutFail},
-		{"fail", v1alpha1.DragonflySyncTimeoutProceed},
-		{"FAIL", v1alpha1.DragonflySyncTimeoutProceed},
-		{"Proceed", v1alpha1.DragonflySyncTimeoutProceed},
-		{"proceed", v1alpha1.DragonflySyncTimeoutProceed},
-		{"", v1alpha1.DragonflySyncTimeoutProceed},
-		{"bogus", v1alpha1.DragonflySyncTimeoutProceed},
+		{"Fail", v1beta1.DragonflySyncTimeoutFail},
+		{"fail", v1beta1.DragonflySyncTimeoutProceed},
+		{"FAIL", v1beta1.DragonflySyncTimeoutProceed},
+		{"Proceed", v1beta1.DragonflySyncTimeoutProceed},
+		{"proceed", v1beta1.DragonflySyncTimeoutProceed},
+		{"", v1beta1.DragonflySyncTimeoutProceed},
+		{"bogus", v1beta1.DragonflySyncTimeoutProceed},
 	} {
 		if got := effectiveDragonflyOnSyncTimeout(plannedFailoverFGWithDragonfly(string(tc.in))); got != tc.want {
 			t.Errorf("spec %q: got %q, want %q", tc.in, got, tc.want)
 		}
-		pf := &v1alpha1.PlannedFailoverStatus{Settings: v1alpha1.PlannedFailoverSettings{
-			Dragonfly: &v1alpha1.PlannedFailoverDragonflySettings{OnSyncTimeout: tc.in}}}
+		pf := &v1beta1.PlannedFailoverStatus{Settings: v1beta1.PlannedFailoverSettings{
+			Dragonfly: &v1beta1.PlannedFailoverDragonflySettings{OnSyncTimeout: tc.in}}}
 		if got := plannedSettings(pf).Dragonfly.OnSyncTimeout; got != tc.want {
 			t.Errorf("settings %q: got %q, want %q", tc.in, got, tc.want)
 		}
@@ -295,7 +295,7 @@ func TestDragonflyOnSyncTimeoutExactValues(t *testing.T) {
 }
 
 func TestCooldownRetryAfter(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{}
+	fg := &v1beta1.MysqlFailoverGroup{}
 	if !cooldownRetryAfter(fg, time.Now()).IsZero() {
 		t.Error("no lastFailover: want zero time")
 	}
@@ -316,11 +316,11 @@ func TestPlannedSettings(t *testing.T) {
 	}
 	fg := plannedFailoverFGWithDragonfly("Fail")
 	s := plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: "pdx", MaxLagWait: 7 * time.Second})
-	if s.MaxLagWait.Duration != 7*time.Second || s.Dragonfly == nil || s.Dragonfly.OnSyncTimeout != v1alpha1.DragonflySyncTimeoutFail ||
+	if s.MaxLagWait.Duration != 7*time.Second || s.Dragonfly == nil || s.Dragonfly.OnSyncTimeout != v1beta1.DragonflySyncTimeoutFail ||
 		s.Dragonfly.MaxSyncWait.Duration != 100*time.Millisecond {
 		t.Errorf("snapshot: %+v %+v", s, s.Dragonfly)
 	}
-	if got := plannedSettings(&v1alpha1.PlannedFailoverStatus{Settings: s}); got.MaxLagWait.Duration != 7*time.Second {
+	if got := plannedSettings(&v1beta1.PlannedFailoverStatus{Settings: s}); got.MaxLagWait.Duration != 7*time.Second {
 		t.Errorf("read back: %+v", got)
 	}
 	if s := plannedFailoverSettingsFor(plannedFailoverFG(""), PlannedFailoverRequest{Site: "pdx"}); s.Dragonfly != nil {

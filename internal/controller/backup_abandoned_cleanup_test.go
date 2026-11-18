@@ -15,14 +15,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
 // abandonedFixture is a cleanup fixture whose backup never succeeded: no
 // completed artifact, but status.artifactStorage records the planned
 // destination its Job wrote the backup stamp to.
-func abandonedFixture(t *testing.T, phase v1alpha1.BackupPhase) *cleanupFixture {
+func abandonedFixture(t *testing.T, phase v1beta1.BackupPhase) *cleanupFixture {
 	t.Helper()
 	f := newCleanupFixture(t)
 	ctx := context.Background()
@@ -43,8 +43,8 @@ func (f *cleanupFixture) producerJob(t *testing.T, terminal batchv1.JobCondition
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: backupJobName(f.mb.Name), Namespace: f.mb.Namespace, UID: "producer-uid",
-			Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"},
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "MysqlBackup",
+			Labels: map[string]string{v1beta1.MysqlBackupLabel: f.mb.Name, v1beta1.ResourceLabel: "backup"},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1beta1.GroupVersion.String(), Kind: "MysqlBackup",
 				Name: f.mb.Name, UID: f.mb.UID, Controller: boolPtr(true)}},
 		},
 		Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: volumes}}},
@@ -90,7 +90,7 @@ func (f *cleanupFixture) finishCleanupJob(t *testing.T, condition batchv1.JobCon
 // warning instead of holding the deletion.
 func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 	t.Run("failed backup runs an abandoned cleanup at the planned destination", func(t *testing.T) {
-		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
+		f := abandonedFixture(t, v1beta1.BackupPhaseFailed)
 		f.producerJob(t, batchv1.JobFailed)
 		if done, _ := f.finalize(t); done {
 			t.Fatal("released before the abandoned stamp was cleaned up")
@@ -119,7 +119,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 	})
 
 	t.Run("failed cleanup releases with a warning and is not retried", func(t *testing.T) {
-		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
+		f := abandonedFixture(t, v1beta1.BackupPhaseFailed)
 		f.finalize(t)
 		f.finishCleanupJob(t, batchv1.JobFailed, backupmeta.CleanupExitRejected, backupmeta.CleanupFailedPrefix+" decrypt backup stamp: wrong passphrase")
 		drainEvents(f.rec)
@@ -134,10 +134,10 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 	})
 
 	t.Run("a running backup's Job is stopped first", func(t *testing.T) {
-		f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
+		f := abandonedFixture(t, v1beta1.BackupPhaseRunning)
 		producer := f.producerJob(t, "")
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dump-pod", Namespace: "ns",
-			Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"}},
+			Labels: map[string]string{v1beta1.MysqlBackupLabel: f.mb.Name, v1beta1.ResourceLabel: "backup"}},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 		if err := f.c.Create(context.Background(), pod); err != nil {
 			t.Fatal(err)
@@ -165,8 +165,8 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 	})
 
 	t.Run("encrypted backup mounts the producing Job's passphrase", func(t *testing.T) {
-		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
-		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+		f := abandonedFixture(t, v1beta1.BackupPhaseFailed)
+		f.mb.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
 		if err := f.c.Status().Update(context.Background(), f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -193,8 +193,8 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 	})
 
 	t.Run("encrypted backup without a passphrase source is skipped", func(t *testing.T) {
-		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
-		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+		f := abandonedFixture(t, v1beta1.BackupPhaseFailed)
+		f.mb.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
 		if err := f.c.Status().Update(context.Background(), f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -211,7 +211,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 	})
 
 	t.Run("a backup whose Job never ran is released at once", func(t *testing.T) {
-		f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
+		f := abandonedFixture(t, v1beta1.BackupPhaseFailed)
 		f.mb.Status.ArtifactStorage = nil
 		if err := f.c.Status().Update(context.Background(), f.mb); err != nil {
 			t.Fatal(err)
@@ -229,7 +229,7 @@ func TestFinalize_AbandonedBackupCleanup(t *testing.T) {
 func (f *cleanupFixture) runningProducerPod(t *testing.T, mutate func(*corev1.Pod)) *corev1.Pod {
 	t.Helper()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dump-pod", Namespace: "ns",
-		Labels: map[string]string{v1alpha1.MysqlBackupLabel: f.mb.Name, v1alpha1.ResourceLabel: "backup"}},
+		Labels: map[string]string{v1beta1.MysqlBackupLabel: f.mb.Name, v1beta1.ResourceLabel: "backup"}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 	if mutate != nil {
 		mutate(pod)
@@ -272,7 +272,7 @@ func TestFinalize_AbandonedEarlyReleaseStopsProducerFirst(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
+			f := abandonedFixture(t, v1beta1.BackupPhaseRunning)
 			producer := f.producerJob(t, "")
 			pod := f.runningProducerPod(t, nil)
 			tc.mutate(t, f)
@@ -306,7 +306,7 @@ func TestFinalize_AbandonedEarlyReleaseStopsProducerFirst(t *testing.T) {
 // empty; the failed producer's own destination is recovered so its stamp
 // and partial dump are cleaned up instead of released silently.
 func TestFinalize_AbandonedRecoversDestinationFromFailedProducer(t *testing.T) {
-	f := abandonedFixture(t, v1alpha1.BackupPhaseFailed)
+	f := abandonedFixture(t, v1beta1.BackupPhaseFailed)
 	ctx := context.Background()
 	producer, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
 		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
@@ -351,7 +351,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 		t.Cleanup(func() { SetOperatorImageDefaults("", "") })
 		fg := fgWithBackup()
 		profile := fg.Spec.Backup.Profiles[0]
-		profile.Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "secret-a", Key: "pp"}}
+		profile.Encryption = &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "secret-a", Key: "pp"}}
 		mb := backupCR("art", "lion", profile.Name)
 		job, err := BuildBackupJob(BackupJobInputs{DumpKeySecretName: testDumpKeySecret, FailoverGroup: fg, Profile: profile, Backup: mb,
 			SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
@@ -379,17 +379,17 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 	})
 
 	t.Run("cleanup after the producer is gone mounts the recorded Secret", func(t *testing.T) {
-		f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
+		f := abandonedFixture(t, v1beta1.BackupPhaseRunning)
 		ctx := context.Background()
-		f.fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "secret-b"}}
+		f.fg.Spec.Backup.Profiles[0].Encryption = &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "secret-b"}}
 		if err := f.c.Update(ctx, f.fg); err != nil {
 			t.Fatal(err)
 		}
 		if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
 			t.Fatal(err)
 		}
-		f.mb.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
-		f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1alpha1.SecretKeyRef{Name: "secret-a", Key: "pp"}
+		f.mb.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
+		f.mb.Status.ArtifactStorage.PassphraseSecretKeyRef = &v1beta1.SecretKeyRef{Name: "secret-a", Key: "pp"}
 		if err := f.c.Status().Update(ctx, f.mb); err != nil {
 			t.Fatal(err)
 		}
@@ -421,7 +421,7 @@ func TestFinalize_AbandonedUsesRecordedPassphrase(t *testing.T) {
 // deletion held, since it may still write, but after producerStopStuckAfter
 // the wait is reported with the remedy instead of requeueing silently.
 func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
-	f := abandonedFixture(t, v1alpha1.BackupPhaseRunning)
+	f := abandonedFixture(t, v1beta1.BackupPhaseRunning)
 	stopping := metav1.NewTime(time.Now().Add(-producerStopStuckAfter - time.Minute))
 	pod := f.runningProducerPod(t, func(p *corev1.Pod) {
 		p.Finalizers = []string{"test/hold"}
@@ -443,8 +443,8 @@ func TestFinalize_AbandonedReportsStuckProducer(t *testing.T) {
 	if done || requeue != 30*time.Second {
 		t.Fatalf("done=%v requeue=%s, want a held deletion", done, requeue)
 	}
-	cond := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1alpha1.ConditionArtifactCleanup)
-	if cond == nil || cond.Reason != v1alpha1.ReasonProducerStopStuck || !strings.Contains(cond.Message, "dump-pod") ||
+	cond := apiMeta.FindStatusCondition(f.mb.Status.Conditions, v1beta1.ConditionArtifactCleanup)
+	if cond == nil || cond.Reason != v1beta1.ReasonProducerStopStuck || !strings.Contains(cond.Message, "dump-pod") ||
 		!strings.Contains(cond.Message, "--force") {
 		t.Fatalf("condition %+v", cond)
 	}

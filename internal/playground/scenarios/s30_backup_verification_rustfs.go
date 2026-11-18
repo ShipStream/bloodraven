@@ -7,7 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -188,7 +188,7 @@ func s30WaitBackupSucceeded(v s30Variant) runner.Step {
 			prefix := ctxFetch(env, "backupPrefix")
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			b, err := waitForBackupPhase(waitCtx, env, name, v1alpha1.BackupPhaseSucceeded)
+			b, err := waitForBackupPhase(waitCtx, env, name, v1beta1.BackupPhaseSucceeded)
 			if err != nil {
 				return err
 			}
@@ -205,15 +205,15 @@ func s30WaitBackupSucceeded(v s30Variant) runner.Step {
 			if storage.Location != wantLocation {
 				return fmt.Errorf("backup artifactStorage.location %q, want %q", storage.Location, wantLocation)
 			}
-			if storage.Type != v1alpha1.BackupStorageS3 {
+			if storage.Type != v1beta1.BackupStorageS3 {
 				return fmt.Errorf("backup artifactStorage.type=%q, want S3", storage.Type)
 			}
 			if b.Status.JobName == "" {
 				return fmt.Errorf("backup status.jobName is empty")
 			}
-			wantMode := v1alpha1.EncryptionModeNone
+			wantMode := v1beta1.EncryptionModeNone
 			if v.encrypted {
-				wantMode = v1alpha1.EncryptionModePassphrase
+				wantMode = v1beta1.EncryptionModePassphrase
 			}
 			if b.Status.Encryption == nil || b.Status.Encryption.Mode != wantMode {
 				return fmt.Errorf("backup status.encryption=%+v, want mode %s", b.Status.Encryption, wantMode)
@@ -253,7 +253,7 @@ func s30WaitVerificationSucceeded(v s30Variant) runner.Step {
 			backupUID := ctxFetch(env, "backupUID")
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			vr, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseSucceeded)
+			vr, err := waitForVerificationPhase(waitCtx, env, name, v1beta1.VerificationPhaseSucceeded)
 			if err != nil {
 				return err
 			}
@@ -263,10 +263,10 @@ func s30WaitVerificationSucceeded(v s30Variant) runner.Step {
 			if backupUID != "" && vr.Status.BackupRef.UID != "" && vr.Status.BackupRef.UID != backupUID {
 				return fmt.Errorf("verification backupRef UID=%q, want %q", vr.Status.BackupRef.UID, backupUID)
 			}
-			if vr.Status.SanityCheck == nil || vr.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomePassed || vr.Status.SanityCheck.Result != "2" {
+			if vr.Status.SanityCheck == nil || vr.Status.SanityCheck.Outcome != v1beta1.SanityCheckOutcomePassed || vr.Status.SanityCheck.Result != "2" {
 				return fmt.Errorf("verification sanity=%v, want outcome=Passed result=2", vr.Status.SanityCheck)
 			}
-			if !conditionTrue(vr.Status.Conditions, v1alpha1.ConditionVerified) {
+			if !conditionTrue(vr.Status.Conditions, v1beta1.ConditionVerified) {
 				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(vr.Status.Conditions))
 			}
 			env.Capture.Note("verification succeeded: " + verificationStatusSummary(vr))
@@ -291,10 +291,10 @@ func s30Cleanup(ctx context.Context, env *runner.Env, v s30Variant) error {
 			errs = append(errs, err)
 		}
 	}
-	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s30 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s30 cleanup healthy baseline", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		ready := false
 		for _, c := range mfg.Status.Conditions {
-			if c.Type == v1alpha1.ConditionReady {
+			if c.Type == v1beta1.ConditionReady {
 				ready = c.Status == metav1.ConditionTrue
 			}
 		}

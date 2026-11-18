@@ -148,7 +148,7 @@ func stringConst(p *packages.Package, e ast.Expr) string {
 }
 
 // deployFieldValues adds the values e can carry to s. A value of an
-// api/v1alpha1 enum type carries that type's constants; anything else is
+// api/v1beta1 enum type carries that type's constants; anything else is
 // followed to its constants like every other served value.
 func deployFieldValues(t *testing.T, a *analysis, reg registry, p *packages.Package, e ast.Expr, path string, s *tokenSet) {
 	t.Helper()
@@ -162,7 +162,7 @@ func deployFieldValues(t *testing.T, a *analysis, reg registry, p *packages.Pack
 		if typ := strings.TrimPrefix(namedPath(tv.Type), apiPath+"."); typ != namedPath(tv.Type) {
 			consts := reg.byType[typ]
 			if len(consts) == 0 {
-				t.Errorf("%s: %s is of api/v1alpha1.%s, which declares no constants", a.pos(e.Pos()), path, typ)
+				t.Errorf("%s: %s is of api/v1beta1.%s, which declares no constants", a.pos(e.Pos()), path, typ)
 			}
 			for v := range consts {
 				s.values[v] = true
@@ -181,7 +181,7 @@ func deployFieldValues(t *testing.T, a *analysis, reg registry, p *packages.Pack
 			continue
 		}
 		if _, ok := allowed[o.value]; !ok && reg.byTypeValue(o.value) == "" {
-			t.Errorf("%s %q (spelled at %s) is not declared in api/v1alpha1", path, o.value, strings.ReplaceAll(o.pos.String(), a.root, ""))
+			t.Errorf("%s %q (spelled at %s) is not declared in api/v1beta1", path, o.value, strings.ReplaceAll(o.pos.String(), a.root, ""))
 		}
 		s.values[o.value] = true
 	}
@@ -250,7 +250,7 @@ func (r registry) byTypeValue(v string) string {
 
 // TestDeployAPITokenFieldsAreDeclared pins A-114 and F-32 for /deploy/v1:
 // every string field of the group response is either a name or a token
-// field, and every value a token field can carry is an api/v1alpha1
+// field, and every value a token field can carry is an api/v1beta1
 // constant, the unstableReason included.
 func TestDeployAPITokenFieldsAreDeclared(t *testing.T) {
 	a, _ := analysed(t)
@@ -316,7 +316,7 @@ func TestDeployAPIDocTokenSets(t *testing.T) {
 	} {
 		want := sortedKeys(reg.byType[typ])
 		if got := byPhase[phase]; strings.Join(got, ",") != strings.Join(want, ",") {
-			t.Errorf("planned failover reason for phase %s: documented %v, want %s (api/v1alpha1.%s)", phase, got, backtickList(want), typ)
+			t.Errorf("planned failover reason for phase %s: documented %v, want %s (api/v1beta1.%s)", phase, got, backtickList(want), typ)
 		}
 	}
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -13,20 +13,20 @@ import (
 // status.artifactStorage, never the profile's current destination. Only
 // the S3 credentials come from the profile.
 
-func recordedS3Seed() *v1alpha1.MysqlBackup {
+func recordedS3Seed() *v1beta1.MysqlBackup {
 	seed := succeededSeedBackup()
-	seed.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{
-		Type: v1alpha1.BackupStorageS3, Location: "recorded-prefix/seed",
+	seed.Status.ArtifactStorage = &v1beta1.BackupArtifactStorage{
+		Type: v1beta1.BackupStorageS3, Location: "recorded-prefix/seed",
 		Bucket: "recorded-bucket", EndpointURL: "https://recorded.example", Region: "eu-west-9",
 	}
 	return seed
 }
 
-func recordedPVCSeed() *v1alpha1.MysqlBackup {
+func recordedPVCSeed() *v1beta1.MysqlBackup {
 	seed := succeededSeedBackup()
 	seed.Spec.ProfileName = "daily-local"
-	seed.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{
-		Type: v1alpha1.BackupStoragePVC, Location: backupPVCMountPath + "/recorded/seed", ClaimName: "recorded-claim",
+	seed.Status.ArtifactStorage = &v1beta1.BackupArtifactStorage{
+		Type: v1beta1.BackupStoragePVC, Location: backupPVCMountPath + "/recorded/seed", ClaimName: "recorded-claim",
 	}
 	return seed
 }
@@ -64,7 +64,7 @@ func TestVerificationJob_ReadsRecordedDestination(t *testing.T) {
 	}
 	env := envMap(job.Spec.Template.Spec.Containers[0].Env)
 	requireRecordedS3Env(t, "verification", env)
-	if env["BLOODRAVEN_INPUT_URL"] != mysqlShellDumpInput("recorded-prefix/seed", v1alpha1.BackupStorageS3) {
+	if env["BLOODRAVEN_INPUT_URL"] != mysqlShellDumpInput("recorded-prefix/seed", v1beta1.BackupStorageS3) {
 		t.Errorf("verification input %q", env["BLOODRAVEN_INPUT_URL"])
 	}
 	if v := findVolume(job.Spec.Template.Spec.Volumes, "aws-creds"); v == nil || v.Secret.SecretName != "s3-creds" {

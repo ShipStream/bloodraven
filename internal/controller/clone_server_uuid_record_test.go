@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -724,24 +724,24 @@ func TestCloneHold_ReleasedAfterASuccessfulBootstrap(t *testing.T) {
 
 func TestGroupCloneIdentityStore(t *testing.T) {
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "lion",
+	fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "lion",
 		Annotations: map[string]string{"example.com/keep": "me"}}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fg).Build()
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	store := (&TopologyManagerRunner{logger: testLogger(), client: c}).cloneIdentityStore(nn)
 	annotation := func() (string, bool) {
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
 		if got.Annotations["example.com/keep"] != "me" {
 			t.Fatalf("another annotation was lost: %v", got.Annotations)
 		}
-		v, ok := got.Annotations[v1alpha1.CloneServerUUIDAnnotation]
+		v, ok := got.Annotations[v1beta1.CloneServerUUIDAnnotation]
 		return v, ok
 	}
 
@@ -790,11 +790,11 @@ func TestGroupCloneIdentityStore(t *testing.T) {
 
 	// A value edited by hand is read as empty, and replaced by the next
 	// record.
-	var edited v1alpha1.MysqlFailoverGroup
+	var edited v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &edited); err != nil {
 		t.Fatal(err)
 	}
-	edited.Annotations[v1alpha1.CloneServerUUIDAnnotation] = "{not json"
+	edited.Annotations[v1beta1.CloneServerUUIDAnnotation] = "{not json"
 	if err := c.Update(ctx, &edited); err != nil {
 		t.Fatal(err)
 	}
@@ -844,11 +844,11 @@ func TestStartManager_WiresCloneIdentityStore(t *testing.T) {
 	if err := store.Record(context.Background(), "dc2", CloneIdentity{ServerUUID: cloneTestUUID0}); err != nil {
 		t.Fatal(err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(fg), &got); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got.Annotations[v1alpha1.CloneServerUUIDAnnotation], cloneTestUUID0) {
+	if !strings.Contains(got.Annotations[v1beta1.CloneServerUUIDAnnotation], cloneTestUUID0) {
 		t.Fatalf("annotations = %v, want the record on the manager's group", got.Annotations)
 	}
 }

@@ -7,7 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -17,19 +17,19 @@ import (
 // gate, and an absent phase, leave the group stable.
 func TestDeploymentUnstableReason_DragonflyPhases(t *testing.T) {
 	for _, tc := range []struct {
-		phase v1alpha1.DragonflyPhase
+		phase v1beta1.DragonflyPhase
 		want  string
 	}{
 		{"", ""},
-		{v1alpha1.DragonflyPhaseDisabled, ""},
-		{v1alpha1.DragonflyPhaseReady, ""},
-		{v1alpha1.DragonflyPhaseReconciling, "DragonflyReconciling"},
-		{v1alpha1.DragonflyPhaseConfiguringReplication, "DragonflyConfiguringReplication"},
-		{v1alpha1.DragonflyPhaseDegraded, "DragonflyDegraded"},
-		{v1alpha1.DragonflyPhasePromoting, "DragonflyPromoting"},
+		{v1beta1.DragonflyPhaseDisabled, ""},
+		{v1beta1.DragonflyPhaseReady, ""},
+		{v1beta1.DragonflyPhaseReconciling, "DragonflyReconciling"},
+		{v1beta1.DragonflyPhaseConfiguringReplication, "DragonflyConfiguringReplication"},
+		{v1beta1.DragonflyPhaseDegraded, "DragonflyDegraded"},
+		{v1beta1.DragonflyPhasePromoting, "DragonflyPromoting"},
 	} {
 		fg := stableDeploymentGroup()
-		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Phase: tc.phase}
+		fg.Status.Dragonfly = &v1beta1.DragonflyStatus{Phase: tc.phase}
 		if got := DeploymentUnstableReason(fg); got != tc.want {
 			t.Errorf("phase %q: unstableReason %q, want %q", tc.phase, got, tc.want)
 		}
@@ -41,13 +41,13 @@ func TestDeploymentUnstableReason_DragonflyPhases(t *testing.T) {
 // "SourceConvergence<state>", Converged and empty do not.
 func TestDeploymentUnstableReason_SourceConvergence(t *testing.T) {
 	for _, tc := range []struct {
-		state v1alpha1.SourceConvergenceState
+		state v1beta1.SourceConvergenceState
 		want  string
 	}{
 		{"", ""},
-		{v1alpha1.SourceConvergenceConverged, ""},
-		{v1alpha1.SourceConvergencePending, "SourceConvergencePending"},
-		{v1alpha1.SourceConvergenceBlocked, "SourceConvergenceBlocked"},
+		{v1beta1.SourceConvergenceConverged, ""},
+		{v1beta1.SourceConvergencePending, "SourceConvergencePending"},
+		{v1beta1.SourceConvergenceBlocked, "SourceConvergenceBlocked"},
 	} {
 		fg := stableDeploymentGroup()
 		fg.Status.Sites[1].SourceConvergenceState = tc.state
@@ -59,15 +59,15 @@ func TestDeploymentUnstableReason_SourceConvergence(t *testing.T) {
 
 // stableDeploymentGroup is a two-site group the deployment API reports
 // stable.
-func stableDeploymentGroup() *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+func stableDeploymentGroup() *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}},
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			Conditions: []metav1.Condition{{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonHealthy}},
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+			Conditions: []metav1.Condition{{Type: v1beta1.ConditionReady, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonHealthy}},
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 			},
 		},
 	}
@@ -93,7 +93,7 @@ func TestNewStandbyArchiveRefusal_Reasons(t *testing.T) {
 		errors.New("no token here"),
 		errors.New(string(pitrarchive.TokenStopAmbiguous) + ": not an archive refusal"),
 	} {
-		if got := newStandbyArchiveRefusal(err).reason; got != v1alpha1.ReasonArchiveUnreadable {
+		if got := newStandbyArchiveRefusal(err).reason; got != v1beta1.ReasonArchiveUnreadable {
 			t.Errorf("%v: reason %q, want ArchiveUnreadable", err, got)
 		}
 	}

@@ -1,6 +1,6 @@
 # Proposal: API audit and cleanup before `shipstream.io/v1beta1`
 
-**Status:** Draft, revision 7 (release split, see Summary); revision 6 (WS-E step 0 and re-triage at `8067420`, B.5; revision 5 followed critique rounds 1, 2
+**Status:** Draft, revision 8 (section 5.1: the promotion as built for v1.8.0); revision 7 (release split, see Summary); revision 6 (WS-E step 0 and re-triage at `8067420`, B.5; revision 5 followed critique rounds 1, 2
 and 3 and the ultra review of PR #242, section 8.1)
 **Branch:** `docs/api-v1beta1-audit`
 **Tracking:** #237
@@ -3244,6 +3244,49 @@ steps (`:55-112`) are rewritten to match C-1 and C-7 (OPS-19).
 
 The v1 criteria in `3.crd-versioning.md:40-54` stay as they are. Its deprecation table still applies after
 v1beta1.
+
+### 5.1 As built for v1.8.0 (revision 8, 2026-11-16)
+
+The promotion and #243 were built as one change. The table says where each criterion lives. The decisions below
+were taken while building and are **pending Colin's sign-off**.
+
+| # | Where it is |
+|---|---|
+| C-1, C-4 | `api/v1beta1` holds the only Go types. `hack/crd-served-versions` (run by `make manifests`) adds `v1alpha1` to each CRD as a copy of the `v1beta1` entry, deprecated and not stored. `internal/crdcompat`: `TestServedVersionsShareOneSchema`, `TestCRDsFitTheRequestLimit` (MFG is 675 KB with both versions). |
+| C-3 | `test/envtest/served_versions_test.go`: `TestExamplesPassServerSideDryRun`, at both versions. |
+| C-5, C-5b | `charts/bloodraven/crd_check_test.go`: the chart's ClusterRole covers `config/rbac/role.yaml`, and holds `get` on the five CRDs by name and nothing else on CRDs. `examples/storage-migrator-clusterrole.yaml` is pinned to the command's permission list. |
+| C-6 | `test/fixtures/v1alpha1`: one real object per kind with status, captured from the published v1.7.0. `TestV170FixturesFitThisBuild`, and `TestMigrateStorage_FromV170` in envtest. |
+| C-7, U-10 to U-13 | `internal/storagemigration`, `kubectl bloodraven migrate-storage`. Envtests in `test/envtest/storage_migration_test.go`: the v1.7.0 happy path with only the example ClusterRole, the refusal of v1.6.0 objects, a concurrent status writer, and the `storedVersions` guard. |
+| C-8 | The `upgrade` E2E job: `upgrade-e2e.sh install` (published v1.7.0, one object of every kind through `v1alpha1`), scenario 74 (upgrade, paced rollout), scenario 78 (`migrate-storage`), scenario 01 (failover). |
+| C-9 | `TestServedVersions_SpecAndStatusThroughBoth`, `TestServedVersions_ConfirmationAndImmutabilityThroughBoth`. |
+| C-12 | `3.crd-versioning.md` rewritten; `10.upgrade-policy.md` gains the v1.7.0 → v1.8.0 path, the operator's check at start, and the v1.6.0 procedure. |
+| C-14 | `cmd/bloodraven/crd_check.go` on `internal/crdcompat`. Envtests in `storage_migration_test.go`. |
+| C-16, U-1 to U-9 | The procedure in `10.upgrade-policy.md`, executed by `playground/migrate-from-v1.6.0-e2e.sh`. The recovery of U-2 is `TestRecoverV160CRDsAfterTheNewOnesWereApplied`. |
+
+Decisions:
+
+1. **The C-8 baseline is the released v1.7.0.** `v1.7.0-rc.0` was never cut, and v1.7.0 is what clusters upgrade
+   from. Its schema differs from v1.8.0's only by additions, so the upgrade is in place.
+2. **One Go package, and the second version copied in the CRD.** Rejected: a second Go package for `v1alpha1`,
+   which two 5,000-line type files would have to keep identical by hand or by a generator.
+3. **The object check validates with the API server's own libraries, as a create.** Rejected: a dry-run update
+   (it ratchets, F-07), a dry-run create (it does not validate status), and a validator of our own (any
+   difference from the server's is a false refusal). The cost is the `k8s.io/apiserver` and CEL dependencies in
+   the operator and the plugin.
+4. **The operator refuses only objects that do not have the schema's shape** (a missing required field, another
+   type, a value outside an enum, a duplicate list-map key). An object that breaks a value rule only warns. This
+   narrows U-10 for the operator: ratcheting lets stored objects legitimately break a rule that a later release
+   tightens, and refusing those would stop the operator on a routine upgrade. `migrate-storage` refuses both
+   kinds, as U-10 says.
+5. **`crdCheck: warn`** (chart value, `--crd-check=warn`) starts the operator despite a refusal. It is a
+   break-glass for a wrong check. Rejected: no override, because a false refusal would leave every group without
+   failover until a patch release.
+6. **A refused operator is no operator.** The Deployment's strategy is `Recreate`, so on a chart-only upgrade
+   the previous operator is gone before the new one refuses. The docs say so. Changing the strategy, or a
+   pre-upgrade hook that runs the check, is left for a follow-up.
+7. **Owner references are not migrated.** Workloads created before the upgrade name their owner as
+   `shipstream.io/v1alpha1`. That works while `v1alpha1` is served. The release that removes `v1alpha1` must
+   rewrite them first, or the garbage collector can no longer resolve the owners.
 
 **WS-F items that revision 3 adds.** They come with the C rows above and belong in WS-F's brief:
 

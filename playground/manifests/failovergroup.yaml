@@ -1,4 +1,4 @@
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlFailoverGroup
 metadata:
   name: playground

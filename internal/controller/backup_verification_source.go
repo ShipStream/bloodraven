@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -16,18 +16,18 @@ import (
 
 // verificationBackupSnapshot pins the backup a verification reads: its
 // identity and its recorded artifact destination.
-func verificationBackupSnapshot(backup *v1alpha1.MysqlBackup) *v1alpha1.VerificationBackupRef {
-	return &v1alpha1.VerificationBackupRef{
+func verificationBackupSnapshot(backup *v1beta1.MysqlBackup) *v1beta1.VerificationBackupRef {
+	return &v1beta1.VerificationBackupRef{
 		Name: backup.Name, UID: string(backup.UID),
 		ArtifactStorage: backup.Status.ArtifactStorage.DeepCopy(),
 	}
 }
 
-func validateVerificationBackupRef(ref *v1alpha1.VerificationBackupRef) error {
+func validateVerificationBackupRef(ref *v1beta1.VerificationBackupRef) error {
 	if ref == nil || ref.Name == "" || ref.UID == "" || ref.ArtifactStorage == nil || ref.ArtifactStorage.Location == "" {
 		return fmt.Errorf("verification source requires a pinned name, UID and artifact location")
 	}
-	if t := ref.ArtifactStorage.Type; t != v1alpha1.BackupStorageS3 && t != v1alpha1.BackupStoragePVC {
+	if t := ref.ArtifactStorage.Type; t != v1beta1.BackupStorageS3 && t != v1beta1.BackupStoragePVC {
 		return fmt.Errorf("verification source has unknown storage type %q", t)
 	}
 	return nil
@@ -35,7 +35,7 @@ func validateVerificationBackupRef(ref *v1alpha1.VerificationBackupRef) error {
 
 // resolvePinnedVerificationBackup selects once, then checks the original UID
 // and uses its recorded destination when building a not-yet-created Job.
-func (r *MysqlBackupVerificationReconciler) resolvePinnedVerificationBackup(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (*v1alpha1.MysqlBackup, error) {
+func (r *MysqlBackupVerificationReconciler) resolvePinnedVerificationBackup(ctx context.Context, v *v1beta1.MysqlBackupVerification) (*v1beta1.MysqlBackup, error) {
 	if v.Status.BackupRef == nil {
 		backup, err := r.resolveBackup(ctx, v)
 		if err != nil {
@@ -51,14 +51,14 @@ func (r *MysqlBackupVerificationReconciler) resolvePinnedVerificationBackup(ctx 
 	if err := validateVerificationBackupRef(ref); err != nil {
 		return nil, err
 	}
-	var backup v1alpha1.MysqlBackup
+	var backup v1beta1.MysqlBackup
 	if err := r.Get(ctx, client.ObjectKey{Namespace: v.Namespace, Name: ref.Name}, &backup); err != nil {
 		return nil, fmt.Errorf("get pinned backup %q: %w", ref.Name, err)
 	}
 	if string(backup.UID) != ref.UID {
 		return nil, fmt.Errorf("pinned backup %q UID changed: expected %q, found %q", ref.Name, ref.UID, backup.UID)
 	}
-	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Spec.FailoverGroupRef.Name != v.Spec.FailoverGroupRef.Name || backup.Spec.ProfileName != v.Spec.ProfileName {
+	if backup.Status.Phase != v1beta1.BackupPhaseSucceeded || backup.Spec.FailoverGroupRef.Name != v.Spec.FailoverGroupRef.Name || backup.Spec.ProfileName != v.Spec.ProfileName {
 		return nil, fmt.Errorf("pinned backup %q is no longer a successful backup for this group/profile", ref.Name)
 	}
 	if !backup.DeletionTimestamp.IsZero() {
@@ -88,7 +88,7 @@ func verificationContainerEnv(container corev1.Container) map[string]string {
 
 // verificationJobReadsBackup checks the original source, not a decrypt staging
 // path. This also permits safe observation of older Jobs without a snapshot.
-func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBackupRef) bool {
+func verificationJobReadsBackup(job *batchv1.Job, ref *v1beta1.VerificationBackupRef) bool {
 	storage := ref.ArtifactStorage
 	for _, container := range job.Spec.Template.Spec.InitContainers {
 		if container.Name != "decrypt-download" {
@@ -99,10 +99,10 @@ func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBack
 			return false
 		}
 		switch storage.Type {
-		case v1alpha1.BackupStorageS3:
+		case v1beta1.BackupStorageS3:
 			_, prefix := splitS3Location(storage.Location)
 			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix && env["BLOODRAVEN_S3_BUCKET"] == storage.Bucket
-		case v1alpha1.BackupStoragePVC:
+		case v1beta1.BackupStoragePVC:
 			prefix := strings.TrimSuffix(strings.TrimPrefix(storage.Location, backupPVCMountPath+"/"), "/")
 			return env["BLOODRAVEN_SOURCE_PREFIX"] == prefix
 		}
@@ -113,7 +113,7 @@ func verificationJobReadsBackup(job *batchv1.Job, ref *v1alpha1.VerificationBack
 		}
 		env := verificationContainerEnv(container)
 		return env["BLOODRAVEN_INPUT_URL"] == mysqlShellDumpInput(storage.Location, storage.Type) &&
-			(storage.Type != v1alpha1.BackupStorageS3 || env["BLOODRAVEN_S3_BUCKET"] == storage.Bucket)
+			(storage.Type != v1beta1.BackupStorageS3 || env["BLOODRAVEN_S3_BUCKET"] == storage.Bucket)
 	}
 	return false
 }
@@ -126,12 +126,12 @@ const verificationSourceSchemaVersion = 1
 // the pinned source, with its schema version.
 type verificationSourceRecord struct {
 	SchemaVersion int `json:"schemaVersion"`
-	v1alpha1.VerificationBackupRef
+	v1beta1.VerificationBackupRef
 }
 
 // encodeVerificationSource renders ref as the verification-backup
 // annotation value.
-func encodeVerificationSource(ref *v1alpha1.VerificationBackupRef) ([]byte, error) {
+func encodeVerificationSource(ref *v1beta1.VerificationBackupRef) ([]byte, error) {
 	return json.Marshal(verificationSourceRecord{SchemaVersion: verificationSourceSchemaVersion, VerificationBackupRef: *ref})
 }
 
@@ -142,15 +142,15 @@ type errVerificationSourceVersion struct{ version int }
 func (e errVerificationSourceVersion) Error() string {
 	return fmt.Sprintf("the verification Job's %s record has schemaVersion %d, which this operator does not know (it reads %d); "+
 		"it proves no source, so the run cannot be certified: create a new verification",
-		v1alpha1.VerificationBackupAnnotation, e.version, verificationSourceSchemaVersion)
+		v1beta1.VerificationBackupAnnotation, e.version, verificationSourceSchemaVersion)
 }
 
-func verificationJobSource(v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) (*v1alpha1.VerificationBackupRef, error) {
+func verificationJobSource(v *v1beta1.MysqlBackupVerification, job *batchv1.Job) (*v1beta1.VerificationBackupRef, error) {
 	if !metav1.IsControlledBy(job, v) {
 		return nil, fmt.Errorf("verification Job is not owned by this verification")
 	}
 	ref := v.Status.BackupRef
-	if encoded, exists := job.Spec.Template.Annotations[v1alpha1.VerificationBackupAnnotation]; exists {
+	if encoded, exists := job.Spec.Template.Annotations[v1beta1.VerificationBackupAnnotation]; exists {
 		var recorded verificationSourceRecord
 		if err := json.Unmarshal([]byte(encoded), &recorded); err != nil {
 			return nil, fmt.Errorf("decode verification Job source snapshot: %w", err)
@@ -169,16 +169,16 @@ func verificationJobSource(v *v1alpha1.MysqlBackupVerification, job *batchv1.Job
 	return ref, nil
 }
 
-func (r *MysqlBackupVerificationReconciler) pinVerificationJobSource(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job, ref *v1alpha1.VerificationBackupRef) error {
-	if equality.Semantic.DeepEqual(v.Status.BackupRef, ref) && v.Status.JobName == job.Name && v.Status.Phase != v1alpha1.VerificationPhaseProvisioning && v.Status.Phase != v1alpha1.VerificationPhasePending && v.Status.Phase != "" {
+func (r *MysqlBackupVerificationReconciler) pinVerificationJobSource(ctx context.Context, v *v1beta1.MysqlBackupVerification, job *batchv1.Job, ref *v1beta1.VerificationBackupRef) error {
+	if equality.Semantic.DeepEqual(v.Status.BackupRef, ref) && v.Status.JobName == job.Name && v.Status.Phase != v1beta1.VerificationPhaseProvisioning && v.Status.Phase != v1beta1.VerificationPhasePending && v.Status.Phase != "" {
 		return nil
 	}
 	patch := client.MergeFrom(v.DeepCopy())
 	copy := *ref
 	v.Status.BackupRef = &copy
 	v.Status.JobName = job.Name
-	if v.Status.Phase == "" || v.Status.Phase == v1alpha1.VerificationPhasePending || v.Status.Phase == v1alpha1.VerificationPhaseProvisioning {
-		v.Status.Phase = v1alpha1.VerificationPhaseRestoring
+	if v.Status.Phase == "" || v.Status.Phase == v1beta1.VerificationPhasePending || v.Status.Phase == v1beta1.VerificationPhaseProvisioning {
+		v.Status.Phase = v1beta1.VerificationPhaseRestoring
 	}
 	setVerificationReady(&v.Status, v.Generation)
 	if err := r.Status().Patch(ctx, v, patch); err != nil {

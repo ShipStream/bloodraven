@@ -7,7 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -243,7 +243,7 @@ func (e *PlannedFailoverEngine) SetRunIDSourceForSim(fn func() string) { e.runID
 // process: rec becomes the out-of-band recorder, then the observed
 // authority, the watermark and the newer failover record are restored from
 // fg exactly as restoreFailoverState does. Call before the first Poll.
-func (tm *TopologyManager) RestoreFailoverStateForSim(fg *v1alpha1.MysqlFailoverGroup, rec FailoverStateRecorder) {
+func (tm *TopologyManager) RestoreFailoverStateForSim(fg *v1beta1.MysqlFailoverGroup, rec FailoverStateRecorder) {
 	tm.SetFailoverStateRecorder(rec)
 	tm.restoreFailoverRecordFrom(fg, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, tm.logger)
 }
@@ -252,7 +252,7 @@ func (tm *TopologyManager) RestoreFailoverStateForSim(fg *v1alpha1.MysqlFailover
 // restore from an uncached view (§3.7, §6.5): a confirmed run's record and
 // the naming of a source the run left fenced. Call after
 // RestoreFailoverStateForSim.
-func (tm *TopologyManager) RestorePlannedFailoverStateForSim(view *v1alpha1.MysqlFailoverGroup) {
+func (tm *TopologyManager) RestorePlannedFailoverStateForSim(view *v1beta1.MysqlFailoverGroup) {
 	if view == nil {
 		return
 	}
@@ -263,7 +263,7 @@ func (tm *TopologyManager) RestorePlannedFailoverStateForSim(view *v1alpha1.Mysq
 // PlannedOwnRecordDurableForSim reports whether fg's durable failover
 // record is the run pf's own, by §4.4's by-content rule (the DST-3 ruling's
 // durable-record half), evaluated at now.
-func PlannedOwnRecordDurableForSim(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) bool {
+func PlannedOwnRecordDurableForSim(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus, now time.Time) bool {
 	return plannedOwnRecordDurable(fg, pf, now)
 }
 
@@ -275,7 +275,7 @@ func (tm *TopologyManager) FailoverRecordForSim() (FailoverRecord, bool) {
 
 // PlannedFailoverOwnsSitesForSim is plannedFailoverOwnsSites: fg's unmarked
 // run is in a phase that owns the sites.
-func PlannedFailoverOwnsSitesForSim(fg *v1alpha1.MysqlFailoverGroup) bool {
+func PlannedFailoverOwnsSitesForSim(fg *v1beta1.MysqlFailoverGroup) bool {
 	return plannedFailoverOwnsSites(fg)
 }
 

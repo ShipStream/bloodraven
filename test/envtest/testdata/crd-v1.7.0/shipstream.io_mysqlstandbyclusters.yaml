@@ -1,0 +1,423 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: mysqlstandbyclusters.shipstream.io
+spec:
+  group: shipstream.io
+  names:
+    categories:
+    - bloodraven
+    - mysql
+    - dr
+    kind: MysqlStandbyCluster
+    listKind: MysqlStandbyClusterList
+    plural: mysqlstandbyclusters
+    shortNames:
+    - msc
+    - mscs
+    singular: mysqlstandbycluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.discovered.latestDump.name
+      name: Dump
+      type: string
+    - jsonPath: .status.discovered.binlogArchive.newestEventTime
+      name: NewestBinlog
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          MysqlStandbyCluster is a passive observability descriptor for a DR
+          relationship from this cluster to a source MysqlFailoverGroup's dumps and
+          PITR archive in a shared object store. The controller scans the source
+          prefix every spec.freshness.discoveryInterval and publishes the
+          BucketReadable and SourceConfigKnown conditions, summarised by Ready, with
+          status.discovered (the newest dump and the verified binlog archive window). It never
+          contacts MySQL, runs no restore Jobs and writes nothing to the bucket.
+
+          One MysqlStandbyCluster per DR relationship per namespace. Failback uses a
+          second MysqlStandbyCluster on the original source cluster pointing at the
+          new primary's prefix.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MysqlStandbyClusterSpec defines the desired state of MysqlStandbyCluster.
+            properties:
+              freshness:
+                description: Freshness configures the bucket-discovery cadence.
+                properties:
+                  discoveryInterval:
+                    default: 5m0s
+                    description: |-
+                      DiscoveryInterval controls how often the controller re-scans
+                      the source bucket to refresh status.discovered.
+                      Default: 5m. Bounds: 30s to 24h (shorter intervals produce no
+                      scheduled poll; the reconciler also enforces the floor as
+                      defense-in-depth).
+                    maxLength: 64
+                    type: string
+                    x-kubernetes-validations:
+                    - message: discoveryInterval must be between 30s and 24h
+                      rule: duration(self) >= duration('30s') && duration(self) <=
+                        duration('24h')
+                type: object
+              source:
+                description: |-
+                  Source is the source group's object store and, for an encrypted
+                  source, the passphrase that decrypts it.
+                properties:
+                  decryption:
+                    description: |-
+                      Decryption provides the passphrase that decrypts the source archive.
+                      Required when the source profile encrypts. The Secret must exist in
+                      this (DR) cluster's namespace; see
+                      https://bloodraven.dev/docs/architecture/multi-cluster-dr for
+                      distributing the passphrase across clusters.
+                    properties:
+                      passphraseSecretKeyRef:
+                        description: |-
+                          PassphraseSecretKeyRef selects the Secret key holding the passphrase
+                          that was used when the source artifact was originally encrypted.
+                          Bumping the Secret contents to a new value does not rotate the
+                          ciphertext — it will simply fail to decrypt.
+                        properties:
+                          key:
+                            default: passphrase
+                            description: |-
+                              Key within the Secret that holds the passphrase bytes. Leading
+                              and trailing whitespace is stripped when the passphrase is
+                              read.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[-._a-zA-Z0-9]+$
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - passphraseSecretKeyRef
+                    type: object
+                  s3:
+                    description: |-
+                      S3 is the S3-compatible object store and prefix the source group's
+                      backup profile writes to.
+                    properties:
+                      bucket:
+                        description: Bucket is the S3 bucket name.
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                        x-kubernetes-validations:
+                        - message: bucket must be at most 63 bytes (UTF-8)
+                          rule: bytes(self).size() <= 63
+                      credentialsSecretName:
+                        description: |-
+                          CredentialsSecretName names a Secret in this namespace with read access
+                          to the bucket. Expected keys: AWS_ACCESS_KEY_ID and
+                          AWS_SECRET_ACCESS_KEY (required), AWS_SESSION_TOKEN and AWS_REGION
+                          (optional; AWS_REGION overrides region).
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                        type: string
+                      endpointURL:
+                        description: |-
+                          EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
+                          Must be an absolute http:// or https:// URL without credentials, a
+                          query or a fragment.
+                        maxLength: 512
+                        pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: endpointURL must be at most 512 bytes (UTF-8)
+                          rule: bytes(self).size() <= 512
+                      prefix:
+                        description: |-
+                          Prefix is the source profile's object-name prefix inside the bucket.
+                          A leading or trailing "/" is ignored; at least one segment is
+                          required. Empty segments ("a//b") and "." or ".." segments are
+                          refused, as on S3Storage.
+                        maxLength: 512
+                        minLength: 1
+                        pattern: ^/?([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+)(/([^/.][^/]*|\.[^/.][^/]*|\.\.[^/]+))*/?$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: prefix must be at most 512 bytes (UTF-8)
+                          rule: bytes(self).size() <= 512
+                      region:
+                        description: Region is the AWS region. Optional for non-AWS
+                          S3 stores.
+                        type: string
+                    required:
+                    - bucket
+                    - credentialsSecretName
+                    - prefix
+                    type: object
+                required:
+                - s3
+                type: object
+              transport:
+                default: ObjectStore
+                description: |-
+                  Transport selects the DR data path. ObjectStore, the only transport,
+                  reads the source group's dumps and PITR archive from its object store.
+                enum:
+                - ObjectStore
+                type: string
+            required:
+            - source
+            type: object
+          status:
+            description: MysqlStandbyClusterStatus describes the observed state of
+              a MysqlStandbyCluster.
+            properties:
+              conditions:
+                description: |-
+                  Conditions are BucketReadable and SourceConfigKnown, and Ready, which
+                  summarises the two.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              discovered:
+                description: |-
+                  Discovered is the result of the most recent complete bucket scan. A
+                  scan that fails or is cut short leaves it unchanged; the conditions
+                  say why.
+                properties:
+                  binlogArchive:
+                    description: |-
+                      BinlogArchive is the source PITR archive's verified identity and the
+                      window its manifests cover, published together. Absent when the
+                      prefix holds no archive, or while the archive's descriptor is missing
+                      or refused (SourceConfigKnown says why); LatestDump is still
+                      published then.
+                    properties:
+                      fileCount:
+                        description: FileCount is the number of archived binlog files
+                          in the window.
+                        format: int32
+                        type: integer
+                      identity:
+                        description: |-
+                          Identity is the identity read from the archive's descriptor and
+                          verified against every manifest.
+                        properties:
+                          algorithm:
+                            description: Algorithm is the encryption algorithm; empty
+                              for None.
+                            enum:
+                            - AES-256-GCM
+                            type: string
+                          archiveID:
+                            description: |-
+                              ArchiveID is the descriptor's archive ID, derived from the source
+                              group's UID and the normalized destination.
+                            pattern: ^ar1-[a-z2-7]{26}$
+                            type: string
+                          destination:
+                            description: |-
+                              Destination is the normalized archive destination the descriptor
+                              was read from (s3://… or pvc://…).
+                            maxLength: 4096
+                            type: string
+                          encryptionMode:
+                            description: EncryptionMode is the archive's encryption
+                              mode.
+                            enum:
+                            - None
+                            - Passphrase
+                            type: string
+                          source:
+                            description: Source is the group that created the archive.
+                            properties:
+                              name:
+                                description: Name is the source group's name.
+                                maxLength: 253
+                                type: string
+                              namespace:
+                                description: Namespace is the source group's namespace.
+                                maxLength: 63
+                                type: string
+                              uid:
+                                description: UID is the source group's metadata.uid.
+                                type: string
+                            required:
+                            - name
+                            - namespace
+                            - uid
+                            type: object
+                        required:
+                        - archiveID
+                        - encryptionMode
+                        - source
+                        type: object
+                      manifestCount:
+                        description: ManifestCount is the number of per-site manifests.
+                        format: int32
+                        type: integer
+                      newestEventTime:
+                        description: |-
+                          NewestEventTime is the latest last-event time of an archived file.
+                          Together with LatestDump it bounds the recoverable point-in-time
+                          window.
+                        format: date-time
+                        type: string
+                      oldestEventTime:
+                        description: OldestEventTime is the earliest first-event time
+                          of an archived file.
+                        format: date-time
+                        type: string
+                      sizeBytes:
+                        description: |-
+                          SizeBytes is the total size of the archived binlog files in the
+                          window.
+                        format: int64
+                        type: integer
+                    required:
+                    - fileCount
+                    - identity
+                    - manifestCount
+                    - sizeBytes
+                    type: object
+                  lastScanTime:
+                    description: LastScanTime is when the most recent complete scan
+                      finished.
+                    format: date-time
+                    type: string
+                  latestDump:
+                    description: |-
+                      LatestDump is the newest dump under the prefix. Absent when the
+                      prefix holds no dump (SourceConfigKnown=False/NoDumpFound).
+                    properties:
+                      completionTime:
+                        description: |-
+                          CompletionTime is the source-side completion time recorded in the
+                          dump's @.json metadata. Absent when the metadata does not record one.
+                        format: date-time
+                        type: string
+                      gtidExecuted:
+                        description: GtidExecuted is the GTID set recorded in the
+                          dump's @.json metadata.
+                        type: string
+                      location:
+                        description: |-
+                          Location is the dump directory's object key under the bucket, with
+                          a trailing "/" (e.g. "orders/west/orders-nightly-20260520/").
+                        type: string
+                      name:
+                        description: Name is the dump directory's basename (the source
+                          MysqlBackup name).
+                        type: string
+                      sizeBytes:
+                        description: |-
+                          SizeBytes is the dump's size from its @.json metadata. Absent when the
+                          metadata does not record one.
+                        format: int64
+                        type: integer
+                    required:
+                    - location
+                    - name
+                    type: object
+                type: object
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation this status was
+                  computed against.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -22,12 +22,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const holdBackupUID = "uid-held"
 
-func heldBackup(holders ...*v1alpha1.MysqlBackupVerification) *v1alpha1.MysqlBackup {
+func heldBackup(holders ...*v1beta1.MysqlBackupVerification) *v1beta1.MysqlBackup {
 	b := successfulBackup("held", "lion", "nightly-s3")
 	b.UID = holdBackupUID
 	for _, v := range holders {
@@ -39,12 +39,12 @@ func heldBackup(holders ...*v1alpha1.MysqlBackupVerification) *v1alpha1.MysqlBac
 	return b
 }
 
-func holdVerification(name string, phase v1alpha1.VerificationPhase, refUID string) *v1alpha1.MysqlBackupVerification {
+func holdVerification(name string, phase v1beta1.VerificationPhase, refUID string) *v1beta1.MysqlBackupVerification {
 	v := verifyCR(name, "lion", "nightly-s3")
 	v.UID = types.UID("uid-" + name)
 	v.Status.Phase = phase
 	if refUID != "" {
-		v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "held", UID: refUID, ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/nightly/held/")}
+		v.Status.BackupRef = &v1beta1.VerificationBackupRef{Name: "held", UID: refUID, ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, "lion/nightly/held/")}
 	}
 	return v
 }
@@ -60,17 +60,17 @@ func holdJob(verification string, condition batchv1.JobConditionType) *batchv1.J
 func holdPod(verification string, phase corev1.PodPhase) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: verification + "-pod-" + strings.ToLower(string(phase)), Namespace: "ns",
-			Labels: map[string]string{v1alpha1.MysqlBackupVerificationLabel: verification}},
+			Labels: map[string]string{v1beta1.MysqlBackupVerificationLabel: verification}},
 		Status: corev1.PodStatus{Phase: phase},
 	}
 }
 
 func TestArtifactReaders(t *testing.T) {
-	running := holdVerification("running", v1alpha1.VerificationPhaseRestoring, holdBackupUID)
-	failed := holdVerification("failed", v1alpha1.VerificationPhaseFailed, holdBackupUID)
-	done := holdVerification("done", v1alpha1.VerificationPhaseSucceeded, holdBackupUID)
-	gone := holdVerification("gone", v1alpha1.VerificationPhaseRestoring, holdBackupUID)
-	successor := holdVerification("again", v1alpha1.VerificationPhaseSucceeded, "uid-other")
+	running := holdVerification("running", v1beta1.VerificationPhaseRestoring, holdBackupUID)
+	failed := holdVerification("failed", v1beta1.VerificationPhaseFailed, holdBackupUID)
+	done := holdVerification("done", v1beta1.VerificationPhaseSucceeded, holdBackupUID)
+	gone := holdVerification("gone", v1beta1.VerificationPhaseRestoring, holdBackupUID)
+	successor := holdVerification("again", v1beta1.VerificationPhaseSucceeded, "uid-other")
 	predecessor := successor.DeepCopy()
 	predecessor.UID = "uid-again-previous"
 
@@ -88,7 +88,7 @@ func TestArtifactReaders(t *testing.T) {
 		{name: "holder deleted, nothing running", objs: []client.Object{heldBackup(gone)}, want: ""},
 		{name: "same-name successor, previous run stopped", objs: []client.Object{heldBackup(predecessor), successor}, want: ""},
 		{name: "unstamped running verification (older operator)", objs: []client.Object{heldBackup(), running}, want: "running"},
-		{name: "unstamped verification of another backup", objs: []client.Object{heldBackup(), holdVerification("other", v1alpha1.VerificationPhaseRestoring, "uid-other")}, want: ""},
+		{name: "unstamped verification of another backup", objs: []client.Object{heldBackup(), holdVerification("other", v1beta1.VerificationPhaseRestoring, "uid-other")}, want: ""},
 		{name: "not yet pinned, same group and profile", objs: []client.Object{heldBackup(), holdVerification("pending", "", "")}, want: "pending"},
 		{name: "not yet pinned, other profile", objs: []client.Object{heldBackup(), func() client.Object {
 			v := holdVerification("pending", "", "")
@@ -97,14 +97,14 @@ func TestArtifactReaders(t *testing.T) {
 		}()}, want: ""},
 		{name: "not yet pinned to another backup by name", objs: []client.Object{heldBackup(), func() client.Object {
 			v := holdVerification("pending", "", "")
-			v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "another"}
+			v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: "another"}
 			return v
 		}()}, want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(tc.objs...).Build()
-			var backup v1alpha1.MysqlBackup
+			var backup v1beta1.MysqlBackup
 			if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "held"}, &backup); err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +120,7 @@ func TestArtifactReaders(t *testing.T) {
 }
 
 func TestArtifactReaders_FailsClosedOnAPIErrors(t *testing.T) {
-	failed := holdVerification("failed", v1alpha1.VerificationPhaseFailed, holdBackupUID)
+	failed := holdVerification("failed", v1beta1.VerificationPhaseFailed, holdBackupUID)
 	for _, kind := range []string{"pods", "verifications", "jobs"} {
 		t.Run(kind, func(t *testing.T) {
 			base := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(heldBackup(failed), failed).Build()
@@ -129,7 +129,7 @@ func TestArtifactReaders_FailsClosedOnAPIErrors(t *testing.T) {
 					if _, ok := list.(*corev1.PodList); ok && kind == "pods" {
 						return errors.New("injected")
 					}
-					if _, ok := list.(*v1alpha1.MysqlBackupVerificationList); ok && kind == "verifications" {
+					if _, ok := list.(*v1beta1.MysqlBackupVerificationList); ok && kind == "verifications" {
 						return errors.New("injected")
 					}
 					return c.List(ctx, list, opts...)
@@ -154,7 +154,7 @@ func TestPruneSuccessful_SkipsBackupsBeingRead(t *testing.T) {
 	for i := range backups {
 		backups[i].UID = types.UID("uid-" + backups[i].Name)
 	}
-	reader := holdVerification("reader", v1alpha1.VerificationPhaseRestoring, "uid-b-b")
+	reader := holdVerification("reader", v1beta1.VerificationPhaseRestoring, "uid-b-b")
 	objs := append(asClientObjects(backups), reader)
 	r, _ := newBackupReconciler(t, objs...)
 	if err := r.pruneSuccessful(context.Background(), backups, 1, 0); err != nil {
@@ -181,7 +181,7 @@ func TestPruneSuccessful_DoesNotDeleteSameNameReplacement(t *testing.T) {
 	if err := r.pruneSuccessful(context.Background(), stale, 1, 0); err != nil {
 		t.Fatal(err)
 	}
-	var live v1alpha1.MysqlBackup
+	var live v1beta1.MysqlBackup
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "b-b"}, &live); err != nil {
 		t.Fatalf("replacement was deleted: %v", err)
 	}
@@ -194,11 +194,11 @@ func TestResolveBackup_SkipsTerminatingBackups(t *testing.T) {
 	newer.Status.CompletionTime = &metav1.Time{Time: older.Status.CompletionTime.Add(time.Hour)}
 	now := metav1.Now()
 	newer.DeletionTimestamp = &now
-	newer.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	newer.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
 
 	latest := verifyCR("latest", fg.Name, "nightly-s3")
 	explicit := verifyCR("explicit", fg.Name, "nightly-s3")
-	explicit.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "newer"}
+	explicit.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: "newer"}
 	r, _ := newVerificationReconciler(t, fg, older, newer)
 
 	got, err := r.resolveBackup(context.Background(), latest)
@@ -242,7 +242,7 @@ func TestVerificationHold_StampedOnLaunchAndReleasedWhenStopped(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if v.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Fatalf("phase %s, want Failed", v.Status.Phase)
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
@@ -271,16 +271,16 @@ func TestVerificationHold_RefusesTerminatingBackupAtLaunch(t *testing.T) {
 	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	now := metav1.Now()
 	b.DeletionTimestamp = &now
-	b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+	b.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
 	v := verifyCR("late", fg.Name, "nightly-s3")
-	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: b.Name}
+	v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: b.Name}
 	r, c := newVerificationReconciler(t, fg, b, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
 	}
-	cond := apiMeta.FindStatusCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
-	if v.Status.Phase != v1alpha1.VerificationPhaseFailed || cond == nil || cond.Reason != "BackupNotAvailable" {
+	cond := apiMeta.FindStatusCondition(v.Status.Conditions, v1beta1.ConditionVerified)
+	if v.Status.Phase != v1beta1.VerificationPhaseFailed || cond == nil || cond.Reason != "BackupNotAvailable" {
 		t.Fatalf("status %+v, want Failed/BackupNotAvailable", v.Status)
 	}
 	var jobs batchv1.JobList
@@ -332,8 +332,8 @@ func TestVerificationHold_DeletionWaitsForPods(t *testing.T) {
 func TestFinalize_DefersWhileVerificationReads(t *testing.T) {
 	f := newCleanupFixture(t)
 	reader := verifyCR("reader", "lion", "nightly-s3")
-	reader.Status.Phase = v1alpha1.VerificationPhaseRestoring
-	reader.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, testArtifactLocation(f.mb))}
+	reader.Status.Phase = v1beta1.VerificationPhaseRestoring
+	reader.Status.BackupRef = &v1beta1.VerificationBackupRef{Name: f.mb.Name, UID: string(f.mb.UID), ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, testArtifactLocation(f.mb))}
 	if err := f.c.Create(context.Background(), reader); err != nil {
 		t.Fatal(err)
 	}
@@ -346,14 +346,14 @@ func TestFinalize_DefersWhileVerificationReads(t *testing.T) {
 		t.Fatal("cleanup started while a verification reads the artifact")
 	}
 	cond := cleanupCondition(t, f)
-	if cond == nil || cond.Reason != v1alpha1.ReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
+	if cond == nil || cond.Reason != v1beta1.ReasonHeldByVerification || !strings.Contains(cond.Message, "reader") {
 		t.Fatalf("condition %+v", cond)
 	}
 	if n := countEvents(f.rec, "ArtifactCleanupDeferred"); n != 1 {
 		t.Fatalf("ArtifactCleanupDeferred events = %d, want 1", n)
 	}
 
-	reader.Status.Phase = v1alpha1.VerificationPhaseSucceeded
+	reader.Status.Phase = v1beta1.VerificationPhaseSucceeded
 	// This client has no status subresource for verifications.
 	if err := f.c.Update(context.Background(), reader); err != nil {
 		t.Fatal(err)
@@ -374,11 +374,11 @@ func TestVerificationHold_StampedAfterCrashBetweenPinAndStamp(t *testing.T) {
 	newer.Status.CompletionTime = &metav1.Time{Time: pinned.Status.CompletionTime.Add(time.Hour)}
 	v := verifyCR("crashed", fg.Name, "nightly-s3")
 	v.UID = "uid-crashed"
-	v.Status.Phase = v1alpha1.VerificationPhaseProvisioning
+	v.Status.Phase = v1beta1.VerificationPhaseProvisioning
 	v.Status.BackupRef = verificationBackupSnapshot(pinned)
 	r, c := newVerificationReconciler(t, fg, pinned, newer, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
-	for _, b := range []*v1alpha1.MysqlBackup{pinned, newer} {
+	for _, b := range []*v1beta1.MysqlBackup{pinned, newer} {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
 			t.Fatal(err)
 		}
@@ -411,7 +411,7 @@ func TestVerificationHold_ReleaseConflictIsRetried(t *testing.T) {
 	conflicts := 1
 	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-			if _, ok := obj.(*v1alpha1.MysqlBackup); ok && conflicts > 0 {
+			if _, ok := obj.(*v1beta1.MysqlBackup); ok && conflicts > 0 {
 				conflicts--
 				return apierrors.NewConflict(schema.GroupResource{Resource: "mysqlbackups"}, obj.GetName(), errors.New("injected"))
 			}
@@ -460,7 +460,7 @@ func TestVerificationHold_StampedOnObserveAfterCrash(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
 	}
-	v.Status.JobName, v.Status.Phase = "", v1alpha1.VerificationPhaseProvisioning
+	v.Status.JobName, v.Status.Phase = "", v1beta1.VerificationPhaseProvisioning
 	if err := c.Status().Update(ctx, v); err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +473,7 @@ func TestVerificationHold_StampedOnObserveAfterCrash(t *testing.T) {
 	if b.Annotations[verificationHoldKey(v)] != v.Name {
 		t.Fatalf("observe path did not stamp the hold: %v", b.Annotations)
 	}
-	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil || v.Status.JobName == "" || v.Status.Phase != v1alpha1.VerificationPhaseRestoring {
+	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil || v.Status.JobName == "" || v.Status.Phase != v1beta1.VerificationPhaseRestoring {
 		t.Fatalf("status not recovered: %+v %v", v.Status, err)
 	}
 }
@@ -484,7 +484,7 @@ func TestPruneSuccessful_LogsHeldBackup(t *testing.T) {
 	for i := range backups {
 		backups[i].UID = types.UID("uid-" + backups[i].Name)
 	}
-	reader := holdVerification("reader", v1alpha1.VerificationPhaseRestoring, "uid-b-b")
+	reader := holdVerification("reader", v1beta1.VerificationPhaseRestoring, "uid-b-b")
 	r, _ := newBackupReconciler(t, append(asClientObjects(backups), reader)...)
 	var lines []string
 	logger := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
@@ -509,14 +509,14 @@ func TestPruneSuccessful_LogsHeldBackup(t *testing.T) {
 func TestArtifactReaders_UnpinnedIgnoresUnpickableBackups(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlBackup)
+		mutate func(*v1beta1.MysqlBackup)
 	}{
-		{name: "terminating", mutate: func(b *v1alpha1.MysqlBackup) {
+		{name: "terminating", mutate: func(b *v1beta1.MysqlBackup) {
 			now := metav1.Now()
 			b.DeletionTimestamp = &now
-			b.Finalizers = []string{v1alpha1.MysqlBackupFinalizer}
+			b.Finalizers = []string{v1beta1.MysqlBackupFinalizer}
 		}},
-		{name: "failed", mutate: func(b *v1alpha1.MysqlBackup) { b.Status.Phase = v1alpha1.BackupPhaseFailed }},
+		{name: "failed", mutate: func(b *v1beta1.MysqlBackup) { b.Status.Phase = v1beta1.BackupPhaseFailed }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backup := heldBackup()

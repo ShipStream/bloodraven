@@ -29,7 +29,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -253,7 +253,7 @@ func pitrPreRecloneTailOutcome(lines []pglogs.Match, site string) pitrPreReclone
 // recloned site although its binlog tail was not confirmed archived.
 func pitrNewTailNotArchived(before map[string]int32, events []corev1.Event, group, site string) (corev1.Event, bool) {
 	for _, ev := range events {
-		if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != group || ev.Reason != v1alpha1.EventPITRArchiveTailNotArchived {
+		if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != group || ev.Reason != v1beta1.EventPITRArchiveTailNotArchived {
 			continue
 		}
 		// "site <name> is being recloned although …" (the operator's
@@ -305,7 +305,7 @@ func pitrAssertRecloneTailArchived(ctx context.Context, env *runner.Env, operato
 			return err
 		}
 		if out.Archived {
-			env.Capture.Note(fmt.Sprintf("reclone of %s: the operator confirmed its binlog tail archived before the clone (waited %s); no %s Event", site, out.Waited, v1alpha1.EventPITRArchiveTailNotArchived))
+			env.Capture.Note(fmt.Sprintf("reclone of %s: the operator confirmed its binlog tail archived before the clone (waited %s); no %s Event", site, out.Waited, v1beta1.EventPITRArchiveTailNotArchived))
 			return nil
 		}
 		select {

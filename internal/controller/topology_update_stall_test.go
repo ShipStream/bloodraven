@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -339,7 +339,7 @@ func TestUpdateStall_CrashLoopKeepsOneStallAcrossLoopPhases(t *testing.T) {
 	// The status the poll loop writes carries the current stall.
 	fg := newTestFG()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 	rec := record.NewFakeRecorder(20)
 	runner := &TopologyManagerRunner{client: c, recorder: rec, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -354,7 +354,7 @@ func TestUpdateStall_CrashLoopKeepsOneStallAcrossLoopPhases(t *testing.T) {
 		if err := runner.updateCRStatus(context.Background(), nn, snap); err != nil {
 			t.Fatalf("updateCRStatus() error = %v", err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &got); err != nil {
 			t.Fatal(err)
 		}
@@ -377,7 +377,7 @@ func TestUpdateStall_CrashLoopKeepsOneStallAcrossLoopPhases(t *testing.T) {
 		t.Fatalf("stall = %q\nwant    %q", got, want)
 	}
 	cond := writeStatus()
-	if cond == nil || cond.Reason != v1alpha1.ReasonOrderedUpdateStalled || len(events) != 1 {
+	if cond == nil || cond.Reason != v1beta1.ReasonOrderedUpdateStalled || len(events) != 1 {
 		t.Fatalf("Updating = %+v events %q, want the stall and one Event", cond, events)
 	}
 	message, snaps := cond.Message, h.snapshots()

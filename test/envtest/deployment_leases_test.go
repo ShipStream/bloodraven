@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,9 +32,9 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 			fg.Status.TopologyGeneration = 7
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.Now()}}
-			fg.Status.Sites = []v1alpha1.SiteStatus{
-				{Name: "dc1", State: v1alpha1.SiteStateWritable},
-				{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+			fg.Status.Sites = []v1beta1.SiteStatus{
+				{Name: "dc1", State: v1beta1.SiteStateWritable},
+				{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 			}
 			if err := k8sClient.Status().Update(ctx, fg); err != nil {
 				t.Fatal(err)
@@ -105,7 +105,7 @@ func TestDeploymentLeaseTerminalPersistence(t *testing.T) {
 				if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds != 1 {
 					t.Fatalf("%s: terminal duration must be 1", lease.Name)
 				}
-				if record.State != tc.state || record.Reason != tc.reason || !record.ExpiresAt.Equal(expiresAt) || record.TopologyGeneration != 7 || lease.Labels[v1alpha1.DeploymentStateLabel] != tc.state {
+				if record.State != tc.state || record.Reason != tc.reason || !record.ExpiresAt.Equal(expiresAt) || record.TopologyGeneration != 7 || lease.Labels[v1beta1.DeploymentStateLabel] != tc.state {
 					t.Fatalf("%s: terminal record = %+v", lease.Name, record)
 				}
 			}

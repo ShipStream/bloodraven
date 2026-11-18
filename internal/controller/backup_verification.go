@@ -4,7 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Labels / finalizers specific to MysqlBackupVerification. The shared
@@ -48,11 +48,11 @@ func verificationScheduleCronJobName(fgName, profileName string) string {
 // MysqlBackupVerification based on its spec so retention, finalizers,
 // and schedule rollups can use label-selector lookups. Returns true if
 // anything changed so the caller can decide whether to issue an Update.
-func ensureVerificationLabels(v *v1alpha1.MysqlBackupVerification) bool {
+func ensureVerificationLabels(v *v1beta1.MysqlBackupVerification) bool {
 	desired := map[string]string{
-		v1alpha1.FailoverGroupLabel: v.Spec.FailoverGroupRef.Name,
-		v1alpha1.BackupProfileLabel: v.Spec.ProfileName,
-		labelManagedBy:              managerName,
+		v1beta1.FailoverGroupLabel: v.Spec.FailoverGroupRef.Name,
+		v1beta1.BackupProfileLabel: v.Spec.ProfileName,
+		labelManagedBy:             managerName,
 	}
 	changed := false
 	if v.Labels == nil {

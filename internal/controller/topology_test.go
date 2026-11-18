@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -296,7 +296,7 @@ func TestPoll_FirstWritableNonPromotableObservationFencesImmediately(t *testing.
 				if tm.sites[1].state != state.StateWritable || tm.activeSiteLocked() != "" {
 					t.Fatalf("anomaly did not immediately invalidate authority: state=%s active=%q", tm.sites[1].state, tm.activeSiteLocked())
 				}
-				if snapshot.DegradedReason != v1alpha1.ReasonSiteUnhealthy {
+				if snapshot.DegradedReason != v1beta1.ReasonSiteUnhealthy {
 					t.Fatalf("degraded reason = %q, want SiteUnhealthy", snapshot.DegradedReason)
 				}
 			})
@@ -712,10 +712,10 @@ func TestNormalSite0Primary(t *testing.T) {
 	}
 
 	s := tm.Status()
-	if s.Sites[0].State != v1alpha1.SiteStateWritable {
+	if s.Sites[0].State != v1beta1.SiteStateWritable {
 		t.Errorf("site0 state: got %s, want writable", s.Sites[0].State)
 	}
-	if s.Sites[1].State != v1alpha1.SiteStateReadOnly {
+	if s.Sites[1].State != v1beta1.SiteStateReadOnly {
 		t.Errorf("site1 state: got %s, want read-only", s.Sites[1].State)
 	}
 }
@@ -1669,7 +1669,7 @@ func TestDetectEmptySite_SkipsSitesUnderRecovery(t *testing.T) {
 	tm, _, _ := newTestTopologyManager(site0, site1)
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
-	tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentGtid: "bbbb:1-9", divergentCount: 9}
+	tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateBlocked, divergentGtid: "bbbb:1-9", divergentCount: 9}
 
 	donor, empty := tm.detectEmptySite(context.Background())
 	if donor != "" || empty != "" {
@@ -1999,7 +1999,7 @@ func TestReclone_PreservesRecoveryStateUntilReplicationHealthy(t *testing.T) {
 
 	// Simulate RecoveryBlocked state on dc2.
 	tm.mu.Lock()
-	tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
+	tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
 	tm.mu.Unlock()
 
 	tm.SetRecloneSite("dc2")
@@ -2009,7 +2009,7 @@ func TestReclone_PreservesRecoveryStateUntilReplicationHealthy(t *testing.T) {
 	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
 
-	if rec == nil || rec.state != v1alpha1.RecoveryStateBlocked {
+	if rec == nil || rec.state != v1beta1.RecoveryStateBlocked {
 		t.Fatalf("dc2 recovery should remain blocked until replication is healthy, got %+v", rec)
 	}
 	if rec.divergentGtid != "aaaa:50-55" {
@@ -2029,7 +2029,7 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	pollN(tm, 2)
 
 	tm.mu.Lock()
-	tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateInProgress}
+	tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateInProgress}
 	tm.lastFailoverTarget = ""
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
@@ -2062,7 +2062,7 @@ func TestCheckRecovery_HealthyReplicationDoesNotClearDivergenceBlock(t *testing.
 	pollN(tm, 2)
 
 	tm.mu.Lock()
-	tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
+	tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
 	tm.lastFailoverTarget = ""
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
@@ -2075,7 +2075,7 @@ func TestCheckRecovery_HealthyReplicationDoesNotClearDivergenceBlock(t *testing.
 	tm.mu.RLock()
 	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
-	if rec == nil || rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentGtid != "aaaa:50-55" {
+	if rec == nil || rec.state != v1beta1.RecoveryStateBlocked || rec.divergentGtid != "aaaa:50-55" {
 		t.Fatalf("divergence block cleared on thread health: %+v", rec)
 	}
 }
@@ -2088,7 +2088,7 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t 
 	tm.mu.Lock()
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
-	tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateInProgress}
+	tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateInProgress}
 	tm.lastFailoverTarget = "dc1"
 	tm.bootstrapCfg = BootstrapConfig{}
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
@@ -2119,7 +2119,7 @@ func TestCheckRecovery_PreservesBlockedRecordedTargetDuringSplitBrain(t *testing
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateWritable
 	tm.recovery["dc2"] = &siteRecovery{
-		state:          v1alpha1.RecoveryStateBlocked,
+		state:          v1beta1.RecoveryStateBlocked,
 		divergentGtid:  "aaaa:50-55",
 		divergentCount: 6,
 		drainComplete:  true,
@@ -2157,7 +2157,7 @@ func TestCheckRecovery_DrainsSurvivingConnectionsBeforeCompletion(t *testing.T) 
 	tm.mu.Lock()
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
-	tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateInProgress}
+	tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateInProgress}
 	tm.lastFailoverTarget = "dc1"
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
@@ -2263,7 +2263,7 @@ func TestCheckRecovery_PersistsInProgressAndSuppressesImmediateRetry(t *testing.
 	if got := site1.startReplicaCallCount(); got != 1 {
 		t.Fatalf("expected one recovery sequence, got %d", got)
 	}
-	if len(snapshots) == 0 || snapshots[0].RecoverySite != "dc2" || snapshots[0].RecoveryState != v1alpha1.RecoveryStateInProgress {
+	if len(snapshots) == 0 || snapshots[0].RecoverySite != "dc2" || snapshots[0].RecoveryState != v1beta1.RecoveryStateInProgress {
 		t.Fatalf("expected RecoveryInProgress snapshot before recovery, got %#v", snapshots)
 	}
 
@@ -3150,7 +3150,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 		primaryGTID      string // defaults to clusterGTID
 		oldGTID          string
 		wantRecovery     bool
-		wantState        v1alpha1.SiteRecoveryState
+		wantState        v1beta1.SiteRecoveryState
 		wantStartReplica bool
 		wantDivergent    string
 	}{
@@ -3159,7 +3159,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			name:             "shares cluster history: recover despite no user schemas",
 			oldGTID:          clusterGTID,
 			wantRecovery:     true,
-			wantState:        v1alpha1.RecoveryStateInProgress,
+			wantState:        v1beta1.RecoveryStateInProgress,
 			wantStartReplica: true,
 		},
 		{
@@ -3170,7 +3170,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			name:             "diverged but shares history: blocked, never auto-started",
 			oldGTID:          clusterGTID + ",aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:13-15",
 			wantRecovery:     true,
-			wantState:        v1alpha1.RecoveryStateBlocked,
+			wantState:        v1beta1.RecoveryStateBlocked,
 			wantStartReplica: false,
 		},
 		{
@@ -3185,7 +3185,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			name:             "tagged history under a cluster uuid: blocked, never cloned over",
 			oldGTID:          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
 			wantRecovery:     true,
-			wantState:        v1alpha1.RecoveryStateBlocked,
+			wantState:        v1beta1.RecoveryStateBlocked,
 			wantStartReplica: false,
 			wantDivergent:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
 		},
@@ -3194,7 +3194,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			primaryGTID:      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:ops:1-12",
 			oldGTID:          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
 			wantRecovery:     true,
-			wantState:        v1alpha1.RecoveryStateBlocked,
+			wantState:        v1beta1.RecoveryStateBlocked,
 			wantStartReplica: false,
 			wantDivergent:    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:app:1-3",
 		},
@@ -3227,7 +3227,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 			if !tt.wantRecovery {
 				return
 			}
-			var gotState v1alpha1.SiteRecoveryState
+			var gotState v1beta1.SiteRecoveryState
 			if rec != nil {
 				gotState = rec.state
 			}

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -82,7 +82,7 @@ func rendererIdentity() string {
 	fmt.Fprintf(h, "configMapRenderVersion=%s\n", configMapRenderVersion)
 	fmt.Fprintf(h, "pitrPodRenderVersion=%s\n", pitrPodRenderVersion)
 	fmt.Fprintf(h, "encryptionPodRenderVersion=%s\n", encryptionPodRenderVersion)
-	probe := &v1alpha1.MysqlFailoverGroup{}
+	probe := &v1beta1.MysqlFailoverGroup{}
 	for _, tls := range []bool{false, true} {
 		command, args := mysqlLauncher(probe, mysqlServerArgs(0, tls))
 		fmt.Fprintf(h, "launcher[tls=%t]=%q %q\n", tls, command, args)
@@ -96,7 +96,7 @@ func rendererIdentity() string {
 // operator release, or one from before the annotation existed) last wrote
 // obj's pod template.
 func renderedByOther(obj metav1.Object) bool {
-	return obj.GetAnnotations()[v1alpha1.RenderedByAnnotation] != rendererIdentity()
+	return obj.GetAnnotations()[v1beta1.RenderedByAnnotation] != rendererIdentity()
 }
 
 // stampRenderedBy records the running renderer on a workload it writes.
@@ -105,14 +105,14 @@ func stampRenderedBy(obj metav1.Object) {
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
-	annotations[v1alpha1.RenderedByAnnotation] = rendererIdentity()
+	annotations[v1beta1.RenderedByAnnotation] = rendererIdentity()
 	obj.SetAnnotations(annotations)
 }
 
 // rolloutAdmitted reports whether fg's rollout record admits it to roll the
 // running renderer's pod templates. A record for another renderer does not:
 // the pacer retargets an unfinished admission after an operator upgrade.
-func rolloutAdmitted(fg *v1alpha1.MysqlFailoverGroup) bool {
+func rolloutAdmitted(fg *v1beta1.MysqlFailoverGroup) bool {
 	r := fg.Status.Rollout
 	return r.InFlight() && r.Renderer == rendererIdentity()
 }
@@ -122,19 +122,19 @@ func rolloutAdmitted(fg *v1alpha1.MysqlFailoverGroup) bool {
 // replaced and its pod must restart with a writable keyring before the clone
 // can run, so its roll is not held for the paced rollout: holding it would
 // hold the group's recovery behind every other group's upgrade.
-func siteCloneUnsealPending(fg *v1alpha1.MysqlFailoverGroup, site string) bool {
+func siteCloneUnsealPending(fg *v1beta1.MysqlFailoverGroup, site string) bool {
 	if !fg.Spec.EncryptionEnabled() {
 		return false
 	}
 	s := fg.Status.EncryptionAtRest.SiteEncryptionStatusByName(site)
-	return s != nil && s.UnsealReason == v1alpha1.UnsealReasonClone
+	return s != nil && s.UnsealReason == v1beta1.UnsealReasonClone
 }
 
 // rolloutHoldsSite reports whether an existing site Deployment that differs
 // from the running render must keep its template: pacing is on, another
 // renderer wrote it, and the group is not admitted. The drift check and the
 // write path both decide by it.
-func rolloutHoldsSite(pacing bool, fg *v1alpha1.MysqlFailoverGroup, site string, deploy *appsv1.Deployment) bool {
+func rolloutHoldsSite(pacing bool, fg *v1beta1.MysqlFailoverGroup, site string, deploy *appsv1.Deployment) bool {
 	return pacing && renderedByOther(deploy) && !rolloutAdmitted(fg) && !siteCloneUnsealPending(fg, site)
 }
 
@@ -161,7 +161,7 @@ func (r *MysqlFailoverGroupReconciler) admitRolloutWrite(ctx context.Context, nn
 		}
 		now := metav1.NewTime(r.now())
 		fresh.Status.Rollout.StartedTime = &now
-		fresh.Status.Rollout.Phase = v1alpha1.RolloutPhaseRolling
+		fresh.Status.Rollout.Phase = v1beta1.RolloutPhaseRolling
 		fresh.Status.Rollout.Reason = rolloutReasonStarted
 		fresh.Status.Rollout.Message = "the group's workloads are being rolled to the release's pod template"
 		if err := r.Status().Update(ctx, fresh); err != nil {
@@ -201,7 +201,7 @@ func (r *MysqlFailoverGroupReconciler) restampWorkload(ctx context.Context, obj 
 // it is also any difference a server-side dry run of the write shows, so a
 // release that changes an unhashed part of the template is paced too.
 // deploy and mutate are reconcileDeployment's: mutate renders into deploy.
-func (r *MysqlFailoverGroupReconciler) gateDeploymentRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec,
+func (r *MysqlFailoverGroupReconciler) gateDeploymentRollout(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec,
 	deploy *appsv1.Deployment, mutate func() error, specHash, pitrCanonical string, pitr groupPITRRender) (done bool, err error) {
 	if !r.RolloutPacing {
 		return false, nil
@@ -224,10 +224,10 @@ func (r *MysqlFailoverGroupReconciler) gateDeploymentRollout(ctx context.Context
 	if pitr.action == pitrRenderDefer || deploymentSelectorMismatch(&live, fg, site.Name) != nil {
 		return false, nil
 	}
-	pending := live.Annotations[v1alpha1.SpecHashAnnotation] != specHash ||
-		live.Annotations[v1alpha1.PITRRenderAnnotation] != pitrCanonical
+	pending := live.Annotations[v1beta1.SpecHashAnnotation] != specHash ||
+		live.Annotations[v1beta1.PITRRenderAnnotation] != pitrCanonical
 	templateOnly := false
-	if !pending && fg.Spec.UpdateStrategy.EffectiveType() == v1alpha1.UpdateStrategyRecreate {
+	if !pending && fg.Spec.UpdateStrategy.EffectiveType() == v1beta1.UpdateStrategyRecreate {
 		templateOnly = r.deploymentTemplateWouldChange(ctx, &live, deploy, mutate)
 		pending = templateOnly
 	}
@@ -297,7 +297,7 @@ func (r *MysqlFailoverGroupReconciler) rolloutTemplateVerdict(nn types.Namespace
 
 // siteSpecHash is the spec hash reconcileDeployment would stamp on site's
 // Deployment.
-func (r *MysqlFailoverGroupReconciler) siteSpecHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, pitr pitrRenderInputs) (string, error) {
+func (r *MysqlFailoverGroupReconciler) siteSpecHash(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, pitr pitrRenderInputs) (string, error) {
 	digestKey, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, fg)
 	if err != nil {
 		return "", err
@@ -314,7 +314,7 @@ func (r *MysqlFailoverGroupReconciler) siteSpecHash(ctx context.Context, fg *v1a
 // running render would change. The group reconcile leaves the ConfigMap of
 // such a site alone (gateDeploymentRollout writes it with the pod), and
 // restamps the others another renderer wrote.
-func (r *MysqlFailoverGroupReconciler) rolloutPendingSites(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr groupPITRRender) (map[string]bool, error) {
+func (r *MysqlFailoverGroupReconciler) rolloutPendingSites(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pitr groupPITRRender) (map[string]bool, error) {
 	if !r.RolloutPacing {
 		return nil, nil
 	}
@@ -336,13 +336,13 @@ func (r *MysqlFailoverGroupReconciler) rolloutPendingSites(ctx context.Context, 
 		if err != nil {
 			return nil, err
 		}
-		if live.Annotations[v1alpha1.SpecHashAnnotation] != hash || live.Annotations[v1alpha1.PITRRenderAnnotation] != pitrCanonical {
+		if live.Annotations[v1beta1.SpecHashAnnotation] != hash || live.Annotations[v1beta1.PITRRenderAnnotation] != pitrCanonical {
 			pending[site.Name] = true
 			continue
 		}
 		// Under Recreate the Deployment write that follows restamps it, or
 		// finds a template-only difference by dry run.
-		if fg.Spec.UpdateStrategy.EffectiveType() != v1alpha1.UpdateStrategyRecreate {
+		if fg.Spec.UpdateStrategy.EffectiveType() != v1beta1.UpdateStrategyRecreate {
 			if err := r.restampWorkload(ctx, &live); err != nil {
 				return nil, fmt.Errorf("restamp deployment %s: %w", key.Name, err)
 			}
@@ -368,7 +368,7 @@ type rolloutGroupState struct {
 
 // RolloutGroupState reads fg's workloads through reader and classifies
 // them for the pacer. It writes nothing.
-func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) (rolloutGroupState, error) {
+func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, reader client.Reader, fg *v1beta1.MysqlFailoverGroup) (rolloutGroupState, error) {
 	var st rolloutGroupState
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if _, err := effectiveSidecarImage(fg); err != nil {
@@ -407,12 +407,12 @@ func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, re
 		if !renderedByOther(&deploy) || action == pitrRenderDefer {
 			continue
 		}
-		if deploy.Annotations[v1alpha1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
-			deploy.Annotations[v1alpha1.PITRRenderAnnotation] != pitr.Canonical() {
+		if deploy.Annotations[v1beta1.SpecHashAnnotation] != ComputeSpecHash(fg, site, secretDigest, pitr) ||
+			deploy.Annotations[v1beta1.PITRRenderAnnotation] != pitr.Canonical() {
 			st.Pending = append(st.Pending, rolloutMySQLWorkload(site.Name))
 			continue
 		}
-		if fg.Spec.UpdateStrategy.EffectiveType() != v1alpha1.UpdateStrategyRecreate {
+		if fg.Spec.UpdateStrategy.EffectiveType() != v1beta1.UpdateStrategyRecreate {
 			continue
 		}
 		// Another renderer wrote it and the hash matches: under Recreate
@@ -444,7 +444,7 @@ func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, re
 		}
 		// A site the serial rollout restarted counts until it is back in
 		// sync (the in-flight mark), not only until its pod is Ready.
-		if !dragonflyStatefulSetRolloutComplete(&sts) || sts.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation] != "" {
+		if !dragonflyStatefulSetRolloutComplete(&sts) || sts.Annotations[v1beta1.DragonflyRolloutInFlightAnnotation] != "" {
 			st.Incomplete = append(st.Incomplete, rolloutDragonflyWorkload(site.Name))
 		}
 		if !renderedByOther(&sts) {
@@ -468,7 +468,7 @@ func (r *MysqlFailoverGroupReconciler) RolloutGroupState(ctx context.Context, re
 // (a master it cannot name, a replica that is not in sync), and an admission
 // that changed nothing must stay withdrawable. latchDragonflyRollout latches
 // before the first action.
-func (r *MysqlFailoverGroupReconciler) gateDragonflyRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, current *appsv1.StatefulSet) (held bool, err error) {
+func (r *MysqlFailoverGroupReconciler) gateDragonflyRollout(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, current *appsv1.StatefulSet) (held bool, err error) {
 	if !r.RolloutPacing || !renderedByOther(current) {
 		return false, nil
 	}
@@ -483,7 +483,7 @@ func (r *MysqlFailoverGroupReconciler) gateDragonflyRollout(ctx context.Context,
 // StatefulSet another renderer wrote: a template write, or the takeover
 // that moves the master away from the site first. It returns errRolloutHeld
 // when the admission was withdrawn since gateDragonflyRollout read it.
-func (r *MysqlFailoverGroupReconciler) latchDragonflyRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, current *appsv1.StatefulSet) error {
+func (r *MysqlFailoverGroupReconciler) latchDragonflyRollout(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, current *appsv1.StatefulSet) error {
 	if !r.RolloutPacing || current == nil || !renderedByOther(current) {
 		return nil
 	}

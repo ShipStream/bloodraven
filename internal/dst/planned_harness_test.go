@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -89,7 +89,7 @@ func TestConsumeRequestFailureIsRetried(t *testing.T) {
 	if len(r.Violations) != 0 {
 		t.Fatalf("violations: %v", r.Violations)
 	}
-	if _, ok := r.Planned.Object.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := r.Planned.Object.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("the request annotation outlived its failed consumption")
 	}
 	forbidden := false
@@ -130,7 +130,7 @@ func TestStalledClaimWithinDeadline(t *testing.T) {
 	if pl.stalledClaimWithinDeadline() {
 		t.Fatal("no claim held: not stalled")
 	}
-	pf := &v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDraining,
+	pf := &v1beta1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1beta1.PlannedFailoverPhaseDraining,
 		TargetSite: "beta", SourceSite: "alpha"}
 	pl.reg.register(r.newManager(nil), controller.ManagerWiring{HydrateFrom: pf})
 	if id, hold, ok := pl.reg.Slot(pl.nn).HeldForSim(); !ok || hold || id != "r1" {
@@ -140,7 +140,7 @@ func TestStalledClaimWithinDeadline(t *testing.T) {
 		t.Fatal("claim held without a stall-since: not stalled")
 	}
 	if err := pl.store.PatchAnnotations("test", map[string]string{
-		v1alpha1.PlannedFailoverStallSinceAnnotation: controller.FormatDeadlineStart("r1", r.clk.Now()),
+		v1beta1.PlannedFailoverStallSinceAnnotation: controller.FormatDeadlineStart("r1", r.clk.Now()),
 	}); err != nil {
 		t.Fatal(err)
 	}

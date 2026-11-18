@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// SiteRole mirrors api/v1alpha1.SiteRole as a string. The pure state
-// package avoids importing v1alpha1 to stay decoupled from CRD types.
+// SiteRole mirrors api/v1beta1.SiteRole as a string. The pure state
+// package avoids importing v1beta1 to stay decoupled from CRD types.
 type SiteRole string
 
 const (
@@ -90,7 +90,7 @@ type CrossSiteAction struct {
 
 // CrossSiteAction.Reason values. The operator serves them as the
 // MysqlFailoverGroup Ready and Degraded condition reasons, so each must also
-// be declared in api/v1alpha1 (internal/apiregistry pins that).
+// be declared in api/v1beta1 (internal/apiregistry pins that).
 const (
 	ReasonHealthy       = "Healthy"
 	ReasonSiteUnhealthy = "SiteUnhealthy"

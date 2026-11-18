@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -156,7 +156,7 @@ func observePlannedFailoverSucceeded() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("plannedFailover.phase==Succeeded with target=%s", target),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					pf := mfg.Status.PlannedFailover
 					if pf == nil {
 						return false, "no plannedFailover status yet", nil
@@ -176,10 +176,10 @@ func observePlannedFailoverSucceeded() runner.Step {
 							pf.StartTime, env.StartTime), nil
 					}
 					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.TargetSite, plannedReason(pf))
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", plannedReason(pf), pf.Message)
 					}
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseSucceeded {
 						if pf.TargetSite != target {
 							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q", pf.TargetSite, target)
 						}
@@ -206,7 +206,7 @@ func verifyPlannedFailoverWatermark() runner.Step {
 			if pf == nil {
 				return fmt.Errorf("no plannedFailover status to inspect")
 			}
-			if plannedOutcome(pf) != v1alpha1.PlannedFailoverOutcomeSucceeded {
+			if plannedOutcome(pf) != v1beta1.PlannedFailoverOutcomeSucceeded {
 				return fmt.Errorf("outcome=%q reason=%q, want Succeeded", plannedOutcome(pf), plannedReason(pf))
 			}
 			// The promotion proves the target held exactly the fenced set,

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -14,7 +14,7 @@ import (
 func releasedWithStalledPublishing(t *testing.T, h *pfHarness) {
 	t.Helper()
 	h.request("dc2")
-	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+	h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhasePromoting))
 	h.store.DenyStatus(1 << 20) // the Publishing write cannot land
 	for range 4 {
 		h.pass()
@@ -23,7 +23,7 @@ func releasedWithStalledPublishing(t *testing.T, h *pfHarness) {
 		t.Fatal("setup: the target was not promoted")
 	}
 	pf := h.pf()
-	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+	if pf.Phase != v1beta1.PlannedFailoverPhasePromoting {
 		t.Fatalf("setup: the Publishing write landed: %+v", pf)
 	}
 	if run, _, ok := h.held(); ok {
@@ -67,7 +67,7 @@ func TestFixR2_RecordedPromotionIsNotHydrated(t *testing.T) {
 	}
 	h.store.ClearFaults()
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if h.holdCondition() {
 		t.Fatal("a recorded promotion ended with an automation hold")
 	}
@@ -85,8 +85,8 @@ func TestFixR2_RestartAfterLaterEmergencyFailoverDoesNotHold(t *testing.T) {
 	for range 20 {
 		h.tick()
 		h.pass()
-		if m, ok := controller.ParseTerminalMarker(h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok {
-			if m.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
+		if m, ok := controller.ParseTerminalMarker(h.store.Object().GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]); ok {
+			if m.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
 				t.Fatalf("marker %+v, want Succeeded", m)
 			}
 			marked = true
@@ -123,5 +123,5 @@ func TestFixR2_RestartAfterLaterEmergencyFailoverDoesNotHold(t *testing.T) {
 	}
 	h.store.ClearFaults()
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 }

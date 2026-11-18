@@ -13,10 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
-func mysqlTLSConfig(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, serverName string) (string, error) {
+func mysqlTLSConfig(ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup, serverName string) (string, error) {
 	if fg.Spec.TLS == nil || fg.Spec.TLS.SecretName == "" {
 		return "", nil
 	}
@@ -78,7 +78,7 @@ const mysqlTLSMountPath = "/etc/mysql/tls"
 //
 // Returns nil when spec.tls is unset, so groups without TLS render
 // exactly as before.
-func mysqlTLSSidecarEnv(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []corev1.EnvVar {
+func mysqlTLSSidecarEnv(fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) []corev1.EnvVar {
 	if fg.Spec.TLS == nil || fg.Spec.TLS.SecretName == "" {
 		return nil
 	}

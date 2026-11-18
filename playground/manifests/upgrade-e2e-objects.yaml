@@ -1,0 +1,77 @@
+# Objects of the upgrade E2E (C-8 of proposals/20-api-v1beta1.md): one of
+# every kind beside the playground MysqlFailoverGroup. upgrade-e2e.sh
+# applies them while the previous release runs, at the version that release
+# serves, so they are stored as that version. Scenario 78 then requires
+# `kubectl bloodraven migrate-storage` to rewrite each of them after the
+# upgrade.
+#
+# They use the playground's RustFS and a `rustfs` backup profile.
+# upgrade-e2e.sh creates the bucket and adds the profile to the group first.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: upgrade-e2e-tenant-owner
+  namespace: bloodraven-playground
+type: Opaque
+stringData:
+  username: upgrade_e2e
+  password: upgrade-e2e-password
+---
+apiVersion: shipstream.io/v1beta1
+kind: MysqlDatabase
+metadata:
+  name: upgrade-e2e
+  namespace: bloodraven-playground
+spec:
+  failoverGroupRef:
+    name: playground
+  databaseName: upgrade_e2e
+  owner:
+    secretName: upgrade-e2e-tenant-owner
+    privileges: [ALL PRIVILEGES]
+---
+apiVersion: shipstream.io/v1beta1
+kind: MysqlBackup
+metadata:
+  name: upgrade-e2e
+  namespace: bloodraven-playground
+  annotations:
+    bloodraven.shipstream.io/triggered-by: manual
+spec:
+  failoverGroupRef:
+    name: playground
+  profileName: rustfs
+---
+apiVersion: shipstream.io/v1beta1
+kind: MysqlBackupVerification
+metadata:
+  name: upgrade-e2e
+  namespace: bloodraven-playground
+  labels:
+    # upgrade-e2e.sh applies it once the backup it names has succeeded: a
+    # verification of a backup that is not Succeeded fails at once.
+    playground.bloodraven.shipstream.io/after-backup: "true"
+spec:
+  failoverGroupRef:
+    name: playground
+  profileName: rustfs
+  backupRef:
+    name: upgrade-e2e
+---
+# A standby cluster that reads the playground's own backup prefix. It only
+# has to exist: the kind has no pods, and its discovery loop reports what it
+# finds in the bucket.
+apiVersion: shipstream.io/v1beta1
+kind: MysqlStandbyCluster
+metadata:
+  name: upgrade-e2e
+  namespace: bloodraven-playground
+spec:
+  transport: ObjectStore
+  source:
+    s3:
+      bucket: bloodraven
+      prefix: playground
+      region: us-east-1
+      endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
+      credentialsSecretName: dragonfly-s3-credentials

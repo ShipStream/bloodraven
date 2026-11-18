@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -60,7 +60,7 @@ func newMdbHarnessWithInterceptor(t *testing.T, funcs interceptor.Funcs, objs ..
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("add client-go scheme: %v", err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add bloodraven scheme: %v", err)
 	}
 
@@ -71,7 +71,7 @@ func newMdbHarnessWithInterceptor(t *testing.T, funcs interceptor.Funcs, objs ..
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlDatabase{}, &v1beta1.MysqlFailoverGroup{}).
 		WithObjects(objs...).
 		WithInterceptorFuncs(funcs).
 		Build()
@@ -102,16 +102,16 @@ func (h *mdbHarness) reconcile() ctrl.Result {
 	return res
 }
 
-func (h *mdbHarness) get() *v1alpha1.MysqlDatabase {
+func (h *mdbHarness) get() *v1beta1.MysqlDatabase {
 	h.t.Helper()
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}, &out); err != nil {
 		h.t.Fatalf("get mysqldatabase: %v", err)
 	}
 	return &out
 }
 
-func (h *mdbHarness) update(mutate func(*v1alpha1.MysqlDatabase)) {
+func (h *mdbHarness) update(mutate func(*v1beta1.MysqlDatabase)) {
 	h.t.Helper()
 	mdb := h.get()
 	mutate(mdb)
@@ -146,23 +146,23 @@ func (h *mdbHarness) setOwnerPassword(password string) {
 	}
 }
 
-func (h *mdbHarness) requireReady() *v1alpha1.MysqlDatabase {
+func (h *mdbHarness) requireReady() *v1beta1.MysqlDatabase {
 	h.t.Helper()
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseReady {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseReady {
 		h.t.Fatalf("phase = %q (message %q), want Ready", mdb.Status.Phase, mdb.Status.Message)
 	}
 	return mdb
 }
 
-func mdbGroup(activeSite string) *v1alpha1.MysqlFailoverGroup {
-	fg := &v1alpha1.MysqlFailoverGroup{
+func mdbGroup(activeSite string) *v1beta1.MysqlFailoverGroup {
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: mdbGroupName, Namespace: mdbNamespace},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
-			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "dc2", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
+			Sites: []v1beta1.SiteSpec{
+				{Name: "dc1", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate},
+				{Name: "dc2", ServerID: 102, Role: v1beta1.SiteRolePrimaryCandidate},
 			},
 		},
 	}
@@ -191,20 +191,20 @@ func mdbOwnerSecret() *corev1.Secret {
 	}
 }
 
-func mdbCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
-	mdb := &v1alpha1.MysqlDatabase{
+func mdbCR(mutate ...func(*v1beta1.MysqlDatabase)) *v1beta1.MysqlDatabase {
+	mdb := &v1beta1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       mdbName,
 			Namespace:  mdbNamespace,
 			Generation: 1,
-			Finalizers: []string{v1alpha1.MysqlDatabaseFinalizer},
+			Finalizers: []string{v1beta1.MysqlDatabaseFinalizer},
 		},
-		Spec: v1alpha1.MysqlDatabaseSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: mdbGroupName},
+		Spec: v1beta1.MysqlDatabaseSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: mdbGroupName},
 			DatabaseName:     mdbDatabase,
 			CharacterSet:     "utf8mb4",
 			Collation:        "utf8mb4_unicode_ci",
-			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: mdbOwnerSecretName},
+			Owner:            v1beta1.MysqlDatabaseOwner{SecretName: mdbOwnerSecretName},
 		},
 	}
 	for _, m := range mutate {
@@ -217,7 +217,7 @@ func mdbCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
 // spec.collation the statements carry no COLLATE clause and the schema gets
 // the character set's default collation, not the legacy utf8mb4_unicode_ci.
 func TestMysqlDatabaseUnsetCollation(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.Collation = "" })
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) { m.Spec.Collation = "" })
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 	before := h.server.statementCount()
 
@@ -238,10 +238,10 @@ func TestMysqlDatabaseUnsetCollation(t *testing.T) {
 // provisioner exercises: one database, one owner, one grant onto an existing
 // shared principal.
 func TestMysqlDatabaseCreateAndGrant(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{
-				v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete,
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{
+				v1beta1.PrivilegeSelect, v1beta1.PrivilegeDelete,
 			}},
 		}
 	})
@@ -358,10 +358,10 @@ func TestMysqlDatabaseAddGrantLater(t *testing.T) {
 		t.Fatal("maester was granted before it was requested")
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{
-				v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete,
+	h.update(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{
+				v1beta1.PrivilegeSelect, v1beta1.PrivilegeDelete,
 			}},
 		}
 	})
@@ -378,9 +378,9 @@ func TestMysqlDatabaseAddGrantLater(t *testing.T) {
 // case that defines the CRD's blast radius: spec.grants[] must never be able
 // to bring a MySQL principal into existence.
 func TestMysqlDatabaseGrantUserMissingFailsAndCreatesNothing(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "ghost", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 		}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
@@ -388,7 +388,7 @@ func TestMysqlDatabaseGrantUserMissingFailsAndCreatesNothing(t *testing.T) {
 	h.reconcile()
 
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 		t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
 	}
 	var ready *metav1.Condition
@@ -451,10 +451,10 @@ func TestMysqlDatabaseDeleteRetainLeavesMySQLIntact(t *testing.T) {
 // TestMysqlDatabaseDeletePolicyDropsDatabaseButNotSharedUsers covers the
 // opt-in destructive path, including the rule that shared principals survive.
 func TestMysqlDatabaseDeletePolicyDropsDatabaseButNotSharedUsers(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 		}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
@@ -507,7 +507,7 @@ func TestMysqlDatabaseReappliesAfterFailover(t *testing.T) {
 	before := h.server.statementCount()
 
 	// Promote dc2.
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	key := types.NamespacedName{Namespace: mdbNamespace, Name: mdbGroupName}
 	if err := h.client.Get(context.Background(), key, &fg); err != nil {
 		t.Fatalf("get failover group: %v", err)
@@ -535,8 +535,8 @@ func TestMysqlDatabaseReappliesAfterFailover(t *testing.T) {
 // is Pending, not an error, and that it does not dial the fenced primary.
 func TestMysqlDatabasePendingDuringPlannedFailover(t *testing.T) {
 	fg := mdbGroup("dc1")
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhaseDraining,
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		Phase: v1beta1.PlannedFailoverPhaseDraining,
 	}
 	h := newMdbHarness(t, mdbCR(), fg, mdbOperatorSecret(), mdbOwnerSecret())
 
@@ -546,7 +546,7 @@ func TestMysqlDatabasePendingDuringPlannedFailover(t *testing.T) {
 	}
 
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q, want Pending during a planned failover", mdb.Status.Phase)
 	}
 	if n := h.server.statementCount(); n != 0 {
@@ -566,10 +566,10 @@ func TestMysqlDatabasePendingDuringPlannedFailover(t *testing.T) {
 //     fully-privileged owner account on delete. It is now stamped before any
 //     SQL runs.
 func TestMysqlDatabaseDeleteAfterPartialApplyCleansUp(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "ghost", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 		}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
@@ -578,7 +578,7 @@ func TestMysqlDatabaseDeleteAfterPartialApplyCleansUp(t *testing.T) {
 
 	// Partial apply: database and owner exist, CR is Failed on the ghost.
 	mdb := h.get()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 		t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
 	}
 	if !h.server.hasUser(mdbOwnerUser) {
@@ -593,7 +593,7 @@ func TestMysqlDatabaseDeleteAfterPartialApplyCleansUp(t *testing.T) {
 	h.reconcile()
 
 	// The finalizer released despite the ghost user never existing…
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}, &out)
 	if err == nil {
 		t.Fatalf("MysqlDatabase still present (finalizers %v); deletion wedged", out.Finalizers)
@@ -658,8 +658,8 @@ func TestMysqlDatabaseOwnerPrivilegeNarrowingRevokes(t *testing.T) {
 		t.Fatalf("owner grants = %v, want default ALL PRIVILEGES", privs)
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Owner.Privileges = []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}
+	h.update(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Owner.Privileges = []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}
 	})
 	h.reconcile()
 	h.requireReady()
@@ -675,10 +675,10 @@ func TestMysqlDatabaseOwnerPrivilegeNarrowingRevokes(t *testing.T) {
 // additive (like the real server), so this test cannot pass unless the
 // reconciler revokes before it grants.
 func TestMysqlDatabaseGrantNarrowingRevokes(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{
-				v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeInsert,
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{
+				v1beta1.PrivilegeSelect, v1beta1.PrivilegeInsert,
 			}},
 		}
 	})
@@ -694,8 +694,8 @@ func TestMysqlDatabaseGrantNarrowingRevokes(t *testing.T) {
 		t.Fatalf("maester grants = %v, want INSERT and SELECT", privs)
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants[0].Privileges = []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}
+	h.update(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants[0].Privileges = []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}
 	})
 	h.reconcile()
 	h.requireReady()
@@ -706,9 +706,9 @@ func TestMysqlDatabaseGrantNarrowingRevokes(t *testing.T) {
 }
 
 // requireFailed asserts a Failed phase with the given Ready reason.
-func requireFailed(t *testing.T, mdb *v1alpha1.MysqlDatabase, reason string) {
+func requireFailed(t *testing.T, mdb *v1beta1.MysqlDatabase, reason string) {
 	t.Helper()
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 		t.Fatalf("phase = %q (message %q), want Failed/%s", mdb.Status.Phase, mdb.Status.Message, reason)
 	}
 	for i := range mdb.Status.Conditions {
@@ -726,10 +726,10 @@ func requireFailed(t *testing.T, mdb *v1alpha1.MysqlDatabase, reason string) {
 // the way out, not just on the way in: removing an entry revokes it on the
 // next apply, via the diff against status.appliedGrants.
 func TestMysqlDatabaseRemovingGrantRevokesIt(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{
-				v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete,
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{
+				v1beta1.PrivilegeSelect, v1beta1.PrivilegeDelete,
 			}},
 		}
 	})
@@ -742,7 +742,7 @@ func TestMysqlDatabaseRemovingGrantRevokesIt(t *testing.T) {
 		t.Fatal("test premise broken: maester not granted after first apply")
 	}
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
+	h.update(func(m *v1beta1.MysqlDatabase) {
 		m.Spec.Grants = nil
 	})
 	h.reconcile()
@@ -763,10 +763,10 @@ func TestMysqlDatabaseRemovingGrantRevokesIt(t *testing.T) {
 // mysql.db row otherwise survives DROP DATABASE and reactivates if the
 // schema name is ever recreated.
 func TestMysqlDatabaseDeleteRevokesRemovedGrants(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 		}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
@@ -778,7 +778,7 @@ func TestMysqlDatabaseDeleteRevokesRemovedGrants(t *testing.T) {
 	// Remove the entry and delete WITHOUT re-applying: only the delete
 	// path's union of spec.grants and status.appliedGrants can still reach
 	// maester's grant.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Grants = nil })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Grants = nil })
 	before := h.server.statementCount()
 	h.delete()
 	h.reconcile()
@@ -819,7 +819,7 @@ func TestMysqlDatabaseRefusesPreExistingSchema(t *testing.T) {
 
 	// Deletion under Delete must release without touching the foreign
 	// schema.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if _, ok := h.server.database(mdbDatabase); !ok {
@@ -857,7 +857,7 @@ func TestMysqlDatabaseRefusesPreExistingOwnerUser(t *testing.T) {
 	}
 
 	// Deletion under Delete never drops the foreign account.
-	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete })
+	h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete })
 	h.delete()
 	h.reconcile()
 	if !h.server.hasUser(mdbOwnerUser) {
@@ -875,7 +875,7 @@ func TestMysqlDatabaseCharacterSetEditAppliesAlterDatabase(t *testing.T) {
 	h.reconcile()
 	h.requireReady()
 
-	h.update(func(m *v1alpha1.MysqlDatabase) {
+	h.update(func(m *v1beta1.MysqlDatabase) {
 		m.Spec.CharacterSet = "utf8mb3"
 		m.Spec.Collation = "utf8mb3_general_ci"
 	})
@@ -958,7 +958,7 @@ func TestMysqlDatabaseRotationSurvivesFailedReadyStamp(t *testing.T) {
 	h.server.removeUser(mdbOwnerUser)
 	h.server.addUser("acme_app_v2", "owner-pw-2")
 	mdb := h.get()
-	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseApplying
+	mdb.Status.Phase = v1beta1.MysqlDatabasePhaseApplying
 	mdb.Status.PendingOwnerUser = "acme_app_v2"
 	mdb.Status.LastAppliedHash = ""
 	if err := h.client.Status().Update(context.Background(), mdb); err != nil {
@@ -989,7 +989,7 @@ func TestMysqlDatabaseOwnerSecondRotationDropsUnresolvedTargetFirst(t *testing.T
 		staleTarget = "acme_app_v2"
 		next        = "acme_app_v3"
 	)
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
 		m.Status.DatabaseCreated = true
 		m.Status.OwnerUser = mdbOwnerUser
 		m.Status.PendingOwnerUser = staleTarget
@@ -1036,9 +1036,9 @@ func TestMysqlDatabaseOwnerSecondRotationDropsUnresolvedTargetFirst(t *testing.T
 // it ON everywhere. Rows in either spelling from earlier applies converge
 // on the unescaped one.
 func TestMysqlDatabaseGrantRowIsLiteral(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 		}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())

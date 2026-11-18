@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // SiteDeploymentProblems lists the sites of mfg whose MySQL Deployment
@@ -24,7 +24,7 @@ import (
 // of the update. A scenario that changed the spec and a cleanup that
 // reverted it must wait for this instead (#236: a reverted memory patch
 // rolled the primary under the next scenario).
-func (c *Client) SiteDeploymentProblems(ctx context.Context, namespace string, mfg *v1alpha1.MysqlFailoverGroup) []string {
+func (c *Client) SiteDeploymentProblems(ctx context.Context, namespace string, mfg *v1beta1.MysqlFailoverGroup) []string {
 	var problems []string
 	for i := range mfg.Spec.Sites {
 		site := &mfg.Spec.Sites[i]
@@ -46,7 +46,7 @@ func (c *Client) SiteDeploymentProblems(ctx context.Context, namespace string, m
 }
 
 // SiteDeploymentProblem is SiteDeploymentProblems for one site, or "".
-func SiteDeploymentProblem(site *v1alpha1.SiteSpec, dep *appsv1.Deployment) string {
+func SiteDeploymentProblem(site *v1beta1.SiteSpec, dep *appsv1.Deployment) string {
 	found := false
 	for _, ctr := range dep.Spec.Template.Spec.Containers {
 		if ctr.Name != "mysql" {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -107,13 +107,13 @@ func settleAfterReplicaPartition() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, fmt.Sprintf("replica %s reported unreachable", replica),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if a := mfg.Status.ActiveSite; a != "" && a != original {
 						return false, "", fmt.Errorf("active site moved to %s during the replica partition", a)
 					}
 					for _, st := range mfg.Status.Sites {
 						if st.Name == replica {
-							return st.State == v1alpha1.SiteStateUnreachable, fmt.Sprintf("replica state=%s", st.State), nil
+							return st.State == v1beta1.SiteStateUnreachable, fmt.Sprintf("replica state=%s", st.State), nil
 						}
 					}
 					return false, "replica not in status", nil
@@ -141,7 +141,7 @@ func verifyActivePrimaryUnchanged() runner.Step {
 			// The primary should still be writable; the replica's state
 			// may be "unreachable" — that's the expected, correct
 			// classification while the partition holds.
-			var primaryState, replicaState v1alpha1.SiteState
+			var primaryState, replicaState v1beta1.SiteState
 			for _, s := range mfg.Status.Sites {
 				switch s.Name {
 				case original:
@@ -150,10 +150,10 @@ func verifyActivePrimaryUnchanged() runner.Step {
 					replicaState = s.State
 				}
 			}
-			if primaryState != v1alpha1.SiteStateWritable {
+			if primaryState != v1beta1.SiteStateWritable {
 				return fmt.Errorf("expected primary %s state=writable, got %q", original, primaryState)
 			}
-			if replicaState != v1alpha1.SiteStateUnreachable {
+			if replicaState != v1beta1.SiteStateUnreachable {
 				return fmt.Errorf("replica partition did not take effect: site %s state=%q, want unreachable", replica, replicaState)
 			}
 			env.Capture.Note(fmt.Sprintf("primary %s state=%s, replica %s state=%s", original, primaryState, replica, replicaState))

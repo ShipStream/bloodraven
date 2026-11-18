@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -20,9 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const holdAnnotationPrefix = v1alpha1.VerificationHoldAnnotationPrefix
+const holdAnnotationPrefix = v1beta1.VerificationHoldAnnotationPrefix
 
-func hasHold(b *v1alpha1.MysqlBackup) bool {
+func hasHold(b *v1beta1.MysqlBackup) bool {
 	for key := range b.Annotations {
 		if strings.HasPrefix(key, holdAnnotationPrefix) {
 			return true
@@ -31,7 +31,7 @@ func hasHold(b *v1alpha1.MysqlBackup) bool {
 	return false
 }
 
-func createHeldTestBackup(t *testing.T, ns, fgName, name string, completed time.Time) *v1alpha1.MysqlBackup {
+func createHeldTestBackup(t *testing.T, ns, fgName, name string, completed time.Time) *v1beta1.MysqlBackup {
 	t.Helper()
 	b := newSucceededBackup(ns, fgName, "nightly-s3")
 	b.Name = name
@@ -40,9 +40,9 @@ func createHeldTestBackup(t *testing.T, ns, fgName, name string, completed time.
 		t.Fatal(err)
 	}
 	done := metav1.NewTime(completed)
-	b.Status = v1alpha1.MysqlBackupStatus{
-		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "lion/" + name, Bucket: "bloodraven"},
+	b.Status = v1beta1.MysqlBackupStatus{
+		Phase: v1beta1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
+		ArtifactStorage: &v1beta1.BackupArtifactStorage{Type: v1beta1.BackupStorageS3, Location: "lion/" + name, Bucket: "bloodraven"},
 	}
 	if err := k8sClient.Status().Update(ctx, b); err != nil {
 		t.Fatal(err)
@@ -99,9 +99,9 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-read", time.Now())
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
-		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
-		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backup.Name},
+	v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "reader", Namespace: ns}, Spec: v1beta1.MysqlBackupVerificationSpec{
+		FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &v1beta1.LocalMysqlBackupRef{Name: backup.Name},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 		if err := k8sClient.Get(ctx, vKey, v); err != nil {
 			t.Fatal(err)
 		}
-		return v.Status.Phase == v1alpha1.VerificationPhaseRestoring
+		return v.Status.Phase == v1beta1.VerificationPhaseRestoring
 	})
 	if err := k8sClient.Get(ctx, bKey, backup); err != nil || !hasHold(backup) {
 		t.Fatalf("launch did not stamp the hold: %v %v", err, backup.Annotations)
@@ -159,7 +159,7 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 	if err := k8sClient.Get(ctx, bKey, backup); err != nil {
 		t.Fatal(err)
 	}
-	if cond := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup); cond == nil || cond.Reason != "HeldByVerification" {
+	if cond := apiMeta.FindStatusCondition(backup.Status.Conditions, v1beta1.ConditionArtifactCleanup); cond == nil || cond.Reason != "HeldByVerification" {
 		t.Fatalf("ArtifactCleanup condition = %+v", cond)
 	}
 
@@ -180,7 +180,7 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 	}
 	reconcileVerification()
 	reconcileVerification()
-	if err := k8sClient.Get(ctx, vKey, v); err != nil || v.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if err := k8sClient.Get(ctx, vKey, v); err != nil || v.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Fatalf("verification phase %s (%v), want Failed", v.Status.Phase, err)
 	}
 	if err := k8sClient.Get(ctx, bKey, backup); err != nil || !hasHold(backup) {
@@ -213,14 +213,14 @@ func TestEnvtest_RetentionHoldsUnstampedRun(t *testing.T) {
 	ns := createNamespace(t, "verification-hold-upgrade")
 	ensureSecret(t, ns)
 	fg := newVerificationFG(ns)
-	fg.Spec.Backup.Profiles[0].Retention = v1alpha1.BackupRetention{KeepLast: 1}
+	fg.Spec.Backup.Profiles[0].Retention = v1beta1.BackupRetention{KeepLast: 1}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
 	older := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-older", time.Now().Add(-2*time.Hour))
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
-		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
-		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: older.Name},
+	v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: ns}, Spec: v1beta1.MysqlBackupVerificationSpec{
+		FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &v1beta1.LocalMysqlBackupRef{Name: older.Name},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestEnvtest_RetentionHoldsUnstampedRun(t *testing.T) {
 		if err := k8sClient.Get(ctx, vKey, v); err != nil {
 			t.Fatal(err)
 		}
-		return v.Status.Phase == v1alpha1.VerificationPhaseRestoring
+		return v.Status.Phase == v1beta1.VerificationPhaseRestoring
 	})
 	// Simulate the older operator: no hold on the backup.
 	if err := k8sClient.Get(ctx, oKey, older); err != nil {
@@ -281,9 +281,9 @@ func TestEnvtest_VerificationDeletionWaitsForForegroundJobDeletion(t *testing.T)
 		t.Fatal(err)
 	}
 	backup := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-fg", time.Now())
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "deleting", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
-		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
-		BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backup.Name},
+	v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "deleting", Namespace: ns}, Spec: v1beta1.MysqlBackupVerificationSpec{
+		FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &v1beta1.LocalMysqlBackupRef{Name: backup.Name},
 	}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
@@ -294,7 +294,7 @@ func TestEnvtest_VerificationDeletionWaitsForForegroundJobDeletion(t *testing.T)
 		if err := k8sClient.Get(ctx, vKey, v); err != nil {
 			t.Fatal(err)
 		}
-		return v.Status.Phase == v1alpha1.VerificationPhaseRestoring
+		return v.Status.Phase == v1beta1.VerificationPhaseRestoring
 	})
 	jobKey := client.ObjectKey{Namespace: ns, Name: v.Status.JobName}
 
@@ -365,7 +365,7 @@ func TestEnvtest_ArtifactStorageImmutable(t *testing.T) {
 		client.RawPatch(types.MergePatchType, []byte(`{"status":{"artifactStorage":null}}`)),
 		client.RawPatch(types.MergePatchType, []byte(`{"status":{"artifactStorage":{"location":"team-b/`+b.Name+`","bucket":"other"}}}`)),
 	} {
-		target := &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: b.Name, Namespace: ns}}
+		target := &v1beta1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: b.Name, Namespace: ns}}
 		err := k8sClient.Status().Patch(ctx, target, p)
 		if err == nil {
 			t.Fatalf("API server accepted status patch %T that drops or replaces the recorded destination", p)
@@ -373,7 +373,7 @@ func TestEnvtest_ArtifactStorageImmutable(t *testing.T) {
 		if !strings.Contains(err.Error(), "status.artifactStorage cannot be changed or removed") {
 			t.Fatalf("status patch rejected for another reason: %v", err)
 		}
-		var got v1alpha1.MysqlBackup
+		var got v1beta1.MysqlBackup
 		if err := k8sClient.Get(ctx, key, &got); err != nil {
 			t.Fatal(err)
 		}

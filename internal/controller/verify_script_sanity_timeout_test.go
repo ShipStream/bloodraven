@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestVerifyScriptSanityTimeoutOutcome runs verify_script.sh's sanity-check
@@ -35,12 +35,12 @@ func TestVerifyScriptSanityTimeoutOutcome(t *testing.T) {
 	tests := []struct {
 		name        string
 		fakeMySQL   string
-		wantOutcome v1alpha1.SanityCheckOutcome
+		wantOutcome v1beta1.SanityCheckOutcome
 		wantFail    string
 	}{
-		{name: "slow query", fakeMySQL: "exec sleep 30", wantOutcome: v1alpha1.SanityCheckOutcomeTimedOut, wantFail: "SanityCheckTimeout"},
-		{name: "query error", fakeMySQL: "echo 'ERROR 1146: no such table' >&2; exit 1", wantOutcome: v1alpha1.SanityCheckOutcomeFailed, wantFail: "SanityCheckFailed"},
-		{name: "passes", fakeMySQL: "echo 42", wantOutcome: v1alpha1.SanityCheckOutcomePassed},
+		{name: "slow query", fakeMySQL: "exec sleep 30", wantOutcome: v1beta1.SanityCheckOutcomeTimedOut, wantFail: "SanityCheckTimeout"},
+		{name: "query error", fakeMySQL: "echo 'ERROR 1146: no such table' >&2; exit 1", wantOutcome: v1beta1.SanityCheckOutcomeFailed, wantFail: "SanityCheckFailed"},
+		{name: "passes", fakeMySQL: "echo 42", wantOutcome: v1beta1.SanityCheckOutcomePassed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

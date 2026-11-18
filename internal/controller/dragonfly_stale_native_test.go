@@ -14,7 +14,7 @@ import (
 
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -63,7 +63,7 @@ func TestDragonflyNativeManagerDoesNotPromoteAStaleReplica(t *testing.T) {
 
 	fg := fgWithDragonflyEnabledAndActive() // sites dc1 (MySQL active) and dc2
 	fg.Spec.Dragonfly.Auth = nil
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	host := func(site string) string {
 		h, _ := splitHostPort(dragonflyAddr(fg, site), 6379)
 		return h
@@ -75,7 +75,7 @@ func TestDragonflyNativeManagerDoesNotPromoteAStaleReplica(t *testing.T) {
 		_ = exec.Command(docker, "rm", "-f", dc1, dc2, holder).Run()
 		_ = exec.Command(docker, "network", "rm", network).Run()
 	})
-	flags := append(buildDragonflyArgs(&v1alpha1.DragonflySpec{}, 6379, 9999), "--proactor_threads=2")
+	flags := append(buildDragonflyArgs(&v1beta1.DragonflySpec{}, 6379, 9999), "--proactor_threads=2")
 	run("run", "-d", "--name", holder, "--network", network, "--network-alias", host("dc1"), "-p", "127.0.0.1::6379",
 		"--entrypoint", "sleep", image, "infinity")
 	startDC1 := func() {
@@ -257,10 +257,10 @@ func TestDragonflyNativeManagerDoesNotPromoteAStaleReplica(t *testing.T) {
 	}
 	stale := 0
 	for _, ev := range drainEventsCh(rec.Events, 256, 100*time.Millisecond) {
-		if strings.Contains(ev, v1alpha1.EventDragonflySessionsLost) {
+		if strings.Contains(ev, v1beta1.EventDragonflySessionsLost) {
 			t.Fatalf("a promotion was made: %s", ev)
 		}
-		if strings.Contains(ev, v1alpha1.EventDragonflyStaleReplicaNotPromoted) {
+		if strings.Contains(ev, v1beta1.EventDragonflyStaleReplicaNotPromoted) {
 			stale++
 		}
 	}

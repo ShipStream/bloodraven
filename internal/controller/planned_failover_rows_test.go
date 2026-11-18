@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -49,8 +49,8 @@ func TestPF_I27_WaitingRequestNotDragonflyOwner(t *testing.T) {
 	slot := &PlannedClaimSlot{}
 	mgr.SetPlannedOwner(slot.Held)
 	fg := fgWithDragonflyEnabledAndActive()
-	for _, phase := range []v1alpha1.PlannedFailoverPhase{v1alpha1.PlannedFailoverPhaseAdmitting, v1alpha1.PlannedFailoverPhaseDeferred} {
-		fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, TargetSite: "dc2"}
+	for _, phase := range []v1beta1.PlannedFailoverPhase{v1beta1.PlannedFailoverPhaseAdmitting, v1beta1.PlannedFailoverPhaseDeferred} {
+		fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, TargetSite: "dc2"}
 		if plannedFailoverOwnsDragonfly(fg, slot.Held()) {
 			t.Errorf("a %s request owns the group's Dragonfly", phase)
 		}
@@ -58,7 +58,7 @@ func TestPF_I27_WaitingRequestNotDragonflyOwner(t *testing.T) {
 			t.Errorf("a %s request paused the Dragonfly manager", phase)
 		}
 	}
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseFencing
+	fg.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhaseFencing
 	slot.hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "dc1", target: "dc2"})
 	if !plannedFailoverOwnsDragonfly(fg, slot.Held()) || !mgr.paused() {
 		t.Error("a run that holds the claim does not own the group's Dragonfly")
@@ -73,18 +73,18 @@ func TestPF_I28_DragonflyUpgradeSupersededByMySQLAuthority(t *testing.T) {
 	start := time.Now().Add(-time.Minute).Truncate(time.Second)
 	r := &MysqlFailoverGroupReconciler{}
 
-	during := upgradeDuringEmergency(v1alpha1.DragonflyUpgradePhaseSavingSnapshot, start, start.Add(10*time.Second))
+	during := upgradeDuringEmergency(v1beta1.DragonflyUpgradePhaseSavingSnapshot, start, start.Add(10*time.Second))
 	if why, active := r.dragonflyUpgradeSupersededByMySQL(during, during.Status.Dragonfly.Upgrade); why == "" || active != "dc2" {
 		t.Fatalf("a failover during the upgrade did not supersede it (why %q, active %q)", why, active)
 	}
-	before := upgradeDuringEmergency(v1alpha1.DragonflyUpgradePhaseSavingSnapshot, start, start.Add(-10*time.Second))
+	before := upgradeDuringEmergency(v1beta1.DragonflyUpgradePhaseSavingSnapshot, start, start.Add(-10*time.Second))
 	if why, _ := r.dragonflyUpgradeSupersededByMySQL(before, before.Status.Dragonfly.Upgrade); why != "" {
 		t.Fatalf("a failover from before the upgrade superseded it: %q", why)
 	}
 
 	// With a registered manager its live active site decides, even when the
 	// durable record has not caught up: the manager sees dc2 writable.
-	idle := upgradeDuringEmergency(v1alpha1.DragonflyUpgradePhaseSavingSnapshot, start, time.Time{})
+	idle := upgradeDuringEmergency(v1beta1.DragonflyUpgradePhaseSavingSnapshot, start, time.Time{})
 	nn := types.NamespacedName{Namespace: idle.Namespace, Name: idle.Name}
 	f := newOpsFixture(t, "")
 	f.tm.mu.Lock()
@@ -109,12 +109,12 @@ func TestPF_I28_DragonflyUpgradeSupersededByMySQLAuthority(t *testing.T) {
 // `fail` policy rolls back with nothing written to the MySQL target.
 func TestPF_I06_DragonflyFailRollsBack(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Fail")
-	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1alpha1.DragonflyOffsetUnavailable
+	fg.Status.PlannedFailover.Dragonfly.SourceOffsetState = v1beta1.DragonflyOffsetUnavailable
 	r, _, _ := pfDFReconciler(t, fg)
 	pfDFPass(t, r, fgNN(fg))
 	pf := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Rollback == nil ||
-		pf.Rollback.Reason != v1alpha1.PlannedFailoverReasonDragonflySyncTimeout {
+	if pf.Phase != v1beta1.PlannedFailoverPhaseRollingBack || pf.Rollback == nil ||
+		pf.Rollback.Reason != v1beta1.PlannedFailoverReasonDragonflySyncTimeout {
 		t.Fatalf("block %s rollback %+v, want RollingBack{DragonflySyncTimeout}", pf.Phase, pf.Rollback)
 	}
 	if pf.Promotion != nil {
@@ -128,12 +128,12 @@ func TestPF_I06_DragonflyFailRollsBack(t *testing.T) {
 // rather than the reconcile worker.
 func TestPF_PassWallTimeBounded(t *testing.T) {
 	for _, tc := range []struct {
-		phase v1alpha1.PlannedFailoverPhase
+		phase v1beta1.PlannedFailoverPhase
 		op    string
 		bound time.Duration
 	}{
-		{v1alpha1.PlannedFailoverPhaseWaitingForLag, "probe", plannedPassOrdinary},
-		{v1alpha1.PlannedFailoverPhasePromoting, "promote", plannedPassPromoting},
+		{v1beta1.PlannedFailoverPhaseWaitingForLag, "probe", plannedPassOrdinary},
+		{v1beta1.PlannedFailoverPhasePromoting, "promote", plannedPassPromoting},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			h := pfHarnessAt(t, tc.phase)

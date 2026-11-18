@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -203,7 +203,7 @@ func s40ReplaceReaderDataAndObserve(state *s40RunState) runner.Step {
 
 			waitCtx, cancelWait := context.WithTimeout(ctx, 6*time.Minute)
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "reader returns with direct healthy replication",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.ActiveSite != state.active {
 						return false, fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite), fmt.Errorf("active site changed during reader loss: %q -> %q", state.active, mfg.Status.ActiveSite)
 					}
@@ -435,7 +435,7 @@ func s40AssertServiceTopology(ctx context.Context, env *runner.Env, reader, expe
 	if internalPorts["mysql"] != 3306 || internalPorts["sidecar"] != 8080 || len(internalPorts) != 2 {
 		return fmt.Errorf("internal Service ports=%v, want mysql:3306 and sidecar:8080", internalPorts)
 	}
-	if _, gated := internalService.Spec.Selector[v1alpha1.HealthyLabel]; gated {
+	if _, gated := internalService.Spec.Selector[v1beta1.HealthyLabel]; gated {
 		return fmt.Errorf("internal Service must not select bloodraven.shipstream.io/healthy")
 	}
 	return nil

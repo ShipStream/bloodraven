@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -184,7 +184,7 @@ func TestPacedDeploymentRolledOut(t *testing.T) {
 // A spare node is one the playground group never taints: outside its
 // zones and its taintNodeSelector labels, schedulable and untainted.
 func TestPacedPickSpareNode(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
+	fg := &v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{
 		{Name: "iad", Zone: "zone-iad", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.playground": "true", "bloodraven.shipstream.io/site.playground": "iad"}},
 		{Name: "pdx", Zone: "zone-pdx", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.playground": "true", "bloodraven.shipstream.io/site.playground": "pdx"}},
 	}}}
@@ -256,8 +256,8 @@ func pacedTestTime(sec int) time.Time {
 	return time.Date(2026, 11, 12, 10, 0, sec, 0, time.UTC)
 }
 
-func pacedTestRecord(phase v1alpha1.RolloutPhase, admitted, completed int) *v1alpha1.RolloutStatus {
-	r := &v1alpha1.RolloutStatus{Phase: phase, Renderer: "new"}
+func pacedTestRecord(phase v1beta1.RolloutPhase, admitted, completed int) *v1beta1.RolloutStatus {
+	r := &v1beta1.RolloutStatus{Phase: phase, Renderer: "new"}
 	if admitted >= 0 {
 		t := metav1.NewTime(pacedTestTime(admitted))
 		r.AdmittedTime, r.StartedTime = &t, &t
@@ -270,7 +270,7 @@ func pacedTestRecord(phase v1alpha1.RolloutPhase, admitted, completed int) *v1al
 }
 
 // pacedTestGroup is a two-site group on pods "<gen>-one"/"<gen>-two".
-func pacedTestGroup(name, gen string, rollout *v1alpha1.RolloutStatus) pacedGroupSample {
+func pacedTestGroup(name, gen string, rollout *v1beta1.RolloutStatus) pacedGroupSample {
 	by, hash, image := "", "hash-old", "sidecar:old"
 	if gen != "old" {
 		by, hash, image = "new", "hash-new", "sidecar:new"
@@ -299,15 +299,15 @@ func pacedTestSample(sec int, groups ...pacedGroupSample) pacedSample {
 // A paced rollout of two groups, as the samples of a correct operator show
 // it: a rolls and completes, then b is admitted, rolls and completes.
 func pacedTestGoodRun() (base pacedSample, samples []pacedSample, final pacedSample) {
-	pending := &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhasePending, Reason: "WaitingForSlot"}
+	pending := &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhasePending, Reason: "WaitingForSlot"}
 	base = pacedTestSample(0, pacedTestGroup("a", "old", nil), pacedTestGroup("b", "old", nil))
 	samples = []pacedSample{
 		base,
-		pacedTestSample(5, pacedTestGroup("a", "old", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "old", pending)),
-		pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "old", pending)),
-		pacedTestSample(40, pacedTestGroup("a", "new", pacedTestRecord(v1alpha1.RolloutPhaseComplete, 4, 38)), pacedTestGroup("b", "old", pending)),
-		pacedTestSample(55, pacedTestGroup("a", "new", pacedTestRecord(v1alpha1.RolloutPhaseComplete, 4, 38)), pacedTestGroup("b", "old", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 50, -1))),
-		pacedTestSample(90, pacedTestGroup("a", "new", pacedTestRecord(v1alpha1.RolloutPhaseComplete, 4, 38)), pacedTestGroup("b", "new", pacedTestRecord(v1alpha1.RolloutPhaseComplete, 50, 88))),
+		pacedTestSample(5, pacedTestGroup("a", "old", pacedTestRecord(v1beta1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "old", pending)),
+		pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1beta1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "old", pending)),
+		pacedTestSample(40, pacedTestGroup("a", "new", pacedTestRecord(v1beta1.RolloutPhaseComplete, 4, 38)), pacedTestGroup("b", "old", pending)),
+		pacedTestSample(55, pacedTestGroup("a", "new", pacedTestRecord(v1beta1.RolloutPhaseComplete, 4, 38)), pacedTestGroup("b", "old", pacedTestRecord(v1beta1.RolloutPhaseRolling, 50, -1))),
+		pacedTestSample(90, pacedTestGroup("a", "new", pacedTestRecord(v1beta1.RolloutPhaseComplete, 4, 38)), pacedTestGroup("b", "new", pacedTestRecord(v1beta1.RolloutPhaseComplete, 50, 88))),
 	}
 	return base, samples, samples[len(samples)-1]
 }
@@ -346,15 +346,15 @@ func TestPacedInvariantsRejectAnUnpacedRollout(t *testing.T) {
 
 	// Two groups admitted in one sample.
 	both := append([]pacedSample{}, good...)
-	both[2] = pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "old", pacedTestRecord(v1alpha1.RolloutPhaseAdmitted, 20, -1)))
+	both[2] = pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1beta1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "old", pacedTestRecord(v1beta1.RolloutPhaseAdmitted, 20, -1)))
 	if err := pacedCheckOneAtATime(both); err == nil || !strings.Contains(err.Error(), "more than one group") {
 		t.Errorf("two admissions in one sample: %v", err)
 	}
 
 	// A group that is not admitted loses a pod.
 	rolledWhilePending := append([]pacedSample{}, good...)
-	rolledWhilePending[2] = pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 4, -1)),
-		pacedTestGroup("b", "new", &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhasePending}))
+	rolledWhilePending[2] = pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1beta1.RolloutPhaseRolling, 4, -1)),
+		pacedTestGroup("b", "new", &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhasePending}))
 	if err := pacedCheckHeldGroupsKeepPods(base, rolledWhilePending, groups); err == nil || !strings.Contains(err.Error(), "group b was not admitted") {
 		t.Errorf("a pending group rolled: %v", err)
 	}
@@ -370,9 +370,9 @@ func TestPacedInvariantsRejectAnUnpacedRollout(t *testing.T) {
 
 	// A held group whose container restarted.
 	restarted := append([]pacedSample{}, good...)
-	g := pacedTestGroup("b", "old", &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhasePending})
+	g := pacedTestGroup("b", "old", &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhasePending})
 	g.Pods["two"] = []pacedPod{{UID: "b-old-two", Restarts: 1, Ready: true}}
-	restarted[1] = pacedTestSample(5, pacedTestGroup("a", "old", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 4, -1)), g)
+	restarted[1] = pacedTestSample(5, pacedTestGroup("a", "old", pacedTestRecord(v1beta1.RolloutPhaseRolling, 4, -1)), g)
 	if err := pacedCheckHeldGroupsKeepPods(base, restarted, groups); err == nil || !strings.Contains(err.Error(), "restarted containers") {
 		t.Errorf("a held group's container restarted: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestPacedInvariantsRejectAnUnpacedRollout(t *testing.T) {
 	early := final
 	early.Groups = map[string]pacedGroupSample{
 		"a": final.Groups["a"],
-		"b": pacedTestGroup("b", "new", pacedTestRecord(v1alpha1.RolloutPhaseComplete, 20, 88)),
+		"b": pacedTestGroup("b", "new", pacedTestRecord(v1beta1.RolloutPhaseComplete, 20, 88)),
 	}
 	if err := pacedCheckSequential(base, good, early, []string{"a", "b"}); err == nil || !strings.Contains(err.Error(), "before a completed") {
 		t.Errorf("b admitted before a completed: %v", err)
@@ -389,7 +389,7 @@ func TestPacedInvariantsRejectAnUnpacedRollout(t *testing.T) {
 
 	// b's pods changed in a sample where a shows no completedTime.
 	overlap := append([]pacedSample{}, good...)
-	overlap[2] = pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "new", pacedTestRecord(v1alpha1.RolloutPhaseRolling, 20, -1)))
+	overlap[2] = pacedTestSample(30, pacedTestGroup("a", "new", pacedTestRecord(v1beta1.RolloutPhaseRolling, 4, -1)), pacedTestGroup("b", "new", pacedTestRecord(v1beta1.RolloutPhaseRolling, 20, -1)))
 	if err := pacedCheckSequential(base, overlap, final, []string{"a", "b"}); err == nil || !strings.Contains(err.Error(), "had not completed its roll") {
 		t.Errorf("b rolled while a was rolling: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestPacedInvariantsRejectAnUnpacedRollout(t *testing.T) {
 
 	// A group that never completed.
 	unfinished := final
-	unfinished.Groups = map[string]pacedGroupSample{"a": final.Groups["a"], "b": pacedTestGroup("b", "old", pacedTestRecord(v1alpha1.RolloutPhaseStalled, 50, -1))}
+	unfinished.Groups = map[string]pacedGroupSample{"a": final.Groups["a"], "b": pacedTestGroup("b", "old", pacedTestRecord(v1beta1.RolloutPhaseStalled, 50, -1))}
 	if err := pacedCheckSequential(base, good, unfinished, []string{"a", "b"}); err == nil || !strings.Contains(err.Error(), "did not complete") {
 		t.Errorf("an unfinished group: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestPacedCheckRolledRejectsAPartialRoll(t *testing.T) {
 // each way it can be wrong.
 func TestS73HaltProblems(t *testing.T) {
 	const bad = "sidecar:bad"
-	started := pacedTestRecord(v1alpha1.RolloutPhaseStalled, 4, -1)
+	started := pacedTestRecord(v1beta1.RolloutPhaseStalled, 4, -1)
 	stalledAt := metav1.NewTime(pacedTestTime(50))
 	started.StalledTime = &stalledAt
 	run := &s73Run{
@@ -450,7 +450,7 @@ func TestS73HaltProblems(t *testing.T) {
 		// The follower (site two) was rolled to the bad release.
 		a.Pods["two"] = []pacedPod{{UID: "a-bad-two", Ready: false}}
 		a.Workloads["two"] = pacedWorkload{RenderedBy: "bad-renderer", SpecHash: "hash-bad", SidecarImage: bad}
-		b := pacedTestGroup("b", "old", &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhasePending, Reason: "RolloutHalted"})
+		b := pacedTestGroup("b", "old", &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhasePending, Reason: "RolloutHalted"})
 		return pacedTestSample(60, a, b, pacedTestGroup("playground", "old", nil))
 	}
 	if problems := s73HaltProblemsIn(run, "playground", halted()); len(problems) != 0 {
@@ -478,7 +478,7 @@ func TestS73HaltProblems(t *testing.T) {
 		}, "a was handed over"},
 		"the first group is not stalled": {func(s *pacedSample) {
 			g := s.Groups["a"]
-			g.Rollout = pacedTestRecord(v1alpha1.RolloutPhaseRolling, 4, -1)
+			g.Rollout = pacedTestRecord(v1beta1.RolloutPhaseRolling, 4, -1)
 			s.Groups["a"] = g
 		}, "a is not Stalled"},
 		"the latch moved": {func(s *pacedSample) {
@@ -489,7 +489,7 @@ func TestS73HaltProblems(t *testing.T) {
 		}, "startedTime moved"},
 		"the second group was admitted": {func(s *pacedSample) {
 			g := s.Groups["b"]
-			g.Rollout = pacedTestRecord(v1alpha1.RolloutPhaseAdmitted, 55, -1)
+			g.Rollout = pacedTestRecord(v1beta1.RolloutPhaseAdmitted, 55, -1)
 			s.Groups["b"] = g
 		}, "b is not Pending/RolloutHalted"},
 		"the second group lost a pod": {func(s *pacedSample) {

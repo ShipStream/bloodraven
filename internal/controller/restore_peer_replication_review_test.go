@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -104,9 +104,9 @@ func (unreachableAPIReader) Get(context.Context, client.ObjectKey, client.Object
 // uncached read, not from a cached list item that predates the queue.
 func TestInitRestoreProtection_ReadsUncached(t *testing.T) {
 	fresh := fgThreeSiteRestore()
-	fresh.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "iad"}
-	fresh.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"pdx", "sea"}}
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fresh).Build()
+	fresh.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceFailed, TargetSite: "iad"}
+	fresh.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1beta1.RestoreReclonesHeld, Pending: []string{"pdx", "sea"}}
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fresh).Build()
 	cached := fresh.DeepCopy()
 	cached.Status.RestoreReclones = nil
 
@@ -141,21 +141,21 @@ func TestInitRestoreProtection_ReadsUncached(t *testing.T) {
 // replication the legitimate reclone started.
 func TestApplyRestoreProtection_StaleViewDoesNotReArmReStop(t *testing.T) {
 	stale := fgThreeSiteRestore()
-	stale.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: "iad"}
-	stale.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"dc2"}}
+	stale.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceRestoring, TargetSite: "iad"}
+	stale.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1beta1.RestoreReclonesArmed, Pending: []string{"dc2"}}
 
 	for _, tc := range []struct {
 		name  string
-		queue *v1alpha1.RestoreReclonesStatus
+		queue *v1beta1.RestoreReclonesStatus
 	}{
-		{"draining", &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesDraining, Pending: []string{"dc2"}}},
+		{"draining", &v1beta1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1beta1.RestoreReclonesDraining, Pending: []string{"dc2"}}},
 		{"recloned", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			current := stale.DeepCopy()
-			current.Status.RestoreInPlace.Phase = v1alpha1.RestoreInPlaceSucceeded
+			current.Status.RestoreInPlace.Phase = v1beta1.RestoreInPlaceSucceeded
 			current.Status.RestoreReclones = tc.queue
-			c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(current).Build()
+			c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(current).Build()
 			runner := &TopologyManagerRunner{client: c, apiReader: c, logger: testLogger()}
 			tm, _, peer := heldTopologyManager(t)
 			if err := runner.applyRestoreProtection(context.Background(), tm, current, true); err != nil {
@@ -181,8 +181,8 @@ func TestApplyRestoreProtection_StaleViewDoesNotReArmReStop(t *testing.T) {
 // A stale cached view cannot clear the clone block either.
 func TestApplyRestoreProtection_StaleViewDoesNotUnblockClones(t *testing.T) {
 	fg := fgThreeSiteRestore()
-	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"pdx"}}
-	c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+	fg.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{Phase: v1beta1.RestoreReclonesHeld, Pending: []string{"pdx"}}
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 	runner := &TopologyManagerRunner{client: c, apiReader: c, logger: testLogger()}
 	tm, _, _ := heldTopologyManager(t)
 	_ = runner.applyRestoreProtection(context.Background(), tm, fg, false)
@@ -204,22 +204,22 @@ func TestUnsettledEarlierQueueIsHeldWhenNextRunEndsWithoutJob(t *testing.T) {
 	fg.Spec.RestoreInPlace.Confirm = confirmB
 	site, peerName := fg.Spec.Sites[0].Name, fg.Spec.Sites[1].Name
 	no := false
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, ConfirmTokenUsed: confirmA, RunConfirm: confirmB, RunID: "run-b",
+	fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{
+		Phase: v1beta1.RestoreInPlacePreflight, Scope: &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull}, ConfirmTokenUsed: confirmA, RunConfirm: confirmB, RunID: "run-b",
 		StartTime: ptrTime(time.Now()),
 	}
-	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{peerName}}
-	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: confirmA, RunID: "run-a", PriorOfflineMode: &no, SessionsEvicted: true}
+	fg.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1beta1.RestoreReclonesArmed, Pending: []string{peerName}}
+	fg.Status.RestoreOfflineFence = &v1beta1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: confirmA, RunID: "run-a", PriorOfflineMode: &no, SessionsEvicted: true}
 	r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret(), primaryFencedPod(fg.Name, site))
 	_, mocks := withFenceRunner(r, c, fg)
 	r.Recorder = record.NewFakeRecorder(100)
 	mocks[site].gtidExecuted = peerGTID("1-10")
 	mocks[peerName].replicaStatusErr = errors.New("connection refused") // B cannot stop the peer
 
-	for i := 0; i < 8 && fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing; i++ {
+	for i := 0; i < 8 && fg.Status.RestoreInPlace.Phase != v1beta1.RestoreInPlaceFencing; i++ {
 		restorePass(t, r, c, fg)
 	}
-	if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing {
+	if fg.Status.RestoreInPlace.Phase != v1beta1.RestoreInPlaceFencing {
 		t.Fatalf("run B did not reach Fencing: %+v", fg.Status.RestoreInPlace)
 	}
 	if q := fg.Status.RestoreReclones; q == nil || q.ConfirmToken != confirmB || q.Superseded == nil || !q.Superseded.Held ||
@@ -229,14 +229,14 @@ func TestUnsettledEarlierQueueIsHeldWhenNextRunEndsWithoutJob(t *testing.T) {
 	restorePass(t, r, c, fg)
 	backdatePeerStop(r, fg, restorePeerStopTimeout+time.Second)
 	restorePass(t, r, c, fg)
-	if st := fg.Status.RestoreInPlace; st.Phase != v1alpha1.RestoreInPlaceFailed || st.JobName != "" || st.JobCreating {
+	if st := fg.Status.RestoreInPlace; st.Phase != v1beta1.RestoreInPlaceFailed || st.JobName != "" || st.JobCreating {
 		t.Fatalf("run B status = %+v, want Failed without a Job", st)
 	}
 	if _, err := r.reconcileRestoreOfflineFence(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
 	q := getFG(t, c, fg).Status.RestoreReclones
-	if q == nil || q.Phase != v1alpha1.RestoreReclonesHeld || !slices.Equal(q.Pending, []string{peerName}) {
+	if q == nil || q.Phase != v1beta1.RestoreReclonesHeld || !slices.Equal(q.Pending, []string{peerName}) {
 		t.Fatalf("queue = %+v, want A's peers Held", q)
 	}
 }
@@ -245,8 +245,8 @@ func TestUnsettledEarlierQueueIsHeldWhenNextRunEndsWithoutJob(t *testing.T) {
 // arms its own.
 func TestArmRestoreReclones_CarriesUnsettledArmedQueueAsHeld(t *testing.T) {
 	fg := fgThreeSiteRestore()
-	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx"},
-		Superseded: &v1alpha1.RestoreReclonesCarryover{ConfirmToken: "2026-04-16T00:00:00Z", Pending: []string{"sea"}}}
+	fg.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1beta1.RestoreReclonesArmed, Pending: []string{"pdx"},
+		Superseded: &v1beta1.RestoreReclonesCarryover{ConfirmToken: "2026-04-16T00:00:00Z", Pending: []string{"sea"}}}
 	r, c := newReconciler(fg, operatorCredsSecret())
 	if err := r.armRestoreReclones(context.Background(), fg, "iad", "2026-04-18T10:00:00Z"); err != nil {
 		t.Fatal(err)
@@ -257,12 +257,12 @@ func TestArmRestoreReclones_CarriesUnsettledArmedQueueAsHeld(t *testing.T) {
 	}
 }
 
-func jobLostFG(completed time.Time) *v1alpha1.MysqlFailoverGroup {
+func jobLostFG(completed time.Time) *v1beta1.MysqlFailoverGroup {
 	fg := failedRestoreFG(true, peerGTID("1-10"))
 	fg.Status.RestoreInPlace.Message = "restore Job mysql-lion-iad-inplace-restore no longer exists; the restore outcome is unknown"
 	fg.Status.RestoreInPlace.CompletionTime = &metav1.Time{Time: completed}
 	no := false
-	fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: &no, SessionsEvicted: true}
+	fg.Status.RestoreOfflineFence = &v1beta1.RestoreOfflineFenceStatus{Site: "iad", ConfirmToken: testRestoreConfirm, PriorOfflineMode: &no, SessionsEvicted: true}
 	return fg
 }
 
@@ -290,7 +290,7 @@ func TestSettle_JobLostWaitsForRestorePodsBeforeDiscarding(t *testing.T) {
 		t.Fatalf("wait=%s err=%v, want a requeue while the restore pod runs", wait, err)
 	}
 	fresh := getFG(t, c, fg)
-	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed || fresh.Status.RestoreOfflineFence == nil || !primary.offlineMode {
+	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed || fresh.Status.RestoreOfflineFence == nil || !primary.offlineMode {
 		t.Fatalf("queue %+v fence %+v offline=%v, want Armed with the fence kept", q, fresh.Status.RestoreOfflineFence, primary.offlineMode)
 	}
 
@@ -318,7 +318,7 @@ func TestSettle_JobLostWithPodsAliveBeyondBoundHolds(t *testing.T) {
 	if _, err := r.settleArmedRestoreReclones(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld {
+	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesHeld {
 		t.Fatalf("queue = %+v, want Held", q)
 	}
 }
@@ -334,7 +334,7 @@ func TestSettle_GTIDReadFailureRetriesBeforeHolding(t *testing.T) {
 	if err != nil || wait == 0 {
 		t.Fatalf("wait=%s err=%v, want a retry", wait, err)
 	}
-	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed {
+	if q := getFG(t, c, fg).Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed {
 		t.Fatalf("queue = %+v, want still Armed while retrying", q)
 	}
 	mocks["iad"].gtidExecutedErr = nil // it recovers: unchanged, so discarded
@@ -354,7 +354,7 @@ func TestSettle_GTIDReadFailureRetriesBeforeHolding(t *testing.T) {
 	if wait, err := r2.settleArmedRestoreReclones(context.Background(), late); err != nil || wait != 0 {
 		t.Fatalf("wait=%s err=%v past the bound, want a decision", wait, err)
 	}
-	if q := getFG(t, c2, late).Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesHeld {
+	if q := getFG(t, c2, late).Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesHeld {
 		t.Fatalf("queue = %+v, want Held after the bound", q)
 	}
 }
@@ -376,7 +376,7 @@ func TestReconcileInPlaceRestore_PreflightRejectsPeerWithoutStopper(t *testing.T
 		managers: map[types.NamespacedName]*managedTopology{client.ObjectKeyFromObject(fg): {tm: tm}}}
 	restorePass(t, r, c, fg)
 	st := fg.Status.RestoreInPlace
-	if st == nil || st.Phase != v1alpha1.RestoreInPlaceFailed || !strings.Contains(st.Message, "cannot stop the replication receiver of peer") || st.ConfirmTokenUsed != "" {
+	if st == nil || st.Phase != v1beta1.RestoreInPlaceFailed || !strings.Contains(st.Message, "cannot stop the replication receiver of peer") || st.ConfirmTokenUsed != "" {
 		t.Fatalf("status = %+v, want a non-consuming rejection", st)
 	}
 }
@@ -392,7 +392,7 @@ func TestInitiateRecovery_HeldSiteNotMarkedInProgress(t *testing.T) {
 	tm.mu.RLock()
 	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
-	if rec != nil && rec.state == v1alpha1.RecoveryStateInProgress {
+	if rec != nil && rec.state == v1beta1.RecoveryStateInProgress {
 		t.Fatal("a held site was marked RecoveryInProgress")
 	}
 }

@@ -1,0 +1,8 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackupVerification
+metadata:
+  name: orders-drill
+spec:
+  failoverGroupRef:
+    name: orders
+  profileName: s3-daily

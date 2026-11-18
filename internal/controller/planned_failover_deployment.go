@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // leaseAdmissionGuard wraps each planned-failover admission pass with the
@@ -28,7 +28,7 @@ func (g leaseAdmissionGuard) Now() time.Time {
 	return time.Now()
 }
 
-func (g leaseAdmissionGuard) BeginPlanned(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*DeploymentLeaseView, func(), error) {
+func (g leaseAdmissionGuard) BeginPlanned(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (*DeploymentLeaseView, func(), error) {
 	m := g.r.deploymentLeaseManager()
 	if m == nil {
 		return nil, func() {}, nil

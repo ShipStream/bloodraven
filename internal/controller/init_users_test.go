@@ -8,15 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // credentialsModeGroup builds a group that exercises every optional secret so
 // the generated script contains all create_user_with_grants
 // call sites.
-func credentialsModeGroup() *v1alpha1.MysqlFailoverGroup {
-	fg := &v1alpha1.MysqlFailoverGroup{}
-	fg.Spec.Credentials = v1alpha1.CredentialsSpec{
+func credentialsModeGroup() *v1beta1.MysqlFailoverGroup {
+	fg := &v1beta1.MysqlFailoverGroup{}
+	fg.Spec.Credentials = v1beta1.CredentialsSpec{
 		OperatorSecretName: "op",
 		AppSecretName:      "app",
 		ReadOnlySecretName: "ro",
@@ -29,7 +29,7 @@ func credentialsModeGroup() *v1alpha1.MysqlFailoverGroup {
 func initScriptVariants() map[string]string {
 	return map[string]string{
 		"all roles":     generateInitUsersScript(credentialsModeGroup()),
-		"operator only": generateInitUsersScript(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "op"}}}),
+		"operator only": generateInitUsersScript(&v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "op"}}}),
 	}
 }
 
@@ -245,8 +245,8 @@ func TestInitUsersScriptCreatesReplicationUser(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			script := strings.ReplaceAll(generateInitUsersScript(&v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{
-				Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "op"},
+			script := strings.ReplaceAll(generateInitUsersScript(&v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{
+				Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "op"},
 			}}), "/etc/mysql/creds", creds)
 			cmd := exec.Command(bash, "-c", script)
 			cmd.Env = append(os.Environ(), "SOCKET="+sock, "PATH="+bin+":"+os.Getenv("PATH"))

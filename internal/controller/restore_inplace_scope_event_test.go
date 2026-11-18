@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
@@ -37,16 +37,16 @@ func TestInPlaceRestoreEventsNameScopeReadably(t *testing.T) {
 		if _, err := r.reconcileInPlaceRestore(ctx, fg); err != nil {
 			t.Fatal(err)
 		}
-		wantScope(t, drainEvents(r.Recorder.(*record.FakeRecorder)), v1alpha1.EventRestoreInPlaceStarted, `Schema "orders"`)
+		wantScope(t, drainEvents(r.Recorder.(*record.FakeRecorder)), v1beta1.EventRestoreInPlaceStarted, `Schema "orders"`)
 	})
 
 	t.Run("succeeded", func(t *testing.T) {
 		fg := fgInPlaceRestore("orders")
 		site := fg.Spec.Sites[0].Name
-		fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-			Phase:      v1alpha1.RestoreInPlaceRestoring,
+		fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{
+			Phase:      v1beta1.RestoreInPlaceRestoring,
 			TargetSite: site,
-			Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeSchema, Schema: "orders"},
+			Scope:      &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeSchema, Schema: "orders"},
 			JobName:    inPlaceRestoreJobName(fg.Name, site),
 			StartTime:  ptrTime(time.Now()),
 		}
@@ -58,9 +58,9 @@ func TestInPlaceRestoreEventsNameScopeReadably(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceSucceeded {
+		if fg.Status.RestoreInPlace.Phase != v1beta1.RestoreInPlaceSucceeded {
 			t.Fatalf("phase %s, want Succeeded", fg.Status.RestoreInPlace.Phase)
 		}
-		wantScope(t, drainEvents(r.Recorder.(*record.FakeRecorder)), v1alpha1.EventRestoreInPlaceSucceeded, `Schema "orders"`)
+		wantScope(t, drainEvents(r.Recorder.(*record.FakeRecorder)), v1beta1.EventRestoreInPlaceSucceeded, `Schema "orders"`)
 	})
 }

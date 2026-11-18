@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 )
 
@@ -47,7 +47,7 @@ func TestRunResetPhasesStopsOnFirstError(t *testing.T) {
 	boom := errors.New("boom")
 	var calls []string
 	phase := func(name string, err error) resetPhase {
-		return resetPhase{name: name, fn: func(context.Context, []v1alpha1.SiteSpec) error {
+		return resetPhase{name: name, fn: func(context.Context, []v1beta1.SiteSpec) error {
 			calls = append(calls, name)
 			return err
 		}}
@@ -87,7 +87,7 @@ func TestEscapeSQLString(t *testing.T) {
 
 func TestNodeStorageWipePathsUsesFailoverGroup(t *testing.T) {
 	r := &resetter{fg: "dragonfly"}
-	sites := []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
+	sites := []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 
 	got := r.nodeStorageWipePaths(sites)
 	want := []string{
@@ -198,7 +198,7 @@ func TestMFGStatusFieldsToClear(t *testing.T) {
 		"pitrArchiveBindings": "cleared by the wipe pass only (asserted above)",
 		"rollout":             "the paced-rollout record of the group's workloads, which the reset keeps; the pacer re-derives it every pass",
 	}
-	statusType := reflect.TypeOf(v1alpha1.MysqlFailoverGroupStatus{})
+	statusType := reflect.TypeOf(v1beta1.MysqlFailoverGroupStatus{})
 	all := map[string]bool{}
 	for i := 0; i < statusType.NumField(); i++ {
 		name, _, _ := strings.Cut(statusType.Field(i).Tag.Get("json"), ",")
@@ -261,7 +261,7 @@ func TestClearMFGFailoverStatusKeepsEncryptionAtRest(t *testing.T) {
 		got.Status.PromotionGtidExecuted() != "" || got.Status.PlannedFailover != nil {
 		t.Fatalf("failover history survived normalization: %+v", got.Status)
 	}
-	for _, a := range []string{v1alpha1.PlannedFailoverAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation} {
+	for _, a := range []string{v1beta1.PlannedFailoverAnnotation, v1beta1.PlannedFailoverTerminalAnnotation} {
 		if v, ok := got.Annotations[a]; ok {
 			t.Fatalf("annotation %s=%q survived normalization: a surviving request starts a new switchover", a, v)
 		}
@@ -282,33 +282,33 @@ func TestClearMFGFailoverStatusKeepsEncryptionAtRest(t *testing.T) {
 	}
 }
 
-func newStatusResetter(t *testing.T) (*resetter, *v1alpha1.MysqlFailoverGroup) {
+func newStatusResetter(t *testing.T) (*resetter, *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	failedOver := metav1.NewTime(metav1.Now().Rfc3339Copy().Time)
-	mfg := &v1alpha1.MysqlFailoverGroup{
+	mfg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "playground", Annotations: map[string]string{
 			// A Deferred request keeps its annotation; reset must drop it
 			// with the status block it belongs to.
-			v1alpha1.PlannedFailoverAnnotation:         "pdx",
-			v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"r1","outcome":"Succeeded"}`,
+			v1beta1.PlannedFailoverAnnotation:         "pdx",
+			v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"r1","outcome":"Succeeded"}`,
 			"unrelated": "kept",
 		}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			LastFailover: &v1alpha1.FailoverRecord{
-				FailoverRecordRef:     v1alpha1.FailoverRecordRef{Time: &failedOver, Target: "iad"},
+			LastFailover: &v1beta1.FailoverRecord{
+				FailoverRecordRef:     v1beta1.FailoverRecordRef{Time: &failedOver, Target: "iad"},
 				PromotionGtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5",
 			},
-			PlannedFailover: &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded},
-			EncryptionAtRest: &v1alpha1.EncryptionAtRestStatus{
+			PlannedFailover: &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseSucceeded},
+			EncryptionAtRest: &v1beta1.EncryptionAtRestStatus{
 				ObservedGeneration: 3,
-				Sites: []v1alpha1.SiteEncryptionStatus{
-					{Name: "iad", Phase: v1alpha1.KeyringPhaseSealed, KeyringSecret: "mysql-orders-iad-keyring-v2", KeyringVersion: 2, KeyringDigest: "sha256:aa"},
-					{Name: "pdx", Phase: v1alpha1.KeyringPhaseSealed, KeyringSecret: "mysql-orders-pdx-keyring-v1", KeyringVersion: 1, KeyringDigest: "sha256:bb"},
+				Sites: []v1beta1.SiteEncryptionStatus{
+					{Name: "iad", Phase: v1beta1.KeyringPhaseSealed, KeyringSecret: "mysql-orders-iad-keyring-v2", KeyringVersion: 2, KeyringDigest: "sha256:aa"},
+					{Name: "pdx", Phase: v1beta1.KeyringPhaseSealed, KeyringSecret: "mysql-orders-pdx-keyring-v1", KeyringVersion: 1, KeyringDigest: "sha256:bb"},
 				},
 			},
 		},
@@ -316,7 +316,7 @@ func newStatusResetter(t *testing.T) (*resetter, *v1alpha1.MysqlFailoverGroup) {
 	k := &pgkube.Client{
 		Controller: ctrlfake.NewClientBuilder().
 			WithScheme(scheme).
-			WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+			WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 			WithObjects(mfg.DeepCopy()).
 			Build(),
 	}

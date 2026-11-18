@@ -15,7 +15,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // rolloutSweepSeeds is the quick sweep's seed range, shared by the tests
@@ -371,12 +371,12 @@ func TestSlotHeld(t *testing.T) {
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	const grace = 20 * time.Second
 	at := func(d time.Duration) *metav1.Time { mt := metav1.NewTime(t0.Add(d)); return &mt }
-	admitted := &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseAdmitted, AdmittedTime: at(0)}
-	started := &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseRolling, AdmittedTime: at(0), StartedTime: at(5 * time.Second)}
-	completed := &v1alpha1.RolloutStatus{Phase: v1alpha1.RolloutPhaseComplete, AdmittedTime: at(0), StartedTime: at(5 * time.Second), CompletedTime: at(10 * time.Second)}
+	admitted := &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseAdmitted, AdmittedTime: at(0)}
+	started := &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseRolling, AdmittedTime: at(0), StartedTime: at(5 * time.Second)}
+	completed := &v1beta1.RolloutStatus{Phase: v1beta1.RolloutPhaseComplete, AdmittedTime: at(0), StartedTime: at(5 * time.Second), CompletedTime: at(10 * time.Second)}
 	for _, tc := range []struct {
 		name                   string
-		rec                    *v1alpha1.RolloutStatus
+		rec                    *v1beta1.RolloutStatus
 		admitAnno, releaseAnno bool
 		after                  time.Duration
 		want                   bool

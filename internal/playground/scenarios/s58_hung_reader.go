@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -79,12 +79,12 @@ func scenario58HungReader() runner.Scenario {
 					waitCtx, cancel := context.WithTimeout(ctx, time.Minute)
 					defer cancel()
 					if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "reader declared unreachable",
-						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+						func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 							rs := statusSiteByName(mfg, st.topo.reader)
 							if rs == nil {
 								return false, "reader missing from status", nil
 							}
-							return rs.State == v1alpha1.SiteStateUnreachable, "reader state=" + string(rs.State), nil
+							return rs.State == v1beta1.SiteStateUnreachable, "reader state=" + string(rs.State), nil
 						}); err != nil {
 						return err
 					}
@@ -115,7 +115,7 @@ func scenario58HungReader() runner.Scenario {
 					waitCtx, cancel := context.WithDeadline(ctx, st.killedAt.Add(s58FailoverBudget))
 					defer cancel()
 					_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "candidate promoted",
-						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+						func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 							return mfg.Status.ActiveSite == candidate,
 								fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite), nil
 						})

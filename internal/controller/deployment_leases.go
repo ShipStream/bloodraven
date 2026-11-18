@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -102,9 +102,9 @@ type DeploymentLeaseManager struct {
 // while another one holds the reservation carries the holder's name as
 // its reason, so each name is the unstableReason the operation reports.
 const (
-	deploymentOperationPlannedFailover = v1alpha1.UnstableReasonPlannedFailover
-	deploymentOperationRestoreInPlace  = v1alpha1.UnstableReasonRestoreInPlace
-	deploymentOperationOrderedUpdate   = v1alpha1.UnstableReasonOrderedUpdate
+	deploymentOperationPlannedFailover = v1beta1.UnstableReasonPlannedFailover
+	deploymentOperationRestoreInPlace  = v1beta1.UnstableReasonRestoreInPlace
+	deploymentOperationOrderedUpdate   = v1beta1.UnstableReasonOrderedUpdate
 )
 
 func NewDeploymentLeaseManager(c client.Client, reader client.Reader, recorder record.EventRecorder) *DeploymentLeaseManager {
@@ -140,13 +140,13 @@ func (m *DeploymentLeaseManager) SetPlannedHoldHeld(hold func(types.NamespacedNa
 }
 
 // claimHeld reports the injected planned-failover claim check for fg.
-func (m *DeploymentLeaseManager) claimHeld(fg *v1alpha1.MysqlFailoverGroup) bool {
+func (m *DeploymentLeaseManager) claimHeld(fg *v1beta1.MysqlFailoverGroup) bool {
 	held := m.plannedClaimHeld.Load()
 	return held != nil && (*held)(client.ObjectKeyFromObject(fg))
 }
 
 // holdClaimed reports the injected automation-hold check for fg.
-func (m *DeploymentLeaseManager) holdClaimed(fg *v1alpha1.MysqlFailoverGroup) bool {
+func (m *DeploymentLeaseManager) holdClaimed(fg *v1beta1.MysqlFailoverGroup) bool {
 	hold := m.plannedHoldHeld.Load()
 	return hold != nil && (*hold)(client.ObjectKeyFromObject(fg))
 }
@@ -157,32 +157,32 @@ func (m *DeploymentLeaseManager) holdClaimed(fg *v1alpha1.MysqlFailoverGroup) bo
 // loaded into the slot or only durable (before the slot has been hydrated
 // from it), is "AutomaticFailoverHeld": unlike a run it does not end by
 // itself.
-func (m *DeploymentLeaseManager) UnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
+func (m *DeploymentLeaseManager) UnstableReason(fg *v1beta1.MysqlFailoverGroup) string {
 	reason := DeploymentUnstableReason(fg)
 	switch reason {
-	case v1alpha1.UnstableReasonDeploymentRevocationPending, v1alpha1.UnstableReasonInitializing, v1alpha1.UnstableReasonNoPrimary, v1alpha1.UnstableReasonPlannedFailover:
+	case v1beta1.UnstableReasonDeploymentRevocationPending, v1beta1.UnstableReasonInitializing, v1beta1.UnstableReasonNoPrimary, v1beta1.UnstableReasonPlannedFailover:
 		return reason
 	}
 	holdClaimed := m.holdClaimed(fg)
 	if m.claimHeld(fg) && !holdClaimed {
-		return v1alpha1.UnstableReasonPlannedFailover
+		return v1beta1.UnstableReasonPlannedFailover
 	}
 	if holdClaimed || PlannedHoldFrom(fg) != nil {
-		return v1alpha1.UnstableReasonAutomaticFailoverHeld
+		return v1beta1.UnstableReasonAutomaticFailoverHeld
 	}
 	if reason == "" && m.workloadRefused(fg) {
 		// A refused workload is reported as Degraded only while no
 		// higher-ranked reason holds the condition, and some of those
 		// (replica-audit divergence) do not gate deployments; the standing
 		// refusal gates on its own.
-		return v1alpha1.ReasonWorkloadSelectorMismatch
+		return v1beta1.ReasonWorkloadSelectorMismatch
 	}
 	return reason
 }
 
 // workloadRefused reports whether fg has a standing workload selector
 // refusal (workload_selector.go).
-func (m *DeploymentLeaseManager) workloadRefused(fg *v1alpha1.MysqlFailoverGroup) bool {
+func (m *DeploymentLeaseManager) workloadRefused(fg *v1beta1.MysqlFailoverGroup) bool {
 	report := m.refusals.Load()
 	if report == nil || (*report).keys == nil {
 		return false
@@ -208,7 +208,7 @@ func leaseTokenHash(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (m *DeploymentLeaseManager) read(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, operation string) (*coordinationv1.Lease, *deploymentLeaseRecord, error) {
+func (m *DeploymentLeaseManager) read(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind, operation string) (*coordinationv1.Lease, *deploymentLeaseRecord, error) {
 	l := &coordinationv1.Lease{}
 	name := deploymentLeaseName(fg.Name, kind, operation)
 	err := m.reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, l)
@@ -237,8 +237,8 @@ func (m *DeploymentLeaseManager) read(ctx context.Context, fg *v1alpha1.MysqlFai
 // operator does not know is refused, and reported as a group refusal
 // (Degraded=True/MetadataVersionUnsupported and a Warning Event); a
 // readable one clears that refusal.
-func (m *DeploymentLeaseManager) decodeRecord(fg *v1alpha1.MysqlFailoverGroup, l *coordinationv1.Lease) (*deploymentLeaseRecord, error) {
-	raw := l.Annotations[v1alpha1.DeploymentLeaseAnnotation]
+func (m *DeploymentLeaseManager) decodeRecord(fg *v1beta1.MysqlFailoverGroup, l *coordinationv1.Lease) (*deploymentLeaseRecord, error) {
+	raw := l.Annotations[v1beta1.DeploymentLeaseAnnotation]
 	key := leaseRefusalKey(l.Name)
 	var r deploymentLeaseRecord
 	if err := json.Unmarshal([]byte(raw), &r); err != nil {
@@ -249,9 +249,9 @@ func (m *DeploymentLeaseManager) decodeRecord(fg *v1alpha1.MysqlFailoverGroup, l
 			"lease requests for the group, the admission of planned operations (planned failover, ordered update, in-place restore) "+
 			"and the reopening of admission after a topology change are refused until the Lease is deleted "+
 			"or an operator release that reads it runs",
-			l.Name, v1alpha1.DeploymentLeaseAnnotation, r.SchemaVersion, deploymentLeaseRecordSchemaVersion)
+			l.Name, v1beta1.DeploymentLeaseAnnotation, r.SchemaVersion, deploymentLeaseRecordSchemaVersion)
 		if report := m.refusals.Load(); report != nil {
-			(*report).set(fg, key, v1alpha1.ReasonMetadataVersionUnsupported, msg)
+			(*report).set(fg, key, v1beta1.ReasonMetadataVersionUnsupported, msg)
 		}
 		return nil, errLeaseRecordVersion{msg: msg}
 	}
@@ -273,7 +273,7 @@ func leaseRefusalKey(leaseName string) string { return leaseRefusalPrefix + leas
 // reports the refusal, before it reads any Lease, and housekeeping lists
 // only the hold Leases that still exist. Read uncached, as every Lease
 // read here is.
-func (m *DeploymentLeaseManager) pruneLeaseRefusals(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (m *DeploymentLeaseManager) pruneLeaseRefusals(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	report := m.refusals.Load()
 	if report == nil || (*report).keys == nil {
 		return nil
@@ -302,13 +302,13 @@ type errLeaseRecordVersion struct{ msg string }
 func (e errLeaseRecordVersion) Error() string { return e.msg }
 
 func (e errLeaseRecordVersion) Unwrap() error {
-	return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.ReasonMetadataVersionUnsupported}
+	return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1beta1.ReasonMetadataVersionUnsupported}
 }
 
 // leaseRefusalReporter is the runner's group refusal registry, as the
 // lease manager uses it.
 type leaseRefusalReporter struct {
-	set   func(fg *v1alpha1.MysqlFailoverGroup, key, reason, message string)
+	set   func(fg *v1beta1.MysqlFailoverGroup, key, reason, message string)
 	clear func(nn types.NamespacedName, key string)
 	keys  func(nn types.NamespacedName, prefix string) []string
 }
@@ -324,11 +324,11 @@ func (m *DeploymentLeaseManager) SetGroupRefusals(r *TopologyManagerRunner) {
 	m.refusals.Store(&leaseRefusalReporter{set: r.SetGroupRefusal, clear: r.ClearGroupRefusal, keys: r.GroupRefusalKeys})
 }
 
-func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, l *coordinationv1.Lease, r *deploymentLeaseRecord, operation string) error {
+func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, l *coordinationv1.Lease, r *deploymentLeaseRecord, operation string) error {
 	create := l == nil
 	if create {
 		l = &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: deploymentLeaseName(fg.Name, r.Kind, operation), Namespace: fg.Namespace,
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "MysqlFailoverGroup", Name: fg.Name, UID: fg.UID}}}}
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1beta1.GroupVersion.String(), Kind: "MysqlFailoverGroup", Name: fg.Name, UID: fg.UID}}}}
 	}
 	r.SchemaVersion = deploymentLeaseRecordSchemaVersion
 	b, err := json.Marshal(r)
@@ -338,12 +338,12 @@ func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFa
 	if l.Annotations == nil {
 		l.Annotations = make(map[string]string)
 	}
-	l.Annotations[v1alpha1.DeploymentLeaseAnnotation] = string(b)
+	l.Annotations[v1beta1.DeploymentLeaseAnnotation] = string(b)
 	if l.Labels == nil {
 		l.Labels = make(map[string]string)
 	}
-	l.Labels[v1alpha1.DeploymentKindLabel] = r.Kind
-	l.Labels[v1alpha1.DeploymentStateLabel] = r.State
+	l.Labels[v1beta1.DeploymentKindLabel] = r.Kind
+	l.Labels[v1beta1.DeploymentStateLabel] = r.State
 	l.Spec.HolderIdentity = &r.OperationID
 	now := metav1.NewMicroTime(m.now())
 	l.Spec.RenewTime = &now
@@ -357,7 +357,7 @@ func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFa
 	return m.client.Update(ctx, l)
 }
 
-func (m *DeploymentLeaseManager) archive(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, r *deploymentLeaseRecord) error {
+func (m *DeploymentLeaseManager) archive(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, r *deploymentLeaseRecord) error {
 	// Revocation tombstones intentionally live until the owning group is deleted:
 	// expiring them would let a delayed client reuse a revoked operation ID.
 	l, _, err := m.read(ctx, fg, r.Kind, r.OperationID)
@@ -368,7 +368,7 @@ func (m *DeploymentLeaseManager) archive(ctx context.Context, fg *v1alpha1.Mysql
 }
 
 // current expires/revokes durably before allowing the slot to be reused.
-func (m *DeploymentLeaseManager) current(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind string, operation ...string) (*coordinationv1.Lease, *deploymentLeaseRecord, error) {
+func (m *DeploymentLeaseManager) current(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind string, operation ...string) (*coordinationv1.Lease, *deploymentLeaseRecord, error) {
 	id := ""
 	if kind == "failover-hold" && len(operation) > 0 {
 		id = operation[0]
@@ -381,10 +381,10 @@ func (m *DeploymentLeaseManager) current(ctx context.Context, fg *v1alpha1.Mysql
 		reason := ""
 		if m.now().After(r.ExpiresAt) {
 			r.State = "expired"
-		} else if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
-			reason = v1alpha1.DeploymentLeaseRevokedByOperator
+		} else if _, pending := fg.Annotations[v1beta1.RevokeDeploymentLeasesAnnotation]; pending {
+			reason = v1beta1.DeploymentLeaseRevokedByOperator
 		} else if r.TopologyGeneration != fg.Status.TopologyGeneration {
-			reason = v1alpha1.DeploymentLeaseRevokedTopologyChanged
+			reason = v1beta1.DeploymentLeaseRevokedTopologyChanged
 		}
 		if reason != "" {
 			r.State, r.Reason = "revoked", reason
@@ -411,11 +411,11 @@ func (m *DeploymentLeaseManager) current(ctx context.Context, fg *v1alpha1.Mysql
 	return l, r, nil
 }
 
-func (m *DeploymentLeaseManager) currentHolds(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) ([]DeploymentLeaseView, error) {
+func (m *DeploymentLeaseManager) currentHolds(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) ([]DeploymentLeaseView, error) {
 	var leases coordinationv1.LeaseList
 	if err := m.reader.List(ctx, &leases, client.InNamespace(fg.Namespace), client.MatchingLabels{
-		v1alpha1.DeploymentKindLabel:  "failover-hold",
-		v1alpha1.DeploymentStateLabel: "active",
+		v1beta1.DeploymentKindLabel:  "failover-hold",
+		v1beta1.DeploymentStateLabel: "active",
 	}); err != nil {
 		return nil, err
 	}
@@ -450,10 +450,10 @@ func (m *DeploymentLeaseManager) currentHolds(ctx context.Context, fg *v1alpha1.
 	return views, nil
 }
 
-func (m *DeploymentLeaseManager) revocation(fg *v1alpha1.MysqlFailoverGroup, r *deploymentLeaseRecord) {
+func (m *DeploymentLeaseManager) revocation(fg *v1beta1.MysqlFailoverGroup, r *deploymentLeaseRecord) {
 	metrics.DeployLeaseRevocationsTotal.WithLabelValues(fg.Name, r.Kind, r.Reason).Inc()
 	if m.recorder != nil {
-		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventDeploymentLeaseRevoked, "%s lease for operation %s instance %s revoked: %s", r.Kind, r.OperationID, r.Instance, r.Reason)
+		m.recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventDeploymentLeaseRevoked, "%s lease for operation %s instance %s revoked: %s", r.Kind, r.OperationID, r.Instance, r.Reason)
 	}
 }
 
@@ -463,57 +463,57 @@ func (m *DeploymentLeaseManager) revocation(fg *v1alpha1.MysqlFailoverGroup, r *
 // the phase while the update has not finished, and it resumes by itself,
 // so it stays as unstable for deployments and as exclusive of other
 // operations as the phase it paused.
-func orderedUpdateInProgress(fg *v1alpha1.MysqlFailoverGroup) bool {
+func orderedUpdateInProgress(fg *v1beta1.MysqlFailoverGroup) bool {
 	if fg.Status.UpdatePhase != "" {
 		return true
 	}
-	c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionUpdating)
-	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == v1alpha1.ReasonOrderedUpdateStalled
+	c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionUpdating)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == v1beta1.ReasonOrderedUpdateStalled
 }
 
 // DeploymentUnstableReason mirrors the companion API stability contract.
-func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
-	if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
-		return v1alpha1.UnstableReasonDeploymentRevocationPending
+func DeploymentUnstableReason(fg *v1beta1.MysqlFailoverGroup) string {
+	if _, pending := fg.Annotations[v1beta1.RevokeDeploymentLeasesAnnotation]; pending {
+		return v1beta1.UnstableReasonDeploymentRevocationPending
 	}
 	if fg.Status.ActiveSite == "" {
-		ready := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady)
+		ready := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionReady)
 		switch {
-		case ready != nil && ready.Reason == v1alpha1.ReasonInitializing:
-			return v1alpha1.UnstableReasonInitializing
-		case ready != nil && ready.Reason == v1alpha1.ReasonPlannedWritePause:
+		case ready != nil && ready.Reason == v1beta1.ReasonInitializing:
+			return v1beta1.UnstableReasonInitializing
+		case ready != nil && ready.Reason == v1beta1.ReasonPlannedWritePause:
 			// The operator paused writes itself. The operation that did it
 			// is the reason, as it is before and after the pause:
 			// PlannedFailover or OrderedUpdate below, or NotReady when
 			// status no longer shows either.
 		default:
-			return v1alpha1.UnstableReasonNoPrimary
+			return v1beta1.UnstableReasonNoPrimary
 		}
 	}
 	if plannedFailoverActive(fg) {
-		return v1alpha1.UnstableReasonPlannedFailover
+		return v1beta1.UnstableReasonPlannedFailover
 	}
 	if orderedUpdateInProgress(fg) {
-		return v1alpha1.UnstableReasonOrderedUpdate
+		return v1beta1.UnstableReasonOrderedUpdate
 	}
-	if restoreInFlight(fg) || (fg.Status.Restore != nil && fg.Status.Restore.Phase != "" && fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded && fg.Status.Restore.Phase != v1alpha1.BackupPhaseFailed) {
-		return v1alpha1.UnstableReasonRestore
+	if restoreInFlight(fg) || (fg.Status.Restore != nil && fg.Status.Restore.Phase != "" && fg.Status.Restore.Phase != v1beta1.BackupPhaseSucceeded && fg.Status.Restore.Phase != v1beta1.BackupPhaseFailed) {
+		return v1beta1.UnstableReasonRestore
 	}
-	if d := fg.Status.Dragonfly; d != nil && d.Upgrade != nil && d.Upgrade.Phase != "" && d.Upgrade.Phase != v1alpha1.DragonflyUpgradePhaseSucceeded && d.Upgrade.Phase != v1alpha1.DragonflyUpgradePhaseFailed {
-		return v1alpha1.UnstableReasonDragonflyUpgrade
+	if d := fg.Status.Dragonfly; d != nil && d.Upgrade != nil && d.Upgrade.Phase != "" && d.Upgrade.Phase != v1beta1.DragonflyUpgradePhaseSucceeded && d.Upgrade.Phase != v1beta1.DragonflyUpgradePhaseFailed {
+		return v1beta1.UnstableReasonDragonflyUpgrade
 	}
 	if d := fg.Status.Dragonfly; d != nil {
 		if reason, ok := dragonflyUnstableReasons[d.Phase]; ok {
 			return reason
 		}
 	}
-	if s := fg.Status.RestoreInPlace; s != nil && s.Phase != v1alpha1.RestoreInPlaceSucceeded && s.Phase != v1alpha1.RestoreInPlaceFailed && s.Phase != "" {
-		return v1alpha1.UnstableReasonRestoreInPlace
+	if s := fg.Status.RestoreInPlace; s != nil && s.Phase != v1beta1.RestoreInPlaceSucceeded && s.Phase != v1beta1.RestoreInPlaceFailed && s.Phase != "" {
+		return v1beta1.UnstableReasonRestoreInPlace
 	}
 	auditOnly := divergenceIsReplicaAuditOnly(fg)
-	for _, name := range []string{v1alpha1.ConditionDegraded, v1alpha1.ConditionRecoveryPending, v1alpha1.ConditionBootstrapping} {
+	for _, name := range []string{v1beta1.ConditionDegraded, v1beta1.ConditionRecoveryPending, v1beta1.ConditionBootstrapping} {
 		if c := apimeta.FindStatusCondition(fg.Status.Conditions, name); c != nil && c.Status == metav1.ConditionTrue {
-			if name == v1alpha1.ConditionDegraded && c.Reason == v1alpha1.ReasonReplicationLagging {
+			if name == v1beta1.ConditionDegraded && c.Reason == v1beta1.ReasonReplicationLagging {
 				continue
 			}
 			// A replica-audit divergence report is an integrity warning
@@ -522,13 +522,13 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 			// hide is still checked below (Ready, per-site replication and
 			// source convergence). A returning old primary's report still
 			// gates, as it always has.
-			if c.Reason == v1alpha1.ReasonDivergentTransactions && (name == v1alpha1.ConditionDegraded || auditOnly) {
+			if c.Reason == v1beta1.ReasonDivergentTransactions && (name == v1beta1.ConditionDegraded || auditOnly) {
 				continue
 			}
 			// RecoveryPending summarizes one site. When it names a
 			// replica's divergence but another site's recovery is what
 			// gates, report that site's state instead.
-			if name == v1alpha1.ConditionRecoveryPending && c.Reason == v1alpha1.ReasonDivergentTransactions {
+			if name == v1beta1.ConditionRecoveryPending && c.Reason == v1beta1.ReasonDivergentTransactions {
 				if reason := gatingRecoveryState(fg); reason != "" {
 					return reason
 				}
@@ -539,8 +539,8 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 			return name
 		}
 	}
-	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionReady); c == nil || c.Status != metav1.ConditionTrue {
-		return v1alpha1.UnstableReasonNotReady
+	if c := apimeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionReady); c == nil || c.Status != metav1.ConditionTrue {
+		return v1beta1.UnstableReasonNotReady
 	}
 	for _, configured := range fg.Spec.Sites {
 		found := false
@@ -551,29 +551,29 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 			}
 		}
 		if !found {
-			return v1alpha1.UnstableReasonSiteNotObserved
+			return v1beta1.UnstableReasonSiteNotObserved
 		}
 	}
 	for _, s := range fg.Status.Sites {
-		if s.Name == fg.Status.ActiveSite && s.State != v1alpha1.SiteStateWritable {
-			return v1alpha1.UnstableReasonNoPrimary
+		if s.Name == fg.Status.ActiveSite && s.State != v1beta1.SiteStateWritable {
+			return v1beta1.UnstableReasonNoPrimary
 		}
-		if s.Name != fg.Status.ActiveSite && s.State != v1alpha1.SiteStateReadOnly {
-			return v1alpha1.UnstableReasonSiteNotReady
+		if s.Name != fg.Status.ActiveSite && s.State != v1beta1.SiteStateReadOnly {
+			return v1beta1.UnstableReasonSiteNotReady
 		}
 		if s.Name != fg.Status.ActiveSite && restoreReclonePending(fg, s.Name) {
 			// Held out of failover and replication until its
 			// post-restore reclone.
-			return v1alpha1.UnstableReasonRestoreReclonePending
+			return v1beta1.UnstableReasonRestoreReclonePending
 		}
-		if s.RecoveryState != "" && !(s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit) {
+		if s.RecoveryState != "" && !(s.RecoveryState == v1beta1.RecoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit) {
 			return string(s.RecoveryState)
 		}
 		if reason, ok := sourceConvergenceUnstableReasons[s.SourceConvergenceState]; ok {
 			return reason
 		}
 		if s.Name != fg.Status.ActiveSite && !s.Replication.Running() {
-			return v1alpha1.UnstableReasonReplicationNotRunning
+			return v1beta1.UnstableReasonReplicationNotRunning
 		}
 	}
 	return ""
@@ -581,30 +581,30 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 
 // dragonflyUnstableReasons maps each Dragonfly phase that makes the group
 // unstable to its unstableReason. Disabled and Ready do not.
-var dragonflyUnstableReasons = map[v1alpha1.DragonflyPhase]string{
-	v1alpha1.DragonflyPhaseReconciling:            v1alpha1.UnstableReasonDragonflyReconciling,
-	v1alpha1.DragonflyPhaseConfiguringReplication: v1alpha1.UnstableReasonDragonflyConfiguringReplication,
-	v1alpha1.DragonflyPhaseDegraded:               v1alpha1.UnstableReasonDragonflyDegraded,
-	v1alpha1.DragonflyPhasePromoting:              v1alpha1.UnstableReasonDragonflyPromoting,
+var dragonflyUnstableReasons = map[v1beta1.DragonflyPhase]string{
+	v1beta1.DragonflyPhaseReconciling:            v1beta1.UnstableReasonDragonflyReconciling,
+	v1beta1.DragonflyPhaseConfiguringReplication: v1beta1.UnstableReasonDragonflyConfiguringReplication,
+	v1beta1.DragonflyPhaseDegraded:               v1beta1.UnstableReasonDragonflyDegraded,
+	v1beta1.DragonflyPhasePromoting:              v1beta1.UnstableReasonDragonflyPromoting,
 }
 
 // sourceConvergenceUnstableReasons maps each source-convergence state that
 // makes the group unstable to its unstableReason. Converged does not.
-var sourceConvergenceUnstableReasons = map[v1alpha1.SourceConvergenceState]string{
-	v1alpha1.SourceConvergencePending: v1alpha1.UnstableReasonSourceConvergencePending,
-	v1alpha1.SourceConvergenceBlocked: v1alpha1.UnstableReasonSourceConvergenceBlocked,
+var sourceConvergenceUnstableReasons = map[v1beta1.SourceConvergenceState]string{
+	v1beta1.SourceConvergencePending: v1beta1.UnstableReasonSourceConvergencePending,
+	v1beta1.SourceConvergenceBlocked: v1beta1.UnstableReasonSourceConvergenceBlocked,
 }
 
 // divergenceIsReplicaAuditOnly reports whether every site in recovery
 // carries a replica-audit divergence report, so RecoveryPending describes
 // nothing but those. A report restored without provenance (an older CRD
 // pruned the field) counts as an old primary's.
-func divergenceIsReplicaAuditOnly(fg *v1alpha1.MysqlFailoverGroup) bool {
+func divergenceIsReplicaAuditOnly(fg *v1beta1.MysqlFailoverGroup) bool {
 	for _, s := range fg.Status.Sites {
 		if s.RecoveryState == "" {
 			continue
 		}
-		if s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.DivergenceDetectedBy != divergenceDetectedByAudit {
+		if s.RecoveryState != v1beta1.RecoveryStateBlocked || s.DivergenceDetectedBy != divergenceDetectedByAudit {
 			return false
 		}
 	}
@@ -615,13 +615,13 @@ func divergenceIsReplicaAuditOnly(fg *v1alpha1.MysqlFailoverGroup) bool {
 // recovery gates the deployment API (anything but a replica-audit
 // divergence report), as a reason: "DivergentTransactions" for an old
 // primary's block (or one without provenance), otherwise the state.
-func gatingRecoveryState(fg *v1alpha1.MysqlFailoverGroup) string {
+func gatingRecoveryState(fg *v1beta1.MysqlFailoverGroup) string {
 	for _, s := range fg.Status.Sites {
 		switch {
 		case s.RecoveryState == "":
-		case s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit:
-		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
-			return v1alpha1.ReasonDivergentTransactions
+		case s.RecoveryState == v1beta1.RecoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit:
+		case s.RecoveryState == v1beta1.RecoveryStateBlocked:
+			return v1beta1.ReasonDivergentTransactions
 		default:
 			return string(s.RecoveryState)
 		}
@@ -629,8 +629,8 @@ func gatingRecoveryState(fg *v1alpha1.MysqlFailoverGroup) string {
 	return ""
 }
 
-func (m *DeploymentLeaseManager) fresh(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*v1alpha1.MysqlFailoverGroup, error) {
-	fresh := &v1alpha1.MysqlFailoverGroup{}
+func (m *DeploymentLeaseManager) fresh(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (*v1beta1.MysqlFailoverGroup, error) {
+	fresh := &v1beta1.MysqlFailoverGroup{}
 	if err := m.reader.Get(ctx, client.ObjectKeyFromObject(fg), fresh); err != nil {
 		return nil, err
 	}
@@ -640,10 +640,10 @@ func (m *DeploymentLeaseManager) fresh(ctx context.Context, fg *v1alpha1.MysqlFa
 	return fresh, nil
 }
 
-func (m *DeploymentLeaseManager) gate(fg *v1alpha1.MysqlFailoverGroup) error {
+func (m *DeploymentLeaseManager) gate(fg *v1beta1.MysqlFailoverGroup) error {
 	nn := client.ObjectKeyFromObject(fg)
-	if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
-		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonDeploymentRevocationPending, RetryAfterSeconds: 1}
+	if _, pending := fg.Annotations[v1beta1.RevokeDeploymentLeasesAnnotation]; pending {
+		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1beta1.UnstableReasonDeploymentRevocationPending, RetryAfterSeconds: 1}
 	}
 	if err := m.topologyGate(fg); err != nil {
 		return err
@@ -654,13 +654,13 @@ func (m *DeploymentLeaseManager) gate(fg *v1alpha1.MysqlFailoverGroup) error {
 	return nil
 }
 
-func (m *DeploymentLeaseManager) topologyGate(fg *v1alpha1.MysqlFailoverGroup) error {
+func (m *DeploymentLeaseManager) topologyGate(fg *v1beta1.MysqlFailoverGroup) error {
 	nn := client.ObjectKeyFromObject(fg)
 	if _, pending := m.pending.Load(nn); pending {
-		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyPersistencePending, RetryAfterSeconds: 1}
+		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1beta1.UnstableReasonTopologyPersistencePending, RetryAfterSeconds: 1}
 	}
 	if uid, observed := m.observed.Load(nn); m.requireTopology.Load() && (!observed || uid != fg.UID) {
-		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyNotObserved, RetryAfterSeconds: 1}
+		return &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1beta1.UnstableReasonTopologyNotObserved, RetryAfterSeconds: 1}
 	}
 	return nil
 }
@@ -671,7 +671,7 @@ func sameDeploymentHolder(r *deploymentLeaseRecord, operation, instance, namespa
 
 func validDeploymentKind(kind string) bool { return kind == "migration" || kind == "failover-hold" }
 
-func (m *DeploymentLeaseManager) Grant(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount string, ttl int) (DeploymentLeaseResult, error) {
+func (m *DeploymentLeaseManager) Grant(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount string, ttl int) (DeploymentLeaseResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !validDeploymentKind(kind) || operationID == "" || instance == "" || namespace == "" || serviceAccount == "" {
@@ -766,20 +766,20 @@ func (m *DeploymentLeaseManager) Grant(ctx context.Context, fg *v1alpha1.MysqlFa
 	return DeploymentLeaseResult{DeploymentLeaseView: r.DeploymentLeaseView, Token: token, Status: status}, nil
 }
 
-func (m *DeploymentLeaseManager) Renew(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount, token string, ttl int) (DeploymentLeaseResult, error) {
+func (m *DeploymentLeaseManager) Renew(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount, token string, ttl int) (DeploymentLeaseResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.mutate(ctx, fg, kind, operationID, instance, namespace, serviceAccount, token, ttl, false)
 }
 
-func (m *DeploymentLeaseManager) Release(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount, token string) error {
+func (m *DeploymentLeaseManager) Release(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount, token string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, err := m.mutate(ctx, fg, kind, operationID, instance, namespace, serviceAccount, token, 0, true)
 	return err
 }
 
-func (m *DeploymentLeaseManager) mutate(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount, token string, ttl int, release bool) (DeploymentLeaseResult, error) {
+func (m *DeploymentLeaseManager) mutate(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind, operationID, instance, namespace, serviceAccount, token string, ttl int, release bool) (DeploymentLeaseResult, error) {
 	if !validDeploymentKind(kind) {
 		return DeploymentLeaseResult{}, &DeploymentLeaseError{Status: 400, Code: "invalid_request"}
 	}
@@ -849,22 +849,22 @@ func (m *DeploymentLeaseManager) mutate(ctx context.Context, fg *v1alpha1.MysqlF
 }
 
 // Reconciler-owned status writes do not take the admission mutex.
-func (m *DeploymentLeaseManager) validateWrite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, operation string, grant bool) error {
+func (m *DeploymentLeaseManager) validateWrite(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind, operation string, grant bool) error {
 	fresh, err := m.fresh(ctx, fg)
 	if err != nil {
 		return err
 	}
-	if _, pending := fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
+	if _, pending := fresh.Annotations[v1beta1.RevokeDeploymentLeasesAnnotation]; pending {
 		if _, _, err := m.current(ctx, fresh, kind, operation); err != nil {
 			return err
 		}
-		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: v1alpha1.DeploymentLeaseRevokedByOperator, TopologyGeneration: fresh.Status.TopologyGeneration}
+		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: v1beta1.DeploymentLeaseRevokedByOperator, TopologyGeneration: fresh.Status.TopologyGeneration}
 	}
 	if fresh.Status.TopologyGeneration != fg.Status.TopologyGeneration {
 		if _, _, err := m.current(ctx, fresh, kind, operation); err != nil {
 			return err
 		}
-		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: v1alpha1.DeploymentLeaseRevokedTopologyChanged, TopologyGeneration: fresh.Status.TopologyGeneration}
+		return &DeploymentLeaseError{Status: 409, Code: "revoked", Reason: v1beta1.DeploymentLeaseRevokedTopologyChanged, TopologyGeneration: fresh.Status.TopologyGeneration}
 	}
 	if grant {
 		if reason := m.UnstableReason(fresh); reason != "" {
@@ -874,7 +874,7 @@ func (m *DeploymentLeaseManager) validateWrite(ctx context.Context, fg *v1alpha1
 	return m.gate(fresh)
 }
 
-func (m *DeploymentLeaseManager) List(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) ([]DeploymentLeaseView, error) {
+func (m *DeploymentLeaseManager) List(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) ([]DeploymentLeaseView, error) {
 	_, views, err := m.Snapshot(ctx, fg)
 	return views, err
 }
@@ -882,7 +882,7 @@ func (m *DeploymentLeaseManager) List(ctx context.Context, fg *v1alpha1.MysqlFai
 // Snapshot returns a freshly read group and its leases from one observation.
 // HTTP callers must use this group, not combine List with a separate group read.
 // An in-memory operation reservation returns 423 until status can describe it.
-func (m *DeploymentLeaseManager) Snapshot(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*v1alpha1.MysqlFailoverGroup, []DeploymentLeaseView, error) {
+func (m *DeploymentLeaseManager) Snapshot(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (*v1beta1.MysqlFailoverGroup, []DeploymentLeaseView, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for attempt := 0; attempt < 3; attempt++ {
@@ -920,10 +920,10 @@ func (m *DeploymentLeaseManager) Snapshot(ctx context.Context, fg *v1alpha1.Mysq
 			return fresh, views, nil
 		}
 	}
-	return nil, nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyObservationChanged, RetryAfterSeconds: 1}
+	return nil, nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1beta1.UnstableReasonTopologyObservationChanged, RetryAfterSeconds: 1}
 }
 
-func (m *DeploymentLeaseManager) Hold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*DeploymentLeaseView, error) {
+func (m *DeploymentLeaseManager) Hold(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (*DeploymentLeaseView, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fg, err := m.fresh(ctx, fg)
@@ -933,7 +933,7 @@ func (m *DeploymentLeaseManager) Hold(ctx context.Context, fg *v1alpha1.MysqlFai
 	return m.hold(ctx, fg)
 }
 
-func (m *DeploymentLeaseManager) hold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*DeploymentLeaseView, error) {
+func (m *DeploymentLeaseManager) hold(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (*DeploymentLeaseView, error) {
 	holds, err := m.currentHolds(ctx, fg)
 	if err != nil {
 		return nil, err
@@ -946,14 +946,14 @@ func (m *DeploymentLeaseManager) hold(ctx context.Context, fg *v1alpha1.MysqlFai
 
 // BeginPlanned atomically checks holds and reserves admission. The caller must
 // persist its operation phase before EndPlanned, and never retain the mutex.
-func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, operation string) (*DeploymentLeaseView, error) {
+func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, operation string) (*DeploymentLeaseView, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fg, err := m.fresh(ctx, fg)
 	if err != nil {
 		return nil, err
 	}
-	if _, pending := fg.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]; pending {
+	if _, pending := fg.Annotations[v1beta1.RevokeDeploymentLeasesAnnotation]; pending {
 		return nil, m.gate(fg)
 	}
 	hold, err := m.hold(ctx, fg)
@@ -967,11 +967,11 @@ func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.
 	if (operation != deploymentOperationPlannedFailover && (plannedFailoverOwnsSites(fg) || m.claimHeld(fg) || PlannedHoldFrom(fg) != nil)) ||
 		(operation != deploymentOperationRestoreInPlace && inPlaceRestoreInFlight(fg)) ||
 		(operation != deploymentOperationOrderedUpdate && orderedUpdateInProgress(fg)) {
-		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonConcurrentOperation, RetryAfterSeconds: 1}
+		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1beta1.UnstableReasonConcurrentOperation, RetryAfterSeconds: 1}
 	}
 	nn := client.ObjectKeyFromObject(fg)
 	if _, pending := m.pending.Load(nn); pending {
-		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1alpha1.UnstableReasonTopologyPersistencePending, RetryAfterSeconds: 1}
+		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: v1beta1.UnstableReasonTopologyPersistencePending, RetryAfterSeconds: 1}
 	}
 	if m.planned[nn] != "" {
 		return nil, &DeploymentLeaseError{Status: 423, Code: "unstable", Reason: m.planned[nn]}
@@ -980,7 +980,7 @@ func (m *DeploymentLeaseManager) BeginPlanned(ctx context.Context, fg *v1alpha1.
 	return nil, nil
 }
 
-func (m *DeploymentLeaseManager) EndPlanned(fg *v1alpha1.MysqlFailoverGroup) {
+func (m *DeploymentLeaseManager) EndPlanned(fg *v1beta1.MysqlFailoverGroup) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.planned, client.ObjectKeyFromObject(fg))
@@ -999,7 +999,7 @@ func (m *DeploymentLeaseManager) TopologyPending(nn types.NamespacedName) uint64
 }
 
 // TopologyPersisted revokes old generations before reopening admission.
-func (m *DeploymentLeaseManager) TopologyPersisted(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, epoch uint64) error {
+func (m *DeploymentLeaseManager) TopologyPersisted(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, epoch uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fg, err := m.fresh(ctx, fg)
@@ -1021,8 +1021,8 @@ func (m *DeploymentLeaseManager) TopologyPersisted(ctx context.Context, fg *v1al
 	return nil
 }
 
-func (m *DeploymentLeaseManager) Revoke(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, reason string) error {
-	if reason != v1alpha1.DeploymentLeaseRevokedTopologyChanged && reason != v1alpha1.DeploymentLeaseRevokedByOperator {
+func (m *DeploymentLeaseManager) Revoke(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, reason string) error {
+	if reason != v1beta1.DeploymentLeaseRevokedTopologyChanged && reason != v1beta1.DeploymentLeaseRevokedByOperator {
 		return fmt.Errorf("invalid revocation reason")
 	}
 	m.mu.Lock()
@@ -1036,34 +1036,34 @@ func (m *DeploymentLeaseManager) Revoke(ctx context.Context, fg *v1alpha1.MysqlF
 
 // reconcileRevocation runs before operation-specific reconcile early returns.
 // Admission stays closed until every revocation and annotation removal persist.
-func (m *DeploymentLeaseManager) reconcileRevocation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (m *DeploymentLeaseManager) reconcileRevocation(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fresh, err := m.fresh(ctx, fg)
 	if err != nil {
 		return err
 	}
-	request, pending := fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]
+	request, pending := fresh.Annotations[v1beta1.RevokeDeploymentLeasesAnnotation]
 	if !pending {
 		// The informer can still carry a completed request, including after
 		// an annotation removal committed but its response was lost.
 		*fg = *fresh
 		return nil
 	}
-	if err := m.revoke(ctx, fresh, v1alpha1.DeploymentLeaseRevokedByOperator); err != nil {
+	if err := m.revoke(ctx, fresh, v1beta1.DeploymentLeaseRevokedByOperator); err != nil {
 		return err
 	}
 	fresh, err = m.fresh(ctx, fresh)
 	if err != nil {
 		return err
 	}
-	current, pending := fresh.Annotations[v1alpha1.RevokeDeploymentLeasesAnnotation]
+	current, pending := fresh.Annotations[v1beta1.RevokeDeploymentLeasesAnnotation]
 	if pending {
 		if current != request {
 			return fmt.Errorf("deployment lease revocation request changed")
 		}
 		patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
-		delete(fresh.Annotations, v1alpha1.RevokeDeploymentLeasesAnnotation)
+		delete(fresh.Annotations, v1beta1.RevokeDeploymentLeasesAnnotation)
 		if err := m.client.Patch(ctx, fresh, patch); err != nil {
 			return err
 		}
@@ -1073,7 +1073,7 @@ func (m *DeploymentLeaseManager) reconcileRevocation(ctx context.Context, fg *v1
 }
 
 // Caller holds m.mu and supplies an uncached group observation.
-func (m *DeploymentLeaseManager) revoke(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, reason string) error {
+func (m *DeploymentLeaseManager) revoke(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, reason string) error {
 	holds, err := m.currentHolds(ctx, fg)
 	if err != nil {
 		return err
@@ -1098,11 +1098,11 @@ func (m *DeploymentLeaseManager) revoke(ctx context.Context, fg *v1alpha1.MysqlF
 }
 
 type deploymentTopologyConfirmation struct {
-	fg    *v1alpha1.MysqlFailoverGroup
+	fg    *v1beta1.MysqlFailoverGroup
 	epoch uint64
 }
 
-func (m *DeploymentLeaseManager) confirmTopology(fg *v1alpha1.MysqlFailoverGroup, epoch uint64) {
+func (m *DeploymentLeaseManager) confirmTopology(fg *v1beta1.MysqlFailoverGroup, epoch uint64) {
 	nn := client.ObjectKeyFromObject(fg)
 	next := &deploymentTopologyConfirmation{fg: fg.DeepCopy(), epoch: epoch}
 	for {

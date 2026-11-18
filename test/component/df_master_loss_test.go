@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
@@ -37,17 +37,17 @@ func dfMasterLossGroup(t *testing.T, replica controller.DragonflyConnection) (*c
 	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-	_ = v1alpha1.AddToScheme(scheme)
-	fg := &v1alpha1.MysqlFailoverGroup{
+	_ = v1beta1.AddToScheme(scheme)
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "ns"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites:     []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
-			Dragonfly: &v1alpha1.DragonflySpec{Enabled: true, Image: "example.invalid/dragonfly:v1", Port: 6379},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Sites:     []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}},
+			Dragonfly: &v1beta1.DragonflySpec{Enabled: true, Image: "example.invalid/dragonfly:v1", Port: 6379},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", Dragonfly: &v1alpha1.DragonflyStatus{ActiveSite: "iad"}},
+		Status: v1beta1.MysqlFailoverGroupStatus{ActiveSite: "iad", Dragonfly: &v1beta1.DragonflyStatus{ActiveSite: "iad"}},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		Build()
 	key := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -64,7 +64,7 @@ func dfMasterLossGroup(t *testing.T, replica controller.DragonflyConnection) (*c
 
 func dfActiveSite(t *testing.T, c client.Client, key types.NamespacedName) string {
 	t.Helper()
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}

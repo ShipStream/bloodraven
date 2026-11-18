@@ -104,11 +104,19 @@ extraEnv: []
 # - name: LOG_LEVEL
 #   value: "debug"
 
-# -- Additional volume mounts for the operator container
+# -- Additional volume mounts for the operator container. The chart mounts
+# a small in-memory volume at /tmp (the root filesystem is read-only) unless
+# one of these already mounts /tmp.
 extraVolumeMounts: []
 
 # -- Additional volumes for the operator pod
 extraVolumes: []
+
+# -- What the operator does at start when the installed CRDs are older than
+# it needs, or a stored object does not fit them. `enforce` exits with the
+# list of problems. `warn` logs them and starts anyway: a break-glass for a
+# check that is wrong about a cluster, not a way to skip a CRD upgrade.
+crdCheck: enforce
 
 # Leader election ensures safe single-writer semantics.
 leaderElection:

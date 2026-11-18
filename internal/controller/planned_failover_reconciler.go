@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/metrics/labels"
@@ -28,17 +28,17 @@ import (
 // plannedFailoverTerminal reports whether the given status is in a
 // terminal phase (Succeeded or Failed). A terminal marker is not
 // considered here; plannedFailoverRun reports it.
-func plannedFailoverTerminal(s *v1alpha1.PlannedFailoverStatus) bool {
+func plannedFailoverTerminal(s *v1beta1.PlannedFailoverStatus) bool {
 	if s == nil {
 		return false
 	}
-	return s.Phase == v1alpha1.PlannedFailoverPhaseSucceeded ||
-		s.Phase == v1alpha1.PlannedFailoverPhaseFailed
+	return s.Phase == v1beta1.PlannedFailoverPhaseSucceeded ||
+		s.Phase == v1beta1.PlannedFailoverPhaseFailed
 }
 
 // reconcilePlannedFailover runs one engine pass for the group when one is
 // due. A positive duration asks for a requeue.
-func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
+func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if !plannedFailoverPassDue(fg) && !r.plannedClaimHeld(nn) {
 		return 0, nil
@@ -67,7 +67,7 @@ func plannedStepResult(ctx context.Context, nn types.NamespacedName) func(time.D
 // that returns before its regular planned-failover step: for a run already
 // in flight, a hold, a terminal marker, a durable deadline annotation, or a
 // held claim, never to admit a new request. ran reports whether a pass ran.
-func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailoverInFlight(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, bool, error) {
+func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailoverInFlight(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (time.Duration, bool, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if !plannedFailoverInFlightDue(fg) && !r.plannedClaimHeld(nn) {
 		return 0, false, nil
@@ -78,7 +78,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailoverInFlight(ctx cont
 
 // plannedFailoverPassRuns reports whether reconcilePlannedFailover runs a
 // pass for fg.
-func (r *MysqlFailoverGroupReconciler) plannedFailoverPassRuns(fg *v1alpha1.MysqlFailoverGroup) bool {
+func (r *MysqlFailoverGroupReconciler) plannedFailoverPassRuns(fg *v1beta1.MysqlFailoverGroup) bool {
 	return plannedFailoverPassDue(fg) || r.plannedClaimHeld(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
 }
 
@@ -87,11 +87,11 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPassRuns(fg *v1alpha1.Mysq
 // Publishing, or a Run-mode claim (a run's, or its provisional grant).
 // A run that owns nothing (Admitting or Deferred without a claim) and an
 // automation hold do not.
-func (r *MysqlFailoverGroupReconciler) plannedFailoverHoldsReconcile(fg *v1alpha1.MysqlFailoverGroup) bool {
+func (r *MysqlFailoverGroupReconciler) plannedFailoverHoldsReconcile(fg *v1beta1.MysqlFailoverGroup) bool {
 	if plannedFailoverOwnsSites(fg) {
 		return true
 	}
-	if pf, marked := plannedFailoverRun(fg); pf != nil && !marked && pf.Phase == v1alpha1.PlannedFailoverPhasePublishing {
+	if pf, marked := plannedFailoverRun(fg); pf != nil && !marked && pf.Phase == v1beta1.PlannedFailoverPhasePublishing {
 		return true
 	}
 	return r.plannedRunClaimHeld(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
@@ -102,7 +102,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverHoldsReconcile(fg *v1alpha
 // object still shows the phase before the pass, so the source's role
 // label would otherwise follow a newly recorded fence only on a later
 // reconcile. fg itself is returned when no pass ran or the read fails.
-func (r *MysqlFailoverGroupReconciler) plannedPostPassView(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, ran bool) *v1alpha1.MysqlFailoverGroup {
+func (r *MysqlFailoverGroupReconciler) plannedPostPassView(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, ran bool) *v1beta1.MysqlFailoverGroup {
 	if !ran {
 		return fg
 	}
@@ -110,7 +110,7 @@ func (r *MysqlFailoverGroupReconciler) plannedPostPassView(ctx context.Context, 
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(fg), &fresh); err != nil || fresh.UID != fg.UID {
 		return fg
 	}
@@ -123,7 +123,7 @@ func (r *MysqlFailoverGroupReconciler) plannedPostPassView(ctx context.Context, 
 // the sites (or a Run-mode claim is held), an error of the earlier step is
 // logged and the reconcile requeues on the run's cadence instead of the
 // controller's exponential backoff, which would starve the run's deadlines.
-func (r *MysqlFailoverGroupReconciler) drivePlannedFailoverOnEarlyReturn(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
+func (r *MysqlFailoverGroupReconciler) drivePlannedFailoverOnEarlyReturn(ctx context.Context, fg *v1beta1.MysqlFailoverGroup,
 	result ctrl.Result, err error) (ctrl.Result, error) {
 	pfRequeue, ran, pfErr := r.reconcilePlannedFailoverInFlight(ctx, fg)
 	if !ran {
@@ -161,8 +161,8 @@ func (r *MysqlFailoverGroupReconciler) StepPlannedFailoverForTest(ctx context.Co
 // annotation, a non-terminal block, a terminal marker, a durable deadline
 // annotation, or an automation hold. The engine re-reads uncached; the cache
 // only lets a quiet group skip the read.
-func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
-	if _, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
+func plannedFailoverPassDue(fg *v1beta1.MysqlFailoverGroup) bool {
+	if _, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; ok {
 		return true
 	}
 	return plannedFailoverInFlightDue(fg)
@@ -171,10 +171,10 @@ func plannedFailoverPassDue(fg *v1alpha1.MysqlFailoverGroup) bool {
 // plannedFailoverInFlightDue is plannedFailoverPassDue without a new
 // request: an acknowledgement, a non-terminal block, a terminal marker, a
 // durable deadline annotation, or an automation hold.
-func plannedFailoverInFlightDue(fg *v1alpha1.MysqlFailoverGroup) bool {
+func plannedFailoverInFlightDue(fg *v1beta1.MysqlFailoverGroup) bool {
 	a := fg.GetAnnotations()
-	for _, k := range []string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, v1alpha1.PlannedFailoverTerminalAnnotation,
-		v1alpha1.PlannedFailoverStallSinceAnnotation, v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation, v1alpha1.PlannedFailoverConfirmedAnnotation} {
+	for _, k := range []string{v1beta1.AcknowledgePlannedFailoverHoldAnnotation, v1beta1.PlannedFailoverTerminalAnnotation,
+		v1beta1.PlannedFailoverStallSinceAnnotation, v1beta1.PlannedFailoverManagerAbsentSinceAnnotation, v1beta1.PlannedFailoverConfirmedAnnotation} {
 		if _, ok := a[k]; ok {
 			return true
 		}
@@ -208,7 +208,7 @@ func (r *MysqlFailoverGroupReconciler) plannedTopologyFacade() PlannedFailoverTo
 // so the slot alone decides (a run that released its claim after recording
 // its promotion owns nothing, whatever status says); before that, or with
 // no runner, the status form (plannedFailoverOwnsDragonfly) decides.
-func (r *MysqlFailoverGroupReconciler) plannedOwnsDragonfly(fg *v1alpha1.MysqlFailoverGroup) bool {
+func (r *MysqlFailoverGroupReconciler) plannedOwnsDragonfly(fg *v1beta1.MysqlFailoverGroup) bool {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if r.Runner == nil {
 		return plannedFailoverOwnsDragonfly(fg, false)
@@ -264,13 +264,13 @@ type reconcilerPlannedSink struct {
 
 var _ PlannedFailoverSink = reconcilerPlannedSink{}
 
-func (s reconcilerPlannedSink) Event(fg *v1alpha1.MysqlFailoverGroup, eventType, reason, message string) {
+func (s reconcilerPlannedSink) Event(fg *v1beta1.MysqlFailoverGroup, eventType, reason, message string) {
 	if s.r.Recorder != nil {
 		s.r.Recorder.Eventf(fg, eventType, reason, "%s", message)
 	}
 }
 
-func (s reconcilerPlannedSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
+func (s reconcilerPlannedSink) RunTerminal(_ types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) {
 	if pf == nil {
 		return
 	}
@@ -288,7 +288,7 @@ func (s reconcilerPlannedSink) LagWaitObserved(_ types.NamespacedName, target st
 	metrics.PlannedFailoverLagWaitSeconds.WithLabelValues(target).Observe(d.Seconds())
 }
 
-func (s reconcilerPlannedSink) Deferred(nn types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason) {
+func (s reconcilerPlannedSink) Deferred(nn types.NamespacedName, reason v1beta1.PlannedFailoverDeferReason) {
 	metrics.PlannedFailoversDeferredTotal.WithLabelValues(nn.Name, string(reason)).Inc()
 }
 

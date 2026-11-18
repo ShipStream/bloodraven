@@ -6,7 +6,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -14,13 +14,13 @@ import (
 // rotationBlockedSites returns the names of sites whose UnsealReason is
 // Rotation. Order is spec-stable (sorted) so slice compares are not
 // order-sensitive across status rewrites.
-func rotationBlockedSites(fg *v1alpha1.MysqlFailoverGroup) []string {
+func rotationBlockedSites(fg *v1beta1.MysqlFailoverGroup) []string {
 	if fg == nil || !fg.Spec.EncryptionEnabled() || fg.Status.EncryptionAtRest == nil {
 		return nil
 	}
 	var out []string
 	for _, s := range fg.Status.EncryptionAtRest.Sites {
-		if s.UnsealReason == v1alpha1.UnsealReasonRotation {
+		if s.UnsealReason == v1beta1.UnsealReasonRotation {
 			out = append(out, s.Name)
 		}
 	}

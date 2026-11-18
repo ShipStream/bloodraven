@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"strings"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // tenantUserHost is the host part of every account a MysqlDatabase touches
 // that carries no explicit hosts list: spec.grants[] principals (created
 // elsewhere, by contract on '%'), and the owner and users[] entries when
 // their hosts list is omitted. It matches every account in credentials.go.
-const tenantUserHost = v1alpha1.DefaultMysqlHost
+const tenantUserHost = v1beta1.DefaultMysqlHost
 
 // mysqlAccount is one 'user'@'host' pair. A MysqlDatabase principal (owner
 // or users[] entry) is one username over a hosts list, so every statement
@@ -45,7 +45,7 @@ var defaultHosts = []string{tenantUserHost}
 // identifier. Callers must have validated it first; the check is repeated
 // here so that no path can reach the format string unvalidated.
 func quoteIdentifier(kind, name string) (string, error) {
-	if err := v1alpha1.ValidateMysqlIdentifier(kind, name); err != nil {
+	if err := v1beta1.ValidateMysqlIdentifier(kind, name); err != nil {
 		return "", err
 	}
 	return "`" + name + "`", nil
@@ -96,7 +96,7 @@ const maxGrantDatabaseLen = 64
 // quoteGrantDatabase is quoteIdentifier for a grantDatabaseSpellings
 // spelling: the schema name with `_` optionally escaped as `\_`.
 func quoteGrantDatabase(name string) (string, error) {
-	if err := v1alpha1.ValidateMysqlIdentifier("spec.databaseName", strings.ReplaceAll(name, `\_`, `_`)); err != nil {
+	if err := v1beta1.ValidateMysqlIdentifier("spec.databaseName", strings.ReplaceAll(name, `\_`, `_`)); err != nil {
 		return "", err
 	}
 	if len(name) > maxGrantDatabaseLen {
@@ -108,10 +108,10 @@ func quoteGrantDatabase(name string) (string, error) {
 
 // quoteAccount renders a validated username and host as 'user'@'host'.
 func quoteAccount(kind, username, host string) (string, error) {
-	if err := v1alpha1.ValidateMysqlUsername(kind, username); err != nil {
+	if err := v1beta1.ValidateMysqlUsername(kind, username); err != nil {
 		return "", err
 	}
-	if err := v1alpha1.ValidateMysqlHost(kind+" host", host); err != nil {
+	if err := v1beta1.ValidateMysqlHost(kind+" host", host); err != nil {
 		return "", err
 	}
 	return mysqlAccount{user: username, host: host}.String(), nil
@@ -175,13 +175,13 @@ func renderCreateDatabase(database, characterSet, collation string) (string, err
 // CREATE and on ALTER alike, so clearing spec.collation resets an existing
 // schema to that default.
 func renderDatabaseOptions(characterSet, collation string) (string, error) {
-	if err := v1alpha1.ValidateMysqlIdentifier("spec.characterSet", characterSet); err != nil {
+	if err := v1beta1.ValidateMysqlIdentifier("spec.characterSet", characterSet); err != nil {
 		return "", err
 	}
 	if collation == "" {
 		return "CHARACTER SET " + characterSet, nil
 	}
-	if err := v1alpha1.ValidateMysqlIdentifier("spec.collation", collation); err != nil {
+	if err := v1beta1.ValidateMysqlIdentifier("spec.collation", collation); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("CHARACTER SET %s COLLATE %s", characterSet, collation), nil
@@ -236,7 +236,7 @@ func renderOwnerUserStatements(username, password string, hosts []string) ([]str
 //
 // The WITH clause is statement-wide in ALTER USER, so one statement sets the
 // same limits on every host's account; MySQL enforces them per account.
-func renderTenantUserStatements(kind, username, password string, hosts []string, limits *v1alpha1.MysqlUserResourceLimits) ([]string, error) {
+func renderTenantUserStatements(kind, username, password string, hosts []string, limits *v1beta1.MysqlUserResourceLimits) ([]string, error) {
 	if password == "" {
 		return nil, fmt.Errorf("%s password must not be empty", kind)
 	}
@@ -262,8 +262,8 @@ func renderTenantUserStatements(kind, username, password string, hosts []string,
 // It never emits WITH GRANT OPTION, and there is no code path that can:
 // the suffix does not exist anywhere in this file, and the privilege text
 // comes from the fixed table in the API package rather than from the CR.
-func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, username string, hosts []string) (string, error) {
-	privSQL, err := v1alpha1.CanonicalPrivileges(kind, privileges)
+func renderGrant(kind string, privileges []v1beta1.MysqlPrivilege, database, username string, hosts []string) (string, error) {
+	privSQL, err := v1beta1.CanonicalPrivileges(kind, privileges)
 	if err != nil {
 		return "", err
 	}

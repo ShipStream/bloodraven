@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/platform"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,22 +38,22 @@ func cutoffTestDestination() pitrarchive.Destination {
 var cutoffTestArchive = pitrarchive.CreateArchiveID(cutoffTestUID, cutoffTestDestination())
 
 // cutoffTestBinding is a Bound plaintext binding for dest.
-func cutoffTestBinding(dest pitrarchive.Destination) v1alpha1.PITRArchiveBinding {
+func cutoffTestBinding(dest pitrarchive.Destination) v1beta1.PITRArchiveBinding {
 	sum := sha256.Sum256([]byte("bloodraven-pitr-binding-v1\x00" + dest.String()))
-	return v1alpha1.PITRArchiveBinding{
+	return v1beta1.PITRArchiveBinding{
 		ID:          "pab-" + hex.EncodeToString(sum[:])[:16],
 		Destination: dest.String(),
-		Encryption:  v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionModeNone},
-		State:       v1alpha1.PITRArchiveBindingBound,
+		Encryption:  v1beta1.PITRArchiveBindingEncryption{Mode: v1beta1.EncryptionModeNone},
+		State:       v1beta1.PITRArchiveBindingBound,
 		Reason:      "Bound",
 	}
 }
 
-func cutoffTestGroup() *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func cutoffTestGroup() *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "fg", UID: cutoffTestUID},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p"}}},
-		Status:     v1alpha1.MysqlFailoverGroupStatus{PITRArchiveBindings: []v1alpha1.PITRArchiveBinding{cutoffTestBinding(cutoffTestDestination())}},
+		Spec:       v1beta1.MysqlFailoverGroupSpec{Backup: &v1beta1.BackupSpec{PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "p"}}},
+		Status:     v1beta1.MysqlFailoverGroupStatus{PITRArchiveBindings: []v1beta1.PITRArchiveBinding{cutoffTestBinding(cutoffTestDestination())}},
 	}
 }
 func cutoffRequest(t *testing.T, h http.Handler, caller, query string) (int, map[string]any) {

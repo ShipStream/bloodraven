@@ -9,7 +9,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Pins of what the planned DST sweep found around a site that lost its own
@@ -46,7 +46,7 @@ func TestOwnTransactionsLost_RecloneIsNotRunOnAnOldComparison(t *testing.T) {
 	f.armClone(&replicationBeforeClone)
 
 	f.poll(8)
-	if got := f.statusSite("dc1"); got.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || got.LostGtid != ownLossLost {
+	if got := f.statusSite("dc1"); got.RecoveryState != v1beta1.RecoveryStateRecloneRequired || got.LostGtid != ownLossLost {
 		t.Fatalf("setup: dc1 status = %+v, want RecloneRequired for %s", got, ownLossLost)
 	}
 	if !strings.Contains(f.logs.String(), `msg="reclone requested for a site that lacks transactions it issued itself" site=dc1`) {
@@ -67,7 +67,7 @@ func TestOwnTransactionsLost_RecloneIsNotRunOnAnOldComparison(t *testing.T) {
 		t.Fatalf("dc1 was cloned over (cloned=%v, set %s): it held %s:101-105, which dc2 lacks", cloned, set, ownLossUUIDdc1)
 	}
 	got := f.statusSite("dc1")
-	if got.RecoveryState != v1alpha1.RecoveryStateBlocked || got.DivergentGtid != ownLossUUIDdc1+":101-105" || got.LostGtid != ownLossLost {
+	if got.RecoveryState != v1beta1.RecoveryStateBlocked || got.DivergentGtid != ownLossUUIDdc1+":101-105" || got.LostGtid != ownLossLost {
 		t.Fatalf("dc1 status = %+v, want RecoveryBlocked for its five transactions, with the lost set beside it", got)
 	}
 	if !strings.Contains(f.logs.String(), `msg="automatic reclone not started: the check before the clone does not allow it" site=dc1 donor=dc2`) {
@@ -121,7 +121,7 @@ func TestOwnTransactionsLost_ReassertCountsAPeersRecordedDivergence(t *testing.T
 	// dc2 answers again: it holds the ten transactions dc1 lacks.
 	cutOff(false)
 	f.poll(8)
-	if got := f.statusSite("dc2"); got.RecoveryState != v1alpha1.RecoveryStateBlocked || got.DivergentGtid != ownLossLost {
+	if got := f.statusSite("dc2"); got.RecoveryState != v1beta1.RecoveryStateBlocked || got.DivergentGtid != ownLossLost {
 		t.Fatalf("setup: dc2 status = %+v, want RecoveryBlocked for %s", got, ownLossLost)
 	}
 
@@ -134,7 +134,7 @@ func TestOwnTransactionsLost_ReassertCountsAPeersRecordedDivergence(t *testing.T
 		t.Fatalf("dc1 was made writable again although dc2 holds %s, which dc1 issued and would issue again", ownLossLost)
 	}
 	got := f.statusSite("dc1")
-	if got.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || got.LostGtid != ownLossLost {
+	if got.RecoveryState != v1beta1.RecoveryStateRecloneRequired || got.LostGtid != ownLossLost {
 		t.Fatalf("dc1 status = %+v, want RecloneRequired for %s", got, ownLossLost)
 	}
 	if !strings.Contains(f.logs.String(), `msg="primary re-assert refused: a peer holds transactions the target issued itself and lacks" site=dc1 peer=dc2`) {

@@ -7,7 +7,7 @@ import (
 
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
@@ -19,7 +19,7 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 	m, fg, now := deploymentLeaseFixture(t)
 	grantDeploymentLease(t, m, fg, "migration", "op1", 120)
 	hold := grantDeploymentLease(t, m, fg, "failover-hold", "op1", 30)
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx:maxLagWait=45s"}
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverAnnotation: "pdx:maxLagWait=45s"}
 	if err := m.client.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -34,8 +34,8 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 	}
 	fresh := fetchFG(t, r, fgNN(fg))
 	pf := fresh.Status.PlannedFailover
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
-		pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold || pf.RunID == "" {
+	if pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseDeferred || pf.Admission == nil ||
+		pf.Admission.DeferReason != v1beta1.PlannedFailoverDeferDeploymentHold || pf.RunID == "" {
 		t.Fatalf("expected deployment deferral, got %+v", pf)
 	}
 	if pf.Admission.RetryTime == nil || !pf.Admission.RetryTime.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) {
@@ -46,10 +46,10 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 	}
 	// The deferral is recorded in status only: the user's annotation is
 	// kept byte for byte, never rewritten (A-50 item 4).
-	if v := fresh.Annotations[v1alpha1.PlannedFailoverAnnotation]; v != "pdx:maxLagWait=45s" {
+	if v := fresh.Annotations[v1beta1.PlannedFailoverAnnotation]; v != "pdx:maxLagWait=45s" {
 		t.Fatalf("request annotation = %q, want it unchanged", v)
 	}
-	req, err := parsePlannedFailoverAnnotation(fresh.Annotations[v1alpha1.PlannedFailoverAnnotation])
+	req, err := parsePlannedFailoverAnnotation(fresh.Annotations[v1beta1.PlannedFailoverAnnotation])
 	if err != nil || req.Site != "pdx" || req.MaxLagWait != 45*time.Second {
 		t.Fatalf("request not retained: %+v, %v", req, err)
 	}
@@ -70,7 +70,7 @@ func TestDeploymentHoldDefersRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := fetchFG(t, r, fgNN(fg)).Status.PlannedFailover
-	if got.RunID != runID || got.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || !got.StartTime.Equal(start) {
+	if got.RunID != runID || got.Phase != v1beta1.PlannedFailoverPhaseAdmitting || !got.StartTime.Equal(start) {
 		t.Fatalf("after the hold = %+v, want run %s in Admitting with its start time", got, runID)
 	}
 }

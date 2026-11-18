@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/metrics"
 )
@@ -90,7 +90,7 @@ func TestObserveLicenseNeverFailsReconcile(t *testing.T) {
 	}
 
 	good := mustLicenseToken(t, priv, kid, licenseClaims(now))
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &live); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestObserveLicenseTransitions(t *testing.T) {
 	}
 
 	r.observeLicense(fg)
-	if got := drainFakeEvents(rec); licenseEventCount(got, v1alpha1.EventLicenseInvalid)+licenseEventCount(got, v1alpha1.EventLicenseVerified) != 0 {
+	if got := drainFakeEvents(rec); licenseEventCount(got, v1beta1.EventLicenseInvalid)+licenseEventCount(got, v1beta1.EventLicenseVerified) != 0 {
 		t.Fatalf("community must not emit license events: %v", got)
 	}
 
@@ -133,14 +133,14 @@ func TestObserveLicenseTransitions(t *testing.T) {
 	r.observeLicense(fg)
 	r.observeLicense(fg)
 	events := drainFakeEvents(rec)
-	if licenseEventCount(events, v1alpha1.EventLicenseInvalid) != 1 {
+	if licenseEventCount(events, v1beta1.EventLicenseInvalid) != 1 {
 		t.Fatalf("invalid token should event once, got %v", events)
 	}
 
 	fg.Spec.License = good
 	r.observeLicense(fg)
 	events = drainFakeEvents(rec)
-	if licenseEventCount(events, v1alpha1.EventLicenseVerified) != 1 {
+	if licenseEventCount(events, v1beta1.EventLicenseVerified) != 1 {
 		t.Fatalf("valid token should event once, got %v", events)
 	}
 	if !strings.Contains(logBuf.String(), msgLicenseVerified) {
@@ -153,7 +153,7 @@ func TestObserveLicenseTransitions(t *testing.T) {
 	fg.Spec.License = "bad-token"
 	r.observeLicense(fg)
 	events = drainFakeEvents(rec)
-	if licenseEventCount(events, v1alpha1.EventLicenseInvalid) != 1 {
+	if licenseEventCount(events, v1beta1.EventLicenseInvalid) != 1 {
 		t.Fatalf("recreation should warn again, got %v", events)
 	}
 }

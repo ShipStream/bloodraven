@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const verifyUsage = `Create an on-demand MysqlBackupVerification.
@@ -77,7 +77,7 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: group}, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("MysqlFailoverGroup %s/%s not found", ns, group)
@@ -88,7 +88,7 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 		return fmt.Errorf("profile %q is not defined in spec.backup.profiles of %s/%s", profile, ns, group)
 	}
 	if backupName != "" {
-		var ref v1alpha1.MysqlBackup
+		var ref v1beta1.MysqlBackup
 		if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: backupName}, &ref); err != nil {
 			if apierrors.IsNotFound(err) {
 				return fmt.Errorf("MysqlBackup %s/%s not found", ns, backupName)
@@ -128,28 +128,28 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 // pulls VerificationSpec defaults off the named profile so a manual
 // verification produces a CR equivalent to one a scheduled CronJob
 // would create.
-func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, backupName, triggeredBy string) *v1alpha1.MysqlBackupVerification {
+func buildVerificationCR(fg *v1beta1.MysqlFailoverGroup, ns, group, profile, backupName, triggeredBy string) *v1beta1.MysqlBackupVerification {
 	if triggeredBy == "" {
 		triggeredBy = "manual"
 	}
-	cr := &v1alpha1.MysqlBackupVerification{
+	cr := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: generateNameWithInfix(group, profile, "verify"),
 			Namespace:    ns,
-			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: triggeredBy},
+			Annotations:  map[string]string{v1beta1.TriggeredByAnnotation: triggeredBy},
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel:    group,
-				v1alpha1.BackupProfileLabel:    profile,
+				v1beta1.FailoverGroupLabel:     group,
+				v1beta1.BackupProfileLabel:     profile,
 				"app.kubernetes.io/managed-by": "bloodraven",
 			},
 		},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: group},
 			ProfileName:      profile,
 		},
 	}
 	if backupName != "" {
-		cr.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: backupName}
+		cr.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: backupName}
 	}
 	if vs := profileVerificationSpec(fg, profile); vs != nil {
 		// Copy the pointers so an unset field stays unset on the CR
@@ -173,7 +173,7 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 	return cr
 }
 
-func profileVerificationSpec(fg *v1alpha1.MysqlFailoverGroup, profile string) *v1alpha1.VerificationSpec {
+func profileVerificationSpec(fg *v1beta1.MysqlFailoverGroup, profile string) *v1beta1.VerificationSpec {
 	if fg.Spec.Backup == nil {
 		return nil
 	}
@@ -192,11 +192,11 @@ func waitForVerification(stdout, stderr io.Writer, cl client.Client, ns, name st
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	startedAt := time.Now()
-	last := v1alpha1.VerificationPhase("")
+	last := v1beta1.VerificationPhase("")
 	consecutiveErrors := 0
 
 	for {
-		var v v1alpha1.MysqlBackupVerification
+		var v v1beta1.MysqlBackupVerification
 		getCtx, getCancel := context.WithTimeout(ctx, 10*time.Second)
 		err := cl.Get(getCtx, client.ObjectKey{Namespace: ns, Name: name}, &v)
 		getCancel()
@@ -226,7 +226,7 @@ func waitForVerification(stdout, stderr io.Writer, cl client.Client, ns, name st
 			last = v.Status.Phase
 		}
 		switch v.Status.Phase {
-		case v1alpha1.VerificationPhaseSucceeded:
+		case v1beta1.VerificationPhaseSucceeded:
 			fmt.Fprintln(stdout, "Verification succeeded.")
 			if v.Status.BackupRef != nil {
 				fmt.Fprintf(stdout, "  Verified backup: %s\n", v.Status.BackupRef.Name)
@@ -235,7 +235,7 @@ func waitForVerification(stdout, stderr io.Writer, cl client.Client, ns, name st
 				fmt.Fprintf(stdout, "  Duration: %ds\n", v.Status.DurationSeconds)
 			}
 			return nil
-		case v1alpha1.VerificationPhaseFailed:
+		case v1beta1.VerificationPhaseFailed:
 			fmt.Fprintf(stderr, "Verification failed: %s\n", v.Status.Message)
 			return fmt.Errorf("verification %s reached Failed", name)
 		}

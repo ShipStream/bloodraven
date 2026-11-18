@@ -15,27 +15,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // pitrRolloutFG is a group archiving to an encrypted S3 profile, with its
 // write binding Bound (K6-eligible: this group created the archive).
-func pitrRolloutFG(credentials bool) *v1alpha1.MysqlFailoverGroup {
+func pitrRolloutFG(credentials bool) *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG()
 	if credentials {
 		fg = newTestFGWithCredentials()
 	}
 	fg.UID = "lion-uid"
-	fg.Spec.Backup = &v1alpha1.BackupSpec{
-		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "archive"},
-		Profiles: []v1alpha1.BackupProfile{{
+	fg.Spec.Backup = &v1beta1.BackupSpec{
+		PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "archive"},
+		Profiles: []v1beta1.BackupProfile{{
 			Name: "archive",
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3,
-				S3:   &v1alpha1.S3Storage{Bucket: "backups", Region: "us-east-1", CredentialsSecretName: "s3-creds"},
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStorageS3,
+				S3:   &v1beta1.S3Storage{Bucket: "backups", Region: "us-east-1", CredentialsSecretName: "s3-creds"},
 			},
-			Encryption: &v1alpha1.BackupEncryptionSpec{
-				PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "archive-passphrase"},
+			Encryption: &v1beta1.BackupEncryptionSpec{
+				PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "archive-passphrase"},
 			},
 		}},
 	}
@@ -53,37 +53,37 @@ func TestComputeSpecHashPITRRender(t *testing.T) {
 		fg := pitrRolloutFG(credentials)
 		for _, tc := range []struct {
 			name     string
-			change   func(*v1alpha1.MysqlFailoverGroup)
+			change   func(*v1beta1.MysqlFailoverGroup)
 			wantSame bool
 		}{
-			{"row 2: encryption removed", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Encryption = nil }, true},
-			{"row 5: secret renamed", func(fg *v1alpha1.MysqlFailoverGroup) {
+			{"row 2: encryption removed", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Encryption = nil }, true},
+			{"row 5: secret renamed", func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "rotated"
 			}, true},
-			{"selector key", func(fg *v1alpha1.MysqlFailoverGroup) {
+			{"selector key", func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Key = "next"
 			}, true},
-			{"row 9/10: same-prefix alias made active", func(fg *v1alpha1.MysqlFailoverGroup) {
+			{"row 9/10: same-prefix alias made active", func(fg *v1beta1.MysqlFailoverGroup) {
 				alias := *fg.Spec.Backup.Profiles[0].DeepCopy()
 				alias.Name = "alias"
 				alias.Encryption.PassphraseSecretKeyRef.Name = "other-bytes"
 				fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, alias)
 				fg.Spec.Backup.PITR.ProfileName = "alias"
 			}, true},
-			{"unused profile", func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, v1alpha1.BackupProfile{Name: "unused", Encryption: &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "unused"}}})
+			{"unused profile", func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, v1beta1.BackupProfile{Name: "unused", Encryption: &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "unused"}}})
 			}, true},
-			{"row 10a: region", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage.S3.Region = "eu-west-1" }, false},
-			{"row 10a: credentials Secret", func(fg *v1alpha1.MysqlFailoverGroup) {
+			{"row 10a: region", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage.S3.Region = "eu-west-1" }, false},
+			{"row 10a: credentials Secret", func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecretName = "s3-creds-2"
 			}, false},
-			{"row 10a: endpoint spelling", func(fg *v1alpha1.MysqlFailoverGroup) {
+			{"row 10a: endpoint spelling", func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.Backup.Profiles[0].Storage.S3.EndpointURL = "https://s3.amazonaws.com:443"
 			}, false},
-			{"row 10a: poll interval", func(fg *v1alpha1.MysqlFailoverGroup) {
+			{"row 10a: poll interval", func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.Backup.PITR.ArchivePollInterval = &metav1.Duration{Duration: 30 * time.Second}
 			}, false},
-			{"row 22: PITR disabled", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.Enabled = false }, false},
+			{"row 22: PITR disabled", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.Enabled = false }, false},
 		} {
 			t.Run(tc.name+"/credentials="+strconv.FormatBool(credentials), func(t *testing.T) {
 				changed := fg.DeepCopy()
@@ -100,12 +100,12 @@ func TestComputeSpecHashPITRRender(t *testing.T) {
 // Δ29: neither the profile name nor the backup PVC's size or storage class
 // is a render input.
 func TestComputeSpecHashPITRIgnoresProfileNameAndPVCSizing(t *testing.T) {
-	hash := func(fg *v1alpha1.MysqlFailoverGroup) string {
+	hash := func(fg *v1beta1.MysqlFailoverGroup) string {
 		return ComputeSpecHash(fg, fg.Spec.Sites[0], "", testPITRRender(fg))
 	}
-	setup := func(pvc v1alpha1.PVCStorage) *v1alpha1.MysqlFailoverGroup {
+	setup := func(pvc v1beta1.PVCStorage) *v1beta1.MysqlFailoverGroup {
 		fg := pitrRolloutFG(false)
-		fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: &pvc}
+		fg.Spec.Backup.Profiles[0].Storage = v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: &pvc}
 		fg.Spec.Backup.Profiles[0].Encryption = nil
 		fg.Status.PITRArchiveBindings = nil
 		bindAllTestPITRArchives(fg)
@@ -113,7 +113,7 @@ func TestComputeSpecHashPITRIgnoresProfileNameAndPVCSizing(t *testing.T) {
 	}
 
 	// An existing claim: the profile name is no render input.
-	fg := setup(v1alpha1.PVCStorage{ClaimName: "archive"})
+	fg := setup(v1beta1.PVCStorage{ClaimName: "archive"})
 	base := hash(fg)
 	renamed := fg.DeepCopy()
 	renamed.Spec.Backup.Profiles[0].Name = "renamed"
@@ -123,7 +123,7 @@ func TestComputeSpecHashPITRIgnoresProfileNameAndPVCSizing(t *testing.T) {
 	}
 
 	// A provisioned claim: its size and class are no render input.
-	fg = setup(v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{Size: "10Gi", StorageClassName: new("fast")}})
+	fg = setup(v1beta1.PVCStorage{Provisioned: &v1beta1.ProvisionedVolumeSpec{Size: "10Gi", StorageClassName: new("fast")}})
 	base = hash(fg)
 	resized := fg.DeepCopy()
 	resized.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "20Gi"
@@ -143,9 +143,9 @@ func TestSpecSecretInputsConsumedKeysOnly(t *testing.T) {
 	for _, credentials := range []bool{false, true} {
 		t.Run("credentials="+strconv.FormatBool(credentials), func(t *testing.T) {
 			fg := pitrRolloutFG(credentials)
-			fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
+			fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"}
 			// Row 33a: the PITR passphrase lives in the TLS Secret.
-			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef = v1alpha1.PassphraseSecretKeyRef{Name: "mysql-tls", Key: "pitr-passphrase"}
+			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef = v1beta1.PassphraseSecretKeyRef{Name: "mysql-tls", Key: "pitr-passphrase"}
 			tls := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "mysql-tls", Namespace: fg.Namespace},
 				Data: map[string][]byte{"ca.crt": []byte("ca"), "tls.crt": []byte("crt"), "tls.key": []byte("key"), "pitr-passphrase": []byte("p1")}}
 			objs := []client.Object{tls}
@@ -227,7 +227,7 @@ func TestSpecSecretInputsNeverReadsPassphrase(t *testing.T) {
 func TestComputeCredentialHashConsumedKeysOnly(t *testing.T) {
 	ctx := context.Background()
 	fg := pitrRolloutFG(true)
-	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef = v1alpha1.PassphraseSecretKeyRef{Name: "missing-passphrase"}
+	fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef = v1beta1.PassphraseSecretKeyRef{Name: "missing-passphrase"}
 	objs := []client.Object{fg}
 	for _, s := range newTestCredentialSecrets() {
 		objs = append(objs, s)

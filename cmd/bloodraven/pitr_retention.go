@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/sidecar"
@@ -22,7 +22,7 @@ type pitrLookupResult struct {
 // uncached reader used only to decide whether a backup being deleted is
 // still read by a verification or a restore.
 func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, namespace, group, archive string) (map[string]any, error) {
-	var list v1alpha1.MysqlBackupList
+	var list v1beta1.MysqlBackupList
 	// Specs are authoritative: labels and the PITR profile do not delimit which
 	// group backups may later be used as PITR restore sources.
 	if err := reader.List(ctx, &list, client.InNamespace(namespace)); err != nil {
@@ -51,7 +51,7 @@ func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, na
 		// server, and fail closed on errors. Holds are only taken on
 		// Succeeded backups, so a deleted backup in any other phase is
 		// skipped without asking the API server.
-		if !b.DeletionTimestamp.IsZero() && b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+		if !b.DeletionTimestamp.IsZero() && b.Status.Phase != v1beta1.BackupPhaseSucceeded {
 			continue
 		}
 		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasReadHold(b) {
@@ -67,9 +67,9 @@ func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, na
 			}
 		}
 		switch b.Status.Phase {
-		case v1alpha1.BackupPhaseFailed:
+		case v1beta1.BackupPhaseFailed:
 			continue
-		case v1alpha1.BackupPhaseSucceeded:
+		case v1beta1.BackupPhaseSucceeded:
 		default:
 			// Pending, Running and unknown phases can still produce an older dump.
 			inFlight = true

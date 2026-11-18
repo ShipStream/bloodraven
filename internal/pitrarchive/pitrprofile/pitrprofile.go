@@ -1,4 +1,4 @@
-// Package pitrprofile builds pitrarchive values from v1alpha1 backup
+// Package pitrprofile builds pitrarchive values from v1beta1 backup
 // profiles. It is split from pitrarchive so that the sidecar, which never
 // sees a profile, does not link the Kubernetes API types.
 //
@@ -14,19 +14,19 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
 // DestinationFor returns the normalized archive destination of profile p in
 // group fg (§3.1). For PVC the claim is the one ClaimFor resolves, and the
 // namespace is fg's.
-func DestinationFor(fg *v1alpha1.MysqlFailoverGroup, p *v1alpha1.BackupProfile) (pitrarchive.Destination, error) {
+func DestinationFor(fg *v1beta1.MysqlFailoverGroup, p *v1beta1.BackupProfile) (pitrarchive.Destination, error) {
 	if fg == nil || p == nil {
 		return pitrarchive.Destination{}, fmt.Errorf("%w: nil group or profile", pitrarchive.ErrInvalidDestination)
 	}
 	switch p.Storage.Type {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		s3 := p.Storage.S3
 		if s3 == nil {
 			return pitrarchive.Destination{}, fmt.Errorf("%w: profile %q type=S3 but storage.s3 is nil", pitrarchive.ErrInvalidDestination, p.Name)
@@ -36,7 +36,7 @@ func DestinationFor(fg *v1alpha1.MysqlFailoverGroup, p *v1alpha1.BackupProfile) 
 			return pitrarchive.Destination{}, fmt.Errorf("profile %q: %w", p.Name, err)
 		}
 		return d, nil
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		pvc := p.Storage.PVC
 		if pvc == nil {
 			return pitrarchive.Destination{}, fmt.Errorf("%w: profile %q type=PVC but storage.pvc is nil", pitrarchive.ErrInvalidDestination, p.Name)
@@ -60,7 +60,7 @@ func DestinationFor(fg *v1alpha1.MysqlFailoverGroup, p *v1alpha1.BackupProfile) 
 // algorithm (AES-256-GCM when unset)}. Unlike
 // BackupEncryptionSpec.AlgorithmOrDefault, a nil spec never yields an
 // algorithm (F30).
-func EncryptionIdentityFor(p *v1alpha1.BackupProfile) pitrarchive.EncryptionIdentity {
+func EncryptionIdentityFor(p *v1beta1.BackupProfile) pitrarchive.EncryptionIdentity {
 	if !p.EncryptionEnabled() {
 		return pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}
 	}
@@ -75,7 +75,7 @@ func EncryptionIdentityFor(p *v1alpha1.BackupProfile) pitrarchive.EncryptionIden
 // then true); else an error. Admission requires exactly one of the two, so
 // the error is reached only by an object stored before that rule, and it
 // names the fix instead of mounting a claim nobody provisions.
-func ClaimFor(fgName, profileName string, pvc *v1alpha1.PVCStorage) (claim string, owned bool, err error) {
+func ClaimFor(fgName, profileName string, pvc *v1beta1.PVCStorage) (claim string, owned bool, err error) {
 	switch {
 	case pvc == nil:
 		return "", false, fmt.Errorf("profile %q has no storage.pvc", profileName)

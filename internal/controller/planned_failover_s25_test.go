@@ -10,21 +10,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
 // assertDragonflyStatusConsistent fails when status.dragonfly reads Ready
 // while the site it lists as the master is not status.dragonfly.activeSite
 // (DragonflyPhaseReady: exactly one master serving, the active site's).
-func assertDragonflyStatusConsistent(t *testing.T, when string, df *v1alpha1.DragonflyStatus) {
+func assertDragonflyStatusConsistent(t *testing.T, when string, df *v1beta1.DragonflyStatus) {
 	t.Helper()
-	if df == nil || df.Phase != v1alpha1.DragonflyPhaseReady {
+	if df == nil || df.Phase != v1beta1.DragonflyPhaseReady {
 		return
 	}
 	var masters []string
 	for _, s := range df.Sites {
-		if s.Role == v1alpha1.DragonflyRoleMaster {
+		if s.Role == v1beta1.DragonflyRoleMaster {
 			masters = append(masters, s.Name)
 		}
 	}
@@ -56,7 +56,7 @@ func TestS25_RestartMidSyncThenFollowUpKeepsDragonflyStatusConsistent(t *testing
 	started := metav1.NewTime(time.Now().Add(-time.Minute))
 	off := int64(100)
 	pf.Dragonfly.SyncWaitStartTime = &started
-	pf.Dragonfly.SourceOffsetState, pf.Dragonfly.SourceOffset = v1alpha1.DragonflyOffsetCaptured, &off
+	pf.Dragonfly.SourceOffsetState, pf.Dragonfly.SourceOffset = v1beta1.DragonflyOffsetCaptured, &off
 	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
 	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
 
@@ -73,14 +73,14 @@ func TestS25_RestartMidSyncThenFollowUpKeepsDragonflyStatusConsistent(t *testing
 	// the takeover intent.
 	pfDFPass(t, r, nn)
 	pf = fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Reason != v1alpha1.DragonflyPlannedReasonSyncTimeout {
+	if pf.Phase != v1beta1.PlannedFailoverPhasePromotingDragonfly || pf.Dragonfly.Reason != v1beta1.DragonflyPlannedReasonSyncTimeout {
 		t.Fatalf("after the sync wait: %s %+v, want PromotingDragonfly{SyncTimeout}", pf.Phase, pf.Dragonfly)
 	}
 	// The takeover refuses the empty standalone master: no REPLTAKEOVER, the
 	// source is neither demoted nor deleted, and MySQL goes on (Proceed).
 	pfDFTakeoverPasses(t, r, nn)
 	pf = fetchFG(t, r, nn).Status.PlannedFailover
-	if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1alpha1.DragonflyTakeoverFailed {
+	if pf.Phase != v1beta1.PlannedFailoverPhasePromoting || pf.Dragonfly.Takeover.State != v1beta1.DragonflyTakeoverFailed {
 		t.Fatalf("after the takeover: %s %+v, want Promoting with the takeover Failed", pf.Phase, pf.Dragonfly.Takeover)
 	}
 	if target.takeovers != 0 || pfDFPodGone(t, c, sourcePod) {
@@ -91,8 +91,8 @@ func TestS25_RestartMidSyncThenFollowUpKeepsDragonflyStatusConsistent(t *testing
 	// Dragonfly master is still the source.
 	cur := fetchFG(t, r, nn)
 	cur.Status.ActiveSite = "pdx"
-	cur.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseSucceeded
-	cur.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "iad"}
+	cur.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhaseSucceeded
+	cur.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "iad"}
 	if err := c.Status().Update(context.Background(), cur); err != nil {
 		t.Fatalf("finish the run: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestS25_RestartMidSyncThenFollowUpKeepsDragonflyStatusConsistent(t *testing
 		}
 		return nil, errors.New("no programmed conn for " + addr)
 	})
-	status := func() *v1alpha1.DragonflyStatus { return fetchFG(t, r, nn).Status.Dragonfly }
+	status := func() *v1beta1.DragonflyStatus { return fetchFG(t, r, nn).Status.Dragonfly }
 
 	// Tick 1: the empty target is a stale master that never took a write;
 	// it is re-attached to the source.
@@ -134,7 +134,7 @@ func TestS25_RestartMidSyncThenFollowUpKeepsDragonflyStatusConsistent(t *testing
 		MasterPort: 6379, MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 500}
 	mgr.Tick(context.Background())
 	df = status()
-	if df.Phase != v1alpha1.DragonflyPhaseReady || df.ActiveSite != "pdx" {
+	if df.Phase != v1beta1.DragonflyPhaseReady || df.ActiveSite != "pdx" {
 		t.Fatalf("converged status = %s on %q (%q), want Ready on pdx", df.Phase, df.ActiveSite, df.Message)
 	}
 	assertDragonflyStatusConsistent(t, "converged", df)

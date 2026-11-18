@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/testutil"
 )
@@ -241,7 +241,7 @@ func TestBinlogRotation_BoundIsTheInjectedClock(t *testing.T) {
 		var err error
 		go func() {
 			defer close(done)
-			out, err = f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+			out, err = f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		}()
 		requireBoundOnInjectedClock(t, f.clk, h, done)
 		if err != nil || out.Kind != PromoteConfirmed {

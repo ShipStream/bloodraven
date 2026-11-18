@@ -8,21 +8,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // makeDragonflyPod returns a pod fixture matching the labels the
 // label-sync helpers select on, for the given site/role/traffic.
 func makeDragonflyPod(fgName, siteName, role string, trafficEnabled bool) *corev1.Pod {
 	labels := map[string]string{
-		labelAppName:                dragonflyAppName,
-		labelInstance:               fgName,
-		v1alpha1.FailoverGroupLabel: fgName,
-		v1alpha1.SiteLabel:          siteName,
-		v1alpha1.DragonflyRoleLabel: role,
+		labelAppName:               dragonflyAppName,
+		labelInstance:              fgName,
+		v1beta1.FailoverGroupLabel: fgName,
+		v1beta1.SiteLabel:          siteName,
+		v1beta1.DragonflyRoleLabel: role,
 	}
 	if trafficEnabled {
-		labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
+		labels[v1beta1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -52,17 +52,17 @@ func TestSyncDragonflyPodLabels_StampsBothLabels(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: dc2Pod.Name, Namespace: dc2Pod.Namespace}, &got2); err != nil {
 		t.Fatalf("get dc2 pod: %v", err)
 	}
-	if got1.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
-		t.Errorf("dc1 role = %q, want master", got1.Labels[v1alpha1.DragonflyRoleLabel])
+	if got1.Labels[v1beta1.DragonflyRoleLabel] != "master" {
+		t.Errorf("dc1 role = %q, want master", got1.Labels[v1beta1.DragonflyRoleLabel])
 	}
-	if got1.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
-		t.Errorf("dc1 traffic = %q, want %q", got1.Labels[v1alpha1.DragonflyTrafficLabel], dragonflyTrafficEnabled)
+	if got1.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+		t.Errorf("dc1 traffic = %q, want %q", got1.Labels[v1beta1.DragonflyTrafficLabel], dragonflyTrafficEnabled)
 	}
-	if got2.Labels[v1alpha1.DragonflyRoleLabel] != "replica" {
-		t.Errorf("dc2 role = %q, want replica", got2.Labels[v1alpha1.DragonflyRoleLabel])
+	if got2.Labels[v1beta1.DragonflyRoleLabel] != "replica" {
+		t.Errorf("dc2 role = %q, want replica", got2.Labels[v1beta1.DragonflyRoleLabel])
 	}
-	if got2.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
-		t.Errorf("dc2 traffic = %q, want %q (replicas keep traffic enabled — selector is gated by role too)", got2.Labels[v1alpha1.DragonflyTrafficLabel], dragonflyTrafficEnabled)
+	if got2.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+		t.Errorf("dc2 traffic = %q, want %q (replicas keep traffic enabled — selector is gated by role too)", got2.Labels[v1beta1.DragonflyTrafficLabel], dragonflyTrafficEnabled)
 	}
 }
 
@@ -74,13 +74,13 @@ func TestSyncDragonflyPodLabels_SkipsRestoreDuringStripWindow(t *testing.T) {
 	// active Service mid-REPLTAKEOVER.
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
 		RunID:      "run-1",
-		Phase:      v1alpha1.PlannedFailoverPhasePromotingDragonfly,
+		Phase:      v1beta1.PlannedFailoverPhasePromotingDragonfly,
 		TargetSite: "dc2",
 		SourceSite: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
-			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverIntended, IntentTime: metav1.Now()},
+		Dragonfly: &v1beta1.PlannedFailoverDragonflyStatus{
+			Takeover: &v1beta1.DragonflyTakeoverRecord{State: v1beta1.DragonflyTakeoverIntended, IntentTime: metav1.Now()},
 		},
 	}
 	// dc1 (source) has role=master but traffic stripped (no traffic label).
@@ -95,8 +95,8 @@ func TestSyncDragonflyPodLabels_SkipsRestoreDuringStripWindow(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: dc1Pod.Name, Namespace: dc1Pod.Namespace}, &got1); err != nil {
 		t.Fatalf("get dc1 pod: %v", err)
 	}
-	if _, ok := got1.Labels[v1alpha1.DragonflyTrafficLabel]; ok {
-		t.Errorf("dc1 traffic label = %q, want absent (strip-active gate)", got1.Labels[v1alpha1.DragonflyTrafficLabel])
+	if _, ok := got1.Labels[v1beta1.DragonflyTrafficLabel]; ok {
+		t.Errorf("dc1 traffic label = %q, want absent (strip-active gate)", got1.Labels[v1beta1.DragonflyTrafficLabel])
 	}
 }
 
@@ -107,14 +107,14 @@ func TestSyncDragonflyPodLabels_RestoresAfterTakeoverSucceeded(t *testing.T) {
 	// should enforce target=master,traffic=true and source=replica,traffic=true.
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
 		RunID:      "run-1",
-		Phase:      v1alpha1.PlannedFailoverPhasePromotingDragonfly,
+		Phase:      v1beta1.PlannedFailoverPhasePromotingDragonfly,
 		TargetSite: "dc2",
 		SourceSite: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
-			Takeover: &v1alpha1.DragonflyTakeoverRecord{State: v1alpha1.DragonflyTakeoverSucceeded, IntentTime: metav1.Now(),
-				Method: v1alpha1.DragonflyTakeoverMethodReplTakeover},
+		Dragonfly: &v1beta1.PlannedFailoverDragonflyStatus{
+			Takeover: &v1beta1.DragonflyTakeoverRecord{State: v1beta1.DragonflyTakeoverSucceeded, IntentTime: metav1.Now(),
+				Method: v1beta1.DragonflyTakeoverMethodReplTakeover},
 		},
 	}
 	// Both pods have been rewritten by the phase handler to their new
@@ -133,21 +133,21 @@ func TestSyncDragonflyPodLabels_RestoresAfterTakeoverSucceeded(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: dc2Pod.Name, Namespace: dc2Pod.Namespace}, &got2); err != nil {
 		t.Fatalf("get dc2: %v", err)
 	}
-	if got1.Labels[v1alpha1.DragonflyRoleLabel] != "replica" {
-		t.Errorf("dc1 role = %q, want replica", got1.Labels[v1alpha1.DragonflyRoleLabel])
+	if got1.Labels[v1beta1.DragonflyRoleLabel] != "replica" {
+		t.Errorf("dc1 role = %q, want replica", got1.Labels[v1beta1.DragonflyRoleLabel])
 	}
-	if got2.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
-		t.Errorf("dc2 role = %q, want master", got2.Labels[v1alpha1.DragonflyRoleLabel])
+	if got2.Labels[v1beta1.DragonflyRoleLabel] != "master" {
+		t.Errorf("dc2 role = %q, want master", got2.Labels[v1beta1.DragonflyRoleLabel])
 	}
-	if got2.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
-		t.Errorf("dc2 traffic = %q, want enabled", got2.Labels[v1alpha1.DragonflyTrafficLabel])
+	if got2.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+		t.Errorf("dc2 traffic = %q, want enabled", got2.Labels[v1beta1.DragonflyTrafficLabel])
 	}
 }
 
 func TestSyncDragonflyPodLabels_HonorsDragonflyOnlyActiveSite(t *testing.T) {
 	fg := fgWithDragonfly()
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{
 		ActiveSite: "dc2",
 	}
 	dc1Pod := makeDragonflyPod(fg.Name, "dc1", "master", true)
@@ -164,11 +164,11 @@ func TestSyncDragonflyPodLabels_HonorsDragonflyOnlyActiveSite(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: dc2Pod.Name, Namespace: dc2Pod.Namespace}, &got2); err != nil {
 		t.Fatalf("get dc2: %v", err)
 	}
-	if got1.Labels[v1alpha1.DragonflyRoleLabel] != "replica" {
-		t.Errorf("dc1 role = %q, want replica", got1.Labels[v1alpha1.DragonflyRoleLabel])
+	if got1.Labels[v1beta1.DragonflyRoleLabel] != "replica" {
+		t.Errorf("dc1 role = %q, want replica", got1.Labels[v1beta1.DragonflyRoleLabel])
 	}
-	if got2.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
-		t.Errorf("dc2 role = %q, want master", got2.Labels[v1alpha1.DragonflyRoleLabel])
+	if got2.Labels[v1beta1.DragonflyRoleLabel] != "master" {
+		t.Errorf("dc2 role = %q, want master", got2.Labels[v1beta1.DragonflyRoleLabel])
 	}
 }
 
@@ -185,8 +185,8 @@ func TestSetDragonflyTrafficOnSite_RemovesAndRestores(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
 		t.Fatalf("get pod: %v", err)
 	}
-	if _, ok := got.Labels[v1alpha1.DragonflyTrafficLabel]; ok {
-		t.Errorf("after strip, traffic label still present: %q", got.Labels[v1alpha1.DragonflyTrafficLabel])
+	if _, ok := got.Labels[v1beta1.DragonflyTrafficLabel]; ok {
+		t.Errorf("after strip, traffic label still present: %q", got.Labels[v1beta1.DragonflyTrafficLabel])
 	}
 
 	// Restore
@@ -196,7 +196,7 @@ func TestSetDragonflyTrafficOnSite_RemovesAndRestores(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
 		t.Fatalf("get pod after restore: %v", err)
 	}
-	if got.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
-		t.Errorf("after restore, traffic label = %q, want %q", got.Labels[v1alpha1.DragonflyTrafficLabel], dragonflyTrafficEnabled)
+	if got.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+		t.Errorf("after restore, traffic label = %q, want %q", got.Labels[v1beta1.DragonflyTrafficLabel], dragonflyTrafficEnabled)
 	}
 }

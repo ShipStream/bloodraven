@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // inertFieldsObject converts a typed object to unstructured so a test can
@@ -23,7 +23,7 @@ func inertFieldsObject(t *testing.T, obj runtime.Object, kind string) *unstructu
 		t.Fatal(err)
 	}
 	u := &unstructured.Unstructured{Object: raw}
-	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind(kind))
+	u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind(kind))
 	return u
 }
 
@@ -37,7 +37,7 @@ func inertFieldsSet(t *testing.T, u *unstructured.Unstructured, value any, path 
 func inertFieldsGet(t *testing.T, ns, name, kind string) *unstructured.Unstructured {
 	t.Helper()
 	stored := &unstructured.Unstructured{}
-	stored.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind(kind))
+	stored.SetGroupVersionKind(v1beta1.GroupVersion.WithKind(kind))
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, stored); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestE3_FailoverGroupWithoutCredentialsRejected(t *testing.T) {
 	}
 
 	fg := newTestFG(ns)
-	fg.Spec.Credentials = v1alpha1.CredentialsSpec{}
+	fg.Spec.Credentials = v1beta1.CredentialsSpec{}
 	err = k8sClient.Create(ctx, fg)
 	if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "operatorSecretName") {
 		t.Fatalf("an empty operatorSecretName: want an Invalid error naming operatorSecretName, got %v", err)
@@ -91,12 +91,12 @@ func TestE3_FailoverGroupRemovedFieldsArePruned(t *testing.T) {
 	ensureNamespace(t, ns)
 
 	fg := newVerificationFG(ns)
-	fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
-	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
+	fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"}
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{Enabled: true, Schedule: "0 5 * * *"}
+	fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{
 		Confirm:     "2026-04-17T14:32:00Z",
-		Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
-		LoadOptions: &v1alpha1.LoadOptions{Threads: 2},
+		Source:      v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"}},
+		LoadOptions: &v1beta1.LoadOptions{Threads: 2},
 	}
 	u := inertFieldsObject(t, fg, "MysqlFailoverGroup")
 	inertFieldsSet(t, u, "mysql-credentials", "spec", "secretName")
@@ -141,9 +141,9 @@ func TestE3_BackupAndVerificationRemovedFields(t *testing.T) {
 	ns := "e3-mbk-mbv-pruned"
 	ensureNamespace(t, ns)
 
-	mb := &v1alpha1.MysqlBackup{}
+	mb := &v1beta1.MysqlBackup{}
 	mb.Name, mb.Namespace = "manual", ns
-	mb.Spec = v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"}
+	mb.Spec = v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"}
 	ub := inertFieldsObject(t, mb, "MysqlBackup")
 	inertFieldsSet(t, ub, "manual", "spec", "triggeredBy")
 	if err := k8sClient.Create(ctx, ub); err != nil {
@@ -151,9 +151,9 @@ func TestE3_BackupAndVerificationRemovedFields(t *testing.T) {
 	}
 	inertFieldsAbsent(t, inertFieldsGet(t, ns, "manual", "MysqlBackup"), "spec", "triggeredBy")
 
-	v := &v1alpha1.MysqlBackupVerification{}
+	v := &v1beta1.MysqlBackupVerification{}
 	v.Name, v.Namespace = "verify", ns
-	v.Spec = v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"}
+	v.Spec = v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"}
 	uv := inertFieldsObject(t, v, "MysqlBackupVerification")
 	inertFieldsSet(t, uv, "manual", "spec", "triggeredBy")
 	inertFieldsSet(t, uv, map[string]any{"storageClassName": "standard", "size": "20Gi"}, "spec", "storage")

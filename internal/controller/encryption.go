@@ -11,7 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const (
@@ -193,7 +193,7 @@ func keyringComponentConfigJSON(dataFilePath string, readOnly bool) string {
 // applied as operator-owned invariants (after user overrides), so a
 // stray spec.mysqlConf entry cannot silently drop coverage that the
 // security claim depends on.
-func encryptionMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
+func encryptionMySQLSettings(fg *v1beta1.MysqlFailoverGroup) map[string]string {
 	if !fg.Spec.EncryptionEnabled() {
 		return nil
 	}
@@ -230,8 +230,8 @@ func encryptionMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string 
 // escrowSecret may be empty, which is only valid when sealed=false —
 // there is nothing to seal against yet.
 func buildEncryptionFragments(
-	fg *v1alpha1.MysqlFailoverGroup,
-	site v1alpha1.SiteSpec,
+	fg *v1beta1.MysqlFailoverGroup,
+	site v1beta1.SiteSpec,
 	sealed bool,
 	escrowSecret string,
 	rotate bool,
@@ -242,7 +242,7 @@ func buildEncryptionFragments(
 	}
 
 	kr := fg.Spec.EffectiveKeyring()
-	dataFilePath := path.Join(kr.DataFileDir, v1alpha1.KeyringDataFileName)
+	dataFilePath := path.Join(kr.DataFileDir, v1beta1.KeyringDataFileName)
 
 	// ConfigMap sources for the launcher (mysqld.my + component cnf).
 	// Keep image plugin_dir / lc-messages-dir; staging those onto
@@ -289,7 +289,7 @@ func buildEncryptionFragments(
 					SecretName:  escrowSecret,
 					DefaultMode: int32Ptr(keyringSecretMode),
 					Items: []corev1.KeyToPath{
-						{Key: v1alpha1.KeyringDataFileName, Path: v1alpha1.KeyringDataFileName},
+						{Key: v1beta1.KeyringDataFileName, Path: v1beta1.KeyringDataFileName},
 					},
 				},
 			},
@@ -318,10 +318,10 @@ func buildEncryptionFragments(
 		Name: keyringTokenVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName:  v1alpha1.KeyringTokenSecretName(fg.Name, site.Name),
+				SecretName:  v1beta1.KeyringTokenSecretName(fg.Name, site.Name),
 				DefaultMode: int32Ptr(keyringTokenMode(fg)),
 				Items: []corev1.KeyToPath{
-					{Key: v1alpha1.KeyringTokenKey, Path: v1alpha1.KeyringTokenKey},
+					{Key: v1beta1.KeyringTokenKey, Path: v1beta1.KeyringTokenKey},
 				},
 			},
 		},
@@ -337,7 +337,7 @@ func buildEncryptionFragments(
 		corev1.EnvVar{Name: "BLOODRAVEN_KEYRING_ESCROW_CA_FILE", Value: "/etc/mysql/tls/ca.crt"},
 		corev1.EnvVar{
 			Name:  "BLOODRAVEN_KEYRING_TOKEN_FILE",
-			Value: path.Join(keyringTokenMountPath, v1alpha1.KeyringTokenKey),
+			Value: path.Join(keyringTokenMountPath, v1beta1.KeyringTokenKey),
 		},
 	)
 	if rotate {
@@ -360,7 +360,7 @@ func buildEncryptionFragments(
 					SecretName:  escrowSecret,
 					DefaultMode: int32Ptr(keyringSecretMode),
 					Items: []corev1.KeyToPath{
-						{Key: v1alpha1.KeyringDataFileName, Path: v1alpha1.KeyringDataFileName},
+						{Key: v1beta1.KeyringDataFileName, Path: v1beta1.KeyringDataFileName},
 					},
 				},
 			},
@@ -381,7 +381,7 @@ func buildEncryptionFragments(
 			"keyring-init",
 			dataFilePath,
 			path.Dir(dataFilePath),
-			path.Join(keyringSeedMountPath, v1alpha1.KeyringDataFileName),
+			path.Join(keyringSeedMountPath, v1beta1.KeyringDataFileName),
 		},
 		VolumeMounts:    initMounts,
 		SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
@@ -404,7 +404,7 @@ func buildEncryptionFragments(
 // throwaway keyring in verify_script.sh. It works around the same
 // MySQL/AppArmor quirks (private mysqld copy, component manifest, private
 // plugin directory); apply a change to one in the other.
-func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup) (steps string, argPrefix []string) {
+func encryptionMysqlLauncher(fg *v1beta1.MysqlFailoverGroup) (steps string, argPrefix []string) {
 	kr := fg.Spec.EffectiveKeyring()
 	mysqlImageBasedir := path.Dir(kr.MysqldDir)
 	mysqlImageBinary := path.Join(kr.MysqldDir, "mysqld")
@@ -469,7 +469,7 @@ export PATH=%q:"$PATH"
 // gosu. gosu resets the process's supplementary groups from the image's
 // group database, dropping the fsGroup kubelet injected, so group
 // permissions cannot be relied on there.
-func keyringTokenMode(fg *v1alpha1.MysqlFailoverGroup) int32 {
+func keyringTokenMode(fg *v1beta1.MysqlFailoverGroup) int32 {
 	if fg.Spec.PodSecurityContext != nil && fg.Spec.PodSecurityContext.FSGroup != nil {
 		return keyringTokenModeFSGroup
 	}
@@ -527,7 +527,7 @@ fi
 `, seed, keyringFileOwner, keyringFileOwner)
 }
 
-func defaultKeyringEscrowURL(fg *v1alpha1.MysqlFailoverGroup) string {
+func defaultKeyringEscrowURL(fg *v1beta1.MysqlFailoverGroup) string {
 	if configured := strings.TrimSpace(os.Getenv("BLOODRAVEN_DEFAULT_ESCROW_URL")); configured != "" {
 		return configured
 	}
@@ -538,7 +538,7 @@ func defaultKeyringEscrowURL(fg *v1alpha1.MysqlFailoverGroup) string {
 // keyring manifest and component config for a site. Returns nil when
 // encryption is disabled so the ConfigMap stays byte-identical to what
 // pre-encryption releases produced.
-func keyringConfigMapData(fg *v1alpha1.MysqlFailoverGroup, sealed bool) map[string]string {
+func keyringConfigMapData(fg *v1beta1.MysqlFailoverGroup, sealed bool) map[string]string {
 	if !fg.Spec.EncryptionEnabled() {
 		return nil
 	}
@@ -558,7 +558,7 @@ func keyringDigest(b []byte) string {
 
 // effectiveMySQLImage centralizes the spec.image default so the
 // keyring-init container cannot drift from the mysql container's image.
-func effectiveMySQLImage(fg *v1alpha1.MysqlFailoverGroup) string {
+func effectiveMySQLImage(fg *v1beta1.MysqlFailoverGroup) string {
 	if fg.Spec.Image != "" {
 		return fg.Spec.Image
 	}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -375,7 +375,7 @@ func TestOwnLoss_AWritablePrimaryThatLacksItsOwnTransactionsIsNamed(t *testing.T
 	// holds.
 	f := newWitnessFixture(t, lossUUIDOld+":1-90,"+lossUUIDNew+":1-18", lossUUIDOld+":1-90,"+lossUUIDNew+":1-20", lossUUIDOld+":1-90,"+lossUUIDNew+":1-18")
 	f.poll(t, 6)
-	if got := recoveryOf(f.tm, "dc2"); got.state != v1alpha1.RecoveryStateBlocked || got.divergentGtid != lossUUIDNew+":19-20" {
+	if got := recoveryOf(f.tm, "dc2"); got.state != v1beta1.RecoveryStateBlocked || got.divergentGtid != lossUUIDNew+":19-20" {
 		t.Fatalf("dc2 recovery = %+v, want it reported RecoveryBlocked for the transactions the primary lost", got)
 	}
 	const msg = "the primary lacks transactions it issued itself, which another site holds; it restarted on older data and was made writable outside the operator, and reuses their GTIDs for what it commits now"
@@ -419,10 +419,10 @@ func TestOwnLoss_CrossCheckCountsOnlyWhatThePrimaryLacks(t *testing.T) {
 func TestMergeTopologySnapshotStatus_LostComparedTo(t *testing.T) {
 	snap := TopologySnapshot{ActiveSite: "dc1", Sites: []SiteSnapshot{
 		{Name: "dc1", State: state.StateWritable},
-		{Name: "dc2", State: state.StateReadOnly, RecoveryState: v1alpha1.RecoveryStateRecloneRequired,
+		{Name: "dc2", State: state.StateReadOnly, RecoveryState: v1beta1.RecoveryStateRecloneRequired,
 			LostGtid: lossLostGTID, LostTxnCount: 10, LostComparedTo: "dc3", LostToWitness: true},
 	}}
-	var st v1alpha1.MysqlFailoverGroupStatus
+	var st v1beta1.MysqlFailoverGroupStatus
 	if !MergeTopologySnapshotStatus(&st, snap) {
 		t.Fatal("snapshot not merged")
 	}

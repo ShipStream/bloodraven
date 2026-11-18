@@ -7,15 +7,15 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // plannedFG builds a minimal MysqlFailoverGroup suitable for driving
 // the planned-failover parser + validator. Sites are declared as
 // primary-candidate by default; the drOnly set overrides specific
 // names. statusStates and replicating configure status.sites entries.
-func plannedFG(sites, drOnly []string, active string, statusStates map[string]v1alpha1.SiteState, replicating map[string]bool) *v1alpha1.MysqlFailoverGroup {
-	fg := &v1alpha1.MysqlFailoverGroup{
+func plannedFG(sites, drOnly []string, active string, statusStates map[string]v1beta1.SiteState, replicating map[string]bool) *v1beta1.MysqlFailoverGroup {
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
 	}
 	drSet := map[string]bool{}
@@ -23,28 +23,28 @@ func plannedFG(sites, drOnly []string, active string, statusStates map[string]v1
 		drSet[n] = true
 	}
 	for i, name := range sites {
-		role := v1alpha1.SiteRolePrimaryCandidate
+		role := v1beta1.SiteRolePrimaryCandidate
 		if drSet[name] {
-			role = v1alpha1.SiteRoleDisasterRecovery
+			role = v1beta1.SiteRoleDisasterRecovery
 		}
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: role})
-		st := v1alpha1.SiteStatus{Name: name}
+		fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: role})
+		st := v1beta1.SiteStatus{Name: name}
 		if s, ok := statusStates[name]; ok {
 			st.State = s
 		} else {
-			st.State = v1alpha1.SiteStateReadOnly
+			st.State = v1beta1.SiteStateReadOnly
 		}
 		running, ok := replicating[name]
 		if !ok {
-			running = st.State == v1alpha1.SiteStateReadOnly
+			running = st.State == v1beta1.SiteStateReadOnly
 		}
-		st.Replication = v1alpha1.SiteReplicationBroken
+		st.Replication = v1beta1.SiteReplicationBroken
 		if running {
-			st.Replication = v1alpha1.SiteReplicationHealthy
+			st.Replication = v1beta1.SiteReplicationHealthy
 		}
 		if name == active {
-			st.State = v1alpha1.SiteStateWritable
-			st.Replication = v1alpha1.SiteReplicationNotApplicable
+			st.State = v1beta1.SiteStateWritable
+			st.Replication = v1beta1.SiteReplicationNotApplicable
 		}
 		fg.Status.Sites = append(fg.Status.Sites, st)
 	}
@@ -141,7 +141,7 @@ func TestValidatePlannedFailover_UnknownSite(t *testing.T) {
 func TestValidatePlannedFailover_DROnlyTargetRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx", "lhr"}, []string{"lhr"}, "iad", nil, nil)
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "lhr"}, time.Now(), false)
-	if result != PlannedFailoverReject || reason != v1alpha1.PlannedFailoverReasonTargetNotPromotable {
+	if result != PlannedFailoverReject || reason != v1beta1.PlannedFailoverReasonTargetNotPromotable {
 		t.Fatalf("expected TargetNotPromotable reject for dr-only target, got result=%v reason=%q err=%v", result, reason, err)
 	}
 	if err == nil || !strings.Contains(err.Error(), "PrimaryCandidate") {
@@ -159,10 +159,10 @@ func TestValidatePlannedFailover_ActiveSiteIsNoop(t *testing.T) {
 
 func TestValidatePlannedFailover_TargetMidRotation(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{{
-			Name: "pdx", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealReason: v1alpha1.UnsealReasonRotation,
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{{
+			Name: "pdx", Phase: v1beta1.KeyringPhaseUnsealed, UnsealReason: v1beta1.UnsealReasonRotation,
 		}},
 	}
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
@@ -176,12 +176,12 @@ func TestValidatePlannedFailover_TargetMidRotation(t *testing.T) {
 
 func TestValidatePlannedFailover_TargetMidRotationBeatsUnhealthy(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateUnreachable},
+		map[string]v1beta1.SiteState{"pdx": v1beta1.SiteStateUnreachable},
 		map[string]bool{"pdx": false})
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{{
-			Name: "pdx", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealReason: v1alpha1.UnsealReasonRotation,
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{{
+			Name: "pdx", Phase: v1beta1.KeyringPhaseUnsealed, UnsealReason: v1beta1.UnsealReasonRotation,
 		}},
 	}
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
@@ -192,7 +192,7 @@ func TestValidatePlannedFailover_TargetMidRotationBeatsUnhealthy(t *testing.T) {
 
 func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateUnreachable},
+		map[string]v1beta1.SiteState{"pdx": v1beta1.SiteStateUnreachable},
 		map[string]bool{"pdx": false})
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {
@@ -202,7 +202,7 @@ func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 
 func TestValidatePlannedFailover_TargetNotReplicating(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
-		map[string]v1alpha1.SiteState{"pdx": v1alpha1.SiteStateReadOnly},
+		map[string]v1beta1.SiteState{"pdx": v1beta1.SiteStateReadOnly},
 		map[string]bool{"pdx": false})
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {
@@ -221,7 +221,7 @@ func TestValidatePlannedFailover_Cooldown(t *testing.T) {
 		statusAgo   time.Duration
 		annotation  *FailoverRecord
 		wantResult  PlannedFailoverValidationResult
-		wantReason  v1alpha1.PlannedFailoverReason
+		wantReason  v1beta1.PlannedFailoverReason
 		wantErr     string
 		wantRetryAt time.Time
 	}{
@@ -262,8 +262,8 @@ func TestValidatePlannedFailover_Cooldown(t *testing.T) {
 			fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "iad", fg.Status.PromotionGtidExecuted())
 			if tc.annotation != nil {
 				fg.Annotations = map[string]string{
-					v1alpha1.LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
-					v1alpha1.LastFailoverTargetAnnotation: tc.annotation.LastFailoverTarget,
+					v1beta1.LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
+					v1beta1.LastFailoverTargetAnnotation: tc.annotation.LastFailoverTarget,
 				}
 			}
 
@@ -289,7 +289,7 @@ func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
 	cases := []struct {
 		name       string
 		withStatus bool
-		wantReason v1alpha1.PlannedFailoverReason
+		wantReason v1beta1.PlannedFailoverReason
 		wantErr    string
 	}{
 		{
@@ -309,8 +309,8 @@ func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 			fg.Annotations = map[string]string{
-				v1alpha1.LastFailoverAnnotation:       "not-a-timestamp",
-				v1alpha1.LastFailoverTargetAnnotation: "iad",
+				v1beta1.LastFailoverAnnotation:       "not-a-timestamp",
+				v1beta1.LastFailoverTargetAnnotation: "iad",
 			}
 			if tc.withStatus {
 				last := metav1.NewTime(now.Add(-time.Minute))
@@ -332,8 +332,8 @@ func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
 
 func TestValidatePlannedFailover_ConcurrentRestoreRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase: v1alpha1.RestoreInPlaceRestoring,
+	fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{
+		Phase: v1beta1.RestoreInPlaceRestoring,
 	}
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "ConcurrentOperation" {
@@ -352,21 +352,21 @@ func TestValidatePlannedFailover_ConcurrentUpdateRejected(t *testing.T) {
 
 func TestValidatePlannedFailover_InFlightPlannedFailoverRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag,
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		RunID: "run-1", Phase: v1beta1.PlannedFailoverPhaseWaitingForLag,
 	}
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "ConcurrentOperation" {
 		t.Fatalf("expected ConcurrentOperation reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
 	// The run itself passes the check on its own admission passes.
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseAdmitting
+	fg.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhaseAdmitting
 	if result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), true); result != PlannedFailoverAccept {
 		t.Fatalf("own Admitting run refused: %v %v", result, err)
 	}
 	// A run the terminal marker ended does not block a new one.
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+	fg.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhaseWaitingForLag
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 	if result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false); result != PlannedFailoverAccept {
 		t.Fatalf("marked run blocks a new request: %v %v", result, err)
 	}
@@ -374,8 +374,8 @@ func TestValidatePlannedFailover_InFlightPlannedFailoverRejected(t *testing.T) {
 
 func TestValidatePlannedFailover_TerminalPlannedFailoverOK(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase:      v1alpha1.PlannedFailoverPhaseSucceeded,
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		Phase:      v1beta1.PlannedFailoverPhaseSucceeded,
 		TargetSite: "pdx",
 	}
 	// Terminal Succeeded must not block a fresh run. Active site is "iad",
@@ -387,13 +387,13 @@ func TestValidatePlannedFailover_TerminalPlannedFailoverOK(t *testing.T) {
 }
 
 func TestEffectiveMaxLagWait(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{}
+	fg := &v1beta1.MysqlFailoverGroup{}
 	// Default fallback.
 	if got := effectiveMaxLagWait(fg, PlannedFailoverRequest{}); got != defaultPlannedFailoverMaxLagWait {
 		t.Errorf("default fallback: got %s, want %s", got, defaultPlannedFailoverMaxLagWait)
 	}
 	// Spec override.
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{
 		MaxLagWait: &metav1.Duration{Duration: 2 * time.Minute},
 	}
 	if got := effectiveMaxLagWait(fg, PlannedFailoverRequest{}); got != 2*time.Minute {
@@ -409,37 +409,37 @@ func TestEffectiveMaxLagWait(t *testing.T) {
 // the sites and is not marked.
 func TestPlannedFailoverFencedSite(t *testing.T) {
 	cases := []struct {
-		phase v1alpha1.PlannedFailoverPhase
+		phase v1beta1.PlannedFailoverPhase
 		want  string
 	}{
-		{v1alpha1.PlannedFailoverPhaseAdmitting, ""},
-		{v1alpha1.PlannedFailoverPhaseDeferred, ""},
-		{v1alpha1.PlannedFailoverPhaseFencing, "iad"},
-		{v1alpha1.PlannedFailoverPhaseDraining, "iad"},
-		{v1alpha1.PlannedFailoverPhaseWaitingForLag, "iad"},
-		{v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, "iad"},
-		{v1alpha1.PlannedFailoverPhasePromotingDragonfly, "iad"},
-		{v1alpha1.PlannedFailoverPhasePromoting, "iad"},
-		{v1alpha1.PlannedFailoverPhaseRollingBack, "iad"},
-		{v1alpha1.PlannedFailoverPhasePublishing, ""},
-		{v1alpha1.PlannedFailoverPhaseSucceeded, ""},
-		{v1alpha1.PlannedFailoverPhaseFailed, ""},
+		{v1beta1.PlannedFailoverPhaseAdmitting, ""},
+		{v1beta1.PlannedFailoverPhaseDeferred, ""},
+		{v1beta1.PlannedFailoverPhaseFencing, "iad"},
+		{v1beta1.PlannedFailoverPhaseDraining, "iad"},
+		{v1beta1.PlannedFailoverPhaseWaitingForLag, "iad"},
+		{v1beta1.PlannedFailoverPhaseWaitingForDragonflySync, "iad"},
+		{v1beta1.PlannedFailoverPhasePromotingDragonfly, "iad"},
+		{v1beta1.PlannedFailoverPhasePromoting, "iad"},
+		{v1beta1.PlannedFailoverPhaseRollingBack, "iad"},
+		{v1beta1.PlannedFailoverPhasePublishing, ""},
+		{v1beta1.PlannedFailoverPhaseSucceeded, ""},
+		{v1beta1.PlannedFailoverPhaseFailed, ""},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.phase), func(t *testing.T) {
-			fg := &v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{
-				PlannedFailover: &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: tc.phase, SourceSite: "iad", TargetSite: "pdx"},
+			fg := &v1beta1.MysqlFailoverGroup{Status: v1beta1.MysqlFailoverGroupStatus{
+				PlannedFailover: &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: tc.phase, SourceSite: "iad", TargetSite: "pdx"},
 			}}
 			if got := plannedFailoverFencedSite(fg); got != tc.want {
 				t.Errorf("fenced site = %q, want %q", got, tc.want)
 			}
-			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+			fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 			if got := plannedFailoverFencedSite(fg); got != "" {
 				t.Errorf("marked run fences %q", got)
 			}
 		})
 	}
-	if plannedFailoverFencedSite(&v1alpha1.MysqlFailoverGroup{}) != "" {
+	if plannedFailoverFencedSite(&v1beta1.MysqlFailoverGroup{}) != "" {
 		t.Error("nil status should not fence")
 	}
 }
@@ -449,20 +449,20 @@ func TestPlannedFailoverFencedSite(t *testing.T) {
 // a marker naming another run, or a malformed one, changes nothing.
 func TestPlannedFailoverPredicates_MarkerIsTerminal(t *testing.T) {
 	for _, phase := range plannedEnginePhases {
-		fg := &v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{
-			PlannedFailover: &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, SourceSite: "iad", TargetSite: "pdx"},
+		fg := &v1beta1.MysqlFailoverGroup{Status: v1beta1.MysqlFailoverGroupStatus{
+			PlannedFailover: &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, SourceSite: "iad", TargetSite: "pdx"},
 		}}
 		live := plannedFailoverActive(fg)
 		if !live {
 			t.Errorf("%s: unmarked run not active", phase)
 		}
 		for _, other := range []string{`{"schemaVersion":1,"runID":"run-2","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, `{"schemaVersion":1,"runID":"run-1","outcome":"Bogus","reason":"StatusStalled"}`, "garbage"} {
-			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: other}
+			fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: other}
 			if !plannedFailoverActive(fg) {
 				t.Errorf("%s: marker %q ended the run", phase, other)
 			}
 		}
-		fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
+		fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"SourceLeftFenced","reason":"StatusStalled"}`}
 		if plannedFailoverActive(fg) || plannedFailoverOwnsSites(fg) || plannedFailoverPending(fg) || plannedFailoverFencedSite(fg) != "" ||
 			plannedFailoverDragonflyStripActive(fg) || plannedDragonflyTakeoverSucceeded(fg) {
 			t.Errorf("%s: a marked run is still live to a predicate", phase)

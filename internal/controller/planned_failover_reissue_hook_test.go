@@ -3,7 +3,7 @@ package controller
 import (
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // The planned engine's Succeeded terminal write is one of the two writers
@@ -11,17 +11,17 @@ import (
 // the D-46 PITR archive reissue warning, once, against the persisted
 // pre-write value.
 func TestPlannedFailoverEngine_ReportsPersistedActiveSiteMove(t *testing.T) {
-	h := pfHarnessAt(t, v1alpha1.PlannedFailoverPhasePublishing)
+	h := pfHarnessAt(t, v1beta1.PlannedFailoverPhasePublishing)
 	// The manager has promoted the target: its authority names pdx at a
 	// newer topology generation than the persisted status.
 	h.topo.authority = &PlannedAuthority{ActiveSite: "pdx", TopologyGeneration: h.fg().Status.TopologyGeneration + 1}
 	type call struct{ from, to string }
 	var calls []call
-	h.e.activeSitePersisted = func(committed *v1alpha1.MysqlFailoverGroup, from string) {
+	h.e.activeSitePersisted = func(committed *v1beta1.MysqlFailoverGroup, from string) {
 		calls = append(calls, call{from: from, to: committed.Status.ActiveSite})
 	}
 	h.step()
-	if pf := h.pf(); pf == nil || pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
+	if pf := h.pf(); pf == nil || pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("block = %+v, want Succeeded", pf)
 	}
 	var moves []call

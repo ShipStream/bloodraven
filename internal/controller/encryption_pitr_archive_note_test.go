@@ -8,7 +8,7 @@ import (
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -17,22 +17,22 @@ import (
 // EncryptionAtRestReady condition and once in an Event, and never refused:
 // the store may encrypt, which the operator cannot see.
 func TestEncryptionPITRArchiveWithoutClientEncryptionIsReported(t *testing.T) {
-	profile := func(encrypted bool) *v1alpha1.BackupSpec {
-		p := v1alpha1.BackupProfile{Name: "archive"}
+	profile := func(encrypted bool) *v1beta1.BackupSpec {
+		p := v1beta1.BackupProfile{Name: "archive"}
 		if encrypted {
-			p.Encryption = &v1alpha1.BackupEncryptionSpec{}
+			p.Encryption = &v1beta1.BackupEncryptionSpec{}
 		}
-		return &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{p}, PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "archive"}}
+		return &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{p}, PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "archive"}}
 	}
 	for name, tc := range map[string]struct {
-		backup *v1alpha1.BackupSpec
+		backup *v1beta1.BackupSpec
 		want   bool
 	}{
 		"no PITR":                         {nil, false},
-		"PITR off":                        {&v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{{Name: "archive"}}, PITR: &v1alpha1.PITRSpec{ProfileName: "archive"}}, false},
+		"PITR off":                        {&v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{{Name: "archive"}}, PITR: &v1beta1.PITRSpec{ProfileName: "archive"}}, false},
 		"profile with encryption":         {profile(true), false},
 		"profile without encryption":      {profile(false), true},
-		"profile the group does not have": {&v1alpha1.BackupSpec{PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "archive"}}, false},
+		"profile the group does not have": {&v1beta1.BackupSpec{PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "archive"}}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fg := encTestFG()
@@ -64,7 +64,7 @@ func TestEncryptionPITRArchiveWithoutClientEncryptionIsReported(t *testing.T) {
 		for {
 			select {
 			case e := <-events.Events:
-				if strings.Contains(e, v1alpha1.EventPITRArchiveNotEncrypted) {
+				if strings.Contains(e, v1beta1.EventPITRArchiveNotEncrypted) {
 					if !strings.HasPrefix(e, "Warning ") || !strings.Contains(e, pitrArchivePlainMarker) {
 						t.Fatalf("event = %q", e)
 					}
@@ -82,7 +82,7 @@ func TestEncryptionPITRArchiveWithoutClientEncryptionIsReported(t *testing.T) {
 		if got := reported(); got != want {
 			t.Fatalf("pass %d raised the Event %d times, want %d", i+1, got, want)
 		}
-		c := apiMeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
+		c := apiMeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionEncryptionAtRestReady)
 		if c == nil || !strings.Contains(c.Message, pitrArchivePlainMarker) {
 			t.Fatalf("pass %d: condition = %+v, want the note in its message", i+1, c)
 		}
@@ -93,7 +93,7 @@ func TestEncryptionPITRArchiveWithoutClientEncryptionIsReported(t *testing.T) {
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	if c := apiMeta.FindStatusCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady); c == nil || strings.Contains(c.Message, pitrArchivePlainMarker) || reported() != 0 {
+	if c := apiMeta.FindStatusCondition(fg.Status.Conditions, v1beta1.ConditionEncryptionAtRestReady); c == nil || strings.Contains(c.Message, pitrArchivePlainMarker) || reported() != 0 {
 		t.Fatalf("condition = %+v after the profile got encryption", c)
 	}
 	fg.Spec.Backup = profile(false)

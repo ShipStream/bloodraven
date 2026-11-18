@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // MFGKeyForName returns the controller-runtime key for a named
@@ -26,14 +26,14 @@ func MFGKeyForName(namespace, name string) client.ObjectKey {
 
 // GetMFG fetches the playground MysqlFailoverGroup. The returned
 // object is a fresh deep copy — safe to read without locks.
-func (c *Client) GetMFG(ctx context.Context, namespace string) (*v1alpha1.MysqlFailoverGroup, error) {
+func (c *Client) GetMFG(ctx context.Context, namespace string) (*v1beta1.MysqlFailoverGroup, error) {
 	return c.GetMFGNamed(ctx, namespace, FailoverGroupName)
 }
 
 // GetMFGNamed fetches the named MysqlFailoverGroup. The returned
 // object is a fresh deep copy — safe to read without locks.
-func (c *Client) GetMFGNamed(ctx context.Context, namespace, name string) (*v1alpha1.MysqlFailoverGroup, error) {
-	mfg := &v1alpha1.MysqlFailoverGroup{}
+func (c *Client) GetMFGNamed(ctx context.Context, namespace, name string) (*v1beta1.MysqlFailoverGroup, error) {
+	mfg := &v1beta1.MysqlFailoverGroup{}
 	if err := c.Controller.Get(ctx, MFGKeyForName(namespace, name), mfg); err != nil {
 		return nil, fmt.Errorf("get MysqlFailoverGroup: %w", err)
 	}
@@ -66,7 +66,7 @@ func (c *Client) PatchMFGNamed(ctx context.Context, namespace, name string, ops 
 	if err != nil {
 		return fmt.Errorf("marshal JSON Patch: %w", err)
 	}
-	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg := &v1beta1.MysqlFailoverGroup{}
 	key := MFGKeyForName(namespace, name)
 	mfg.Namespace = key.Namespace
 	mfg.Name = key.Name
@@ -88,7 +88,7 @@ func (c *Client) PatchMFGStatusNamed(ctx context.Context, namespace, name string
 		return fmt.Errorf("marshal status JSON Patch: %w", err)
 	}
 	objKey := MFGKeyForName(namespace, name)
-	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg := &v1beta1.MysqlFailoverGroup{}
 	mfg.Namespace = objKey.Namespace
 	mfg.Name = objKey.Name
 	patch := client.RawPatch(types.JSONPatchType, body)
@@ -122,7 +122,7 @@ func (c *Client) AnnotateMFGNamed(ctx context.Context, namespace, name, key, val
 	if err != nil {
 		return fmt.Errorf("marshal annotation patch: %w", err)
 	}
-	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg := &v1beta1.MysqlFailoverGroup{}
 	objKey := MFGKeyForName(namespace, name)
 	mfg.Namespace = objKey.Namespace
 	mfg.Name = objKey.Name
@@ -135,7 +135,7 @@ func (c *Client) AnnotateMFGNamed(ctx context.Context, namespace, name, key, val
 
 // SiteState returns the observed state for the named site, or "" if
 // the site is unknown to the status.
-func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) v1alpha1.SiteState {
+func SiteState(mfg *v1beta1.MysqlFailoverGroup, site string) v1beta1.SiteState {
 	for _, s := range mfg.Status.Sites {
 		if s.Name == site {
 			return s.State
@@ -146,9 +146,9 @@ func SiteState(mfg *v1alpha1.MysqlFailoverGroup, site string) v1alpha1.SiteState
 
 // ReadyCondition returns the Ready condition status from the MFG, or
 // "Unknown" if no Ready condition has been written yet.
-func ReadyCondition(mfg *v1alpha1.MysqlFailoverGroup) string {
+func ReadyCondition(mfg *v1beta1.MysqlFailoverGroup) string {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == v1alpha1.ConditionReady {
+		if c.Type == v1beta1.ConditionReady {
 			return string(c.Status)
 		}
 	}

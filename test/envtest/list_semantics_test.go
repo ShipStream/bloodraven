@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // e4WantInvalid fails unless err is an Invalid refusal whose message
@@ -55,7 +55,7 @@ func e4Unstructured(t *testing.T, obj client.Object, kind string) *unstructured.
 		t.Fatal(err)
 	}
 	u := &unstructured.Unstructured{Object: m}
-	u.SetAPIVersion(v1alpha1.GroupVersion.String())
+	u.SetAPIVersion(v1beta1.GroupVersion.String())
 	u.SetKind(kind)
 	unstructured.RemoveNestedField(u.Object, "metadata", "creationTimestamp")
 	unstructured.RemoveNestedField(u.Object, "status")
@@ -68,7 +68,7 @@ func TestE4_SpecRequiredOnEveryKind(t *testing.T) {
 	ns := createNamespace(t, "e4-spec")
 	for _, kind := range []string{"MysqlFailoverGroup", "MysqlBackup", "MysqlBackupVerification", "MysqlDatabase", "MysqlStandbyCluster"} {
 		u := &unstructured.Unstructured{Object: map[string]any{}}
-		u.SetAPIVersion(v1alpha1.GroupVersion.String())
+		u.SetAPIVersion(v1beta1.GroupVersion.String())
 		u.SetKind(kind)
 		u.SetNamespace(ns)
 		u.SetName("no-spec")
@@ -81,35 +81,35 @@ func TestE4_SpecRequiredOnEveryKind(t *testing.T) {
 // independent of the site's position.
 func TestE4_SiteServerID(t *testing.T) {
 	ns := createNamespace(t, "e4-serverid")
-	create := func(name string, mutate func(*v1alpha1.MysqlFailoverGroup)) error {
+	create := func(name string, mutate func(*v1beta1.MysqlFailoverGroup)) error {
 		fg := newTestFG(ns)
 		fg.Name = name
 		mutate(fg)
 		return k8sClient.Create(ctx, fg)
 	}
 
-	if err := create("max", func(fg *v1alpha1.MysqlFailoverGroup) {
-		fg.Spec.Sites[0].ServerID = v1alpha1.MaxServerID
+	if err := create("max", func(fg *v1beta1.MysqlFailoverGroup) {
+		fg.Spec.Sites[0].ServerID = v1beta1.MaxServerID
 		fg.Spec.Sites[1].ServerID = 7
 	}); err != nil {
 		t.Fatalf("serverIDs 4294967295 and 7 refused: %v", err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: "max"}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Spec.Sites[0].ServerID != v1alpha1.MaxServerID || got.Spec.Sites[1].ServerID != 7 {
+	if got.Spec.Sites[0].ServerID != v1beta1.MaxServerID || got.Spec.Sites[1].ServerID != 7 {
 		t.Fatalf("stored serverIDs = %d, %d", got.Spec.Sites[0].ServerID, got.Spec.Sites[1].ServerID)
 	}
 
-	e4WantInvalid(t, "duplicate serverID", create("dup-id", func(fg *v1alpha1.MysqlFailoverGroup) {
+	e4WantInvalid(t, "duplicate serverID", create("dup-id", func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Sites[1].ServerID = fg.Spec.Sites[0].ServerID
 	}), "spec.sites[].serverID must be unique within the group")
-	e4WantInvalid(t, "duplicate site name", create("dup-name", func(fg *v1alpha1.MysqlFailoverGroup) {
+	e4WantInvalid(t, "duplicate site name", create("dup-name", func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Sites[1].Name = fg.Spec.Sites[0].Name
 	}), "spec.sites", "Duplicate value")
-	for _, id := range []int64{0, -1, v1alpha1.MaxServerID + 1} {
-		e4WantInvalid(t, fmt.Sprintf("serverID %d", id), create(fmt.Sprintf("bad-id-%d", id+1), func(fg *v1alpha1.MysqlFailoverGroup) {
+	for _, id := range []int64{0, -1, v1beta1.MaxServerID + 1} {
+		e4WantInvalid(t, fmt.Sprintf("serverID %d", id), create(fmt.Sprintf("bad-id-%d", id+1), func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Sites[0].ServerID = id
 		}), "serverID")
 	}
@@ -137,7 +137,7 @@ func TestE4_SiteServerID(t *testing.T) {
 func TestE4_SitePrioritiesUnique(t *testing.T) {
 	ns := createNamespace(t, "e4-priorities")
 	fg := newTestFG(ns)
-	fg.Spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: []string{"dc1", "dc1"}}
+	fg.Spec.SplitBrainPolicy = &v1beta1.SplitBrainPolicySpec{SitePriorities: []string{"dc1", "dc1"}}
 	e4WantInvalid(t, "duplicate sitePriorities", k8sClient.Create(ctx, fg), "splitBrainPolicy.sitePriorities entries must be unique")
 	fg.Spec.SplitBrainPolicy.SitePriorities = []string{"dc2", "dc1"}
 	if err := k8sClient.Create(ctx, fg); err != nil {
@@ -156,11 +156,11 @@ func TestE4_NamedSpecListsAreMaps(t *testing.T) {
 		}
 		return out
 	}
-	schedule := func(name string) v1alpha1.BackupSchedule {
-		return v1alpha1.BackupSchedule{Name: name, ProfileName: "nightly-s3", Schedule: "0 3 * * *"}
+	schedule := func(name string) v1beta1.BackupSchedule {
+		return v1beta1.BackupSchedule{Name: name, ProfileName: "nightly-s3", Schedule: "0 3 * * *"}
 	}
-	schedules := func(n int) []v1alpha1.BackupSchedule {
-		out := make([]v1alpha1.BackupSchedule, 0, n)
+	schedules := func(n int) []v1beta1.BackupSchedule {
+		out := make([]v1beta1.BackupSchedule, 0, n)
 		for i := 0; i < n; i++ {
 			out = append(out, schedule(fmt.Sprintf("s%d", i)))
 		}
@@ -168,31 +168,31 @@ func TestE4_NamedSpecListsAreMaps(t *testing.T) {
 	}
 	for i, tc := range []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlFailoverGroup)
+		mutate func(*v1beta1.MysqlFailoverGroup)
 		want   []string // empty: accepted
 	}{
-		{"extraContainers duplicate", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"extraContainers duplicate", func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.ExtraContainers = []corev1.Container{container("x"), container("x")}
 		}, []string{"extraContainers", "Duplicate value"}},
-		{"extraContainers 16", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.ExtraContainers = containers(16) }, nil},
-		{"extraContainers 17", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.ExtraContainers = containers(17) }, []string{"extraContainers", "16"}},
-		{"extraInitContainers duplicate", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"extraContainers 16", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.ExtraContainers = containers(16) }, nil},
+		{"extraContainers 17", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.ExtraContainers = containers(17) }, []string{"extraContainers", "16"}},
+		{"extraInitContainers duplicate", func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.ExtraInitContainers = []corev1.Container{container("x"), container("x")}
 		}, []string{"extraInitContainers", "Duplicate value"}},
-		{"extraInitContainers 17", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.ExtraInitContainers = containers(17) }, []string{"extraInitContainers", "16"}},
-		{"imagePullSecrets duplicate", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"extraInitContainers 17", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.ExtraInitContainers = containers(17) }, []string{"extraInitContainers", "16"}},
+		{"imagePullSecrets duplicate", func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "r"}, {Name: "r"}}
 		}, []string{"imagePullSecrets", "Duplicate value"}},
-		{"schedules duplicate", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{schedule("daily"), schedule("daily")}
+		{"schedules duplicate", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Schedules = []v1beta1.BackupSchedule{schedule("daily"), schedule("daily")}
 		}, []string{"schedules", "Duplicate value"}},
-		{"schedules 32", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Schedules = schedules(32) }, nil},
-		{"schedules 33", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Schedules = schedules(33) }, []string{"schedules", "32"}},
-		{"schedule name 63", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{schedule(strings.Repeat("a", 63))}
+		{"schedules 32", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.Schedules = schedules(32) }, nil},
+		{"schedules 33", func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.Schedules = schedules(33) }, []string{"schedules", "32"}},
+		{"schedule name 63", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Schedules = []v1beta1.BackupSchedule{schedule(strings.Repeat("a", 63))}
 		}, nil},
-		{"schedule name 64", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup.Schedules = []v1alpha1.BackupSchedule{schedule(strings.Repeat("a", 64))}
+		{"schedule name 64", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Schedules = []v1beta1.BackupSchedule{schedule(strings.Repeat("a", 64))}
 		}, []string{"schedules", "63"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,44 +215,44 @@ func TestE4_NamedSpecListsAreMaps(t *testing.T) {
 // most one schema.
 func TestE4_SchemaListsAreSets(t *testing.T) {
 	ns := createNamespace(t, "e4-schemas")
-	backupRef := v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "b"}}
+	backupRef := v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "b"}}
 	for i, tc := range []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlFailoverGroup)
+		mutate func(*v1beta1.MysqlFailoverGroup)
 		want   []string
 	}{
-		{"dump includeSchemas duplicate", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup.Profiles[0].Dump = &v1alpha1.DumpOptions{IncludeSchemas: []string{"a", "a"}}
+		{"dump includeSchemas duplicate", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Profiles[0].Dump = &v1beta1.DumpOptions{IncludeSchemas: []string{"a", "a"}}
 		}, []string{"includeSchemas", "Duplicate value"}},
-		{"dump excludeSchemas name 65", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup.Profiles[0].Dump = &v1alpha1.DumpOptions{ExcludeSchemas: []string{strings.Repeat("a", 65)}}
+		{"dump excludeSchemas name 65", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Profiles[0].Dump = &v1beta1.DumpOptions{ExcludeSchemas: []string{strings.Repeat("a", 65)}}
 		}, []string{"excludeSchemas", "64"}},
-		{"initFromBackup includeSchemas two", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: backupRef, LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
+		{"initFromBackup includeSchemas two", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: backupRef, LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
 		}, nil},
-		{"initFromBackup excludeSchemas 257", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup excludeSchemas 257", func(fg *v1beta1.MysqlFailoverGroup) {
 			names := make([]string, 257)
 			for j := range names {
 				names[j] = fmt.Sprintf("s%d", j)
 			}
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: backupRef, LoadOptions: &v1alpha1.LoadOptions{ExcludeSchemas: names}}
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: backupRef, LoadOptions: &v1beta1.LoadOptions{ExcludeSchemas: names}}
 		}, []string{"excludeSchemas", "256"}},
-		{"restoreInPlace includeSchemas one", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
-				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"a"}}}
+		{"restoreInPlace includeSchemas one", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
+				LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{"a"}}}
 		}, nil},
-		{"restoreInPlace includeSchemas two", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
-				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
+		{"restoreInPlace includeSchemas two", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
+				LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
 		}, []string{"restoreInPlace.loadOptions.includeSchemas supports at most one schema"}},
 		// O-09: an empty name would produce an in-place restore scope its
 		// own status rule refuses, stalling the restore silently.
-		{"restoreInPlace includeSchemas empty name", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
-				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{""}}}
+		{"restoreInPlace includeSchemas empty name", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z", Source: backupRef,
+				LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{""}}}
 		}, []string{"includeSchemas", "at least 1"}},
-		{"initFromBackup excludeSchemas empty name", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: backupRef, LoadOptions: &v1alpha1.LoadOptions{ExcludeSchemas: []string{""}}}
+		{"initFromBackup excludeSchemas empty name", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: backupRef, LoadOptions: &v1beta1.LoadOptions{ExcludeSchemas: []string{""}}}
 		}, []string{"excludeSchemas", "at least 1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -286,31 +286,31 @@ func TestE4_StatusListsAreMaps(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlFailoverGroupStatus)
+		mutate func(*v1beta1.MysqlFailoverGroupStatus)
 		want   []string
 	}{
-		{"sites duplicate", func(s *v1alpha1.MysqlFailoverGroupStatus) {
-			s.Sites = []v1alpha1.SiteStatus{{Name: "dc1"}, {Name: "dc1"}}
+		{"sites duplicate", func(s *v1beta1.MysqlFailoverGroupStatus) {
+			s.Sites = []v1beta1.SiteStatus{{Name: "dc1"}, {Name: "dc1"}}
 		}, []string{"status.sites", "Duplicate value"}},
-		{"sites empty name", func(s *v1alpha1.MysqlFailoverGroupStatus) {
-			s.Sites = []v1alpha1.SiteStatus{{Name: ""}}
+		{"sites empty name", func(s *v1beta1.MysqlFailoverGroupStatus) {
+			s.Sites = []v1beta1.SiteStatus{{Name: ""}}
 		}, []string{"status.sites", "name"}},
-		{"conditions duplicate", func(s *v1alpha1.MysqlFailoverGroupStatus) {
+		{"conditions duplicate", func(s *v1beta1.MysqlFailoverGroupStatus) {
 			s.Conditions = []metav1.Condition{cond("Ready"), cond("Ready")}
 		}, []string{"status.conditions", "Duplicate value"}},
-		{"backupSchedules duplicate", func(s *v1alpha1.MysqlFailoverGroupStatus) {
-			s.BackupSchedules = []v1alpha1.BackupScheduleStatus{{Name: "daily"}, {Name: "daily"}}
+		{"backupSchedules duplicate", func(s *v1beta1.MysqlFailoverGroupStatus) {
+			s.BackupSchedules = []v1beta1.BackupScheduleStatus{{Name: "daily"}, {Name: "daily"}}
 		}, []string{"status.backupSchedules", "Duplicate value"}},
-		{"dragonfly sites duplicate", func(s *v1alpha1.MysqlFailoverGroupStatus) {
-			s.Dragonfly = &v1alpha1.DragonflyStatus{Sites: []v1alpha1.DragonflySiteStatus{{Name: "dc1"}, {Name: "dc1"}}}
+		{"dragonfly sites duplicate", func(s *v1beta1.MysqlFailoverGroupStatus) {
+			s.Dragonfly = &v1beta1.DragonflyStatus{Sites: []v1beta1.DragonflySiteStatus{{Name: "dc1"}, {Name: "dc1"}}}
 		}, []string{"status.dragonfly.sites", "Duplicate value"}},
-		{"restoreReclones failures duplicate", func(s *v1alpha1.MysqlFailoverGroupStatus) {
-			s.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: "2026-01-01T00:00:00Z", Phase: v1alpha1.RestoreReclonesDraining,
-				Pending: []string{"dc2"}, Failures: []v1alpha1.RestoreRecloneFailure{{Site: "dc2", Message: "a", Time: now}, {Site: "dc2", Message: "b", Time: now}}}
+		{"restoreReclones failures duplicate", func(s *v1beta1.MysqlFailoverGroupStatus) {
+			s.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: "2026-01-01T00:00:00Z", Phase: v1beta1.RestoreReclonesDraining,
+				Pending: []string{"dc2"}, Failures: []v1beta1.RestoreRecloneFailure{{Site: "dc2", Message: "a", Time: now}, {Site: "dc2", Message: "b", Time: now}}}
 		}, []string{"status.restoreReclones.failures", "Duplicate value"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cur := &v1alpha1.MysqlFailoverGroup{}
+			cur := &v1beta1.MysqlFailoverGroup{}
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), cur); err != nil {
 				t.Fatal(err)
 			}
@@ -340,10 +340,10 @@ func TestE4_SSACoOwnership(t *testing.T) {
 	applyAs("platform", e4Unstructured(t, platform, "MysqlFailoverGroup"))
 
 	// Team adds a reader site and its own sidecar container.
-	reader := v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-		Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: platform.Spec.Sites[0].Storage.Size}}
-	teamTyped := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{
-		Sites:           []v1alpha1.SiteSpec{reader},
+	reader := v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly, Zone: "reader-zone",
+		Storage: v1beta1.StorageSpec{StorageClassName: "standard", Size: platform.Spec.Sites[0].Storage.Size}}
+	teamTyped := &v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{
+		Sites:           []v1beta1.SiteSpec{reader},
 		ExtraContainers: []corev1.Container{{Name: "shipper", Image: "shipper:1"}},
 	}}
 	full := e4Unstructured(t, teamTyped, "MysqlFailoverGroup")
@@ -361,7 +361,7 @@ func TestE4_SSACoOwnership(t *testing.T) {
 
 	// The platform re-applies its own config unchanged; the team's entries stay.
 	applyAs("platform", e4Unstructured(t, platform, "MysqlFailoverGroup"))
-	got := &v1alpha1.MysqlFailoverGroup{}
+	got := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, key, got); err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestE4_TightenedSpecRulesOnStoredObjects(t *testing.T) {
 		crds = append(crds, loose)
 	}
 	upgradeScheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme, apiextensionsv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1beta1.AddToScheme, apiextensionsv1.AddToScheme} {
 		if err := add(upgradeScheme); err != nil {
 			t.Fatal(err)
 		}
@@ -490,29 +490,29 @@ func TestE4_TightenedSpecRulesOnStoredObjects(t *testing.T) {
 	cases := []struct {
 		name    string
 		message string
-		violate func(*v1alpha1.MysqlFailoverGroup)
-		edit    func(*v1alpha1.MysqlFailoverGroup) // changes the violating value, still violating
+		violate func(*v1beta1.MysqlFailoverGroup)
+		edit    func(*v1beta1.MysqlFailoverGroup) // changes the violating value, still violating
 	}{
 		{"dup-server-id", "serverID must be unique",
-			func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[1].ServerID = fg.Spec.Sites[0].ServerID },
-			func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: fg.Spec.Sites[0].ServerID, Role: v1alpha1.SiteRoleReadOnly,
+			func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[1].ServerID = fg.Spec.Sites[0].ServerID },
+			func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: fg.Spec.Sites[0].ServerID, Role: v1beta1.SiteRoleReadOnly,
 					Zone: "reader-zone", Storage: fg.Spec.Sites[0].Storage})
 			}},
 		{"dup-priorities", "sitePriorities entries must be unique",
-			func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: []string{"dc1", "dc1"}}
+			func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.SplitBrainPolicy = &v1beta1.SplitBrainPolicySpec{SitePriorities: []string{"dc1", "dc1"}}
 			},
-			func(fg *v1alpha1.MysqlFailoverGroup) {
+			func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.SplitBrainPolicy.SitePriorities = []string{"dc2", "dc2"}
 			}},
 		{"two-schemas", "includeSchemas supports at most one schema",
-			func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z",
-					Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "b"}},
-					LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
+			func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z",
+					Source:      v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "b"}},
+					LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{"a", "b"}}}
 			},
-			func(fg *v1alpha1.MysqlFailoverGroup) {
+			func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.RestoreInPlace.LoadOptions.IncludeSchemas = []string{"a", "c"}
 			}},
 	}
@@ -554,9 +554,9 @@ func TestE4_TightenedSpecRulesOnStoredObjects(t *testing.T) {
 
 	ratchets := statusWritesRatchet(t, envCfg)
 	for _, tc := range cases {
-		get := func() *v1alpha1.MysqlFailoverGroup {
+		get := func() *v1beta1.MysqlFailoverGroup {
 			t.Helper()
-			fg := &v1alpha1.MysqlFailoverGroup{}
+			fg := &v1beta1.MysqlFailoverGroup{}
 			if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: tc.name}, fg); err != nil {
 				t.Fatal(err)
 			}

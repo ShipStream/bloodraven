@@ -7,7 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestBuildBackupJob_TLSLayout(t *testing.T) {
@@ -30,12 +30,12 @@ func TestBuildBackupJob_TLSLayout(t *testing.T) {
 				fg = fgWithEncryptedBackup()
 			}
 			if tc.tls {
-				fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
+				fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"}
 			}
-			backup := &v1alpha1.MysqlBackup{
+			backup := &v1beta1.MysqlBackup{
 				ObjectMeta: metav1.ObjectMeta{Name: "lion-nightly-abc", Namespace: "ns"},
-				Spec: v1alpha1.MysqlBackupSpec{
-					FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+				Spec: v1beta1.MysqlBackupSpec{
+					FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 					ProfileName:      "nightly-s3",
 				},
 			}
@@ -76,14 +76,14 @@ func TestBuildRestoreJobSpec_TLSLayout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgWithBackup()
 			if tc.tls {
-				fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
+				fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"}
 			}
 			r, _ := newReconciler(fg)
 			job, err := r.buildRestoreJobSpec(context.Background(), fg, restoreJobInputs{
 				TargetSite: "iad",
 				CredsName:  "mysql-creds",
-				Source: v1alpha1.RestoreSource{
-					PVC: &v1alpha1.InitFromBackupPVCSource{
+				Source: v1beta1.RestoreSource{
+					PVC: &v1beta1.InitFromBackupPVCSource{
 						ClaimName: "restore-source",
 						SubPath:   "dump",
 					},

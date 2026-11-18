@@ -12,14 +12,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/scenarios"
 )
 
@@ -44,12 +42,10 @@ func TestPacedRolloutScenarioObjectsAdmitted(t *testing.T) {
 //   - after this build's CRD is applied over it, the objects are still
 //     there and status.rollout is stored.
 func TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170(t *testing.T) {
-	upgradeScheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme, apiextensionsv1.AddToScheme} {
-		if err := add(upgradeScheme); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// v1.7.0 serves shipstream.io/v1alpha1 only, and the scenario's runner
+	// talks that version until the end (kube.apiGroupVersion). v1.8.0
+	// keeps serving it with the schema of v1beta1.
+	upgradeScheme := schemeAt(t, v1beta1.DeprecatedGroupVersion)
 	oldEnv := &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("testdata", "crd-v1.7.0")},
 		ErrorIfCRDPathMissing: true,
@@ -67,13 +63,13 @@ func TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170(t *testing.T) {
 
 	ns, groups := pacedRolloutScenarioObjectsAdmitted(t, c)
 	key := types.NamespacedName{Namespace: ns, Name: groups[0]}
-	record := func() *v1alpha1.RolloutStatus {
+	record := func() *v1beta1.RolloutStatus {
 		now := metav1.Now()
-		return &v1alpha1.RolloutStatus{Renderer: "0123456789abcdef", Phase: v1alpha1.RolloutPhaseAdmitted, Reason: "Admitted", AdmittedTime: &now}
+		return &v1beta1.RolloutStatus{Renderer: "0123456789abcdef", Phase: v1beta1.RolloutPhaseAdmitted, Reason: "Admitted", AdmittedTime: &now}
 	}
-	writeRecord := func() *v1alpha1.RolloutStatus {
+	writeRecord := func() *v1beta1.RolloutStatus {
 		t.Helper()
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, key, &fg); err != nil {
 			t.Fatal(err)
 		}
@@ -81,7 +77,7 @@ func TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170(t *testing.T) {
 		if err := c.Status().Update(ctx, &fg); err != nil {
 			t.Fatalf("write status.rollout: %v", err)
 		}
-		var stored v1alpha1.MysqlFailoverGroup
+		var stored v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, key, &stored); err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +111,7 @@ func TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170(t *testing.T) {
 	// The objects created under v1.7.0 are still served, and the record
 	// is stored once the API server serves the new schema.
 	for _, name := range groups {
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &fg); err != nil {
 			t.Fatalf("group %s after the CRD upgrade: %v", name, err)
 		}
@@ -126,7 +122,7 @@ func TestPacedRolloutScenarioObjectsAcrossTheUpgradeFromV170(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		got := writeRecord()
-		if got != nil && got.Phase == v1alpha1.RolloutPhaseAdmitted && got.AdmittedTime != nil {
+		if got != nil && got.Phase == v1beta1.RolloutPhaseAdmitted && got.AdmittedTime != nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -162,7 +158,7 @@ func pacedRolloutScenarioObjectsAdmitted(t *testing.T, c client.Client) (string,
 
 	// The pin and its removal, as pacedPinSidecar and pacedUnpinSidecar
 	// send them (JSON patches on /spec/sidecar/image).
-	target := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: groups[0].Name}}
+	target := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: ns.Name, Name: groups[0].Name}}
 	patch := func(ops []map[string]any) error {
 		body, err := json.Marshal(ops)
 		if err != nil {
@@ -173,7 +169,7 @@ func pacedRolloutScenarioObjectsAdmitted(t *testing.T, c client.Client) (string,
 	if err := patch([]map[string]any{{"op": "add", "path": "/spec/sidecar/image", "value": "bloodraven-sidecar:playground"}}); err != nil {
 		t.Fatalf("pin refused: %v", err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, client.ObjectKeyFromObject(target), &got); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +179,7 @@ func pacedRolloutScenarioObjectsAdmitted(t *testing.T, c client.Client) (string,
 	if err := patch([]map[string]any{{"op": "remove", "path": "/spec/sidecar/image"}}); err != nil {
 		t.Fatalf("removing the pin refused: %v", err)
 	}
-	got = v1alpha1.MysqlFailoverGroup{}
+	got = v1beta1.MysqlFailoverGroup{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(target), &got); err != nil {
 		t.Fatal(err)
 	}

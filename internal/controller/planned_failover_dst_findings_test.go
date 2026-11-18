@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -47,13 +47,13 @@ func TestPFFinding_WritableTargetWithChannel(t *testing.T) {
 		name string
 		prep func(f *opsFixture)
 		kind PromoteOutcomeKind
-		term v1alpha1.PlannedFailoverOutcome
+		term v1beta1.PlannedFailoverOutcome
 	}{
-		{"another process, channel running", func(*opsFixture) {}, PromoteAborted, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"another process, channel stopped", func(f *opsFixture) { f.tgt.repl = stopped }, PromoteAborted, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"another process, channel running", func(*opsFixture) {}, PromoteAborted, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"another process, channel stopped", func(f *opsFixture) { f.tgt.repl = stopped }, PromoteAborted, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
 		{"another process, the external writer's own transactions", func(f *opsFixture) { f.tgt.gtid = opsF + "," + opsUUIDB + ":1-3" },
-			PromoteAborted, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"this process, no clear sent", func(f *opsFixture) { f.topo.startPromoteMemo(f.ref.RunID) }, PromoteAborted, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+			PromoteAborted, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"this process, no clear sent", func(f *opsFixture) { f.topo.startPromoteMemo(f.ref.RunID) }, PromoteAborted, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
 		{"this process, a clear sent", func(f *opsFixture) { f.memoOfAClear() }, PromoteInconsistent, ""},
 	}
 	for _, tc := range cases {
@@ -63,8 +63,8 @@ func TestPFFinding_WritableTargetWithChannel(t *testing.T) {
 			f.fenced()
 			f.tgt.ro, f.tgt.sro = false, false // an external read_only=0; the channel is still configured
 			tc.prep(f)
-			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-			if err != nil || out.Kind != tc.kind || out.Reason != v1alpha1.PlannedFailoverReasonForeignWritable || out.Terminal != tc.term {
+			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+			if err != nil || out.Kind != tc.kind || out.Reason != v1beta1.PlannedFailoverReasonForeignWritable || out.Terminal != tc.term {
 				t.Fatalf("Promote = %+v, %v; want kind %d ForeignWritable terminal %q", out, err, tc.kind, tc.term)
 			}
 			if tc.kind == PromoteAborted && out.MayHaveWritten {
@@ -95,8 +95,8 @@ func TestPFFinding_ClearsNeverLeaveAChannel(t *testing.T) {
 			f.tgt.set(func(m *opsMySQL) { m.repl = &mysql.ReplicaStatus{SourceHost: "mysql-dc1"} })
 			return nil
 		}
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonTargetChanged {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonTargetChanged {
 			t.Fatalf("Promote = %+v, %v; want the gate to refuse with Aborted{TargetChanged}", out, err)
 		}
 		if clearsSent(f.tgt) {
@@ -115,7 +115,7 @@ func TestPFFinding_ClearsNeverLeaveAChannel(t *testing.T) {
 				clearedWithChannel = true
 			}
 		}
-		pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+		pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 		out, err := f.topo.Promote(context.Background(), f.ref, pf)
 		if err != nil || out.Kind != PromoteUnconfirmed || out.MayHaveWritten {
 			t.Fatalf("Promote = %+v, %v; want Unconfirmed with no possible write", out, err)
@@ -174,8 +174,8 @@ func TestPFFinding_ReplacedTargetAfterAClear(t *testing.T) {
 			// channel, a data directory that is behind F.
 			f.tgt.uuid, f.tgt.repl, f.tgt.ro, f.tgt.sro, f.tgt.gtid = opsUUIDD, nil, true, false, opsUUIDA+":1-7"
 			tc.prep(f)
-			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-			if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1alpha1.PlannedFailoverReasonExecuteFailed {
+			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+			if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1beta1.PlannedFailoverReasonExecuteFailed {
 				t.Fatalf("Promote = %+v, %v; want Inconsistent{ExecuteFailed}", out, err)
 			}
 			if out.RollbackIfUnrecorded != tc.rollback {
@@ -194,8 +194,8 @@ func TestPFFinding_ReplacedTargetAfterAClear(t *testing.T) {
 		f.fenced()
 		f.topo.startPromoteMemo(f.ref.RunID)
 		f.tgt.uuid, f.tgt.repl, f.tgt.gtid = opsUUIDD, nil, opsUUIDA+":1-7"
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteAborted || out.Reason != v1alpha1.PlannedFailoverReasonTargetChanged || out.Terminal != "" {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteAborted || out.Reason != v1beta1.PlannedFailoverReasonTargetChanged || out.Terminal != "" {
 			t.Fatalf("Promote = %+v, %v; want Aborted{TargetChanged}", out, err)
 		}
 	})
@@ -210,7 +210,7 @@ func TestPFFinding_ReplacedTargetAfterAClear(t *testing.T) {
 func TestPFFinding_ConfirmNeedsAnAnswer(t *testing.T) {
 	ctx := context.Background()
 	warned := func(out PromoteOutcome) bool {
-		return slices.Contains(out.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
+		return slices.Contains(out.Warnings, v1beta1.PlannedFailoverWarningUnreachablePeers)
 	}
 	// writableTarget is the state another process finds after the clears: a
 	// writable target with exactly F and no channel, and no memo.
@@ -223,7 +223,7 @@ func TestPFFinding_ConfirmNeedsAnAnswer(t *testing.T) {
 	}
 	promote := func(f *opsFixture) PromoteOutcome {
 		t.Helper()
-		out, err := f.topo.Promote(ctx, f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		out, err := f.topo.Promote(ctx, f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		if err != nil {
 			t.Fatalf("Promote: %v", err)
 		}
@@ -276,7 +276,7 @@ func TestPFFinding_ConfirmNeedsAnAnswer(t *testing.T) {
 				}
 				if tc.kind == PromoteUnconfirmed &&
 					(!slices.Equal(out.Sites, []string{tc.down}) || !out.MayHaveWritten || !out.TargetReachable ||
-						out.Reason != v1alpha1.PlannedFailoverReasonPromotionUnconfirmed) {
+						out.Reason != v1beta1.PlannedFailoverReasonPromotionUnconfirmed) {
 					t.Fatalf("Promote = %+v; want Unconfirmed{PromotionUnconfirmed} naming %s, the target reachable, a possible write", out, tc.down)
 				}
 			})
@@ -299,13 +299,13 @@ func TestPFFinding_ConfirmNeedsAnAnswer(t *testing.T) {
 	t.Run("a peer last seen writable", func(t *testing.T) {
 		f := writableTarget(t, state.SiteRolePrimaryCandidate)
 		f.third.ro, f.third.sro = false, false
-		if out := promote(f); out.Kind != PromoteInconsistent || out.Reason != v1alpha1.PlannedFailoverReasonForeignWritable {
+		if out := promote(f); out.Kind != PromoteInconsistent || out.Reason != v1beta1.PlannedFailoverReasonForeignWritable {
 			t.Fatalf("writable peer: Promote = %+v; want Inconsistent{ForeignWritable}", out)
 		}
 		// The hold did not commit; the peer stops answering.
 		f.third.set(func(m *opsMySQL) { m.down = true })
 		out := promote(f)
-		if out.Kind != PromoteInconsistent || out.Reason != v1alpha1.PlannedFailoverReasonForeignWritable || !slices.Equal(out.Sites, []string{"dc3"}) {
+		if out.Kind != PromoteInconsistent || out.Reason != v1beta1.PlannedFailoverReasonForeignWritable || !slices.Equal(out.Sites, []string{"dc3"}) {
 			t.Fatalf("the writable peer stopped answering: Promote = %+v; want Inconsistent{ForeignWritable} naming dc3", out)
 		}
 		// It answers again, read-only: nothing is held against it.
@@ -351,9 +351,9 @@ func TestPFFinding_ConfirmNeedsAnAnswer(t *testing.T) {
 		f := writableTarget(t, state.SiteRolePrimaryCandidate)
 		f.hold(true)
 		f.third.ro, f.third.sro = false, false
-		fg := opsGroup(opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		fg := opsGroup(opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		res, err := f.topo.Reprove(ctx, f.ref, fg)
-		if err != nil || res.Hold == nil || *res.Hold != v1alpha1.PlannedFailoverReasonForeignWritable {
+		if err != nil || res.Hold == nil || *res.Hold != v1beta1.PlannedFailoverReasonForeignWritable {
 			t.Fatalf("Reprove beside a writable peer = %+v, %v; want Hold{ForeignWritable}", res, err)
 		}
 		// The hold did not commit; the peer stops answering, so the next
@@ -361,7 +361,7 @@ func TestPFFinding_ConfirmNeedsAnAnswer(t *testing.T) {
 		f.third.set(func(m *opsMySQL) { m.down = true })
 		res, err = f.topo.Reprove(ctx, f.ref, fg)
 		if err != nil || res.HandOff == nil || res.HandOff.Kind != PromoteInconsistent ||
-			res.HandOff.Reason != v1alpha1.PlannedFailoverReasonForeignWritable || !slices.Equal(res.HandOff.Sites, []string{"dc3"}) {
+			res.HandOff.Reason != v1beta1.PlannedFailoverReasonForeignWritable || !slices.Equal(res.HandOff.Sites, []string{"dc3"}) {
 			t.Fatalf("Reprove after the peer stopped answering = %+v (handoff %+v), %v; want HandOff Inconsistent{ForeignWritable} naming dc3",
 				res, res.HandOff, err)
 		}
@@ -369,7 +369,7 @@ func TestPFFinding_ConfirmNeedsAnAnswer(t *testing.T) {
 	t.Run("a read-only answer to the re-proof is not the gate's", func(t *testing.T) {
 		f := writableTarget(t, state.SiteRolePrimaryCandidate)
 		f.hold(true)
-		fg := opsGroup(opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+		fg := opsGroup(opsRun(v1beta1.PlannedFailoverPhasePromoting))
 		if res, err := f.topo.Reprove(ctx, f.ref, fg); err != nil || !res.OK {
 			t.Fatalf("Reprove = %+v, %v; want OK", res, err)
 		}

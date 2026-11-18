@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -135,7 +135,7 @@ func TestOwnLoss_RestoredPrimaryIsNotReportedOnAQueuedPeer(t *testing.T) {
 	tm.lastFailoverTarget = "dc1"
 	tm.mu.Unlock()
 	pollN(tm, 3)
-	if st := tm.Status(); st.Sites[0].LostGtid != "" || st.Sites[0].RecoveryState == v1alpha1.RecoveryStateRecloneRequired {
+	if st := tm.Status(); st.Sites[0].LostGtid != "" || st.Sites[0].RecoveryState == v1beta1.RecoveryStateRecloneRequired {
 		t.Fatalf("the restored primary is reported %q (lostGtid %s) on the evidence of a peer that awaits its post-restore reclone",
 			st.Sites[0].RecoveryState, st.Sites[0].LostGtid)
 	}
@@ -378,7 +378,7 @@ func TestOwnLoss_HeldRequestDoesNotCloneOverADivergentSite(t *testing.T) {
 	}
 	f.setHold(false)
 	f.pollNoClone(t, 40, "although it holds "+lossUUIDOld+":101-105, which the primary lacks")
-	if got := recoveryOf(f.tm, "dc2").state; got != v1alpha1.RecoveryStateBlocked {
+	if got := recoveryOf(f.tm, "dc2").state; got != v1beta1.RecoveryStateBlocked {
 		t.Fatalf("recovery state = %q, want RecoveryBlocked", got)
 	}
 }
@@ -424,7 +424,7 @@ func TestOwnLoss_RequestIsWithdrawnEveryPoll(t *testing.T) {
 	}{
 		{"the report cleared", func(f *lossFixture) { delete(f.tm.ownLoss, "dc2") }},
 		{"a divergence block was recorded", func(f *lossFixture) {
-			f.tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentGtid: lossUUIDOld + ":101-105"}
+			f.tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateBlocked, divergentGtid: lossUUIDOld + ":101-105"}
 		}},
 		{"an ordered update began", func(f *lossFixture) { f.tm.deploymentUpdateRunning = true }},
 		{"the report is not confirmed", func(f *lossFixture) { f.tm.ownLoss["dc2"].detectedBy = "" }},
@@ -515,7 +515,7 @@ func TestOwnLoss_RecloneIsRefusedForASiteThatDivergedAfterTheReport(t *testing.T
 	f.setSiteGTID(lossUUIDOld + ":1-90:101-105")
 	gate.ready = true
 	f.pollNoClone(t, 40, "although it holds "+lossUUIDOld+":101-105, which the primary lacks")
-	if got := recoveryOf(f.tm, "dc2").state; got != v1alpha1.RecoveryStateBlocked {
+	if got := recoveryOf(f.tm, "dc2").state; got != v1beta1.RecoveryStateBlocked {
 		t.Fatalf("recovery state = %q, want RecoveryBlocked", got)
 	}
 	refusals := f.records(t, "automatic reclone not started: the check before the clone does not allow it")
@@ -588,7 +588,7 @@ func TestOwnLoss_VerifyRecloneRefusals(t *testing.T) {
 		{"the primary's set cannot be read", func(f *lossFixture) { f.primary.mockMySQL.gtidExecutedErr = errors.New("read failed") }, "primary's GTID set could not be read"},
 		{"the site is recorded divergent", func(f *lossFixture) {
 			f.tm.mu.Lock()
-			f.tm.recovery["dc2"] = &siteRecovery{state: v1alpha1.RecoveryStateBlocked, divergentGtid: lossUUIDOld + ":101"}
+			f.tm.recovery["dc2"] = &siteRecovery{state: v1beta1.RecoveryStateBlocked, divergentGtid: lossUUIDOld + ":101"}
 			f.tm.mu.Unlock()
 		}, "also holds transactions the primary lacks"},
 		{"the primary changed", func(f *lossFixture) {
@@ -759,11 +759,11 @@ func TestCloneIdentityRecord_StoresTheServerUUIDHistoryInTheSameWrite(t *testing
 	site := fg.Spec.Sites[1].Name
 	history := func() (map[string][]string, string) {
 		t.Helper()
-		var cur v1alpha1.MysqlFailoverGroup
+		var cur v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &cur); err != nil {
 			t.Fatal(err)
 		}
-		return parseServerUUIDHistory(cur.Annotations[v1alpha1.ServerUUIDHistoryAnnotation], nil, nn), cur.ResourceVersion
+		return parseServerUUIDHistory(cur.Annotations[v1beta1.ServerUUIDHistoryAnnotation], nil, nn), cur.ResourceVersion
 	}
 
 	store := &groupCloneIdentityStore{client: c, nn: nn, logger: testLogger()}
@@ -780,11 +780,11 @@ func TestCloneIdentityRecord_StoresTheServerUUIDHistoryInTheSameWrite(t *testing
 	if recs, err := store.Load(ctx); err != nil || recs[site].ServerUUID == "" {
 		t.Fatalf("clone identity record = %v, %v, want it stored", recs, err)
 	}
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
-	if before == after || cur.Annotations[v1alpha1.CloneServerUUIDAnnotation] == "" {
+	if before == after || cur.Annotations[v1beta1.CloneServerUUIDAnnotation] == "" {
 		t.Fatalf("resourceVersion %s -> %s: the record was not written", before, after)
 	}
 	// Removing the record keeps the history.
@@ -876,16 +876,16 @@ func TestCloneMarker_OnlyForAnInstalledClone(t *testing.T) {
 	f.site.mockMySQL.cloneStatusVal = &mysql.CloneStatus{State: mysql.CloneStateFailed, BeginTime: "2026-11-11 08:00:00"}
 	f.site.mockMySQL.mu.Unlock()
 	f.tm.settleCloneIdentity(ctx, f.site, site)
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
-	timeline := parseServerUUIDHistory(cur.Annotations[v1alpha1.ServerUUIDHistoryAnnotation], nil, nn)[site]
+	timeline := parseServerUUIDHistory(cur.Annotations[v1beta1.ServerUUIDHistoryAnnotation], nil, nn)[site]
 	if !stringSlicesEqual(timeline, []string{lossUUIDOld}) {
 		t.Fatalf("server_uuid timeline after a failed clone = %v, want no clone marker", timeline)
 	}
-	if cur.Annotations[v1alpha1.CloneServerUUIDAnnotation] != "" {
-		t.Fatalf("clone identity record = %q, want it removed: the clone failed", cur.Annotations[v1alpha1.CloneServerUUIDAnnotation])
+	if cur.Annotations[v1beta1.CloneServerUUIDAnnotation] != "" {
+		t.Fatalf("clone identity record = %q, want it removed: the clone failed", cur.Annotations[v1beta1.CloneServerUUIDAnnotation])
 	}
 	// The data directory is replaced by hand: the site answers under
 	// another server_uuid. The first identity is still one it can have
@@ -1007,7 +1007,7 @@ func TestOwnLoss_ConvergenceReportsARecordedSiteDuringAHold(t *testing.T) {
 	f.setHold(true)
 	pollN(f.tm, 3)
 	st := f.tm.Status()
-	if st.Sites[1].SourceConvergenceState != sourceConvergenceBlocked || st.Sites[1].SourceConvergenceReason != v1alpha1.SourceReasonOwnTransactionsLost {
+	if st.Sites[1].SourceConvergenceState != sourceConvergenceBlocked || st.Sites[1].SourceConvergenceReason != v1beta1.SourceReasonOwnTransactionsLost {
 		t.Fatalf("source convergence during the hold = %s/%s, want Blocked/OwnTransactionsLost", st.Sites[1].SourceConvergenceState, st.Sites[1].SourceConvergenceReason)
 	}
 	if changes, starts, _, _ := f.site.counts(); starts != 0 || changes != 0 {

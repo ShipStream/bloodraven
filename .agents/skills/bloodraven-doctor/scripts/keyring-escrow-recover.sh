@@ -205,7 +205,7 @@ kubectl annotate secret "$SECRET" -n "$NAMESPACE" "bloodraven.shipstream.io/keyr
     || die "created $SECRET (digest verified) but could not annotate it; add bloodraven.shipstream.io/keyring-digest=$DIGEST by hand, do not delete it"
 kubectl patch secret "$SECRET" -n "$NAMESPACE" --type=merge -p="{
   \"metadata\":{\"ownerReferences\":[{
-    \"apiVersion\":\"shipstream.io/v1alpha1\",\"kind\":\"MysqlFailoverGroup\",
+    \"apiVersion\":\"shipstream.io/v1beta1\",\"kind\":\"MysqlFailoverGroup\",
     \"name\":\"$GROUP\",\"uid\":\"$FG_UID\",\"controller\":true,\"blockOwnerDeletion\":true
   }]},\"immutable\":true
 }" || die "created $SECRET (digest verified) but could not set its owner reference and immutability; patch it by hand, do not delete it"

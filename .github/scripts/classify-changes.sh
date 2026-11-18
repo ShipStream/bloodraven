@@ -34,7 +34,7 @@ while IFS= read -r f || [ -n "$f" ]; do
     cmd/bloodraven/*|internal/pitrplan/*|internal/pitrarchive/*|internal/backupmeta/*|internal/sidecar/*|internal/mysql/*|internal/backupcrypto/*|internal/controller/pitr*.go|internal/controller/mysql_launcher*.go|internal/controller/encryption.go|internal/controller/own_transactions_lost*.go|internal/controller/gtid_audit.go|internal/controller/backup.go|internal/controller/script_credentials_test.go|internal/controller/restore_script.py|internal/controller/verify_script.sh|go.mod|go.sum) pitr=true ;;
   esac
   case "$f" in
-    internal/dragonfly/*|internal/controller/dragonfly_*.go|internal/controller/planned_failover_df*.go|api/v1alpha1/dragonfly_types.go|playground/manifests/failovergroup.yaml|go.mod|go.sum) dragonfly=true ;;
+    internal/dragonfly/*|internal/controller/dragonfly_*.go|internal/controller/planned_failover_df*.go|api/v1beta1/dragonfly_types.go|playground/manifests/failovergroup.yaml|go.mod|go.sum) dragonfly=true ;;
   esac
   case "$f" in
     .github/workflows/ci.yml|.github/actions/*|.github/scripts/*|Makefile|.gitignore) all ;;

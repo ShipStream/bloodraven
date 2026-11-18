@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -144,7 +144,7 @@ func statusRunner(t *testing.T, tm *TopologyManager) (func() map[string]metav1.C
 	t.Helper()
 	fg := newTestFG()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 	recorder := record.NewFakeRecorder(100)
 	runner := &TopologyManagerRunner{client: c, logger: testLogger(), recorder: recorder, managers: make(map[types.NamespacedName]*managedTopology)}
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -154,7 +154,7 @@ func statusRunner(t *testing.T, tm *TopologyManager) (func() map[string]metav1.C
 		tm.MarkStatusWriteResult(err)
 	}
 	return func() map[string]metav1.Condition {
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &got); err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +178,7 @@ func TestGTIDAudit_Issue202HealthyReplicaIsBlocked(t *testing.T) {
 	pollN(tm, 2)
 
 	rec := recoveryOf(tm, "follower-a")
-	if rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentGtid != issue202ErrantGTID || rec.divergentCount != 221 {
+	if rec.state != v1beta1.RecoveryStateBlocked || rec.divergentGtid != issue202ErrantGTID || rec.divergentCount != 221 {
 		t.Fatalf("recovery = %+v, want RecoveryBlocked with %s (221)", rec, issue202ErrantGTID)
 	}
 	if rec.detectedBy != divergenceDetectedByAudit || rec.comparedTo != "primary" {
@@ -188,7 +188,7 @@ func TestGTIDAudit_Issue202HealthyReplicaIsBlocked(t *testing.T) {
 		t.Errorf("bloodraven_divergent_transactions{follower-a} = %v, want 221", got)
 	}
 	st := tm.Status()
-	if st.Sites[1].DivergentGtid != issue202ErrantGTID || st.Sites[1].RecoveryState != v1alpha1.RecoveryStateBlocked {
+	if st.Sites[1].DivergentGtid != issue202ErrantGTID || st.Sites[1].RecoveryState != v1beta1.RecoveryStateBlocked {
 		t.Errorf("status site = %+v, want the divergent set", st.Sites[1])
 	}
 	conds := conditions()
@@ -246,7 +246,7 @@ func TestGTIDAudit_TransactionAppliedBetweenReadsIsNotDivergent(t *testing.T) {
 	if replica.reads() == 0 {
 		t.Fatal("follower was never audited")
 	}
-	if rec := recoveryOf(tm, "follower-a"); rec.state == v1alpha1.RecoveryStateBlocked {
+	if rec := recoveryOf(tm, "follower-a"); rec.state == v1beta1.RecoveryStateBlocked {
 		t.Fatalf("follower reported divergent (%s) for a transaction it applied between the reads", rec.divergentGtid)
 	}
 }
@@ -294,7 +294,7 @@ func TestGTIDAudit_DiscardsResultWhenAuthorityOrIdentityChanges(t *testing.T) {
 			if replica.reads() == 0 {
 				t.Fatal("follower was never audited")
 			}
-			if rec := recoveryOf(tm, "follower-a"); rec.state == v1alpha1.RecoveryStateBlocked {
+			if rec := recoveryOf(tm, "follower-a"); rec.state == v1beta1.RecoveryStateBlocked {
 				t.Fatalf("published a result read across a change: %+v", rec)
 			}
 		})
@@ -325,7 +325,7 @@ func TestGTIDAudit_ProbeFailureIsUnverified(t *testing.T) {
 			pollN(tm, 2)
 
 			rec := recoveryOf(tm, "follower-a")
-			if tc.blocked && (rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentGtid != issue202ErrantGTID) {
+			if tc.blocked && (rec.state != v1beta1.RecoveryStateBlocked || rec.divergentGtid != issue202ErrantGTID) {
 				t.Fatalf("unverified audit changed the block: %+v", rec)
 			}
 			if !tc.blocked && rec.state != "" {
@@ -343,7 +343,7 @@ func TestGTIDAudit_BlockSurvivesHealthyReplication(t *testing.T) {
 	replica := auditReplica(issue202ReplicaUUID, issue202ReplicaGTID)
 	tm, clk := twoSiteAudit(t, primary, replica)
 	pollN(tm, 2)
-	if rec := recoveryOf(tm, "follower-a"); rec.state != v1alpha1.RecoveryStateBlocked {
+	if rec := recoveryOf(tm, "follower-a"); rec.state != v1beta1.RecoveryStateBlocked {
 		t.Fatalf("setup: recovery = %+v, want blocked", rec)
 	}
 
@@ -353,7 +353,7 @@ func TestGTIDAudit_BlockSurvivesHealthyReplication(t *testing.T) {
 	}
 	tm.clearHealthyRecoverySites(context.Background(), []*mysql.ReplicaStatus{nil, replica.replicaStatusVal})
 
-	if rec := recoveryOf(tm, "follower-a"); rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentCount != 221 {
+	if rec := recoveryOf(tm, "follower-a"); rec.state != v1beta1.RecoveryStateBlocked || rec.divergentCount != 221 {
 		t.Fatalf("block cleared without a containment proof: %+v", rec)
 	}
 }
@@ -419,7 +419,7 @@ func TestGTIDAudit_RehydratedBlockIsReverified(t *testing.T) {
 			pollN(tm, 2)
 
 			rec := recoveryOf(tm, "follower-a")
-			if tc.wantBlocked && (rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentGtid != issue202ErrantGTID) {
+			if tc.wantBlocked && (rec.state != v1beta1.RecoveryStateBlocked || rec.divergentGtid != issue202ErrantGTID) {
 				t.Fatalf("recovery = %+v, want the restored block kept", rec)
 			}
 			if !tc.wantBlocked && rec.state != "" {
@@ -442,7 +442,7 @@ func TestGTIDAudit_AuditsReaderSites(t *testing.T) {
 
 	pollN(tm, 2)
 
-	if rec := recoveryOf(tm, "follower-b"); rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentCount != 2 {
+	if rec := recoveryOf(tm, "follower-b"); rec.state != v1beta1.RecoveryStateBlocked || rec.divergentCount != 2 {
 		t.Fatalf("reader recovery = %+v, want blocked with 2 transactions", rec)
 	}
 	if rec := recoveryOf(tm, "follower-a"); rec.state != "" {
@@ -482,7 +482,7 @@ func TestGTIDAudit_IsRateLimited(t *testing.T) {
 func TestUpdateCRStatus_DivergenceWinsOverReplicationReasons(t *testing.T) {
 	fg := newTestFG()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 	runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	lag := int64(900)
@@ -492,14 +492,14 @@ func TestUpdateCRStatus_DivergenceWinsOverReplicationReasons(t *testing.T) {
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly,
 				ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged,
 				Replication:   &mysql.ReplicaStatus{IORunning: false, SQLRunning: true, SourceHost: "dc1", SecondsBehindSource: &lag},
-				RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: issue202ErrantGTID, DivergentTxnCount: 221},
+				RecoveryState: v1beta1.RecoveryStateBlocked, DivergentGtid: issue202ErrantGTID, DivergentTxnCount: 221},
 		},
 		ActiveSite:     "dc1",
 		DegradedReason: "Healthy",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +540,7 @@ func TestGTIDAudit_RestoredBlockOnPrimaryBecomesPromotionNote(t *testing.T) {
 func TestUpdateCRStatus_PersistsDivergenceProvenance(t *testing.T) {
 	fg := newTestFG()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(fg).Build()
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(fg).Build()
 	runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	if err := runner.updateCRStatus(context.Background(), nn, TopologySnapshot{
@@ -548,14 +548,14 @@ func TestUpdateCRStatus_PersistsDivergenceProvenance(t *testing.T) {
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true,
 				SourceConvergenceState: sourceConvergenceConverged,
-				RecoveryState:          v1alpha1.RecoveryStateBlocked, DivergentGtid: issue202ErrantGTID, DivergentTxnCount: 221,
+				RecoveryState:          v1beta1.RecoveryStateBlocked, DivergentGtid: issue202ErrantGTID, DivergentTxnCount: 221,
 				DivergenceDetectedBy: divergenceDetectedByAudit, DivergenceComparedTo: "dc1"},
 		},
 		ActiveSite: "dc1", DegradedReason: "Healthy",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -825,7 +825,7 @@ func TestGTIDAudit_HandoffRefusalWakesAudit(t *testing.T) {
 	clk.Advance(time.Second)
 	pollN(tm, 1)
 
-	if rec := recoveryOf(tm, "follower-a"); rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentCount != 3 {
+	if rec := recoveryOf(tm, "follower-a"); rec.state != v1beta1.RecoveryStateBlocked || rec.divergentCount != 3 {
 		t.Fatalf("recovery = %+v, want the refused candidate audited and blocked on the next poll", rec)
 	}
 }

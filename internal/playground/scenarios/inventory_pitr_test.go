@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -129,19 +129,19 @@ func TestPITRMarkerQuery(t *testing.T) {
 }
 
 func TestPITRSourceSpecForRestore(t *testing.T) {
-	src := &v1alpha1.MysqlFailoverGroup{}
+	src := &v1beta1.MysqlFailoverGroup{}
 	src.Namespace = "ns"
 	src.Status.ActiveSite = "pdx"
-	src.Spec.DNS = v1alpha1.DNSSpec{Hostname: "playground-db.example.local", TTLSeconds: 10}
-	src.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-iad", LoadBalancerIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
-		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LoadBalancerIP: "10.0.0.2"},
-		{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "zone-reader"},
+	src.Spec.DNS = v1beta1.DNSSpec{Hostname: "playground-db.example.local", TTLSeconds: 10}
+	src.Spec.Sites = []v1beta1.SiteSpec{
+		{Name: "iad", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate, Zone: "zone-iad", LoadBalancerIP: "10.0.0.1", TaintNodeSelector: map[string]string{"a": "b"}},
+		{Name: "pdx", ServerID: 102, Role: v1beta1.SiteRolePrimaryCandidate, Zone: "zone-pdx", LoadBalancerIP: "10.0.0.2"},
+		{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly, Zone: "zone-reader"},
 	}
-	src.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true}
-	src.Spec.Backup = &v1alpha1.BackupSpec{
-		Profiles: []v1alpha1.BackupProfile{{Name: backupE2EProfile}},
-		PITR:     &v1alpha1.PITRSpec{Enabled: true, ProfileName: backupE2EProfile},
+	src.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true}
+	src.Spec.Backup = &v1beta1.BackupSpec{
+		Profiles: []v1beta1.BackupProfile{{Name: backupE2EProfile}},
+		PITR:     &v1beta1.PITRSpec{Enabled: true, ProfileName: backupE2EProfile},
 	}
 	got, err := pitrSourceSpecForRestore(src, "s37-restored", "bk", "2026-11-05T10:00:01Z")
 	if err != nil {

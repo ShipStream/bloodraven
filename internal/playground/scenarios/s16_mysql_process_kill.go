@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -191,12 +191,12 @@ func s16VerifyNoSplitBrain() runner.Step {
 					var writable, readOnly, blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}
@@ -228,7 +228,7 @@ func s16VerifyNoSplitBrain() runner.Step {
 	}
 }
 
-func summarizeSites(mfg *v1alpha1.MysqlFailoverGroup) string {
+func summarizeSites(mfg *v1beta1.MysqlFailoverGroup) string {
 	if mfg == nil {
 		return "<nil>"
 	}

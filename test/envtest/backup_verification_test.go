@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -22,27 +22,27 @@ import (
 // profile suitable for driving a verification reconcile. The S3
 // endpoint/bucket are fake — the reconciler only needs them to reach
 // the Job-creation step; nothing in envtest actually hits S3.
-func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func newVerificationFG(namespace string) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: namespace},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-			Sites: []v1alpha1.SiteSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+			Sites: []v1beta1.SiteSpec{
 				{Name: "dc1", ServerID: 101, Zone: "lion-dc1", LoadBalancerIP: "203.0.113.1", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
-					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
+					Storage: v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
 				{Name: "dc2", ServerID: 102, Zone: "lion-dc2", LoadBalancerIP: "203.0.113.2", TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
-					Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
+					Storage: v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"}},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
-			Backup: &v1alpha1.BackupSpec{
+			DNS: v1beta1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
+			Backup: &v1beta1.BackupSpec{
 				Image: "container-registry.oracle.com/mysql/community-server:9.7",
-				Profiles: []v1alpha1.BackupProfile{
+				Profiles: []v1beta1.BackupProfile{
 					{
 						Name: "nightly-s3",
-						Storage: v1alpha1.BackupStorage{
-							Type: v1alpha1.BackupStorageS3,
-							S3: &v1alpha1.S3Storage{
+						Storage: v1beta1.BackupStorage{
+							Type: v1beta1.BackupStorageS3,
+							S3: &v1beta1.S3Storage{
 								Bucket:                "bloodraven",
 								Prefix:                "lion",
 								CredentialsSecretName: "s3-creds",
@@ -58,8 +58,8 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 // newSucceededBackup returns a MysqlBackup already in the Succeeded
 // phase with the metadata the verification reconciler needs to resolve
 // a target and build a Job (status.location + storageType).
-func newSucceededBackup(namespace, fgName, profile string) *v1alpha1.MysqlBackup {
-	return &v1alpha1.MysqlBackup{
+func newSucceededBackup(namespace, fgName, profile string) *v1beta1.MysqlBackup {
+	return &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "lion-nightly-ok",
 			Namespace: namespace,
@@ -69,8 +69,8 @@ func newSucceededBackup(namespace, fgName, profile string) *v1alpha1.MysqlBackup
 				"app.kubernetes.io/managed-by":            "bloodraven",
 			},
 		},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 	}
@@ -99,16 +99,16 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 	ns := "envtest-verify-schema"
 	ensureNamespace(t, ns)
 
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-a", Namespace: ns},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
-			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode:     v1alpha1.PointInTimeModeTimestamp,
+			PointInTime: &v1beta1.PointInTimeVerificationSpec{
+				Mode:     v1beta1.PointInTimeModeTimestamp,
 				StopTime: &metav1.Time{Time: time.Date(2026, 4, 15, 9, 30, 0, 0, time.UTC)},
 			},
-			SanityCheck: &v1alpha1.SanityCheckSpec{
+			SanityCheck: &v1beta1.SanityCheckSpec{
 				Query:     "SELECT COUNT(*) FROM information_schema.tables",
 				MinResult: new(int64(1)),
 				Timeout:   &metav1.Duration{Duration: 30 * time.Second},
@@ -119,11 +119,11 @@ func TestEnvtest_Verification_CreationAndSchemaAcceptance(t *testing.T) {
 		t.Fatalf("create MysqlBackupVerification: %v", err)
 	}
 
-	var fetched v1alpha1.MysqlBackupVerification
+	var fetched v1beta1.MysqlBackupVerification
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "verify-a", Namespace: ns}, &fetched); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if fetched.Spec.PointInTime == nil || fetched.Spec.PointInTime.Mode != v1alpha1.PointInTimeModeTimestamp {
+	if fetched.Spec.PointInTime == nil || fetched.Spec.PointInTime.Mode != v1beta1.PointInTimeModeTimestamp {
 		t.Errorf("pointInTime.mode not persisted: %+v", fetched.Spec.PointInTime)
 	}
 	if fetched.Spec.SanityCheck == nil || fetched.Spec.SanityCheck.Query == "" {
@@ -146,11 +146,11 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 		t.Fatalf("create backup: %v", err)
 	}
 	// Status is a subresource — write it separately.
-	backup.Status = v1alpha1.MysqlBackupStatus{
-		Phase:          v1alpha1.BackupPhaseSucceeded,
+	backup.Status = v1beta1.MysqlBackupStatus{
+		Phase:          v1beta1.BackupPhaseSucceeded,
 		CompletionTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
-			Type: v1alpha1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
+		ArtifactStorage: &v1beta1.BackupArtifactStorage{
+			Type: v1beta1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
 		},
 		SizeBytes: 512 * 1024 * 1024,
 	}
@@ -173,10 +173,10 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 		t.Fatalf("create scripts configmap: %v", err)
 	}
 
-	verify := &v1alpha1.MysqlBackupVerification{
+	verify := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-provision", Namespace: ns},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -263,11 +263,11 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 		t.Errorf("verification Job must set BLOODRAVEN_LOAD_PROGRESS_FILE=\"\" to disable mysqlsh progress tracking on the read-only backup mount; got %q", gotProgress.Value)
 	}
 
-	var after v1alpha1.MysqlBackupVerification
+	var after v1beta1.MysqlBackupVerification
 	if err := k8sClient.Get(ctx, nn, &after); err != nil {
 		t.Fatalf("get verify after reconcile: %v", err)
 	}
-	if after.Status.Phase != v1alpha1.VerificationPhaseRestoring {
+	if after.Status.Phase != v1beta1.VerificationPhaseRestoring {
 		t.Errorf("want phase=Restoring once Job is created, got %q", after.Status.Phase)
 	}
 	if after.Status.JobName != jobKey.Name {
@@ -295,11 +295,11 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	if err := k8sClient.Create(ctx, backup); err != nil {
 		t.Fatalf("create backup: %v", err)
 	}
-	backup.Status = v1alpha1.MysqlBackupStatus{
-		Phase:          v1alpha1.BackupPhaseSucceeded,
+	backup.Status = v1beta1.MysqlBackupStatus{
+		Phase:          v1beta1.BackupPhaseSucceeded,
 		CompletionTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{
-			Type: v1alpha1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
+		ArtifactStorage: &v1beta1.BackupArtifactStorage{
+			Type: v1beta1.BackupStorageS3, Location: "s3://bloodraven/lion/lion-nightly-ok/", Bucket: "bloodraven",
 		},
 		SizeBytes: 512 * 1024 * 1024,
 	}
@@ -315,10 +315,10 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 		t.Fatalf("create scripts configmap: %v", err)
 	}
 
-	verify := &v1alpha1.MysqlBackupVerification{
+	verify := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-ok", Namespace: ns},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -369,14 +369,14 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	}
 
 	reconcileUntil(t, r, nn, func() bool {
-		var got v1alpha1.MysqlBackupVerification
+		var got v1beta1.MysqlBackupVerification
 		if err := k8sClient.Get(ctx, nn, &got); err != nil {
 			return false
 		}
-		return got.Status.Phase == v1alpha1.VerificationPhaseSucceeded
+		return got.Status.Phase == v1beta1.VerificationPhaseSucceeded
 	})
 
-	var terminal v1alpha1.MysqlBackupVerification
+	var terminal v1beta1.MysqlBackupVerification
 	if err := k8sClient.Get(ctx, nn, &terminal); err != nil {
 		t.Fatalf("get final: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestEnvtest_Verification_ReconcilerTransitionsToSucceededOnJobComplete(t *t
 	}
 	var seenVerified bool
 	for _, c := range terminal.Status.Conditions {
-		if c.Type == v1alpha1.ConditionVerified {
+		if c.Type == v1beta1.ConditionVerified {
 			seenVerified = true
 			if c.Status != metav1.ConditionTrue {
 				t.Errorf("Verified condition status: want True, got %s", c.Status)
@@ -409,10 +409,10 @@ func TestEnvtest_Verification_BackupNotFound_FailsWithReason(t *testing.T) {
 		t.Fatalf("create fg: %v", err)
 	}
 
-	verify := &v1alpha1.MysqlBackupVerification{
+	verify := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-no-backup", Namespace: ns},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -428,20 +428,20 @@ func TestEnvtest_Verification_BackupNotFound_FailsWithReason(t *testing.T) {
 	nn := types.NamespacedName{Name: verify.Name, Namespace: ns}
 
 	reconcileUntil(t, r, nn, func() bool {
-		var got v1alpha1.MysqlBackupVerification
+		var got v1beta1.MysqlBackupVerification
 		if err := k8sClient.Get(ctx, nn, &got); err != nil {
 			return false
 		}
-		return got.Status.Phase == v1alpha1.VerificationPhaseFailed
+		return got.Status.Phase == v1beta1.VerificationPhaseFailed
 	})
 
-	var terminal v1alpha1.MysqlBackupVerification
+	var terminal v1beta1.MysqlBackupVerification
 	if err := k8sClient.Get(ctx, nn, &terminal); err != nil {
 		t.Fatalf("get final: %v", err)
 	}
 	var reason string
 	for _, c := range terminal.Status.Conditions {
-		if c.Type == v1alpha1.ConditionVerified {
+		if c.Type == v1beta1.ConditionVerified {
 			reason = c.Reason
 		}
 	}

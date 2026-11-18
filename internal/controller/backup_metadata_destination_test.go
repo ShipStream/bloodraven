@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,7 +41,7 @@ func metadataRoundTripRuntimeEnv(container corev1.Container) map[string]string {
 func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	for _, storage := range []v1alpha1.BackupStorageType{v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC} {
+	for _, storage := range []v1beta1.BackupStorageType{v1beta1.BackupStorageS3, v1beta1.BackupStoragePVC} {
 		for _, encrypted := range []bool{false, true} {
 			for _, prefix := range []struct{ template, literal string }{
 				{"$$(BLOODRAVEN_STORAGE_TYPE)", "$(BLOODRAVEN_STORAGE_TYPE)"},
@@ -54,13 +54,13 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					if encrypted {
 						fg = fgWithEncryptedBackup()
 					}
-					if storage == v1alpha1.BackupStoragePVC {
-						fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: storage, PVC: &v1alpha1.PVCStorage{ClaimName: "backups", SubPath: prefix.template}}
+					if storage == v1beta1.BackupStoragePVC {
+						fg.Spec.Backup.Profiles[0].Storage = v1beta1.BackupStorage{Type: storage, PVC: &v1beta1.PVCStorage{ClaimName: "backups", SubPath: prefix.template}}
 					} else {
 						fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = prefix.template
 					}
 					fg.Status.ActiveSite = "iad"
-					fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
+					fg.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateWritable}}
 					mb := backupCR("metadata", fg.Name, "nightly-s3")
 					mb.UID = "literal-backup"
 					r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
@@ -71,13 +71,13 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					}
 					key := prefix.literal + "/metadata"
 					wantLocation := key
-					if storage == v1alpha1.BackupStoragePVC {
+					if storage == v1beta1.BackupStoragePVC {
 						wantLocation = "/backups/" + key
 					} else if encrypted {
 						wantLocation = "s3://bloodraven-backups/" + key + "/"
 					}
 					wantOutput := key
-					if storage == v1alpha1.BackupStoragePVC {
+					if storage == v1beta1.BackupStoragePVC {
 						wantOutput = wantLocation
 					}
 					if actual := metadataRoundTripRuntimeEnv(*backupJobMainContainer(&producer))["BLOODRAVEN_OUTPUT_URL"]; actual != wantOutput {
@@ -94,10 +94,10 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
 						t.Fatal(err)
 					}
-					if testArtifactLocation(mb) != wantLocation || mb.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+					if testArtifactLocation(mb) != wantLocation || mb.Status.Phase != v1beta1.BackupPhaseSucceeded {
 						t.Fatalf("recovery changed actual artifact identity: %+v want %q", mb.Status, wantLocation)
 					}
-					fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: mb.Name}}}
+					fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: mb.Name}}}
 					objs := []client.Object{fg, mb}
 					if encrypted {
 						// The restore decrypts with the backup's dump-key
@@ -117,7 +117,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-literal", Namespace: mb.Namespace, UID: "literal-verification"}}
+					v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-literal", Namespace: mb.Namespace, UID: "literal-verification"}}
 					verify, err := buildVerificationJob(verificationJobInputs{FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Backup: mb, Verification: v, CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
 					if err != nil {
 						t.Fatal(err)
@@ -128,7 +128,7 @@ func TestBackupMetadata_LiteralDestinationRoundTrip(t *testing.T) {
 					for name, job := range map[string]*batchv1.Job{"restore": restore, "verification": verify} {
 						container := job.Spec.Template.Spec.Containers[0]
 						variable, want := "BLOODRAVEN_INPUT_URL", wantLocation
-						if storage == v1alpha1.BackupStoragePVC {
+						if storage == v1beta1.BackupStoragePVC {
 							want += "/"
 						}
 						if encrypted {
@@ -180,7 +180,7 @@ func TestBackupMetadata_CleanupWarningWithoutJob(t *testing.T) {
 	if err := c.Delete(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	mb.Status.Phase = v1beta1.BackupPhaseSucceeded
 	// No recorded destination.
 	mb.Status.ArtifactStorage = nil
 	if err := c.Status().Update(ctx, mb); err != nil {

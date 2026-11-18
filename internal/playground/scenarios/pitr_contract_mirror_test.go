@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // controllerStringConsts reads the untyped string constants declared in the
@@ -60,7 +60,7 @@ func controllerStringConsts(t *testing.T) map[string]string {
 }
 
 // TestPITRPlaygroundContractMirrors pins U65: every playground mirror of an
-// operator #203 contract string that api/v1alpha1 does not export equals the
+// operator #203 contract string that api/v1beta1 does not export equals the
 // operator's declaration, so a
 // renamed label, annotation or selector fails here instead of silently
 // matching nothing in s69's assertions (for example "no check Job ran").
@@ -77,7 +77,7 @@ func TestPITRPlaygroundContractMirrors(t *testing.T) {
 		"app label":                {pitrSnapshotAppLabel, get("labelAppName")},
 		"archive key snapshot app": {pitrKeySnapshotApp, get("appNamePITRKeySnapshot")},
 		"dump key snapshot app":    {pitrDumpKeySnapshotApp, get("appNameDumpKeySnapshot")},
-		"check Job selector":       {pitrCheckJobSelector, get("labelAppName") + "=" + get("appNameBackupJob") + "," + v1alpha1.ResourceLabel + "=" + get("resourcePITRArchiveCheck")},
+		"check Job selector":       {pitrCheckJobSelector, get("labelAppName") + "=" + get("appNameBackupJob") + "," + v1beta1.ResourceLabel + "=" + get("resourcePITRArchiveCheck")},
 		"snapshot passphrase key":  {pitrSnapshotPassphraseKey, get("pitrKeySnapshotDataKey")},
 	}
 	for name, tc := range cases {

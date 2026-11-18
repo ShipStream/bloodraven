@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -137,7 +137,7 @@ func s21ObserveActiveSiteFlip() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite changes from %s", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite)
 					return mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original, msg, nil
 				},

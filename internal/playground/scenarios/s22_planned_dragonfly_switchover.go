@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -136,7 +136,7 @@ func verifyDragonflyActiveSiteFlipped() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("status.dragonfly.activeSite==%s", target),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil {
 						return false, "no status.dragonfly yet", nil
 					}
@@ -164,12 +164,12 @@ func verifyDragonflyPromotionMethodAndSessions() runner.Step {
 			if pf == nil || pf.Dragonfly == nil {
 				return fmt.Errorf("status.plannedFailover.dragonfly missing on Succeeded run")
 			}
-			if tk := pf.Dragonfly.Takeover; tk == nil || tk.State != v1alpha1.DragonflyTakeoverSucceeded ||
-				tk.Method != v1alpha1.DragonflyTakeoverMethodReplTakeover {
+			if tk := pf.Dragonfly.Takeover; tk == nil || tk.State != v1beta1.DragonflyTakeoverSucceeded ||
+				tk.Method != v1beta1.DragonflyTakeoverMethodReplTakeover {
 				return fmt.Errorf("takeover=%+v want Succeeded via REPLTAKEOVER (reason=%q msg=%q)",
 					tk, pf.Dragonfly.Reason, pf.Dragonfly.Message)
 			}
-			if pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsPreserved {
+			if pf.Dragonfly.Sessions != v1beta1.DragonflySessionsPreserved {
 				return fmt.Errorf("sessions=%q want Preserved (reason=%q msg=%q)",
 					pf.Dragonfly.Sessions, pf.Dragonfly.Reason, pf.Dragonfly.Message)
 			}
@@ -272,7 +272,7 @@ func verifyDragonflyPromotionsMetric() runner.Step {
 // status, falling back to status.activeSite for the very first
 // reconcile race window when status.dragonfly.activeSite hasn't been
 // populated yet.
-func dragonflyActiveSite(mfg *v1alpha1.MysqlFailoverGroup) (string, error) {
+func dragonflyActiveSite(mfg *v1beta1.MysqlFailoverGroup) (string, error) {
 	if mfg.Status.Dragonfly != nil && mfg.Status.Dragonfly.ActiveSite != "" {
 		return mfg.Status.Dragonfly.ActiveSite, nil
 	}

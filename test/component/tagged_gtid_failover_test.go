@@ -3,7 +3,7 @@ package component
 import (
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // MySQL 8.4+ prints tagged transactions in the compact
@@ -17,7 +17,7 @@ func TestFailover_CompactTaggedGTIDCandidateIsPromoted(t *testing.T) {
 	h := newTestHarnessWithMySQL(t, dc1, dc2)
 
 	h.pollN(2)
-	if s := h.tm.Status(); s.Sites[0].State != v1alpha1.SiteStateWritable || s.Sites[1].State != v1alpha1.SiteStateReadOnly {
+	if s := h.tm.Status(); s.Sites[0].State != v1beta1.SiteStateWritable || s.Sites[1].State != v1beta1.SiteStateReadOnly {
 		t.Fatalf("setup: states = %s/%s, want writable/read-only", s.Sites[0].State, s.Sites[1].State)
 	}
 

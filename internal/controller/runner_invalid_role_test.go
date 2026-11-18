@@ -9,7 +9,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 )
 
@@ -32,7 +32,7 @@ func TestSync_InvalidRoleRetiresRunningManager(t *testing.T) {
 	site := fg.Spec.Sites[0].Name
 	metrics.SiteState.With(prometheus.Labels{"namespace": fg.Namespace, "group": fg.Name, "site": site, "role": "primary-candidate", "state": "writable"}).Set(1)
 
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &live); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestSync_InvalidRoleRetiresRunningManager(t *testing.T) {
 	}
 	warnings := 0
 	for _, e := range drainEvents(rec) {
-		if strings.Contains(e, "Warning") && strings.Contains(e, v1alpha1.EventTopologyManagerStartFailed) {
+		if strings.Contains(e, "Warning") && strings.Contains(e, v1beta1.EventTopologyManagerStartFailed) {
 			warnings++
 		}
 	}

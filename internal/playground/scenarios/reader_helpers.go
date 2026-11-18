@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -18,7 +18,7 @@ import (
 // plus exactly one dedicated read-only reader.
 
 // statusSiteByName returns the status entry for the named site, or nil.
-func statusSiteByName(mfg *v1alpha1.MysqlFailoverGroup, name string) *v1alpha1.SiteStatus {
+func statusSiteByName(mfg *v1beta1.MysqlFailoverGroup, name string) *v1beta1.SiteStatus {
 	for i := range mfg.Status.Sites {
 		if mfg.Status.Sites[i].Name == name {
 			return &mfg.Status.Sites[i]
@@ -44,14 +44,14 @@ func canonicalMySQLHost(host string) string {
 // assertReaderServingStatus asserts the CR status shape of a healthy,
 // serving reader: read-only state, replicating, converged directly onto
 // expectedHost, with known lag at or below readOnlyMaxLagSeconds.
-func assertReaderServingStatus(mfg *v1alpha1.MysqlFailoverGroup, status *v1alpha1.SiteStatus, expectedHost string) error {
-	if status.State != v1alpha1.SiteStateReadOnly {
-		return fmt.Errorf("state=%q, want %s", status.State, v1alpha1.SiteStateReadOnly)
+func assertReaderServingStatus(mfg *v1beta1.MysqlFailoverGroup, status *v1beta1.SiteStatus, expectedHost string) error {
+	if status.State != v1beta1.SiteStateReadOnly {
+		return fmt.Errorf("state=%q, want %s", status.State, v1beta1.SiteStateReadOnly)
 	}
 	if !status.Replication.Running() {
 		return fmt.Errorf("replicating=false")
 	}
-	if status.SourceConvergenceState != v1alpha1.SourceConvergenceConverged {
+	if status.SourceConvergenceState != v1beta1.SourceConvergenceConverged {
 		return fmt.Errorf("sourceConvergenceState=%q, want Converged", status.SourceConvergenceState)
 	}
 	if canonicalMySQLHost(status.SourceHost) != canonicalMySQLHost(expectedHost) {
@@ -69,7 +69,7 @@ func assertReaderServingStatus(mfg *v1alpha1.MysqlFailoverGroup, status *v1alpha
 
 // findReadOnlyReaderSite returns the name of the single read-only role
 // site, erroring when zero or multiple readers are present.
-func findReadOnlyReaderSite(mfg *v1alpha1.MysqlFailoverGroup) (string, error) {
+func findReadOnlyReaderSite(mfg *v1beta1.MysqlFailoverGroup) (string, error) {
 	reader := ""
 	for i := range mfg.Spec.Sites {
 		if mfg.Spec.Sites[i].IsReadOnlyReader() {

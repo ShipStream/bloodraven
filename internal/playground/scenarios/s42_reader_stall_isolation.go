@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -170,13 +170,13 @@ func s42SoakGroupUnaffected(state *s42RunState) runner.Step {
 				if status == nil {
 					return fmt.Errorf("reader %q missing from status during soak", state.topo.reader)
 				}
-				if status.State != v1alpha1.SiteStateReadOnly {
+				if status.State != v1beta1.SiteStateReadOnly {
 					return fmt.Errorf("reader state=%q during stall, want read-only", status.State)
 				}
-				if status.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
+				if status.SourceConvergenceState == v1beta1.SourceConvergenceBlocked {
 					return fmt.Errorf("reader entered SourceConvergenceState=Blocked (reason=%s) during a pure lag stall", status.SourceConvergenceReason)
 				}
-				if status.RecoveryState == v1alpha1.RecoveryStateBlocked {
+				if status.RecoveryState == v1beta1.RecoveryStateBlocked {
 					return fmt.Errorf("reader entered RecoveryBlocked during a pure lag stall")
 				}
 				if status.SecondsBehindSource != nil && *status.SecondsBehindSource > state.maxObservedLag {
@@ -255,7 +255,7 @@ func s42ClearDelayAndRecover(state *s42RunState) runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"reader lag back under threshold with serving status",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					status := statusSiteByName(mfg, state.topo.reader)
 					if status == nil {
 						return false, "reader status missing", nil

@@ -12,22 +12,22 @@ import (
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // The deploy principal of issue #172: a users[] account that maintains the
 // tenant's stored routines without being the schema owner.
 var (
-	deployPrivileges = []v1alpha1.MysqlPrivilege{
-		v1alpha1.PrivilegeAlterRoutine, v1alpha1.PrivilegeSelect,
-		v1alpha1.PrivilegeCreateRoutine, v1alpha1.PrivilegeExecute,
+	deployPrivileges = []v1beta1.MysqlPrivilege{
+		v1beta1.PrivilegeAlterRoutine, v1beta1.PrivilegeSelect,
+		v1beta1.PrivilegeCreateRoutine, v1beta1.PrivilegeExecute,
 	}
-	narrowedDeployPrivileges = []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeExecute}
+	narrowedDeployPrivileges = []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect, v1beta1.PrivilegeExecute}
 )
 
-func withDeployUser(privileges []v1alpha1.MysqlPrivilege) func(*v1alpha1.MysqlDatabase) {
-	return func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: mdbSupportSecretName, Privileges: privileges}}
+func withDeployUser(privileges []v1beta1.MysqlPrivilege) func(*v1beta1.MysqlDatabase) {
+	return func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Users = []v1beta1.MysqlDatabaseUser{{SecretName: mdbSupportSecretName, Privileges: privileges}}
 	}
 }
 

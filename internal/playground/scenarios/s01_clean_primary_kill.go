@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -217,7 +217,7 @@ func observeFailover() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite changes from %s and is observed writable", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					done, msg := failoverObserved(mfg, original)
 					return done, msg, nil
 				},
@@ -227,10 +227,10 @@ func observeFailover() runner.Step {
 	}
 }
 
-func failoverObserved(mfg *v1alpha1.MysqlFailoverGroup, original string) (bool, string) {
+func failoverObserved(mfg *v1beta1.MysqlFailoverGroup, original string) (bool, string) {
 	var writable []string
 	for _, site := range mfg.Status.Sites {
-		if site.State == v1alpha1.SiteStateWritable {
+		if site.State == v1beta1.SiteStateWritable {
 			writable = append(writable, site.Name)
 		}
 	}

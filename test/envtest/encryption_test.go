@@ -14,32 +14,32 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // newEncryptionFG returns a minimal valid group with TLS configured, so
 // individual tests only have to vary spec.encryptionAtRest.
-func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func newEncryptionFG(namespace, name string) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
 			Image:       "mysql:9.7",
-			Sidecar:     v1alpha1.SidecarSpec{Image: "ghcr.io/shipstream/bloodraven-sidecar:1.3.2"},
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-			Sites: []v1alpha1.SiteSpec{
+			Sidecar:     v1beta1.SidecarSpec{Image: "ghcr.io/shipstream/bloodraven-sidecar:1.3.2"},
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+			Sites: []v1beta1.SiteSpec{
 				{
 					Name: "dc1", ServerID: 101, Zone: "lion-dc1", LoadBalancerIP: "203.0.113.1",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.lion": "dc1"},
-					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
+					Storage:           v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
 				},
 				{
 					Name: "dc2", ServerID: 102, Zone: "lion-dc2", LoadBalancerIP: "203.0.113.2",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/site.lion": "dc2"},
-					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
+					Storage:           v1beta1.StorageSpec{StorageClassName: "standard", Size: "10Gi"},
 				},
 			},
-			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
-			TLS: &v1alpha1.TLSSpec{
+			DNS: v1beta1.DNSSpec{Hostname: "lion.az.example.com", TTLSeconds: 60},
+			TLS: &v1beta1.TLSSpec{
 				SecretName: "mysql-tls",
 			},
 		},
@@ -56,7 +56,7 @@ func TestEncryptionRequiresTLS(t *testing.T) {
 
 	fg := newEncryptionFG(ns, "no-tls")
 	fg.Spec.TLS = nil
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 
 	err := k8sClient.Create(ctx, fg)
 	if err == nil {
@@ -74,7 +74,7 @@ func TestEncryptionDisabledWithoutTLSIsAccepted(t *testing.T) {
 
 	fg := newEncryptionFG(ns, "off")
 	fg.Spec.TLS = nil
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: false}
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: false}
 
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("disabled encryption without TLS should be accepted: %v", err)
@@ -90,9 +90,9 @@ func TestKeyringDataFileDirRejectedInsideDataDir(t *testing.T) {
 
 	for _, bad := range []string{"/var/lib/mysql", "/var/lib/mysql/keys"} {
 		fg := newEncryptionFG(ns, "bad"+strings.ReplaceAll(bad, "/", "-"))
-		fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{
+		fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{
 			Enabled: true,
-			Keyring: &v1alpha1.KeyringSpec{DataFileDir: bad},
+			Keyring: &v1beta1.KeyringSpec{DataFileDir: bad},
 		}
 		err := k8sClient.Create(ctx, fg)
 		if err == nil {
@@ -112,15 +112,15 @@ func TestKeyringPathsRejectShellMetacharacters(t *testing.T) {
 	ns := createNamespace(t, "enc-paths")
 
 	for i, bad := range []string{"/usr/$(id)", "/usr/`id`", `/usr/"x`, "/usr/a b", `/usr/a\b`} {
-		for j, set := range []func(*v1alpha1.KeyringSpec){
-			func(k *v1alpha1.KeyringSpec) { k.DataFileDir = bad },
-			func(k *v1alpha1.KeyringSpec) { k.MysqldDir = bad },
-			func(k *v1alpha1.KeyringSpec) { k.PluginDir = bad },
+		for j, set := range []func(*v1beta1.KeyringSpec){
+			func(k *v1beta1.KeyringSpec) { k.DataFileDir = bad },
+			func(k *v1beta1.KeyringSpec) { k.MysqldDir = bad },
+			func(k *v1beta1.KeyringSpec) { k.PluginDir = bad },
 		} {
 			fg := newEncryptionFG(ns, fmt.Sprintf("bad-path-%d-%d", i, j))
-			kr := &v1alpha1.KeyringSpec{}
+			kr := &v1beta1.KeyringSpec{}
 			set(kr)
-			fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, Keyring: kr}
+			fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true, Keyring: kr}
 			if err := k8sClient.Create(ctx, fg); err == nil {
 				t.Errorf("API server accepted keyring path %q (field %d)", bad, j)
 			}
@@ -128,9 +128,9 @@ func TestKeyringPathsRejectShellMetacharacters(t *testing.T) {
 	}
 
 	fg := newEncryptionFG(ns, "custom-paths")
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{
 		Enabled: true,
-		Keyring: &v1alpha1.KeyringSpec{DataFileDir: "/run/my_keyring-1.0", MysqldDir: "/opt/mysql/bin", PluginDir: "/opt/mysql/lib/plugin"},
+		Keyring: &v1beta1.KeyringSpec{DataFileDir: "/run/my_keyring-1.0", MysqldDir: "/opt/mysql/bin", PluginDir: "/opt/mysql/lib/plugin"},
 	}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Errorf("API server rejected ordinary custom keyring paths: %v", err)
@@ -141,35 +141,35 @@ func TestKeyringDefaultsAppliedByAPIServer(t *testing.T) {
 	ns := createNamespace(t, "enc-defaults")
 
 	fg := newEncryptionFG(ns, "defaults")
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{
 		Enabled: true,
-		Keyring: &v1alpha1.KeyringSpec{},
+		Keyring: &v1beta1.KeyringSpec{},
 	}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "defaults"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	kr := got.Spec.EncryptionAtRest.Keyring
-	if kr.DataFileDir != v1alpha1.DefaultKeyringDataFileDir {
-		t.Errorf("dataFileDir = %q, want the CRD default %q", kr.DataFileDir, v1alpha1.DefaultKeyringDataFileDir)
+	if kr.DataFileDir != v1beta1.DefaultKeyringDataFileDir {
+		t.Errorf("dataFileDir = %q, want the CRD default %q", kr.DataFileDir, v1beta1.DefaultKeyringDataFileDir)
 	}
-	if kr.MysqldDir != v1alpha1.DefaultKeyringMysqldDir {
+	if kr.MysqldDir != v1beta1.DefaultKeyringMysqldDir {
 		t.Errorf("mysqldDir = %q", kr.MysqldDir)
 	}
-	if kr.PluginDir != v1alpha1.DefaultKeyringPluginDir {
+	if kr.PluginDir != v1beta1.DefaultKeyringPluginDir {
 		t.Errorf("pluginDir = %q", kr.PluginDir)
 	}
-	if kr.RetainVersions != v1alpha1.DefaultKeyringRetainVersions {
+	if kr.RetainVersions != v1beta1.DefaultKeyringRetainVersions {
 		t.Errorf("retainVersions = %d", kr.RetainVersions)
 	}
 	// The Go-side helper must agree with what admission produced,
 	// otherwise the operator would render one path and validate another.
-	if kr.EscrowTimeout == nil || kr.EscrowTimeout.Duration != v1alpha1.DefaultKeyringEscrowTimeout {
-		t.Errorf("escrowTimeout = %v, want the CRD default %v", kr.EscrowTimeout, v1alpha1.DefaultKeyringEscrowTimeout)
+	if kr.EscrowTimeout == nil || kr.EscrowTimeout.Duration != v1beta1.DefaultKeyringEscrowTimeout {
+		t.Errorf("escrowTimeout = %v, want the CRD default %v", kr.EscrowTimeout, v1beta1.DefaultKeyringEscrowTimeout)
 	}
 	if eff := got.Spec.EffectiveKeyring(); !equality.Semantic.DeepEqual(eff, *kr) {
 		t.Errorf("EffectiveKeyring() = %+v, admission produced %+v", eff, *kr)
@@ -182,18 +182,18 @@ func TestKeyringRetainVersionsBounds(t *testing.T) {
 	// Keeping only one version would leave no rollback target if a
 	// rotation produced a bad keyring.
 	fg := newEncryptionFG(ns, "too-few")
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{
 		Enabled: true,
-		Keyring: &v1alpha1.KeyringSpec{RetainVersions: 1},
+		Keyring: &v1beta1.KeyringSpec{RetainVersions: 1},
 	}
 	if err := k8sClient.Create(ctx, fg); err == nil {
 		t.Error("retainVersions=1 should be rejected")
 	}
 
 	fg2 := newEncryptionFG(ns, "too-many")
-	fg2.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{
+	fg2.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{
 		Enabled: true,
-		Keyring: &v1alpha1.KeyringSpec{RetainVersions: 500},
+		Keyring: &v1beta1.KeyringSpec{RetainVersions: 500},
 	}
 	if err := k8sClient.Create(ctx, fg2); err == nil {
 		t.Error("retainVersions=500 should be rejected")
@@ -208,21 +208,21 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 	ns := createNamespace(t, "enc-status")
 
 	fg := newEncryptionFG(ns, "status")
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
 	now := metav1.Now()
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{{
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{{
 			Name:           "dc1",
-			Phase:          v1alpha1.KeyringPhaseSealed,
+			Phase:          v1beta1.KeyringPhaseSealed,
 			KeyringSecret:  "mysql-status-dc1-keyring-v3",
 			KeyringVersion: 3,
 			KeyringDigest:  "sha256:abc123",
 			LastEscrowTime: &now,
-			Coverage: &v1alpha1.SiteEncryptionCoverage{
+			Coverage: &v1beta1.SiteEncryptionCoverage{
 				KeyringComponent:          "component_keyring_file",
 				KeyringReadOnly:           new(true),
 				SystemTablespaceEncrypted: new(true),
@@ -238,7 +238,7 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 		t.Fatalf("status update: %v", err)
 	}
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "status"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestEncryptionStatusRoundTrips(t *testing.T) {
 		t.Fatalf("status did not round-trip: %+v", st)
 	}
 	s := st.Sites[0]
-	if s.Phase != v1alpha1.KeyringPhaseSealed || s.KeyringVersion != 3 || s.KeyringDigest != "sha256:abc123" {
+	if s.Phase != v1beta1.KeyringPhaseSealed || s.KeyringVersion != 3 || s.KeyringDigest != "sha256:abc123" {
 		t.Errorf("site status = %+v", s)
 	}
 	if c := s.Coverage; c == nil || c.UnencryptedTablespaces != 7 || c.KeyringReadOnly == nil || !*c.KeyringReadOnly || c.BinlogEncrypted != nil {
@@ -264,12 +264,12 @@ func TestInvalidKeyringPhaseRejected(t *testing.T) {
 	ns := createNamespace(t, "enc-phase")
 
 	fg := newEncryptionFG(ns, "phase")
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{{Name: "dc1", Phase: v1alpha1.SiteKeyringPhase("Bogus")}},
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{{Name: "dc1", Phase: v1beta1.SiteKeyringPhase("Bogus")}},
 	}
 	if err := k8sClient.Status().Update(ctx, fg); err == nil {
 		t.Error("an unknown keyring phase should be rejected by the CRD enum")
@@ -298,16 +298,16 @@ func createNamespace(t *testing.T, prefix string) string {
 // does move the version, and the stale PUT is then rejected.
 func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 	ns := createNamespace(t, "enc-noop")
-	stampAt := func(name string) (stale *v1alpha1.MysqlFailoverGroup, rv string) {
+	stampAt := func(name string) (stale *v1beta1.MysqlFailoverGroup, rv string) {
 		t.Helper()
 		fg := newEncryptionFG(ns, name)
 		if err := k8sClient.Create(ctx, fg); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-			Sites: []v1alpha1.SiteEncryptionStatus{
-				{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed, Message: "rotation deferred: an ordered update is in flight"},
-				{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed},
+		fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+			Sites: []v1beta1.SiteEncryptionStatus{
+				{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed, Message: "rotation deferred: an ordered update is in flight"},
+				{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed},
 			},
 		}
 		if err := k8sClient.Status().Update(ctx, fg); err != nil {
@@ -316,8 +316,8 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 		// The rotation stamp's PUT, prepared at this version; its
 		// response will be "lost".
 		stale = fg.DeepCopy()
-		stale.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseUnsealed
-		stale.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonRotation
+		stale.Status.EncryptionAtRest.Sites[1].Phase = v1beta1.KeyringPhaseUnsealed
+		stale.Status.EncryptionAtRest.Sites[1].UnsealReason = v1beta1.UnsealReasonRotation
 
 		// A later pass reproduces the persisted status: success, same
 		// resourceVersion.
@@ -332,11 +332,11 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 	}
 	stamped := func(name string) bool {
 		t.Helper()
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &got); err != nil {
 			t.Fatal(err)
 		}
-		return got.Status.EncryptionAtRest.Sites[1].UnsealReason == v1alpha1.UnsealReasonRotation
+		return got.Status.EncryptionAtRest.Sites[1].UnsealReason == v1beta1.UnsealReasonRotation
 	}
 
 	stale, _ := stampAt("unfenced")
@@ -345,7 +345,7 @@ func TestNoOpStatusUpdateDoesNotInvalidateLostWrite(t *testing.T) {
 	}
 
 	stale, _ = stampAt("fenced")
-	var read v1alpha1.MysqlFailoverGroup
+	var read v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "fenced"}, &read); err != nil {
 		t.Fatal(err)
 	}

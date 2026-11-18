@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
@@ -62,7 +62,7 @@ func TestEnsurePITRKeySnapshot(t *testing.T) {
 	// Another object holds the name of the k2 snapshot.
 	name := pitrKeySnapshotName(pbtName, key, dest, []byte("k2"))
 	squatter := newPITRKeySnapshot(fg, name, dest, []byte("k2"), "")
-	squatter.Labels[v1alpha1.FailoverGroupUIDLabel] = "another-group"
+	squatter.Labels[v1beta1.FailoverGroupUIDLabel] = "another-group"
 	if err := e.c.Create(context.Background(), squatter); err != nil {
 		t.Fatal(err)
 	}
@@ -116,22 +116,22 @@ func TestPITRBindingRecovery(t *testing.T) {
 	c := pbtProfile("c", "p2", "pass-c")
 	e := newPBTEnv(t, pbtGroup(a, c), pbtSecret("pass-a", "k1"), pbtSecret("pass-c", "k2"))
 	k1 := e.bound(a)
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
 	k2 := e.bound(c)
 	// Row 34: K1's live Secret deleted, status wiped.
 	s, _ := e.secret("pass-a")
 	e.deleteObj(s)
 	// Row 36: a snapshot with a malformed acceptance.
 	bad := newPITRKeySnapshot(e.fg(), "mysql-orders-pitr-key-badbadbad0", e.dest(a).String(), []byte("x"), "")
-	bad.Annotations[v1alpha1.PITRAcceptedAnnotation] = `{"schemaVersion":1,`
+	bad.Annotations[v1beta1.PITRAcceptedAnnotation] = `{"schemaVersion":1,`
 	if err := e.c.Create(context.Background(), bad); err != nil {
 		t.Fatal(err)
 	}
-	e.updateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) { st.PITRArchiveBindings = nil })
+	e.updateStatus(func(st *v1beta1.MysqlFailoverGroupStatus) { st.PITRArchiveBindings = nil })
 	e.pass()
-	for _, want := range []*v1alpha1.PITRArchiveBinding{k1, k2} {
+	for _, want := range []*v1beta1.PITRArchiveBinding{k1, k2} {
 		got := findBindingIn(e.fg().Status.PITRArchiveBindings, want.ID)
-		if got == nil || got.State != v1alpha1.PITRArchiveBindingBound || got.Encryption != want.Encryption ||
+		if got == nil || got.State != v1beta1.PITRArchiveBindingBound || got.Encryption != want.Encryption ||
 			got.ArchiveID != want.ArchiveID || *got.Source != *want.Source {
 			t.Fatalf("rebuilt %+v, want %+v", got, want)
 		}
@@ -139,11 +139,11 @@ func TestPITRBindingRecovery(t *testing.T) {
 	if len(e.jobs()) != 0 {
 		t.Fatal("recovery ran a check Job")
 	}
-	cond := e.expectCond(metav1.ConditionTrue, string(v1alpha1.PITRArchiveBindingReasonBound))
+	cond := e.expectCond(metav1.ConditionTrue, string(v1beta1.PITRArchiveBindingReasonBound))
 	if !strings.Contains(cond.Message, "key snapshot "+bad.Name+" is unreadable") {
 		t.Fatalf("message %q", cond.Message)
 	}
-	e.expectEvents(v1alpha1.EventPITRArchiveKeySnapshotReadFailed)
+	e.expectEvents(v1beta1.EventPITRArchiveKeySnapshotReadFailed)
 	e.pass()
 	e.expectEvents()
 	if _, ok := e.secret(bad.Name); !ok {
@@ -158,11 +158,11 @@ func TestPITRBindingRecoveryOverflow(t *testing.T) {
 	e := newPBTEnv(t, pbtGroup(a), pbtSecret("pass-a", "k1"))
 	inUse := e.bound(a)
 	fg := e.fg()
-	src := v1alpha1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID}
+	src := v1beta1.PITRArchiveSource{Namespace: pbtNS, Name: pbtName, UID: pbtUID}
 	for i := 0; i < pitrArchiveBindingsMax; i++ {
 		d, _ := pitrarchive.NewS3Destination("aaa-retained", fmt.Sprintf("r%02d", i), "")
-		entry := &v1alpha1.PITRArchiveBinding{Destination: d.String(), ArchiveID: pitrarchive.CreateArchiveID(pbtUID, d), Source: &src,
-			Encryption: passEnc(fmt.Sprintf("mysql-orders-pitr-key-r%09d", i)), State: v1alpha1.PITRArchiveBindingBound}
+		entry := &v1beta1.PITRArchiveBinding{Destination: d.String(), ArchiveID: pitrarchive.CreateArchiveID(pbtUID, d), Source: &src,
+			Encryption: passEnc(fmt.Sprintf("mysql-orders-pitr-key-r%09d", i)), State: v1beta1.PITRArchiveBindingBound}
 		acc, err := newPITRAcceptance(entry, []byte("k"), time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -172,13 +172,13 @@ func TestPITRBindingRecoveryOverflow(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	e.updateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) { st.PITRArchiveBindings = nil })
+	e.updateStatus(func(st *v1beta1.MysqlFailoverGroupStatus) { st.PITRArchiveBindings = nil })
 	e.pass()
 	got := e.fg().Status.PITRArchiveBindings
 	if len(got) != pitrArchiveBindingsMax || findBindingIn(e.fg().Status.PITRArchiveBindings, inUse.ID) == nil {
 		t.Fatalf("rebuilt %d bindings, in-use one present=%t", len(got), findBindingIn(e.fg().Status.PITRArchiveBindings, inUse.ID) != nil)
 	}
-	c := e.expectCond(metav1.ConditionFalse, v1alpha1.ReasonBindingLimitReached)
+	c := e.expectCond(metav1.ConditionFalse, v1beta1.ReasonBindingLimitReached)
 	if !strings.Contains(c.Message, "could not be rebuilt") {
 		t.Fatalf("message %q", c.Message)
 	}
@@ -199,28 +199,28 @@ func TestPITRBindingSnapshotIntegrity(t *testing.T) {
 	// Row 17.
 	e.deleteObj(snap())
 	e.pass()
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
+	e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound)
 	if _, err := verifyPITRAcceptance(snap()); err != nil {
 		t.Fatalf("re-created snapshot: %v", err)
 	}
-	e.expectEvents(v1alpha1.EventPITRArchiveKeySnapshotRecreated)
+	e.expectEvents(v1beta1.EventPITRArchiveKeySnapshotRecreated)
 
 	// Row 18: the live bytes were rotated before the snapshot vanished.
 	saved := snap().DeepCopy()
 	e.setSecret("pass-a", "k2")
 	e.deleteObj(snap())
 	e.pass()
-	lost := e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost)
+	lost := e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonKeyMaterialLost)
 	if lost.Encryption.KeySecretName != name {
 		t.Fatalf("the lost entry changed its snapshot: %+v", lost)
 	}
 	// The accepted bytes are gone, so no key change can be judged.
-	e.expectCond(metav1.ConditionFalse, string(v1alpha1.PITRArchiveBindingReasonKeyMaterialLost))
-	e.expectEvents(v1alpha1.EventPITRArchiveKeyMaterialLost)
+	e.expectCond(metav1.ConditionFalse, string(v1beta1.PITRArchiveBindingReasonKeyMaterialLost))
+	e.expectEvents(v1beta1.EventPITRArchiveKeyMaterialLost)
 	e.setSecret("pass-a", "k1")
 	e.pass()
-	e.expectCond(metav1.ConditionTrue, string(v1alpha1.PITRArchiveBindingReasonBound))
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
+	e.expectCond(metav1.ConditionTrue, string(v1beta1.PITRArchiveBindingReasonBound))
+	e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound)
 	e.events()
 
 	// Row 19: replaced by hand with other bytes under the same name.
@@ -232,9 +232,9 @@ func TestPITRBindingSnapshotIntegrity(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.pass()
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonKeyMaterialLost)
-	e.expectCond(metav1.ConditionFalse, string(v1alpha1.PITRArchiveBindingReasonKeyMaterialLost))
-	e.expectEvents(v1alpha1.EventPITRArchiveKeyMaterialLost)
+	e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonKeyMaterialLost)
+	e.expectCond(metav1.ConditionFalse, string(v1beta1.PITRArchiveBindingReasonKeyMaterialLost))
+	e.expectEvents(v1beta1.EventPITRArchiveKeyMaterialLost)
 	e.pass()
 	e.expectEvents()
 	if s := snap(); s == nil || string(s.Data["passphrase"]) != "forged" {
@@ -243,7 +243,7 @@ func TestPITRBindingSnapshotIntegrity(t *testing.T) {
 	// Deleting it leads to row 17.
 	e.deleteObj(snap())
 	e.pass()
-	e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
+	e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound)
 	e.events()
 
 	// Row 39: a re-created digest key keeps every name and the condition.
@@ -253,35 +253,35 @@ func TestPITRBindingSnapshotIntegrity(t *testing.T) {
 	}
 	e.deleteObj(&dk)
 	e.pass()
-	if got := e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound); got.Encryption.KeySecretName != name {
+	if got := e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound); got.Encryption.KeySecretName != name {
 		t.Fatalf("entry = %+v", got)
 	}
-	e.expectCond(metav1.ConditionTrue, string(v1alpha1.PITRArchiveBindingReasonBound))
+	e.expectCond(metav1.ConditionTrue, string(v1beta1.PITRArchiveBindingReasonBound))
 }
 
 // pbtReleaseEnv is a group with an unused Bound binding a (after a switch
 // to c) ready to be released.
-func pbtReleaseEnv(t *testing.T, funcs interceptor.Funcs) (*pbtEnv, v1alpha1.BackupProfile, *v1alpha1.PITRArchiveBinding) {
+func pbtReleaseEnv(t *testing.T, funcs interceptor.Funcs) (*pbtEnv, v1beta1.BackupProfile, *v1beta1.PITRArchiveBinding) {
 	a := pbtProfile("a", "p1", "pass-a")
 	c := pbtProfile("c", "p2", "pass-c")
 	e := newPBTEnvWith(t, funcs, pbtGroup(a, c), pbtSecret("pass-a", "k1"), pbtSecret("pass-c", "k2"))
 	entry := e.bound(a)
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
 	e.bound(c)
 	return e, a, entry
 }
 
 func (e *pbtEnv) release(value string) {
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) {
 		if fg.Annotations == nil {
 			fg.Annotations = map[string]string{}
 		}
-		fg.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation] = value
+		fg.Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation] = value
 	})
 }
 
 func (e *pbtEnv) releaseAnnotation() (string, bool) {
-	v, ok := e.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]
+	v, ok := e.fg().Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation]
 	return v, ok
 }
 
@@ -299,8 +299,8 @@ func TestPITRBindingRelease(t *testing.T) {
 		if _, ok := e.releaseAnnotation(); ok {
 			t.Fatalf("%q: rejected annotation kept", bad)
 		}
-		e.expectEvents(v1alpha1.EventPITRArchiveBindingReleaseRejected)
-		e.expectEntry(a, v1alpha1.PITRArchiveBindingBound, v1alpha1.PITRArchiveBindingReasonBound)
+		e.expectEvents(v1beta1.EventPITRArchiveBindingReleaseRejected)
+		e.expectEntry(a, v1beta1.PITRArchiveBindingBound, v1beta1.PITRArchiveBindingReasonBound)
 	}
 	e.release(entry.ID + ":confirm=" + pbtName + ":uid=" + string(pbtUID))
 	e.pass()
@@ -313,19 +313,19 @@ func TestPITRBindingRelease(t *testing.T) {
 	if _, ok := e.releaseAnnotation(); ok {
 		t.Fatal("release annotation kept")
 	}
-	e.expectEvents(v1alpha1.EventPITRArchiveBindingReleased)
+	e.expectEvents(v1beta1.EventPITRArchiveBindingReleased)
 
 	// Row 35: a never-accepted candidate of a dropped entry is released by
 	// its id although no entry names it.
 	x := pbtProfile("x", "p7", "pass-x")
 	e.setSecret("pass-x", "kx")
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, x)
 		fg.Spec.Backup.PITR.ProfileName = "x"
 	})
 	e.pass()
 	cand := e.entry(x)
-	e.update(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
+	e.update(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.PITR.ProfileName = "c" })
 	e.pass()
 	if e.entry(x) != nil {
 		t.Fatal("unused Pending entry kept")
@@ -339,7 +339,7 @@ func TestPITRBindingRelease(t *testing.T) {
 	if _, ok := e.secret(cand.Encryption.KeySecretName); ok {
 		t.Fatal("release by id kept the snapshot")
 	}
-	e.expectEvents(v1alpha1.EventPITRArchiveBindingReleased)
+	e.expectEvents(v1beta1.EventPITRArchiveBindingReleased)
 }
 
 // Row 28 (K9): release is refused while anything uses the binding: it is a
@@ -347,16 +347,16 @@ func TestPITRBindingRelease(t *testing.T) {
 // old ReplicaSet mid-roll) mounts it, a labelled Job has not finished, or a
 // live verification holds it. The annotation is kept and retried.
 func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
-	cases := map[string]func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding){
-		"a current target": func(e *pbtEnv, _ *v1alpha1.PITRArchiveBinding) {
-			e.update(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{PointInTime: &v1alpha1.PointInTimeSpec{ArchiveProfileName: "a"}}
+	cases := map[string]func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding){
+		"a current target": func(e *pbtEnv, _ *v1beta1.PITRArchiveBinding) {
+			e.update(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{PointInTime: &v1beta1.PointInTimeSpec{ArchiveProfileName: "a"}}
 			})
 		},
-		"a Deployment render": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+		"a Deployment render": func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding) {
 			e.deploy("iad", e.render(pbtProfile("a", "p1", "pass-a"), entry.Encryption))
 		},
-		"a pod of an old ReplicaSet": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+		"a pod of an old ReplicaSet": func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding) {
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mysql-orders-iad-old", Namespace: pbtNS},
 				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "pitr-passphrase", VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{SecretName: entry.Encryption.KeySecretName}}}}},
@@ -367,7 +367,7 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 		},
 		// U03: a scaled-to-zero Deployment with no render annotation still
 		// mounts the snapshot through its pod template.
-		"a scaled-to-zero Deployment's pod template": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+		"a scaled-to-zero Deployment's pod template": func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding) {
 			d := pbcDeploy("mysql-"+pbtName+"-iad", pbtName, "iad", "")
 			d.Namespace = pbtNS
 			zero := int32(0)
@@ -380,12 +380,12 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 		},
 		// U03: what a Deployment with an undecodable annotation renders
 		// cannot be told.
-		"a malformed render annotation": func(e *pbtEnv, _ *v1alpha1.PITRArchiveBinding) {
+		"a malformed render annotation": func(e *pbtEnv, _ *v1beta1.PITRArchiveBinding) {
 			e.deploy("iad", `{"schemaVersion":99}`)
 		},
 		// U57: a maintenance pod mounting the snapshot through a projected
 		// volume, and one reading it from env.
-		"a pod's projected volume": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+		"a pod's projected volume": func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding) {
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "repair", Namespace: pbtNS},
 				Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "keys", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
 					Sources: []corev1.VolumeProjection{{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: entry.Encryption.KeySecretName}}}}}}}}},
@@ -394,7 +394,7 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 				e.t.Fatal(err)
 			}
 		},
-		"a pod's env": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+		"a pod's env": func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding) {
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "repair-env", Namespace: pbtNS},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Env: []corev1.EnvVar{{Name: "K", ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: entry.Encryption.KeySecretName}, Key: "passphrase"}}}}}}},
@@ -403,21 +403,21 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 				e.t.Fatal(err)
 			}
 		},
-		"a running labelled Job": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
+		"a running labelled Job": func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding) {
 			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "restore", Namespace: pbtNS,
-				Labels: map[string]string{v1alpha1.PITRKeySecretLabel: entry.Encryption.KeySecretName}}}
+				Labels: map[string]string{v1beta1.PITRKeySecretLabel: entry.Encryption.KeySecretName}}}
 			if err := e.c.Create(context.Background(), job); err != nil {
 				e.t.Fatal(err)
 			}
 		},
-		"a live verification hold": func(e *pbtEnv, entry *v1alpha1.PITRArchiveBinding) {
-			mbv := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-1", Namespace: pbtNS, UID: "mbv-uid-1"},
-				Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "someone-else"}, ProfileName: "a"}}
+		"a live verification hold": func(e *pbtEnv, entry *v1beta1.PITRArchiveBinding) {
+			mbv := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-1", Namespace: pbtNS, UID: "mbv-uid-1"},
+				Spec: v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "someone-else"}, ProfileName: "a"}}
 			if err := e.c.Create(context.Background(), mbv); err != nil {
 				e.t.Fatal(err)
 			}
 			s, _ := e.secret(entry.Encryption.KeySecretName)
-			s.Annotations[v1alpha1.VerificationHoldAnnotationPrefix+"mbv-uid-1"] = "verify-1"
+			s.Annotations[v1beta1.VerificationHoldAnnotationPrefix+"mbv-uid-1"] = "verify-1"
 			if err := e.c.Update(context.Background(), s); err != nil {
 				e.t.Fatal(err)
 			}
@@ -442,7 +442,7 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 			got := e.events()
 			found := false
 			for _, ev := range got {
-				found = found || strings.Contains(ev, v1alpha1.EventPITRArchiveBindingReleaseRefused)
+				found = found || strings.Contains(ev, v1beta1.EventPITRArchiveBindingReleaseRefused)
 			}
 			if !found {
 				t.Fatalf("events = %q", got)
@@ -452,7 +452,7 @@ func TestPITRBindingReleaseRefusedInUse(t *testing.T) {
 	// A hold whose verification is gone and stopped is not live.
 	e, a, entry := pbtReleaseEnv(t, interceptor.Funcs{})
 	s, _ := e.secret(entry.Encryption.KeySecretName)
-	s.Annotations[v1alpha1.VerificationHoldAnnotationPrefix+"gone-uid"] = "gone"
+	s.Annotations[v1beta1.VerificationHoldAnnotationPrefix+"gone-uid"] = "gone"
 	if err := e.c.Update(context.Background(), s); err != nil {
 		t.Fatal(err)
 	}
@@ -477,12 +477,12 @@ func TestPITRBindingReleaseRacesHold(t *testing.T) {
 			if err := c.Get(ctx, client.ObjectKeyFromObject(s), &cur); err != nil {
 				return err
 			}
-			mbv := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-2", Namespace: pbtNS, UID: "mbv-uid-2"},
-				Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "x"}, ProfileName: "a"}}
+			mbv := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "verify-2", Namespace: pbtNS, UID: "mbv-uid-2"},
+				Spec: v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "x"}, ProfileName: "a"}}
 			if err := c.Create(ctx, mbv); err != nil {
 				return err
 			}
-			cur.Annotations[v1alpha1.VerificationHoldAnnotationPrefix+"mbv-uid-2"] = "verify-2"
+			cur.Annotations[v1beta1.VerificationHoldAnnotationPrefix+"mbv-uid-2"] = "verify-2"
 			if err := c.Update(ctx, &cur); err != nil {
 				return err
 			}
@@ -498,13 +498,13 @@ func TestPITRBindingReleaseRacesHold(t *testing.T) {
 	if _, ok := e.secret(entry.Encryption.KeySecretName); !ok {
 		t.Fatal("the release deleted a snapshot whose hold landed after the in-use read")
 	}
-	if _, ok := e.fg().Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]; !ok {
+	if _, ok := e.fg().Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation]; !ok {
 		t.Fatal("the release annotation was removed although the release did not finish")
 	}
 	e.events()
 	e.pass()
 	got := e.events()
-	if len(got) != 1 || !strings.Contains(got[0], v1alpha1.EventPITRArchiveBindingReleaseRefused) {
+	if len(got) != 1 || !strings.Contains(got[0], v1beta1.EventPITRArchiveBindingReleaseRefused) {
 		t.Fatalf("events after the race = %q", got)
 	}
 }
@@ -522,9 +522,9 @@ func TestPITRBindingReleaseCrashFinishes(t *testing.T) {
 	if e.entry(a) != nil {
 		t.Fatal("entry kept")
 	}
-	got := e.expectEvents(v1alpha1.EventPITRArchiveBindingReleased)
+	got := e.expectEvents(v1beta1.EventPITRArchiveBindingReleased)
 	for _, ev := range got {
-		if strings.Contains(ev, v1alpha1.EventPITRArchiveKeyMaterialLost) {
+		if strings.Contains(ev, v1beta1.EventPITRArchiveKeyMaterialLost) {
 			t.Fatalf("lost key material reported during a release: %q", got)
 		}
 	}

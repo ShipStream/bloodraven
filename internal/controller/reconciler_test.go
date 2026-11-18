@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/testutil"
@@ -32,27 +32,27 @@ import (
 func testScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)
-	_ = v1alpha1.AddToScheme(s)
+	_ = v1beta1.AddToScheme(s)
 	return s
 }
 
-func newTestFG() *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func newTestFG() *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "lion",
 			Namespace: "shared-lion",
 			UID:       "test-uid-123",
 		},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
 			Image: "mysql:9.7",
-			Sites: []v1alpha1.SiteSpec{
+			Sites: []v1beta1.SiteSpec{
 				{
 					Name:              "dc1",
 					ServerID:          101,
 					Zone:              "lion-dc1",
 					LoadBalancerIP:    "203.0.113.1",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc1"},
-					Storage: v1alpha1.StorageSpec{
+					Storage: v1beta1.StorageSpec{
 						StorageClassName: "local-dc1",
 						Size:             "100Gi",
 					},
@@ -69,7 +69,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					Zone:              "lion-dc2",
 					LoadBalancerIP:    "203.0.113.2",
 					TaintNodeSelector: map[string]string{"bloodraven.shipstream.io/failover-group.lion": "true", "bloodraven.shipstream.io/site.lion": "dc2"},
-					Storage: v1alpha1.StorageSpec{
+					Storage: v1beta1.StorageSpec{
 						StorageClassName: "local-dc2",
 						Size:             "100Gi",
 					},
@@ -81,8 +81,8 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					},
 				},
 			},
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-			DNS: v1alpha1.DNSSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+			DNS: v1beta1.DNSSpec{
 				Hostname:   "lion.az.example.com",
 				TTLSeconds: 60,
 			},
@@ -113,7 +113,7 @@ func newReconciler(objs ...client.Object) (*MysqlFailoverGroupReconciler, client
 	scheme := testScheme()
 	// Always include the test secret so the reconciler's validation passes.
 	allObjs := withTestPassphraseSecrets(append([]client.Object{newTestSecret()}, objs...))
-	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...)
+	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(allObjs...)
 	c := cb.Build()
 	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
@@ -230,7 +230,7 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 
 		// Verify per-group taint toleration key
 		tolerations := deploy.Spec.Template.Spec.Tolerations
-		expectedKey := v1alpha1.ReadOnlyTaintKey("shared-lion", "lion")
+		expectedKey := v1beta1.ReadOnlyTaintKey("shared-lion", "lion")
 		found := false
 		for _, tol := range tolerations {
 			if tol.Key == expectedKey && tol.Operator == corev1.TolerationOpExists && tol.Effect == "" {
@@ -290,8 +290,8 @@ func TestReconcile_PrimaryServiceSelector(t *testing.T) {
 		t.Fatalf("primary service not found: %v", err)
 	}
 
-	if svc.Spec.Selector[v1alpha1.RoleLabel] != "primary" {
-		t.Errorf("primary service selector role: expected 'primary', got %q", svc.Spec.Selector[v1alpha1.RoleLabel])
+	if svc.Spec.Selector[v1beta1.RoleLabel] != "primary" {
+		t.Errorf("primary service selector role: expected 'primary', got %q", svc.Spec.Selector[v1beta1.RoleLabel])
 	}
 }
 
@@ -313,11 +313,11 @@ func TestReconcile_ReplicasServiceSelector(t *testing.T) {
 		t.Fatalf("replicas service not found: %v", err)
 	}
 
-	if svc.Spec.Selector[v1alpha1.RoleLabel] != "replica" {
-		t.Errorf("replicas service selector role: expected 'replica', got %q", svc.Spec.Selector[v1alpha1.RoleLabel])
+	if svc.Spec.Selector[v1beta1.RoleLabel] != "replica" {
+		t.Errorf("replicas service selector role: expected 'replica', got %q", svc.Spec.Selector[v1beta1.RoleLabel])
 	}
-	if svc.Spec.Selector[v1alpha1.HealthyLabel] != v1alpha1.LabelValueTrue {
-		t.Errorf("replicas service selector healthy: expected 'yes', got %q", svc.Spec.Selector[v1alpha1.HealthyLabel])
+	if svc.Spec.Selector[v1beta1.HealthyLabel] != v1beta1.LabelValueTrue {
+		t.Errorf("replicas service selector healthy: expected 'yes', got %q", svc.Spec.Selector[v1beta1.HealthyLabel])
 	}
 }
 
@@ -353,7 +353,7 @@ func TestReconcile_Idempotent(t *testing.T) {
 
 func TestReconcile_TLSConfig(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.TLS = &v1alpha1.TLSSpec{}
+	fg.Spec.TLS = &v1beta1.TLSSpec{}
 	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -381,7 +381,7 @@ func TestReconcile_TLSConfig(t *testing.T) {
 
 func TestReconcile_MysqlConfOverrides(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{
+	fg.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{
 		"max-connections": "1000",
 		"custom-setting":  "value",
 	}
@@ -496,26 +496,26 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	var updated v1alpha1.MysqlFailoverGroup
+	var updated v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
 
 	found := false
 	for _, f := range updated.Finalizers {
-		if f == v1alpha1.FailoverGroupFinalizer {
+		if f == v1beta1.FailoverGroupFinalizer {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected finalizer %q to be present, got finalizers: %v", v1alpha1.FailoverGroupFinalizer, updated.Finalizers)
+		t.Errorf("expected finalizer %q to be present, got finalizers: %v", v1beta1.FailoverGroupFinalizer, updated.Finalizers)
 	}
 }
 
 func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	fg := newTestFG()
-	fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
+	fg.Finalizers = []string{v1beta1.FailoverGroupFinalizer}
 	now := metav1.Now()
 	fg.DeletionTimestamp = &now
 
@@ -525,7 +525,7 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 
 	scheme := testScheme()
 	allObjs := []client.Object{newTestSecret(), fg}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(allObjs...).Build()
 	recorder := record.NewFakeRecorder(10)
 	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
@@ -550,11 +550,11 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 
 	// After removing the last finalizer on an object with DeletionTimestamp,
 	// the fake client deletes the object, so a NotFound is expected.
-	var fetched v1alpha1.MysqlFailoverGroup
+	var fetched v1beta1.MysqlFailoverGroup
 	err = c.Get(context.Background(), nn, &fetched)
 	if err == nil {
 		for _, f := range fetched.Finalizers {
-			if f == v1alpha1.FailoverGroupFinalizer {
+			if f == v1beta1.FailoverGroupFinalizer {
 				t.Error("finalizer should have been removed after graceful shutdown")
 			}
 		}
@@ -581,13 +581,13 @@ func TestReconcile_DeletionWithoutFinalizer(t *testing.T) {
 
 func TestReconcile_DeletionWithNilTainter(t *testing.T) {
 	fg := newTestFG()
-	fg.Finalizers = []string{v1alpha1.FailoverGroupFinalizer}
+	fg.Finalizers = []string{v1beta1.FailoverGroupFinalizer}
 	now := metav1.Now()
 	fg.DeletionTimestamp = &now
 
 	scheme := testScheme()
 	allObjs := []client.Object{newTestSecret(), fg}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(allObjs...).Build()
 	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
 		Scheme:   scheme,
@@ -601,11 +601,11 @@ func TestReconcile_DeletionWithNilTainter(t *testing.T) {
 		t.Fatalf("reconcile should succeed even without tainter: %v", err)
 	}
 
-	var fetched2 v1alpha1.MysqlFailoverGroup
+	var fetched2 v1beta1.MysqlFailoverGroup
 	err = c.Get(context.Background(), nn, &fetched2)
 	if err == nil {
 		for _, f := range fetched2.Finalizers {
-			if f == v1alpha1.FailoverGroupFinalizer {
+			if f == v1beta1.FailoverGroupFinalizer {
 				t.Error("finalizer should have been removed")
 			}
 		}
@@ -736,7 +736,7 @@ func TestGenerateMyCnf_StripsLogBinDisableAliases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{tt.key: ""}
+			fg.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{tt.key: ""}
 
 			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if strings.Contains(cnf, "skip-log-bin") || strings.Contains(cnf, "disable-log-bin") {
@@ -769,7 +769,7 @@ func TestGenerateMyCnf_OwnsReplicaPreserveCommitOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
 			if tt.key != "" {
-				conf := map[string]v1alpha1.MysqlConfValue{tt.key: v1alpha1.MysqlConfValue(tt.val)}
+				conf := map[string]v1beta1.MysqlConfValue{tt.key: v1beta1.MysqlConfValue(tt.val)}
 				if tt.site {
 					fg.Spec.Sites[0].MysqlConf = conf
 				} else {
@@ -801,7 +801,7 @@ func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{tt.key: "0"}
+			fg.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{tt.key: "0"}
 
 			cnf := generateMyCnf(fg, pitrEnabled(fg))
 			if !strings.Contains(cnf, "log-bin-trust-function-creators=0") {
@@ -820,9 +820,9 @@ func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) 
 func TestGenerateMyCnf_PITRInjectsMaxBinlogSize(t *testing.T) {
 	fg := newTestFG()
 	if fg.Spec.Backup == nil {
-		fg.Spec.Backup = &v1alpha1.BackupSpec{}
+		fg.Spec.Backup = &v1beta1.BackupSpec{}
 	}
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "128M"}
+	fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "128M"}
 	cnf := generateMyCnf(fg, pitrEnabled(fg))
 	if !strings.Contains(cnf, "max-binlog-size=128M") {
 		t.Errorf("my.cnf should contain max-binlog-size=128M when PITR is enabled; got:\n%s", cnf)
@@ -832,9 +832,9 @@ func TestGenerateMyCnf_PITRInjectsMaxBinlogSize(t *testing.T) {
 func TestGenerateMyCnf_PITRDefaultMaxBinlogSize(t *testing.T) {
 	fg := newTestFG()
 	if fg.Spec.Backup == nil {
-		fg.Spec.Backup = &v1alpha1.BackupSpec{}
+		fg.Spec.Backup = &v1beta1.BackupSpec{}
 	}
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p"}
+	fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "p"}
 	cnf := generateMyCnf(fg, pitrEnabled(fg))
 	// Default when MaxBinlogSize is unset should be 100M per the PITR design.
 	if !strings.Contains(cnf, "max-binlog-size=100M") {
@@ -854,7 +854,7 @@ func TestGenerateMyCnf_PITRDisabledLeavesDefault(t *testing.T) {
 
 func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.TLS = &v1alpha1.TLSSpec{
+	fg.Spec.TLS = &v1beta1.TLSSpec{
 		SecretName: "mysql-tls",
 	}
 	tlsSecret := &corev1.Secret{
@@ -880,7 +880,7 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	}, &deploy); err != nil {
 		t.Fatalf("deployment not found: %v", err)
 	}
-	hashBefore := deploy.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation]
+	hashBefore := deploy.Spec.Template.Annotations[v1beta1.SpecHashAnnotation]
 	if hashBefore == "" {
 		t.Fatal("expected spec-hash annotation to be set")
 	}
@@ -907,7 +907,7 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	}, &deploy); err != nil {
 		t.Fatalf("deployment not found after re-reconcile: %v", err)
 	}
-	hashAfter := deploy.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation]
+	hashAfter := deploy.Spec.Template.Annotations[v1beta1.SpecHashAnnotation]
 	if hashAfter == hashBefore {
 		t.Error("expected spec-hash to change after TLS certificate rotation")
 	}
@@ -935,7 +935,7 @@ func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 	site := fg.Spec.Sites[0]
 	twoSiteHash := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 
-	reader := v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly}
+	reader := v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly}
 	fg.Spec.Sites = append(fg.Spec.Sites, reader)
 	threeSiteHash := ComputeSpecHash(fg, site, "", testPITRRender(fg))
 	if threeSiteHash == twoSiteHash {
@@ -976,15 +976,15 @@ func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 
 func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	fg := newTestFG()
-	reader := v1alpha1.SiteSpec{
-		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
-		Storage: v1alpha1.StorageSpec{StorageClassName: "local", Size: "10Gi"},
-		ServiceTemplate: &v1alpha1.SiteServiceTemplate{
+	reader := v1beta1.SiteSpec{
+		Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly, Zone: "reader-zone",
+		Storage: v1beta1.StorageSpec{StorageClassName: "local", Size: "10Gi"},
+		ServiceTemplate: &v1beta1.SiteServiceTemplate{
 			Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
 			NodePort: 31001, Annotations: map[string]string{"site": "reader"},
 		},
 	}
-	fg.Spec.ServiceTemplate = &v1alpha1.ServiceTemplate{Annotations: map[string]string{"group": "yes", "site": "group"}}
+	fg.Spec.ServiceTemplate = &v1beta1.ServiceTemplate{Annotations: map[string]string{"group": "yes", "site": "group"}}
 	r, c := newReconciler(fg)
 	if err := r.reconcileSiteService(context.Background(), fg, reader); err != nil {
 		t.Fatal(err)
@@ -996,7 +996,7 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-reader", Namespace: fg.Namespace}, &external); err != nil {
 		t.Fatal(err)
 	}
-	if external.Spec.Selector[v1alpha1.HealthyLabel] != v1alpha1.LabelValueTrue || len(external.Spec.Ports) != 1 || external.Spec.Ports[0].Name != "mysql" {
+	if external.Spec.Selector[v1beta1.HealthyLabel] != v1beta1.LabelValueTrue || len(external.Spec.Ports) != 1 || external.Spec.Ports[0].Name != "mysql" {
 		t.Fatalf("reader service = %#v", external.Spec)
 	}
 	if external.Spec.Ports[0].NodePort != 31001 || external.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
@@ -1009,16 +1009,16 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-reader-internal", Namespace: fg.Namespace}, &internal); err != nil {
 		t.Fatal(err)
 	}
-	if internal.Spec.Type != corev1.ServiceTypeClusterIP || !internal.Spec.PublishNotReadyAddresses || internal.Spec.Selector[v1alpha1.HealthyLabel] != "" || len(internal.Spec.Ports) != 2 {
+	if internal.Spec.Type != corev1.ServiceTypeClusterIP || !internal.Spec.PublishNotReadyAddresses || internal.Spec.Selector[v1beta1.HealthyLabel] != "" || len(internal.Spec.Ports) != 2 {
 		t.Fatalf("internal service = %#v", internal.Spec)
 	}
 }
 
 func TestReaderLoadBalancerIPLifecycle(t *testing.T) {
 	fg := newTestFG()
-	reader := v1alpha1.SiteSpec{
-		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly, LoadBalancerIP: "203.0.113.30",
-		ServiceTemplate: &v1alpha1.SiteServiceTemplate{Type: corev1.ServiceTypeLoadBalancer},
+	reader := v1beta1.SiteSpec{
+		Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly, LoadBalancerIP: "203.0.113.30",
+		ServiceTemplate: &v1beta1.SiteServiceTemplate{Type: corev1.ServiceTypeLoadBalancer},
 	}
 	r, c := newReconciler(fg)
 	ctx := context.Background()
@@ -1070,9 +1070,9 @@ func TestMutateServiceSpecLifecycle(t *testing.T) {
 
 func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
+	fg.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
 	site := fg.Spec.Sites[0]
-	site.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max-connections": "700", "log_bin": "/unsafe"}
+	site.MysqlConf = map[string]v1beta1.MysqlConfValue{"max-connections": "700", "log_bin": "/unsafe"}
 	cnf := generateMyCnf(fg, pitrEnabled(fg), site)
 	for _, want := range []string{"max-connections=700", "sync-binlog=0", "gtid-mode=ON", "log-bin=/var/lib/mysql/mysql-bin"} {
 		if !strings.Contains(cnf, want) {
@@ -1080,7 +1080,7 @@ func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 		}
 	}
 	fg2 := fg.DeepCopy()
-	fg2.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
+	fg2.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
 	if ComputeSpecHash(fg, site, "", testPITRRender(fg)) != ComputeSpecHash(fg2, site, "", testPITRRender(fg2)) {
 		t.Fatal("normalized equivalent MySQL settings must hash identically")
 	}
@@ -1196,51 +1196,51 @@ func TestLegacyConfigMapCleanupRetentionMatrix(t *testing.T) {
 
 func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 	lag0, lagHigh := int64(0), int64(301)
-	base := func() *v1alpha1.MysqlFailoverGroup {
+	base := func() *v1beta1.MysqlFailoverGroup {
 		fg := newTestFG()
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
+		fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly})
 		return fg
 	}
-	healthyStatuses := func() []v1alpha1.SiteStatus {
-		return []v1alpha1.SiteStatus{
-			{Name: "dc1", State: v1alpha1.SiteStateWritable},
-			{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
-			{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local", SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
+	healthyStatuses := func() []v1beta1.SiteStatus {
+		return []v1beta1.SiteStatus{
+			{Name: "dc1", State: v1beta1.SiteStateWritable},
+			{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
+			{Name: "reader", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local", SourceConvergenceState: v1beta1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
 		}
 	}
 	for _, tc := range []struct {
 		name          string
-		configure     func(*v1alpha1.MysqlFailoverGroup)
+		configure     func(*v1beta1.MysqlFailoverGroup)
 		wantPrimary   bool
 		wantReaderYes bool
 	}{
-		{name: "empty active", configure: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites = healthyStatuses() }},
-		{name: "non-promotable active", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "empty active", configure: func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.Sites = healthyStatuses() }},
+		{name: "non-promotable active", configure: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "reader"
 			fg.Status.Sites = healthyStatuses()
-			fg.Status.Sites[0].State = v1alpha1.SiteStateReadOnly
-			fg.Status.Sites[2].State = v1alpha1.SiteStateWritable
+			fg.Status.Sites[0].State = v1beta1.SiteStateReadOnly
+			fg.Status.Sites[2].State = v1beta1.SiteStateWritable
 		}},
-		{name: "incomplete status", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "incomplete status", configure: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = healthyStatuses()[:2]
 		}},
-		{name: "source mismatch", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "source mismatch", configure: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = healthyStatuses()
 			fg.Status.Sites[2].SourceHost = "wrong"
 		}, wantPrimary: true},
-		{name: "thread failure", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "thread failure", configure: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = healthyStatuses()
-			fg.Status.Sites[2].Replication = v1alpha1.SiteReplicationBroken
+			fg.Status.Sites[2].Replication = v1beta1.SiteReplicationBroken
 		}, wantPrimary: true},
-		{name: "lag failure", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "lag failure", configure: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = healthyStatuses()
 			fg.Status.Sites[2].SecondsBehindSource = &lagHigh
 		}, wantPrimary: true},
-		{name: "healthy recovery", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "healthy recovery", configure: func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Status.ActiveSite = "dc1"
 			fg.Status.Sites = healthyStatuses()
 		}, wantPrimary: true, wantReaderYes: true},
@@ -1249,10 +1249,10 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 			fg := base()
 			tc.configure(fg)
 			primaryPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "primary", v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
+				labelAppName: "mysql", labelInstance: fg.Name, v1beta1.SiteLabel: "dc1", v1beta1.RoleLabel: "primary", v1beta1.HealthyLabel: v1beta1.LabelValueTrue,
 			}}}
 			readerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: fg.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "reader", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
+				labelAppName: "mysql", labelInstance: fg.Name, v1beta1.SiteLabel: "reader", v1beta1.RoleLabel: "replica", v1beta1.HealthyLabel: v1beta1.LabelValueTrue,
 			}}}
 			r, c := newReconciler(fg, primaryPod, readerPod)
 			if err := r.syncPodLabels(context.Background(), fg); err != nil {
@@ -1265,11 +1265,11 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 			if err := c.Get(context.Background(), types.NamespacedName{Name: readerPod.Name, Namespace: fg.Namespace}, &gotReader); err != nil {
 				t.Fatal(err)
 			}
-			if (gotPrimary.Labels[v1alpha1.RoleLabel] == "primary") != tc.wantPrimary {
-				t.Fatalf("primary role label = %q, wantPrimary=%t", gotPrimary.Labels[v1alpha1.RoleLabel], tc.wantPrimary)
+			if (gotPrimary.Labels[v1beta1.RoleLabel] == "primary") != tc.wantPrimary {
+				t.Fatalf("primary role label = %q, wantPrimary=%t", gotPrimary.Labels[v1beta1.RoleLabel], tc.wantPrimary)
 			}
-			if (gotReader.Labels[v1alpha1.HealthyLabel] == v1alpha1.LabelValueTrue) != tc.wantReaderYes {
-				t.Fatalf("reader healthy label = %q, wantHealthy=%t", gotReader.Labels[v1alpha1.HealthyLabel], tc.wantReaderYes)
+			if (gotReader.Labels[v1beta1.HealthyLabel] == v1beta1.LabelValueTrue) != tc.wantReaderYes {
+				t.Fatalf("reader healthy label = %q, wantHealthy=%t", gotReader.Labels[v1beta1.HealthyLabel], tc.wantReaderYes)
 			}
 		})
 	}
@@ -1324,13 +1324,13 @@ func TestReconcileDeployment_UsesStableRelayLogNames(t *testing.T) {
 
 func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.Backup = &v1alpha1.BackupSpec{
-		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly"},
-		Profiles: []v1alpha1.BackupProfile{{
+	fg.Spec.Backup = &v1beta1.BackupSpec{
+		PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly"},
+		Profiles: []v1beta1.BackupProfile{{
 			Name: "nightly",
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3,
-				S3: &v1alpha1.S3Storage{
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStorageS3,
+				S3: &v1beta1.S3Storage{
 					Bucket:                "backups",
 					Prefix:                "pitr/a",
 					Region:                "us-east-1",
@@ -1358,9 +1358,9 @@ func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 	}
 }
 
-func newTestFGWithCredentials() *v1alpha1.MysqlFailoverGroup {
+func newTestFGWithCredentials() *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG()
-	fg.Spec.Credentials = v1alpha1.CredentialsSpec{
+	fg.Spec.Credentials = v1beta1.CredentialsSpec{
 		OperatorSecretName: "mysql-operator-creds",
 		AppSecretName:      "mysql-app-creds",
 		BackupSecretName:   "mysql-backup-creds",
@@ -1640,7 +1640,7 @@ func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
 		if len(d.Spec.Template.Spec.Containers) == 0 {
 			t.Fatalf("deployment %s has no containers", site)
 		}
-		return d.Annotations[v1alpha1.SpecHashAnnotation], d.Spec.Template.Spec.Containers[0].Image
+		return d.Annotations[v1beta1.SpecHashAnnotation], d.Spec.Template.Spec.Containers[0].Image
 	}
 
 	hashDC1Before, imgDC1Before := captureSite("dc1")
@@ -1666,7 +1666,7 @@ func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
 	r.Runner = runner
 
 	// Mutate spec to trigger drift.
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &fresh); err != nil {
 		t.Fatalf("get CR for mutation: %v", err)
 	}
@@ -1723,7 +1723,7 @@ func TestReconcile_DefersExistingDeploymentWhenRunnerUnavailable(t *testing.T) {
 		t.Fatalf("initial reconcile failed: %v", err)
 	}
 
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &fresh); err != nil {
 		t.Fatalf("get CR for mutation: %v", err)
 	}
@@ -1749,7 +1749,7 @@ func TestReconcile_DefersExistingDeploymentWhenRunnerUnavailable(t *testing.T) {
 func TestReconcile_RecreateUpdatesExistingDeployments(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
+	fg.Spec.UpdateStrategy = v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreate}
 	r, c := newReconciler(fg)
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 
@@ -1757,7 +1757,7 @@ func TestReconcile_RecreateUpdatesExistingDeployments(t *testing.T) {
 		t.Fatalf("initial reconcile: %v", err)
 	}
 
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &fresh); err != nil {
 		t.Fatalf("get failover group: %v", err)
 	}
@@ -1784,7 +1784,7 @@ func TestReconcile_RecreateUpdatesExistingDeployments(t *testing.T) {
 
 func TestCheckSpecDrift_RecreateClearsOrderedDrift(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy = v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRecreate}
+	fg.Spec.UpdateStrategy = v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreate}
 	logger := testLogger()
 	tm := NewTopologyManager(testTopologyConfig(), []internalmysql.Checker{
 		&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true},
@@ -1813,14 +1813,14 @@ func TestReconcile_StartupDefersExistingDeploymentsBeforeManagerRegistration(t *
 	// The runner is wired as it is in production, but startup synchronization
 	// has not registered this group's manager yet.
 	r.Runner = &TopologyManagerRunner{managers: make(map[types.NamespacedName]*managedTopology)}
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &fresh); err != nil {
 		t.Fatal(err)
 	}
 	fresh.Spec.Image = "mysql:startup-drift"
-	fresh.Spec.Sites = append(fresh.Spec.Sites, v1alpha1.SiteSpec{
-		Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly,
-		Storage: v1alpha1.StorageSpec{StorageClassName: "local-reader", Size: "10Gi"},
+	fresh.Spec.Sites = append(fresh.Spec.Sites, v1beta1.SiteSpec{
+		Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly,
+		Storage: v1beta1.StorageSpec{StorageClassName: "local-reader", Size: "10Gi"},
 	})
 	if err := c.Update(ctx, &fresh); err != nil {
 		t.Fatal(err)
@@ -1870,7 +1870,7 @@ func TestReconcile_HashlessLegacyDeploymentsQueueOrderedDrift(t *testing.T) {
 		if err := c.Get(ctx, types.NamespacedName{Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace}, &deployment); err != nil {
 			t.Fatal(err)
 		}
-		if got := deployment.Annotations[v1alpha1.SpecHashAnnotation]; got != "" {
+		if got := deployment.Annotations[v1beta1.SpecHashAnnotation]; got != "" {
 			t.Fatalf("hashless deployment %s was bulk-patched with hash %q", site.Name, got)
 		}
 		if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "mysql:legacy" {
@@ -2011,27 +2011,27 @@ func TestWaitForDeploymentRollout_UpdatedButNotAvailable(t *testing.T) {
 // step fails persistently here; the primary pod must still be relabeled.
 func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.Backup = &v1alpha1.BackupSpec{
-		Profiles: []v1alpha1.BackupProfile{{
+	fg.Spec.Backup = &v1beta1.BackupSpec{
+		Profiles: []v1beta1.BackupProfile{{
 			Name: "nightly",
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC,
-				PVC:  &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{StorageClassName: new("fast"), Size: "50Gi"}},
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStoragePVC,
+				PVC:  &v1beta1.PVCStorage{Provisioned: &v1beta1.ProvisionedVolumeSpec{StorageClassName: new("fast"), Size: "50Gi"}},
 			},
 		}},
-		Schedules: []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly", Schedule: "0 2 * * *"}},
+		Schedules: []v1beta1.BackupSchedule{{Name: "nightly", ProfileName: "nightly", Schedule: "0 2 * * *"}},
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "dc1", State: v1alpha1.SiteStateWritable},
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+	fg.Status.Sites = []v1beta1.SiteStatus{
+		{Name: "dc1", State: v1beta1.SiteStateWritable},
+		{Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
-		labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: "dc1", v1alpha1.RoleLabel: "replica",
+		labelAppName: "mysql", labelInstance: fg.Name, v1beta1.SiteLabel: "dc1", v1beta1.RoleLabel: "replica",
 	}}}
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(newTestSecret(), fg, pod).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
@@ -2051,7 +2051,7 @@ func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Labels[v1alpha1.RoleLabel] != "primary" {
-		t.Fatalf("active site pod role label = %q, want primary despite the backup step failing", got.Labels[v1alpha1.RoleLabel])
+	if got.Labels[v1beta1.RoleLabel] != "primary" {
+		t.Fatalf("active site pod role label = %q, want primary despite the backup step failing", got.Labels[v1beta1.RoleLabel])
 	}
 }

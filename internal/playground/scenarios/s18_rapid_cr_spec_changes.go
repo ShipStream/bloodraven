@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -146,7 +146,7 @@ func s18ObserveActiveSiteFlip() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite changes from %s", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q updatePhase=%q",
 						mfg.Status.ActiveSite, mfg.Status.UpdatePhase)
 					return mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original, msg, nil
@@ -185,18 +185,18 @@ func s18ObserveConvergence() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"writable=1 read-only=N-1 blocked=0 updatePhase=\"\"",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}
@@ -227,7 +227,7 @@ func s18VerifyFinalMemoryRequest() runner.Step {
 			defer cancel()
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("deployments memory=%s", expected.String()),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var bad []string
 					for _, s := range mfg.Spec.Sites {
 						dep, err := env.Kube.GetDeployment(ctx, env.Namespace, fmt.Sprintf("mysql-%s-%s", env.FG, s.Name))

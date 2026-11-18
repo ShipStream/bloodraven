@@ -1,7 +1,7 @@
 # A terminal backup acknowledges a later spec edit (for example a
 # deletionPolicy change) by moving status.observedGeneration, so it reads
 # Healthy again rather than Progressing forever.
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlBackup
 metadata:
   name: nightly-1

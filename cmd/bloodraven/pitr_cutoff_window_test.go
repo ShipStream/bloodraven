@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/sidecar"
@@ -38,19 +38,19 @@ func (c *countingBackupReader) List(ctx context.Context, obj client.ObjectList, 
 func cutoffTestClient(t *testing.T, backups ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	hasGroup := false
 	for _, obj := range backups {
-		if g, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok && g.Namespace == "ns" && g.Name == "fg" {
+		if g, ok := obj.(*v1beta1.MysqlFailoverGroup); ok && g.Namespace == "ns" && g.Name == "fg" {
 			hasGroup = true
 		}
 	}
 	if !hasGroup {
 		backups = append(backups, cutoffTestGroup())
 	}
-	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlBackup{}).WithObjects(backups...).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlBackup{}).WithObjects(backups...).Build()
 }
 func readCutoff(t *testing.T, handler http.Handler) (int, map[string]any) {
 	t.Helper()
@@ -81,7 +81,7 @@ func TestPITRCutoffBoundsRepeatedPositiveLookups(t *testing.T) {
 }
 func TestPITRCutoffIncludesAllGroupProfilesAndInFlightBackups(t *testing.T) {
 	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
-	for _, phase := range []v1alpha1.BackupPhase{v1alpha1.BackupPhaseSucceeded, v1alpha1.BackupPhasePending, v1alpha1.BackupPhaseRunning, ""} {
+	for _, phase := range []v1beta1.BackupPhase{v1beta1.BackupPhaseSucceeded, v1beta1.BackupPhasePending, v1beta1.BackupPhaseRunning, ""} {
 		t.Run(string(phase), func(t *testing.T) {
 			first := retentionBoundaryBackup("p", retentionTestSID+":1-20", start)
 			other := retentionBoundaryBackup("other", retentionTestSID+":1-10", start.Add(-48*time.Hour))
@@ -90,7 +90,7 @@ func TestPITRCutoffIncludesAllGroupProfilesAndInFlightBackups(t *testing.T) {
 			other.Status.Phase = phase
 			c := cutoffTestClient(t, first, other)
 			_, body := readCutoff(t, newAuxMux(nil, platform.NewHub(slog.Default()), c))
-			if phase == v1alpha1.BackupPhaseSucceeded {
+			if phase == v1beta1.BackupPhaseSucceeded {
 				sets, ok := body["retainedGTIDs"].([]any)
 				if !ok || len(sets) != 2 {
 					t.Fatalf("other profile's replay window omitted: %v", body)
@@ -105,7 +105,7 @@ func TestPITRRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
 	start := time.Date(2026, 4, 19, 0, 0, 0, 0, time.UTC)
 	recent := retentionBoundaryBackup("recent", retentionTestSID+":1-20", start.Add(-48*time.Hour))
 	running := retentionBoundaryBackup("overlapping", "", start.Add(-96*time.Hour))
-	running.Status.Phase = v1alpha1.BackupPhaseRunning
+	running.Status.Phase = v1beta1.BackupPhaseRunning
 	running.Status.CompletionTime = nil
 	c := cutoffTestClient(t, recent, running)
 	ctx := context.Background()
@@ -179,7 +179,7 @@ func TestPITRRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
 		}
 	}
 	sweep()
-	running.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	running.Status.Phase = v1beta1.BackupPhaseSucceeded
 	running.Status.GtidExecuted = retentionTestSID + ":1-10"
 	if err := c.Status().Update(ctx, running); err != nil {
 		t.Fatal(err)

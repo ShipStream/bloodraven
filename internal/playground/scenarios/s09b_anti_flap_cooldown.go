@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -241,7 +241,7 @@ func s09bObserveFirstFailover() runner.Step {
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"activeSite changed AND lastFailover stamped",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					hasStamp := mfg.Status.LastFailoverTime() != nil && !mfg.Status.LastFailoverTime().IsZero()
 					flipped := mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original
 					msg := fmt.Sprintf("activeSite=%q stamp=%v target=%q",
@@ -281,15 +281,15 @@ func s09bObserveOriginalPrimaryReadOnly() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s reachable post-failover", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					// Caught up, not just reachable: the second fault loses
 					// whatever this site has not received yet.
 					s := statusSiteByName(mfg, original)
 					if s == nil {
 						return false, "site missing from status", nil
 					}
-					caughtUp := s.State == v1alpha1.SiteStateReadOnly && s.Replication.Running() && s.RecoveryState == "" &&
-						s.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
+					caughtUp := s.State == v1beta1.SiteStateReadOnly && s.Replication.Running() && s.RecoveryState == "" &&
+						s.SourceConvergenceState == v1beta1.SourceConvergenceConverged &&
 						s.SecondsBehindSource != nil && *s.SecondsBehindSource == 0
 					return caughtUp, fmt.Sprintf("site %s state=%q replication=%s recovery=%q convergence=%q lag=%s",
 						original, s.State, s.Replication, s.RecoveryState, s.SourceConvergenceState,
@@ -395,7 +395,7 @@ func s09bVerifyRetriedAtExpiry() runner.Step {
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("second failover back to %s after cooldown expiry", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					lf := mfg.Status.LastFailoverTime()
 					second := lf != nil && lf.Time.After(firstAt.Add(time.Second))
 					msg := fmt.Sprintf("activeSite=%q lastFailover=%v target=%q", mfg.Status.ActiveSite, lf, mfg.Status.LastFailoverTarget())

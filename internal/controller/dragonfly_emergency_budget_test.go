@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -125,15 +125,15 @@ func shrinkEmergencyWaits(m *DragonflyManager) {
 	m.emergencySettle = func(time.Duration) time.Duration { return 10 * time.Millisecond }
 }
 
-func newEmergencyManager(t *testing.T) (*DragonflyManager, func() *v1alpha1.MysqlFailoverGroup) {
+func newEmergencyManager(t *testing.T) (*DragonflyManager, func() *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	fg := fgWithDragonflyEnabledAndActive()
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.Build()
 	mgr := NewDragonflyManager(c, record.NewFakeRecorder(32), slog.Default(), key, 50*time.Millisecond)
 	shrinkEmergencyWaits(mgr)
-	get := func() *v1alpha1.MysqlFailoverGroup {
-		var got v1alpha1.MysqlFailoverGroup
+	get := func() *v1beta1.MysqlFailoverGroup {
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), key, &got); err != nil {
 			t.Fatalf("get fg: %v", err)
 		}
@@ -359,7 +359,7 @@ func (s *scriptedConnector) connect(ctx context.Context, addr, _ string) (Dragon
 
 // writableEndpoints lists the sites whose Dragonfly pods the active
 // Service selects (role=master and traffic enabled).
-func writableEndpoints(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) []string {
+func writableEndpoints(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup) []string {
 	t.Helper()
 	var pods corev1.PodList
 	if err := c.List(context.Background(), &pods, client.InNamespace(fg.Namespace)); err != nil {
@@ -367,18 +367,18 @@ func writableEndpoints(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailover
 	}
 	var out []string
 	for _, p := range pods.Items {
-		if p.Labels[v1alpha1.DragonflyRoleLabel] == "master" && p.Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
-			out = append(out, p.Labels[v1alpha1.SiteLabel])
+		if p.Labels[v1beta1.DragonflyRoleLabel] == "master" && p.Labels[v1beta1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
+			out = append(out, p.Labels[v1beta1.SiteLabel])
 		}
 	}
 	slices.Sort(out)
 	return out
 }
 
-func newEmergencyManagerWithPods(t *testing.T) (*DragonflyManager, client.Client, *v1alpha1.MysqlFailoverGroup) {
+func newEmergencyManagerWithPods(t *testing.T) (*DragonflyManager, client.Client, *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "master", true),
@@ -417,7 +417,7 @@ func TestTryEmergencyPromote_UnconfirmedTakeoverObservedAsMasterIsRecorded(t *te
 	if gap := dials[2].Sub(dials[0]); gap < settle {
 		t.Errorf("role observed %s after the takeover was sent, want at least the %s settle time", gap, settle)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), mgr.fgKey, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func TestTryEmergencyPromote_UnconfirmedTakeoverObservedAsMasterIsRecorded(t *te
 	}
 	sawLost := false
 	for _, ev := range drainEventsCh(rec.Events, 16, 50*time.Millisecond) {
-		sawLost = sawLost || strings.Contains(ev, v1alpha1.EventDragonflySessionsLost)
+		sawLost = sawLost || strings.Contains(ev, v1beta1.EventDragonflySessionsLost)
 	}
 	if !sawLost {
 		t.Error("no SessionsLost event for a promotion whose sessions may not have survived")
@@ -453,7 +453,7 @@ func TestTryEmergencyPromote_UnconfirmedFallbackObservedAsReplicaRestoresSource(
 	if mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1") {
 		t.Fatal("TryEmergencyPromote() = true for a target observed as a replica")
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), mgr.fgKey, &got); err != nil {
 		t.Fatal(err)
 	}

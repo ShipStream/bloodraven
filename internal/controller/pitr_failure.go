@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
@@ -27,12 +27,12 @@ import (
 // ("PITRCoverageInvalid: " when it refuses a verdict), so the earliest
 // whole-word token wins. The replay script's sentinel is served as
 // PITRReplayFailed; the message keeps the raw sentinel.
-func pitrFailureReason(message string) v1alpha1.PITRToken {
+func pitrFailureReason(message string) v1beta1.PITRToken {
 	for _, field := range strings.FieldsFunc(message, func(r rune) bool {
 		return strings.ContainsRune(" \t\n\r:,;()\"{}=", r)
 	}) {
 		if t := pitrarchive.Token(strings.TrimSuffix(field, ".")); t.Known() {
-			return v1alpha1.PITRToken(t.Served())
+			return v1beta1.PITRToken(t.Served())
 		}
 	}
 	return ""
@@ -200,7 +200,7 @@ func renderedPITRRequest(job *batchv1.Job) pitrRenderedRequest {
 // Succeeded pod owned by the Job, terminated with exit code 0, and only when
 // it is consistent with the replay the Job template rendered. It returns the
 // certified PointInTimeResult.
-func pitrJobVerdict(pod *corev1.Pod, job *batchv1.Job) (*v1alpha1.PointInTimeResult, error) {
+func pitrJobVerdict(pod *corev1.Pod, job *batchv1.Job) (*v1beta1.PointInTimeResult, error) {
 	if pod == nil {
 		return nil, fmt.Errorf("the Job's pod is gone, so its PITR verdict cannot be read")
 	}
@@ -232,7 +232,7 @@ func pitrJobVerdict(pod *corev1.Pod, job *batchv1.Job) (*v1alpha1.PointInTimeRes
 
 // parsePITRVerdict parses restore.py's termination message against the
 // rendered request.
-func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointInTimeResult, error) {
+func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1beta1.PointInTimeResult, error) {
 	lines := strings.Split(strings.ReplaceAll(message, "\r\n", "\n"), "\n")
 	tokens, ok := parseSentinelTokens(lines[0], pitrVerdictSentinel)
 	if !ok || tokens["v"] != "2" {
@@ -277,14 +277,14 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		counts[key] = n
 	}
 
-	res := &v1alpha1.PointInTimeResult{}
+	res := &v1beta1.PointInTimeResult{}
 	// Mode and stop must be the rendered ones.
 	if fields["mode"] != req.Mode {
 		return nil, fmt.Errorf("PITR verdict mode %q differs from the rendered mode %q", fields["mode"], req.Mode)
 	}
 	switch req.Mode {
 	case "timestamp":
-		res.Mode = v1alpha1.PointInTimeModeTimestamp
+		res.Mode = v1beta1.PointInTimeModeTimestamp
 		if fields["stop"] != req.Stop {
 			return nil, fmt.Errorf("PITR verdict stop %q differs from the rendered stop %q", fields["stop"], req.Stop)
 		}
@@ -295,7 +295,7 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		st := metav1.NewTime(stop.Time)
 		res.StopTime = &st
 	case "latest":
-		res.Mode = v1alpha1.PointInTimeModeLatest
+		res.Mode = v1beta1.PointInTimeModeLatest
 		if fields["stop"] != "" {
 			return nil, fmt.Errorf("latest PITR verdict carries a stop %q", fields["stop"])
 		}
@@ -303,12 +303,12 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		return nil, fmt.Errorf("the Job rendered no PITR mode")
 	}
 
-	res.Outcome = v1alpha1.PointInTimeOutcome(fields["outcome"])
+	res.Outcome = v1beta1.PointInTimeOutcome(fields["outcome"])
 	switch {
-	case req.Mode == "latest" && res.Outcome != v1alpha1.PointInTimeArchiveHead,
-		req.Mode == "timestamp" && res.Outcome != v1alpha1.PointInTimeTargetCovered && res.Outcome != v1alpha1.PointInTimePartial:
+	case req.Mode == "latest" && res.Outcome != v1beta1.PointInTimeArchiveHead,
+		req.Mode == "timestamp" && res.Outcome != v1beta1.PointInTimeTargetCovered && res.Outcome != v1beta1.PointInTimePartial:
 		return nil, fmt.Errorf("PITR verdict outcome %q is not valid in %s mode", res.Outcome, req.Mode)
-	case res.Outcome == v1alpha1.PointInTimePartial && (!req.AllowPartial || req.Verification):
+	case res.Outcome == v1beta1.PointInTimePartial && (!req.AllowPartial || req.Verification):
 		return nil, fmt.Errorf("PITR verdict reports a partial outcome that was not authorized")
 	}
 
@@ -316,8 +316,8 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 	if !pitrarchive.ValidArchiveID(fields["archive"]) {
 		return nil, fmt.Errorf("PITR verdict archive %q is malformed", fields["archive"])
 	}
-	mode := v1alpha1.EncryptionMode(fields["encryptionMode"])
-	if mode != v1alpha1.EncryptionModeNone && mode != v1alpha1.EncryptionModePassphrase {
+	mode := v1beta1.EncryptionMode(fields["encryptionMode"])
+	if mode != v1beta1.EncryptionModeNone && mode != v1beta1.EncryptionModePassphrase {
 		return nil, fmt.Errorf("PITR verdict encryption mode %q is invalid", mode)
 	}
 	if req.EncryptionMode != "" && string(mode) != req.EncryptionMode {
@@ -334,14 +334,14 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 	if req.ExpectedSourceUID != "" && fields["sourceUID"] != req.ExpectedSourceUID {
 		return nil, fmt.Errorf("PITR verdict source uid %s differs from the backup's source group %s", fields["sourceUID"], req.ExpectedSourceUID)
 	}
-	archive := &v1alpha1.PITRArchiveIdentity{
+	archive := &v1beta1.PITRArchiveIdentity{
 		ArchiveID:      fields["archive"],
 		Destination:    req.Destination,
-		Source:         v1alpha1.PITRArchiveSource{Namespace: fields["sourceNamespace"], Name: fields["sourceName"], UID: types.UID(fields["sourceUID"])},
+		Source:         v1beta1.PITRArchiveSource{Namespace: fields["sourceNamespace"], Name: fields["sourceName"], UID: types.UID(fields["sourceUID"])},
 		EncryptionMode: mode,
 	}
-	if mode == v1alpha1.EncryptionModePassphrase {
-		archive.Algorithm = v1alpha1.EncryptionAlgorithmAES256GCM
+	if mode == v1beta1.EncryptionModePassphrase {
+		archive.Algorithm = v1beta1.EncryptionAlgorithmAES256GCM
 	}
 	res.Archive = archive
 
@@ -355,7 +355,7 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		return nil, fmt.Errorf("PITR verdict replays files without segments")
 	case segments > 0 && (files == 0 || files > segments || transactions < segments):
 		return nil, fmt.Errorf("PITR verdict segment, file and transaction counts disagree")
-	case segments == 0 && res.Outcome != v1alpha1.PointInTimeTargetCovered:
+	case segments == 0 && res.Outcome != v1beta1.PointInTimeTargetCovered:
 		return nil, fmt.Errorf("%s PITR verdict replayed no archived transaction", res.Outcome)
 	}
 	res.SegmentCount = int32(segments)
@@ -366,7 +366,7 @@ func parsePITRVerdict(message string, req pitrRenderedRequest) (*v1alpha1.PointI
 		if !ok || !pitrSiteName.MatchString(site) || len(site) > 63 || name == "" || len(name) > 255 || strings.Contains(name, "/") {
 			return nil, fmt.Errorf("PITR verdict lastFile %q is not <site>/<name>", fields["lastFile"])
 		}
-		res.LastReplayedBinlog = &v1alpha1.ReplayedBinlogRef{Site: site, Name: name}
+		res.LastReplayedBinlog = &v1beta1.ReplayedBinlogRef{Site: site, Name: name}
 	}
 	if fields["newest"] != "" {
 		newest, err := backupmeta.ParseMicroTime(fields["newest"])

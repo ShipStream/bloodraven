@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -37,18 +37,18 @@ func TestVerifyScriptSanityFloor(t *testing.T) {
 		name   string
 		result string
 		floor  *int64
-		want   v1alpha1.SanityCheckOutcome
+		want   v1beta1.SanityCheckOutcome
 	}{
-		{name: "negative, floor unset", result: "-1", want: v1alpha1.SanityCheckOutcomePassed},
-		{name: "negative, floor 0", result: "-1", floor: new(int64(0)), want: v1alpha1.SanityCheckOutcomeFailed},
-		{name: "negative, floor 5", result: "-1", floor: new(int64(5)), want: v1alpha1.SanityCheckOutcomeFailed},
-		{name: "zero, floor 0", result: "0", floor: new(int64(0)), want: v1alpha1.SanityCheckOutcomePassed},
-		{name: "below floor", result: "4", floor: new(int64(5)), want: v1alpha1.SanityCheckOutcomeFailed},
-		{name: "at floor", result: "5", floor: new(int64(5)), want: v1alpha1.SanityCheckOutcomePassed},
-		{name: "above floor", result: "12", floor: new(int64(5)), want: v1alpha1.SanityCheckOutcomePassed},
-		{name: "beyond int64", result: "18446744073709551615", floor: new(int64(9223372036854775807)), want: v1alpha1.SanityCheckOutcomePassed},
-		{name: "large negative", result: "-9223372036854775808", floor: new(int64(0)), want: v1alpha1.SanityCheckOutcomeFailed},
-		{name: "non-integer", result: "abc", floor: new(int64(5)), want: v1alpha1.SanityCheckOutcomePassed},
+		{name: "negative, floor unset", result: "-1", want: v1beta1.SanityCheckOutcomePassed},
+		{name: "negative, floor 0", result: "-1", floor: new(int64(0)), want: v1beta1.SanityCheckOutcomeFailed},
+		{name: "negative, floor 5", result: "-1", floor: new(int64(5)), want: v1beta1.SanityCheckOutcomeFailed},
+		{name: "zero, floor 0", result: "0", floor: new(int64(0)), want: v1beta1.SanityCheckOutcomePassed},
+		{name: "below floor", result: "4", floor: new(int64(5)), want: v1beta1.SanityCheckOutcomeFailed},
+		{name: "at floor", result: "5", floor: new(int64(5)), want: v1beta1.SanityCheckOutcomePassed},
+		{name: "above floor", result: "12", floor: new(int64(5)), want: v1beta1.SanityCheckOutcomePassed},
+		{name: "beyond int64", result: "18446744073709551615", floor: new(int64(9223372036854775807)), want: v1beta1.SanityCheckOutcomePassed},
+		{name: "large negative", result: "-9223372036854775808", floor: new(int64(0)), want: v1beta1.SanityCheckOutcomeFailed},
+		{name: "non-integer", result: "abc", floor: new(int64(5)), want: v1beta1.SanityCheckOutcomePassed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,7 +71,7 @@ func TestVerifyScriptSanityFloor(t *testing.T) {
 				cmd.Env = append(cmd.Env, "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS="+strconv.FormatInt(*tt.floor, 10))
 			}
 			out, err := cmd.CombinedOutput()
-			if (tt.want == v1alpha1.SanityCheckOutcomeFailed) != (err != nil) {
+			if (tt.want == v1beta1.SanityCheckOutcomeFailed) != (err != nil) {
 				t.Fatalf("script error %v, want outcome %s:\n%s", err, tt.want, out)
 			}
 			var sentinel string
@@ -108,14 +108,14 @@ func TestVerificationJobSanityFloorPresence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fg := verifyFG()
 			backup := successfulBackup("happy", "lion", "nightly-s3")
-			v := &v1alpha1.MysqlBackupVerification{
+			v := &v1beta1.MysqlBackupVerification{
 				ObjectMeta: metav1.ObjectMeta{Name: "verify-floor", Namespace: "ns"},
-				Spec: v1alpha1.MysqlBackupVerificationSpec{
-					FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+				Spec: v1beta1.MysqlBackupVerificationSpec{
+					FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 					ProfileName:      "nightly-s3",
 				},
 			}
-			v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1", MinResult: tt.floor, Timeout: &metav1.Duration{Duration: 60e9}}
+			v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1", MinResult: tt.floor, Timeout: &metav1.Duration{Duration: 60e9}}
 			job, err := buildVerificationJob(verificationJobInputs{
 				FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: v, Backup: backup,
 				CredsSecretName: "c", ScriptsConfigMapName: "s",

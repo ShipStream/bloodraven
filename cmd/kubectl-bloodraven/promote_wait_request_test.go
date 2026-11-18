@@ -13,13 +13,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
-func requestFixture() *v1alpha1.MysqlFailoverGroup {
-	fg := waitFixture("", v1alpha1.PlannedFailoverPhaseSucceeded)
+func requestFixture() *v1beta1.MysqlFailoverGroup {
+	fg := waitFixture("", v1beta1.PlannedFailoverPhaseSucceeded)
 	fg.Status.PlannedFailover.RunID = "run-0"
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
+	fg.Spec.Sites = []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	return fg
 }
 
@@ -36,7 +36,7 @@ func TestWaitForPlannedFailover_FollowsDeferredRunForAnotherSite(t *testing.T) {
 	fastPlannedWait(t)
 	ctx := context.Background()
 
-	fg := baselineFixture(v1alpha1.PlannedFailoverPhaseDeferred, "")
+	fg := baselineFixture(v1beta1.PlannedFailoverPhaseDeferred, "")
 	fg.Status.PlannedFailover.TargetSite = "iad"
 	cl := waitClient(t, fg).Build()
 	b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
@@ -55,7 +55,7 @@ func TestWaitForPlannedFailover_FollowsDeferredRunForAnotherSite(t *testing.T) {
 	})
 
 	t.Run("resumed retargeted", func(t *testing.T) {
-		setRun(t, cl, &v1alpha1.PlannedFailoverStatus{RunID: "run-0", Revision: 7, Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
+		setRun(t, cl, &v1beta1.PlannedFailoverStatus{RunID: "run-0", Revision: 7, Phase: v1beta1.PlannedFailoverPhaseSucceeded,
 			TargetSite: "pdx", StartTime: metav1.Now()})
 		patchAnnotation(t, cl, false)
 		if _, _, err := runWait(t, cl, b); err != nil {
@@ -69,13 +69,13 @@ func TestWaitForPlannedFailover_FollowsDeferredRunForAnotherSite(t *testing.T) {
 func TestWaitForPlannedFailover_IgnoresRunForAnotherSite(t *testing.T) {
 	fastPlannedWait(t)
 	ctx := context.Background()
-	fg := baselineFixture(v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverOutcomeSucceeded)
+	fg := baselineFixture(v1beta1.PlannedFailoverPhaseSucceeded, v1beta1.PlannedFailoverOutcomeSucceeded)
 	cl := waitClient(t, fg).Build()
 	b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
-	setRun(t, cl, &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
+	setRun(t, cl, &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 9, Phase: v1beta1.PlannedFailoverPhaseSucceeded,
 		TargetSite: "iad", StartTime: metav1.Now()})
 	patchAnnotation(t, cl, false)
-	if err := cl.Create(ctx, refusalEvent("ev-stale", v1alpha1.EventPlannedFailoverRejected,
+	if err := cl.Create(ctx, refusalEvent("ev-stale", v1beta1.EventPlannedFailoverRejected,
 		`planned-failover annotation ignored: a previous planned failover is still running (phase="Fencing")`, 1)); err != nil {
 		t.Fatal(err)
 	}
@@ -88,10 +88,10 @@ func TestWaitForPlannedFailover_IgnoresRunForAnotherSite(t *testing.T) {
 	}
 
 	t.Run("no Event names the other run", func(t *testing.T) {
-		fg := baselineFixture(v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverOutcomeSucceeded)
+		fg := baselineFixture(v1beta1.PlannedFailoverPhaseSucceeded, v1beta1.PlannedFailoverOutcomeSucceeded)
 		cl := waitClient(t, fg).Build()
 		b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
-		setRun(t, cl, &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseAdmitting,
+		setRun(t, cl, &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1beta1.PlannedFailoverPhaseAdmitting,
 			TargetSite: "iad", StartTime: metav1.Now()})
 		_, _, err := runWait(t, cl, b)
 		if err == nil || !strings.Contains(err.Error(), `planned failover run-1 runs for site "iad"`) {
@@ -113,7 +113,7 @@ func TestAnnotatePlannedFailover_ConflictRebaselines(t *testing.T) {
 			patches++
 			if patches == 1 {
 				// A concurrent request is admitted between the read and the write.
-				setRun(t, c, &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseAdmitting,
+				setRun(t, c, &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1beta1.PlannedFailoverPhaseAdmitting,
 					TargetSite: "iad", StartTime: metav1.Now()})
 			}
 			return c.Patch(ctx, obj, patch, opts...)
@@ -129,11 +129,11 @@ func TestAnnotatePlannedFailover_ConflictRebaselines(t *testing.T) {
 	if b.runID != "run-1" || b.follow {
 		t.Fatalf("baseline = %+v; want run-1 (another site's Admitting run, not followed)", b)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := cl.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Annotations[v1alpha1.PlannedFailoverAnnotation] != "pdx" {
+	if got.Annotations[v1beta1.PlannedFailoverAnnotation] != "pdx" {
 		t.Fatalf("annotations = %v", got.Annotations)
 	}
 }
@@ -143,19 +143,19 @@ func TestAnnotatePlannedFailover_ConflictRebaselines(t *testing.T) {
 func TestWaitForPlannedFailover_FollowedRunEndsWithoutRequest(t *testing.T) {
 	fastPlannedWait(t)
 	ctx := context.Background()
-	fg := baselineFixture(v1alpha1.PlannedFailoverPhaseAdmitting, "")
+	fg := baselineFixture(v1beta1.PlannedFailoverPhaseAdmitting, "")
 	cl := waitClient(t, fg).Build()
 	b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
 	if !b.follow {
 		t.Fatal("the Admitting run to the same site is not followed")
 	}
 	patchAnnotation(t, cl, true)
-	setRun(t, cl, &v1alpha1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseFailed,
-		TargetSite: "pdx", StartTime: metav1.Now(), Result: &v1alpha1.PlannedFailoverResult{
-			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonAdmissionTimeout}})
+	setRun(t, cl, &v1beta1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1beta1.PlannedFailoverPhaseFailed,
+		TargetSite: "pdx", StartTime: metav1.Now(), Result: &v1beta1.PlannedFailoverResult{
+			Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonAdmissionTimeout}})
 	go func() {
 		time.Sleep(150 * time.Millisecond)
-		setRun(t, cl, &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 5, Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
+		setRun(t, cl, &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 5, Phase: v1beta1.PlannedFailoverPhaseSucceeded,
 			TargetSite: "pdx", StartTime: metav1.Now()})
 		patchAnnotation(t, cl, false)
 	}()
@@ -168,12 +168,12 @@ func TestWaitForPlannedFailover_FollowedRunEndsWithoutRequest(t *testing.T) {
 	}
 
 	t.Run("the ending run consumed the request", func(t *testing.T) {
-		fg := baselineFixture(v1alpha1.PlannedFailoverPhaseDeferred, "")
+		fg := baselineFixture(v1beta1.PlannedFailoverPhaseDeferred, "")
 		cl := waitClient(t, fg).Build()
 		b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
-		setRun(t, cl, &v1alpha1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseFailed,
-			TargetSite: "pdx", StartTime: metav1.Now(), Result: &v1alpha1.PlannedFailoverResult{
-				Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonTargetUnhealthy}})
+		setRun(t, cl, &v1beta1.PlannedFailoverStatus{RunID: "run-0", Revision: 3, Phase: v1beta1.PlannedFailoverPhaseFailed,
+			TargetSite: "pdx", StartTime: metav1.Now(), Result: &v1beta1.PlannedFailoverResult{
+				Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonTargetUnhealthy}})
 		patchAnnotation(t, cl, false)
 		_, _, err := runWait(t, cl, b)
 		if err == nil || !strings.Contains(err.Error(), "TargetUnhealthy") {
@@ -189,25 +189,25 @@ func TestWaitForPlannedFailover_LegacyOperator(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name    string
-		phase   v1alpha1.PlannedFailoverPhase
+		phase   v1beta1.PlannedFailoverPhase
 		wantErr string
 	}{
-		{name: "succeeded", phase: v1alpha1.PlannedFailoverPhaseSucceeded},
-		{name: "failed", phase: v1alpha1.PlannedFailoverPhaseFailed, wantErr: "lag wait exceeded"},
+		{name: "succeeded", phase: v1beta1.PlannedFailoverPhaseSucceeded},
+		{name: "failed", phase: v1beta1.PlannedFailoverPhaseFailed, wantErr: "lag wait exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := requestFixture()
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded,
+			fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseSucceeded,
 				StartTime: metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))}
 			cl := waitClient(t, fg).Build()
 			b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
 			patchAnnotation(t, cl, true)
 			go func() {
 				time.Sleep(100 * time.Millisecond)
-				setRun(t, cl, &v1alpha1.PlannedFailoverStatus{Phase: "Pending", StartTime: metav1.NewTime(time.Now().Truncate(time.Second))})
+				setRun(t, cl, &v1beta1.PlannedFailoverStatus{Phase: "Pending", StartTime: metav1.NewTime(time.Now().Truncate(time.Second))})
 				patchAnnotation(t, cl, false)
 				time.Sleep(100 * time.Millisecond)
-				setRun(t, cl, &v1alpha1.PlannedFailoverStatus{Phase: tc.phase, Message: "lag wait exceeded",
+				setRun(t, cl, &v1beta1.PlannedFailoverStatus{Phase: tc.phase, Message: "lag wait exceeded",
 					StartTime: metav1.NewTime(time.Now().Truncate(time.Second))})
 			}()
 			out, errOut, err := runWait(t, cl, b)
@@ -227,9 +227,9 @@ func TestWaitForPlannedFailover_LegacyOperator(t *testing.T) {
 	// not a new legacy run.
 	fg := requestFixture()
 	start := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded, StartTime: start}
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseSucceeded, StartTime: start}
 	b := newPlannedWaitBaseline(ctx, waitClient(t, fg).Build(), fg, "pdx")
-	if b.legacyRun(&v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseFailed, StartTime: start}) {
+	if b.legacyRun(&v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseFailed, StartTime: start}) {
 		t.Fatal("the baseline block counted as a new legacy run")
 	}
 }
@@ -239,12 +239,12 @@ func TestWaitForPlannedFailover_LegacyOperator(t *testing.T) {
 func TestWaitForPlannedFailover_AlreadyActiveIsSkip(t *testing.T) {
 	fastPlannedWait(t)
 	ctx := context.Background()
-	fg := baselineFixture(v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverOutcomeSucceeded)
+	fg := baselineFixture(v1beta1.PlannedFailoverPhaseSucceeded, v1beta1.PlannedFailoverOutcomeSucceeded)
 	cl := waitClient(t, fg).Build()
 	b := newPlannedWaitBaseline(ctx, cl, fg, "pdx")
-	setRun(t, cl, &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 2, Phase: v1alpha1.PlannedFailoverPhaseFailed,
-		TargetSite: "pdx", StartTime: metav1.Now(), Result: &v1alpha1.PlannedFailoverResult{
-			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonAlreadyActive}})
+	setRun(t, cl, &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 2, Phase: v1beta1.PlannedFailoverPhaseFailed,
+		TargetSite: "pdx", StartTime: metav1.Now(), Result: &v1beta1.PlannedFailoverResult{
+			Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonAlreadyActive}})
 	out, _, err := runWait(t, cl, b)
 	if err != nil {
 		t.Fatalf("err = %v; want exit 0 like a Skipped request", err)
@@ -259,7 +259,7 @@ func TestWaitForPlannedFailover_AlreadyActiveIsSkip(t *testing.T) {
 func TestWaitForPlannedFailover_EventListForbidden(t *testing.T) {
 	fastPlannedWait(t)
 	ctx := context.Background()
-	fg := baselineFixture(v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverOutcomeSucceeded)
+	fg := baselineFixture(v1beta1.PlannedFailoverPhaseSucceeded, v1beta1.PlannedFailoverOutcomeSucceeded)
 	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "events"}, "", nil)
 	cl := interceptor.NewClient(waitClient(t, fg).Build(), interceptor.Funcs{
 		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {

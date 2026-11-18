@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -285,10 +285,10 @@ func TestRunBootstrap_NoServerUUIDVerdictWithoutACompletedClone(t *testing.T) {
 // The runner turns the report into a Warning Event on the group.
 func TestEmitCloneServerUUIDNotRotated(t *testing.T) {
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "lion"}}
+	fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "lion"}}
 	rec := record.NewFakeRecorder(4)
 	r := &TopologyManagerRunner{
 		logger:   testLogger(),
@@ -299,8 +299,8 @@ func TestEmitCloneServerUUIDNotRotated(t *testing.T) {
 	r.emitCloneServerUUIDNotRotated(context.Background(), nn, "dc2", cloneTestUUID0)
 	select {
 	case ev := <-rec.Events:
-		for _, want := range []string{"Warning " + v1alpha1.EventCloneServerUUIDNotRotated, "site dc2", cloneTestUUID0,
-			mysqlLauncherLogPrefix, "replicates normally", v1alpha1.EventPITRArchiveReissueRiskDetected, "Reclone the site"} {
+		for _, want := range []string{"Warning " + v1beta1.EventCloneServerUUIDNotRotated, "site dc2", cloneTestUUID0,
+			mysqlLauncherLogPrefix, "replicates normally", v1beta1.EventPITRArchiveReissueRiskDetected, "Reclone the site"} {
 			if !strings.Contains(ev, want) {
 				t.Fatalf("event %q lacks %q", ev, want)
 			}
@@ -339,7 +339,7 @@ func TestStartManager_WiresCloneServerUUIDNotRotated(t *testing.T) {
 	mt.tm.CloneServerUUIDNotRotatedCallback("dc2", cloneTestUUID0)
 	select {
 	case ev := <-rec.Events:
-		if !strings.Contains(ev, "Warning "+v1alpha1.EventCloneServerUUIDNotRotated) || !strings.Contains(ev, "site dc2") || !strings.Contains(ev, cloneTestUUID0) {
+		if !strings.Contains(ev, "Warning "+v1beta1.EventCloneServerUUIDNotRotated) || !strings.Contains(ev, "site dc2") || !strings.Contains(ev, cloneTestUUID0) {
 			t.Fatalf("event = %q", ev)
 		}
 	default:

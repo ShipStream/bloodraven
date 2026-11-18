@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -231,7 +231,7 @@ func s75BindBackupClaim(ctx context.Context, env *runner.Env) error {
 }
 
 // s75Peers returns the sites other than active, in spec order.
-func s75Peers(mfg *v1alpha1.MysqlFailoverGroup, active string) []string {
+func s75Peers(mfg *v1beta1.MysqlFailoverGroup, active string) []string {
 	var peers []string
 	for _, s := range mfg.Spec.Sites {
 		if s.Name != active {
@@ -327,16 +327,16 @@ func s75CreateBackup() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			b, err := waitForBackupPhase(waitCtx, env, name, v1alpha1.BackupPhaseSucceeded)
+			b, err := waitForBackupPhase(waitCtx, env, name, v1beta1.BackupPhaseSucceeded)
 			if err != nil {
 				return err
 			}
 			env.Capture.Note("backup succeeded: " + backupStatusSummary(b))
-			if st := b.Status.ArtifactStorage; st == nil || st.Type != v1alpha1.BackupStoragePVC {
+			if st := b.Status.ArtifactStorage; st == nil || st.Type != v1beta1.BackupStoragePVC {
 				return fmt.Errorf("backup status.artifactStorage=%+v, want a PVC artifact", b.Status.ArtifactStorage)
 			}
-			if b.Status.Encryption == nil || b.Status.Encryption.Mode != v1alpha1.EncryptionModePassphrase {
-				return fmt.Errorf("backup status.encryption=%+v, want mode %s", b.Status.Encryption, v1alpha1.EncryptionModePassphrase)
+			if b.Status.Encryption == nil || b.Status.Encryption.Mode != v1beta1.EncryptionModePassphrase {
+				return fmt.Errorf("backup status.encryption=%+v, want mode %s", b.Status.Encryption, v1beta1.EncryptionModePassphrase)
 			}
 			return nil
 		},
@@ -524,7 +524,7 @@ func s75ClientPodSpec(env *runner.Env, image, primaryHost, siteHost string) *cor
 		Spec: corev1.PodSpec{
 			RestartPolicy:         corev1.RestartPolicyNever,
 			ActiveDeadlineSeconds: &deadline,
-			Tolerations:           []corev1.Toleration{{Key: v1alpha1.ReadOnlyTaintKey(env.Namespace, env.FG), Operator: corev1.TolerationOpExists}},
+			Tolerations:           []corev1.Toleration{{Key: v1beta1.ReadOnlyTaintKey(env.Namespace, env.FG), Operator: corev1.TolerationOpExists}},
 			Containers: []corev1.Container{{
 				Name:            "client",
 				Image:           image,
@@ -769,16 +769,16 @@ func s75HoldDropAndRequestRestore() runner.Step {
 	}
 }
 
-func s75RestoreSpec(env *runner.Env, confirm string) v1alpha1.RestoreInPlaceSpec {
-	return v1alpha1.RestoreInPlaceSpec{
+func s75RestoreSpec(env *runner.Env, confirm string) v1beta1.RestoreInPlaceSpec {
+	return v1beta1.RestoreInPlaceSpec{
 		Confirm: confirm,
-		Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: ctxFetch(env, "backupName")}},
+		Source:  v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: ctxFetch(env, "backupName")}},
 	}
 }
 
 // s75SameRunStart reports whether rip is the status of the run this
 // scenario started (same startTime, to the second the API keeps).
-func s75SameRunStart(env *runner.Env, rip *v1alpha1.RestoreInPlaceStatus) bool {
+func s75SameRunStart(env *runner.Env, rip *v1beta1.RestoreInPlaceStatus) bool {
 	want := s75StashedTime(env, "s75RunStart")
 	return rip.StartTime != nil && !want.IsZero() && rip.StartTime.Time.Equal(want)
 }
@@ -914,7 +914,7 @@ func s75ObserveFenceWhileJobHeld() runner.Step {
 			defer cancel()
 			// A status left by an earlier run stays until this request is
 			// accepted; wait for the run of this request first.
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "restoreInPlace run of this request", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "restoreInPlace run of this request", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				rip := mfg.Status.RestoreInPlace
 				if rip == nil {
 					return false, "no status", nil
@@ -982,10 +982,10 @@ func s75ObserveFenceWhileJobHeld() runner.Step {
 			case !fence.SessionsEvicted:
 				return fmt.Errorf("status.restoreOfflineFence.sessionsEvicted=false while the Job runs")
 			}
-			if _, ok, err := findMFGEvent(ctx, env, requested, v1alpha1.EventRestoreOfflineFenceApplied, active); err != nil {
+			if _, ok, err := findMFGEvent(ctx, env, requested, v1beta1.EventRestoreOfflineFenceApplied, active); err != nil {
 				return err
 			} else if !ok {
-				return fmt.Errorf("no %s event for %s since the request", v1alpha1.EventRestoreOfflineFenceApplied, active)
+				return fmt.Errorf("no %s event for %s since the request", v1beta1.EventRestoreOfflineFenceApplied, active)
 			}
 			if err := s75RequireOfflineMode(ctx, primary, true); err != nil {
 				return err
@@ -1117,13 +1117,13 @@ func s75RequirePrimaryServiceEmpty(ctx context.Context, env *runner.Env) error {
 
 // s75RequirePeersHeld checks the reclone queue armed for every peer, the
 // ReadOnly reader last, and every peer's replication receiver stopped.
-func s75RequirePeersHeld(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, active string) error {
+func s75RequirePeersHeld(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup, active string) error {
 	q := mfg.Status.RestoreReclones
 	if q == nil {
 		return fmt.Errorf("status.restoreReclones is not set while the restore Job runs")
 	}
-	if q.Phase != v1alpha1.RestoreReclonesArmed {
-		return fmt.Errorf("status.restoreReclones.phase=%s, want %s while the restore runs", q.Phase, v1alpha1.RestoreReclonesArmed)
+	if q.Phase != v1beta1.RestoreReclonesArmed {
+		return fmt.Errorf("status.restoreReclones.phase=%s, want %s while the restore runs", q.Phase, v1beta1.RestoreReclonesArmed)
 	}
 	peers := s75Peers(mfg, active)
 	got := slices.Clone(q.Pending)
@@ -1171,7 +1171,7 @@ func s75RemoveSpecMidRestoring() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, time.Minute)
 			defer cancel()
-			ev, err := waitForMFGEvent(waitCtx, env, removed, v1alpha1.EventRestoreInPlaceSpecRemoved, jobName)
+			ev, err := waitForMFGEvent(waitCtx, env, removed, v1beta1.EventRestoreInPlaceSpecRemoved, jobName)
 			if err != nil {
 				return err
 			}
@@ -1200,7 +1200,7 @@ func s75RemoveSpecMidRestoring() runner.Step {
 			if err := s75RequireProbesRefused(ctx, env, removed, 4); err != nil {
 				return err
 			}
-			for _, reason := range []string{v1alpha1.EventRestoreInPlaceCanceled, v1alpha1.EventRestoreInPlaceJobLost, v1alpha1.EventRestoreOfflineFenceReleased} {
+			for _, reason := range []string{v1beta1.EventRestoreInPlaceCanceled, v1beta1.EventRestoreInPlaceJobLost, v1beta1.EventRestoreOfflineFenceReleased} {
 				if ev, ok, err := findMFGEvent(ctx, env, removed, reason, ""); err != nil {
 					return err
 				} else if ok {
@@ -1227,7 +1227,7 @@ func s75CheckGuardsHeld(ctx context.Context, env *runner.Env, primary *pgmysql.S
 	switch {
 	case rip == nil:
 		return fmt.Errorf("status.restoreInPlace was cleared")
-	case rip.Phase != v1alpha1.RestoreInPlaceRestoring:
+	case rip.Phase != v1beta1.RestoreInPlaceRestoring:
 		return fmt.Errorf("status.restoreInPlace.phase=%s message=%q, want Restoring while the Job runs", rip.Phase, rip.Message)
 	case rip.JobName != jobName || rip.RunID != runID:
 		return fmt.Errorf("status.restoreInPlace job=%q runID=%q, want %q %q", rip.JobName, rip.RunID, jobName, runID)
@@ -1240,7 +1240,7 @@ func s75CheckGuardsHeld(ctx context.Context, env *runner.Env, primary *pgmysql.S
 	if f := mfg.Status.RestoreOfflineFence; f == nil || f.RunID != runID {
 		return fmt.Errorf("status.restoreOfflineFence=%+v, want the run's fence held", f)
 	}
-	if q := mfg.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesArmed {
+	if q := mfg.Status.RestoreReclones; q == nil || q.Phase != v1beta1.RestoreReclonesArmed {
 		return fmt.Errorf("status.restoreReclones=%+v, want Armed", q)
 	}
 	if err := s75RequireOfflineMode(ctx, primary, true); err != nil {
@@ -1287,7 +1287,7 @@ func s75ObserveSucceededAndRelease() runner.Step {
 			released := time.Now()
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			rip, err := waitRestoreInPlacePhase(waitCtx, env, v1alpha1.RestoreInPlaceSucceeded)
+			rip, err := waitRestoreInPlacePhase(waitCtx, env, v1beta1.RestoreInPlaceSucceeded)
 			captureJobPodLogs(ctx, env, ctxFetch(env, "restoreJobName"), "s75-restore-job")
 			if err != nil {
 				return fmt.Errorf("restore did not end Succeeded: %w", err)
@@ -1308,14 +1308,14 @@ func s75ObserveSucceededAndRelease() runner.Step {
 			env.Capture.Note(fmt.Sprintf("restore Succeeded: confirmTokenUsed=%s message=%q", rip.ConfirmTokenUsed, rip.Message))
 
 			// The fence is released once the run is terminal.
-			_, err = env.Wait.UntilCR(waitCtx, env.Namespace, "restoreOfflineFence released", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace, "restoreOfflineFence released", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				f := mfg.Status.RestoreOfflineFence
 				return f == nil, fmt.Sprintf("restoreOfflineFence=%+v", f), nil
 			})
 			if err != nil {
 				return err
 			}
-			ev, err := waitForMFGEvent(waitCtx, env, released, v1alpha1.EventRestoreOfflineFenceReleased, active+" is OFF")
+			ev, err := waitForMFGEvent(waitCtx, env, released, v1beta1.EventRestoreOfflineFenceReleased, active+" is OFF")
 			if err != nil {
 				return err
 			}
@@ -1407,7 +1407,7 @@ func s75ReapplySameConfirm() runner.Step {
 				switch {
 				case rip == nil:
 					return fmt.Errorf("status.restoreInPlace was cleared after the re-apply")
-				case rip.Phase != v1alpha1.RestoreInPlaceSucceeded || rip.RunID != "" || rip.RunConfirm != "" || !s75SameRunStart(env, rip) || rip.ConfirmTokenUsed != confirm:
+				case rip.Phase != v1beta1.RestoreInPlaceSucceeded || rip.RunID != "" || rip.RunConfirm != "" || !s75SameRunStart(env, rip) || rip.ConfirmTokenUsed != confirm:
 					return fmt.Errorf("re-applying confirm=%s started a run: phase=%s runID=%q runConfirm=%q startTime=%v confirmTokenUsed=%s message=%q",
 						confirm, rip.Phase, rip.RunID, rip.RunConfirm, rip.StartTime, rip.ConfirmTokenUsed, rip.Message)
 				case rip.CompletionTime == nil || !rip.CompletionTime.Time.Equal(completion):
@@ -1425,7 +1425,7 @@ func s75ReapplySameConfirm() runner.Step {
 				} else if err != nil && !apierrors.IsNotFound(err) {
 					return err
 				}
-				for _, reason := range []string{v1alpha1.EventRestoreInPlaceStarted, v1alpha1.EventRestoreOfflineFenceApplied, v1alpha1.EventRestoreInPlaceJobCreated} {
+				for _, reason := range []string{v1beta1.EventRestoreInPlaceStarted, v1beta1.EventRestoreOfflineFenceApplied, v1beta1.EventRestoreInPlaceJobCreated} {
 					if ev, ok, err := findMFGEvent(ctx, env, reapplied, reason, ""); err != nil {
 						return err
 					} else if ok {
@@ -1473,12 +1473,12 @@ func s75WaitPeersRecloned() runner.Step {
 			requested := s75StashedTime(env, "s75RequestedAt")
 			waitCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "status.restoreReclones drained", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "status.restoreReclones drained", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				q := mfg.Status.RestoreReclones
 				if q == nil {
 					return true, "drained", nil
 				}
-				if q.Phase == v1alpha1.RestoreReclonesHeld {
+				if q.Phase == v1beta1.RestoreReclonesHeld {
 					return false, "", fmt.Errorf("the reclone queue of a succeeded restore is Held: %+v", q)
 				}
 				if q.ConfirmToken != confirm {
@@ -1494,24 +1494,24 @@ func s75WaitPeersRecloned() runner.Step {
 				return err
 			}
 			for _, peer := range s75Peers(mfg, active) {
-				evs, err := s75AllMFGEvents(ctx, env, requested, v1alpha1.EventRestoreRecloneSucceeded, "recloned "+peer+" ")
+				evs, err := s75AllMFGEvents(ctx, env, requested, v1beta1.EventRestoreRecloneSucceeded, "recloned "+peer+" ")
 				if err != nil {
 					return err
 				}
 				if len(evs) == 0 {
-					return fmt.Errorf("no %s event for %s", v1alpha1.EventRestoreRecloneSucceeded, peer)
+					return fmt.Errorf("no %s event for %s", v1beta1.EventRestoreRecloneSucceeded, peer)
 				}
 				env.Capture.Note("reclone event: " + evs[0].Message)
 			}
-			evs, err := s75AllMFGEvents(ctx, env, requested, v1alpha1.EventRestoreReclonesDrained, "confirm="+confirm)
+			evs, err := s75AllMFGEvents(ctx, env, requested, v1beta1.EventRestoreReclonesDrained, "confirm="+confirm)
 			if err != nil {
 				return err
 			}
 			if len(evs) == 0 {
-				return fmt.Errorf("no %s event for confirm=%s", v1alpha1.EventRestoreReclonesDrained, confirm)
+				return fmt.Errorf("no %s event for confirm=%s", v1beta1.EventRestoreReclonesDrained, confirm)
 			}
-			if failed, err := s75AllMFGEvents(ctx, env, requested, v1alpha1.EventRestoreRecloneFailed, ""); err == nil && len(failed) > 0 {
-				env.Capture.Note(fmt.Sprintf("%d %s event(s) before the queue drained (retried): %s", len(failed), v1alpha1.EventRestoreRecloneFailed, failed[0].Message))
+			if failed, err := s75AllMFGEvents(ctx, env, requested, v1beta1.EventRestoreRecloneFailed, ""); err == nil && len(failed) > 0 {
+				env.Capture.Note(fmt.Sprintf("%d %s event(s) before the queue drained (retried): %s", len(failed), v1beta1.EventRestoreRecloneFailed, failed[0].Message))
 			}
 			return nil
 		},
@@ -1526,12 +1526,12 @@ func s75VerifyGroupAndPeers() runner.Step {
 			active := ctxFetch(env, "activeAtRestore")
 			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
-			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Ready with one writable site and every peer replicating", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Ready with one writable site and every peer replicating", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1beta1.ConditionReady, mfg.Generation)
 				var writable []string
 				var notReplicating []string
 				for _, s := range mfg.Status.Sites {
-					if s.State == v1alpha1.SiteStateWritable {
+					if s.State == v1beta1.SiteStateWritable {
 						writable = append(writable, s.Name)
 						continue
 					}
@@ -1603,7 +1603,7 @@ func s75Cleanup(ctx context.Context, env *runner.Env) error {
 	// released (a running Job is never interrupted); wait for it before
 	// touching the Job or the queue.
 	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	_, werr := env.Wait.UntilCR(waitCtx, env.Namespace, "restoreInPlace terminal and fence released", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	_, werr := env.Wait.UntilCR(waitCtx, env.Namespace, "restoreInPlace terminal and fence released", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		rip := mfg.Status.RestoreInPlace
 		terminal := rip == nil || restoreInPlaceTerminal(rip.Phase)
 		phase := ""
@@ -1617,12 +1617,12 @@ func s75Cleanup(ctx context.Context, env *runner.Env) error {
 		errs = append(errs, werr)
 	}
 	waitCtx, cancel = context.WithTimeout(ctx, 12*time.Minute)
-	_, qerr := env.Wait.UntilCR(waitCtx, env.Namespace, "reclone queue drained or held", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	_, qerr := env.Wait.UntilCR(waitCtx, env.Namespace, "reclone queue drained or held", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		q := mfg.Status.RestoreReclones
 		if q == nil {
 			return true, "none", nil
 		}
-		return q.Phase == v1alpha1.RestoreReclonesHeld, fmt.Sprintf("phase=%s pending=%v", q.Phase, q.Pending), nil
+		return q.Phase == v1beta1.RestoreReclonesHeld, fmt.Sprintf("phase=%s pending=%v", q.Phase, q.Pending), nil
 	})
 	cancel()
 	if qerr != nil {
@@ -1632,7 +1632,7 @@ func s75Cleanup(ctx context.Context, env *runner.Env) error {
 	if err != nil {
 		errs = append(errs, err)
 	} else {
-		if q := mfg.Status.RestoreReclones; q != nil && q.ConfirmToken == confirm && (q.Phase == v1alpha1.RestoreReclonesHeld || werr != nil) {
+		if q := mfg.Status.RestoreReclones; q != nil && q.ConfirmToken == confirm && (q.Phase == v1beta1.RestoreReclonesHeld || werr != nil) {
 			// A failed run held the peers. run-all resets before the next
 			// destructive scenario; release the hold so a single run
 			// leaves a replicating group behind.

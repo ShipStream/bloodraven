@@ -8,7 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -127,7 +127,7 @@ func (tm *TopologyManager) cloneInProgress() string {
 
 // ApplyRecloneRequest hands fg's reclone annotation to its running
 // topology manager now, instead of on the next 30s runner sync.
-func (r *TopologyManagerRunner) ApplyRecloneRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) {
+func (r *TopologyManagerRunner) ApplyRecloneRequest(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) {
 	if r == nil {
 		return
 	}

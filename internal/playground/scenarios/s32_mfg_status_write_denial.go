@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -152,11 +152,11 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 					defer cancel()
 					_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 						fmt.Sprintf("status.activeSite==%s with lastFailoverTarget and promotionGtid populated", peerSite),
-						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+						func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 							msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q promotionGtid=%q ready=%s/%s",
 								mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), truncGtid(mfg.Status.PromotionGtidExecuted()), readyOf(mfg), readyReasonOf(mfg))
 							for _, s := range mfg.Status.Sites {
-								if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+								if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 									return false, msg, fmt.Errorf("site %s RecoveryBlocked during status heal", s.Name)
 								}
 							}
@@ -164,8 +164,8 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 							// stays False for its replication
 							// (ReplicationUnhealthy) until the settle step brings
 							// it back; what heals here is the writable site.
-							ready := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady)
-							writableReady := ready != nil && (ready.Reason == v1alpha1.ReasonHealthy || ready.Reason == v1alpha1.ReasonReplicationUnhealthy)
+							ready := findCondition(mfg.Status.Conditions, v1beta1.ConditionReady)
+							writableReady := ready != nil && (ready.Reason == v1beta1.ReasonHealthy || ready.Reason == v1beta1.ReasonReplicationUnhealthy)
 							done := mfg.Status.ActiveSite == peerSite &&
 								mfg.Status.LastFailoverTarget() == peerSite &&
 								mfg.Status.PromotionGtidExecuted() != "" &&
@@ -190,8 +190,8 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 					defer cancel()
 					_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 						fmt.Sprintf("old primary %s rejoins as healthy replica or recovery progresses without block", activeSite),
-						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-							var old *v1alpha1.SiteStatus
+						func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+							var old *v1beta1.SiteStatus
 							for i := range mfg.Status.Sites {
 								if mfg.Status.Sites[i].Name == activeSite {
 									old = &mfg.Status.Sites[i]
@@ -202,11 +202,11 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 							}
 							msg := fmt.Sprintf("old=%s state=%s replication=%s recovery=%q ready=%s",
 								old.Name, old.State, old.Replication, old.RecoveryState, readyOf(mfg))
-							if old.RecoveryState == v1alpha1.RecoveryStateBlocked {
+							if old.RecoveryState == v1beta1.RecoveryStateBlocked {
 								return false, msg, fmt.Errorf("old primary %s RecoveryBlocked", activeSite)
 							}
-							healthyReplica := old.State == v1alpha1.SiteStateReadOnly && old.Replication.Running() && readyOf(mfg) == "True"
-							recovering := old.RecoveryState == v1alpha1.RecoveryStateInProgress
+							healthyReplica := old.State == v1beta1.SiteStateReadOnly && old.Replication.Running() && readyOf(mfg) == "True"
+							recovering := old.RecoveryState == v1beta1.RecoveryStateInProgress
 							return healthyReplica || recovering, msg, nil
 						})
 					return err
@@ -242,17 +242,17 @@ func precheckHealthyWithOperatorRole(ctx context.Context, env *runner.Env) error
 	return nil
 }
 
-func readyOf(mfg *v1alpha1.MysqlFailoverGroup) string {
+func readyOf(mfg *v1beta1.MysqlFailoverGroup) string {
 	for _, c := range mfg.Status.Conditions {
-		if c.Type == v1alpha1.ConditionReady {
+		if c.Type == v1beta1.ConditionReady {
 			return string(c.Status)
 		}
 	}
 	return "<none>"
 }
 
-func readyReasonOf(mfg *v1alpha1.MysqlFailoverGroup) string {
-	if c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady); c != nil {
+func readyReasonOf(mfg *v1beta1.MysqlFailoverGroup) string {
+	if c := findCondition(mfg.Status.Conditions, v1beta1.ConditionReady); c != nil {
 		return c.Reason
 	}
 	return "<none>"

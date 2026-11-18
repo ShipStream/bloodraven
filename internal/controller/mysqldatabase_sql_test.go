@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestRenderCreateDatabase(t *testing.T) {
@@ -136,7 +136,7 @@ func TestRenderOwnerUserStatementsRejectsBadUsername(t *testing.T) {
 
 func TestRenderGrant(t *testing.T) {
 	got, err := renderGrant("spec.grants[0].privileges",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeDelete, v1alpha1.PrivilegeSelect},
+		[]v1beta1.MysqlPrivilege{v1beta1.PrivilegeDelete, v1beta1.PrivilegeSelect},
 		"acme_wms", "maester", defaultHosts)
 	if err != nil {
 		t.Fatalf("renderGrant(, defaultHosts) error = %v", err)
@@ -152,15 +152,15 @@ func TestRenderGrantNeverEmitsGrantOption(t *testing.T) {
 	// renderGrant can produce WITH GRANT OPTION, because the privilege text
 	// comes from the fixed table and the suffix exists nowhere in the
 	// rendering path.
-	all := make([]v1alpha1.MysqlPrivilege, 0, len(v1alpha1.AllowedPrivilegeNames()))
-	for _, name := range v1alpha1.AllowedPrivilegeNames() {
-		if name == string(v1alpha1.PrivilegeAllPrivileges) {
+	all := make([]v1beta1.MysqlPrivilege, 0, len(v1beta1.AllowedPrivilegeNames()))
+	for _, name := range v1beta1.AllowedPrivilegeNames() {
+		if name == string(v1beta1.PrivilegeAllPrivileges) {
 			continue
 		}
-		all = append(all, v1alpha1.MysqlPrivilege(name))
+		all = append(all, v1beta1.MysqlPrivilege(name))
 	}
 
-	for _, privs := range [][]v1alpha1.MysqlPrivilege{all, {v1alpha1.PrivilegeAllPrivileges}} {
+	for _, privs := range [][]v1beta1.MysqlPrivilege{all, {v1beta1.PrivilegeAllPrivileges}} {
 		stmt, err := renderGrant("spec.owner.privileges", privs, "acme_wms", "acme_app", defaultHosts)
 		if err != nil {
 			t.Fatalf("renderGrant(, defaultHosts) error = %v", err)
@@ -175,7 +175,7 @@ func TestRenderGrantDeploymentPrivileges(t *testing.T) {
 	for _, field := range []string{"spec.owner.privileges", "spec.users[0].privileges", "spec.grants[0].privileges"} {
 		t.Run(field, func(t *testing.T) {
 			got, err := renderGrant(field,
-				[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeCreateView, v1alpha1.PrivilegeCreateTemporaryTables, v1alpha1.PrivilegeSelect},
+				[]v1beta1.MysqlPrivilege{v1beta1.PrivilegeCreateView, v1beta1.PrivilegeCreateTemporaryTables, v1beta1.PrivilegeSelect},
 				"acme_wms", "acme_app", defaultHosts)
 			if err != nil {
 				t.Fatal(err)
@@ -190,7 +190,7 @@ func TestRenderGrantDeploymentPrivileges(t *testing.T) {
 
 func TestRenderGrantRoutinePrivileges(t *testing.T) {
 	got, err := renderGrant("spec.users[0].privileges",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAlterRoutine, v1alpha1.PrivilegeCreateRoutine, v1alpha1.PrivilegeExecute, v1alpha1.PrivilegeSelect},
+		[]v1beta1.MysqlPrivilege{v1beta1.PrivilegeAlterRoutine, v1beta1.PrivilegeCreateRoutine, v1beta1.PrivilegeExecute, v1beta1.PrivilegeSelect},
 		"acme_wms", "acme_deploy", []string{"10.0.0.1", "10.0.0.2"})
 	if err != nil {
 		t.Fatal(err)
@@ -204,8 +204,8 @@ func TestRenderGrantRoutinePrivileges(t *testing.T) {
 // Narrowing reads the held set back through schemaPrivilegeNames, so every
 // grantable privilege must be revocable as surplus.
 func TestSchemaPrivilegeNamesCoverAllowlist(t *testing.T) {
-	for _, name := range v1alpha1.AllowedPrivilegeNames() {
-		if name == string(v1alpha1.PrivilegeAllPrivileges) {
+	for _, name := range v1beta1.AllowedPrivilegeNames() {
+		if name == string(v1beta1.PrivilegeAllPrivileges) {
 			continue
 		}
 		if !slices.Contains(schemaPrivilegeNames, name) {
@@ -217,17 +217,17 @@ func TestSchemaPrivilegeNamesCoverAllowlist(t *testing.T) {
 func TestRenderGrantRejectsBadInput(t *testing.T) {
 	cases := []struct {
 		name     string
-		privs    []v1alpha1.MysqlPrivilege
+		privs    []v1beta1.MysqlPrivilege
 		database string
 		username string
 	}{
-		{"privilege outside allowlist", []v1alpha1.MysqlPrivilege{"SUPER"}, "acme_wms", "maester"},
-		{"grant option", []v1alpha1.MysqlPrivilege{"GRANT OPTION"}, "acme_wms", "maester"},
-		{"temporary tables injection", []v1alpha1.MysqlPrivilege{"CREATE TEMPORARY TABLES WITH GRANT OPTION"}, "acme_wms", "maester"},
-		{"view injection", []v1alpha1.MysqlPrivilege{"CREATE VIEW; GRANT ALL"}, "acme_wms", "maester"},
+		{"privilege outside allowlist", []v1beta1.MysqlPrivilege{"SUPER"}, "acme_wms", "maester"},
+		{"grant option", []v1beta1.MysqlPrivilege{"GRANT OPTION"}, "acme_wms", "maester"},
+		{"temporary tables injection", []v1beta1.MysqlPrivilege{"CREATE TEMPORARY TABLES WITH GRANT OPTION"}, "acme_wms", "maester"},
+		{"view injection", []v1beta1.MysqlPrivilege{"CREATE VIEW; GRANT ALL"}, "acme_wms", "maester"},
 		{"no privileges", nil, "acme_wms", "maester"},
-		{"bad database", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme`x", "maester"},
-		{"bad username", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "maester'@'%"},
+		{"bad database", []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}, "acme`x", "maester"},
+		{"bad username", []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}, "acme_wms", "maester'@'%"},
 	}
 
 	for _, tc := range cases {
@@ -277,14 +277,14 @@ func TestRenderDestructiveStatements(t *testing.T) {
 }
 
 func TestComputeDatabaseHashStability(t *testing.T) {
-	mdb := &v1alpha1.MysqlDatabase{
+	mdb := &v1beta1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: "tenant-acme", Namespace: "bloodraven"},
-		Spec: v1alpha1.MysqlDatabaseSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+		Spec: v1beta1.MysqlDatabaseSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "main"},
 			DatabaseName:     "acme_wms",
-			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
-			Grants: []v1alpha1.MysqlDatabaseGrant{
-				{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete}},
+			Owner:            v1beta1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			Grants: []v1beta1.MysqlDatabaseGrant{
+				{Username: "maester", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect, v1beta1.PrivilegeDelete}},
 			},
 		},
 	}
@@ -292,7 +292,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "acme-mysql-owner", Namespace: "bloodraven", UID: "uid-secret", ResourceVersion: "1"},
 		Data:       map[string][]byte{"username": []byte("acme_app"), "password": []byte("pw1")},
 	}
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: "bloodraven", UID: "uid-group"},
 	}
 	fg.Status.ActiveSite = "dc1"
@@ -344,8 +344,8 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	// active site never moved: the fence transitions may have been missed
 	// while the operator was down.
 	restored := fg.DeepCopy()
-	restored.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase:            v1alpha1.RestoreInPlaceSucceeded,
+	restored.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{
+		Phase:            v1beta1.RestoreInPlaceSucceeded,
 		ConfirmTokenUsed: "2026-08-10T00:00:00Z",
 	}
 	if h, err := computeDatabaseHash(mdb, secret, nil, restored); err != nil || h == base {
@@ -354,8 +354,8 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 
 	// A spec change must change the hash.
 	edited := mdb.DeepCopy()
-	edited.Spec.Grants = append(edited.Spec.Grants, v1alpha1.MysqlDatabaseGrant{
-		Username: "reporting", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+	edited.Spec.Grants = append(edited.Spec.Grants, v1beta1.MysqlDatabaseGrant{
+		Username: "reporting", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
 	})
 	if h, err := computeDatabaseHash(edited, secret, nil, fg); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after a spec edit = %q (err %v), want a different digest", h, err)
@@ -363,16 +363,16 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 }
 
 func TestComputeDatabaseHashNeverContainsSecretBytes(t *testing.T) {
-	mdb := &v1alpha1.MysqlDatabase{
+	mdb := &v1beta1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{Name: "tenant-acme", Namespace: "bloodraven"},
-		Spec:       v1alpha1.MysqlDatabaseSpec{DatabaseName: "acme_wms"},
+		Spec:       v1beta1.MysqlDatabaseSpec{DatabaseName: "acme_wms"},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "acme-mysql-owner"},
 		Data:       map[string][]byte{"username": []byte("acme_app"), "password": []byte("hunter2")},
 	}
 
-	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "main"}}
+	fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "main"}}
 	fg.Status.ActiveSite = "dc1"
 	hash, err := computeDatabaseHash(mdb, secret, nil, fg)
 	if err != nil {
@@ -423,8 +423,8 @@ func TestRenderSchemaRevoke(t *testing.T) {
 }
 
 func TestGroupFenced(t *testing.T) {
-	group := func(mutate func(*v1alpha1.MysqlFailoverGroup)) *v1alpha1.MysqlFailoverGroup {
-		fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "main"}}
+	group := func(mutate func(*v1beta1.MysqlFailoverGroup)) *v1beta1.MysqlFailoverGroup {
+		fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "main"}}
 		fg.Status.ActiveSite = "dc1"
 		mutate(fg)
 		return fg
@@ -432,100 +432,100 @@ func TestGroupFenced(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		fg         *v1alpha1.MysqlFailoverGroup
+		fg         *v1beta1.MysqlFailoverGroup
 		wantFenced bool
 		wantReason string
 	}{
-		{"clean", group(func(fg *v1alpha1.MysqlFailoverGroup) {}), false, ""},
+		{"clean", group(func(fg *v1beta1.MysqlFailoverGroup) {}), false, ""},
 		// F004: a point-in-time initFromBackup proves the target's exact
 		// gtid_executed; tenant DDL during its load or replay breaks it.
 		{
 			"initFromBackup requested",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
 			}),
 			true, "RestoreInProgress",
 		},
 		{
 			"initFromBackup running",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
-				fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
+				fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning}
 			}),
 			true, "RestoreInProgress",
 		},
 		{
 			"initFromBackup succeeded is not fenced",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
-				fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseSucceeded}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
+				fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseSucceeded}
 			}),
 			false, "",
 		},
 		{
 			"restore restoring",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
-				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
+				fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceRestoring}
 			}),
 			true, "RestoreInProgress",
 		},
 		{
 			"restore fencing",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
-				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
+				fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceFencing}
 			}),
 			true, "RestoreInProgress",
 		},
 		{
 			"restore requested but not yet observed",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
 			}),
 			true, "RestoreInProgress",
 		},
 		{
 			"restore succeeded is not fenced",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
-				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceSucceeded}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
+				fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceSucceeded}
 			}),
 			false, "",
 		},
 		{
 			"restore failed is not fenced",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
-				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
+				fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceFailed}
 			}),
 			false, "",
 		},
 		{
 			"planned failover promoting",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhasePromoting}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhasePromoting}
 			}),
 			true, "PlannedFailoverInProgress",
 		},
 		{
 			"planned failover draining",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDraining}
 			}),
 			true, "PlannedFailoverInProgress",
 		},
 		{
 			"planned failover succeeded is not fenced",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseSucceeded}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseSucceeded}
 			}),
 			false, "",
 		},
 		{
 			"planned failover deferred is not fenced",
-			group(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDeferred}
+			group(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDeferred}
 			}),
 			false, "",
 		},
@@ -550,7 +550,7 @@ func TestGroupFenced(t *testing.T) {
 func TestRenderMultiHostPrincipal(t *testing.T) {
 	hosts := []string{"35.1.2.3", "35.4.5.6", "2001:db8::1"}
 	got, err := renderTenantUserStatements("spec.users[0] secret username", "acme_support", "pw", hosts,
-		&v1alpha1.MysqlUserResourceLimits{MaxUserConnections: 5})
+		&v1beta1.MysqlUserResourceLimits{MaxUserConnections: 5})
 	if err != nil {
 		t.Fatalf("renderTenantUserStatements() error = %v", err)
 	}
@@ -562,7 +562,7 @@ func TestRenderMultiHostPrincipal(t *testing.T) {
 		t.Fatalf("renderTenantUserStatements() =\n%q\nwant\n%q", got, want)
 	}
 
-	grant, err := renderGrant("spec.users[0].privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_support", hosts)
+	grant, err := renderGrant("spec.users[0].privileges", []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}, "acme_wms", "acme_support", hosts)
 	if err != nil {
 		t.Fatalf("renderGrant() error = %v", err)
 	}
@@ -581,7 +581,7 @@ func TestRenderMultiHostPrincipal(t *testing.T) {
 	if _, err := renderDropUser("spec.users[] ledger username", "acme_support", []string{"35.1.2.3", "evil'@'%"}); err == nil {
 		t.Fatal("renderDropUser() accepted an invalid host")
 	}
-	if _, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_app", nil); err == nil {
+	if _, err := renderGrant("spec.owner.privileges", []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}, "acme_wms", "acme_app", nil); err == nil {
 		t.Fatal("renderGrant() accepted an empty hosts list; defaults are the caller's job")
 	}
 }
@@ -594,13 +594,13 @@ func TestHostSetHelpers(t *testing.T) {
 		t.Fatalf("diffHosts = %v", got)
 	}
 	// Pre-hosts records mean '%'.
-	if got := recordedOwnerHosts(&v1alpha1.MysqlDatabaseStatus{OwnerUser: "acme_app"}); !reflect.DeepEqual(got, []string{"%"}) {
+	if got := recordedOwnerHosts(&v1beta1.MysqlDatabaseStatus{OwnerUser: "acme_app"}); !reflect.DeepEqual(got, []string{"%"}) {
 		t.Fatalf("recordedOwnerHosts(legacy) = %v", got)
 	}
-	if got := recordedOwnerHosts(&v1alpha1.MysqlDatabaseStatus{}); got != nil {
+	if got := recordedOwnerHosts(&v1beta1.MysqlDatabaseStatus{}); got != nil {
 		t.Fatalf("recordedOwnerHosts(no owner) = %v, want nil", got)
 	}
-	if got := ledgerHosts(v1alpha1.MysqlDatabaseUserState{Username: "x"}); !reflect.DeepEqual(got, []string{"%"}) {
+	if got := ledgerHosts(v1beta1.MysqlDatabaseUserState{Username: "x"}); !reflect.DeepEqual(got, []string{"%"}) {
 		t.Fatalf("ledgerHosts(legacy) = %v", got)
 	}
 }
@@ -622,7 +622,7 @@ func TestGrantDatabaseSpellings(t *testing.T) {
 		}
 	}
 
-	grant, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, `my\_ql`, "acme_app", defaultHosts)
+	grant, err := renderGrant("spec.owner.privileges", []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}, `my\_ql`, "acme_app", defaultHosts)
 	if err != nil {
 		t.Fatalf("renderGrant(escaped) error = %v", err)
 	}
@@ -630,7 +630,7 @@ func TestGrantDatabaseSpellings(t *testing.T) {
 		t.Fatalf("renderGrant(escaped) = %q, want %q", grant, want)
 	}
 	for _, bad := range []string{`acme\wms`, `acme\\_wms`, "acme%wms", "acme`wms"} {
-		if _, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, bad, "acme_app", defaultHosts); err == nil {
+		if _, err := renderGrant("spec.owner.privileges", []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}, bad, "acme_app", defaultHosts); err == nil {
 			t.Errorf("renderGrant(%q) accepted a malformed grant database", bad)
 		}
 	}

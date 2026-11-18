@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestMysqlDatabasePartialRevokesOffPreservesState(t *testing.T) {
@@ -66,7 +66,7 @@ func TestMysqlDatabasePartialRevokesOffPreservesState(t *testing.T) {
 			before := h.get().Status.DeepCopy()
 			res := h.reconcile()
 			mdb := h.get()
-			if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending || res.RequeueAfter == 0 {
+			if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending || res.RequeueAfter == 0 {
 				t.Fatalf("phase = %s, requeue = %s, want Pending with retry: %s", mdb.Status.Phase, res.RequeueAfter, mdb.Status.Message)
 			}
 			if len(mdb.Status.Conditions) != 1 || mdb.Status.Conditions[0].Reason != "PartialRevokesOff" || mdb.Status.Conditions[0].Status != metav1.ConditionFalse {
@@ -135,7 +135,7 @@ func TestMysqlDatabasePartialRevokesConnectionFailureIsPrimaryUnavailable(t *tes
 				}
 				res := h.reconcile()
 				mdb := h.get()
-				if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending || res.RequeueAfter == 0 {
+				if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending || res.RequeueAfter == 0 {
 					t.Fatalf("phase = %s, requeue = %s, want Pending with retry", mdb.Status.Phase, res.RequeueAfter)
 				}
 				if len(mdb.Status.Conditions) != 1 || mdb.Status.Conditions[0].Reason != "PrimaryUnavailable" || mdb.Status.Conditions[0].Status != metav1.ConditionFalse {
@@ -156,9 +156,9 @@ func TestMysqlDatabasePartialRevokesConnectionFailureIsPrimaryUnavailable(t *tes
 }
 
 func TestMysqlDatabaseDeleteDoesNotRequirePartialRevokes(t *testing.T) {
-	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "shared", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+	cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "shared", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 	h.server.addUser("shared", "shared-pw")
@@ -176,7 +176,7 @@ func TestMysqlDatabaseDeleteDoesNotRequirePartialRevokes(t *testing.T) {
 	start := h.server.statementCount()
 	h.delete()
 	h.reconcile()
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}, &out); !apierrors.IsNotFound(err) {
 		t.Fatalf("delete did not release finalizer: object %+v, error %v", out.Status, err)
 	}
@@ -195,15 +195,15 @@ func TestMysqlDatabaseDeleteDoesNotRequirePartialRevokes(t *testing.T) {
 func TestMysqlDatabaseReappliesFrozenRenderV3(t *testing.T) {
 	for _, mode := range []bool{false, true} {
 		t.Run(fmt.Sprintf("partial_revokes=%t", mode), func(t *testing.T) {
-			cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "shared", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
-				m.Status = v1alpha1.MysqlDatabaseStatus{
-					Phase: v1alpha1.MysqlDatabasePhaseReady, ObservedGeneration: m.Generation,
+			cr := mdbCR(withSupportUser, func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "shared", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
+				m.Status = v1beta1.MysqlDatabaseStatus{
+					Phase: v1beta1.MysqlDatabasePhaseReady, ObservedGeneration: m.Generation,
 					Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue,
 						ObservedGeneration: m.Generation, Reason: "DatabaseReconciled"}},
 					DatabaseCreated: true, OwnerUser: mdbOwnerUser, OwnerHosts: []string{"%"},
 					ActiveSite: "dc1", AppliedGrants: []string{mdbOwnerUser, "shared"},
-					AppliedUsers: []v1alpha1.MysqlDatabaseUserState{{SecretName: mdbSupportSecretName, Username: mdbSupportUser, Hosts: []string{"%"}}},
+					AppliedUsers: []v1beta1.MysqlDatabaseUserState{{SecretName: mdbSupportSecretName, Username: mdbSupportUser, Hosts: []string{"%"}}},
 				}
 			})
 			fg, owner, support := mdbGroup("dc1"), mdbOwnerSecret(), mdbSupportSecret()

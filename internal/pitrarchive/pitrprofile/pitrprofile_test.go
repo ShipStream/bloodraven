@@ -7,71 +7,71 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 )
 
-func testGroup() *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "db", Name: "orders", UID: "uid-1"}}
+func testGroup() *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "db", Name: "orders", UID: "uid-1"}}
 }
 
 func TestDestinationFor(t *testing.T) {
 	fg := testGroup()
 	tests := []struct {
 		name    string
-		profile v1alpha1.BackupProfile
+		profile v1beta1.BackupProfile
 		want    string
 		wantErr bool
 	}{
 		{
 			name: "s3 aws",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "backups", Prefix: "/prod/", CredentialsSecretName: "c"}}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStorageS3, S3: &v1beta1.S3Storage{Bucket: "backups", Prefix: "/prod/", CredentialsSecretName: "c"}}},
 			want: "s3://backups/prod/binlogs?endpoint=aws",
 		},
 		{
 			name: "s3 endpoint",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "b", EndpointURL: "http://MinIO:80/", CredentialsSecretName: "c"}}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStorageS3, S3: &v1beta1.S3Storage{Bucket: "b", EndpointURL: "http://MinIO:80/", CredentialsSecretName: "c"}}},
 			want: "s3://b/binlogs?endpoint=http%3A%2F%2Fminio",
 		},
 		{
 			name: "pvc explicit claim",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "shared", SubPath: "a/b"}}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{ClaimName: "shared", SubPath: "a/b"}}},
 			want: "pvc://db/shared/a/b/binlogs",
 		},
 		{
 			name: "pvc owned claim",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{Size: "10Gi"}}}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{Provisioned: &v1beta1.ProvisionedVolumeSpec{Size: "10Gi"}}}},
 			want: "pvc://db/mysql-orders-backup-pitr/binlogs",
 		},
 		{
 			name: "pvc neither claimName nor provisioned",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{}}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{}}},
 			wantErr: true,
 		},
 		{
 			name: "pvc dot-dot",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC, PVC: &v1alpha1.PVCStorage{ClaimName: "shared", SubPath: "../x"}}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStoragePVC, PVC: &v1beta1.PVCStorage{ClaimName: "shared", SubPath: "../x"}}},
 			wantErr: true,
 		},
 		{
 			name:    "s3 nil",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3}},
 			wantErr: true,
 		},
 		{
 			name:    "pvc nil",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC}},
 			wantErr: true,
 		},
 		{
 			name:    "unknown type",
-			profile: v1alpha1.BackupProfile{Name: "pitr", Storage: v1alpha1.BackupStorage{Type: "GCS"}},
+			profile: v1beta1.BackupProfile{Name: "pitr", Storage: v1beta1.BackupStorage{Type: "GCS"}},
 			wantErr: true,
 		},
 	}
@@ -89,7 +89,7 @@ func TestDestinationFor(t *testing.T) {
 			}
 		})
 	}
-	if _, err := DestinationFor(nil, &v1alpha1.BackupProfile{}); err == nil {
+	if _, err := DestinationFor(nil, &v1beta1.BackupProfile{}); err == nil {
 		t.Fatal("nil group accepted")
 	}
 }
@@ -98,18 +98,18 @@ func TestDestinationFor(t *testing.T) {
 // claimName, else the owned claim when provisioned is set, else an error
 // that names the fix (never the owned name of a claim nobody provisions).
 func TestClaimFor(t *testing.T) {
-	provisioned := &v1alpha1.ProvisionedVolumeSpec{Size: "10Gi"}
+	provisioned := &v1beta1.ProvisionedVolumeSpec{Size: "10Gi"}
 	for _, tc := range []struct {
 		name      string
-		pvc       *v1alpha1.PVCStorage
+		pvc       *v1beta1.PVCStorage
 		wantClaim string
 		wantOwned bool
 		wantErr   string
 	}{
-		{"claimName", &v1alpha1.PVCStorage{ClaimName: "shared"}, "shared", false, ""},
-		{"provisioned", &v1alpha1.PVCStorage{Provisioned: provisioned}, "mysql-orders-backup-nightly", true, ""},
-		{"neither", &v1alpha1.PVCStorage{SubPath: "x"}, "", false, "sets neither storage.pvc.claimName nor storage.pvc.provisioned"},
-		{"both", &v1alpha1.PVCStorage{ClaimName: "shared", Provisioned: provisioned}, "", false, "sets both"},
+		{"claimName", &v1beta1.PVCStorage{ClaimName: "shared"}, "shared", false, ""},
+		{"provisioned", &v1beta1.PVCStorage{Provisioned: provisioned}, "mysql-orders-backup-nightly", true, ""},
+		{"neither", &v1beta1.PVCStorage{SubPath: "x"}, "", false, "sets neither storage.pvc.claimName nor storage.pvc.provisioned"},
+		{"both", &v1beta1.PVCStorage{ClaimName: "shared", Provisioned: provisioned}, "", false, "sets both"},
 		{"no pvc", nil, "", false, "has no storage.pvc"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,16 +130,16 @@ func TestClaimFor(t *testing.T) {
 func TestEncryptionIdentityFor(t *testing.T) {
 	tests := []struct {
 		name string
-		p    *v1alpha1.BackupProfile
+		p    *v1beta1.BackupProfile
 		want pitrarchive.EncryptionIdentity
 	}{
 		{"nil profile", nil, pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}},
-		{"no encryption", &v1alpha1.BackupProfile{}, pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}},
-		{"default algorithm", &v1alpha1.BackupProfile{Encryption: &v1alpha1.BackupEncryptionSpec{
-			PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "k"}}},
+		{"no encryption", &v1beta1.BackupProfile{}, pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionNone}},
+		{"default algorithm", &v1beta1.BackupProfile{Encryption: &v1beta1.BackupEncryptionSpec{
+			PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "k"}}},
 			pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM}},
-		{"explicit algorithm", &v1alpha1.BackupProfile{Encryption: &v1alpha1.BackupEncryptionSpec{
-			Algorithm: "AES-256-GCM", PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "k"}}},
+		{"explicit algorithm", &v1beta1.BackupProfile{Encryption: &v1beta1.BackupEncryptionSpec{
+			Algorithm: "AES-256-GCM", PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "k"}}},
 			pitrarchive.EncryptionIdentity{Mode: pitrarchive.EncryptionPassphrase, Algorithm: pitrarchive.AlgorithmAES256GCM}},
 	}
 	for _, tt := range tests {

@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -39,11 +39,11 @@ func TestEncryptionChaos_FailedSealedSiteKeepsSecretProjection(t *testing.T) {
 	fg := encTestFG()
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{
-			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
-			{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+			{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
 		},
 	}
@@ -74,13 +74,13 @@ func TestEncryptionChaos_FailedSealedSiteKeepsSecretProjection(t *testing.T) {
 
 	reconcileOnce(t, r)
 
-	var after v1alpha1.MysqlFailoverGroup
+	var after v1beta1.MysqlFailoverGroup
 	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
 	if err := c.Get(ctx, nn, &after); err != nil {
 		t.Fatalf("get group: %v", err)
 	}
 	s := after.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc1")
-	if s.Phase != v1alpha1.KeyringPhaseFailed {
+	if s.Phase != v1beta1.KeyringPhaseFailed {
 		t.Fatalf("dc1 phase = %q, want Failed once its only key custody is gone", s.Phase)
 	}
 	if s.KeyringSecret == "" {
@@ -99,7 +99,7 @@ func TestEncryptionChaos_FailedSealedSiteKeepsSecretProjection(t *testing.T) {
 		t.Errorf("projected %q, want the recorded escrow Secret", vol.Secret.SecretName)
 	}
 	// The healthy peer must be untouched by its neighbour's key loss.
-	if peer := after.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2"); peer.Phase != v1alpha1.KeyringPhaseSealed {
+	if peer := after.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2"); peer.Phase != v1beta1.KeyringPhaseSealed {
 		t.Errorf("dc2 phase = %q: one site losing custody must not disturb the other", peer.Phase)
 	}
 }
@@ -111,9 +111,9 @@ func TestEncryptionChaos_RestoredEscrowSecretRecoversSealed(t *testing.T) {
 	fg := encTestFG()
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{{
-			Name: "dc1", Phase: v1alpha1.KeyringPhaseFailed,
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{{
+			Name: "dc1", Phase: v1beta1.KeyringPhaseFailed,
 			KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
 			Message: "escrow Secret mysql-lion-dc1-keyring-v1 is missing",
 		}},
@@ -138,7 +138,7 @@ func TestEncryptionChaos_RestoredEscrowSecretRecoversSealed(t *testing.T) {
 		}
 	}
 	s := siteStatus(fg, "dc1")
-	if s.Phase != v1alpha1.KeyringPhaseSealed {
+	if s.Phase != v1beta1.KeyringPhaseSealed {
 		t.Fatalf("phase = %q (%s), want Sealed after the escrow Secret was restored", s.Phase, s.Message)
 	}
 	if s.KeyringDigest != digest {
@@ -152,9 +152,9 @@ func TestEncryptionChaos_RestoredEscrowDoesNotRecoverWithoutReadOnlyEvidence(t *
 	fg := encTestFG()
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{{
-			Name: "dc1", Phase: v1alpha1.KeyringPhaseFailed,
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{{
+			Name: "dc1", Phase: v1beta1.KeyringPhaseFailed,
 			KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
 			Message: "escrow Secret mysql-lion-dc1-keyring-v1 is missing",
 		}},
@@ -173,7 +173,7 @@ func TestEncryptionChaos_RestoredEscrowDoesNotRecoverWithoutReadOnlyEvidence(t *
 		t.Fatalf("reconcile: %v", err)
 	}
 	s := siteStatus(fg, "dc1")
-	if s.Phase != v1alpha1.KeyringPhaseFailed {
+	if s.Phase != v1beta1.KeyringPhaseFailed {
 		t.Fatalf("phase = %q (%s), want Failed until MySQL reports a read-only keyring", s.Phase, s.Message)
 	}
 	if !strings.Contains(s.Message, "waiting for MySQL to confirm") {
@@ -208,7 +208,7 @@ func TestEncryptionChaos_NeverSealsAgainstAKeylessKeyring(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	s := siteStatus(fg, "dc1")
-	if s.Phase != v1alpha1.KeyringPhaseUnsealed {
+	if s.Phase != v1beta1.KeyringPhaseUnsealed {
 		t.Fatalf("phase = %q, want Unsealed while MySQL has created no keys", s.Phase)
 	}
 	if s.KeyringSecret != "" || s.KeyringVersion != 0 {
@@ -242,20 +242,20 @@ func TestEncryptionChaos_PartialAdoptionKeepsBothSitesRestartable(t *testing.T) 
 	}
 
 	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &live); err != nil {
 		t.Fatalf("get group: %v", err)
 	}
-	live.Spec.TLS = &v1alpha1.TLSSpec{
+	live.Spec.TLS = &v1beta1.TLSSpec{
 		SecretName: "mysql-tls",
 	}
-	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1alpha1.EncryptionExistingDataLeavePlaintext}
+	live.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true, ExistingData: v1beta1.EncryptionExistingDataLeavePlaintext}
 	if err := c.Update(ctx, &live); err != nil {
 		t.Fatalf("enable encryption: %v", err)
 	}
 	reconcileOnce(t, r)
 
-	var refreshed v1alpha1.MysqlFailoverGroup
+	var refreshed v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &refreshed); err != nil {
 		t.Fatalf("refresh group: %v", err)
 	}
@@ -297,7 +297,7 @@ func assertSiteRestartable(
 	t *testing.T,
 	r *MysqlFailoverGroupReconciler,
 	c client.Client,
-	fg *v1alpha1.MysqlFailoverGroup,
+	fg *v1beta1.MysqlFailoverGroup,
 	site string,
 	wantEncrypted bool,
 ) {
@@ -333,7 +333,7 @@ func assertSiteRestartable(
 // instead of it sitting quietly in Unsealed forever.
 func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T) {
 	fg := encTestFG()
-	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
+	fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{EscrowTimeout: &metav1.Duration{Duration: 60 * time.Second}}
 	ctx := context.Background()
 
 	stalled := liveKeyring(keyringDigest([]byte("live-but-unescrowed")), false)
@@ -346,7 +346,7 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 		t.Fatalf("reconcile: %v", err)
 	}
 	s := siteStatus(fg, "dc1")
-	if s.Phase != v1alpha1.KeyringPhaseUnsealed {
+	if s.Phase != v1beta1.KeyringPhaseUnsealed {
 		t.Fatalf("phase = %q, want Unsealed while nothing is escrowed", s.Phase)
 	}
 	if !strings.Contains(s.Message, "x509: certificate signed by unknown authority") {
@@ -359,7 +359,7 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 	// Wind the clock past the escrow deadline, in the stored status too:
 	// a pass whose input differs from what is persisted is discarded.
 	old := metav1.NewTime(time.Now().Add(-10 * time.Minute))
-	var stored v1alpha1.MysqlFailoverGroup
+	var stored v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &stored); err != nil {
 		t.Fatal(err)
 	}
@@ -372,13 +372,13 @@ func TestEncryptionChaos_EscrowOutageSurfacesReasonThenFailsLoudly(t *testing.T)
 		t.Fatalf("reconcile after the deadline: %v", err)
 	}
 	s = siteStatus(fg, "dc1")
-	if s.Phase != v1alpha1.KeyringPhaseFailed {
+	if s.Phase != v1beta1.KeyringPhaseFailed {
 		t.Fatalf("phase = %q, want Failed once escrowTimeout has elapsed", s.Phase)
 	}
 	if fg.SiteKeyringSealed("dc1") {
 		t.Fatal("a site that failed to escrow must not be sealed by the failure itself")
 	}
-	cond := findCondition(fg.Status.Conditions, v1alpha1.ConditionEncryptionAtRestReady)
+	cond := findCondition(fg.Status.Conditions, v1beta1.ConditionEncryptionAtRestReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse {
 		t.Errorf("EncryptionAtRestReady = %+v, want False so the alert fires", cond)
 	}
@@ -427,7 +427,7 @@ func TestEncryptionChaos_APIFailureStallsWithoutBricking(t *testing.T) {
 			fg := encTestFG()
 			scheme := testScheme()
 			c := fake.NewClientBuilder().WithScheme(scheme).
-				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+				WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 				WithObjects(newTestSecret(), fg, unsealedDeployment(fg, "dc1"), unsealedDeployment(fg, "dc2")).
 				WithInterceptorFuncs(tc.funcs).
 				Build()
@@ -448,7 +448,7 @@ func TestEncryptionChaos_APIFailureStallsWithoutBricking(t *testing.T) {
 				if fg.SiteKeyringSealed(name) {
 					t.Errorf("%s rendered sealed despite an API failure mid-lifecycle", name)
 				}
-				if s := siteStatus(fg, name); s != nil && s.Phase == v1alpha1.KeyringPhaseSealed {
+				if s := siteStatus(fg, name); s != nil && s.Phase == v1beta1.KeyringPhaseSealed {
 					t.Errorf("%s advanced to Sealed on an API failure", name)
 				}
 			}
@@ -471,73 +471,73 @@ func TestEncryptionChaos_OperatorRestartAtEveryPhaseBoundary(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		site       v1alpha1.SiteEncryptionStatus
+		site       v1beta1.SiteEncryptionStatus
 		wantSealed bool
 		// wantPhase is the phase the site must still be in (or better)
 		// after a restarted operator's first reconcile.
-		forbidPhase v1alpha1.SiteKeyringPhase
+		forbidPhase v1beta1.SiteKeyringPhase
 	}{
 		{
 			name:       "Pending",
-			site:       v1alpha1.SiteEncryptionStatus{Name: "dc1", Phase: v1alpha1.KeyringPhasePending},
+			site:       v1beta1.SiteEncryptionStatus{Name: "dc1", Phase: v1beta1.KeyringPhasePending},
 			wantSealed: false,
 		},
 		{
 			name: "Unsealed/Bootstrap",
-			site: v1alpha1.SiteEncryptionStatus{
-				Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed,
-				UnsealReason: v1alpha1.UnsealReasonBootstrap,
+			site: v1beta1.SiteEncryptionStatus{
+				Name: "dc1", Phase: v1beta1.KeyringPhaseUnsealed,
+				UnsealReason: v1beta1.UnsealReasonBootstrap,
 			},
 			wantSealed: false,
 		},
 		{
 			name: "Unsealed/Clone",
-			site: v1alpha1.SiteEncryptionStatus{
-				Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed,
-				UnsealReason: v1alpha1.UnsealReasonClone,
+			site: v1beta1.SiteEncryptionStatus{
+				Name: "dc1", Phase: v1beta1.KeyringPhaseUnsealed,
+				UnsealReason: v1beta1.UnsealReasonClone,
 			},
 			wantSealed: false,
 		},
 		{
 			name: "Unsealed/Rotation",
-			site: v1alpha1.SiteEncryptionStatus{
-				Name: "dc1", Phase: v1alpha1.KeyringPhaseUnsealed,
-				UnsealReason:  v1alpha1.UnsealReasonRotation,
+			site: v1beta1.SiteEncryptionStatus{
+				Name: "dc1", Phase: v1beta1.KeyringPhaseUnsealed,
+				UnsealReason:  v1beta1.UnsealReasonRotation,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
 			},
 			wantSealed: false,
 			// A restart must not "finish" a rotation that never rotated.
-			forbidPhase: v1alpha1.KeyringPhaseSealed,
+			forbidPhase: v1beta1.KeyringPhaseSealed,
 		},
 		{
 			name: "Escrowed",
-			site: v1alpha1.SiteEncryptionStatus{
-				Name: "dc1", Phase: v1alpha1.KeyringPhaseEscrowed,
+			site: v1beta1.SiteEncryptionStatus{
+				Name: "dc1", Phase: v1beta1.KeyringPhaseEscrowed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
 			},
 			wantSealed: true,
 		},
 		{
 			name: "Sealed",
-			site: v1alpha1.SiteEncryptionStatus{
-				Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+			site: v1beta1.SiteEncryptionStatus{
+				Name: "dc1", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
 			},
 			wantSealed: true,
 		},
 		{
 			name: "Failed after sealing",
-			site: v1alpha1.SiteEncryptionStatus{
-				Name: "dc1", Phase: v1alpha1.KeyringPhaseFailed,
+			site: v1beta1.SiteEncryptionStatus{
+				Name: "dc1", Phase: v1beta1.KeyringPhaseFailed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
 			},
 			wantSealed: true,
 		},
 		{
 			name: "Failed before ever escrowing",
-			site: v1alpha1.SiteEncryptionStatus{
-				Name: "dc1", Phase: v1alpha1.KeyringPhaseFailed,
-				UnsealReason: v1alpha1.UnsealReasonBootstrap,
+			site: v1beta1.SiteEncryptionStatus{
+				Name: "dc1", Phase: v1beta1.KeyringPhaseFailed,
+				UnsealReason: v1beta1.UnsealReasonBootstrap,
 			},
 			wantSealed: false,
 		},
@@ -547,10 +547,10 @@ func TestEncryptionChaos_OperatorRestartAtEveryPhaseBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			fg := encTestFG()
-			fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-				Sites: []v1alpha1.SiteEncryptionStatus{
+			fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+				Sites: []v1beta1.SiteEncryptionStatus{
 					tc.site,
-					{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+					{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed,
 						KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
 				},
 			}
@@ -580,7 +580,7 @@ func TestEncryptionChaos_OperatorRestartAtEveryPhaseBoundary(t *testing.T) {
 				Client: c, Scheme: c.Scheme(), Recorder: record.NewFakeRecorder(64),
 				keyringStatus: scriptedKeyring(nil), // sidecars not yet reachable after a restart
 			}
-			var rehydrated v1alpha1.MysqlFailoverGroup
+			var rehydrated v1beta1.MysqlFailoverGroup
 			nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
 			if err := c.Get(ctx, nn, &rehydrated); err != nil {
 				t.Fatalf("rehydrate: %v", err)
@@ -597,7 +597,7 @@ func TestEncryptionChaos_OperatorRestartAtEveryPhaseBoundary(t *testing.T) {
 				t.Fatalf("phase advanced to %q on a bare restart with no sidecar evidence", s.Phase)
 			}
 			// The peer must never be disturbed by a restart.
-			if peer := rehydrated.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2"); peer.Phase != v1alpha1.KeyringPhaseSealed {
+			if peer := rehydrated.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2"); peer.Phase != v1beta1.KeyringPhaseSealed {
 				t.Errorf("dc2 phase = %q after an operator restart, want Sealed", peer.Phase)
 			}
 		})
@@ -620,10 +620,10 @@ func TestEncryptionChaos_UnsealedPodRestartDoesNotSealTheOldEscrow(t *testing.T)
 	raw := []byte("pre-rotation")
 	digest := keyringDigest(raw)
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{{
-			Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
-			UnsealReason:  v1alpha1.UnsealReasonRotation,
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{{
+			Name: "dc2", Phase: v1beta1.KeyringPhaseUnsealed,
+			UnsealReason:  v1beta1.UnsealReasonRotation,
 			KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
 		}},
 	}
@@ -641,7 +641,7 @@ func TestEncryptionChaos_UnsealedPodRestartDoesNotSealTheOldEscrow(t *testing.T)
 		t.Fatalf("reconcile: %v", err)
 	}
 	s := siteStatus(fg, "dc2")
-	if s.Phase != v1alpha1.KeyringPhaseUnsealed {
+	if s.Phase != v1beta1.KeyringPhaseUnsealed {
 		t.Fatalf("phase = %q, want to stay Unsealed after the tmpfs keyring was lost", s.Phase)
 	}
 	if fg.SiteKeyringSealed("dc2") {
@@ -656,7 +656,7 @@ func TestEncryptionChaos_UnsealedPodRestartDoesNotSealTheOldEscrow(t *testing.T)
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatalf("post-rotation reconcile: %v", err)
 	}
-	if s = siteStatus(fg, "dc2"); s.Phase != v1alpha1.KeyringPhaseUnsealed {
+	if s = siteStatus(fg, "dc2"); s.Phase != v1beta1.KeyringPhaseUnsealed {
 		t.Fatalf("phase = %q: sealed against v1 while MySQL is running the rotated keyring", s.Phase)
 	}
 	if s.KeyringVersion != 1 || s.KeyringDigest != digest {
@@ -676,12 +676,12 @@ func TestEncryptionChaos_EscrowTokenIsRemintedAfterDeletion(t *testing.T) {
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	name := v1alpha1.KeyringTokenSecretName(fg.Name, "dc1")
+	name := v1beta1.KeyringTokenSecretName(fg.Name, "dc1")
 	var minted corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &minted); err != nil {
 		t.Fatalf("token not minted: %v", err)
 	}
-	original := string(minted.Data[v1alpha1.KeyringTokenKey])
+	original := string(minted.Data[v1beta1.KeyringTokenKey])
 
 	if err := c.Delete(ctx, &minted); err != nil {
 		t.Fatalf("delete token: %v", err)
@@ -693,16 +693,16 @@ func TestEncryptionChaos_EscrowTokenIsRemintedAfterDeletion(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &reminted); err != nil {
 		t.Fatalf("token was not reminted: %v", err)
 	}
-	if len(reminted.Data[v1alpha1.KeyringTokenKey]) < 32 {
-		t.Errorf("reminted token is too short: %d bytes", len(reminted.Data[v1alpha1.KeyringTokenKey]))
+	if len(reminted.Data[v1beta1.KeyringTokenKey]) < 32 {
+		t.Errorf("reminted token is too short: %d bytes", len(reminted.Data[v1beta1.KeyringTokenKey]))
 	}
-	if string(reminted.Data[v1alpha1.KeyringTokenKey]) == original {
+	if string(reminted.Data[v1beta1.KeyringTokenKey]) == original {
 		t.Error("remint reused the deleted token value")
 	}
 
 	// A corrupted (truncated) token must also be replaced rather than
 	// leaving the site unable to escrow forever.
-	reminted.Data[v1alpha1.KeyringTokenKey] = []byte("short")
+	reminted.Data[v1beta1.KeyringTokenKey] = []byte("short")
 	if err := c.Update(ctx, &reminted); err != nil {
 		t.Fatalf("corrupt token: %v", err)
 	}
@@ -713,8 +713,8 @@ func TestEncryptionChaos_EscrowTokenIsRemintedAfterDeletion(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &repaired); err != nil {
 		t.Fatalf("token missing after corruption: %v", err)
 	}
-	if len(repaired.Data[v1alpha1.KeyringTokenKey]) < 32 {
-		t.Errorf("corrupt token was not replaced: %q", repaired.Data[v1alpha1.KeyringTokenKey])
+	if len(repaired.Data[v1beta1.KeyringTokenKey]) < 32 {
+		t.Errorf("corrupt token was not replaced: %q", repaired.Data[v1beta1.KeyringTokenKey])
 	}
 }
 
@@ -732,11 +732,11 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 	ctx := context.Background()
 	rotated := []byte("rotated-keyring")
 	digest := keyringDigest(rotated)
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{
-			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v2", KeyringVersion: 2, KeyringDigest: digest},
-			{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+			{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
 		},
 	}
@@ -776,7 +776,7 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 		t.Fatalf("apply stale projection: %v", err)
 	}
 
-	var refreshed v1alpha1.MysqlFailoverGroup
+	var refreshed v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, types.NamespacedName{Name: "lion", Namespace: "shared-lion"}, &refreshed); err != nil {
 		t.Fatalf("refresh group: %v", err)
 	}
@@ -804,7 +804,7 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 		t.Fatalf("steady-state reconcile: %v", err)
 	}
 	s := refreshed.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc1")
-	if s.Phase != v1alpha1.KeyringPhaseFailed {
+	if s.Phase != v1beta1.KeyringPhaseFailed {
 		t.Fatalf("phase = %q (%s), want Failed while the pod runs a keyring the escrow does not match",
 			s.Phase, s.Message)
 	}
@@ -825,26 +825,26 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 	cases := []struct {
 		name    string
-		mutate  func(*v1alpha1.MysqlFailoverGroup)
+		mutate  func(*v1beta1.MysqlFailoverGroup)
 		wantMsg string
 	}{
 		{
 			name:    "no active primary is known",
-			mutate:  func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.ActiveSite = "" },
+			mutate:  func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.ActiveSite = "" },
 			wantMsg: "no active primary",
 		},
 		{
 			name: "an ordered update is running",
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.UpdatePhase = v1alpha1.UpdatePhaseWaitReplica
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Status.UpdatePhase = v1beta1.UpdatePhaseWaitReplica
 			},
 			wantMsg: "ordered update",
 		},
 		{
 			name: "a planned failover is in flight",
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-					Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "dc2",
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+					Phase: v1beta1.PlannedFailoverPhaseDraining, TargetSite: "dc2",
 				}
 			},
 			wantMsg: "planned failover",
@@ -856,7 +856,7 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 			ctx := context.Background()
 			fg := sealedGroupWithActive("dc1")
 			tc.mutate(fg)
-			fg.Annotations = map[string]string{v1alpha1.RotateKeyringAnnotation: "dc2"}
+			fg.Annotations = map[string]string{v1beta1.RotateKeyringAnnotation: "dc2"}
 			r, c := encReconciler(t, scriptedKeyring(nil), fg)
 			store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
 			for _, s := range []string{"dc1", "dc2"} {
@@ -869,7 +869,7 @@ func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 				t.Fatalf("reconcile: %v", err)
 			}
 			s := siteStatus(fg, "dc2")
-			if s.Phase != v1alpha1.KeyringPhaseSealed {
+			if s.Phase != v1beta1.KeyringPhaseSealed {
 				t.Fatalf("phase = %q: rotation must not start while the topology is in motion", s.Phase)
 			}
 			if !strings.Contains(strings.ToLower(s.Message), tc.wantMsg) {
@@ -896,11 +896,11 @@ func TestEncryptionChaos_LegacyDisabledStateRetainsEscrowAndReEnableResumes(t *t
 	ctx := context.Background()
 	raw := []byte("keyring")
 	digest := keyringDigest(raw)
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
-		Sites: []v1alpha1.SiteEncryptionStatus{
-			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{
+		Sites: []v1beta1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
-			{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+			{Name: "dc2", Phase: v1beta1.KeyringPhaseSealed,
 				KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
 		},
 	}
@@ -931,7 +931,7 @@ func TestEncryptionChaos_LegacyDisabledStateRetainsEscrowAndReEnableResumes(t *t
 	// LeavePlaintext; with it, the lifecycle restarts from the retained
 	// versions.
 	fg.Spec.EncryptionAtRest.Enabled = true
-	fg.Spec.EncryptionAtRest.ExistingData = v1alpha1.EncryptionExistingDataLeavePlaintext
+	fg.Spec.EncryptionAtRest.ExistingData = v1beta1.EncryptionExistingDataLeavePlaintext
 	fg.Status.ActiveSite = "dc1"
 	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 		t.Fatalf("re-enable: %v", err)

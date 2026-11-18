@@ -7,7 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
@@ -109,7 +109,7 @@ func prepareSplitBrainAutoResolvePolicyPath() runner.Step {
 			defer cancel()
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				"operator restarted with empty lastFailoverTarget",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					ready := pgkube.ReadyCondition(mfg)
 					msg := fmt.Sprintf("ready=%s active=%q lastFailoverTarget=%q",
 						ready, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
@@ -204,7 +204,7 @@ func observeAutoResolve() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"non-preferred site returns to read-only",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Spec.SplitBrainPolicy == nil || len(mfg.Spec.SplitBrainPolicy.SitePriorities) == 0 {
 						return false, "spec.splitBrainPolicy not configured", fmt.Errorf("split-brain policy disappeared")
 					}
@@ -268,13 +268,13 @@ func verifyAutoResolveLog() runner.Step {
 	}
 }
 
-func writableSitesExcept(mfg *v1alpha1.MysqlFailoverGroup, prefer string) []string {
+func writableSitesExcept(mfg *v1beta1.MysqlFailoverGroup, prefer string) []string {
 	var out []string
 	for _, s := range mfg.Status.Sites {
 		if s.Name == prefer {
 			continue
 		}
-		if s.State == v1alpha1.SiteStateWritable {
+		if s.State == v1beta1.SiteStateWritable {
 			out = append(out, s.Name)
 		}
 	}

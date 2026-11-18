@@ -6,19 +6,19 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // recloneTestUID is the uid of recloneFG's group.
 const recloneTestUID = "6f1c2d3e-0000-4000-8000-000000000001"
 
-func recloneFG(sites []string, divergentPerSite map[string]string) *v1alpha1.MysqlFailoverGroup {
-	fg := &v1alpha1.MysqlFailoverGroup{
+func recloneFG(sites []string, divergentPerSite map[string]string) *v1beta1.MysqlFailoverGroup {
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default", UID: recloneTestUID},
 	}
 	for i, name := range sites {
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i)})
-		st := v1alpha1.SiteStatus{Name: name}
+		fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: name, ServerID: int64(101 + i)})
+		st := v1beta1.SiteStatus{Name: name}
 		if g, ok := divergentPerSite[name]; ok {
 			st.DivergentGtid = g
 			st.RecoveryState = "RecoveryBlocked"
@@ -103,7 +103,7 @@ func TestValidateRecloneAnnotation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := recloneFG([]string{"iad", "pdx", "reader"}, tc.diverge)
 			if tc.reader {
-				fg.Spec.SiteByName("reader").Role = v1alpha1.SiteRoleReadOnly
+				fg.Spec.SiteByName("reader").Role = v1beta1.SiteRoleReadOnly
 			}
 			err := validateRecloneRequest(fg, parseRecloneAnnotation(tc.value))
 			if tc.wantErr == "" {
@@ -124,13 +124,13 @@ func TestValidateRecloneAnnotation(t *testing.T) {
 func TestValidateRecloneAnnotation_RejectionPrintsFullForm(t *testing.T) {
 	fg := recloneFG([]string{"iad", "pdx"}, map[string]string{"iad": "a1b2c3d4-0000-0000-0000-000000000000:11-15"})
 	err := validateRecloneRequest(fg, parseRecloneAnnotation("iad:confirm=orders"))
-	want := v1alpha1.RecloneAnnotation + "=iad:confirm=orders:uid=" + recloneTestUID + ":gtidPrefix=a1b2c3d4"
+	want := v1beta1.RecloneAnnotation + "=iad:confirm=orders:uid=" + recloneTestUID + ":gtidPrefix=a1b2c3d4"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("err = %v, want it to print %q", err, want)
 	}
 	fg = recloneFG([]string{"iad", "pdx"}, nil)
 	err = validateRecloneRequest(fg, parseRecloneAnnotation("iad"))
-	want = v1alpha1.RecloneAnnotation + "=iad:confirm=orders:uid=" + recloneTestUID
+	want = v1beta1.RecloneAnnotation + "=iad:confirm=orders:uid=" + recloneTestUID
 	if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "gtidPrefix") {
 		t.Fatalf("err = %v, want it to print %q", err, want)
 	}

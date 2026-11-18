@@ -7,7 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestBuildPlannedFailoverValue(t *testing.T) {
@@ -34,13 +34,13 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 		{
 			name:   "lower bound is accepted",
 			site:   "pdx",
-			maxLag: dur(v1alpha1.PlannedFailoverMaxLagWaitMin),
+			maxLag: dur(v1beta1.PlannedFailoverMaxLagWaitMin),
 			want:   "pdx:maxLagWait=1s",
 		},
 		{
 			name:   "upper bound is accepted and parses back",
 			site:   "pdx",
-			maxLag: dur(v1alpha1.PlannedFailoverMaxLagWaitMax),
+			maxLag: dur(v1beta1.PlannedFailoverMaxLagWaitMax),
 			want:   "pdx:maxLagWait=1h0m0s",
 		},
 		{
@@ -113,10 +113,10 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 }
 
 func TestGroupHasSite(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders"},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Sites: []v1beta1.SiteSpec{
 				{Name: "iad", ServerID: 101},
 				{Name: "pdx", ServerID: 102},
 			},

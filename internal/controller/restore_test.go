@@ -15,15 +15,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // helper: a MysqlFailoverGroup with initFromBackup pointing at a MysqlBackup.
-func fgInitFromMysqlBackup() *v1alpha1.MysqlFailoverGroup {
+func fgInitFromMysqlBackup() *v1beta1.MysqlFailoverGroup {
 	fg := fgWithBackup()
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	return fg
@@ -33,7 +33,7 @@ func fgInitFromMysqlBackup() *v1alpha1.MysqlFailoverGroup {
 // group's first profile under its own prefix, for a PITR restore to read
 // from: initFromBackup must name its archive profile, and it may not be the
 // group's own active PITR destination (D-10).
-func addSourceArchiveProfile(fg *v1alpha1.MysqlFailoverGroup) string {
+func addSourceArchiveProfile(fg *v1beta1.MysqlFailoverGroup) string {
 	source := *fg.Spec.Backup.Profiles[0].DeepCopy()
 	source.Name = "source-archive"
 	switch {
@@ -51,26 +51,26 @@ func addSourceArchiveProfile(fg *v1alpha1.MysqlFailoverGroup) string {
 
 // succeededSeedBackup is a previously-completed MysqlBackup the restore
 // can use as its source.
-func succeededSeedBackup() *v1alpha1.MysqlBackup {
+func succeededSeedBackup() *v1beta1.MysqlBackup {
 	// Completed before the fixed PITR targets the tests request.
 	now := metav1.NewTime(time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC))
-	return &v1alpha1.MysqlBackup{
+	return &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "seed", Namespace: "ns",
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel: "lion",
-				v1alpha1.BackupProfileLabel: "nightly-s3",
+				v1beta1.FailoverGroupLabel: "lion",
+				v1beta1.BackupProfileLabel: "nightly-s3",
 			},
 		},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
-		Status: v1alpha1.MysqlBackupStatus{
-			Phase:            v1alpha1.BackupPhaseSucceeded,
+		Status: v1beta1.MysqlBackupStatus{
+			Phase:            v1beta1.BackupPhaseSucceeded,
 			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
 			CompletionTime:   &now,
-			ArtifactStorage:  testArtifactStorage(v1alpha1.BackupStorageS3, "lion/seed/"),
+			ArtifactStorage:  testArtifactStorage(v1beta1.BackupStorageS3, "lion/seed/"),
 			FailoverGroupUID: "lion-uid",
 		},
 	}
@@ -80,10 +80,10 @@ func succeededSeedBackup() *v1alpha1.MysqlBackup {
 // active site: the state the topology manager's fresh-deploy seeding
 // leaves a new initFromBackup group in, and the only one in which
 // reconcileRestoreJob starts the restore Job.
-func seedPublished(fg *v1alpha1.MysqlFailoverGroup) {
+func seedPublished(fg *v1beta1.MysqlFailoverGroup) {
 	seed := fg.Spec.DefaultSeedSite().Name
 	fg.Status.ActiveSite = seed
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: seed, State: v1alpha1.SiteStateWritable}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: seed, State: v1beta1.SiteStateWritable}}
 }
 
 // primaryReadyDeployment returns a Deployment matching the first site with
@@ -161,7 +161,7 @@ func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 	}
 
 	// Status should reflect Running phase.
-	if fg.Status.Restore == nil || fg.Status.Restore.Phase != v1alpha1.BackupPhaseRunning {
+	if fg.Status.Restore == nil || fg.Status.Restore.Phase != v1beta1.BackupPhaseRunning {
 		t.Errorf("want Restore.Running, got %+v", fg.Status.Restore)
 	}
 }
@@ -170,9 +170,9 @@ func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 
 func TestBuildRestoreJob_S3Source_NormalizesTrailingSlash(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			S3: &v1alpha1.S3Storage{
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			S3: &v1beta1.S3Storage{
 				Bucket:                "my-bucket",
 				Prefix:                "dumps/preprod/",
 				CredentialsSecretName: "s3-creds",
@@ -199,9 +199,9 @@ func TestBuildRestoreJob_MysqlBackupRef_MissingS3Profile_Errors(t *testing.T) {
 	fg := fgWithBackup()
 	// Drop the nightly-s3 profile so the lookup fails.
 	fg.Spec.Backup.Profiles = fg.Spec.Backup.Profiles[1:]
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	// Seed backup references the now-missing profile.
@@ -219,14 +219,14 @@ func TestBuildRestoreJob_MysqlBackupRef_MissingS3Profile_Errors(t *testing.T) {
 
 func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"},
 		},
 	}
 	seed := succeededSeedBackup()
 	seed.Spec.ProfileName = "daily-local"
-	setTestArtifactType(seed, v1alpha1.BackupStoragePVC)
+	setTestArtifactType(seed, v1beta1.BackupStoragePVC)
 	setTestArtifactLocation(seed, backupPVCMountPath+"/seed/")
 	r, _ := newReconciler(fg, seed)
 
@@ -282,9 +282,9 @@ func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T)
 
 func TestBuildRestoreJob_PVCSource_EmptyClaimName_Errors(t *testing.T) {
 	fg := fgWithBackup()
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{
-			PVC: &v1alpha1.InitFromBackupPVCSource{SubPath: "dumps"},
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{
+			PVC: &v1beta1.InitFromBackupPVCSource{SubPath: "dumps"},
 		},
 	}
 	r, _ := newReconciler(fg)
@@ -344,14 +344,14 @@ func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 	}
 
 	// Re-fetch fg to mirror the state the reconciler would see.
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	_ = c.Get(context.Background(), types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &fresh)
 
 	if _, err := r.reconcileRestoreJob(context.Background(), &fresh); err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
 
-	if fresh.Status.Restore == nil || fresh.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded {
+	if fresh.Status.Restore == nil || fresh.Status.Restore.Phase != v1beta1.BackupPhaseSucceeded {
 		t.Errorf("want Succeeded, got %+v", fresh.Status.Restore)
 	}
 }
@@ -372,13 +372,13 @@ func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
 
 	steps := []struct {
 		name   string
-		status v1alpha1.MysqlFailoverGroupStatus
+		status v1beta1.MysqlFailoverGroupStatus
 		wait   string
 	}{
-		{"not seeded", v1alpha1.MysqlFailoverGroupStatus{}, `waiting for the operator to seed site "iad"`},
-		{"seeded, still observed read-only", v1alpha1.MysqlFailoverGroupStatus{
+		{"not seeded", v1beta1.MysqlFailoverGroupStatus{}, `waiting for the operator to seed site "iad"`},
+		{"seeded, still observed read-only", v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
-			Sites:      []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateReadOnly}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly}},
+			Sites:      []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateReadOnly}, {Name: "pdx", State: v1beta1.SiteStateReadOnly}},
 		}, `waiting for active site "iad" to be observed writable`},
 	}
 	for _, step := range steps {
@@ -394,7 +394,7 @@ func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
 			t.Fatalf("%s: restore Job created before the target was writable", step.name)
 		}
 		rs := fg.Status.Restore
-		if rs == nil || rs.Phase != v1alpha1.BackupPhasePending || rs.TargetSite != "iad" || !strings.HasPrefix(rs.Message, step.wait) {
+		if rs == nil || rs.Phase != v1beta1.BackupPhasePending || rs.TargetSite != "iad" || !strings.HasPrefix(rs.Message, step.wait) {
 			t.Fatalf("%s: status.restore = %+v, want Pending on iad %q", step.name, rs, step.wait)
 		}
 	}
@@ -406,7 +406,7 @@ func TestReconcileRestoreJob_WaitsForSeededWritableTarget(t *testing.T) {
 	if err := c.Get(ctx, jobKey, &batchv1.Job{}); err != nil {
 		t.Fatalf("restore Job not created once the seed is writable: %v", err)
 	}
-	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhaseRunning {
+	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1beta1.BackupPhaseRunning {
 		t.Fatalf("status.restore = %+v, want Running", rs)
 	}
 }
@@ -423,16 +423,16 @@ func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
 	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1alpha1.BackupPhaseRunning {
+	if rs := fg.Status.Restore; rs == nil || rs.Phase != v1beta1.BackupPhaseRunning {
 		t.Fatalf("status.restore = %+v, want Running", rs)
 	}
 
-	for _, st := range []v1alpha1.SiteState{v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateUnreachable} {
-		fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: st}}
+	for _, st := range []v1beta1.SiteState{v1beta1.SiteStateReadOnly, v1beta1.SiteStateUnreachable} {
+		fg.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: st}}
 		if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 			t.Fatal(err)
 		}
-		if rs := fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseRunning || rs.JobName == "" {
+		if rs := fg.Status.Restore; rs.Phase != v1beta1.BackupPhaseRunning || rs.JobName == "" {
 			t.Fatalf("target %s: running restore reset to %+v", st, rs)
 		}
 	}
@@ -450,7 +450,7 @@ func TestReconcileRestoreJob_ObservesRunningJobWhenTargetFenced(t *testing.T) {
 	if _, err := r.reconcileRestoreJob(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	if rs := fg.Status.Restore; rs.Phase != v1alpha1.BackupPhaseSucceeded || rs.TargetSite != "iad" {
+	if rs := fg.Status.Restore; rs.Phase != v1beta1.BackupPhaseSucceeded || rs.TargetSite != "iad" {
 		t.Fatalf("status.restore = %+v, want Succeeded on iad", rs)
 	}
 }
@@ -466,58 +466,58 @@ func TestBuildRestoreJob_DisablesLoadProgressFile(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 
-	decryption := &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "restore-pass", Key: "passphrase"}}
-	encryptProfile := func(fg *v1alpha1.MysqlFailoverGroup, name string) {
-		findProfile(fg, name).Encryption = &v1alpha1.BackupEncryptionSpec{
+	decryption := &v1beta1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "restore-pass", Key: "passphrase"}}
+	encryptProfile := func(fg *v1beta1.MysqlFailoverGroup, name string) {
+		findProfile(fg, name).Encryption = &v1beta1.BackupEncryptionSpec{
 			Algorithm:              "AES-256-GCM",
-			PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "passphrase"},
+			PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "passphrase"},
 		}
 	}
-	refSrc := v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}}
+	refSrc := v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"}}
 
 	sources := []struct {
 		name       string
-		src        v1alpha1.RestoreSource
-		decryption *v1alpha1.BackupDecryptionSpec
-		setup      func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup
+		src        v1beta1.RestoreSource
+		decryption *v1beta1.BackupDecryptionSpec
+		setup      func(fg *v1beta1.MysqlFailoverGroup) *v1beta1.MysqlBackup
 		roMount    string // source mount the main container reads; "" for S3
 	}{
-		{name: "direct s3", src: v1alpha1.RestoreSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "dumps/x", CredentialsSecretName: "s3-creds"}}},
-		{name: "direct pvc", src: v1alpha1.RestoreSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, roMount: "/restore"},
-		{name: "direct pvc encrypted", src: v1alpha1.RestoreSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, decryption: decryption, roMount: "/restore-decrypted"},
-		{name: "ref s3", src: refSrc, setup: func(*v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup { return succeededSeedBackup() }},
-		{name: "ref pvc", src: refSrc, roMount: backupPVCMountPath, setup: func(*v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
+		{name: "direct s3", src: v1beta1.RestoreSource{S3: &v1beta1.S3Storage{Bucket: "b", Prefix: "dumps/x", CredentialsSecretName: "s3-creds"}}},
+		{name: "direct pvc", src: v1beta1.RestoreSource{PVC: &v1beta1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, roMount: "/restore"},
+		{name: "direct pvc encrypted", src: v1beta1.RestoreSource{PVC: &v1beta1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, decryption: decryption, roMount: "/restore-decrypted"},
+		{name: "ref s3", src: refSrc, setup: func(*v1beta1.MysqlFailoverGroup) *v1beta1.MysqlBackup { return succeededSeedBackup() }},
+		{name: "ref pvc", src: refSrc, roMount: backupPVCMountPath, setup: func(*v1beta1.MysqlFailoverGroup) *v1beta1.MysqlBackup {
 			seed := succeededSeedBackup()
 			seed.Spec.ProfileName = "daily-local"
-			setTestArtifactType(seed, v1alpha1.BackupStoragePVC)
+			setTestArtifactType(seed, v1beta1.BackupStoragePVC)
 			setTestArtifactLocation(seed, backupPVCMountPath+"/seed/")
 			return seed
 		}},
-		{name: "ref s3 encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
+		{name: "ref s3 encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1beta1.MysqlFailoverGroup) *v1beta1.MysqlBackup {
 			encryptProfile(fg, "nightly-s3")
-			return encryptedRefSeed("nightly-s3", v1alpha1.BackupStorageS3)
+			return encryptedRefSeed("nightly-s3", v1beta1.BackupStorageS3)
 		}},
-		{name: "ref pvc encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
+		{name: "ref pvc encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1beta1.MysqlFailoverGroup) *v1beta1.MysqlBackup {
 			encryptProfile(fg, "daily-local")
-			return encryptedRefSeed("daily-local", v1alpha1.BackupStoragePVC)
+			return encryptedRefSeed("daily-local", v1beta1.BackupStoragePVC)
 		}},
 	}
 	callers := []struct {
 		name  string
-		build func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error)
+		build func(r *MysqlFailoverGroupReconciler, fg *v1beta1.MysqlFailoverGroup, src v1beta1.RestoreSource, dec *v1beta1.BackupDecryptionSpec) (*batchv1.Job, error)
 	}{
-		{"bootstrap", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, Decryption: dec}
+		{"bootstrap", func(r *MysqlFailoverGroupReconciler, fg *v1beta1.MysqlFailoverGroup, src v1beta1.RestoreSource, dec *v1beta1.BackupDecryptionSpec) (*batchv1.Job, error) {
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: src, Decryption: dec}
 			return r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
 		}},
-		{"in-place full-instance", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
-			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec}
+		{"in-place full-instance", func(r *MysqlFailoverGroupReconciler, fg *v1beta1.MysqlFailoverGroup, src v1beta1.RestoreSource, dec *v1beta1.BackupDecryptionSpec) (*batchv1.Job, error) {
+			fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec}
 			return r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", true, "")
 		}},
-		{"in-place per-schema", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.RestoreSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
-			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
+		{"in-place per-schema", func(r *MysqlFailoverGroupReconciler, fg *v1beta1.MysqlFailoverGroup, src v1beta1.RestoreSource, dec *v1beta1.BackupDecryptionSpec) (*batchv1.Job, error) {
+			fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{
 				Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec,
-				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders"}},
+				LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{"orders"}},
 			}
 			return r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", false, "orders")
 		}},
@@ -598,27 +598,27 @@ func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 	f, tr := false, true
-	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
+	pit := &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
 
 	for _, tc := range []struct {
 		name        string
-		pit         *v1alpha1.PointInTimeSpec
-		loadOptions *v1alpha1.LoadOptions
+		pit         *v1beta1.PointInTimeSpec
+		loadOptions *v1beta1.LoadOptions
 		wantGtidSet bool
 		wantSkipBin any // nil = key absent
 		wantThreads any
 		wantErr     string
 	}{
 		{name: "pitr, loadOptions omitted", pit: pit, wantGtidSet: true, wantSkipBin: true},
-		{name: "pitr, skipBinlog unset", pit: pit, loadOptions: &v1alpha1.LoadOptions{Threads: 8}, wantGtidSet: true, wantSkipBin: true, wantThreads: float64(8)},
-		{name: "pitr, skipBinlog true", pit: pit, loadOptions: &v1alpha1.LoadOptions{SkipBinlog: &tr}, wantGtidSet: true, wantSkipBin: true},
-		{name: "pitr, skipBinlog false rejected", pit: pit, loadOptions: &v1alpha1.LoadOptions{SkipBinlog: &f}, wantErr: "initFromBackup.loadOptions.skipBinlog"},
+		{name: "pitr, skipBinlog unset", pit: pit, loadOptions: &v1beta1.LoadOptions{Threads: 8}, wantGtidSet: true, wantSkipBin: true, wantThreads: float64(8)},
+		{name: "pitr, skipBinlog true", pit: pit, loadOptions: &v1beta1.LoadOptions{SkipBinlog: &tr}, wantGtidSet: true, wantSkipBin: true},
+		{name: "pitr, skipBinlog false rejected", pit: pit, loadOptions: &v1beta1.LoadOptions{SkipBinlog: &f}, wantErr: "initFromBackup.loadOptions.skipBinlog"},
 		{name: "no pitr, loadOptions omitted", wantSkipBin: nil},
-		{name: "no pitr, skipBinlog false kept", loadOptions: &v1alpha1.LoadOptions{SkipBinlog: &f}, wantSkipBin: false},
+		{name: "no pitr, skipBinlog false kept", loadOptions: &v1beta1.LoadOptions{SkipBinlog: &f}, wantSkipBin: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := fgInitFromMysqlBackup()
-			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 			addSourceArchiveProfile(fg)
 			fg.Spec.InitFromBackup.PointInTime = tc.pit
 			fg.Spec.InitFromBackup.LoadOptions = tc.loadOptions
@@ -677,11 +677,11 @@ func TestSetTerminationMessageLimit(t *testing.T) {
 func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	pit := &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
+	pit := &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: "source-archive"}
 
-	newFG := func() *v1alpha1.MysqlFailoverGroup {
+	newFG := func() *v1beta1.MysqlFailoverGroup {
 		fg := fgInPlaceRestore("")
-		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 		addSourceArchiveProfile(fg)
 		return fg
 	}
@@ -697,7 +697,7 @@ func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) 
 		t.Run("in-place "+tc.name, func(t *testing.T) {
 			fg := newFG()
 			if tc.schema != "" {
-				fg.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{tc.schema}}
+				fg.Spec.RestoreInPlace.LoadOptions = &v1beta1.LoadOptions{IncludeSchemas: []string{tc.schema}}
 			}
 			r, _ := newReconciler(fg, succeededSeedBackup())
 			job, err := r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", tc.fullInst, tc.schema)
@@ -752,18 +752,18 @@ func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) 
 func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	direct := func(src v1alpha1.RestoreSource, decrypt bool) *v1alpha1.MysqlFailoverGroup {
+	direct := func(src v1beta1.RestoreSource, decrypt bool) *v1beta1.MysqlFailoverGroup {
 		fg := fgWithBackup()
-		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
-		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src}
-		fg.Spec.InitFromBackup.PointInTime = &v1alpha1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
+		fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: src}
+		fg.Spec.InitFromBackup.PointInTime = &v1beta1.PointInTimeSpec{StopTime: stopAt("2026-04-15T09:30:00Z"), ArchiveProfileName: addSourceArchiveProfile(fg)}
 		if decrypt {
-			fg.Spec.InitFromBackup.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pp"}}
+			fg.Spec.InitFromBackup.Decryption = &v1beta1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "pp"}}
 		}
 		return fg
 	}
-	s3 := func(prefix string) v1alpha1.RestoreSource {
-		return v1alpha1.RestoreSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: prefix, CredentialsSecretName: "aws"}}
+	s3 := func(prefix string) v1beta1.RestoreSource {
+		return v1beta1.RestoreSource{S3: &v1beta1.S3Storage{Bucket: "b", Prefix: prefix, CredentialsSecretName: "aws"}}
 	}
 
 	for _, decrypt := range []bool{false, true} {
@@ -786,10 +786,10 @@ func TestBuildRestoreJob_DirectSourcePITR(t *testing.T) {
 		}
 	}
 
-	for name, src := range map[string]v1alpha1.RestoreSource{
+	for name, src := range map[string]v1beta1.RestoreSource{
 		"S3 without prefix":   s3(""),
 		"S3 prefix of '/'":    s3("/"),
-		"PVC without subPath": {PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dumps"}},
+		"PVC without subPath": {PVC: &v1beta1.InitFromBackupPVCSource{ClaimName: "dumps"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fg := direct(src, false)

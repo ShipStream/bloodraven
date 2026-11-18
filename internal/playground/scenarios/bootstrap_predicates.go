@@ -6,7 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -25,21 +25,21 @@ func bootstrapRunning(c *metav1.Condition) bool {
 
 // bootstrapFailed reports that the last clone failed.
 func bootstrapFailed(c *metav1.Condition) bool {
-	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonBootstrapFailed
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == v1beta1.ReasonBootstrapFailed
 }
 
 // bootstrapCompletedSince reports that a clone into target finished at or
 // after since: Bootstrapping is False/NotBootstrapping, its last
 // transition is not before since (condition times have second precision),
 // and target replicates (Healthy or Lagging).
-func bootstrapCompletedSince(mfg *v1alpha1.MysqlFailoverGroup, since time.Time, target string) (bool, string) {
-	c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionBootstrapping)
+func bootstrapCompletedSince(mfg *v1beta1.MysqlFailoverGroup, since time.Time, target string) (bool, string) {
+	c := findCondition(mfg.Status.Conditions, v1beta1.ConditionBootstrapping)
 	if c == nil {
 		return false, "no Bootstrapping condition yet"
 	}
 	msg := fmt.Sprintf("status=%s reason=%s lastTransitionTime=%s message=%q",
 		c.Status, c.Reason, c.LastTransitionTime.UTC().Format(time.RFC3339), c.Message)
-	if c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonNotBootstrapping {
+	if c.Status != metav1.ConditionFalse || c.Reason != v1beta1.ReasonNotBootstrapping {
 		return false, msg
 	}
 	if c.LastTransitionTime.Time.Before(since.Truncate(time.Second)) {

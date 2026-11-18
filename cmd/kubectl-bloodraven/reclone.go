@@ -10,7 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -83,7 +83,7 @@ func runReclone(args []string, stdout, stderr *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: group}, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("MysqlFailoverGroup %s/%s not found", ns, group)
@@ -126,19 +126,19 @@ func runReclone(args []string, stdout, stderr *os.File) error {
 	if patched.Annotations == nil {
 		patched.Annotations = map[string]string{}
 	}
-	patched.Annotations[v1alpha1.RecloneAnnotation] = value
+	patched.Annotations[v1beta1.RecloneAnnotation] = value
 	if err := cl.Patch(ctx, patched, client.MergeFrom(&fg)); err != nil {
 		return fmt.Errorf("annotate failover group: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1alpha1.RecloneAnnotation, value)
+	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1beta1.RecloneAnnotation, value)
 	fmt.Fprintln(stdout, "Watch progress with: kubectl bloodraven status", group, "-n", ns)
 	return nil
 }
 
 // siteDivergentGtid returns the recorded divergentGtid for the named
 // site, or "" if no such status entry exists.
-func siteDivergentGtid(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+func siteDivergentGtid(fg *v1beta1.MysqlFailoverGroup, site string) string {
 	for _, s := range fg.Status.Sites {
 		if s.Name == site {
 			return s.DivergentGtid

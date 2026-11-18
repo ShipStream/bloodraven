@@ -14,7 +14,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/metrics/labels"
@@ -105,9 +105,9 @@ type BootstrapPhase string
 
 const (
 	BootstrapPhaseNone       BootstrapPhase = ""
-	BootstrapPhaseCloning    BootstrapPhase = v1alpha1.ReasonCloning
-	BootstrapPhaseRestarting BootstrapPhase = v1alpha1.ReasonWaitingForRestart
-	BootstrapPhaseSetupRepl  BootstrapPhase = v1alpha1.ReasonSetupReplication
+	BootstrapPhaseCloning    BootstrapPhase = v1beta1.ReasonCloning
+	BootstrapPhaseRestarting BootstrapPhase = v1beta1.ReasonWaitingForRestart
+	BootstrapPhaseSetupRepl  BootstrapPhase = v1beta1.ReasonSetupReplication
 	// Done and Failed are internal: the Bootstrapping condition reports
 	// both as False (NotBootstrapping, BootstrapFailed).
 	BootstrapPhaseDone   BootstrapPhase = "Done"
@@ -134,7 +134,7 @@ type SiteSnapshot struct {
 	Replication             *mysql.ReplicaStatus // nil if site is primary or unreachable
 	SourceHost              string
 	SourceConvergenceState  SourceConvergenceState
-	SourceConvergenceReason v1alpha1.SourceConvergenceReason
+	SourceConvergenceReason v1beta1.SourceConvergenceReason
 	ServingHealthy          bool
 	// ReplicationHealthy is the debounced replication health: both
 	// threads running with a source set for consecutive polls.
@@ -148,7 +148,7 @@ type SiteSnapshot struct {
 	// before its first poll. The CR adapter recomputes the enum from this
 	// snapshot's observation and keeps it only inside the hysteresis band,
 	// so the CR and the WebSocket feed report the same value.
-	PublishedReplication v1alpha1.SiteReplicationState
+	PublishedReplication v1beta1.SiteReplicationState
 	// PendingWritable mirrors state.SiteObservation.PendingWritable.
 	PendingWritable bool
 	// ClassificationOverdue mirrors state.SiteObservation.ClassificationOverdue.
@@ -157,13 +157,13 @@ type SiteSnapshot struct {
 	// Per-site old-primary recovery state ("", RecoveryInProgress,
 	// RecoveryBlocked, or RecloneRequired) with the divergence report when
 	// blocked. Multiple sites can carry recovery state at once.
-	RecoveryState     v1alpha1.SiteRecoveryState
+	RecoveryState     v1beta1.SiteRecoveryState
 	DivergentGtid     string
 	DivergentTxnCount int64
 	// DivergenceDetectedBy and DivergenceComparedTo describe a
 	// RecoveryBlocked report: which check recorded it and which primary the
 	// set was computed against.
-	DivergenceDetectedBy v1alpha1.DivergenceDetector
+	DivergenceDetectedBy v1beta1.DivergenceDetector
 	DivergenceComparedTo string
 	// LostGtid and LostTxnCount report the transactions the site issued
 	// itself and no longer holds (own_transactions_lost.go), compared
@@ -188,20 +188,20 @@ type SiteSnapshot struct {
 }
 
 // SourceConvergenceState is the persisted per-follower source state.
-type SourceConvergenceState = v1alpha1.SourceConvergenceState
+type SourceConvergenceState = v1beta1.SourceConvergenceState
 
 const (
-	sourceConvergenceConverged = v1alpha1.SourceConvergenceConverged
-	sourceConvergencePending   = v1alpha1.SourceConvergencePending
-	sourceConvergenceBlocked   = v1alpha1.SourceConvergenceBlocked
+	sourceConvergenceConverged = v1beta1.SourceConvergenceConverged
+	sourceConvergencePending   = v1beta1.SourceConvergencePending
+	sourceConvergenceBlocked   = v1beta1.SourceConvergenceBlocked
 
-	sourceReasonDirectSource   = v1alpha1.SourceReasonDirectSource
-	sourceReasonSourceMismatch = v1alpha1.SourceReasonSourceMismatch
-	sourceReasonProbeFailed    = v1alpha1.SourceReasonProbeFailed
-	sourceReasonMutationFailed = v1alpha1.SourceReasonMutationFailed
-	sourceReasonGTIDDiverged   = v1alpha1.SourceReasonGTIDDiverged
-	sourceReasonRestoreHold    = v1alpha1.SourceReasonRestorePeerHold
-	sourceReasonOwnLoss        = v1alpha1.SourceReasonOwnTransactionsLost
+	sourceReasonDirectSource   = v1beta1.SourceReasonDirectSource
+	sourceReasonSourceMismatch = v1beta1.SourceReasonSourceMismatch
+	sourceReasonProbeFailed    = v1beta1.SourceReasonProbeFailed
+	sourceReasonMutationFailed = v1beta1.SourceReasonMutationFailed
+	sourceReasonGTIDDiverged   = v1beta1.SourceReasonGTIDDiverged
+	sourceReasonRestoreHold    = v1beta1.SourceReasonRestorePeerHold
+	sourceReasonOwnLoss        = v1beta1.SourceReasonOwnTransactionsLost
 )
 
 // TopologySnapshot captures the topology state at a point in time.
@@ -217,13 +217,13 @@ type TopologySnapshot struct {
 	ActiveSite         string
 	LastFailover       time.Time
 	LastFailoverTarget string
-	Alert              string               // non-empty if a cross-site alert fired this cycle
-	DegradedReason     string               // one of "Healthy", "SiteUnhealthy", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
-	UpdatePhase        v1alpha1.UpdatePhase // non-empty if an ordered update is in progress
-	UpdateStalled      string               // why the ordered update is stopped on a pod that is not Ready (PodNotReadyError), or ""
-	BootstrapPhase     string               // non-empty if a fresh-deploy bootstrap is in progress or finished
-	BootstrapError     string               // non-empty if bootstrap failed
-	BootstrapSource    string               // "fresh-deploy", "auto-clone", or "reclone"
+	Alert              string              // non-empty if a cross-site alert fired this cycle
+	DegradedReason     string              // one of "Healthy", "SiteUnhealthy", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
+	UpdatePhase        v1beta1.UpdatePhase // non-empty if an ordered update is in progress
+	UpdateStalled      string              // why the ordered update is stopped on a pod that is not Ready (PodNotReadyError), or ""
+	BootstrapPhase     string              // non-empty if a fresh-deploy bootstrap is in progress or finished
+	BootstrapError     string              // non-empty if bootstrap failed
+	BootstrapSource    string              // "fresh-deploy", "auto-clone", or "reclone"
 	// WritePause says which operation of the operator's own has paused
 	// writes, when DegradedReason is PlannedWritePause (see
 	// TopologyManager.plannedWritePause). Empty otherwise.
@@ -263,10 +263,10 @@ type TopologySnapshot struct {
 	// Sites[].RecoveryState/DivergentGtid/DivergentTxnCount — consult those
 	// when more than one site can be in recovery at once.
 	RecoverySite         string
-	RecoveryState        v1alpha1.SiteRecoveryState // absent, RecoveryInProgress, RecoveryBlocked, or RecloneRequired
+	RecoveryState        v1beta1.SiteRecoveryState // absent, RecoveryInProgress, RecoveryBlocked, or RecloneRequired
 	DivergentGtid        string
 	DivergentTxnCount    int64
-	DivergenceDetectedBy v1alpha1.DivergenceDetector
+	DivergenceDetectedBy v1beta1.DivergenceDetector
 	DivergenceComparedTo string
 
 	// DivergentPromotion is set while a promotion of a divergent site has
@@ -336,10 +336,10 @@ type siteTracker struct {
 	replicaStatusRead bool
 	// replicationState is the replication state last published for the
 	// site (status.sites[].replication, /ws/status).
-	replicationState        v1alpha1.SiteReplicationState
+	replicationState        v1beta1.SiteReplicationState
 	sourceHost              string
 	sourceConvergenceState  SourceConvergenceState
-	sourceConvergenceReason v1alpha1.SourceConvergenceReason
+	sourceConvergenceReason v1beta1.SourceConvergenceReason
 	servingHealthy          bool
 	// probeFailed is true when this poll's liveness probe of the site
 	// failed. Later steps of the same poll skip the site instead of
@@ -985,21 +985,21 @@ type TopologyManager struct {
 // SiteStatusEntry is a single site's status in the StatusResponse. Its
 // enum fields carry the CR values (status.sites[] and spec.sites[].role).
 type SiteStatusEntry struct {
-	Name                      string                           `json:"name"`
-	Role                      v1alpha1.SiteRole                `json:"role,omitempty"`
-	State                     v1alpha1.SiteState               `json:"state"`
-	SourceHost                string                           `json:"sourceHost,omitempty"`
-	SourceConvergenceState    v1alpha1.SourceConvergenceState  `json:"sourceConvergenceState,omitempty"`
-	SourceConvergenceReason   v1alpha1.SourceConvergenceReason `json:"sourceConvergenceReason,omitempty"`
-	ServingHealthy            bool                             `json:"servingHealthy,omitempty"`
-	RecoveryState             v1alpha1.SiteRecoveryState       `json:"recoveryState,omitempty"`
-	DivergentGtid             string                           `json:"divergentGtid,omitempty"`
-	DivergentTransactionCount *int64                           `json:"divergentTransactionCount,omitempty"`
-	DivergenceDetectedBy      v1alpha1.DivergenceDetector      `json:"divergenceDetectedBy,omitempty"`
-	DivergenceComparedTo      string                           `json:"divergenceComparedTo,omitempty"`
-	LostGtid                  string                           `json:"lostGtid,omitempty"`
-	LostTransactionCount      *int64                           `json:"lostTransactionCount,omitempty"`
-	LostComparedTo            string                           `json:"lostComparedTo,omitempty"`
+	Name                      string                          `json:"name"`
+	Role                      v1beta1.SiteRole                `json:"role,omitempty"`
+	State                     v1beta1.SiteState               `json:"state"`
+	SourceHost                string                          `json:"sourceHost,omitempty"`
+	SourceConvergenceState    v1beta1.SourceConvergenceState  `json:"sourceConvergenceState,omitempty"`
+	SourceConvergenceReason   v1beta1.SourceConvergenceReason `json:"sourceConvergenceReason,omitempty"`
+	ServingHealthy            bool                            `json:"servingHealthy,omitempty"`
+	RecoveryState             v1beta1.SiteRecoveryState       `json:"recoveryState,omitempty"`
+	DivergentGtid             string                          `json:"divergentGtid,omitempty"`
+	DivergentTransactionCount *int64                          `json:"divergentTransactionCount,omitempty"`
+	DivergenceDetectedBy      v1beta1.DivergenceDetector      `json:"divergenceDetectedBy,omitempty"`
+	DivergenceComparedTo      string                          `json:"divergenceComparedTo,omitempty"`
+	LostGtid                  string                          `json:"lostGtid,omitempty"`
+	LostTransactionCount      *int64                          `json:"lostTransactionCount,omitempty"`
+	LostComparedTo            string                          `json:"lostComparedTo,omitempty"`
 }
 
 // StatusResponse is returned by the /status endpoint.
@@ -1031,16 +1031,16 @@ const (
 
 // siteRecovery tracks one site's old-primary recovery lifecycle.
 type siteRecovery struct {
-	state          v1alpha1.SiteRecoveryState
+	state          v1beta1.SiteRecoveryState
 	retryAfter     time.Time
 	divergentGtid  string
 	divergentCount int64
 	// detectedBy names the check that recorded the divergence
 	// (divergenceDetectedByRecovery or divergenceDetectedByAudit) and
 	// comparedTo the primary the set was computed against. Both are set
-	// only while state is v1alpha1.RecoveryStateBlocked; comparedTo may be empty for
+	// only while state is v1beta1.RecoveryStateBlocked; comparedTo may be empty for
 	// a block restored from a status written before it was recorded.
-	detectedBy     v1alpha1.DivergenceDetector
+	detectedBy     v1beta1.DivergenceDetector
 	comparedTo     string
 	drainStartedAt time.Time
 	drainComplete  bool
@@ -1290,11 +1290,11 @@ func (tm *TopologyManager) SetRecoveryBlocked(site, divergentGtid string, diverg
 // containment check against a confirmed primary clears it, and a site that
 // is itself the primary when the block is restored is recorded as a
 // divergent promotion rather than compared with itself.
-func (tm *TopologyManager) SetRecoveryBlockedFrom(site, divergentGtid string, divergentCount int64, detectedBy v1alpha1.DivergenceDetector, comparedTo string) {
+func (tm *TopologyManager) SetRecoveryBlockedFrom(site, divergentGtid string, divergentCount int64, detectedBy v1beta1.DivergenceDetector, comparedTo string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.recovery[site] = &siteRecovery{
-		state:          v1alpha1.RecoveryStateBlocked,
+		state:          v1beta1.RecoveryStateBlocked,
 		divergentGtid:  divergentGtid,
 		divergentCount: divergentCount,
 		detectedBy:     detectedBy,
@@ -1310,12 +1310,12 @@ func (tm *TopologyManager) SetRecoveryBlockedFrom(site, divergentGtid string, di
 func (tm *TopologyManager) SetRecoveryInProgress(site string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	tm.recovery[site] = &siteRecovery{state: v1alpha1.RecoveryStateInProgress}
+	tm.recovery[site] = &siteRecovery{state: v1beta1.RecoveryStateInProgress}
 }
 
 // SetSourceConvergence restores persisted source state across an operator
 // restart. Live polling remains authoritative and will clear or retry it.
-func (tm *TopologyManager) SetSourceConvergence(site, host string, convergence SourceConvergenceState, reason v1alpha1.SourceConvergenceReason) {
+func (tm *TopologyManager) SetSourceConvergence(site, host string, convergence SourceConvergenceState, reason v1beta1.SourceConvergenceReason) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if s := tm.getSite(site); s != nil {
@@ -1377,7 +1377,7 @@ func (tm *TopologyManager) Status() StatusResponse {
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			sites[i].RecoveryState = rec.state
-			if rec.state == v1alpha1.RecoveryStateBlocked {
+			if rec.state == v1beta1.RecoveryStateBlocked {
 				sites[i].DivergentGtid = rec.divergentGtid
 				if rec.divergentCount > 0 {
 					c := rec.divergentCount
@@ -1388,8 +1388,8 @@ func (tm *TopologyManager) Status() StatusResponse {
 			}
 		}
 		if loss := tm.ownLoss[tm.sites[i].name]; loss != nil {
-			if sites[i].RecoveryState != v1alpha1.RecoveryStateBlocked {
-				sites[i].RecoveryState = v1alpha1.RecoveryStateRecloneRequired
+			if sites[i].RecoveryState != v1beta1.RecoveryStateBlocked {
+				sites[i].RecoveryState = v1beta1.RecoveryStateRecloneRequired
 			}
 			sites[i].LostGtid = loss.lostGtid
 			if loss.lostCount > 0 {
@@ -1931,7 +1931,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		if prev == "" {
 			// Nothing published yet reads as Unknown: a site still
 			// unprobed is no change.
-			prev = v1alpha1.SiteReplicationUnknown
+			prev = v1beta1.SiteReplicationUnknown
 		}
 		st = lagHysteresis(prev, st, siteRepl[i], tm.cfg.MaxLagSeconds)
 		tm.sites[i].replicationState = st
@@ -2431,7 +2431,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	alert, degradedReason := action.Alert, action.Reason
 	writePause := tm.plannedWritePause(action)
 	if writePause != "" {
-		alert, degradedReason = "", v1alpha1.ReasonPlannedWritePause
+		alert, degradedReason = "", v1beta1.ReasonPlannedWritePause
 	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -2463,7 +2463,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			sites[i].RecoveryState = rec.state
-			if rec.state == v1alpha1.RecoveryStateBlocked {
+			if rec.state == v1beta1.RecoveryStateBlocked {
 				sites[i].DivergentGtid = rec.divergentGtid
 				sites[i].DivergentTxnCount = rec.divergentCount
 				sites[i].DivergenceDetectedBy = rec.detectedBy
@@ -2473,8 +2473,8 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		if loss := tm.ownLoss[tm.sites[i].name]; loss != nil {
 			// A divergence block outranks the loss: it needs an
 			// administrator, and the reclone they ask for repairs both.
-			if sites[i].RecoveryState != v1alpha1.RecoveryStateBlocked {
-				sites[i].RecoveryState = v1alpha1.RecoveryStateRecloneRequired
+			if sites[i].RecoveryState != v1beta1.RecoveryStateBlocked {
+				sites[i].RecoveryState = v1beta1.RecoveryStateRecloneRequired
 			}
 			sites[i].LostGtid = loss.lostGtid
 			sites[i].LostTxnCount = loss.lostCount
@@ -2487,7 +2487,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		}
 	}
 
-	var updatePhase v1alpha1.UpdatePhase
+	var updatePhase v1beta1.UpdatePhase
 	if tm.updater != nil {
 		updatePhase = tm.updater.Phase()
 	}
@@ -2534,11 +2534,11 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	// either block and above a routine rejoin.
 	rank := func(s SiteSnapshot) int {
 		switch {
-		case s.RecoveryState == v1alpha1.RecoveryStateBlocked && s.DivergenceDetectedBy != divergenceDetectedByAudit:
+		case s.RecoveryState == v1beta1.RecoveryStateBlocked && s.DivergenceDetectedBy != divergenceDetectedByAudit:
 			return 4
-		case s.RecoveryState == v1alpha1.RecoveryStateBlocked:
+		case s.RecoveryState == v1beta1.RecoveryStateBlocked:
 			return 3
-		case s.RecoveryState == v1alpha1.RecoveryStateRecloneRequired:
+		case s.RecoveryState == v1beta1.RecoveryStateRecloneRequired:
 			return 2
 		case s.RecoveryState != "":
 			return 1
@@ -2590,7 +2590,7 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 			Name:        tm.sites[i].name,
 			Role:        string(APISiteRole(tm.sites[i].role)),
 			State:       string(apiSiteState(tm.sites[i].state)),
-			Replication: string(v1alpha1.SiteReplicationUnknown),
+			Replication: string(v1beta1.SiteReplicationUnknown),
 		}
 		if rs := tm.sites[i].replicationState; rs != "" {
 			s.Replication = string(rs)
@@ -2604,7 +2604,7 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			s.RecoveryState = string(rec.state)
-			if rec.state == v1alpha1.RecoveryStateBlocked {
+			if rec.state == v1beta1.RecoveryStateBlocked {
 				s.DivergentGtid = rec.divergentGtid
 				if rec.divergentCount > 0 {
 					c := rec.divergentCount
@@ -2613,8 +2613,8 @@ func (tm *TopologyManager) topologyMessageLocked(siteRepl []*mysql.ReplicaStatus
 			}
 		}
 		if loss := tm.ownLoss[tm.sites[i].name]; loss != nil {
-			if s.RecoveryState != string(v1alpha1.RecoveryStateBlocked) {
-				s.RecoveryState = string(v1alpha1.RecoveryStateRecloneRequired)
+			if s.RecoveryState != string(v1beta1.RecoveryStateBlocked) {
+				s.RecoveryState = string(v1beta1.RecoveryStateRecloneRequired)
 			}
 			s.LostGtid = loss.lostGtid
 			if loss.lostCount > 0 {
@@ -2655,19 +2655,19 @@ func replicaThreadsHealthy(rs *mysql.ReplicaStatus) bool {
 // set), healthyStreak the debounced health (threads healthy for
 // consecutive polls). Healthy and Lagging are exactly the observations the
 // boolean replicating reported true for.
-func siteReplicationState(st state.SiteState, repl *mysql.ReplicaStatus, read, healthyStreak bool, maxLagSeconds int64) v1alpha1.SiteReplicationState {
+func siteReplicationState(st state.SiteState, repl *mysql.ReplicaStatus, read, healthyStreak bool, maxLagSeconds int64) v1beta1.SiteReplicationState {
 	switch {
 	case st == state.StateWritable:
-		return v1alpha1.SiteReplicationNotApplicable
+		return v1beta1.SiteReplicationNotApplicable
 	case repl != nil && healthyStreak:
 		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds {
-			return v1alpha1.SiteReplicationLagging
+			return v1beta1.SiteReplicationLagging
 		}
-		return v1alpha1.SiteReplicationHealthy
+		return v1beta1.SiteReplicationHealthy
 	case read && !replicaThreadsHealthy(repl):
-		return v1alpha1.SiteReplicationBroken
+		return v1beta1.SiteReplicationBroken
 	default:
-		return v1alpha1.SiteReplicationUnknown
+		return v1beta1.SiteReplicationUnknown
 	}
 }
 
@@ -2676,13 +2676,13 @@ func siteReplicationState(st state.SiteState, repl *mysql.ReplicaStatus, read, h
 // otherwise flip Healthy and Lagging on every poll, and each flip is a
 // status write. Entering Lagging is not delayed, and every other
 // transition (Broken, Unknown, NotApplicable) is published at once.
-func lagHysteresis(prev, st v1alpha1.SiteReplicationState, repl *mysql.ReplicaStatus, maxLagSeconds int64) v1alpha1.SiteReplicationState {
-	if prev != v1alpha1.SiteReplicationLagging || st != v1alpha1.SiteReplicationHealthy ||
+func lagHysteresis(prev, st v1beta1.SiteReplicationState, repl *mysql.ReplicaStatus, maxLagSeconds int64) v1beta1.SiteReplicationState {
+	if prev != v1beta1.SiteReplicationLagging || st != v1beta1.SiteReplicationHealthy ||
 		repl == nil || repl.SecondsBehindSource == nil {
 		return st
 	}
 	if *repl.SecondsBehindSource > maxLagSeconds-lagHysteresisBand(maxLagSeconds) {
-		return v1alpha1.SiteReplicationLagging
+		return v1beta1.SiteReplicationLagging
 	}
 	return st
 }
@@ -2983,6 +2983,23 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		candidate := tm.getSite(promote)
 		if candidate == nil {
 			tm.logger.Error("promotion requested for unknown site", "site", promote)
+			return
+		}
+		// A group created with initFromBackup gets its first writable site
+		// from the seed step (maybeStartFreshDeployBootstrap), which runs
+		// once every site answers, fences the other sites and publishes
+		// the seed for the sidecars. Until then nothing is promoted: a
+		// candidate that merely answered before the others (their pods
+		// were still starting) is not the survivor of a failed primary.
+		// Promoting it recorded a failover, which ends the seed step for
+		// good; its sidecar's startup safety net fenced it again at once,
+		// because no active site was published yet; and the re-assert then
+		// refused the seed over the first-boot transactions each fresh
+		// server holds under its own server_uuid. The group stayed without
+		// a writable site and its restore never started.
+		if tm.initRestoreUnseeded() {
+			tm.logger.Warn("promotion refused: the initFromBackup restore has not succeeded and its seed is not published yet",
+				"site", candidate.name)
 			return
 		}
 		// Nothing is cloned while an initFromBackup restore has not
@@ -3521,7 +3538,7 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 	divergent := make([]*siteRecovery, len(infos))
 	tm.mu.RLock()
 	for i := range infos {
-		if rec := tm.recovery[infos[i].name]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
+		if rec := tm.recovery[infos[i].name]; rec != nil && rec.state == v1beta1.RecoveryStateBlocked {
 			copied := *rec
 			divergent[i] = &copied
 		}
@@ -3661,6 +3678,19 @@ func (tm *TopologyManager) SetInitRestoreSeed(site string) {
 		return
 	}
 	tm.initRestoreSeed = site
+}
+
+// initRestoreUnseeded reports whether the group is a new one that waits
+// for its initFromBackup restore and has never had a writable site: the
+// restore is unfinished, no seed is known for it (neither published by
+// this process in seedFreshDeploy nor recorded in status,
+// SetInitRestoreSeed), no failover is on record and no active site was
+// ever named. A group that has had a primary is not in that state,
+// whatever its restore record says, and fails over as usual.
+func (tm *TopologyManager) initRestoreUnseeded() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.autoBootstrapSuppressed && tm.initRestoreSeed == "" && tm.lastFailoverTarget == "" && tm.lastActiveSite == ""
 }
 
 // initRestoreSeedSite returns the seed of an unfinished initFromBackup
@@ -4099,7 +4129,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			Name: site.name, Host: site.host, Checker: site.mysql, Promotable: site.isPromotable(),
 			Drifted: drifted[site.name], SelectorRefused: slices.Contains(refusedSites, site.name), ExpectedSource: activeSite.host,
 			RotationBlocked: block.rotation, ReclonePending: block.reclonePending,
-			DivergenceBlocked:     block.divergence.state == v1alpha1.RecoveryStateBlocked,
+			DivergenceBlocked:     block.divergence.state == v1beta1.RecoveryStateBlocked,
 			DivergentTransactions: block.divergence.divergentCount, DivergentGtid: block.divergence.divergentGtid,
 			PodReady:       tm.podReadyProbe(site.name),
 			HandoffBlocked: tm.liveHandoffRefusal(site.name),
@@ -4683,7 +4713,7 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 			// on the same poll that correctly reported the block.
 			tm.mu.RLock()
 			rec := tm.recovery[site.name]
-			inRecovery := rec != nil && (rec.state == v1alpha1.RecoveryStateBlocked || rec.state == v1alpha1.RecoveryStateInProgress)
+			inRecovery := rec != nil && (rec.state == v1beta1.RecoveryStateBlocked || rec.state == v1beta1.RecoveryStateInProgress)
 			probeFailed := site.probeFailed
 			tm.mu.RUnlock()
 			if inRecovery || probeFailed {
@@ -5811,7 +5841,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		tm.mu.RLock()
 		witness := !tm.ownLossWitnessExcludedLocked(s.name)
 		var recorded string
-		if rec := tm.recovery[s.name]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
+		if rec := tm.recovery[s.name]; rec != nil && rec.state == v1beta1.RecoveryStateBlocked {
 			recorded = rec.divergentGtid
 		}
 		tm.mu.RUnlock()
@@ -6017,7 +6047,7 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 		name := tm.sites[i].name
 		tm.mu.RLock()
 		rec := tm.recovery[name]
-		var recState v1alpha1.SiteRecoveryState
+		var recState v1beta1.SiteRecoveryState
 		if rec != nil {
 			recState = rec.state
 		}
@@ -6027,7 +6057,7 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 			continue // probe-backoff marker, not a recovery state
 		}
 		if tm.sites[i].state == state.StateWritable {
-			if recState == v1alpha1.RecoveryStateBlocked {
+			if recState == v1beta1.RecoveryStateBlocked {
 				// A remembered target is not authority by itself. Preserve the
 				// divergence report through split-brain and only clear it when
 				// this site is the unique, directly confirmed writable target.
@@ -6063,7 +6093,7 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 		if tm.sites[i].state != state.StateReadOnly {
 			continue
 		}
-		if recState == v1alpha1.RecoveryStateBlocked {
+		if recState == v1beta1.RecoveryStateBlocked {
 			// Healthy threads do not prove the site holds nothing the
 			// primary lacks: #202's demoted site replicated normally with
 			// 221 extra transactions. Only a fresh containment proof clears
@@ -6405,7 +6435,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 			rec = &siteRecovery{}
 			tm.recovery[oldPrimary.name] = rec
 		}
-		rec.state = v1alpha1.RecoveryStateInProgress
+		rec.state = v1beta1.RecoveryStateInProgress
 		rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
 		rec.divergentGtid = ""
 		rec.divergentCount = 0
@@ -6421,13 +6451,13 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	count := divergent.TransactionCount()
 
 	tm.mu.RLock()
-	var prevState v1alpha1.SiteRecoveryState
+	var prevState v1beta1.SiteRecoveryState
 	var prevDivergentGtid string
 	if prev := tm.recovery[oldPrimary.name]; prev != nil {
 		prevState, prevDivergentGtid = prev.state, prev.divergentGtid
 	}
 	tm.mu.RUnlock()
-	sameReport := prevState == v1alpha1.RecoveryStateBlocked && prevDivergentGtid == divergent.String()
+	sameReport := prevState == v1beta1.RecoveryStateBlocked && prevDivergentGtid == divergent.String()
 	// The periodic re-verification confirms an unchanged report every
 	// recoveryRetryDelay; re-emitting the WARN each time would fill the log
 	// with duplicates of a fact already surfaced. Warn on new or changed
@@ -6452,7 +6482,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		rec = &siteRecovery{}
 		tm.recovery[oldPrimary.name] = rec
 	}
-	rec.state = v1alpha1.RecoveryStateBlocked
+	rec.state = v1beta1.RecoveryStateBlocked
 	rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
 	rec.divergentGtid = divergent.String()
 	rec.divergentCount = count

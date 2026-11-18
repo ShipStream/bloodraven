@@ -21,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
@@ -137,11 +137,11 @@ func standbyTestDescriptor() []byte {
 	return b
 }
 
-// newStandbyScheme returns a runtime.Scheme with v1alpha1 registered.
+// newStandbyScheme returns a runtime.Scheme with v1beta1 registered.
 func newStandbyScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(s); err != nil {
+	if err := v1beta1.AddToScheme(s); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	if err := corev1.AddToScheme(s); err != nil {
@@ -151,16 +151,16 @@ func newStandbyScheme(t *testing.T) *runtime.Scheme {
 }
 
 // minimalStandbyCR returns a MysqlStandbyCluster suitable for testing.
-func minimalStandbyCR(name, ns string) *v1alpha1.MysqlStandbyCluster {
-	return &v1alpha1.MysqlStandbyCluster{
+func minimalStandbyCR(name, ns string) *v1beta1.MysqlStandbyCluster {
+	return &v1beta1.MysqlStandbyCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 		},
-		Spec: v1alpha1.MysqlStandbyClusterSpec{
-			Transport: v1alpha1.StandbyTransportObjectStore,
-			Source: v1alpha1.StandbySource{
-				S3: v1alpha1.StandbyS3Source{
+		Spec: v1beta1.MysqlStandbyClusterSpec{
+			Transport: v1beta1.StandbyTransportObjectStore,
+			Source: v1beta1.StandbySource{
+				S3: v1beta1.StandbyS3Source{
 					Bucket: "my-bucket",
 					Prefix: "orders",
 					// No CredentialsSecret: tests bypass store construction
@@ -172,18 +172,18 @@ func minimalStandbyCR(name, ns string) *v1alpha1.MysqlStandbyCluster {
 }
 
 // discoveredDump is d.latestDump, or the zero dump when either is absent.
-func discoveredDump(d *v1alpha1.StandbyDiscovered) v1alpha1.StandbyDump {
+func discoveredDump(d *v1beta1.StandbyDiscovered) v1beta1.StandbyDump {
 	if d == nil || d.LatestDump == nil {
-		return v1alpha1.StandbyDump{}
+		return v1beta1.StandbyDump{}
 	}
 	return *d.LatestDump
 }
 
 // discoveredArchive is d.binlogArchive, or the zero archive when either is
 // absent.
-func discoveredArchive(d *v1alpha1.StandbyDiscovered) v1alpha1.StandbyBinlogArchive {
+func discoveredArchive(d *v1beta1.StandbyDiscovered) v1beta1.StandbyBinlogArchive {
 	if d == nil || d.BinlogArchive == nil {
-		return v1alpha1.StandbyBinlogArchive{}
+		return v1beta1.StandbyBinlogArchive{}
 	}
 	return *d.BinlogArchive
 }
@@ -193,7 +193,7 @@ func discoveredArchive(d *v1alpha1.StandbyDiscovered) v1alpha1.StandbyBinlogArch
 func newTestReconciler(t *testing.T, objs []client.Object, store sidecar.ArchiveStore) (*MysqlStandbyClusterReconciler, *record.FakeRecorder) {
 	t.Helper()
 	scheme := newStandbyScheme(t)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).WithObjects(objs...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlStandbyCluster{}).WithObjects(objs...).Build()
 	recorder := record.NewFakeRecorder(32)
 	r := &MysqlStandbyClusterReconciler{
 		Client:   fakeClient,
@@ -208,14 +208,14 @@ func newTestReconciler(t *testing.T, objs []client.Object, store sidecar.Archive
 
 // reconcileStandby runs one reconcile cycle and returns the refreshed CR.
 // It calls t.Fatal if the reconcile returns an error.
-func reconcileStandby(t *testing.T, r *MysqlStandbyClusterReconciler, name, ns string) (*v1alpha1.MysqlStandbyCluster, ctrl.Result) {
+func reconcileStandby(t *testing.T, r *MysqlStandbyClusterReconciler, name, ns string) (*v1beta1.MysqlStandbyCluster, ctrl.Result) {
 	t.Helper()
 	ctx := context.Background()
 	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
 	if err != nil {
 		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
-	var updated v1alpha1.MysqlStandbyCluster
+	var updated v1beta1.MysqlStandbyCluster
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &updated); err != nil {
 		t.Fatalf("get CR after reconcile: %v", err)
 	}
@@ -224,11 +224,11 @@ func reconcileStandby(t *testing.T, r *MysqlStandbyClusterReconciler, name, ns s
 
 // reconcileStandbyExpectingError runs one reconcile cycle and returns the error
 // along with the refreshed CR. Use this for tests that verify error-path behavior.
-func reconcileStandbyExpectingError(t *testing.T, r *MysqlStandbyClusterReconciler, name, ns string) (*v1alpha1.MysqlStandbyCluster, ctrl.Result, error) {
+func reconcileStandbyExpectingError(t *testing.T, r *MysqlStandbyClusterReconciler, name, ns string) (*v1beta1.MysqlStandbyCluster, ctrl.Result, error) {
 	t.Helper()
 	ctx := context.Background()
 	res, reconcileErr := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
-	var updated v1alpha1.MysqlStandbyCluster
+	var updated v1beta1.MysqlStandbyCluster
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &updated); err != nil {
 		// CR may not exist (NotFound path); return what we have.
 		return nil, res, reconcileErr
@@ -239,7 +239,7 @@ func reconcileStandbyExpectingError(t *testing.T, r *MysqlStandbyClusterReconcil
 // reconcileStandbyWithCtx runs one reconcile cycle under the supplied context
 // (so tests can impose a short deadline that the scan's derived timeouts
 // inherit) and returns the refreshed CR. It calls t.Fatal if reconcile errors.
-func reconcileStandbyWithCtx(t *testing.T, ctx context.Context, r *MysqlStandbyClusterReconciler, name, ns string) (*v1alpha1.MysqlStandbyCluster, ctrl.Result) {
+func reconcileStandbyWithCtx(t *testing.T, ctx context.Context, r *MysqlStandbyClusterReconciler, name, ns string) (*v1beta1.MysqlStandbyCluster, ctrl.Result) {
 	t.Helper()
 	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
 	if err != nil {
@@ -260,7 +260,7 @@ func reconcileStandbyWithCtx(t *testing.T, ctx context.Context, r *MysqlStandbyC
 	//     mapping without having to pump a real internal timeout. The status
 	//     patch below is therefore read with a fresh ctx, decoupled from the
 	//     deliberately-short scan ctx.
-	var updated v1alpha1.MysqlStandbyCluster
+	var updated v1beta1.MysqlStandbyCluster
 	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: ns}, &updated); err != nil {
 		t.Fatalf("get CR after reconcile: %v", err)
 	}
@@ -268,7 +268,7 @@ func reconcileStandbyWithCtx(t *testing.T, ctx context.Context, r *MysqlStandbyC
 }
 
 // standbyFindCondition returns the named condition, or nil when absent.
-func standbyFindCondition(cr *v1alpha1.MysqlStandbyCluster, condType string) *metav1.Condition {
+func standbyFindCondition(cr *v1beta1.MysqlStandbyCluster, condType string) *metav1.Condition {
 	for i := range cr.Status.Conditions {
 		if cr.Status.Conditions[i].Type == condType {
 			return &cr.Status.Conditions[i]
@@ -284,7 +284,7 @@ func standbyFindCondition(cr *v1alpha1.MysqlStandbyCluster, condType string) *me
 // Reason=ConfigError and is requeued.
 func TestMysqlStandbyCluster_UnsupportedTransport(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
-	cr.Spec.Transport = v1alpha1.StandbyTransport("Network")
+	cr.Spec.Transport = v1beta1.StandbyTransport("Network")
 
 	// The CRD enum admits only ObjectStore, but the fake client bypasses
 	// admission, so this exercises the reconciler's guard.
@@ -297,7 +297,7 @@ func TestMysqlStandbyCluster_UnsupportedTransport(t *testing.T) {
 		t.Error("want non-zero requeue interval, got 0")
 	}
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
 		return
@@ -309,7 +309,7 @@ func TestMysqlStandbyCluster_UnsupportedTransport(t *testing.T) {
 		t.Errorf("BucketReadable reason: want ConfigError, got %s", brc.Reason)
 	}
 
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil {
 		t.Fatal("SourceConfigKnown condition missing")
 		return
@@ -347,20 +347,20 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 	}
 
 	// BucketReadable=True.
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionTrue {
 		t.Errorf("BucketReadable: want True, got %v", brc)
 	}
 
 	// SourceConfigKnown=True.
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionTrue {
 		t.Errorf("SourceConfigKnown: want True, got %v", skc)
 	}
 
 	// Ready summarises the two (A-70).
-	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionTrue ||
-		ready.Reason != v1alpha1.ReasonSourceDiscovered || ready.ObservedGeneration != updated.Generation {
+	if ready := standbyFindCondition(updated, v1beta1.ConditionReady); ready == nil || ready.Status != metav1.ConditionTrue ||
+		ready.Reason != v1beta1.ReasonSourceDiscovered || ready.ObservedGeneration != updated.Generation {
 		t.Errorf("Ready: want True/SourceDiscovered at generation %d, got %v", updated.Generation, ready)
 	}
 
@@ -464,7 +464,7 @@ func TestMysqlStandbyCluster_ListError(t *testing.T) {
 
 	updated, _ := reconcileStandby(t, r, "test-sc", "default")
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionFalse {
 		t.Errorf("BucketReadable: want False, got %v", brc)
 	}
@@ -472,12 +472,12 @@ func TestMysqlStandbyCluster_ListError(t *testing.T) {
 		t.Errorf("Reason: want ListFailed, got %q", brc.Reason)
 	}
 	// SourceConfigKnown should also be False.
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse {
 		t.Errorf("SourceConfigKnown: want False, got %v", skc)
 	}
 	// Ready names BucketReadable's failure first.
-	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ListFailed" {
+	if ready := standbyFindCondition(updated, v1beta1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ListFailed" {
 		t.Errorf("Ready: want False/ListFailed, got %v", ready)
 	}
 	// Warning event emitted.
@@ -503,11 +503,11 @@ func TestMysqlStandbyCluster_NoDumpFound(t *testing.T) {
 
 	updated, _ := reconcileStandby(t, r, "test-sc", "default")
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionTrue {
 		t.Errorf("BucketReadable: want True (list succeeded), got %v", brc)
 	}
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse {
 		t.Errorf("SourceConfigKnown: want False, got %v", skc)
 	}
@@ -515,8 +515,8 @@ func TestMysqlStandbyCluster_NoDumpFound(t *testing.T) {
 		t.Errorf("Reason: want NoDumpFound, got %q", skc.Reason)
 	}
 	// Ready carries the first failing condition's reason.
-	if ready := standbyFindCondition(updated, v1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse ||
-		ready.Reason != v1alpha1.ReasonNoDumpFound || ready.Message != skc.Message {
+	if ready := standbyFindCondition(updated, v1beta1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse ||
+		ready.Reason != v1beta1.ReasonNoDumpFound || ready.Message != skc.Message {
 		t.Errorf("Ready: want False/NoDumpFound with SourceConfigKnown's message, got %v", ready)
 	}
 }
@@ -536,11 +536,11 @@ func TestMysqlStandbyCluster_NoBinlogManifests(t *testing.T) {
 
 	updated, _ := reconcileStandby(t, r, "test-sc", "default")
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionTrue {
 		t.Errorf("BucketReadable: want True, got %v", brc)
 	}
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse {
 		t.Errorf("SourceConfigKnown: want False, got %v", skc)
 	}
@@ -569,7 +569,7 @@ func TestMysqlStandbyCluster_NoBinlogManifests(t *testing.T) {
 func TestMysqlStandbyCluster_RequeueCadence(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	customInterval := 10 * time.Minute
-	cr.Spec.Freshness = &v1alpha1.StandbyFreshnessSpec{
+	cr.Spec.Freshness = &v1beta1.StandbyFreshnessSpec{
 		DiscoveryInterval: &metav1.Duration{Duration: customInterval},
 	}
 
@@ -751,15 +751,15 @@ func TestMysqlStandbyCluster_SlashBoundedPrefix(t *testing.T) {
 
 func TestMysqlStandbyCluster_DecryptionConfiguresPassphraseFile(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
-	cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{
-		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "secret"},
+	cr.Spec.Source.Decryption = &v1beta1.BackupDecryptionSpec{
+		PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "backup-passphrase", Key: "secret"},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-passphrase", Namespace: "default"},
 		Data:       map[string][]byte{"secret": []byte("correct horse battery staple")},
 	}
 	scheme := newStandbyScheme(t)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).WithObjects(cr, secret).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlStandbyCluster{}).WithObjects(cr, secret).Build()
 	store := &fakeStore{Objects: map[string][]byte{
 		"orders/orders-nightly/@.json":     []byte(`{"end":"2026-05-20T04:00:00Z"}`),
 		"orders/binlogs/archive.json":      standbyTestDescriptor(),
@@ -808,8 +808,8 @@ func TestMysqlStandbyCluster_Idempotent(t *testing.T) {
 	cr1, _ := reconcileStandby(t, r, "test-sc", "default")
 
 	// Record the condition timestamps from the first reconcile.
-	brc1 := standbyFindCondition(cr1, v1alpha1.StandbyConditionBucketReadable)
-	skc1 := standbyFindCondition(cr1, v1alpha1.StandbyConditionSourceConfigKnown)
+	brc1 := standbyFindCondition(cr1, v1beta1.StandbyConditionBucketReadable)
+	skc1 := standbyFindCondition(cr1, v1beta1.StandbyConditionSourceConfigKnown)
 	if brc1 == nil || skc1 == nil {
 		t.Fatal("conditions missing after first reconcile")
 		return
@@ -820,8 +820,8 @@ func TestMysqlStandbyCluster_Idempotent(t *testing.T) {
 	// Second reconcile with the same store state.
 	cr2, _ := reconcileStandby(t, r, "test-sc", "default")
 
-	brc2 := standbyFindCondition(cr2, v1alpha1.StandbyConditionBucketReadable)
-	skc2 := standbyFindCondition(cr2, v1alpha1.StandbyConditionSourceConfigKnown)
+	brc2 := standbyFindCondition(cr2, v1beta1.StandbyConditionBucketReadable)
+	skc2 := standbyFindCondition(cr2, v1beta1.StandbyConditionSourceConfigKnown)
 	if brc2 == nil || skc2 == nil {
 		t.Fatal("conditions missing after second reconcile")
 		return
@@ -845,7 +845,7 @@ func TestMysqlStandbyCluster_Idempotent(t *testing.T) {
 func TestMysqlStandbyCluster_StoreConstructionError(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 	scheme := newStandbyScheme(t)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).WithObjects(cr).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlStandbyCluster{}).WithObjects(cr).Build()
 	recorder := record.NewFakeRecorder(32)
 	r := &MysqlStandbyClusterReconciler{
 		Client:   fakeClient,
@@ -858,7 +858,7 @@ func TestMysqlStandbyCluster_StoreConstructionError(t *testing.T) {
 
 	updated, _ := reconcileStandby(t, r, "test-sc", "default")
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionFalse {
 		t.Errorf("BucketReadable: want False, got %v", brc)
 	}
@@ -957,7 +957,7 @@ func TestMysqlStandbyCluster_DumpMetaCachePrunedWhenDumpRemoved(t *testing.T) {
 // degenerates to 0 and silently stops the discovery loop.
 func TestMysqlStandbyCluster_DiscoveryIntervalClampedToFloor(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
-	cr.Spec.Freshness = &v1alpha1.StandbyFreshnessSpec{
+	cr.Spec.Freshness = &v1beta1.StandbyFreshnessSpec{
 		DiscoveryInterval: &metav1.Duration{Duration: time.Second}, // below the 30s floor
 	}
 	store := &fakeStore{Objects: map[string][]byte{}}
@@ -1058,7 +1058,7 @@ func TestMysqlStandbyCluster_ColdStartManyDumpsCorrect(t *testing.T) {
 	if discoveredDump(d).GtidExecuted != wantNewestGtid {
 		t.Errorf("latestDump.gtidExecuted: want %q, got %q", wantNewestGtid, discoveredDump(d).GtidExecuted)
 	}
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionTrue || skc.Reason != "DumpFound" {
 		t.Errorf("SourceConfigKnown: want True/DumpFound, got %v", skc)
 	}
@@ -1107,11 +1107,11 @@ func TestMysqlStandbyCluster_DeadlineDuringReads(t *testing.T) {
 	defer cancel()
 	updated, _ := reconcileStandbyWithCtx(t, ctx, r, "test-sc", "default")
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionTrue || brc.Reason != "ListSucceeded" {
 		t.Errorf("BucketReadable: want True/ListSucceeded (List succeeded), got %v", brc)
 	}
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse || skc.Reason != "ScanIncomplete" {
 		t.Errorf("SourceConfigKnown: want False/ScanIncomplete, got %v", skc)
 	}
@@ -1178,11 +1178,11 @@ func TestMysqlStandbyCluster_DeadlineDuringManifestLoop(t *testing.T) {
 			"the manifest must be the only blocking Get", got)
 	}
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionTrue || brc.Reason != "ListSucceeded" {
 		t.Errorf("BucketReadable: want True/ListSucceeded (List succeeded), got %v", brc)
 	}
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse || skc.Reason != "ScanIncomplete" {
 		t.Fatalf("SourceConfigKnown: want False/ScanIncomplete, got %v", skc)
 	}
@@ -1243,11 +1243,11 @@ func TestMysqlStandbyCluster_DeadlineDuringList(t *testing.T) {
 	defer cancel()
 	updated, _ := reconcileStandbyWithCtx(t, ctx, r, "test-sc", "default")
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionFalse || brc.Reason != "ScanIncomplete" {
 		t.Errorf("BucketReadable: want False/ScanIncomplete (deadline during List), got %v", brc)
 	}
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse || skc.Reason != "ScanIncomplete" {
 		t.Errorf("SourceConfigKnown: want False/ScanIncomplete, got %v", skc)
 	}
@@ -1289,12 +1289,12 @@ func TestMysqlStandbyCluster_AllCandidatesMalformed(t *testing.T) {
 	updated, _ := reconcileStandby(t, r, "test-sc", "default")
 
 	// List succeeded, so BucketReadable stays True.
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionTrue || brc.Reason != "ListSucceeded" {
 		t.Errorf("BucketReadable: want True/ListSucceeded, got %v", brc)
 	}
 	// Malformed (non-ctx) metadata ⇒ MetadataUnreadable, NOT ScanIncomplete.
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse || skc.Reason != "MetadataUnreadable" {
 		t.Fatalf("SourceConfigKnown: want False/MetadataUnreadable (malformed, not a deadline), got %v", skc)
 	}
@@ -1350,7 +1350,7 @@ func TestMysqlStandbyCluster_TwoCRPruneIsolation(t *testing.T) {
 
 	scheme := newStandbyScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).
+		WithStatusSubresource(&v1beta1.MysqlStandbyCluster{}).
 		WithObjects(west, east).Build()
 	r := &MysqlStandbyClusterReconciler{
 		Client:   fakeClient,

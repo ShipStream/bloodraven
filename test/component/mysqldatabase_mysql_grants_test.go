@@ -10,7 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // BLOODRAVEN_TENANT_TEST_ADDR must point at a disposable MySQL server with
@@ -66,12 +66,12 @@ func TestMysqlDatabaseGlobalGrantsMySQL(t *testing.T) {
 				exec("DROP DATABASE IF EXISTS `acme_wms`")
 				exec("DROP USER IF EXISTS 'acme_app'@'%', 'operator'@'%', 'cdc'@'%'")
 			})
-			cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+			cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
 				if lowerCaseNames != 0 {
 					m.Spec.DatabaseName = "Acme_Wms"
 				}
-				m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: username, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+				m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: username, Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 			})
 			h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 			h.r.OpenDB = func(user, password, _, _ string) (*sql.DB, error) { return connect(user, password) }
@@ -101,7 +101,7 @@ func TestMysqlDatabaseGlobalGrantsMySQL(t *testing.T) {
 			assertAccess("initial apply")
 			if username == "cdc" {
 				exec("REVOKE IF EXISTS SELECT, INSERT ON `acme\\_wms`.* FROM 'cdc'@'%'")
-				h.update(func(m *v1alpha1.MysqlDatabase) {})
+				h.update(func(m *v1beta1.MysqlDatabase) {})
 				h.reconcile()
 				h.requireReady()
 				assertAccess("legacy escaped restriction repair")
@@ -111,7 +111,7 @@ func TestMysqlDatabaseGlobalGrantsMySQL(t *testing.T) {
 				// A real-schema restriction has no provenance. Preserve INSERT
 				// outside the desired SELECT until its privilege owner lifts it.
 				exec("REVOKE INSERT ON `acme_wms`.* FROM 'cdc'@'%'")
-				h.update(func(m *v1alpha1.MysqlDatabase) {})
+				h.update(func(m *v1beta1.MysqlDatabase) {})
 				h.reconcile()
 				h.requireReady()
 				var restrictions int
@@ -122,7 +122,7 @@ func TestMysqlDatabaseGlobalGrantsMySQL(t *testing.T) {
 			}
 			if username == "operator" {
 				exec("REVOKE IF EXISTS SELECT ON `acme\\_wms`.* FROM 'operator'@'%'")
-				h.update(func(m *v1alpha1.MysqlDatabase) {})
+				h.update(func(m *v1beta1.MysqlDatabase) {})
 				h.reconcile()
 				h.requireReady()
 				if !h.sawEvent("TenantPrivilegeRestriction") {
@@ -135,19 +135,19 @@ func TestMysqlDatabaseGlobalGrantsMySQL(t *testing.T) {
 			// Force a second apply, including redundant global/schema privileges
 			// and routine DDL outside the CR's desired privilege allowlist.
 			exec("GRANT DELETE, CREATE ROUTINE, ALTER ROUTINE ON `acme_wms`.* TO '" + username + "'@'%'")
-			h.update(func(m *v1alpha1.MysqlDatabase) {})
+			h.update(func(m *v1beta1.MysqlDatabase) {})
 			h.reconcile()
 			h.requireReady()
 			assertAccess("narrowing")
-			h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Grants = nil })
+			h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Grants = nil })
 			h.reconcile()
 			h.requireReady()
 			assertAccess("removal")
-			h.update(func(m *v1alpha1.MysqlDatabase) {})
+			h.update(func(m *v1beta1.MysqlDatabase) {})
 			h.reconcile()
 			assertAccess("removal retry")
-			h.update(func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: username, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+			h.update(func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: username, Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 			})
 			h.reconcile()
 			h.requireReady()
@@ -157,7 +157,7 @@ func TestMysqlDatabaseGlobalGrantsMySQL(t *testing.T) {
 			}
 			h.delete()
 			h.reconcile()
-			var out v1alpha1.MysqlDatabase
+			var out v1beta1.MysqlDatabase
 			if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}, &out); !apierrors.IsNotFound(err) {
 				t.Fatalf("delete did not release finalizer: %v (%+v)", err, out.Status)
 			}

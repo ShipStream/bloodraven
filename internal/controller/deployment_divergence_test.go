@@ -8,7 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -22,45 +22,45 @@ import (
 // otherwise hide.
 func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 	count := int64(221)
-	block := func(fg *v1alpha1.MysqlFailoverGroup, site int, detectedBy v1alpha1.DivergenceDetector) {
+	block := func(fg *v1beta1.MysqlFailoverGroup, site int, detectedBy v1beta1.DivergenceDetector) {
 		s := &fg.Status.Sites[site]
-		s.RecoveryState = v1alpha1.RecoveryStateBlocked
+		s.RecoveryState = v1beta1.RecoveryStateBlocked
 		s.DivergentGtid = issue202ErrantGTID
 		s.DivergentTransactionCount = &count
 		s.DivergenceDetectedBy = detectedBy
 		s.DivergenceComparedTo = "iad"
 	}
-	conditions := func(fg *v1alpha1.MysqlFailoverGroup) {
+	conditions := func(fg *v1beta1.MysqlFailoverGroup) {
 		fg.Status.Conditions = append(fg.Status.Conditions,
 			metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()},
 			metav1.Condition{Type: "RecoveryPending", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()})
 	}
 	for _, tc := range []struct {
 		name   string
-		change func(*v1alpha1.MysqlFailoverGroup)
+		change func(*v1beta1.MysqlFailoverGroup)
 		stable bool
 	}{
-		{"replica audit block on a replicating follower", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"replica audit block on a replicating follower", func(fg *v1beta1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByAudit)
 			conditions(fg)
 		}, true},
-		{"old primary block", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"old primary block", func(fg *v1beta1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByRecovery)
 			conditions(fg)
 		}, false},
-		{"block restored without provenance (CRD not updated)", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"block restored without provenance (CRD not updated)", func(fg *v1beta1.MysqlFailoverGroup) {
 			block(fg, 1, "")
 			conditions(fg)
 		}, false},
-		{"replica audit block on a replica that is not replicating", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"replica audit block on a replica that is not replicating", func(fg *v1beta1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByAudit)
 			conditions(fg)
-			fg.Status.Sites[1].Replication = v1alpha1.SiteReplicationBroken
+			fg.Status.Sites[1].Replication = v1beta1.SiteReplicationBroken
 		}, false},
-		{"replica audit block alongside recovery in progress", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"replica audit block alongside recovery in progress", func(fg *v1beta1.MysqlFailoverGroup) {
 			block(fg, 1, divergenceDetectedByAudit)
 			conditions(fg)
-			fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, RecoveryState: v1alpha1.RecoveryStateInProgress})
+			fg.Status.Sites = append(fg.Status.Sites, v1beta1.SiteStatus{Name: "ord", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, RecoveryState: v1beta1.RecoveryStateInProgress})
 			fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 			fg.Spec.Sites[2].Name = "ord"
 		}, false},
@@ -95,21 +95,21 @@ func TestDeploymentUnstableReason_ReplicaAuditDivergence(t *testing.T) {
 func TestDeploymentUnstableReason_NamesTheGatingRecoveryState(t *testing.T) {
 	m, fg, _ := deploymentLeaseFixture(t)
 	count := int64(221)
-	fg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateBlocked
+	fg.Status.Sites[1].RecoveryState = v1beta1.RecoveryStateBlocked
 	fg.Status.Sites[1].DivergentGtid = issue202ErrantGTID
 	fg.Status.Sites[1].DivergentTransactionCount = &count
 	fg.Status.Sites[1].DivergenceDetectedBy = divergenceDetectedByAudit
 	fg.Spec.Sites = append(fg.Spec.Sites, fg.Spec.Sites[1])
 	fg.Spec.Sites[2].Name = "ord"
-	fg.Status.Sites = append(fg.Status.Sites, v1alpha1.SiteStatus{Name: "ord", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy, RecoveryState: v1alpha1.RecoveryStateInProgress})
+	fg.Status.Sites = append(fg.Status.Sites, v1beta1.SiteStatus{Name: "ord", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy, RecoveryState: v1beta1.RecoveryStateInProgress})
 	fg.Status.Conditions = append(fg.Status.Conditions,
 		metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()},
 		metav1.Condition{Type: "RecoveryPending", Status: metav1.ConditionTrue, Reason: "DivergentTransactions", LastTransitionTime: metav1.Now()})
 	if err := m.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if got := DeploymentUnstableReason(fg); got != string(v1alpha1.RecoveryStateInProgress) {
-		t.Fatalf("DeploymentUnstableReason = %q, want %q (the site whose recovery gates)", got, v1alpha1.RecoveryStateInProgress)
+	if got := DeploymentUnstableReason(fg); got != string(v1beta1.RecoveryStateInProgress) {
+		t.Fatalf("DeploymentUnstableReason = %q, want %q (the site whose recovery gates)", got, v1beta1.RecoveryStateInProgress)
 	}
 }
 
@@ -143,7 +143,7 @@ func TestDeploymentGate_OldPrimaryBlockSurvivesReattachAndAudit(t *testing.T) {
 		clk.Advance(time.Second)
 		tm.Poll(context.Background())
 	}
-	if rec := recoveryOf(tm, "pdx"); rec.state != v1alpha1.RecoveryStateBlocked || rec.detectedBy != divergenceDetectedByRecovery {
+	if rec := recoveryOf(tm, "pdx"); rec.state != v1beta1.RecoveryStateBlocked || rec.detectedBy != divergenceDetectedByRecovery {
 		t.Fatalf("setup: recovery = %+v, want an OldPrimaryRecovery block", rec)
 	}
 
@@ -161,7 +161,7 @@ func TestDeploymentGate_OldPrimaryBlockSurvivesReattachAndAudit(t *testing.T) {
 		t.Fatal("setup: the audit never compared the reattached site")
 	}
 	rec := recoveryOf(tm, "pdx")
-	if rec.state != v1alpha1.RecoveryStateBlocked || rec.divergentCount != 221 {
+	if rec.state != v1beta1.RecoveryStateBlocked || rec.divergentCount != 221 {
 		t.Fatalf("recovery = %+v, want the block kept", rec)
 	}
 	if rec.detectedBy != divergenceDetectedByRecovery {
@@ -169,7 +169,7 @@ func TestDeploymentGate_OldPrimaryBlockSurvivesReattachAndAudit(t *testing.T) {
 	}
 
 	// 4. The published status still refuses leases.
-	fresh := &v1alpha1.MysqlFailoverGroup{}
+	fresh := &v1beta1.MysqlFailoverGroup{}
 	if err := m.client.Get(context.Background(), nn, fresh); err != nil {
 		t.Fatal(err)
 	}

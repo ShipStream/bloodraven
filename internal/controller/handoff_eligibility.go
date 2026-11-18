@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // handoffBlock says why a standby must not receive an ordered-update
@@ -33,7 +33,7 @@ func (tm *TopologyManager) handoffBlockLocked(site string) handoffBlock {
 		ownLost:        tm.ownLossLocked(site),
 		ownLostRemedy:  tm.ownLossPromotionRemedyLocked(site),
 	}
-	if rec := tm.recovery[site]; rec != nil && rec.state == v1alpha1.RecoveryStateBlocked {
+	if rec := tm.recovery[site]; rec != nil && rec.state == v1beta1.RecoveryStateBlocked {
 		b.divergence = *rec
 	}
 	return b
@@ -47,7 +47,7 @@ func (b handoffBlock) err(site string) error {
 		return fmt.Errorf("%s pending post-restore reclone; wait for status.restoreReclones to drain", site)
 	case b.ownLost:
 		return fmt.Errorf("%s lacks transactions it issued itself (status.sites[].lostGtid) and would issue their GTIDs again; %s", site, b.ownLostRemedy)
-	case b.divergence.state == v1alpha1.RecoveryStateBlocked:
+	case b.divergence.state == v1beta1.RecoveryStateBlocked:
 		return errors.New(divergentStandbyMessage(UpdateTarget{Name: site, DivergentTransactions: b.divergence.divergentCount}))
 	}
 	return nil

@@ -57,10 +57,27 @@ func TestCommandsAcceptTrailingFlags(t *testing.T) {
 		{"backup", "orders", "--profile", "nightly", "-n", "orders", "--kubeconfig", kc},
 		{"verify-backup", "orders", "--profile", "nightly", "-n", "orders", "--kubeconfig", kc},
 		{"status", "orders", "-n", "orders", "--kubeconfig", kc},
+		{"migrate-storage", "--kubeconfig", kc},
+		{"migrate-storage", "--dry-run", "--kubeconfig", kc},
 	} {
 		err := run(args, devnull, devnull)
 		if err == nil || strings.Contains(err.Error(), "positional") || !strings.Contains(err.Error(), "kubeconfig") {
 			t.Errorf("run(%q) = %v; want a kubeconfig load error", args, err)
 		}
+	}
+}
+
+// migrate-storage works on every namespace and takes no group: an argument
+// is a mistake (a group name copied from another command), refused before
+// anything is read.
+func TestMigrateStorageTakesNoArguments(t *testing.T) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	err = run([]string{"migrate-storage", "orders", "--kubeconfig", filepath.Join(t.TempDir(), "missing-kubeconfig")}, devnull, devnull)
+	if err == nil || !strings.Contains(err.Error(), "takes no arguments") {
+		t.Fatalf("run = %v, want the argument refused", err)
 	}
 }

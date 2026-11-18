@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
@@ -35,13 +35,13 @@ var (
 // cleanupJobInputs bundles the resolved inputs needed to render the
 // artifact-cleanup Job attached to a MysqlBackup's finalizer.
 type cleanupJobInputs struct {
-	FailoverGroup *v1alpha1.MysqlFailoverGroup
-	Profile       *v1alpha1.BackupProfile
-	Backup        *v1alpha1.MysqlBackup
+	FailoverGroup *v1beta1.MysqlFailoverGroup
+	Profile       *v1beta1.BackupProfile
+	Backup        *v1beta1.MysqlBackup
 	// Storage is the immutable destination; nil falls back to
 	// Backup.Status.ArtifactStorage. The live profile only supplies
 	// credentials.
-	Storage *v1alpha1.BackupArtifactStorage
+	Storage *v1beta1.BackupArtifactStorage
 	// Abandoned cleans up after a backup that never succeeded: the
 	// location is the planned one (Storage.Location), and the Job deletes
 	// only when the backup stamp there names Backup.UID.
@@ -89,15 +89,15 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 	}
 
 	labels := map[string]string{
-		labelAppName:                "mysql-backup",
-		labelInstance:               fg.Name,
-		v1alpha1.FailoverGroupLabel: fg.Name,
-		v1alpha1.MysqlBackupLabel:   backup.Name,
-		labelManagedBy:              managerName,
-		v1alpha1.ResourceLabel:      "backup-cleanup",
+		labelAppName:               "mysql-backup",
+		labelInstance:              fg.Name,
+		v1beta1.FailoverGroupLabel: fg.Name,
+		v1beta1.MysqlBackupLabel:   backup.Name,
+		labelManagedBy:             managerName,
+		v1beta1.ResourceLabel:      "backup-cleanup",
 	}
 	if profile != nil {
-		labels[v1alpha1.BackupProfileLabel] = profile.Name
+		labels[v1beta1.BackupProfileLabel] = profile.Name
 	}
 
 	// Recorded values are already resolved paths; escape them so kubelet's
@@ -124,7 +124,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 	}
 
 	switch storageType {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		if storage.Bucket == "" {
 			return nil, fmt.Errorf("cleanup job: %w: no bucket", errCleanupDestinationNotStored)
 		}
@@ -154,7 +154,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 			ReadOnly:  true,
 		})
 
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		if storage.ClaimName == "" {
 			return nil, fmt.Errorf("cleanup job: %w: no claim", errCleanupDestinationNotStored)
 		}
@@ -186,7 +186,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 	})
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "tmp", MountPath: tmpMountPath})
 
-	var bspec *v1alpha1.BackupSpec
+	var bspec *v1beta1.BackupSpec
 	if fg.Spec.Backup != nil {
 		bspec = fg.Spec.Backup
 	}
@@ -271,7 +271,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 // Job actually used, with kubelet's env expansion applied. It is the single
 // source for status.artifactStorage, both at Job creation and when an
 // older backup without a snapshot is deleted.
-func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, error) {
+func artifactStorageFromJob(job *batchv1.Job) (*v1beta1.BackupArtifactStorage, error) {
 	c := backupJobMainContainer(job)
 	if c == nil {
 		return nil, fmt.Errorf("backup Job has no dump or uploader container")
@@ -301,9 +301,9 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 	if err != nil {
 		return nil, fmt.Errorf("artifact location: %w", err)
 	}
-	storage := &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value), Location: location}
+	storage := &v1beta1.BackupArtifactStorage{Type: v1beta1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value), Location: location}
 	switch storage.Type {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		var err error
 		if storage.Bucket, err = value("BLOODRAVEN_S3_BUCKET", true); err != nil {
 			return nil, err
@@ -317,7 +317,7 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 		if storage.Region, err = value("AWS_REGION", false); err != nil {
 			return nil, err
 		}
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		for _, vol := range job.Spec.Template.Spec.Volumes {
 			if vol.Name == "backups" && vol.PersistentVolumeClaim != nil {
 				storage.ClaimName = vol.PersistentVolumeClaim.ClaimName
@@ -335,14 +335,14 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 
 // backupJobPassphrase returns the passphrase Secret key a backup Job
 // mounts, or nil for a plaintext Job.
-func backupJobPassphrase(job *batchv1.Job) *v1alpha1.SecretKeyRef {
+func backupJobPassphrase(job *batchv1.Job) *v1beta1.SecretKeyRef {
 	for _, vol := range job.Spec.Template.Spec.Volumes {
 		if vol.Name != "backup-passphrase" || vol.Secret == nil || vol.Secret.SecretName == "" {
 			continue
 		}
 		for _, item := range vol.Secret.Items {
 			if item.Path == backupPassphraseFileName && item.Key != "" {
-				return &v1alpha1.SecretKeyRef{Name: vol.Secret.SecretName, Key: item.Key}
+				return &v1beta1.SecretKeyRef{Name: vol.Secret.SecretName, Key: item.Key}
 			}
 		}
 	}
@@ -354,7 +354,7 @@ func backupJobPassphrase(job *batchv1.Job) *v1alpha1.SecretKeyRef {
 // it must end in the backup's name, lie in the recorded bucket or under the
 // PVC mount, and equal the producing Job's destination. producer is the
 // backup's own Job, or nil when it is gone.
-func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
+func artifactIdentityProblem(backup *v1beta1.MysqlBackup, storage *v1beta1.BackupArtifactStorage, producer *batchv1.Job) string {
 	location := storage.Location
 	if location == "" {
 		return "no recorded artifact location"
@@ -363,11 +363,11 @@ func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.Bac
 		return fmt.Sprintf("location %q does not end in the backup name %q", location, backup.Name)
 	}
 	switch storage.Type {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		if bucket, _, inBucket := backupmeta.SplitS3Location(location); inBucket && bucket != storage.Bucket {
 			return fmt.Sprintf("location bucket %q differs from the recorded bucket %q", bucket, storage.Bucket)
 		}
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		if !strings.HasPrefix(location, backupPVCMountPath+"/") {
 			return fmt.Sprintf("location %q is not under %s", location, backupPVCMountPath)
 		}
@@ -382,7 +382,7 @@ func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.Bac
 // Job built from an edited profile writes elsewhere while
 // status.artifactStorage, which cannot change once recorded, still names
 // the first Job's destination. producer is nil when the Job is gone.
-func producerStorageProblem(storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
+func producerStorageProblem(storage *v1beta1.BackupArtifactStorage, producer *batchv1.Job) string {
 	if producer == nil {
 		return ""
 	}
@@ -404,7 +404,7 @@ func producerStorageProblem(storage *v1alpha1.BackupArtifactStorage, producer *b
 
 // describeArtifactStorage spells the identity of a destination for a
 // message: what producerStorageProblem compares, never a credential.
-func describeArtifactStorage(storage *v1alpha1.BackupArtifactStorage) string {
+func describeArtifactStorage(storage *v1beta1.BackupArtifactStorage) string {
 	parts := []string{"type=" + string(storage.Type), fmt.Sprintf("location=%q", storage.Location)}
 	for _, field := range []struct{ name, value string }{
 		{"bucket", storage.Bucket}, {"endpointURL", storage.EndpointURL},
@@ -497,13 +497,13 @@ func cleanupPodVerdict(pod *corev1.Pod) (exitCode int32, message string, termina
 // recorded in status.artifactStorage. Restores, verifications, dump-meta
 // and cleanup read the artifact there, never at the live profile's
 // destination; only credentials come from the profile.
-func recordedArtifactStorage(backup *v1alpha1.MysqlBackup) (*v1alpha1.BackupArtifactStorage, error) {
+func recordedArtifactStorage(backup *v1beta1.MysqlBackup) (*v1beta1.BackupArtifactStorage, error) {
 	storage := backup.Status.ArtifactStorage
 	if storage == nil || storage.Location == "" {
 		return nil, fmt.Errorf("backup %q records no artifact destination (status.artifactStorage.location)", backup.Name)
 	}
 	switch storage.Type {
-	case v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStorageS3, v1beta1.BackupStoragePVC:
 		return storage, nil
 	default:
 		return nil, fmt.Errorf("backup %q records an unknown storage type %q", backup.Name, storage.Type)

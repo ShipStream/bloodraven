@@ -13,7 +13,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -43,7 +43,7 @@ func drainEventReasons(rec *record.FakeRecorder) []string {
 func TestReconcile_RefusesDeploymentWithForeignSelector(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	name := resourceName(fg.Name, "dc1")
 	old := map[string]string{labelAppName: "mysql", labelInstance: fg.Name, "shipstream.io/site": "dc1"}
 	foreign := &appsv1.Deployment{
@@ -84,7 +84,7 @@ func TestReconcile_RefusesDeploymentWithForeignSelector(t *testing.T) {
 		}
 		n := 0
 		for _, e := range events {
-			if e == v1alpha1.EventWorkloadSelectorMismatch {
+			if e == v1beta1.EventWorkloadSelectorMismatch {
 				n++
 			}
 		}
@@ -104,20 +104,20 @@ func TestReconcile_RefusesDeploymentWithForeignSelector(t *testing.T) {
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 		},
-		DegradedReason: v1alpha1.ReasonHealthy,
+		DegradedReason: v1beta1.ReasonHealthy,
 	}
 	degraded := func() *metav1.Condition {
 		t.Helper()
 		if err := r.Runner.updateCRStatus(ctx, nn, snap); err != nil {
 			t.Fatal(err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
-		return apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionDegraded)
+		return apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionDegraded)
 	}
-	if d := degraded(); d == nil || d.Status != metav1.ConditionTrue || d.Reason != v1alpha1.ReasonWorkloadSelectorMismatch ||
+	if d := degraded(); d == nil || d.Status != metav1.ConditionTrue || d.Reason != v1beta1.ReasonWorkloadSelectorMismatch ||
 		!strings.Contains(d.Message, "Deployment "+name) || !strings.Contains(d.Message, "shipstream.io/site=dc1") {
 		t.Fatalf("Degraded = %+v, want True/WorkloadSelectorMismatch naming %s", d, name)
 	}
@@ -132,10 +132,10 @@ func TestReconcile_RefusesDeploymentWithForeignSelector(t *testing.T) {
 	if err := c.Get(ctx, key, &recreated); err != nil {
 		t.Fatalf("Deployment not re-created: %v", err)
 	}
-	if recreated.Spec.Selector.MatchLabels[v1alpha1.SiteLabel] != "dc1" {
+	if recreated.Spec.Selector.MatchLabels[v1beta1.SiteLabel] != "dc1" {
 		t.Fatalf("re-created selector = %v", recreated.Spec.Selector)
 	}
-	if d := degraded(); d == nil || d.Reason == v1alpha1.ReasonWorkloadSelectorMismatch {
+	if d := degraded(); d == nil || d.Reason == v1beta1.ReasonWorkloadSelectorMismatch {
 		t.Fatalf("Degraded = %+v after the object was re-created", d)
 	}
 }

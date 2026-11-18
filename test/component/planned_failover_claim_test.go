@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/dst"
@@ -243,23 +243,23 @@ func (g *pfRegistry) LeaderContext() context.Context                         { r
 type pfSink struct {
 	mu        sync.Mutex
 	events    []string
-	terminals []v1alpha1.PlannedFailoverStatus
+	terminals []v1beta1.PlannedFailoverStatus
 }
 
-func (s *pfSink) Event(_ *v1alpha1.MysqlFailoverGroup, eventType, reason, message string) {
+func (s *pfSink) Event(_ *v1beta1.MysqlFailoverGroup, eventType, reason, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, eventType+"/"+reason+": "+message)
 }
 
-func (s *pfSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
+func (s *pfSink) RunTerminal(_ types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.terminals = append(s.terminals, *pf.DeepCopy())
 }
 
-func (s *pfSink) LagWaitObserved(types.NamespacedName, string, time.Duration)        {}
-func (s *pfSink) Deferred(types.NamespacedName, v1alpha1.PlannedFailoverDeferReason) {}
+func (s *pfSink) LagWaitObserved(types.NamespacedName, string, time.Duration)       {}
+func (s *pfSink) Deferred(types.NamespacedName, v1beta1.PlannedFailoverDeferReason) {}
 
 func (s *pfSink) reasons() []string {
 	s.mu.Lock()
@@ -339,12 +339,12 @@ func newPFHarness(t *testing.T, o pfOpts) *pfHarness {
 		h.uc.SetTickIntervalForTest(5 * time.Millisecond)
 	}
 
-	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: h.nn.Namespace, Name: h.nn.Name}}
+	obj := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: h.nn.Namespace, Name: h.nn.Name}}
 	for i, s := range sites {
-		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: s.Name, ServerID: int64(101 + i), Role: controller.APISiteRole(s.Role)})
+		obj.Spec.Sites = append(obj.Spec.Sites, v1beta1.SiteSpec{Name: s.Name, ServerID: int64(101 + i), Role: controller.APISiteRole(s.Role)})
 	}
 	obj.Spec.FailoverCooldown = &metav1.Duration{Duration: o.cooldown}
-	obj.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
+	obj.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{
 		MaxLagWait: &metav1.Duration{Duration: 20 * time.Second}, DrainTimeout: &metav1.Duration{Duration: 3 * time.Second}}
 	h.store = dst.NewPlannedStore(obj, h.clk)
 	h.newProcess()
@@ -400,18 +400,18 @@ func (h *pfHarness) wiring(slot *controller.PlannedClaimSlot) controller.Manager
 }
 
 // pfOwnsSites mirrors plannedFailoverOwnsSites (unexported).
-func pfOwnsSites(obj *v1alpha1.MysqlFailoverGroup) bool {
+func pfOwnsSites(obj *v1beta1.MysqlFailoverGroup) bool {
 	pf := obj.Status.PlannedFailover
 	if pf == nil || pf.RunID == "" || pf.Result != nil {
 		return false
 	}
-	if m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && m.RunID == pf.RunID {
+	if m, ok := controller.ParseTerminalMarker(obj.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]); ok && m.RunID == pf.RunID {
 		return false
 	}
 	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhaseFencing, v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting, v1alpha1.PlannedFailoverPhaseRollingBack:
+	case v1beta1.PlannedFailoverPhaseFencing, v1beta1.PlannedFailoverPhaseDraining, v1beta1.PlannedFailoverPhaseWaitingForLag,
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync, v1beta1.PlannedFailoverPhasePromotingDragonfly,
+		v1beta1.PlannedFailoverPhasePromoting, v1beta1.PlannedFailoverPhaseRollingBack:
 		return true
 	}
 	return false
@@ -483,7 +483,7 @@ func (h *pfHarness) pass() time.Duration {
 // request annotates the group with a planned failover to target.
 func (h *pfHarness) request(target string) { h.store.SetRequest(target) }
 
-func (h *pfHarness) pf() *v1alpha1.PlannedFailoverStatus {
+func (h *pfHarness) pf() *v1beta1.PlannedFailoverStatus {
 	if obj := h.store.Object(); obj != nil && obj.Status.PlannedFailover != nil {
 		return obj.Status.PlannedFailover.DeepCopy()
 	}
@@ -491,7 +491,7 @@ func (h *pfHarness) pf() *v1alpha1.PlannedFailoverStatus {
 }
 
 // runUntil alternates ticks and passes until done(pf) or max iterations.
-func (h *pfHarness) runUntil(max int, done func(*v1alpha1.PlannedFailoverStatus) bool) *v1alpha1.PlannedFailoverStatus {
+func (h *pfHarness) runUntil(max int, done func(*v1beta1.PlannedFailoverStatus) bool) *v1beta1.PlannedFailoverStatus {
 	h.t.Helper()
 	for range max {
 		h.pass()
@@ -505,16 +505,16 @@ func (h *pfHarness) runUntil(max int, done func(*v1alpha1.PlannedFailoverStatus)
 	return nil
 }
 
-func inPhase(phases ...v1alpha1.PlannedFailoverPhase) func(*v1alpha1.PlannedFailoverStatus) bool {
-	return func(pf *v1alpha1.PlannedFailoverStatus) bool { return slices.Contains(phases, pf.Phase) }
+func inPhase(phases ...v1beta1.PlannedFailoverPhase) func(*v1beta1.PlannedFailoverStatus) bool {
+	return func(pf *v1beta1.PlannedFailoverStatus) bool { return slices.Contains(phases, pf.Phase) }
 }
 
-func terminal(pf *v1alpha1.PlannedFailoverStatus) bool { return pf.Result != nil }
+func terminal(pf *v1beta1.PlannedFailoverStatus) bool { return pf.Result != nil }
 
 // held is the slot's claim.
 func (h *pfHarness) held() (string, bool, bool) { return h.reg.slot.HeldForSim() }
 
-func (h *pfHarness) wantOutcome(pf *v1alpha1.PlannedFailoverStatus, o v1alpha1.PlannedFailoverOutcome, r v1alpha1.PlannedFailoverReason) {
+func (h *pfHarness) wantOutcome(pf *v1beta1.PlannedFailoverStatus, o v1beta1.PlannedFailoverOutcome, r v1beta1.PlannedFailoverReason) {
 	h.t.Helper()
 	if pf.Result == nil || pf.Result.Outcome != o || (r != "" && pf.Result.Reason != r) {
 		h.t.Fatalf("result %+v, want %s/%s; message %q", pf.Result, o, r, pf.Message)
@@ -529,7 +529,7 @@ func TestPF_HappyPath_TwoSite(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
 	pf := h.runUntil(60, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if h.tgt.isReadOnly() || !h.src.isSuperReadOnly() {
 		t.Fatalf("after Succeeded: dc2 read-only=%v, dc1 fenced=%v", h.tgt.isReadOnly(), h.src.isSuperReadOnly())
 	}
@@ -573,9 +573,9 @@ func (h *pfHarness) passBlocked(b *blockedCall, during func()) time.Duration {
 
 // runToPromotingIntent runs until the Promoting intent is durable; the
 // pass that writes it sends no promotion statement (the next one does).
-func (h *pfHarness) runToPromotingIntent() *v1alpha1.PlannedFailoverStatus {
+func (h *pfHarness) runToPromotingIntent() *v1beta1.PlannedFailoverStatus {
 	h.t.Helper()
-	pf := h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+	pf := h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhasePromoting))
 	if got := h.tgt.statements(); len(got) != 0 {
 		h.t.Fatalf("setup: target got %v before the Promoting intent settled", got)
 	}
@@ -584,7 +584,7 @@ func (h *pfHarness) runToPromotingIntent() *v1alpha1.PlannedFailoverStatus {
 
 func (h *pfHarness) holdCondition() bool {
 	for _, c := range h.store.Object().Status.Conditions {
-		if c.Type == v1alpha1.ConditionAutomaticFailoverHeld && c.Status == metav1.ConditionTrue {
+		if c.Type == v1beta1.ConditionAutomaticFailoverHeld && c.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
@@ -617,27 +617,27 @@ func TestPF_I04_ManagerAbsenceIsAWait(t *testing.T) {
 		h.tick()
 	}
 	pf := h.pf()
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
-		pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitManagerAbsent {
+	if pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
+		pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitManagerAbsent {
 		t.Fatalf("with no manager the run must wait in Admitting (ManagerAbsent): %+v", pf)
 	}
 	if h.src.isSuperReadOnly() {
 		t.Fatal("fenced without a manager")
 	}
 	h.setCurrent(tm)
-	h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(60, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 }
 
 // Row 5: an update cannot start or claim between the grant and the release.
 func TestPF_I05_EarlierUpdateExcludedFromGrantToRelease(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(20, inPhase(v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(20, inPhase(v1beta1.PlannedFailoverPhaseDraining, v1beta1.PlannedFailoverPhaseWaitingForLag))
 	if u, err := h.tm.BeginOrderedUpdateForSim(); err == nil {
 		u.FinishOrderedUpdateForSim()
 		t.Fatal("an ordered update started while the run held the claim")
 	}
-	h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(60, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	h.tick()
 	u, err := h.tm.BeginOrderedUpdateForSim()
 	if err != nil {
@@ -662,11 +662,11 @@ func TestPF_I07_UpdateClaimBetweenReadAndGrant(t *testing.T) {
 		h.pass()
 		h.tick()
 	}
-	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || h.src.isSuperReadOnly() {
+	if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || h.src.isSuperReadOnly() {
 		t.Fatalf("the grant must wait for the claimed update: %+v fenced=%v", pf, h.src.isSuperReadOnly())
 	}
 	u.FinishOrderedUpdateForSim()
-	h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(60, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 }
 
 // Row 8: a status write that timed out but committed keeps the claim; one
@@ -675,27 +675,27 @@ func TestPF_I08_TimedOutCommittedWriteKeepsClaim(t *testing.T) {
 	t.Run("ambiguousCommitted", func(t *testing.T) {
 		h := newPFHarness(t, pfOpts{})
 		h.request("dc2")
-		h.runUntil(10, inPhase(v1alpha1.PlannedFailoverPhaseAdmitting))
+		h.runUntil(10, inPhase(v1beta1.PlannedFailoverPhaseAdmitting))
 		h.store.AmbiguousWrites(1) // the Fencing write
 		h.pass()
 		if id, _, ok := h.held(); !ok || id != h.pf().RunID {
 			t.Fatalf("claim %q %v after an ambiguous-but-committed Fencing write", id, ok)
 		}
-		h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+		h.wantOutcome(h.runUntil(60, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	})
 	t.Run("lostReleasesProvisional", func(t *testing.T) {
 		h := newPFHarness(t, pfOpts{})
 		h.request("dc2")
-		h.runUntil(10, inPhase(v1alpha1.PlannedFailoverPhaseAdmitting))
+		h.runUntil(10, inPhase(v1beta1.PlannedFailoverPhaseAdmitting))
 		h.store.LoseWrites(1)
 		h.pass()
-		if _, _, ok := h.held(); ok && h.pf().Phase == v1alpha1.PlannedFailoverPhaseAdmitting {
+		if _, _, ok := h.held(); ok && h.pf().Phase == v1beta1.PlannedFailoverPhaseAdmitting {
 			t.Fatal("a provisional grant survived a proven non-commit")
 		}
 		if h.src.isSuperReadOnly() {
 			t.Fatal("fenced although the Fencing write never committed")
 		}
-		h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+		h.wantOutcome(h.runUntil(60, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	})
 }
 
@@ -711,7 +711,7 @@ func TestPF_I10_NoManagerAtAdmission(t *testing.T) {
 	}
 	h.clk.Advance(3 * time.Minute)
 	pf := h.runUntil(10, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeNotStarted, v1alpha1.PlannedFailoverReasonAdmissionTimeout)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeNotStarted, v1beta1.PlannedFailoverReasonAdmissionTimeout)
 	if len(h.src.statements())+len(h.tgt.statements()) != 0 {
 		t.Fatal("statements sent without a manager")
 	}
@@ -739,7 +739,7 @@ func TestPF_I12_AuthorityMovedBesideThirdWritable(t *testing.T) {
 				t.Fatalf("the run fenced or promoted beside a foreign writable/unreadable site: src fenced=%v tgt=%v",
 					h.src.isSuperReadOnly(), h.tgt.statements())
 			}
-			if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting && (pf.Result == nil || pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeNotStarted) {
+			if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting && (pf.Result == nil || pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeNotStarted) {
 				t.Fatalf("block %+v, want Admitting or NotStarted", pf)
 			}
 		})
@@ -756,7 +756,7 @@ func TestPF_I12c_PostWriteForeignWritableHoldsAutomation(t *testing.T) {
 	b := h.tgt.blockOn(t, "SetReadOnly", true) // read_only=OFF applied, reply pending
 	h.passBlocked(b, func() { h.third.setRO(false, false) })
 	pf := h.runUntil(20, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, "")
 	if !h.holdCondition() {
 		t.Fatal("no AutomaticFailoverHeld condition")
 	}
@@ -781,7 +781,7 @@ func TestPF_I13_PromotingRerunConfirms(t *testing.T) {
 	h.passBlocked(b, h.tgt.dropConnections) // applied; the reply is lost
 	h.newProcess()                          // a cross-process re-run
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	st := h.tgt.statements()
 	if countOf(st, "StopReplica") != 1 || countOf(st, "ResetReplicaAll") != 1 || countOf(st, "KillAppConnections") != 0 {
 		t.Fatalf("target statements %v: the re-run repeated the promotion", st)
@@ -793,7 +793,7 @@ func TestPF_I13_PromotingRerunConfirms(t *testing.T) {
 func TestPF_I13_RestartBetweenRecordAndPublishingConfirms(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+	h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhasePromoting))
 	h.store.DenyStatus(1 << 20) // the Publishing write cannot land
 	for range 4 {
 		h.pass()
@@ -804,7 +804,7 @@ func TestPF_I13_RestartBetweenRecordAndPublishingConfirms(t *testing.T) {
 	h.newProcess()
 	h.store.ClearFaults()
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if h.holdCondition() {
 		t.Fatal("the run's own record became a hold")
 	}
@@ -815,10 +815,10 @@ func TestPF_I13_RestartBetweenRecordAndPublishingConfirms(t *testing.T) {
 func TestPF_I13b_PublishingConflictTimes3Confirms(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePromoting))
+	h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhasePromoting))
 	h.store.ConflictWrites(3)
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if h.holdCondition() {
 		t.Fatal("hold after Publishing conflicts")
 	}
@@ -833,7 +833,7 @@ func TestPF_I15_RerunResumesFromPinnedStage(t *testing.T) {
 	b := h.tgt.blockOn(t, "ResetReplicaAll", true)
 	h.passBlocked(b, h.tgt.dropConnections)
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	st := h.tgt.statements()
 	if countOf(st, "StopReplica") != 1 || countOf(st, "ResetReplicaAll") != 1 {
 		t.Fatalf("target statements %v", st)
@@ -848,20 +848,20 @@ func TestPF_I17_TransientConfirmFailureRetries(t *testing.T) {
 	h.runToPromotingIntent()
 	b := h.tgt.blockOn(t, "SetReadOnly", true)
 	h.passBlocked(b, h.tgt.dropConnections) // the confirm cannot read on this session
-	h.wantOutcome(h.runUntil(40, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(40, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 }
 
 // Row 18: a DNS failure ends Succeeded with the DNSUpdateFailed warning.
 func TestPF_I18_DNSFailureSucceedsWithWarning(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	h.dns.mu.Lock()
 	h.dns.err = errors.New("dnsendpoints is forbidden")
 	h.dns.mu.Unlock()
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
-	if !slices.Contains(pf.Result.Warnings, v1alpha1.PlannedFailoverWarningDNSUpdateFailed) {
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
+	if !slices.Contains(pf.Result.Warnings, v1beta1.PlannedFailoverWarningDNSUpdateFailed) {
 		t.Fatalf("warnings %v, want DNSUpdateFailed", pf.Result.Warnings)
 	}
 }
@@ -874,7 +874,7 @@ func TestPF_I19_GrantRequiresReadyAndLiveEvidence(t *testing.T) {
 		h.newProcess() // no Poll yet
 		h.request("dc2")
 		h.pass()
-		if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || h.src.isSuperReadOnly() {
+		if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || h.src.isSuperReadOnly() {
 			t.Fatalf("granted before the first poll: %+v", pf)
 		}
 	})
@@ -895,7 +895,7 @@ func TestPF_I19_GrantRequiresReadyAndLiveEvidence(t *testing.T) {
 func TestPF_I20a_LostFenceWriteSendsNothing(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(10, inPhase(v1alpha1.PlannedFailoverPhaseAdmitting))
+	h.runUntil(10, inPhase(v1beta1.PlannedFailoverPhaseAdmitting))
 	h.store.LoseWrites(1)
 	h.pass()
 	if h.src.isSuperReadOnly() || countOf(h.src.statements(), "SetSuperReadOnly:on") != 0 {
@@ -910,13 +910,13 @@ func TestPF_I20a_LostFenceWriteSendsNothing(t *testing.T) {
 func TestPF_I20b_UnattributableFenceNeverCleared(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseDraining, v1beta1.PlannedFailoverPhaseWaitingForLag))
 	h.src.replacePod(podReplacement{serverUUID: "eeeeeeee-0000-0000-0000-000000000005"})
 	h.src.setRO(true, true)
 	before := len(h.src.statements())
 	h.newProcess()
 	pf := h.runUntil(60, terminal)
-	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded || pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeRolledBack {
+	if pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded || pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeRolledBack {
 		t.Fatalf("result %+v on a fence that is not the run's", pf.Result)
 	}
 	after := h.src.statements()[before:]
@@ -966,7 +966,7 @@ func TestPF_I21_WaitingRequestOwnsNothing(t *testing.T) {
 func TestPF_I22_WatermarkRestoredAfterRestart(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(60, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	h.newProcess()
 	h.tick()
 	if got := h.tm.Status().PromotionGtidExecuted(); got != pfF {
@@ -995,7 +995,7 @@ func TestPF_I23_PromotingBeforeReplacementRegistersWaits(t *testing.T) {
 	if id, _, ok := h.held(); !ok || id != h.pf().RunID {
 		t.Fatal("the replacement does not share the run's claim")
 	}
-	h.wantOutcome(h.runUntil(40, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(40, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 }
 
 // Row 24: a replaced target is never confirmed as the run's promotion.
@@ -1005,10 +1005,10 @@ func TestPF_I24_TargetKeyedRecordNoFalseConfirm(t *testing.T) {
 	h.runToPromotingIntent()
 	h.tgt.replacePod(podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004"})
 	pf := h.runUntil(40, terminal)
-	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
+	if pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded {
 		t.Fatal("confirmed a replaced target")
 	}
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonTargetChanged)
 	if h.tgt.writableGrants() != 0 || h.src.isReadOnly() {
 		t.Fatalf("target grants %d, source read-only %v", h.tgt.writableGrants(), h.src.isReadOnly())
 	}
@@ -1020,7 +1020,7 @@ func TestPF_I25_StaleReadNeverClearsClaim(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	stale := h.store.Object()
 	h.request("dc2")
-	h.runUntil(20, inPhase(v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(20, inPhase(v1beta1.PlannedFailoverPhaseDraining, v1beta1.PlannedFailoverPhaseWaitingForLag))
 	old := h.tm
 	old.RetireForSim()
 	tm := h.newManager()
@@ -1033,7 +1033,7 @@ func TestPF_I25_StaleReadNeverClearsClaim(t *testing.T) {
 	if id, _, ok := h.held(); !ok || id != h.pf().RunID {
 		t.Fatal("a stale wiring cleared the claim")
 	}
-	h.wantOutcome(h.runUntil(40, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(40, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 }
 
 // Row 26: the recorded watermark is the run's fence.gtidSet, not whatever
@@ -1042,10 +1042,10 @@ func TestPF_I26_WatermarkFromFenceNotStatus(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
 	h.runToPromotingIntent()
-	h.store.MutateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
+	h.store.MutateStatus(func(st *v1beta1.MysqlFailoverGroupStatus) {
 		st.SetLastFailover(st.LastFailoverTime(), st.LastFailoverTarget(), pfUUIDA+":1-7")
 	})
-	h.wantOutcome(h.runUntil(40, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(40, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if got := h.store.Object().Status.PromotionGtidExecuted(); got != pfF {
 		t.Fatalf("watermark %q, want F", got)
 	}
@@ -1127,15 +1127,15 @@ func TestPF_I01_ReplacedManagerUpdateBlocksGrant(t *testing.T) {
 	// The replacement's status no longer shows the retired manager's update
 	// (its own updatePhase is idle), so only the claim can refuse: the
 	// guard under test.
-	h.store.MutateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) { st.UpdatePhase = "" })
+	h.store.MutateStatus(func(st *v1beta1.MysqlFailoverGroupStatus) { st.UpdatePhase = "" })
 	h.request("dc2")
 	for range 5 {
 		h.pass()
 		h.tick()
 	}
 	pf := h.pf()
-	if pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
-		(pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitPredecessorBusy && pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitUpdateInFlight) {
+	if pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
+		(pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitPredecessorBusy && pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitUpdateInFlight) {
 		t.Fatalf("the grant must wait for the predecessor's update: %+v admission %+v result %+v", pf, pf.Admission, pf.Result)
 	}
 	if _, _, ok := h.held(); ok {
@@ -1144,7 +1144,7 @@ func TestPF_I01_ReplacedManagerUpdateBlocksGrant(t *testing.T) {
 	b.Release()
 	h.waitIdle(t)
 	pf = h.runUntil(60, terminal)
-	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && countOf(h.tgt.statements(), "ResetReplicaAll") > 1 {
+	if pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded && countOf(h.tgt.statements(), "ResetReplicaAll") > 1 {
 		t.Fatalf("the target was promoted twice: %v", h.tgt.statements())
 	}
 }
@@ -1155,7 +1155,7 @@ func TestPF_I02_RollbackBesideReplacedPromotion(t *testing.T) {
 	h := newPFHarness(t, pfOpts{updater: true})
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // the target lags: the run waits, then rolls back
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	var applied []string
 	var mu sync.Mutex
 	h.tm.ApplyUpdate = func(_ context.Context, site string) error {
@@ -1170,7 +1170,7 @@ func TestPF_I02_RollbackBesideReplacedPromotion(t *testing.T) {
 	old.Poll(context.Background()) // a retired manager starts nothing
 	h.clk.Advance(30 * time.Second)
 	pf := h.runUntil(30, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonLagTimeout)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(applied) != 0 || h.tgt.writableGrants() != 0 {
@@ -1207,7 +1207,7 @@ func TestPF_I03_InFlightPromotionAtGrantWaits(t *testing.T) {
 	if _, _, ok := h.held(); ok || h.tgt.isSuperReadOnly() == false && countOf(h.tgt.statements(), "SetSuperReadOnly:on") > 0 {
 		t.Fatalf("granted beside an in-flight promotion: block %+v", h.pf())
 	}
-	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting {
+	if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting {
 		t.Fatalf("block %+v, want Admitting", pf)
 	}
 	b.Release()
@@ -1215,7 +1215,7 @@ func TestPF_I03_InFlightPromotionAtGrantWaits(t *testing.T) {
 	h.src.respawn(true) // the old primary is back, read-only
 	h.src.setRO(true, true)
 	pf := h.runUntil(60, terminal)
-	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && pf.SourceSite != "dc2" {
+	if pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded && pf.SourceSite != "dc2" {
 		t.Fatalf("the run named %q as its source, want the new primary dc2", pf.SourceSite)
 	}
 }
@@ -1227,7 +1227,7 @@ func TestPF_I06_RollbackInLagAfterReplacement(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50")
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	old := h.replaceManager()
 	if id, _, ok := h.held(); !ok || id != h.pf().RunID {
 		t.Fatal("the replacement does not hold the run's claim before its first poll")
@@ -1239,7 +1239,7 @@ func TestPF_I06_RollbackInLagAfterReplacement(t *testing.T) {
 		h.tick()
 	}
 	pf := h.runUntil(30, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonLagTimeout)
 	if h.tgt.writableGrants() != 0 || h.src.isReadOnly() {
 		t.Fatalf("target grants %d, source read-only %v", h.tgt.writableGrants(), h.src.isReadOnly())
 	}
@@ -1269,8 +1269,8 @@ func TestPF_I09_RetiringMidPromotionWaits(t *testing.T) {
 		h.pass()
 	}
 	pf := h.pf()
-	if _, _, ok := h.held(); ok || pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
-		pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitPredecessorBusy {
+	if _, _, ok := h.held(); ok || pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
+		pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitPredecessorBusy {
 		t.Fatalf("block %+v held=%v, want Admitting with PredecessorBusy", pf, ok)
 	}
 	b.Release()
@@ -1298,8 +1298,8 @@ func TestPF_I11_UnobservedPromotionWaits(t *testing.T) {
 	h.request("dc3")
 	h.pass()
 	h.pass() // the first pass writes Admitting; the claim is asked on the next
-	if pf := h.pf(); pf.Phase != v1alpha1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
-		(pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitPromotionInFlight && pf.Admission.WaitReason != v1alpha1.PlannedFailoverWaitPeerUnreadable) {
+	if pf := h.pf(); pf.Phase != v1beta1.PlannedFailoverPhaseAdmitting || pf.Admission == nil ||
+		(pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitPromotionInFlight && pf.Admission.WaitReason != v1beta1.PlannedFailoverWaitPeerUnreadable) {
 		t.Fatalf("block %+v admission %+v, want a wait while the promotion is in flight", pf, pf.Admission)
 	}
 	b.Release()
@@ -1308,7 +1308,7 @@ func TestPF_I11_UnobservedPromotionWaits(t *testing.T) {
 	h.src.setRO(true, true)
 	h.clk.Advance(2 * time.Second) // past the emergency promotion's cooldown
 	pf := h.runUntil(60, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if pf.SourceSite != "dc2" {
 		t.Fatalf("source %q, want dc2 (the observed new primary)", pf.SourceSite)
 	}
@@ -1328,7 +1328,7 @@ func TestPF_TargetRestartAfterWriteIsNotRolledBack(t *testing.T) {
 	b := h.tgt.blockOn(t, "SetReadOnly", true)
 	h.passBlocked(b, func() { h.tgt.respawn(true) })
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if !h.src.isSuperReadOnly() {
 		t.Fatal("the source was unfenced after the target had taken the write")
 	}
@@ -1342,7 +1342,7 @@ func TestPF_TargetRestartAfterWriteIsNotRolledBack(t *testing.T) {
 func TestPF_PublishingRerunNeverRecords(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.request("dc2")
-	h.runUntil(60, inPhase(v1alpha1.PlannedFailoverPhasePublishing))
+	h.runUntil(60, inPhase(v1beta1.PlannedFailoverPhasePublishing))
 	before := 0
 	for _, l := range h.store.LogStrings() {
 		if strings.Contains(l, "recorderPatch → committed") {
@@ -1350,7 +1350,7 @@ func TestPF_PublishingRerunNeverRecords(t *testing.T) {
 		}
 	}
 	h.newProcess()
-	h.wantOutcome(h.runUntil(20, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(h.runUntil(20, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	after := 0
 	for _, l := range h.store.LogStrings() {
 		if strings.Contains(l, "recorderPatch → committed") {
@@ -1374,11 +1374,11 @@ func TestPF_SourceLossInDrainingHandsOffIn10s(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.src.killConnectionResults = []int{5, 5, 5, 5, 5, 5, 5, 5}
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseDraining))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseDraining))
 	h.src.setError(errDown)
 	start := h.clk.Now()
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonSourceLost)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverReasonSourceLost)
 	if took := h.clk.Now().Sub(start); took > 15*time.Second {
 		t.Fatalf("the hand-off took %s, want about the 10s window", took)
 	}
@@ -1405,7 +1405,7 @@ func TestPF_WritableWithChannelIsNotTheRunsWrite(t *testing.T) {
 	h.tgt.setRO(false, false) // someone else made it writable, channel still configured
 	h.newProcess()
 	pf := h.runUntil(20, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverReasonForeignWritable)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverReasonForeignWritable)
 	if h.holdCondition() {
 		t.Fatal("the run set the automation hold")
 	}
@@ -1416,12 +1416,12 @@ func TestPF_PreWriteTargetLostRollsBackIn10s(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50")
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	h.tgt.setError(errDown)
 	h.tgt.failNextCalls("GetGtidExecuted", 1000)
 	start := h.clk.Now()
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetLost)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonTargetLost)
 	if took := h.clk.Now().Sub(start); took > 15*time.Second {
 		t.Fatalf("rolled back after %s, want about the 10s window", took)
 	}
@@ -1446,7 +1446,7 @@ func TestPF_UnconfirmedUnreachableTargetDoesNotBlockEmergency(t *testing.T) {
 		h.tgt.failNextCalls("CheckSuperReadOnly", 1000)
 	})
 	pf := h.runUntil(200, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomePromotedUnconfirmed, "")
 	if _, _, ok := h.held(); ok {
 		t.Fatal("the claim outlived PromotedUnconfirmed")
 	}
@@ -1474,7 +1474,7 @@ func TestPF_RestartedUnconfirmedRunNeverNamesOverNewerFailover(t *testing.T) {
 	})
 	// A newer failover lands elsewhere before the restarted process decides.
 	newer := metav1.NewTime(h.clk.Now().Add(time.Second))
-	h.store.MutateStatus(func(st *v1alpha1.MysqlFailoverGroupStatus) {
+	h.store.MutateStatus(func(st *v1beta1.MysqlFailoverGroupStatus) {
 		st.SetLastFailover(&newer, "dc1", st.PromotionGtidExecuted())
 	})
 	h.newProcess()
@@ -1482,7 +1482,7 @@ func TestPF_RestartedUnconfirmedRunNeverNamesOverNewerFailover(t *testing.T) {
 	// The re-proof sees the changed record after a possible write: a hold
 	// (§4.4), or PromotedUnconfirmed if the record check passes. Either way
 	// the target is never named over the newer failover.
-	if o := pf.Result.Outcome; o != v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed && o != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+	if o := pf.Result.Outcome; o != v1beta1.PlannedFailoverOutcomePromotedUnconfirmed && o != v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 		t.Fatalf("result %+v", pf.Result)
 	}
 	for range 2 {
@@ -1505,7 +1505,7 @@ func TestPF_OversizedWatermarkKeepsClaimOnStall(t *testing.T) {
 	h.src.setGtidExecuted(huge)
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-1") // lags: the run waits in WaitingForLag
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	if pf := h.pf(); pf.Fence == nil || pf.Fence.GtidSet == nil || len(*pf.Fence.GtidSet) <= 64*1024 {
 		t.Fatalf("setup: watermark is not oversized (%d bytes)", len(*h.pf().Fence.GtidSet))
 	}
@@ -1517,7 +1517,7 @@ func TestPF_OversizedWatermarkKeepsClaimOnStall(t *testing.T) {
 	if id, _, ok := h.held(); !ok || id != h.pf().RunID {
 		t.Fatal("an oversized-watermark run released its claim on a status stall")
 	}
-	if strings.Contains(h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation], h.pf().RunID) {
+	if strings.Contains(h.store.Object().GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation], h.pf().RunID) {
 		t.Fatal("an oversized-watermark run ended with a terminal marker")
 	}
 }
@@ -1535,7 +1535,7 @@ func TestPF_218_TargetReplacedBetweenLagAndPromote(t *testing.T) {
 	regressed := pfUUIDA + ":1-60"
 	h.tgt.replacePod(podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004", gtidExecuted: &regressed})
 	pf := h.runUntil(40, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonTargetChanged)
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonTargetChanged)
 	if h.tgt.writableGrants() != 0 {
 		t.Fatal("the replaced pod was written")
 	}
@@ -1553,7 +1553,7 @@ func TestPF_218_ReplacedMidPromotionAfterStop(t *testing.T) {
 		h.tgt.replacePod(podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004"})
 	})
 	pf := h.runUntil(40, terminal)
-	if pf.Result.Outcome != v1alpha1.PlannedFailoverOutcomeRolledBack {
+	if pf.Result.Outcome != v1beta1.PlannedFailoverOutcomeRolledBack {
 		t.Fatalf("result %+v, want RolledBack", pf.Result)
 	}
 	if h.tgt.writableGrants() != 0 || h.src.isReadOnly() {
@@ -1572,7 +1572,7 @@ func TestPF_218_ReplacedBetweenClassificationAndFirstStatement(t *testing.T) {
 		h.tgt.replacePod(podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004"})
 	})
 	pf := h.runUntil(40, terminal)
-	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded || h.tgt.writableGrants() != 0 {
+	if pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded || h.tgt.writableGrants() != 0 {
 		t.Fatalf("result %+v, target grants %d", pf.Result, h.tgt.writableGrants())
 	}
 }
@@ -1588,7 +1588,7 @@ func TestPF_218_ReplacedBetweenTheTwoGTIDProofs(t *testing.T) {
 		h.tgt.replacePod(podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004"})
 	})
 	pf := h.runUntil(40, terminal)
-	if pf.Result.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded || h.tgt.writableGrants() != 0 {
+	if pf.Result.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded || h.tgt.writableGrants() != 0 {
 		t.Fatalf("result %+v, target grants %d", pf.Result, h.tgt.writableGrants())
 	}
 }
@@ -1616,7 +1616,7 @@ func TestPF_ExactlyOnceAcrossCrashPoints(t *testing.T) {
 					h.newProcess()
 				}
 				pf := h.pf()
-				if src == nil && pf != nil && (pf.Phase == v1alpha1.PlannedFailoverPhasePublishing || pf.Result != nil) {
+				if src == nil && pf != nil && (pf.Phase == v1beta1.PlannedFailoverPhasePublishing || pf.Result != nil) {
 					src = h.src.statements()
 				}
 				if pf != nil && pf.Result != nil {
@@ -1641,7 +1641,7 @@ func TestPF_HappyPath_ThreeSite(t *testing.T) {
 		t.Run(string(role), func(t *testing.T) {
 			h := newPFHarness(t, pfOpts{third: role})
 			h.request("dc2")
-			h.wantOutcome(h.runUntil(60, terminal), v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+			h.wantOutcome(h.runUntil(60, terminal), v1beta1.PlannedFailoverOutcomeSucceeded, "")
 			if h.tgt.isReadOnly() || h.third.writableGrants() != 0 {
 				t.Fatalf("dc2 read-only %v; dc3 grants %d", h.tgt.isReadOnly(), h.third.writableGrants())
 			}
@@ -1657,19 +1657,19 @@ func TestPF_218_TargetRegressedDuringLagWait(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50")
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	regressed := pfUUIDA + ":1-40"
 	h.tgt.replacePod(podReplacement{serverUUID: "dddddddd-0000-0000-0000-000000000004", gtidExecuted: &regressed})
 	for range 3 {
 		h.pass()
 		h.tick()
 	}
-	if h.tgt.writableGrants() != 0 || h.pf().Phase == v1alpha1.PlannedFailoverPhasePromoting {
+	if h.tgt.writableGrants() != 0 || h.pf().Phase == v1beta1.PlannedFailoverPhasePromoting {
 		t.Fatalf("a regressed target was promoted or reached Promoting: %+v", h.pf())
 	}
 	h.tgt.setGtidExecuted(pfF) // it catches up
 	pf := h.runUntil(60, terminal)
-	h.wantOutcome(pf, v1alpha1.PlannedFailoverOutcomeSucceeded, "")
+	h.wantOutcome(pf, v1beta1.PlannedFailoverOutcomeSucceeded, "")
 	if pf.Promotion.TargetServerUUID != "dddddddd-0000-0000-0000-000000000004" {
 		t.Fatalf("the intent pinned %q, want the replacement's uuid", pf.Promotion.TargetServerUUID)
 	}
@@ -1682,13 +1682,13 @@ func TestPF_StatusStallWritesTerminalMarker(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50") // lags: the run holds the claim
 	h.request("dc2")
-	pf := h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseWaitingForLag))
+	pf := h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseWaitingForLag))
 	h.store.DenyStatus(1 << 30)
 	for range 12 {
 		h.clk.Advance(15 * time.Second)
 		h.pass()
 	}
-	marker := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]
+	marker := h.store.Object().GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]
 	if m, ok := controller.ParseTerminalMarker(marker); !ok || m.RunID != pf.RunID {
 		t.Fatalf("no terminal marker for %s after the stall deadline: %q", pf.RunID, marker)
 	}
@@ -1710,7 +1710,7 @@ func TestPF_LateStatusCommitFencedByMarker(t *testing.T) {
 	h := newPFHarness(t, pfOpts{})
 	h.src.killConnectionResults = []int{3, 3, 3, 3, 3, 3}
 	h.request("dc2")
-	h.runUntil(30, inPhase(v1alpha1.PlannedFailoverPhaseDraining))
+	h.runUntil(30, inPhase(v1beta1.PlannedFailoverPhaseDraining))
 	h.store.LateWrites(1, 600) // the next write commits ten minutes late, if it still can
 	h.store.SettleOutage(3)    // and its settlement cannot read: Unknown
 	h.tgt.setGtidExecuted(pfUUIDA + ":1-50")
@@ -1723,7 +1723,7 @@ func TestPF_LateStatusCommitFencedByMarker(t *testing.T) {
 		h.clk.Advance(15 * time.Second)
 		h.pass()
 	}
-	if m := h.store.Object().GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]; m == "" {
+	if m := h.store.Object().GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]; m == "" {
 		t.Fatal("setup: no terminal marker")
 	}
 	h.clk.Advance(10 * time.Minute)

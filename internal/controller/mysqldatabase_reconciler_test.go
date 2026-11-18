@@ -26,21 +26,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // mdbTestNamespace keeps the fixtures below in one namespace, matching the
 // single-namespace scoping the CRD enforces.
 const mdbTestNamespace = "bloodraven"
 
-func mdbTestGroup() *v1alpha1.MysqlFailoverGroup {
-	fg := &v1alpha1.MysqlFailoverGroup{
+func mdbTestGroup() *v1beta1.MysqlFailoverGroup {
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: mdbTestNamespace},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
-			Sites: []v1alpha1.SiteSpec{
-				{Name: "dc1", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
-				{Name: "dc2", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-operator"},
+			Sites: []v1beta1.SiteSpec{
+				{Name: "dc1", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate},
+				{Name: "dc2", ServerID: 102, Role: v1beta1.SiteRolePrimaryCandidate},
 			},
 		},
 	}
@@ -48,18 +48,18 @@ func mdbTestGroup() *v1alpha1.MysqlFailoverGroup {
 	return fg
 }
 
-func mdbTestCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
-	mdb := &v1alpha1.MysqlDatabase{
+func mdbTestCR(mutate ...func(*v1beta1.MysqlDatabase)) *v1beta1.MysqlDatabase {
+	mdb := &v1beta1.MysqlDatabase{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "tenant-acme",
 			Namespace:  mdbTestNamespace,
 			Generation: 1,
-			Finalizers: []string{v1alpha1.MysqlDatabaseFinalizer},
+			Finalizers: []string{v1beta1.MysqlDatabaseFinalizer},
 		},
-		Spec: v1alpha1.MysqlDatabaseSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "main"},
+		Spec: v1beta1.MysqlDatabaseSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "main"},
 			DatabaseName:     "acme_wms",
-			Owner:            v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			Owner:            v1beta1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
 		},
 	}
 	for _, m := range mutate {
@@ -97,10 +97,10 @@ func newMdbReconciler(t *testing.T, objs ...client.Object) (*MysqlDatabaseReconc
 	scheme := testScheme()
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
-		WithIndex(&v1alpha1.MysqlDatabase{}, mdbSecretNamesIndex, mdbSecretNames).
-		WithIndex(&v1alpha1.MysqlDatabase{}, mdbFailoverGroupRefIndex, func(o client.Object) []string {
-			return []string{o.(*v1alpha1.MysqlDatabase).Spec.FailoverGroupRef.Name}
+		WithStatusSubresource(&v1beta1.MysqlDatabase{}, &v1beta1.MysqlFailoverGroup{}).
+		WithIndex(&v1beta1.MysqlDatabase{}, mdbSecretNamesIndex, mdbSecretNames).
+		WithIndex(&v1beta1.MysqlDatabase{}, mdbFailoverGroupRefIndex, func(o client.Object) []string {
+			return []string{o.(*v1beta1.MysqlDatabase).Spec.FailoverGroupRef.Name}
 		}).
 		WithObjects(objs...).
 		Build()
@@ -120,18 +120,18 @@ func mdbRequest() ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mdbTestNamespace, Name: "tenant-acme"}}
 }
 
-func getMdb(t *testing.T, c client.Client) *v1alpha1.MysqlDatabase {
+func getMdb(t *testing.T, c client.Client) *v1beta1.MysqlDatabase {
 	t.Helper()
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	if err := c.Get(context.Background(), mdbRequest().NamespacedName, &out); err != nil {
 		t.Fatalf("get mysqldatabase: %v", err)
 	}
 	return &out
 }
 
-func readyCondition(mdb *v1alpha1.MysqlDatabase) *metav1.Condition {
+func readyCondition(mdb *v1beta1.MysqlDatabase) *metav1.Condition {
 	for i := range mdb.Status.Conditions {
-		if mdb.Status.Conditions[i].Type == v1alpha1.ConditionReady {
+		if mdb.Status.Conditions[i].Type == v1beta1.ConditionReady {
 			return &mdb.Status.Conditions[i]
 		}
 	}
@@ -152,7 +152,7 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			objects: func() []client.Object {
 				return []client.Object{mdbTestCR(), mdbTestOwnerSecret()}
 			},
-			wantReason: v1alpha1.ReasonGroupNotYetCreated,
+			wantReason: v1beta1.ReasonGroupNotYetCreated,
 		},
 		{
 			name: "group has no active site",
@@ -169,8 +169,8 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 				fg := mdbTestGroup()
 				// Spec and status both set, as on a real cluster: the fence
 				// delegates to inPlaceRestoreInFlight, which keys off both.
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
-				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring}
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
+				fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceRestoring}
 				return []client.Object{mdbTestCR(), fg, mdbTestOwnerSecret()}
 			},
 			wantReason: "RestoreInProgress",
@@ -179,7 +179,7 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			name: "in-place restore requested but not yet observed",
 			objects: func() []client.Object {
 				fg := mdbTestGroup()
-				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
+				fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
 				return []client.Object{mdbTestCR(), fg, mdbTestOwnerSecret()}
 			},
 			wantReason: "RestoreInProgress",
@@ -197,7 +197,7 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			name: "planned failover fences the primary",
 			objects: func() []client.Object {
 				fg := mdbTestGroup()
-				fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining}
+				fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDraining}
 				return []client.Object{mdbTestCR(), fg, mdbTestOwnerSecret()}
 			},
 			wantReason: "PlannedFailoverInProgress",
@@ -221,10 +221,10 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 		{
 			name: "users secret not rendered yet",
 			objects: func() []client.Object {
-				cr := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-					m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+				cr := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
+					m.Spec.Users = []v1beta1.MysqlDatabaseUser{{
 						SecretName: "support-ro-mysql",
-						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+						Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
 					}}
 				})
 				return []client.Object{cr, mdbTestGroup(), mdbTestOwnerSecret()}
@@ -234,10 +234,10 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 		{
 			name: "users secret missing the password key",
 			objects: func() []client.Object {
-				cr := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-					m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+				cr := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
+					m.Spec.Users = []v1beta1.MysqlDatabaseUser{{
 						SecretName: "support-ro-mysql",
-						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+						Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect},
 					}}
 				})
 				s := &corev1.Secret{
@@ -261,7 +261,7 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			assertPendingRequeue(t, res.RequeueAfter)
 
 			mdb := getMdb(t, c)
-			if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+			if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 				t.Fatalf("phase = %q, want Pending", mdb.Status.Phase)
 			}
 			if mdb.Status.ObservedGeneration != mdb.Generation {
@@ -295,7 +295,7 @@ func TestMysqlDatabaseRejectsBadOwnerUsernameFromSecret(t *testing.T) {
 	}
 
 	mdb := getMdb(t, c)
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 		t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
 	}
 	cond := readyCondition(mdb)
@@ -314,8 +314,8 @@ func TestMysqlDatabaseRejectsBadOwnerUsernameFromSecret(t *testing.T) {
 // dialer enforces "zero" literally — it never even connects.
 func TestMysqlDatabaseSkipsWhenNothingChanged(t *testing.T) {
 	mdb := mdbTestCR()
-	mdb.Status = v1alpha1.MysqlDatabaseStatus{
-		Phase:              v1alpha1.MysqlDatabasePhaseReady,
+	mdb.Status = v1beta1.MysqlDatabaseStatus{
+		Phase:              v1beta1.MysqlDatabasePhaseReady,
 		ObservedGeneration: mdb.Generation,
 		DatabaseCreated:    true,
 		OwnerUser:          "acme_app",
@@ -332,7 +332,7 @@ func TestMysqlDatabaseSkipsWhenNothingChanged(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: secret.Name}, &storedSecret); err != nil {
 		t.Fatalf("get stored owner secret: %v", err)
 	}
-	var storedFG v1alpha1.MysqlFailoverGroup
+	var storedFG v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: "main"}, &storedFG); err != nil {
 		t.Fatalf("get stored failover group: %v", err)
 	}
@@ -360,8 +360,8 @@ func TestMysqlDatabaseSkipsWhenNothingChanged(t *testing.T) {
 // the re-apply. Detected here by the tripwire dialer firing.
 func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
 	mdb := mdbTestCR()
-	mdb.Status = v1alpha1.MysqlDatabaseStatus{
-		Phase:              v1alpha1.MysqlDatabasePhaseReady,
+	mdb.Status = v1beta1.MysqlDatabaseStatus{
+		Phase:              v1beta1.MysqlDatabasePhaseReady,
 		ObservedGeneration: mdb.Generation,
 		ActiveSite:         "dc1",
 	}
@@ -372,7 +372,7 @@ func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
 	scheme := testScheme()
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlDatabase{}, &v1beta1.MysqlFailoverGroup{}).
 		WithObjects(mdb, fg, mdbTestOwnerSecret(), mdbTestOperatorSecret()).
 		Build()
 
@@ -386,7 +386,7 @@ func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: mdbTestOwnerSecret().Name}, &storedSecret); err != nil {
 		t.Fatalf("get stored owner secret: %v", err)
 	}
-	var storedFG v1alpha1.MysqlFailoverGroup
+	var storedFG v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: "main"}, &storedFG); err != nil {
 		t.Fatalf("get stored failover group: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
 
 	// A dial failure is transient, not a broken tenant.
 	got := getMdb(t, c)
-	if got.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if got.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q, want Pending after an unreachable primary", got.Status.Phase)
 	}
 	if cond := readyCondition(got); cond == nil || cond.Reason != "PrimaryUnavailable" {
@@ -443,10 +443,10 @@ func (e *dialRefusedError) Error() string { return "connection refused" }
 // default policy must release the finalizer without so much as opening a
 // connection.
 func TestMysqlDatabaseDeleteRetainNeverTouchesMySQL(t *testing.T) {
-	for _, policy := range []v1alpha1.DeletionPolicy{"", v1alpha1.DeletionPolicyRetain} {
+	for _, policy := range []v1beta1.DeletionPolicy{"", v1beta1.DeletionPolicyRetain} {
 		t.Run(string("policy="+policy), func(t *testing.T) {
 			now := metav1.Now()
-			mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+			mdb := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 				m.Spec.DeletionPolicy = policy
 				m.DeletionTimestamp = &now
 				m.Status.OwnerUser = "acme_app"
@@ -460,9 +460,9 @@ func TestMysqlDatabaseDeleteRetainNeverTouchesMySQL(t *testing.T) {
 
 			// The fake client removes the object once the last finalizer
 			// goes away, so a NotFound here is the success signal.
-			var out v1alpha1.MysqlDatabase
+			var out v1beta1.MysqlDatabase
 			err := c.Get(context.Background(), mdbRequest().NamespacedName, &out)
-			if err == nil && controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
+			if err == nil && controllerutil.ContainsFinalizer(&out, v1beta1.MysqlDatabaseFinalizer) {
 				t.Fatal("finalizer still present; Retain must release immediately")
 			}
 
@@ -475,8 +475,8 @@ func TestMysqlDatabaseDeleteRetainNeverTouchesMySQL(t *testing.T) {
 // wedging forever when the group it referenced is already gone.
 func TestMysqlDatabaseDeleteWithoutGroupReleases(t *testing.T) {
 	now := metav1.Now()
-	mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	mdb := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
 		m.Status.DatabaseCreated = true // DDL was applied; there is something to drop
 	})
@@ -487,9 +487,9 @@ func TestMysqlDatabaseDeleteWithoutGroupReleases(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	err := c.Get(context.Background(), mdbRequest().NamespacedName, &out)
-	if err == nil && controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
+	if err == nil && controllerutil.ContainsFinalizer(&out, v1beta1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer still present; a vanished group must not wedge deletion")
 	}
 	assertEventContains(t, rec, "DatabaseCleanupSkipped")
@@ -502,8 +502,8 @@ func TestMysqlDatabaseDeleteWithoutGroupReleases(t *testing.T) {
 // it names may belong to someone else.
 func TestMysqlDatabaseDeleteWithoutAppliedDDLReleases(t *testing.T) {
 	now := metav1.Now()
-	mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	mdb := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
 		// status.DatabaseCreated deliberately unset.
 	})
@@ -518,20 +518,20 @@ func TestMysqlDatabaseDeleteWithoutAppliedDDLReleases(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	err := c.Get(context.Background(), mdbRequest().NamespacedName, &out)
-	if err == nil && controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
+	if err == nil && controllerutil.ContainsFinalizer(&out, v1beta1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer still present; a never-applied CR must release without dropping anything")
 	}
-	assertEventContains(t, rec, "Normal "+v1alpha1.EventDatabaseDropSkipped+" ")
+	assertEventContains(t, rec, "Normal "+v1beta1.EventDatabaseDropSkipped+" ")
 }
 
 // TestMysqlDatabaseDeleteDefersWithoutActiveSite proves the opposite side of
 // the same coin: a requested DROP is deferred, never silently skipped.
 func TestMysqlDatabaseDeleteDefersWithoutActiveSite(t *testing.T) {
 	now := metav1.Now()
-	mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	mdb := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
 		m.Status.DatabaseCreated = true
 	})
@@ -547,14 +547,14 @@ func TestMysqlDatabaseDeleteDefersWithoutActiveSite(t *testing.T) {
 	assertPendingRequeue(t, res.RequeueAfter)
 
 	out := getMdb(t, c)
-	if !controllerutil.ContainsFinalizer(out, v1alpha1.MysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(out, v1beta1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer released without performing the requested DROP")
 	}
 	assertEventContains(t, rec, "DatabaseDropDeferred")
 }
 
 func TestMysqlDatabaseAddsFinalizerOnFirstReconcile(t *testing.T) {
-	mdb := mdbTestCR(func(m *v1alpha1.MysqlDatabase) { m.Finalizers = nil })
+	mdb := mdbTestCR(func(m *v1beta1.MysqlDatabase) { m.Finalizers = nil })
 	r, c, _ := newMdbReconciler(t, mdb, mdbTestGroup(), mdbTestOwnerSecret())
 
 	res, err := r.Reconcile(context.Background(), mdbRequest())
@@ -564,7 +564,7 @@ func TestMysqlDatabaseAddsFinalizerOnFirstReconcile(t *testing.T) {
 	if !res.Requeue {
 		t.Fatal("expected a requeue after adding the finalizer")
 	}
-	if !controllerutil.ContainsFinalizer(getMdb(t, c), v1alpha1.MysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(getMdb(t, c), v1beta1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer was not added")
 	}
 }
@@ -590,8 +590,8 @@ func TestGroupActiveSiteChangedPredicate(t *testing.T) {
 	}
 
 	fenced := base.DeepCopy()
-	fenced.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
-	fenced.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring}
+	fenced.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{}
+	fenced.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceRestoring}
 	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: fenced}) {
 		t.Fatal("predicate did not fire when the group became fenced")
 	}
@@ -601,7 +601,7 @@ func TestGroupActiveSiteChangedPredicate(t *testing.T) {
 }
 
 func TestMysqlDatabaseWatchMapping(t *testing.T) {
-	other := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+	other := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 		m.Name = "tenant-other"
 		m.Spec.FailoverGroupRef.Name = "elsewhere"
 		m.Spec.Owner.SecretName = "other-owner"
@@ -683,7 +683,7 @@ func TestMysqlDatabaseRefusesReservedOwnerUsers(t *testing.T) {
 			}
 
 			mdb := getMdb(t, c)
-			if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+			if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 				t.Fatalf("phase = %q, want Failed for reserved owner %q", mdb.Status.Phase, username)
 			}
 			if cond := readyCondition(mdb); cond == nil || cond.Reason != "OwnerUserReserved" {
@@ -781,7 +781,7 @@ func TestReservedGroupUsernamesFailsClosed(t *testing.T) {
 // CR wins; the newer fails before any SQL is rendered (the tripwire dialer
 // proves no connection was attempted).
 func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
-	older := func(m *v1alpha1.MysqlDatabase) {
+	older := func(m *v1beta1.MysqlDatabase) {
 		m.Name = "tenant-elder"
 		m.CreationTimestamp = metav1.NewTime(metav1.Now().Add(-time.Hour))
 		m.Status.OwnerUser = "elder_app"
@@ -789,12 +789,12 @@ func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		mutateOld  func(*v1alpha1.MysqlDatabase)
+		mutateOld  func(*v1beta1.MysqlDatabase)
 		wantReason string
 	}{
 		{
 			name: "same database name",
-			mutateOld: func(m *v1alpha1.MysqlDatabase) {
+			mutateOld: func(m *v1beta1.MysqlDatabase) {
 				older(m)
 				m.Spec.Owner.SecretName = "elder-owner"
 			},
@@ -802,7 +802,7 @@ func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
 		},
 		{
 			name: "same owner secret",
-			mutateOld: func(m *v1alpha1.MysqlDatabase) {
+			mutateOld: func(m *v1beta1.MysqlDatabase) {
 				older(m)
 				m.Spec.DatabaseName = "elder_wms"
 			},
@@ -810,7 +810,7 @@ func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
 		},
 		{
 			name: "same owner username via different secret",
-			mutateOld: func(m *v1alpha1.MysqlDatabase) {
+			mutateOld: func(m *v1beta1.MysqlDatabase) {
 				older(m)
 				m.Spec.DatabaseName = "elder_wms"
 				m.Spec.Owner.SecretName = "elder-owner"
@@ -823,7 +823,7 @@ func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			elder := mdbTestCR(tc.mutateOld)
-			newer := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+			newer := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 				m.CreationTimestamp = metav1.Now()
 			})
 			r, c, _ := newMdbReconciler(t,
@@ -834,7 +834,7 @@ func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
 			}
 
 			mdb := getMdb(t, c)
-			if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+			if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 				t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
 			}
 			if cond := readyCondition(mdb); cond == nil || cond.Reason != tc.wantReason {
@@ -853,12 +853,12 @@ func TestMysqlDatabaseOwnershipConflicts(t *testing.T) {
 // this exact sequence dropped the winner's live database.
 func TestMysqlDatabaseConflictLoserDeleteDropsNothing(t *testing.T) {
 	now := metav1.Now()
-	loser := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	loser := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 		m.DeletionTimestamp = &now
-		m.Status.Phase = v1alpha1.MysqlDatabasePhaseFailed // lost the conflict; no DatabaseCreated
+		m.Status.Phase = v1beta1.MysqlDatabasePhaseFailed // lost the conflict; no DatabaseCreated
 	})
-	winner := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+	winner := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 		m.Name = "tenant-elder"
 		m.CreationTimestamp = metav1.NewTime(metav1.Now().Add(-time.Hour))
 	})
@@ -868,9 +868,9 @@ func TestMysqlDatabaseConflictLoserDeleteDropsNothing(t *testing.T) {
 	if _, err := r.Reconcile(context.Background(), mdbRequest()); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	if err := c.Get(context.Background(), mdbRequest().NamespacedName, &out); err == nil &&
-		controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
+		controllerutil.ContainsFinalizer(&out, v1beta1.MysqlDatabaseFinalizer) {
 		t.Fatal("conflict loser's finalizer did not release")
 	}
 	assertEventContains(t, rec, "DatabaseDropSkipped")
@@ -925,14 +925,14 @@ func TestMysqlDatabaseRefusesSystemSchemaNames(t *testing.T) {
 	for _, name := range []string{"mysql", "MySQL", "sys", "information_schema", "performance_schema"} {
 		t.Run(name, func(t *testing.T) {
 			r, c, _ := newMdbReconciler(t,
-				mdbTestCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = name }),
+				mdbTestCR(func(m *v1beta1.MysqlDatabase) { m.Spec.DatabaseName = name }),
 				mdbTestGroup(), mdbTestOwnerSecret(), mdbTestOperatorSecret())
 
 			if _, err := r.Reconcile(context.Background(), mdbRequest()); err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
 			mdb := getMdb(t, c)
-			if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+			if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 				t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
 			}
 			if cond := readyCondition(mdb); cond == nil || cond.Reason != "InvalidSpec" ||
@@ -947,9 +947,9 @@ func TestMysqlDatabaseRefusesSystemSchemaNames(t *testing.T) {
 // owner username would silently override spec.owner.privileges, because the
 // grants pass runs after the owner grant. Validate rejects it.
 func TestMysqlDatabaseRefusesGrantsNamingOwner(t *testing.T) {
-	cr := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-			{Username: "acme_app", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	cr := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+			{Username: "acme_app", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 		}
 	})
 	r, c, _ := newMdbReconciler(t, cr, mdbTestGroup(), mdbTestOwnerSecret(), mdbTestOperatorSecret())
@@ -958,7 +958,7 @@ func TestMysqlDatabaseRefusesGrantsNamingOwner(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	mdb := getMdb(t, c)
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 		t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
 	}
 	if cond := readyCondition(mdb); cond == nil || cond.Reason != "InvalidSpec" ||
@@ -992,14 +992,14 @@ func TestMysqlDatabaseSkipsApplyToTerminatingGroup(t *testing.T) {
 // arbitration must wait rather than guess — guessing is how two CRs end up
 // sharing one MySQL account.
 func TestMysqlDatabasePeerSecretMissingDefersArbitration(t *testing.T) {
-	elder := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+	elder := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 		m.Name = "tenant-elder"
 		m.CreationTimestamp = metav1.NewTime(metav1.Now().Add(-time.Hour))
 		m.Spec.DatabaseName = "elder_wms"
 		m.Spec.Owner.SecretName = "elder-owner" // absent on purpose
 	})
 	r, c, _ := newMdbReconciler(t,
-		mdbTestCR(func(m *v1alpha1.MysqlDatabase) { m.CreationTimestamp = metav1.Now() }),
+		mdbTestCR(func(m *v1beta1.MysqlDatabase) { m.CreationTimestamp = metav1.Now() }),
 		elder, mdbTestGroup(),
 		mdbTestOwnerSecret(), mdbTestOperatorSecret())
 
@@ -1009,7 +1009,7 @@ func TestMysqlDatabasePeerSecretMissingDefersArbitration(t *testing.T) {
 	}
 	assertPendingRequeue(t, res.RequeueAfter)
 	mdb := getMdb(t, c)
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q, want Pending", mdb.Status.Phase)
 	}
 	if cond := readyCondition(mdb); cond == nil || cond.Reason != "PeerOwnerSecretMissing" {
@@ -1021,7 +1021,7 @@ func TestMysqlDatabasePeerSecretMissingDefersArbitration(t *testing.T) {
 // blind spot: a higher-ranked peer that has not reconciled yet (empty
 // status.ownerUser) is still detected through the username its Secret names.
 func TestMysqlDatabaseConflictDetectsPeerSecretUsername(t *testing.T) {
-	elder := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+	elder := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 		m.Name = "tenant-elder"
 		m.CreationTimestamp = metav1.NewTime(metav1.Now().Add(-time.Hour))
 		m.Spec.DatabaseName = "elder_wms"
@@ -1032,7 +1032,7 @@ func TestMysqlDatabaseConflictDetectsPeerSecretUsername(t *testing.T) {
 		Data:       map[string][]byte{"username": []byte("acme_app"), "password": []byte("pw")},
 	}
 	r, c, _ := newMdbReconciler(t,
-		mdbTestCR(func(m *v1alpha1.MysqlDatabase) { m.CreationTimestamp = metav1.Now() }),
+		mdbTestCR(func(m *v1beta1.MysqlDatabase) { m.CreationTimestamp = metav1.Now() }),
 		elder, mdbTestGroup(),
 		mdbTestOwnerSecret(), mdbTestOperatorSecret(), elderSecret)
 
@@ -1040,7 +1040,7 @@ func TestMysqlDatabaseConflictDetectsPeerSecretUsername(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	mdb := getMdb(t, c)
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhaseFailed {
 		t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
 	}
 	if cond := readyCondition(mdb); cond == nil || cond.Reason != "OwnerConflict" {
@@ -1062,7 +1062,7 @@ func TestMysqlDatabaseConnectFailureKeepsWriteAheadClean(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	mdb := getMdb(t, c)
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+	if mdb.Status.Phase != v1beta1.MysqlDatabasePhasePending {
 		t.Fatalf("phase = %q, want Pending after a failed connection", mdb.Status.Phase)
 	}
 	if mdb.Status.DatabaseCreated {
@@ -1073,7 +1073,7 @@ func TestMysqlDatabaseConnectFailureKeepsWriteAheadClean(t *testing.T) {
 	}
 
 	// Deleting now must release without dropping anything.
-	mdb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+	mdb.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 	if err := c.Update(context.Background(), mdb); err != nil {
 		t.Fatalf("set deletionPolicy: %v", err)
 	}
@@ -1089,9 +1089,9 @@ func TestMysqlDatabaseConnectFailureKeepsWriteAheadClean(t *testing.T) {
 	if _, err := r.Reconcile(context.Background(), mdbRequest()); err != nil {
 		t.Fatalf("Reconcile() delete error = %v", err)
 	}
-	var out v1alpha1.MysqlDatabase
+	var out v1beta1.MysqlDatabase
 	if err := c.Get(context.Background(), mdbRequest().NamespacedName, &out); err == nil &&
-		controllerutil.ContainsFinalizer(&out, v1alpha1.MysqlDatabaseFinalizer) {
+		controllerutil.ContainsFinalizer(&out, v1beta1.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer not released")
 	}
 }
@@ -1101,11 +1101,11 @@ func TestMysqlDatabaseConnectFailureKeepsWriteAheadClean(t *testing.T) {
 // sibling CR are never dropped, while a crashed mid-rotation handover is
 // cleaned up for both usernames.
 func TestMysqlDatabaseDeleteScope(t *testing.T) {
-	deleting := func(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
+	deleting := func(mutate ...func(*v1beta1.MysqlDatabase)) *v1beta1.MysqlDatabase {
 		now := metav1.Now()
-		return mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+		return mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 			m.DeletionTimestamp = &now
-			m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+			m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 			m.Status.DatabaseCreated = true
 			m.Status.OwnerUser = "acme_app"
 			for _, f := range mutate {
@@ -1133,12 +1133,12 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 
 	t.Run("sibling grants claim survives deletion", func(t *testing.T) {
 		mdb := deleting()
-		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+		sibling := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 			m.Name = "tenant-sibling"
 			m.Spec.DatabaseName = "sibling_wms"
 			m.Spec.Owner.SecretName = "sibling-owner"
-			m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-				{Username: "acme_app", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+			m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{
+				{Username: "acme_app", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}},
 			}
 		})
 		r, _, rec := newMdbReconciler(t, mdb, sibling, mdbTestGroup())
@@ -1158,7 +1158,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 	// Normal DatabaseDropSkipped ("nothing to drop").
 	t.Run("sibling declaring the database refuses the drop", func(t *testing.T) {
 		mdb := deleting()
-		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+		sibling := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 			m.Name = "tenant-sibling"
 			m.Spec.Owner.SecretName = "sibling-owner"
 		})
@@ -1171,12 +1171,12 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 		if dropDB {
 			t.Fatal("dropDB = true, want false — a sibling still declares the database")
 		}
-		assertEventContains(t, rec, "Warning "+v1alpha1.EventDatabaseDropRefused+" ")
+		assertEventContains(t, rec, "Warning "+v1beta1.EventDatabaseDropRefused+" ")
 	})
 
 	t.Run("sibling claiming the owner user skips its drop", func(t *testing.T) {
 		mdb := deleting()
-		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+		sibling := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 			m.Name = "tenant-sibling"
 			m.Spec.DatabaseName = "sibling_wms"
 			m.Spec.Owner.SecretName = "sibling-owner"
@@ -1191,23 +1191,23 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 		if len(dropOwners) != 0 {
 			t.Fatalf("dropOwners = %v, want none — a sibling still claims acme_app", dropOwners)
 		}
-		assertEventContains(t, rec, "Warning "+v1alpha1.EventOwnerUserDropSkipped+" ")
+		assertEventContains(t, rec, "Warning "+v1beta1.EventOwnerUserDropSkipped+" ")
 	})
 
 	t.Run("sibling users ledger claim survives deletion", func(t *testing.T) {
-		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+		mdb := deleting(func(m *v1beta1.MysqlDatabase) {
 			m.Status.OwnerUser = "acme_app"
-			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+			m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{
 				{SecretName: "acme-support", Username: "acme_support"},
 			}
 		})
 		// The sibling's own ledger claims the same account — a shared
 		// support credential. Deleting this CR must leave it in MySQL.
-		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+		sibling := mdbTestCR(func(m *v1beta1.MysqlDatabase) {
 			m.Name = "tenant-sibling"
 			m.Spec.DatabaseName = "sibling_wms"
 			m.Spec.Owner.SecretName = "sibling-owner"
-			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+			m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{
 				{SecretName: "sibling-support", Username: "acme_support"},
 			}
 		})
@@ -1226,7 +1226,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 	})
 
 	t.Run("the owner Secret is not a drop candidate", func(t *testing.T) {
-		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+		mdb := deleting(func(m *v1beta1.MysqlDatabase) {
 			m.Status.OwnerUser = "old_app"
 		})
 		// The owner Secret names acme_app, which status never recorded —
@@ -1246,14 +1246,14 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 	})
 
 	t.Run("ledger record sharing the owner's name merges its hosts", func(t *testing.T) {
-		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+		mdb := deleting(func(m *v1beta1.MysqlDatabase) {
 			m.Spec.Owner.Hosts = []string{"10.0.0.1"}
 			m.Status.OwnerUser = "acme_app"
 			m.Status.OwnerHosts = []string{"10.0.0.1"}
 			// A users[] record that (after a transfer or rename) carries
 			// the owner's name on different hosts: both accounts are this
 			// CR's and both must go.
-			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+			m.Status.AppliedUsers = []v1beta1.MysqlDatabaseUserState{
 				{SecretName: "acme-support", Username: "acme_app", Hosts: []string{"10.0.0.2", "10.0.0.3"}},
 			}
 		})
@@ -1272,7 +1272,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 	})
 
 	t.Run("pending rotation record is cleaned up even without a secret", func(t *testing.T) {
-		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+		mdb := deleting(func(m *v1beta1.MysqlDatabase) {
 			m.Status.OwnerUser = "old_app"
 			m.Status.PendingOwnerUser = "new_app" // rotation crashed after creating it
 		})

@@ -19,7 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
@@ -58,23 +58,23 @@ func backupRunStamp(env *runner.Env) string {
 	return strings.ToLower(start.Format("20060102T150405Z"))
 }
 
-func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
+func backupProfileSpec(prefix string, pitr bool) v1beta1.BackupSpec {
 	consistent := true
-	spec := v1alpha1.BackupSpec{
-		Image:                  v1alpha1.DefaultBackupImage,
+	spec := v1beta1.BackupSpec{
+		Image:                  v1beta1.DefaultBackupImage,
 		MaxLagSecondsForSource: new(int64(60)),
 		ActiveDeadlineSeconds:  1800,
 		BackoffLimit:           new(int32(0)),
-		Profiles: []v1alpha1.BackupProfile{{
+		Profiles: []v1beta1.BackupProfile{{
 			Name: backupE2EProfile,
-			Retention: v1alpha1.BackupRetention{
+			Retention: v1beta1.BackupRetention{
 				KeepLast:       2,
 				KeepWithinDays: new(int32(1)),
 				KeepFailed:     new(int32(2)),
 			},
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStorageS3,
-				S3: &v1alpha1.S3Storage{
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStorageS3,
+				S3: &v1beta1.S3Storage{
 					Bucket:                backupE2EBucket,
 					Prefix:                prefix,
 					EndpointURL:           backupE2EEndpoint,
@@ -82,7 +82,7 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 					Region:                "us-east-1",
 				},
 			},
-			Dump: &v1alpha1.DumpOptions{
+			Dump: &v1beta1.DumpOptions{
 				Threads:       2,
 				BytesPerChunk: "64M",
 				Compression:   "zstd",
@@ -91,7 +91,7 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 		}},
 	}
 	if pitr {
-		spec.PITR = &v1alpha1.PITRSpec{
+		spec.PITR = &v1beta1.PITRSpec{
 			Enabled:             true,
 			ProfileName:         backupE2EProfile,
 			MaxBinlogSize:       "1M",
@@ -106,28 +106,28 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 // (mysql-<group>-backup-<profile>). With passphraseSecret set the profile
 // encrypts its backups with that Secret's passphrase, so a restore from
 // it runs the decrypt-download init container against the read-only claim.
-func pvcBackupProfileSpec(profile, storageClass, size, passphraseSecret string) v1alpha1.BackupSpec {
+func pvcBackupProfileSpec(profile, storageClass, size, passphraseSecret string) v1beta1.BackupSpec {
 	consistent := true
-	spec := v1alpha1.BackupSpec{
-		Image:                  v1alpha1.DefaultBackupImage,
+	spec := v1beta1.BackupSpec{
+		Image:                  v1beta1.DefaultBackupImage,
 		MaxLagSecondsForSource: new(int64(60)),
 		ActiveDeadlineSeconds:  1800,
 		BackoffLimit:           new(int32(0)),
-		Profiles: []v1alpha1.BackupProfile{{
+		Profiles: []v1beta1.BackupProfile{{
 			Name: profile,
-			Retention: v1alpha1.BackupRetention{
+			Retention: v1beta1.BackupRetention{
 				KeepLast:       2,
 				KeepWithinDays: new(int32(1)),
 				KeepFailed:     new(int32(2)),
 			},
-			Storage: v1alpha1.BackupStorage{
-				Type: v1alpha1.BackupStoragePVC,
-				PVC: &v1alpha1.PVCStorage{Provisioned: &v1alpha1.ProvisionedVolumeSpec{
+			Storage: v1beta1.BackupStorage{
+				Type: v1beta1.BackupStoragePVC,
+				PVC: &v1beta1.PVCStorage{Provisioned: &v1beta1.ProvisionedVolumeSpec{
 					StorageClassName: &storageClass,
-					Size:             v1alpha1.StorageQuantity(size),
+					Size:             v1beta1.StorageQuantity(size),
 				}},
 			},
-			Dump: &v1alpha1.DumpOptions{
+			Dump: &v1beta1.DumpOptions{
 				Threads:     2,
 				Compression: "zstd",
 				Consistent:  &consistent,
@@ -143,8 +143,8 @@ func pvcBackupProfileSpec(profile, storageClass, size, passphraseSecret string) 
 // waitForPVCBackupProfile is waitForBackupProfile for a profile written
 // by pvcBackupProfileSpec.
 func waitForPVCBackupProfile(ctx context.Context, env *runner.Env, profile string) error {
-	_, err := env.Wait.UntilCR(ctx, env.Namespace, "PVC backup profile observed", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-		var found *v1alpha1.BackupProfile
+	_, err := env.Wait.UntilCR(ctx, env.Namespace, "PVC backup profile observed", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+		var found *v1beta1.BackupProfile
 		if mfg.Spec.Backup != nil {
 			for i := range mfg.Spec.Backup.Profiles {
 				if mfg.Spec.Backup.Profiles[i].Name == profile {
@@ -152,7 +152,7 @@ func waitForPVCBackupProfile(ctx context.Context, env *runner.Env, profile strin
 				}
 			}
 		}
-		if found == nil || found.Storage.Type != v1alpha1.BackupStoragePVC || found.Storage.PVC == nil {
+		if found == nil || found.Storage.Type != v1beta1.BackupStoragePVC || found.Storage.PVC == nil {
 			return false, profile + " PVC profile not observed", nil
 		}
 		rolloutReady := backupProfileRolloutReady(mfg)
@@ -162,10 +162,10 @@ func waitForPVCBackupProfile(ctx context.Context, env *runner.Env, profile strin
 	return err
 }
 
-func backupE2EEncryption(secretName string) *v1alpha1.BackupEncryptionSpec {
-	return &v1alpha1.BackupEncryptionSpec{
+func backupE2EEncryption(secretName string) *v1beta1.BackupEncryptionSpec {
+	return &v1beta1.BackupEncryptionSpec{
 		Algorithm:              "AES-256-GCM",
-		PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: secretName},
+		PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: secretName},
 	}
 }
 
@@ -224,7 +224,7 @@ func deleteBackupPassphraseSecret(ctx context.Context, env *runner.Env) error {
 	return nil
 }
 
-func patchBackupSpec(ctx context.Context, env *runner.Env, spec v1alpha1.BackupSpec) error {
+func patchBackupSpec(ctx context.Context, env *runner.Env, spec v1beta1.BackupSpec) error {
 	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return fmt.Errorf("read MFG before backup spec patch: %w", err)
@@ -281,7 +281,7 @@ func restoreOriginalBackupSpec(ctx context.Context, env *runner.Env) error {
 		env.Capture.Note("restored spec.backup by removing scenario-added config")
 		return nil
 	}
-	var original v1alpha1.BackupSpec
+	var original v1beta1.BackupSpec
 	if err := json.Unmarshal([]byte(ctxFetch(env, backupOriginalSpecKey)), &original); err != nil {
 		return fmt.Errorf("unmarshal original backup spec: %w", err)
 	}
@@ -304,7 +304,7 @@ func restoreOriginalBackupSpec(ctx context.Context, env *runner.Env) error {
 // and that wait could last forever. A PITR profile rolls every pod behind
 // an archive binding check; pitrWaitArchiveBound is its wait.
 func waitForBackupProfile(ctx context.Context, env *runner.Env, prefix string) error {
-	_, err := env.Wait.UntilCR(ctx, env.Namespace, "backup profile observed", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	_, err := env.Wait.UntilCR(ctx, env.Namespace, "backup profile observed", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		found := backupE2EProfileOf(mfg)
 		if found == nil || found.Storage.S3 == nil {
 			return false, "rustfs-e2e profile not observed", nil
@@ -318,7 +318,7 @@ func waitForBackupProfile(ctx context.Context, env *runner.Env, prefix string) e
 }
 
 // backupE2EProfileOf is the group's rustfs-e2e profile, or nil.
-func backupE2EProfileOf(mfg *v1alpha1.MysqlFailoverGroup) *v1alpha1.BackupProfile {
+func backupE2EProfileOf(mfg *v1beta1.MysqlFailoverGroup) *v1beta1.BackupProfile {
 	if mfg.Spec.Backup == nil {
 		return nil
 	}
@@ -331,17 +331,17 @@ func backupE2EProfileOf(mfg *v1alpha1.MysqlFailoverGroup) *v1alpha1.BackupProfil
 }
 
 // backupProfileMatches reports whether p is the e2e S3 profile at prefix.
-func backupProfileMatches(p *v1alpha1.BackupProfile, prefix string) bool {
+func backupProfileMatches(p *v1beta1.BackupProfile, prefix string) bool {
 	if p == nil || p.Storage.S3 == nil {
 		return false
 	}
 	s3 := p.Storage.S3
-	return p.Storage.Type == v1alpha1.BackupStorageS3 && s3.Bucket == backupE2EBucket && s3.Prefix == prefix && s3.EndpointURL == backupE2EEndpoint
+	return p.Storage.Type == v1beta1.BackupStorageS3 && s3.Bucket == backupE2EBucket && s3.Prefix == prefix && s3.EndpointURL == backupE2EEndpoint
 }
 
 // backupProfileRolloutReady reports a stable topology: an active site and
 // no ordered update in progress.
-func backupProfileRolloutReady(mfg *v1alpha1.MysqlFailoverGroup) bool {
+func backupProfileRolloutReady(mfg *v1beta1.MysqlFailoverGroup) bool {
 	return mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == ""
 }
 
@@ -351,20 +351,20 @@ func createMysqlBackup(ctx context.Context, env *runner.Env, name, scenarioID st
 
 // createMysqlBackupForProfile creates a manual MysqlBackup of profile.
 func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, scenarioID, profile string) error {
-	b := &v1alpha1.MysqlBackup{
+	b := &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel:                          env.FG,
-				v1alpha1.BackupProfileLabel:                          profile,
+				v1beta1.FailoverGroupLabel:                           env.FG,
+				v1beta1.BackupProfileLabel:                           profile,
 				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
 				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
-			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
+			Annotations: map[string]string{v1beta1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:      profile,
 		},
 	}
@@ -375,28 +375,28 @@ func createMysqlBackupForProfile(ctx context.Context, env *runner.Env, name, sce
 	return nil
 }
 
-func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1alpha1.PointInTimeVerificationSpec, query string, minResult int64) error {
+func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, backupName, scenarioID string, pit *v1beta1.PointInTimeVerificationSpec, query string, minResult int64) error {
 	keep := true
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: env.Namespace,
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel:                          env.FG,
-				v1alpha1.BackupProfileLabel:                          backupE2EProfile,
+				v1beta1.FailoverGroupLabel:                           env.FG,
+				v1beta1.BackupProfileLabel:                           backupE2EProfile,
 				"playground.bloodraven.shipstream.io/scenario":       scenarioID,
 				"playground.bloodraven.shipstream.io/created-by-e2e": "true",
 			},
-			Annotations: map[string]string{v1alpha1.TriggeredByAnnotation: "chaos/" + scenarioID},
+			Annotations: map[string]string{v1beta1.TriggeredByAnnotation: "chaos/" + scenarioID},
 		},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef:        v1alpha1.LocalFailoverGroupRef{Name: env.FG},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef:        v1beta1.LocalFailoverGroupRef{Name: env.FG},
 			ProfileName:             backupE2EProfile,
-			BackupRef:               &v1alpha1.LocalMysqlBackupRef{Name: backupName},
+			BackupRef:               &v1beta1.LocalMysqlBackupRef{Name: backupName},
 			KeepOnFailure:           &keep,
 			TTLSecondsAfterFinished: new(int32(0)),
 			PointInTime:             pit,
-			SanityCheck: &v1alpha1.SanityCheckSpec{
+			SanityCheck: &v1beta1.SanityCheckSpec{
 				Query:     query,
 				MinResult: new(minResult),
 				Timeout:   &metav1.Duration{Duration: 30 * time.Second},
@@ -410,23 +410,23 @@ func createMysqlBackupVerification(ctx context.Context, env *runner.Env, name, b
 	return nil
 }
 
-func getMysqlBackup(ctx context.Context, env *runner.Env, name string) (*v1alpha1.MysqlBackup, error) {
-	b := &v1alpha1.MysqlBackup{}
+func getMysqlBackup(ctx context.Context, env *runner.Env, name string) (*v1beta1.MysqlBackup, error) {
+	b := &v1beta1.MysqlBackup{}
 	if err := env.Kube.Controller.Get(ctx, ctrlclient.ObjectKey{Namespace: env.Namespace, Name: name}, b); err != nil {
 		return nil, err
 	}
 	return b, nil
 }
 
-func getMysqlBackupVerification(ctx context.Context, env *runner.Env, name string) (*v1alpha1.MysqlBackupVerification, error) {
-	v := &v1alpha1.MysqlBackupVerification{}
+func getMysqlBackupVerification(ctx context.Context, env *runner.Env, name string) (*v1beta1.MysqlBackupVerification, error) {
+	v := &v1beta1.MysqlBackupVerification{}
 	if err := env.Kube.Controller.Get(ctx, ctrlclient.ObjectKey{Namespace: env.Namespace, Name: name}, v); err != nil {
 		return nil, err
 	}
 	return v, nil
 }
 
-func waitForBackupPhase(ctx context.Context, env *runner.Env, name string, want v1alpha1.BackupPhase) (*v1alpha1.MysqlBackup, error) {
+func waitForBackupPhase(ctx context.Context, env *runner.Env, name string, want v1beta1.BackupPhase) (*v1beta1.MysqlBackup, error) {
 	start := time.Now()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -442,7 +442,7 @@ func waitForBackupPhase(ctx context.Context, env *runner.Env, name string, want 
 			if b.Status.Phase == want {
 				return b, nil
 			}
-			if b.Status.Phase == v1alpha1.BackupPhaseFailed {
+			if b.Status.Phase == v1beta1.BackupPhaseFailed {
 				return b, fmt.Errorf("MysqlBackup %s failed: %s", name, last)
 			}
 		}
@@ -456,7 +456,7 @@ func waitForBackupPhase(ctx context.Context, env *runner.Env, name string, want 
 	}
 }
 
-func waitForVerificationPhase(ctx context.Context, env *runner.Env, name string, want v1alpha1.VerificationPhase) (*v1alpha1.MysqlBackupVerification, error) {
+func waitForVerificationPhase(ctx context.Context, env *runner.Env, name string, want v1beta1.VerificationPhase) (*v1beta1.MysqlBackupVerification, error) {
 	start := time.Now()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -472,13 +472,13 @@ func waitForVerificationPhase(ctx context.Context, env *runner.Env, name string,
 			if v.Status.Phase == want {
 				return v, nil
 			}
-			if v.Status.Phase == v1alpha1.VerificationPhaseFailed {
+			if v.Status.Phase == v1beta1.VerificationPhaseFailed {
 				captureVerificationJobLogs(ctx, env, v)
 				return v, fmt.Errorf("MysqlBackupVerification %s failed: %s", name, last)
 			}
 			// An expected refusal that succeeds is the regression itself;
 			// report it at once, with forensics, instead of timing out.
-			if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded {
+			if v.Status.Phase == v1beta1.VerificationPhaseSucceeded {
 				captureVerificationJobLogs(ctx, env, v)
 				return v, fmt.Errorf("MysqlBackupVerification %s succeeded, want %s: %s", name, want, last)
 			}
@@ -493,7 +493,7 @@ func waitForVerificationPhase(ctx context.Context, env *runner.Env, name string,
 	}
 }
 
-func captureVerificationJobLogs(ctx context.Context, env *runner.Env, v *v1alpha1.MysqlBackupVerification) {
+func captureVerificationJobLogs(ctx context.Context, env *runner.Env, v *v1beta1.MysqlBackupVerification) {
 	if v.Status.JobName == "" {
 		env.Capture.Note("verification failed before status.jobName was set")
 		return
@@ -534,7 +534,7 @@ func captureVerificationJobLogs(ctx context.Context, env *runner.Env, v *v1alpha
 func deleteBackupCRs(ctx context.Context, env *runner.Env, backupName, verificationName string) error {
 	var errs []error
 	if verificationName != "" {
-		if err := deleteAndWait(ctx, env, &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: verificationName, Namespace: env.Namespace}}, "MysqlBackupVerification", verificationName); err != nil {
+		if err := deleteAndWait(ctx, env, &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: verificationName, Namespace: env.Namespace}}, "MysqlBackupVerification", verificationName); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -554,7 +554,7 @@ func deleteBackupCRs(ctx context.Context, env *runner.Env, backupName, verificat
 // prefix before the delete, and none remain once the CR is gone. A cleanup
 // that deleted nothing but exited successfully would otherwise pass.
 func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, name string) error {
-	var backup v1alpha1.MysqlBackup
+	var backup v1beta1.MysqlBackup
 	err := env.Kube.Controller.Get(ctx, types.NamespacedName{Namespace: env.Namespace, Name: name}, &backup)
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -576,7 +576,7 @@ func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, nam
 		}
 		env.Capture.Note(fmt.Sprintf("MysqlBackup %s artifact: %d objects under s3://%s/%s", name, len(keys), bucket, prefix))
 	}
-	if err := deleteAndWait(ctx, env, &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: env.Namespace}}, "MysqlBackup", name); err != nil {
+	if err := deleteAndWait(ctx, env, &v1beta1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: env.Namespace}}, "MysqlBackup", name); err != nil {
 		return err
 	}
 	if !ok {
@@ -600,9 +600,9 @@ func deleteBackupAndAssertArtifactGone(ctx context.Context, env *runner.Env, nam
 // all (a Succeeded backup whose destination could not be recovered, which
 // the finalizer releases with ArtifactCleanupSkipped). An S3 destination
 // that is recorded but lacks its location or bucket is an error.
-func backupArtifactPrefix(b *v1alpha1.MysqlBackup) (bucket, prefix string, ok bool, err error) {
+func backupArtifactPrefix(b *v1beta1.MysqlBackup) (bucket, prefix string, ok bool, err error) {
 	storage := b.Status.ArtifactStorage
-	if b.Status.Phase != v1alpha1.BackupPhaseSucceeded || storage == nil || storage.Type != v1alpha1.BackupStorageS3 {
+	if b.Status.Phase != v1beta1.BackupPhaseSucceeded || storage == nil || storage.Type != v1beta1.BackupStorageS3 {
 		return "", "", false, nil
 	}
 	if storage.Location == "" || storage.Bucket == "" {
@@ -643,12 +643,12 @@ func deleteAndWait(ctx context.Context, env *runner.Env, obj ctrlclient.Object, 
 		}
 		select {
 		case <-waitCtx.Done():
-			if backup, ok := fresh.(*v1alpha1.MysqlBackup); ok {
+			if backup, ok := fresh.(*v1beta1.MysqlBackup); ok {
 				// Artifact cleanup did not finish: fail the scenario with
 				// the operator's reason, then unstick the CR so later
 				// scenarios start clean.
 				cause := "no ArtifactCleanup condition"
-				if c := apimeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionArtifactCleanup); c != nil {
+				if c := apimeta.FindStatusCondition(backup.Status.Conditions, v1beta1.ConditionArtifactCleanup); c != nil {
 					cause = c.Reason + ": " + c.Message
 				}
 				if err := forceRemoveFinalizers(ctx, env, fresh, kind, name); err != nil {
@@ -722,7 +722,7 @@ func dropMarkerSchemaAndReplicate(ctx context.Context, env *runner.Env, dbName s
 func activeAndReplica(ctx context.Context, env *runner.Env) (string, string, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "active site available", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "active site available", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		active := mfg.Status.ActiveSite
 		if active == "" {
 			return false, "activeSite is empty", nil
@@ -801,7 +801,7 @@ func originalPITRExpected(env *runner.Env) (enabled bool, profile string, err er
 	if !hadOriginal {
 		return false, "", nil
 	}
-	var original v1alpha1.BackupSpec
+	var original v1beta1.BackupSpec
 	if err := json.Unmarshal([]byte(ctxFetch(env, backupOriginalSpecKey)), &original); err != nil {
 		return false, "", fmt.Errorf("unmarshal original backup spec for PITR expectation: %w", err)
 	}
@@ -834,8 +834,8 @@ func originalPITRExpected(env *runner.Env) (enabled bool, profile string, err er
 //
 // deployments maps each spec.sites name to its Deployment, nil when it
 // could not be found.
-func pitrBaselineRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
-	ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+func pitrBaselineRestored(mfg *v1beta1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
+	ready := conditionTrueForGeneration(mfg.Status.Conditions, v1beta1.ConditionReady, mfg.Generation)
 	idle, updating := orderedUpdateIdleAtGeneration(mfg)
 	settled := backupProfileRolloutReady(mfg)
 	observed, why := pitrObservationRestored(mfg, wantPITR, wantProfile)
@@ -847,7 +847,7 @@ func pitrBaselineRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[stri
 // pitrBaselineRestoredLive is pitrBaselineRestored with the site
 // Deployments read from the cluster. A failed read is a wait, not an
 // error: the cleanup retries it.
-func pitrBaselineRestoredLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+func pitrBaselineRestoredLive(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
 	deployments, err := pitrSiteDeploymentsLive(ctx, env, mfg)
 	if err != nil {
 		return false, err.Error()
@@ -858,7 +858,7 @@ func pitrBaselineRestoredLive(ctx context.Context, env *runner.Env, mfg *v1alpha
 // pitrSiteDeploymentsLive reads every spec.sites MySQL Deployment from the
 // cluster, as pitrBaselineRestored and pitrRolloutRestored take them: nil
 // for a site whose Deployment does not exist.
-func pitrSiteDeploymentsLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (map[string]*appsv1.Deployment, error) {
+func pitrSiteDeploymentsLive(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup) (map[string]*appsv1.Deployment, error) {
 	deployments := make(map[string]*appsv1.Deployment, len(mfg.Spec.Sites))
 	for _, site := range mfg.Spec.Sites {
 		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, pgkube.MysqlDeploymentName(mfg.Name, site.Name))
@@ -875,13 +875,13 @@ func pitrSiteDeploymentsLive(ctx context.Context, env *runner.Env, mfg *v1alpha1
 
 // orderedUpdateIdleAtGeneration reports Updating=False/NotUpdating for the
 // current generation, with a summary of the condition.
-func orderedUpdateIdleAtGeneration(mfg *v1alpha1.MysqlFailoverGroup) (bool, string) {
-	c := apimeta.FindStatusCondition(mfg.Status.Conditions, v1alpha1.ConditionUpdating)
+func orderedUpdateIdleAtGeneration(mfg *v1beta1.MysqlFailoverGroup) (bool, string) {
+	c := apimeta.FindStatusCondition(mfg.Status.Conditions, v1beta1.ConditionUpdating)
 	if c == nil {
 		return false, "<none>"
 	}
 	summary := fmt.Sprintf("%s/%s@%d", c.Status, c.Reason, c.ObservedGeneration)
-	return c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonNotUpdating && c.ObservedGeneration == mfg.Generation, summary
+	return c.Status == metav1.ConditionFalse && c.Reason == v1beta1.ReasonNotUpdating && c.ObservedGeneration == mfg.Generation, summary
 }
 
 // pitrRolloutRestored reports whether every spec.sites Deployment renders
@@ -889,7 +889,7 @@ func orderedUpdateIdleAtGeneration(mfg *v1alpha1.MysqlFailoverGroup) (bool, stri
 // and, when on, the restored profile's destination) and has finished
 // rolling it out: the Deployment controller observed its generation and
 // every replica is updated, ready and available.
-func pitrRolloutRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
+func pitrRolloutRestored(mfg *v1beta1.MysqlFailoverGroup, deployments map[string]*appsv1.Deployment, wantPITR bool, wantProfile string) (bool, string) {
 	wantDest := ""
 	if wantPITR {
 		dest, err := pitrRestoredDestination(mfg, wantProfile)
@@ -909,8 +909,8 @@ func pitrRolloutRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[strin
 			Enabled     bool   `json:"enabled"`
 			Destination string `json:"destination"`
 		}
-		if err := json.Unmarshal([]byte(dep.Annotations[v1alpha1.PITRRenderAnnotation]), &render); err != nil {
-			pending = append(pending, fmt.Sprintf("%s: %s does not decode", site.Name, v1alpha1.PITRRenderAnnotation))
+		if err := json.Unmarshal([]byte(dep.Annotations[v1beta1.PITRRenderAnnotation]), &render); err != nil {
+			pending = append(pending, fmt.Sprintf("%s: %s does not decode", site.Name, v1beta1.PITRRenderAnnotation))
 			continue
 		}
 		if render.Enabled != wantPITR || render.Destination != wantDest {
@@ -936,8 +936,8 @@ func pitrRolloutRestored(mfg *v1alpha1.MysqlFailoverGroup, deployments map[strin
 
 // pitrRestoredDestination is the normalized archive destination of the
 // restored PITR profile.
-func pitrRestoredDestination(mfg *v1alpha1.MysqlFailoverGroup, wantProfile string) (string, error) {
-	var profile *v1alpha1.BackupProfile
+func pitrRestoredDestination(mfg *v1beta1.MysqlFailoverGroup, wantProfile string) (string, error) {
+	var profile *v1beta1.BackupProfile
 	if mfg.Spec.Backup != nil {
 		for i := range mfg.Spec.Backup.Profiles {
 			if mfg.Spec.Backup.Profiles[i].Name == wantProfile {
@@ -956,7 +956,7 @@ func pitrRestoredDestination(mfg *v1alpha1.MysqlFailoverGroup, wantProfile strin
 }
 
 // pitrObservationRestored is the PITR half of pitrBaselineRestored.
-func pitrObservationRestored(mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
+func pitrObservationRestored(mfg *v1beta1.MysqlFailoverGroup, wantPITR bool, wantProfile string) (bool, string) {
 	if !wantPITR {
 		if pitrSpecProfile(mfg) != "" {
 			return false, "spec still enables PITR"
@@ -982,8 +982,8 @@ func pitrObservationRestored(mfg *v1alpha1.MysqlFailoverGroup, wantPITR bool, wa
 	return true, "archive=" + pitrArchiveSummary(mfg)
 }
 
-func backupStatusSummary(b *v1alpha1.MysqlBackup) string {
-	location, storageType := "", v1alpha1.BackupStorageType("")
+func backupStatusSummary(b *v1beta1.MysqlBackup) string {
+	location, storageType := "", v1beta1.BackupStorageType("")
 	if st := b.Status.ArtifactStorage; st != nil {
 		location, storageType = st.Location, st.Type
 	}
@@ -995,7 +995,7 @@ func backupStatusSummary(b *v1alpha1.MysqlBackup) string {
 		b.Name, b.Status.Phase, b.Status.Message, b.Status.JobName, b.Status.SourceSite, location, storageType, b.Status.SizeBytes, b.Status.GtidExecuted, binlog, conditionsSummary(b.Status.Conditions))
 }
 
-func verificationStatusSummary(v *v1alpha1.MysqlBackupVerification) string {
+func verificationStatusSummary(v *v1beta1.MysqlBackupVerification) string {
 	backupRef := "<nil>"
 	if v.Status.BackupRef != nil {
 		backupRef = fmt.Sprintf("%s/%s", v.Status.BackupRef.Name, v.Status.BackupRef.UID)

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -82,7 +82,7 @@ func TestDeploymentClientsValidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			u := &unstructured.Unstructured{Object: obj}
-			u.SetAPIVersion("shipstream.io/v1alpha1")
+			u.SetAPIVersion("shipstream.io/v1beta1")
 			u.SetKind("MysqlDatabase")
 			if tt.clients != nil {
 				if err := unstructured.SetNestedSlice(u.Object, tt.clients, "spec", "deploymentClients"); err != nil {
@@ -100,7 +100,7 @@ func TestDeploymentClientsValidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = k8sClient.Delete(ctx, u) })
-			var got v1alpha1.MysqlDatabase
+			var got v1beta1.MysqlDatabase
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(u), &got); err != nil {
 				t.Fatal(err)
 			}
@@ -121,24 +121,24 @@ func TestDeploymentPrivilegesAdmission(t *testing.T) {
 	for _, field := range []string{"owner", "users", "grants"} {
 		t.Run(field, func(t *testing.T) {
 			cr := newMysqlDatabaseCR(ns, "tenant-"+field)
-			privs := []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeCreateTemporaryTables, v1alpha1.PrivilegeCreateView}
+			privs := []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect, v1beta1.PrivilegeCreateTemporaryTables, v1beta1.PrivilegeCreateView}
 			switch field {
 			case "owner":
 				cr.Spec.Owner.Privileges = privs
 			case "users":
-				cr.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: "app", Privileges: privs}}
+				cr.Spec.Users = []v1beta1.MysqlDatabaseUser{{SecretName: "app", Privileges: privs}}
 			case "grants":
-				cr.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "reporting", Privileges: privs}}
+				cr.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "reporting", Privileges: privs}}
 			}
 			if err := k8sClient.Create(ctx, cr); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
-			var got v1alpha1.MysqlDatabase
+			var got v1beta1.MysqlDatabase
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), &got); err != nil {
 				t.Fatal(err)
 			}
-			var actual []v1alpha1.MysqlPrivilege
+			var actual []v1beta1.MysqlPrivilege
 			switch field {
 			case "owner":
 				actual = got.Spec.Owner.Privileges
@@ -150,7 +150,7 @@ func TestDeploymentPrivilegesAdmission(t *testing.T) {
 			if !reflect.DeepEqual(actual, privs) {
 				t.Fatalf("privileges = %v, want %v", actual, privs)
 			}
-			for _, invalid := range []v1alpha1.MysqlPrivilege{"CREATE VIEW WITH GRANT OPTION", "CREATE TEMPORARY TABLES; GRANT ALL"} {
+			for _, invalid := range []v1beta1.MysqlPrivilege{"CREATE VIEW WITH GRANT OPTION", "CREATE TEMPORARY TABLES; GRANT ALL"} {
 				actual[1] = invalid
 				if err := k8sClient.Update(ctx, &got); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "privileges") {
 					t.Fatalf("invalid privilege %q: error = %v", invalid, err)
@@ -203,7 +203,7 @@ func TestTopologyGenerationStatusPersistence(t *testing.T) {
 		runCtx, stop := context.WithTimeout(ctx, 15*time.Second)
 		done := make(chan error, 1)
 		go func() { done <- mgr.Start(runCtx) }()
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if mgr.GetCache().WaitForCacheSync(runCtx) {
 			err = mgr.GetClient().Get(runCtx, client.ObjectKeyFromObject(fg), &got)
 		} else {

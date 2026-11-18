@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
@@ -150,11 +150,11 @@ func TestEncryption_SidecarMySQLDSNUsesTLS(t *testing.T) {
 	// must dial TLS or the same crash loop follows.
 	for _, tc := range []struct {
 		name string
-		fg   func() *v1alpha1.MysqlFailoverGroup
+		fg   func() *v1beta1.MysqlFailoverGroup
 	}{
-		{"dedicated operator secret", func() *v1alpha1.MysqlFailoverGroup {
+		{"dedicated operator secret", func() *v1beta1.MysqlFailoverGroup {
 			fg := encTestFG()
-			fg.Spec.Credentials = v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-operator-creds"}
+			fg.Spec.Credentials = v1beta1.CredentialsSpec{OperatorSecretName: "mysql-operator-creds"}
 			return fg
 		}},
 		{"default fixture", encTestFG},

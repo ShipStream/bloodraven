@@ -10,7 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -62,7 +62,7 @@ func runAckPlannedFailoverHold(args []string, stdout, stderr *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: group}, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("MysqlFailoverGroup %s/%s not found", ns, group)
@@ -78,11 +78,11 @@ func runAckPlannedFailoverHold(args []string, stdout, stderr *os.File) error {
 	if patched.Annotations == nil {
 		patched.Annotations = map[string]string{}
 	}
-	patched.Annotations[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation] = value
+	patched.Annotations[v1beta1.AcknowledgePlannedFailoverHoldAnnotation] = value
 	if err := cl.Patch(ctx, patched, client.MergeFrom(&fg)); err != nil {
 		return fmt.Errorf("annotate failover group: %w", err)
 	}
-	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, value)
+	fmt.Fprintf(stdout, "Annotated %s/%s with %s=%s\n", ns, group, v1beta1.AcknowledgePlannedFailoverHoldAnnotation, value)
 	fmt.Fprintln(stdout, "Watch the AutomaticFailoverHeld condition turn False with: kubectl bloodraven status", group, "-n", ns)
 	return nil
 }
@@ -91,7 +91,7 @@ func runAckPlannedFailoverHold(args []string, stdout, stderr *os.File) error {
 // hold: the explicit runID when given (it must name the hold), otherwise
 // the held run's id. It refuses when no hold stands, or when the hold
 // names no run (an administrator then removes it by hand).
-func plannedHoldAckValue(fg *v1alpha1.MysqlFailoverGroup, runID string) (string, error) {
+func plannedHoldAckValue(fg *v1beta1.MysqlFailoverGroup, runID string) (string, error) {
 	hold := brcontroller.PlannedHoldFrom(fg)
 	switch {
 	case hold == nil:

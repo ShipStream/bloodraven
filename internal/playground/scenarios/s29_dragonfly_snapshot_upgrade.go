@@ -8,7 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -95,7 +95,7 @@ func waitDragonflyReadyAfterSnapshotConfig() runner.Step {
 	}
 }
 
-func dragonflyPodsHaveSnapshotArgs(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+func dragonflyPodsHaveSnapshotArgs(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 	for _, site := range mfg.Spec.Sites {
 		pod, err := env.Kube.GetSiteDragonflyPod(ctx, env.Namespace, env.FG, site.Name)
 		if err != nil {
@@ -201,7 +201,7 @@ func observeDragonflySnapshotUpgradeSucceeded() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"status.dragonfly.upgrade.phase==Succeeded",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil || mfg.Status.Dragonfly.Upgrade == nil {
 						return false, "no status.dragonfly.upgrade", nil
 					}
@@ -212,10 +212,10 @@ func observeDragonflySnapshotUpgradeSucceeded() runner.Step {
 							up.StartTime, env.StartTime), nil
 					}
 					msg := fmt.Sprintf("phase=%q reason=%q msg=%q", up.Phase, up.Reason, up.Message)
-					if up.Phase == v1alpha1.DragonflyUpgradePhaseFailed {
+					if up.Phase == v1beta1.DragonflyUpgradePhaseFailed {
 						return false, msg, fmt.Errorf("Dragonfly upgrade failed: %s", up.Message)
 					}
-					return up.Phase == v1alpha1.DragonflyUpgradePhaseSucceeded, msg, nil
+					return up.Phase == v1beta1.DragonflyUpgradePhaseSucceeded, msg, nil
 				},
 			)
 			return err

@@ -1,0 +1,60 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackup
+metadata:
+  annotations:
+    bloodraven.shipstream.io/triggered-by: manual
+  finalizers:
+    - bloodraven.shipstream.io/mysqlbackup
+  labels:
+    app.kubernetes.io/managed-by: bloodraven
+    bloodraven.shipstream.io/backup-profile: rustfs
+    bloodraven.shipstream.io/failover-group: playground
+  name: upgrade-e2e
+spec:
+  deletionPolicy: Delete
+  failoverGroupRef:
+    name: playground
+  profileName: rustfs
+status:
+  activeSiteAtStart: iad
+  artifactStorage:
+    bucket: bloodraven
+    endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
+    location: playground/upgrade-e2e
+    region: us-east-1
+    type: S3
+  attempt: 1
+  binlogPosition:
+    file: mysql-bin.000002
+    position: 2464
+  completionTime: "2026-11-16T23:43:52Z"
+  conditions:
+    - lastTransitionTime: "2026-11-16T23:43:52Z"
+      message: backup completed successfully
+      observedGeneration: 1
+      reason: Succeeded
+      status: "True"
+      type: Ready
+    - lastTransitionTime: "2026-11-16T23:42:40Z"
+      message: Job mysqlbackup-upgrade-e2e created
+      observedGeneration: 1
+      reason: Created
+      status: "True"
+      type: JobCreated
+    - lastTransitionTime: "2026-11-16T23:43:52Z"
+      message: completion metadata collected from Job logs
+      observedGeneration: 1
+      reason: Collected
+      status: "True"
+      type: MetadataComplete
+  encryption:
+    mode: None
+  failoverGroupUID: 7d70af7c-52df-44b3-8d69-78e0ce929aa0
+  gtidExecuted: f792da05-e215-11f1-b2b4-eea4c82fa102:1-25
+  jobName: mysqlbackup-upgrade-e2e
+  message: backup completed successfully
+  mysqlImage: mysql:9.7
+  observedGeneration: 1
+  phase: Succeeded
+  sourceSite: pdx
+  startTime: "2026-11-16T23:42:40Z"

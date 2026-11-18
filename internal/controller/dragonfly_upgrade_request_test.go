@@ -16,11 +16,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
-func dragonflyStatefulSetForTest(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) *appsv1.StatefulSet {
+func dragonflyStatefulSetForTest(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) *appsv1.StatefulSet {
 	t.Helper()
 	var sts appsv1.StatefulSet
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site)}, &sts); err != nil {
@@ -46,7 +46,7 @@ func TestDragonflySnapshotUpgrade_CombinedEditWaitsForSnapshotConfig(t *testing.
 	fg.Spec.Dragonfly.Snapshot.CredentialsSecretName = "dragonfly-s3"
 	before := fg.DeepCopy()
 	before.Spec.Dragonfly.Image = dfSourceImage
-	before.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+	before.Spec.Dragonfly.UpgradeStrategy = v1beta1.DragonflyUpgradeStrategyRolling
 	before.Spec.Dragonfly.Snapshot = nil
 
 	r, c := newReconciler(fg)
@@ -100,7 +100,7 @@ func TestDragonflySnapshotUpgrade_CombinedEditWaitsForSnapshotConfig(t *testing.
 		pass()
 	}
 	up := upgradeRecord(t, c, fg)
-	if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore || conn.saveCalls != 1 {
+	if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore || conn.saveCalls != 1 {
 		t.Fatalf("record %+v after %d SAVEs, want one SAVE and the active restarted", up, conn.saveCalls)
 	}
 	active = dragonflyStatefulSetForTest(t, c, fg, "dc1")
@@ -136,7 +136,7 @@ func TestDragonflySnapshotUpgrade_LostRecordWaitsForLoadingActive(t *testing.T) 
 		}
 	}
 	up := upgradeRecord(t, c, fg)
-	if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore || !strings.Contains(up.Message, "loading") {
+	if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore || !strings.Contains(up.Message, "loading") {
 		t.Fatalf("record = %+v, want a resumed run waiting for the loading active", up)
 	}
 	if img := liveDragonflyImage(t, c, fg, "dc2"); img != dfSourceImage {
@@ -155,7 +155,7 @@ func TestDragonflySnapshotUpgrade_LostRecordWaitsForLoadingActive(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	if up := upgradeRecord(t, c, fg); up.Phase != v1alpha1.DragonflyUpgradePhaseReattachingReplicas {
+	if up := upgradeRecord(t, c, fg); up.Phase != v1beta1.DragonflyUpgradePhaseReattachingReplicas {
 		t.Fatalf("record = %+v, want ReattachingReplicas once the active loaded", up)
 	}
 	if img := liveDragonflyImage(t, c, fg, "dc2"); img != dfTargetImage {
@@ -170,49 +170,49 @@ func TestDragonflySnapshotUpgrade_LostRecordWaitsForLoadingActive(t *testing.T) 
 // loaded.
 func TestDragonflySnapshotUpgrade_InFlightRunFollowsSpec(t *testing.T) {
 	type want struct {
-		reason v1alpha1.DragonflyUpgradeReason
+		reason v1beta1.DragonflyUpgradeReason
 		hold   bool // held (active loading), not ended
 	}
 	for _, tc := range []struct {
 		name          string
-		phase         v1alpha1.DragonflyUpgradePhase
-		mutate        func(*v1alpha1.MysqlFailoverGroup)
+		phase         v1beta1.DragonflyUpgradePhase
+		mutate        func(*v1beta1.MysqlFailoverGroup)
 		loading       bool
 		deleteActive  bool
 		want          want
 		trafficOnEnds bool
 	}{
-		{name: "image reverted before SAVE", phase: v1alpha1.DragonflyUpgradePhasePending,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Image = dfSourceImage },
-			want:   want{reason: v1alpha1.DragonflyUpgradeReasonSpecChanged}},
-		{name: "Rolling while replicas reattach", phase: v1alpha1.DragonflyUpgradePhaseReattachingReplicas,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+		{name: "image reverted before SAVE", phase: v1beta1.DragonflyUpgradePhasePending,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Image = dfSourceImage },
+			want:   want{reason: v1beta1.DragonflyUpgradeReasonSpecChanged}},
+		{name: "Rolling while replicas reattach", phase: v1beta1.DragonflyUpgradePhaseReattachingReplicas,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.Dragonfly.UpgradeStrategy = v1beta1.DragonflyUpgradeStrategyRolling
 			},
-			want: want{reason: v1alpha1.DragonflyUpgradeReasonSpecChanged}},
-		{name: "Rolling while the active loads", phase: v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore, loading: true,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+			want: want{reason: v1beta1.DragonflyUpgradeReasonSpecChanged}},
+		{name: "Rolling while the active loads", phase: v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore, loading: true,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.Dragonfly.UpgradeStrategy = v1beta1.DragonflyUpgradeStrategyRolling
 			},
 			want: want{hold: true}},
-		{name: "image moved on after the active loaded", phase: v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Image = "dragonfly:v1.40.0" },
-			want:   want{reason: v1alpha1.DragonflyUpgradeReasonSpecChanged}},
-		{name: "snapshot dir changed with the active deleted", phase: v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore, deleteActive: true,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Snapshot.Dir = "s3://elsewhere/prefix" },
-			want:   want{reason: v1alpha1.DragonflyUpgradeReasonSpecChanged}},
-		{name: "disabled", phase: v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore, loading: true,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Enabled = false },
-			want:   want{reason: v1alpha1.DragonflyUpgradeReasonDragonflyDisabled}},
-		{name: "removed with a StatefulSet missing", phase: v1alpha1.DragonflyUpgradePhaseUpdatingActive, deleteActive: true,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Dragonfly = nil },
-			want:   want{reason: v1alpha1.DragonflyUpgradeReasonDragonflyDisabled}},
-		{name: "timed out while the active loads", phase: v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore, loading: true,
-			mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+		{name: "image moved on after the active loaded", phase: v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Image = "dragonfly:v1.40.0" },
+			want:   want{reason: v1beta1.DragonflyUpgradeReasonSpecChanged}},
+		{name: "snapshot dir changed with the active deleted", phase: v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore, deleteActive: true,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Snapshot.Dir = "s3://elsewhere/prefix" },
+			want:   want{reason: v1beta1.DragonflyUpgradeReasonSpecChanged}},
+		{name: "disabled", phase: v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore, loading: true,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Enabled = false },
+			want:   want{reason: v1beta1.DragonflyUpgradeReasonDragonflyDisabled}},
+		{name: "removed with a StatefulSet missing", phase: v1beta1.DragonflyUpgradePhaseUpdatingActive, deleteActive: true,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Dragonfly = nil },
+			want:   want{reason: v1beta1.DragonflyUpgradeReasonDragonflyDisabled}},
+		{name: "timed out while the active loads", phase: v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore, loading: true,
+			mutate: func(fg *v1beta1.MysqlFailoverGroup) {
 				old := metav1.NewTime(time.Now().Add(-dragonflyUpgradeRunTimeout - time.Minute))
 				fg.Status.Dragonfly.Upgrade.StartTime = &old
 			},
-			want: want{reason: v1alpha1.DragonflyUpgradeReasonTimedOut}},
+			want: want{reason: v1beta1.DragonflyUpgradeReasonTimedOut}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -246,7 +246,7 @@ func TestDragonflySnapshotUpgrade_InFlightRunFollowsSpec(t *testing.T) {
 					t.Fatalf("= (%+v) record %+v, want a hold at %s until the active loaded", step, up, tc.phase)
 				}
 				for _, p := range podsForSite(t, c, fg, "dc1") {
-					if p.Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
+					if p.Labels[v1beta1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
 						t.Fatal("the loading active got its traffic back")
 					}
 				}
@@ -255,9 +255,9 @@ func TestDragonflySnapshotUpgrade_InFlightRunFollowsSpec(t *testing.T) {
 					t.Fatal(err)
 				}
 				up = upgradeRecord(t, c, fg)
-				tc.want.reason = v1alpha1.DragonflyUpgradeReasonSpecChanged
+				tc.want.reason = v1beta1.DragonflyUpgradeReasonSpecChanged
 			}
-			if up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != tc.want.reason {
+			if up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != tc.want.reason {
 				t.Fatalf("record = %+v, want Failed/%s", up, tc.want.reason)
 			}
 			if step.hold != 0 {
@@ -283,16 +283,16 @@ func TestDragonflySnapshotUpgrade_InFlightRunFollowsSpec(t *testing.T) {
 func TestDragonflySnapshotUpgrade_SpecChangeProbesTheInstalledSettings(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlFailoverGroup)
+		mutate func(*v1beta1.MysqlFailoverGroup)
 	}{
-		{name: "auth Secret replaced", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Dragonfly.Auth = &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "df-auth-new", Key: "password"}}
+		{name: "auth Secret replaced", mutate: func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Dragonfly.Auth = &v1beta1.DragonflyAuthSpec{PasswordSecretKeyRef: v1beta1.DragonflyPasswordSecretKeyRef{Name: "df-auth-new", Key: "password"}}
 		}},
-		{name: "client port changed", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Port = 6390 }},
+		{name: "client port changed", mutate: func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Dragonfly.Port = 6390 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			r, c, fg, conn := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore)
+			r, c, fg, conn := inFlightUpgradeFixture(t, v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore)
 			for name, pw := range map[string]string{"df-auth-old": "old-pw", "df-auth-new": "new-pw"} {
 				if err := c.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: fg.Namespace, Name: name},
 					Data: map[string][]byte{"password": []byte(pw)}}); err != nil {
@@ -329,11 +329,11 @@ func TestDragonflySnapshotUpgrade_SpecChangeProbesTheInstalledSettings(t *testin
 				t.Fatal(err)
 			}
 			up := upgradeRecord(t, c, fg)
-			if step.hold != 0 || up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonSpecChanged {
+			if step.hold != 0 || up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != v1beta1.DragonflyUpgradeReasonSpecChanged {
 				t.Fatalf("= (%+v) record %+v, want the loaded active probed on its own settings and the run ended SpecChanged", step, up)
 			}
 			for _, p := range podsForSite(t, c, fg, "dc1") {
-				if p.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
+				if p.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled {
 					t.Fatal("the loaded active did not get its traffic back")
 				}
 			}
@@ -348,15 +348,15 @@ func TestDragonflySnapshotUpgrade_SpecChangeProbesTheInstalledSettings(t *testin
 // Failed record that gates the sweep is not removed while it holds.
 func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *testing.T) {
 	ctx := context.Background()
-	r, c, fg, conn := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseWaitingForActiveRestore)
+	r, c, fg, conn := inFlightUpgradeFixture(t, v1beta1.DragonflyUpgradePhaseWaitingForActiveRestore)
 	conn.persist = dragonfly.PersistenceInfo{Loading: true}
 	// The restarted active comes from the template: role replica, traffic on.
 	var pod corev1.Pod
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, "dc1") + "-0"}, &pod); err != nil {
 		t.Fatal(err)
 	}
-	pod.Labels[v1alpha1.DragonflyRoleLabel] = "replica"
-	pod.Labels[v1alpha1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
+	pod.Labels[v1beta1.DragonflyRoleLabel] = "replica"
+	pod.Labels[v1beta1.DragonflyTrafficLabel] = dragonflyTrafficEnabled
 	if err := c.Update(ctx, &pod); err != nil {
 		t.Fatal(err)
 	}
@@ -372,13 +372,13 @@ func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *test
 		t.Fatal(err)
 	}
 	up := upgradeRecord(t, c, fg)
-	if step.hold != 0 || up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed || up.Reason != v1alpha1.DragonflyUpgradeReasonTimedOut ||
+	if step.hold != 0 || up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed || up.Reason != v1beta1.DragonflyUpgradeReasonTimedOut ||
 		!strings.Contains(up.Message, "traffic stays off") {
 		t.Fatalf("= (%+v) record %+v, want Failed/TimedOut saying the traffic stays off", step, up)
 	}
 	serving := func() bool {
 		for _, p := range podsForSite(t, c, fg, "dc1") {
-			if p.Labels[v1alpha1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
+			if p.Labels[v1beta1.DragonflyTrafficLabel] == dragonflyTrafficEnabled {
 				return true
 			}
 		}
@@ -421,7 +421,7 @@ func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *test
 	if _, err := r.reconcileDragonflySnapshotUpgrade(ctx, getFGByKey(t, c, fgNN(fg))); err != nil {
 		t.Fatal(err)
 	}
-	if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1alpha1.DragonflyUpgradePhaseFailed {
+	if up := upgradeRecord(t, c, fg); up == nil || up.Phase != v1beta1.DragonflyUpgradePhaseFailed {
 		t.Fatalf("record = %+v, want the Failed record kept while the active's traffic is held", up)
 	}
 
@@ -430,10 +430,10 @@ func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *test
 		t.Fatalf("sweep after the load = (%v, %v), want no requeue", requeue, err)
 	}
 	for _, p := range podsForSite(t, c, fg, "dc1") {
-		if p.Labels[v1alpha1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || p.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+		if p.Labels[v1beta1.DragonflyTrafficLabel] != dragonflyTrafficEnabled || p.Labels[v1beta1.DragonflyRoleLabel] != "master" {
 			t.Fatalf("labels %v once the active loaded, want master with traffic", p.Labels)
 		}
-		if _, ok := p.Annotations[v1alpha1.DragonflyLoadHoldAnnotation]; ok {
+		if _, ok := p.Annotations[v1beta1.DragonflyLoadHoldAnnotation]; ok {
 			t.Fatal("the load-hold mark outlived the load")
 		}
 	}
@@ -445,7 +445,7 @@ func TestDragonflySnapshotUpgrade_TimedOutLoadingActiveStaysOutOfTraffic(t *test
 	}
 }
 
-func podsForSite(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) []corev1.Pod {
+func podsForSite(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) []corev1.Pod {
 	t.Helper()
 	pods, err := listDragonflyPodsForSite(context.Background(), c, fg, site)
 	if err != nil {
@@ -458,9 +458,9 @@ func podsForSite(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup,
 // run's uncached look once the StatefulSet is gone or matches, as the
 // render (held while the run is in flight) would clear it.
 func TestDragonflySnapshotUpgrade_InFlightRunClearsStaleSelectorRefusal(t *testing.T) {
-	r, c, fg, _ := inFlightUpgradeFixture(t, v1alpha1.DragonflyUpgradePhaseReattachingReplicas)
+	r, c, fg, _ := inFlightUpgradeFixture(t, v1beta1.DragonflyUpgradePhaseReattachingReplicas)
 	name := dragonflyStatefulSetName(fg.Name, "dc2")
-	r.Runner.SetGroupRefusal(fg, workloadRefusalKey("StatefulSet", name), v1alpha1.ReasonWorkloadSelectorMismatch, "refused earlier")
+	r.Runner.SetGroupRefusal(fg, workloadRefusalKey("StatefulSet", name), v1beta1.ReasonWorkloadSelectorMismatch, "refused earlier")
 	if _, err := r.reconcileDragonflySnapshotUpgrade(context.Background(), getFGByKey(t, c, fgNN(fg))); err != nil {
 		t.Fatal(err)
 	}

@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // Restore holds (#275). A restore that reads a MysqlBackup through
@@ -68,25 +68,25 @@ const (
 )
 
 func restoreHoldKey(holdID string) string {
-	return v1alpha1.RestoreHoldAnnotationPrefix + holdID
+	return v1beta1.RestoreHoldAnnotationPrefix + holdID
 }
 
 // BackupHasReadHold reports whether any verification or restore hold is
 // recorded on the backup, live or not. The PITR cutoff uses it to keep the
 // binlog coverage of a backup that is being deleted while it is read.
-func BackupHasReadHold(b *v1alpha1.MysqlBackup) bool {
+func BackupHasReadHold(b *v1beta1.MysqlBackup) bool {
 	for key := range b.Annotations {
-		if strings.HasPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix) ||
-			strings.HasPrefix(key, v1alpha1.RestoreHoldAnnotationPrefix) {
+		if strings.HasPrefix(key, v1beta1.VerificationHoldAnnotationPrefix) ||
+			strings.HasPrefix(key, v1beta1.RestoreHoldAnnotationPrefix) {
 			return true
 		}
 	}
 	return false
 }
 
-func backupHasRestoreHold(b *v1alpha1.MysqlBackup) bool {
+func backupHasRestoreHold(b *v1beta1.MysqlBackup) bool {
 	for key := range b.Annotations {
-		if strings.HasPrefix(key, v1alpha1.RestoreHoldAnnotationPrefix) {
+		if strings.HasPrefix(key, v1beta1.RestoreHoldAnnotationPrefix) {
 			return true
 		}
 	}
@@ -97,15 +97,15 @@ func backupHasRestoreHold(b *v1alpha1.MysqlBackup) bool {
 // Succeeded or Failed. A Failed restore is retried (by deleting its Job,
 // or on the next reconcile when the Job could not be built), but every
 // retry is a new attempt that pins and holds its backup again.
-func initRestoreTerminal(rs *v1alpha1.RestoreStatus) bool {
-	return rs != nil && (rs.Phase == v1alpha1.BackupPhaseSucceeded || rs.Phase == v1alpha1.BackupPhaseFailed)
+func initRestoreTerminal(rs *v1beta1.RestoreStatus) bool {
+	return rs != nil && (rs.Phase == v1beta1.BackupPhaseSucceeded || rs.Phase == v1beta1.BackupPhaseFailed)
 }
 
 // restoreRun is one restore of a group, as far as backup holds go.
 type restoreRun struct {
 	kind string
 	// ref is the pinned backup; nil while the run has not pinned one.
-	ref *v1alpha1.RestoreBackupRef
+	ref *v1beta1.RestoreBackupRef
 	// specName is spec.<kind>.source.backupRef.name: "" for another
 	// source, or when the spec was removed.
 	specName string
@@ -121,7 +121,7 @@ type restoreRun struct {
 // terminal in-place status whose spec carries a newer confirm is still
 // terminal here; the run that confirm starts pins and holds its backup in
 // Preflight, before anything is fenced.
-func groupRestoreRuns(fg *v1alpha1.MysqlFailoverGroup) []restoreRun {
+func groupRestoreRuns(fg *v1beta1.MysqlFailoverGroup) []restoreRun {
 	var runs []restoreRun
 	if spec := fg.Spec.InitFromBackup; spec != nil {
 		run := restoreRun{kind: restoreKindInit}
@@ -150,7 +150,7 @@ func groupRestoreRuns(fg *v1alpha1.MysqlFailoverGroup) []restoreRun {
 // restorePin returns the backup the group's restore of kind has pinned,
 // while that restore is not terminal. A terminal restore's pin belongs to
 // an attempt that is over: the next attempt pins again.
-func restorePin(fg *v1alpha1.MysqlFailoverGroup, kind string) *v1alpha1.RestoreBackupRef {
+func restorePin(fg *v1beta1.MysqlFailoverGroup, kind string) *v1beta1.RestoreBackupRef {
 	for _, run := range groupRestoreRuns(fg) {
 		if run.kind == kind && !run.terminal {
 			return run.ref
@@ -161,8 +161,8 @@ func restorePin(fg *v1alpha1.MysqlFailoverGroup, kind string) *v1alpha1.RestoreB
 
 // sameRestorePinState reports whether a and b agree on what decides a hold
 // for the restore of kind: whether it is terminal, and what it pinned.
-func sameRestorePinState(a, b *v1alpha1.MysqlFailoverGroup, kind string) bool {
-	state := func(fg *v1alpha1.MysqlFailoverGroup) (terminal bool, ref v1alpha1.RestoreBackupRef) {
+func sameRestorePinState(a, b *v1beta1.MysqlFailoverGroup, kind string) bool {
+	state := func(fg *v1beta1.MysqlFailoverGroup) (terminal bool, ref v1beta1.RestoreBackupRef) {
 		for _, run := range groupRestoreRuns(fg) {
 			if run.kind == kind {
 				if run.ref != nil {
@@ -189,7 +189,7 @@ func sameRestorePinState(a, b *v1alpha1.MysqlFailoverGroup, kind string) bool {
 // Succeeded; holdRestoreBackup refuses any other). With a Job it was started
 // by an operator that did not pin, and the name is all that is known, so it
 // also keeps a backup that is already being deleted.
-func groupRestoreReads(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, pickable bool) bool {
+func groupRestoreReads(fg *v1beta1.MysqlFailoverGroup, backup *v1beta1.MysqlBackup, pickable bool) bool {
 	for _, run := range groupRestoreRuns(fg) {
 		if run.terminal {
 			continue
@@ -218,7 +218,7 @@ func groupRestoreReads(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBa
 // group name that is still running keeps an earlier restore's ended hold
 // live until it stops too. That only ever keeps a backup longer.
 func restoreExecutionStopped(ctx context.Context, reader client.Reader, namespace, group string) (bool, error) {
-	selector := client.MatchingLabels{labelAppName: restoreJobAppName, v1alpha1.FailoverGroupLabel: group}
+	selector := client.MatchingLabels{labelAppName: restoreJobAppName, v1beta1.FailoverGroupLabel: group}
 	var jobs batchv1.JobList
 	if err := reader.List(ctx, &jobs, client.InNamespace(namespace), selector); err != nil {
 		return false, fmt.Errorf("list restore jobs of group %s: %w", group, err)
@@ -245,8 +245,8 @@ func restoreExecutionStopped(ctx context.Context, reader client.Reader, namespac
 // restore that is not terminal under that hold ID, or restore pods of that
 // group name still run (a terminal restore whose pods have not stopped, or
 // a group deleted mid-restore).
-func restoreHoldLive(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, holdID, group string) (bool, error) {
-	var fg v1alpha1.MysqlFailoverGroup
+func restoreHoldLive(ctx context.Context, reader client.Reader, backup *v1beta1.MysqlBackup, holdID, group string) (bool, error) {
+	var fg v1beta1.MysqlFailoverGroup
 	err := reader.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: group}, &fg)
 	switch {
 	case err == nil:
@@ -265,12 +265,12 @@ func restoreHoldLive(ctx context.Context, reader client.Reader, backup *v1alpha1
 // readHoldLive reports whether annotation key=value on backup is a read
 // hold (a verification's or a restore's) and, when it is, whether the hold
 // is live.
-func readHoldLive(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup, key, value string) (hold, live bool, err error) {
-	if uid, ok := strings.CutPrefix(key, v1alpha1.VerificationHoldAnnotationPrefix); ok {
+func readHoldLive(ctx context.Context, reader client.Reader, backup *v1beta1.MysqlBackup, key, value string) (hold, live bool, err error) {
+	if uid, ok := strings.CutPrefix(key, v1beta1.VerificationHoldAnnotationPrefix); ok {
 		live, err = holdLive(ctx, reader, backup.Namespace, uid, value)
 		return true, live, err
 	}
-	if holdID, ok := strings.CutPrefix(key, v1alpha1.RestoreHoldAnnotationPrefix); ok {
+	if holdID, ok := strings.CutPrefix(key, v1beta1.RestoreHoldAnnotationPrefix); ok {
 		live, err = restoreHoldLive(ctx, reader, backup, holdID, value)
 		return true, live, err
 	}
@@ -318,11 +318,11 @@ func splitReaders(refs []artifactReader) (verifications, restores []artifactRead
 // lets the removal's update event start the retention pass that was
 // deferred. The patch carries the resourceVersion this pass read, so a hold
 // stamped since is never dropped.
-func (r *MysqlBackupReconciler) stripDeadRestoreHolds(ctx context.Context, backup *v1alpha1.MysqlBackup) (time.Duration, error) {
+func (r *MysqlBackupReconciler) stripDeadRestoreHolds(ctx context.Context, backup *v1beta1.MysqlBackup) (time.Duration, error) {
 	if !backupHasRestoreHold(backup) {
 		return 0, nil
 	}
-	dead, err := deadHoldKeys(ctx, r.apiReader(), backup, v1alpha1.RestoreHoldAnnotationPrefix)
+	dead, err := deadHoldKeys(ctx, r.apiReader(), backup, v1beta1.RestoreHoldAnnotationPrefix)
 	if err != nil {
 		return restoreHoldRecheck, err
 	}
@@ -394,16 +394,16 @@ func (r *MysqlFailoverGroupReconciler) restoreHoldReader() client.Reader {
 //     caller ends the restore.
 //   - retry: look again after restoreHoldRetry.
 //   - err: an API error; nothing may be created.
-func (r *MysqlFailoverGroupReconciler) holdRestoreBackup(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind, name, builtFromUID, targetSite string) (refusal string, retry bool, err error) {
+func (r *MysqlFailoverGroupReconciler) holdRestoreBackup(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind, name, builtFromUID, targetSite string) (refusal string, retry bool, err error) {
 	reader := r.restoreHoldReader()
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(fg), &live); err != nil {
 		return "", false, fmt.Errorf("get failover group %s: %w", fg.Name, err)
 	}
 	if live.UID != fg.UID || !sameRestorePinState(fg, &live, kind) {
 		return "", true, nil
 	}
-	var backup v1alpha1.MysqlBackup
+	var backup v1beta1.MysqlBackup
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &backup); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "the backup is gone", false, nil
@@ -424,7 +424,7 @@ func (r *MysqlFailoverGroupReconciler) holdRestoreBackup(ctx context.Context, fg
 	switch {
 	case pin != nil && pin.UID != string(backup.UID):
 		return "the backup was replaced by another backup of the same name after this restore pinned it", false, nil
-	case backup.Status.Phase != v1alpha1.BackupPhaseSucceeded:
+	case backup.Status.Phase != v1beta1.BackupPhaseSucceeded:
 		return "the backup is not Succeeded", false, nil
 	case !backup.DeletionTimestamp.IsZero() && !held:
 		return "the backup is being deleted", false, nil
@@ -432,7 +432,7 @@ func (r *MysqlFailoverGroupReconciler) holdRestoreBackup(ctx context.Context, fg
 		return "", true, nil
 	}
 	if pin == nil || pin.HoldID == "" {
-		pin = &v1alpha1.RestoreBackupRef{Name: backup.Name, UID: string(backup.UID), HoldID: string(uuid.NewUUID())}
+		pin = &v1beta1.RestoreBackupRef{Name: backup.Name, UID: string(backup.UID), HoldID: string(uuid.NewUUID())}
 		recorded, err := r.recordRestorePin(ctx, fg, &live, kind, pin, targetSite)
 		if err != nil {
 			return "", false, err
@@ -469,7 +469,7 @@ func (r *MysqlFailoverGroupReconciler) holdRestoreBackup(ctx context.Context, fg
 // that turns up later under the awaited name must not start a destructive
 // restore on its own). wait is the requeue when the hold could not be
 // confirmed yet.
-func (r *MysqlFailoverGroupReconciler) holdInPlaceRestoreBackup(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, builtFromUID string) (ended bool, wait time.Duration, err error) {
+func (r *MysqlFailoverGroupReconciler) holdInPlaceRestoreBackup(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, builtFromUID string) (ended bool, wait time.Duration, err error) {
 	spec, cur := fg.Spec.RestoreInPlace, fg.Status.RestoreInPlace
 	if spec == nil || cur == nil || spec.Source.BackupRef == nil {
 		return false, 0, nil
@@ -486,7 +486,7 @@ func (r *MysqlFailoverGroupReconciler) holdInPlaceRestoreBackup(ctx context.Cont
 		cur = fg.Status.RestoreInPlace
 		r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, inPlaceRunConfirm(cur, spec),
 			fmt.Sprintf("restoreInPlace.source.backupRef=%q cannot be held for the restore: %s; nothing was restored", name, refusal),
-			v1alpha1.EventRestoreInPlaceBuildFailed)
+			v1beta1.EventRestoreInPlaceBuildFailed)
 		return true, 0, nil
 	}
 	return false, 0, nil
@@ -503,12 +503,12 @@ func (r *MysqlFailoverGroupReconciler) holdInPlaceRestoreBackup(ctx context.Cont
 // afterwards is exactly a restore that is not terminal and carries the
 // pin, whatever the cache showed. An in-place run adds the pin to its
 // status with the optimistic update every in-place status write uses.
-func (r *MysqlFailoverGroupReconciler) recordRestorePin(ctx context.Context, fg, live *v1alpha1.MysqlFailoverGroup, kind string, pin *v1alpha1.RestoreBackupRef, targetSite string) (recorded bool, err error) {
+func (r *MysqlFailoverGroupReconciler) recordRestorePin(ctx context.Context, fg, live *v1beta1.MysqlFailoverGroup, kind string, pin *v1beta1.RestoreBackupRef, targetSite string) (recorded bool, err error) {
 	switch kind {
 	case restoreKindInit:
 		base := live.DeepCopy()
-		live.Status.Restore = &v1alpha1.RestoreStatus{
-			Phase:      v1alpha1.BackupPhasePending,
+		live.Status.Restore = &v1beta1.RestoreStatus{
+			Phase:      v1beta1.BackupPhasePending,
 			TargetSite: targetSite,
 			Message:    fmt.Sprintf("holding MysqlBackup %s for the restore Job", pin.Name),
 			BackupRef:  pin,
@@ -539,7 +539,7 @@ func (r *MysqlFailoverGroupReconciler) recordRestorePin(ctx context.Context, fg,
 // cannot finish yet (pods still stopping, a conflict) is not waited for:
 // the hold is dead once the pods stop, and the backup's reconciler strips
 // it (stripDeadRestoreHolds).
-func (r *MysqlFailoverGroupReconciler) releaseTerminalRestoreHold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, kind string) {
+func (r *MysqlFailoverGroupReconciler) releaseTerminalRestoreHold(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, kind string) {
 	for _, run := range groupRestoreRuns(fg) {
 		if run.kind != kind || !run.terminal || run.ref == nil || run.ref.HoldID == "" {
 			continue
@@ -553,10 +553,10 @@ func (r *MysqlFailoverGroupReconciler) releaseTerminalRestoreHold(ctx context.Co
 // releaseRestoreHold removes the hold ref names from its backup once no
 // restore pod of the group runs. The cached look comes first so that a
 // group whose restore ended long ago costs no API read per reconcile.
-func (r *MysqlFailoverGroupReconciler) releaseRestoreHold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, ref *v1alpha1.RestoreBackupRef) error {
+func (r *MysqlFailoverGroupReconciler) releaseRestoreHold(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, ref *v1beta1.RestoreBackupRef) error {
 	key := restoreHoldKey(ref.HoldID)
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}
-	var backup v1alpha1.MysqlBackup
+	var backup v1beta1.MysqlBackup
 	if err := r.Get(ctx, nn, &backup); err != nil {
 		return client.IgnoreNotFound(err)
 	}

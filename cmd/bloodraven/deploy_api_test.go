@@ -21,7 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -42,8 +42,8 @@ type deployAPIFixture struct {
 	api     *deployAPI
 	client  client.WithWatch
 	reviews *kubefake.Clientset
-	group   *v1alpha1.MysqlFailoverGroup
-	db      *v1alpha1.MysqlDatabase
+	group   *v1beta1.MysqlFailoverGroup
+	db      *v1beta1.MysqlDatabase
 	logs    *bytes.Buffer
 	now     time.Time
 }
@@ -51,18 +51,18 @@ type deployAPIFixture struct {
 func newDeployAPIFixture(t *testing.T) *deployAPIFixture {
 	t.Helper()
 	f := &deployAPIFixture{now: time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC), logs: new(bytes.Buffer)}
-	f.group = &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "database-ns", UID: "group-uid"}}
-	f.group.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
+	f.group = &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "database-ns", UID: "group-uid"}}
+	f.group.Spec.Sites = []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	f.group.Status.ActiveSite = "iad"
 	f.group.Status.TopologyGeneration = 7
-	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}, {Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
+	f.group.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateWritable}, {Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", LastTransitionTime: metav1.NewTime(f.now)}}
-	f.db = &v1alpha1.MysqlDatabase{ObjectMeta: metav1.ObjectMeta{Name: "tenant", Namespace: f.group.Namespace}, Spec: v1alpha1.MysqlDatabaseSpec{
-		FailoverGroupRef:  v1alpha1.LocalFailoverGroupRef{Name: f.group.Name},
-		DeploymentClients: []v1alpha1.DeploymentClient{{Namespace: "app-ns", ServiceAccount: "deployer"}},
+	f.db = &v1beta1.MysqlDatabase{ObjectMeta: metav1.ObjectMeta{Name: "tenant", Namespace: f.group.Namespace}, Spec: v1beta1.MysqlDatabaseSpec{
+		FailoverGroupRef:  v1beta1.LocalFailoverGroupRef{Name: f.group.Name},
+		DeploymentClients: []v1beta1.DeploymentClient{{Namespace: "app-ns", ServiceAccount: "deployer"}},
 	}}
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{v1alpha1.AddToScheme, authv1.AddToScheme, coordinationv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{v1beta1.AddToScheme, authv1.AddToScheme, coordinationv1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}
@@ -531,19 +531,19 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 	lag := int64(9)
 	f.group.Status.ActiveSite = "pdx"
 	f.group.Status.TopologyGeneration = 8
-	f.group.Status.Sites = []v1alpha1.SiteStatus{{Name: "pdx", State: v1alpha1.SiteStateWritable}, {Name: "iad", State: v1alpha1.SiteStateReadOnly, SecondsBehindSource: &lag, RecoveryState: "Recloning", SourceConvergenceState: v1alpha1.SourceConvergencePending}}
+	f.group.Status.Sites = []v1beta1.SiteStatus{{Name: "pdx", State: v1beta1.SiteStateWritable}, {Name: "iad", State: v1beta1.SiteStateReadOnly, SecondsBehindSource: &lag, RecoveryState: "Recloning", SourceConvergenceState: v1beta1.SourceConvergencePending}}
 	f.group.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse}, {Type: "Degraded", Status: metav1.ConditionTrue, Reason: "ReplicaDown"}, {Type: "RecoveryPending", Status: metav1.ConditionTrue}}
-	f.group.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDeferred,
-		Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferDeploymentHold}}
+	f.group.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1beta1.PlannedFailoverPhaseDeferred,
+		Admission: &v1beta1.PlannedFailoverAdmission{DeferReason: v1beta1.PlannedFailoverDeferDeploymentHold}}
 	f.group.Status.UpdatePhase = "UpdatingReplicas"
-	f.group.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceSucceeded}
-	f.group.Status.Dragonfly = &v1alpha1.DragonflyStatus{Upgrade: &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseSucceeded}}
+	f.group.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceSucceeded}
+	f.group.Status.Dragonfly = &v1beta1.DragonflyStatus{Upgrade: &v1beta1.DragonflyUpgradeStatus{Phase: v1beta1.DragonflyUpgradePhaseSucceeded}}
 	if err := f.client.Status().Update(context.Background(), f.group); err != nil {
 		t.Fatal(err)
 	}
 	// The first HTTP read is stale; Snapshot must supply both health and leases.
 	f.api.reader = interceptor.NewClient(f.client, interceptor.Funcs{Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-		stale.DeepCopyInto(obj.(*v1alpha1.MysqlFailoverGroup))
+		stale.DeepCopyInto(obj.(*v1beta1.MysqlFailoverGroup))
 		return nil
 	}})
 	response := f.request(t, "GET", deployTestPath, "", "", 200)
@@ -551,7 +551,7 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 		t.Fatalf("stale snapshot returned: %v", response)
 	}
 	wantHealth := map[string]any{"ready": false, "degradedReason": "ReplicaDown", "replicationRunning": false, "replicationLagSeconds": float64(9), "recoveryPending": true}
-	wantOperations := map[string]any{"plannedFailover": map[string]any{"phase": string(v1alpha1.PlannedFailoverPhaseDeferred), "outcome": "", "reason": "DeploymentHold"}, "updatePhase": "UpdatingReplicas", "restoreInPlace": string(v1alpha1.RestoreInPlaceSucceeded), "dragonflyUpgrade": string(v1alpha1.DragonflyUpgradePhaseSucceeded)}
+	wantOperations := map[string]any{"plannedFailover": map[string]any{"phase": string(v1beta1.PlannedFailoverPhaseDeferred), "outcome": "", "reason": "DeploymentHold"}, "updatePhase": "UpdatingReplicas", "restoreInPlace": string(v1beta1.RestoreInPlaceSucceeded), "dragonflyUpgrade": string(v1beta1.DragonflyUpgradePhaseSucceeded)}
 	if !reflect.DeepEqual(response["health"], wantHealth) || !reflect.DeepEqual(response["operations"], wantOperations) {
 		t.Fatalf("persisted fields missing: %v", response)
 	}
@@ -564,57 +564,57 @@ func TestDeployAPIUnstableAndFreshSnapshot(t *testing.T) {
 // empty reason), and a terminal marker naming the run wins over a stale
 // live phase.
 func TestPlannedFailoverOperationProjection(t *testing.T) {
-	marker := func(runID string, outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) map[string]string {
-		return map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: controller.TerminalMarker{RunID: runID, Outcome: outcome, Reason: reason}.String()}
+	marker := func(runID string, outcome v1beta1.PlannedFailoverOutcome, reason v1beta1.PlannedFailoverReason) map[string]string {
+		return map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: controller.TerminalMarker{RunID: runID, Outcome: outcome, Reason: reason}.String()}
 	}
-	waited := &v1alpha1.PlannedFailoverAdmission{WaitReason: v1alpha1.PlannedFailoverWaitPeerUnreadable}
+	waited := &v1beta1.PlannedFailoverAdmission{WaitReason: v1beta1.PlannedFailoverWaitPeerUnreadable}
 	for name, tc := range map[string]struct {
-		pf          *v1alpha1.PlannedFailoverStatus
+		pf          *v1beta1.PlannedFailoverStatus
 		annotations map[string]string
 		want        map[string]string
 	}{
 		"no run": {want: map[string]string{"phase": "", "outcome": "", "reason": ""}},
 		"admitting reports its wait reason": {
-			pf:   &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseAdmitting, Admission: waited},
+			pf:   &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseAdmitting, Admission: waited},
 			want: map[string]string{"phase": "Admitting", "outcome": "", "reason": "PeerUnreadable"},
 		},
 		"deferred reports its defer reason": {
-			pf: &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseDeferred,
-				Admission: &v1alpha1.PlannedFailoverAdmission{DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive}},
+			pf: &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseDeferred,
+				Admission: &v1beta1.PlannedFailoverAdmission{DeferReason: v1beta1.PlannedFailoverDeferCooldownActive}},
 			want: map[string]string{"phase": "Deferred", "outcome": "", "reason": "CooldownActive"},
 		},
 		"a live phase drops the admission reason": {
-			pf:   &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag, Admission: waited},
+			pf:   &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseWaitingForLag, Admission: waited},
 			want: map[string]string{"phase": "WaitingForLag", "outcome": "", "reason": ""},
 		},
 		"succeeded with an empty reason is not the admission reason": {
-			pf: &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseSucceeded, Admission: waited,
-				Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded}},
+			pf: &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseSucceeded, Admission: waited,
+				Result: &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeSucceeded}},
 			want: map[string]string{"phase": "Succeeded", "outcome": "Succeeded", "reason": ""},
 		},
 		"failed reports its result reason": {
-			pf: &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseFailed, Admission: waited,
-				Result: &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, Reason: v1alpha1.PlannedFailoverReasonLagTimeout}},
+			pf: &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseFailed, Admission: waited,
+				Result: &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeRolledBack, Reason: v1beta1.PlannedFailoverReasonLagTimeout}},
 			want: map[string]string{"phase": "Failed", "outcome": "RolledBack", "reason": "LagTimeout"},
 		},
 		"a matching marker ends a live-looking run": {
-			pf:          &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag},
-			annotations: marker("r1", v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout),
+			pf:          &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhaseWaitingForLag},
+			annotations: marker("r1", v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonLagTimeout),
 			want:        map[string]string{"phase": "Failed", "outcome": "RolledBack", "reason": "LagTimeout"},
 		},
 		"a matching success marker": {
-			pf:          &v1alpha1.PlannedFailoverStatus{RunID: "r1", Phase: v1alpha1.PlannedFailoverPhasePublishing},
-			annotations: marker("r1", v1alpha1.PlannedFailoverOutcomeSucceeded, ""),
+			pf:          &v1beta1.PlannedFailoverStatus{RunID: "r1", Phase: v1beta1.PlannedFailoverPhasePublishing},
+			annotations: marker("r1", v1beta1.PlannedFailoverOutcomeSucceeded, ""),
 			want:        map[string]string{"phase": "Succeeded", "outcome": "Succeeded", "reason": ""},
 		},
 		"another run's marker is ignored": {
-			pf:          &v1alpha1.PlannedFailoverStatus{RunID: "r2", Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag},
-			annotations: marker("r1", v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverReasonLagTimeout),
+			pf:          &v1beta1.PlannedFailoverStatus{RunID: "r2", Phase: v1beta1.PlannedFailoverPhaseWaitingForLag},
+			annotations: marker("r1", v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverReasonLagTimeout),
 			want:        map[string]string{"phase": "WaitingForLag", "outcome": "", "reason": ""},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fg := &v1alpha1.MysqlFailoverGroup{}
+			fg := &v1beta1.MysqlFailoverGroup{}
 			fg.Annotations = tc.annotations
 			fg.Status.PlannedFailover = tc.pf
 			if got := plannedFailoverOperation(fg); !reflect.DeepEqual(got, tc.want) {
@@ -792,31 +792,31 @@ func TestDeployAPIConcurrentAuthenticationCache(t *testing.T) {
 // site has a status entry that is Healthy or Lagging (a lagging replica
 // still replicates; its lag is replicationLagSeconds).
 func TestDeployGroupResponseReplicationRunning(t *testing.T) {
-	base := func(repl v1alpha1.SiteReplicationState) *v1alpha1.MysqlFailoverGroup {
+	base := func(repl v1beta1.SiteReplicationState) *v1beta1.MysqlFailoverGroup {
 		lag := int64(45)
-		fg := &v1alpha1.MysqlFailoverGroup{}
-		fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
+		fg := &v1beta1.MysqlFailoverGroup{}
+		fg.Spec.Sites = []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 		fg.Status.ActiveSite = "iad"
-		fg.Status.Sites = []v1alpha1.SiteStatus{
-			{Name: "iad", State: v1alpha1.SiteStateWritable, Replication: v1alpha1.SiteReplicationNotApplicable},
-			{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: repl, SecondsBehindSource: &lag},
+		fg.Status.Sites = []v1beta1.SiteStatus{
+			{Name: "iad", State: v1beta1.SiteStateWritable, Replication: v1beta1.SiteReplicationNotApplicable},
+			{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: repl, SecondsBehindSource: &lag},
 		}
 		return fg
 	}
-	running := func(fg *v1alpha1.MysqlFailoverGroup) (bool, int64) {
+	running := func(fg *v1beta1.MysqlFailoverGroup) (bool, int64) {
 		t.Helper()
 		health := deployGroupResponse(fg, nil, "")["health"].(map[string]any)
 		return health["replicationRunning"].(bool), health["replicationLagSeconds"].(int64)
 	}
 	for _, tc := range []struct {
-		repl v1alpha1.SiteReplicationState
+		repl v1beta1.SiteReplicationState
 		want bool
 	}{
-		{v1alpha1.SiteReplicationHealthy, true},
-		{v1alpha1.SiteReplicationLagging, true},
-		{v1alpha1.SiteReplicationBroken, false},
-		{v1alpha1.SiteReplicationUnknown, false},
-		{v1alpha1.SiteReplicationNotApplicable, false},
+		{v1beta1.SiteReplicationHealthy, true},
+		{v1beta1.SiteReplicationLagging, true},
+		{v1beta1.SiteReplicationBroken, false},
+		{v1beta1.SiteReplicationUnknown, false},
+		{v1beta1.SiteReplicationNotApplicable, false},
 		{"", false},
 	} {
 		got, lag := running(base(tc.repl))
@@ -826,9 +826,9 @@ func TestDeployGroupResponseReplicationRunning(t *testing.T) {
 	}
 	// A non-active spec site with no status entry is not replicating, and a
 	// status entry for a site no longer in spec is not one that counts.
-	missing := base(v1alpha1.SiteReplicationHealthy)
-	missing.Spec.Sites = append(missing.Spec.Sites, v1alpha1.SiteSpec{Name: "dfw", ServerID: 103})
-	missing.Status.Sites = append(missing.Status.Sites, v1alpha1.SiteStatus{Name: "old", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy})
+	missing := base(v1beta1.SiteReplicationHealthy)
+	missing.Spec.Sites = append(missing.Spec.Sites, v1beta1.SiteSpec{Name: "dfw", ServerID: 103})
+	missing.Status.Sites = append(missing.Status.Sites, v1beta1.SiteStatus{Name: "old", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy})
 	if got, _ := running(missing); got {
 		t.Error("replicationRunning with a spec site that has no status entry")
 	}

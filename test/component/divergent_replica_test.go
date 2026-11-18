@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -93,15 +93,15 @@ func TestDivergentReplica_Issue202UpgradeStallsUntilReconciled(t *testing.T) {
 		return append([]string(nil), applied...)
 	}
 
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "default"},
-		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
+		Spec:       v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "dc1", ServerID: 101}, {Name: "dc2", ServerID: 102}}},
 	}
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(fg).WithObjects(fg).Build()
@@ -112,7 +112,7 @@ func TestDivergentReplica_Issue202UpgradeStallsUntilReconciled(t *testing.T) {
 		tm.MarkStatusWriteResult(runner.WriteStatusForTest(context.Background(), nn, snap))
 	}
 	degraded := func() metav1.Condition {
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), nn, &got); err != nil {
 			t.Fatal(err)
 		}

@@ -7,7 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -45,17 +45,17 @@ func TestPITRArchiveTrackerDivergentRowsAreNotAFailure(t *testing.T) {
 		wantReason  string
 		wantMessage string
 	}{
-		{"clean", ok, ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText},
-		{"one divergent row appears", pitrDivergent(1, 0), ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 1 divergent row" + note},
-		{"it stays", pitrDivergent(1, 0), ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 1 divergent row" + note},
-		{"both sites, sorted", pitrDivergent(2, 0), pitrDivergent(3, 1), cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 2 divergent rows; pdx: 3 divergent rows" + note},
-		{"quarantined rows alone say nothing", pitrDivergent(0, 4), ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText},
+		{"clean", ok, ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText},
+		{"one divergent row appears", pitrDivergent(1, 0), ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 1 divergent row" + note},
+		{"it stays", pitrDivergent(1, 0), ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 1 divergent row" + note},
+		{"both sites, sorted", pitrDivergent(2, 0), pitrDivergent(3, 1), cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 2 divergent rows; pdx: 3 divergent rows" + note},
+		{"quarantined rows alone say nothing", pitrDivergent(0, 4), ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText},
 		// The sidecar reports the divergence that needs action as an error.
-		{"reissuable: first failed scan is pending", pitrReissuable(1), ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText},
-		{"reissuable: confirmed", pitrReissuable(2), ok, cFalse, v1alpha1.ReasonArchiverError, "iad: " + pitrReissuableAuditError},
+		{"reissuable: first failed scan is pending", pitrReissuable(1), ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText},
+		{"reissuable: confirmed", pitrReissuable(2), ok, cFalse, v1beta1.ReasonArchiverError, "iad: " + pitrReissuableAuditError},
 		// Recloned with a new server_uuid: the rows stay, the error ends.
-		{"recovering", pitrDivergent(1, 0), ok, cFalse, v1alpha1.ReasonArchiverError, "iad: " + pitrReissuableAuditError},
-		{"recovered", pitrDivergent(1, 0), ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 1 divergent row" + note},
+		{"recovering", pitrDivergent(1, 0), ok, cFalse, v1beta1.ReasonArchiverError, "iad: " + pitrReissuableAuditError},
+		{"recovered", pitrDivergent(1, 0), ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText + "; iad: 1 divergent row" + note},
 	}
 	tr := newPITRArchiveTracker(nil)
 	for i, s := range steps {
@@ -87,13 +87,13 @@ func TestPITRArchiveConditionReportsDivergenceAsInformation(t *testing.T) {
 		wantPITRMsg string
 		wantEvents  []string
 	}{
-		{ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText, "", nil},
-		{pitrDivergent(1, 0), cTrue, v1alpha1.ReasonArchiving, "; iad: 1 divergent row (", "", nil},
-		{pitrDivergent(1, 0), cTrue, v1alpha1.ReasonArchiving, "; iad: 1 divergent row (", "", nil},
-		{pitrReissuable(2), cFalse, v1alpha1.ReasonArchiverError, "iad: site iad: server_uuid", "iad: site iad: server_uuid", []string{"Warning PITRArchiveNotReady"}},
-		{pitrDivergent(1, 0), cFalse, v1alpha1.ReasonArchiverError, "iad: site iad: server_uuid", "", nil},
-		{pitrDivergent(1, 0), cTrue, v1alpha1.ReasonArchiving, "; iad: 1 divergent row (", "", []string{"Normal PITRArchiveRecovered"}},
-		{ok, cTrue, v1alpha1.ReasonArchiving, pitrArchiveArchivingText, "", nil},
+		{ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText, "", nil},
+		{pitrDivergent(1, 0), cTrue, v1beta1.ReasonArchiving, "; iad: 1 divergent row (", "", nil},
+		{pitrDivergent(1, 0), cTrue, v1beta1.ReasonArchiving, "; iad: 1 divergent row (", "", nil},
+		{pitrReissuable(2), cFalse, v1beta1.ReasonArchiverError, "iad: site iad: server_uuid", "iad: site iad: server_uuid", []string{"Warning PITRArchiveNotReady"}},
+		{pitrDivergent(1, 0), cFalse, v1beta1.ReasonArchiverError, "iad: site iad: server_uuid", "", nil},
+		{pitrDivergent(1, 0), cTrue, v1beta1.ReasonArchiving, "; iad: 1 divergent row (", "", []string{"Normal PITRArchiveRecovered"}},
+		{ok, cTrue, v1beta1.ReasonArchiving, pitrArchiveArchivingText, "", nil},
 	}
 	for i, s := range steps {
 		round := []archiverPollResult{{site: "iad", status: s.iad.status}, {site: "pdx", status: ok.status}}
@@ -123,10 +123,10 @@ func TestPITRArchiveConditionReportsDivergenceAsInformation(t *testing.T) {
 // The message change that names a newly divergent site is written at once,
 // not held by the message-only rate limit.
 func TestPITRArchiveWriteNeededForDivergenceNote(t *testing.T) {
-	status := func(msg string) *v1alpha1.MysqlFailoverGroupStatus {
-		return &v1alpha1.MysqlFailoverGroupStatus{
-			PITR:       &v1alpha1.PITRStatus{},
-			Conditions: []metav1.Condition{{Type: v1alpha1.ConditionPITRArchiveReady, Status: cTrue, Reason: v1alpha1.ReasonArchiving, Message: msg}},
+	status := func(msg string) *v1beta1.MysqlFailoverGroupStatus {
+		return &v1beta1.MysqlFailoverGroupStatus{
+			PITR:       &v1beta1.PITRStatus{},
+			Conditions: []metav1.Condition{{Type: v1beta1.ConditionPITRArchiveReady, Status: cTrue, Reason: v1beta1.ReasonArchiving, Message: msg}},
 		}
 	}
 	sites := []string{"iad", "pdx"}

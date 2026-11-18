@@ -12,7 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestEnsureDigestKeyCreatesOnceAndReplacesMalformed(t *testing.T) {
@@ -83,7 +83,7 @@ func TestSecretContentDigestIsKeyedAndContentSensitive(t *testing.T) {
 func TestDeploymentSpecHashNeedsDigestKey(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()
-	fg.Spec.TLS = &v1alpha1.TLSSpec{
+	fg.Spec.TLS = &v1beta1.TLSSpec{
 		SecretName: "mysql-tls",
 	}
 	tlsSecret := &corev1.Secret{
@@ -100,7 +100,7 @@ func TestDeploymentSpecHashNeedsDigestKey(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: resourceName(fg.Name, site.Name)}, &deploy); err != nil {
 		t.Fatalf("get deployment: %v", err)
 	}
-	published := deploy.Annotations[v1alpha1.SpecHashAnnotation]
+	published := deploy.Annotations[v1beta1.SpecHashAnnotation]
 
 	inputs, err := specSecretInputs(ctx, c, fg)
 	if err != nil {

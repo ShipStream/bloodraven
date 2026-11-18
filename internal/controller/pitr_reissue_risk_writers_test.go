@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -24,16 +24,16 @@ import (
 func persistPlannedSucceeded(t *testing.T, c client.Client, runner *TopologyManagerRunner, nn types.NamespacedName) {
 	t.Helper()
 	ctx := context.Background()
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
 	confirmed := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
 	gtid := "uuid-iad:1-10"
-	cur.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 4,
-		Phase: v1alpha1.PlannedFailoverPhasePublishing, SourceSite: "iad", TargetSite: "pdx", StartTime: confirmed,
-		Fence: &v1alpha1.PlannedFailoverFenceRecord{GtidSet: &gtid},
-		Promotion: &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionConfirmed,
+	cur.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 4,
+		Phase: v1beta1.PlannedFailoverPhasePublishing, SourceSite: "iad", TargetSite: "pdx", StartTime: confirmed,
+		Fence: &v1beta1.PlannedFailoverFenceRecord{GtidSet: &gtid},
+		Promotion: &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionConfirmed,
 			ConfirmationTime: &confirmed}}
 	if err := c.Status().Update(ctx, &cur); err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func persistPlannedSucceeded(t *testing.T, c client.Client, runner *TopologyMana
 	if err := c.Get(ctx, nn, &cur); err != nil {
 		t.Fatal(err)
 	}
-	if pf := cur.Status.PlannedFailover; pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+	if pf := cur.Status.PlannedFailover; pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseSucceeded {
 		t.Fatalf("planned failover block = %+v, want Succeeded", pf)
 	}
 }
@@ -77,7 +77,7 @@ func TestPITRArchiveReissueRiskBothWriterOrderings(t *testing.T) {
 			fg.Status.TopologyGeneration = 5
 			nn := client.ObjectKeyFromObject(fg)
 			c := fake.NewClientBuilder().WithScheme(testScheme()).
-				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+				WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 				WithObjects(fg).Build()
 			rec := record.NewFakeRecorder(50)
 			reissuable := ""
@@ -108,7 +108,7 @@ func TestPITRArchiveReissueRiskBothWriterOrderings(t *testing.T) {
 			}
 			var got []string
 			for _, e := range drainRunnerEvents(rec) {
-				if strings.Contains(e, v1alpha1.EventPITRArchiveReissueRiskDetected) {
+				if strings.Contains(e, v1beta1.EventPITRArchiveReissueRiskDetected) {
 					got = append(got, e)
 				}
 			}
@@ -119,7 +119,7 @@ func TestPITRArchiveReissueRiskBothWriterOrderings(t *testing.T) {
 			} else if len(got) != 1 || !strings.Contains(got[0], "site pdx was promoted") || !strings.Contains(got[0], "bbbbbbbb-0000-4000-8000-00000000000b:9-10") {
 				t.Fatalf("reissue warnings = %v, want exactly one for pdx naming the reissuable set", got)
 			}
-			var live v1alpha1.MysqlFailoverGroup
+			var live v1beta1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &live); err != nil {
 				t.Fatal(err)
 			}
@@ -155,7 +155,7 @@ func TestPITRArchiveReissueRiskAfterPersistedNoPrimary(t *testing.T) {
 			}
 			nn := client.ObjectKeyFromObject(fg)
 			c := fake.NewClientBuilder().WithScheme(testScheme()).
-				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+				WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 				WithObjects(fg).Build()
 			rec := record.NewFakeRecorder(50)
 			// No verdict from the sidecar: the row count decides.
@@ -176,7 +176,7 @@ func TestPITRArchiveReissueRiskAfterPersistedNoPrimary(t *testing.T) {
 			}
 			n := 0
 			for _, e := range drainRunnerEvents(rec) {
-				if strings.Contains(e, v1alpha1.EventPITRArchiveReissueRiskDetected) {
+				if strings.Contains(e, v1beta1.EventPITRArchiveReissueRiskDetected) {
 					n++
 				}
 			}

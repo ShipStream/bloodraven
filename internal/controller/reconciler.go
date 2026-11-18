@@ -38,7 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -86,7 +86,7 @@ const (
 	sidecarPort = 8080
 )
 
-func defaultOperatorEndpoint(fg *v1alpha1.MysqlFailoverGroup) string {
+func defaultOperatorEndpoint(fg *v1beta1.MysqlFailoverGroup) string {
 	if fg.Spec.Sidecar.OperatorEndpoint != "" {
 		return fg.Spec.Sidecar.OperatorEndpoint
 	}
@@ -182,6 +182,14 @@ type MysqlFailoverGroupReconciler struct {
 
 	// OperatorLicense is the optional operator-level JWT (flag/env).
 	OperatorLicense string
+
+	// NewerCRDs is what the startup check found in the installed CRDs
+	// that this build does not know (crd_notice.go). Empty when the CRDs
+	// are the ones the operator was built with.
+	NewerCRDs string
+	// newerCRDsNoted remembers the groups the notice was recorded on.
+	newerCRDsNotedMu sync.Mutex
+	newerCRDsNoted   map[types.NamespacedName]bool
 
 	// LicenseKeys overrides the production trust store. Nil uses
 	// license.ProductionKey.
@@ -292,7 +300,7 @@ type dragonflyRolloutState struct {
 func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := log.FromContext(ctx)
 
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := r.Get(ctx, req.NamespacedName, &fg); err != nil {
 		if errors.IsNotFound(err) {
 			r.forgetLicense(req.NamespacedName)
@@ -308,7 +316,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		r.forgetLicense(req.NamespacedName)
 		r.forgetGroupMemos(req.NamespacedName)
 		r.clearDragonflyUpgradeDeferral(req.NamespacedName)
-		if controllerutil.ContainsFinalizer(&fg, v1alpha1.FailoverGroupFinalizer) {
+		if controllerutil.ContainsFinalizer(&fg, v1beta1.FailoverGroupFinalizer) {
 			logger.Info("CR being deleted, running finalizer cleanup", "name", fg.Name)
 
 			// Stop the topology manager for this CR.
@@ -320,7 +328,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 				return ctrl.Result{}, fmt.Errorf("handle deletion: %w", err)
 			}
 			base := fg.DeepCopy()
-			controllerutil.RemoveFinalizer(&fg, v1alpha1.FailoverGroupFinalizer)
+			controllerutil.RemoveFinalizer(&fg, v1beta1.FailoverGroupFinalizer)
 			if err := r.Patch(ctx, &fg, metadataPatch(base)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 			}
@@ -357,9 +365,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Ensure finalizer is present.
-	if !controllerutil.ContainsFinalizer(&fg, v1alpha1.FailoverGroupFinalizer) {
+	if !controllerutil.ContainsFinalizer(&fg, v1beta1.FailoverGroupFinalizer) {
 		base := fg.DeepCopy()
-		controllerutil.AddFinalizer(&fg, v1alpha1.FailoverGroupFinalizer)
+		controllerutil.AddFinalizer(&fg, v1beta1.FailoverGroupFinalizer)
 		if err := r.Patch(ctx, &fg, metadataPatch(base)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
@@ -370,6 +378,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// License observation is advisory only. It never returns an error
 	// and must not change the rest of reconcile.
 	r.observeLicense(&fg)
+	r.noteNewerCRDs(&fg)
 
 	image := fg.Spec.Image
 	if image == "" {
@@ -456,7 +465,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// The UpdateController manages site-by-site Deployment updates to avoid
 	// simultaneous restarts of both sites (which causes a TOTAL LOSS window).
 	orderedUpdateActive := fg.Status.UpdatePhase != ""
-	recreateUpdates := fg.Spec.UpdateStrategy.EffectiveType() == v1alpha1.UpdateStrategyRecreate
+	recreateUpdates := fg.Spec.UpdateStrategy.EffectiveType() == v1beta1.UpdateStrategyRecreate
 
 	// With OrderedUpdate (including its defaulted empty value in unit tests),
 	// defer every existing Deployment to the ordered update path: the
@@ -573,7 +582,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Reconcile MySQL users.
 	if err := r.reconcileCredentials(ctx, &fg); err != nil {
 		logger.Error(err, "credential reconciliation failed, will retry")
-		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, v1alpha1.EventCredentialReconcileFailed,
+		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, v1beta1.EventCredentialReconcileFailed,
 			"failed to reconcile MySQL users: %v", err)
 		// Nothing else wakes this up: the step can be waiting on a
 		// site that comes back without touching the CR.
@@ -766,7 +775,7 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		r.APIReader = mgr.GetAPIReader()
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.MysqlFailoverGroup{}).
+		For(&v1beta1.MysqlFailoverGroup{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
@@ -776,11 +785,11 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToFailoverGroup)).
-		Watches(&v1alpha1.MysqlBackup{}, handler.EnqueueRequestsFromMapFunc(r.mapBackupToGroup)).
+		Watches(&v1beta1.MysqlBackup{}, handler.EnqueueRequestsFromMapFunc(r.mapBackupToGroup)).
 		// PITR archive bindings (#203): a verification adds or drops a
 		// read target, and an archive key snapshot (ownerless, so Owns
 		// would see nothing) is mapped back by its group label.
-		Watches(&v1alpha1.MysqlBackupVerification{}, handler.EnqueueRequestsFromMapFunc(r.mapVerificationToGroup)).
+		Watches(&v1beta1.MysqlBackupVerification{}, handler.EnqueueRequestsFromMapFunc(r.mapVerificationToGroup)).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapPITRKeySnapshotToGroup),
 			builder.WithPredicates(pitrKeySnapshotPredicate())).
 		Complete(r)
@@ -790,7 +799,7 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 // (via spec.credentials.*, spec.tls.secretName or a backup passphrase), triggering
 // reconciliation on credential or cert rotation.
 func (r *MysqlFailoverGroupReconciler) secretToFailoverGroup(ctx context.Context, obj client.Object) []ctrl.Request {
-	var fgList v1alpha1.MysqlFailoverGroupList
+	var fgList v1beta1.MysqlFailoverGroupList
 	if err := r.List(ctx, &fgList, client.InNamespace(obj.GetNamespace())); err != nil {
 		log.FromContext(ctx).Error(err, "unable to list MysqlFailoverGroups for Secret watch")
 		return nil
@@ -819,7 +828,7 @@ func (r *MysqlFailoverGroupReconciler) secretToFailoverGroup(ctx context.Context
 // mapBackupToGroup enqueues the MysqlFailoverGroup referenced by a
 // MysqlBackup so that spec.status.backupSchedules[] stays fresh.
 func (r *MysqlFailoverGroupReconciler) mapBackupToGroup(_ context.Context, obj client.Object) []reconcile.Request {
-	backup, ok := obj.(*v1alpha1.MysqlBackup)
+	backup, ok := obj.(*v1beta1.MysqlBackup)
 	if !ok || backup.Spec.FailoverGroupRef.Name == "" {
 		return nil
 	}
@@ -828,12 +837,12 @@ func (r *MysqlFailoverGroupReconciler) mapBackupToGroup(_ context.Context, obj c
 	}
 }
 
-func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	logger := log.FromContext(ctx)
 	logger.Info("starting graceful shutdown", "fg", fg.Name)
 
 	// Record event
-	r.Recorder.Event(fg, corev1.EventTypeNormal, v1alpha1.EventGracefulShutdown, "Starting graceful shutdown sequence")
+	r.Recorder.Event(fg, corev1.EventTypeNormal, v1beta1.EventGracefulShutdown, "Starting graceful shutdown sequence")
 
 	// Remove taints for all configured site selectors.
 	if r.Tainter != nil {
@@ -856,13 +865,13 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 	logger.Info("CR deleted — DNSEndpoint will be garbage-collected",
 		"hostname", fg.Spec.DNS.Hostname)
 
-	r.Recorder.Event(fg, corev1.EventTypeNormal, v1alpha1.EventGracefulShutdown, "Graceful shutdown complete, removing finalizer")
+	r.Recorder.Event(fg, corev1.EventTypeNormal, v1beta1.EventGracefulShutdown, "Graceful shutdown complete, removing finalizer")
 	return nil
 }
 
 // validateCredentialSecrets validates that the referenced credential
 // secrets exist and contain the expected keys.
-func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
+func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (ctrl.Result, error) {
 	operatorSecretName := fg.Spec.Credentials.OperatorSecretName
 	var secret corev1.Secret
 	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
@@ -870,7 +879,7 @@ func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Con
 		if !errors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("get operator secret %s: %w", operatorSecretName, err)
 		}
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretNotFound,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventSecretNotFound,
 			"operator secret %q not found", operatorSecretName)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -880,13 +889,13 @@ func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Con
 		// unreachable. MYSQL_ROOT_PASSWORD only has to be present, as the
 		// admin connection skips root when it is empty.
 		if problem := credentialKeyProblem(secret.Data, key, key != "MYSQL_ROOT_PASSWORD"); problem != "" {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventSecretMissingKey,
 				"operator secret %q %s %q", operatorSecretName, problem, key)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
 	if _, _, msg := replicationCredentials(secret.Data); msg != "" {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventSecretMissingKey,
 			"operator secret %q: %s", operatorSecretName, msg)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -910,13 +919,13 @@ func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Con
 			if !errors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("get %s secret %s: %w", opt.role, opt.name, err)
 			}
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretNotFound,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventSecretNotFound,
 				"%s secret %q not found", opt.role, opt.name)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		for _, key := range []string{"username", "password"} {
 			if problem := credentialKeyProblem(s.Data, key, true); problem != "" {
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSecretMissingKey,
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventSecretMissingKey,
 					"%s secret %q %s %q", opt.role, opt.name, problem, key)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
@@ -947,11 +956,11 @@ func resourceName(fgName, siteName string) string {
 // commonLabels returns the labels applied to all resources for a failover group/site.
 func commonLabels(fgName, siteName string) map[string]string {
 	return map[string]string{
-		labelAppName:                "mysql",
-		labelInstance:               fgName,
-		v1alpha1.FailoverGroupLabel: fgName,
-		v1alpha1.SiteLabel:          siteName,
-		labelManagedBy:              managerName,
+		labelAppName:               "mysql",
+		labelInstance:              fgName,
+		v1beta1.FailoverGroupLabel: fgName,
+		v1beta1.SiteLabel:          siteName,
+		labelManagedBy:             managerName,
 	}
 }
 
@@ -964,14 +973,14 @@ func siteConfigMapName(group, site string) string {
 // AppArmor and seccomp to Unconfined for GHA kind runners; the private
 // mysqld copy (see mysqlRuntimeBinDir) is what avoids the host AppArmor
 // profile, so a cluster that still needs Unconfined sets it explicitly.
-func mysqlSecurityContext(fg *v1alpha1.MysqlFailoverGroup) *corev1.SecurityContext {
+func mysqlSecurityContext(fg *v1beta1.MysqlFailoverGroup) *corev1.SecurityContext {
 	return fg.Spec.ContainerSecurityContext.DeepCopy()
 }
 
 // configInitScript copies the operator-managed my.cnf fragments into the
 // conf emptyDir. When encryption is enabled it also plants a local
 // component manifest in the datadir (see encryptionConfigInitSnippet).
-func configInitScript(fg *v1alpha1.MysqlFailoverGroup, serverID uint32) string {
+func configInitScript(fg *v1beta1.MysqlFailoverGroup, serverID uint32) string {
 	script := fmt.Sprintf(
 		"cp /etc/mysql/config-map/bloodraven.cnf /etc/mysql/conf.d/bloodraven.cnf && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf",
 		serverID,
@@ -985,7 +994,7 @@ func configInitScript(fg *v1alpha1.MysqlFailoverGroup, serverID uint32) string {
 // configInitVolumeMounts returns the volume mounts for the config init
 // container. The datadir is only mounted when encryption needs to write
 // a local mysqld.my there.
-func configInitVolumeMounts(fg *v1alpha1.MysqlFailoverGroup) []corev1.VolumeMount {
+func configInitVolumeMounts(fg *v1beta1.MysqlFailoverGroup) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/etc/mysql/config-map"},
 		{Name: "conf", MountPath: "/etc/mysql/conf.d"},
@@ -1006,7 +1015,7 @@ func configInitVolumeMounts(fg *v1alpha1.MysqlFailoverGroup) []corev1.VolumeMoun
 //
 // pitr is the group's resolved PITR render: my.cnf's PITR settings follow its
 // Enabled, not the spec's (Δ33), so enabling PITR rolls the pods once.
-func desiredSiteConfigData(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, pitr pitrRenderInputs) map[string]string {
+func desiredSiteConfigData(fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, pitr pitrRenderInputs) map[string]string {
 	data := map[string]string{
 		"bloodraven.cnf": generateMyCnf(fg, pitr.Enabled, site),
 	}
@@ -1020,7 +1029,7 @@ func desiredSiteConfigData(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSp
 // live adoption, existing pods keep referencing the old unencrypted canonical
 // ConfigMap while the ordered updater atomically switches one Deployment's
 // ConfigMap reference and keyring wiring in the same PodTemplate patch.
-func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, pitr pitrRenderInputs) string {
+func desiredSiteConfigMapName(fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, pitr pitrRenderInputs) string {
 	base := siteConfigMapName(fg.Name, site.Name)
 	if !fg.Spec.EncryptionEnabled() {
 		return base
@@ -1043,20 +1052,20 @@ func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.Sit
 // its ConfigMap as it is: my.cnf follows the render (max_binlog_size), and
 // a restarted pod of the untouched Deployment must start with the
 // configuration it was rendered with (U09).
-func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr groupPITRRender, rolloutPending map[string]bool) error {
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pitr groupPITRRender, rolloutPending map[string]bool) error {
 	if _, refused := effectivePITRMaxBinlogSize(fg); refused != "" && pitr.inputs.Enabled && r.Recorder != nil {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventMysqlConfIgnored,
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventMysqlConfIgnored,
 			"ignoring spec.backup.pitr.maxBinlogSize %q: it must be a byte count with an optional k, m or g suffix; max-binlog-size is %s",
 			refused, defaultPITRMaxBinlogSize)
 	}
 	for _, site := range fg.Spec.Sites {
 		if keys := unsafeMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventMysqlConfIgnored,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventMysqlConfIgnored,
 				"site %s: ignoring mysqlConf keys %s: keys must match [A-Za-z0-9_.-]+ and values must not contain line breaks",
 				site.Name, strings.Join(keys, ", "))
 		}
 		if keys := shadowedMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventMysqlConfIgnored,
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventMysqlConfIgnored,
 				"site %s: ignoring mysqlConf keys %s: they override an operator-owned setting",
 				site.Name, strings.Join(keys, ", "))
 		}
@@ -1070,7 +1079,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Conte
 	return nil
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, pitr pitrRenderInputs) error {
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, pitr pitrRenderInputs) error {
 	versioned := fg.Spec.EncryptionEnabled()
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1084,11 +1093,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Contex
 			return err
 		}
 		cm.Labels = map[string]string{
-			labelAppName:                "mysql",
-			labelInstance:               fg.Name,
-			v1alpha1.FailoverGroupLabel: fg.Name,
-			v1alpha1.SiteLabel:          site.Name,
-			labelManagedBy:              managerName,
+			labelAppName:               "mysql",
+			labelInstance:              fg.Name,
+			v1beta1.FailoverGroupLabel: fg.Name,
+			v1beta1.SiteLabel:          site.Name,
+			labelManagedBy:             managerName,
 		}
 		cm.Data = desiredSiteConfigData(fg, site, pitr)
 		if versioned {
@@ -1108,7 +1117,7 @@ var mysqlOptionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 // directives or [section] headers, overriding operator-owned settings.
 // Admission refuses both (the key rule and MysqlConfValue's pattern); this
 // check keeps a value that bypassed it out of the file.
-func unsafeMySQLSetting(key string, value v1alpha1.MysqlConfValue) bool {
+func unsafeMySQLSetting(key string, value v1beta1.MysqlConfValue) bool {
 	return !mysqlOptionKeyPattern.MatchString(key) || strings.ContainsAny(string(value), "\r\n\x00")
 }
 
@@ -1122,7 +1131,7 @@ var mysqlSizePattern = regexp.MustCompile(`^[0-9]+[kKmMgG]?$`)
 // is unset or not a size. refused is the spec value when it was not a size
 // (only reachable past admission); it would otherwise be written into my.cnf
 // as it is, and a line break in it would inject further directives.
-func effectivePITRMaxBinlogSize(fg *v1alpha1.MysqlFailoverGroup) (value, refused string) {
+func effectivePITRMaxBinlogSize(fg *v1beta1.MysqlFailoverGroup) (value, refused string) {
 	if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || fg.Spec.Backup.PITR.MaxBinlogSize == "" {
 		return defaultPITRMaxBinlogSize, ""
 	}
@@ -1134,9 +1143,9 @@ func effectivePITRMaxBinlogSize(fg *v1alpha1.MysqlFailoverGroup) (value, refused
 
 // unsafeMySQLConfKeys lists the spec.mysqlConf keys, group-level then the
 // site's, that generateMyCnf drops as unsafe.
-func unsafeMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
+func unsafeMySQLConfKeys(fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) []string {
 	var out []string
-	for _, raw := range []map[string]v1alpha1.MysqlConfValue{fg.Spec.MysqlConf, site.MysqlConf} {
+	for _, raw := range []map[string]v1beta1.MysqlConfValue{fg.Spec.MysqlConf, site.MysqlConf} {
 		for k, v := range raw {
 			if unsafeMySQLSetting(k, v) {
 				out = append(out, strconv.Quote(k))
@@ -1147,7 +1156,7 @@ func unsafeMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec
 	return out
 }
 
-func normalizedMySQLSettings(raw map[string]v1alpha1.MysqlConfValue) map[string]string {
+func normalizedMySQLSettings(raw map[string]v1beta1.MysqlConfValue) map[string]string {
 	keys := make([]string, 0, len(raw))
 	for key := range raw {
 		keys = append(keys, key)
@@ -1239,7 +1248,7 @@ func shadowsOwnedSetting(key string, owned map[string]string) bool {
 
 // ownedMySQLSettings returns the my.cnf settings that group and site
 // mysqlConf overrides cannot change.
-func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
+func ownedMySQLSettings(fg *v1beta1.MysqlFailoverGroup) map[string]string {
 	// These settings are operator-owned safety invariants and cannot be
 	// weakened by group or site overrides.
 	owned := map[string]string{
@@ -1268,10 +1277,10 @@ func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
 
 // shadowedMySQLConfKeys lists the spec.mysqlConf keys, group-level then the
 // site's, that generateMyCnf drops as prefixed spellings of an owned option.
-func shadowedMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
+func shadowedMySQLConfKeys(fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) []string {
 	owned := ownedMySQLSettings(fg)
 	var out []string
-	for _, raw := range []map[string]v1alpha1.MysqlConfValue{fg.Spec.MysqlConf, site.MysqlConf} {
+	for _, raw := range []map[string]v1beta1.MysqlConfValue{fg.Spec.MysqlConf, site.MysqlConf} {
 		for k := range normalizedMySQLSettings(raw) {
 			if shadowsOwnedSetting(k, owned) {
 				out = append(out, strconv.Quote(k))
@@ -1284,7 +1293,7 @@ func shadowedMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSp
 
 // generateMyCnf renders a site's my.cnf. pitrOn is the group's resolved PITR
 // render's Enabled (Δ33), which decides max_binlog_size.
-func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, pitrOn bool, sites ...v1alpha1.SiteSpec) string {
+func generateMyCnf(fg *v1beta1.MysqlFailoverGroup, pitrOn bool, sites ...v1beta1.SiteSpec) string {
 	// Base config
 	settings := map[string]string{
 		"gtid-mode":                       "ON",
@@ -1332,7 +1341,7 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, pitrOn bool, sites ...v1alph
 	for k, v := range normalizedMySQLSettings(fg.Spec.MysqlConf) {
 		settings[k] = v
 	}
-	var site v1alpha1.SiteSpec
+	var site v1beta1.SiteSpec
 	if len(sites) > 0 {
 		site = sites[0]
 		for k, v := range normalizedMySQLSettings(site.MysqlConf) {
@@ -1385,7 +1394,7 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, pitrOn bool, sites ...v1alph
 	return b.String()
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) error {
 	size, err := site.Storage.Size.Quantity()
 	if err != nil {
 		return fmt.Errorf("site %s: storage.size: %w", site.Name, err)
@@ -1420,7 +1429,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1a
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, serverID uint32, image string, pitr groupPITRRender) error {
+func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, serverID uint32, image string, pitr groupPITRRender) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name),
@@ -1485,12 +1494,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		if deploy.Annotations == nil {
 			deploy.Annotations = make(map[string]string)
 		}
-		deploy.Annotations[v1alpha1.SpecHashAnnotation] = specHash
+		deploy.Annotations[v1beta1.SpecHashAnnotation] = specHash
 		// The operator release that wrote this template (rollout.go).
 		stampRenderedBy(deploy)
 		// The render this Deployment carries: the group hold's source
 		// (groupPITRHold) and the rendered identity backups stamp (K5).
-		deploy.Annotations[v1alpha1.PITRRenderAnnotation] = pitrCanonical
+		deploy.Annotations[v1beta1.PITRRenderAnnotation] = pitrCanonical
 
 		var replicas int32 = 1
 		deploy.Spec.Replicas = &replicas
@@ -1510,8 +1519,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		// Static defaults — syncPodLabels sets the real values on live pods.
 		// These must NOT depend on fg.Status.ActiveSite or any mutable state,
 		// otherwise every status change triggers a Deployment rollout.
-		podLabels[v1alpha1.RoleLabel] = "replica"
-		podLabels[v1alpha1.HealthyLabel] = v1alpha1.LabelValueFalse
+		podLabels[v1beta1.RoleLabel] = "replica"
+		podLabels[v1beta1.HealthyLabel] = v1beta1.LabelValueFalse
 
 		configMapName := desiredSiteConfigMapName(fg, site, pitr.inputs)
 
@@ -1875,7 +1884,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			podAnnotations[k] = v
 		}
 		// Operator annotations take precedence over user-supplied annotations.
-		podAnnotations[v1alpha1.SpecHashAnnotation] = specHash
+		podAnnotations[v1beta1.SpecHashAnnotation] = specHash
 
 		deploy.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1951,14 +1960,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 // Kubernetes API. User-supplied extra containers may (a log shipper
 // enriching with pod metadata), so pods that carry any keep the
 // Kubernetes default.
-func mysqlPodAutomountToken(fg *v1alpha1.MysqlFailoverGroup) *bool {
+func mysqlPodAutomountToken(fg *v1beta1.MysqlFailoverGroup) *bool {
 	if len(fg.Spec.ExtraContainers) > 0 || len(fg.Spec.ExtraInitContainers) > 0 {
 		return nil
 	}
 	return boolPtr(false)
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name),
@@ -1973,9 +1982,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 		svc.Labels = commonLabels(fg.Name, site.Name)
 		applyManagedServiceAnnotations(svc, effectiveSiteServiceAnnotations(fg.Spec.ServiceTemplate, site.ServiceTemplate))
 		selector := map[string]string{
-			labelAppName:       "mysql",
-			labelInstance:      fg.Name,
-			v1alpha1.SiteLabel: site.Name,
+			labelAppName:      "mysql",
+			labelInstance:     fg.Name,
+			v1beta1.SiteLabel: site.Name,
 		}
 		// A reader serves only while healthy. So does every site while an
 		// initFromBackup restore has not succeeded: syncPodLabels marks
@@ -1984,7 +1993,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 		// has no endpoints while the seed is being loaded or holds a
 		// failed load. The restore Job uses the internal Service instead.
 		if site.IsReadOnlyReader() || restoreInFlight(fg) {
-			selector[v1alpha1.HealthyLabel] = v1alpha1.LabelValueTrue
+			selector[v1beta1.HealthyLabel] = v1beta1.LabelValueTrue
 		}
 		serviceType := effectiveSiteServiceType(fg.Spec.ServiceTemplate, site.ServiceTemplate)
 		mutateServiceSpec(svc, serviceType, effectiveSiteExternalTrafficPolicy(fg.Spec.ServiceTemplate, site.ServiceTemplate), selector, []corev1.ServicePort{
@@ -2005,7 +2014,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileInternalSiteService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+func (r *MysqlFailoverGroupReconciler) reconcileInternalSiteService(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec) error {
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: internalSiteServiceName(fg.Name, site.Name), Namespace: fg.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		if err := controllerutil.SetControllerReference(fg, svc, r.Scheme); err != nil {
@@ -2014,7 +2023,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInternalSiteService(ctx context.
 		svc.Labels = commonLabels(fg.Name, site.Name)
 		applyManagedServiceAnnotations(svc, nil)
 		mutateServiceSpec(svc, corev1.ServiceTypeClusterIP, "", map[string]string{
-			labelAppName: "mysql", labelInstance: fg.Name, v1alpha1.SiteLabel: site.Name,
+			labelAppName: "mysql", labelInstance: fg.Name, v1beta1.SiteLabel: site.Name,
 		}, []corev1.ServicePort{
 			{Name: "mysql", Port: mysqlPort, TargetPort: intstr.FromInt32(mysqlPort), Protocol: corev1.ProtocolTCP},
 			{Name: "sidecar", Port: sidecarPort, TargetPort: intstr.FromInt32(sidecarPort), Protocol: corev1.ProtocolTCP},
@@ -2025,7 +2034,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInternalSiteService(ctx context.
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcilePrimaryService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcilePrimaryService(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("mysql-%s-primary", fg.Name),
@@ -2038,15 +2047,15 @@ func (r *MysqlFailoverGroupReconciler) reconcilePrimaryService(ctx context.Conte
 			return err
 		}
 		svc.Labels = map[string]string{
-			labelAppName:                "mysql",
-			labelInstance:               fg.Name,
-			v1alpha1.FailoverGroupLabel: fg.Name,
-			labelManagedBy:              managerName,
+			labelAppName:               "mysql",
+			labelInstance:              fg.Name,
+			v1beta1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:             managerName,
 		}
 		applyManagedServiceAnnotations(svc, serviceAnnotations(fg.Spec.ServiceTemplate))
 		mutateServiceSpec(svc, serviceType(fg.Spec.ServiceTemplate), serviceExternalTrafficPolicy(fg.Spec.ServiceTemplate), map[string]string{
-			labelInstance:      fg.Name,
-			v1alpha1.RoleLabel: "primary",
+			labelInstance:     fg.Name,
+			v1beta1.RoleLabel: "primary",
 		}, []corev1.ServicePort{
 			{
 				Name:       "mysql",
@@ -2061,7 +2070,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePrimaryService(ctx context.Conte
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("mysql-%s-replicas", fg.Name),
@@ -2074,16 +2083,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Cont
 			return err
 		}
 		svc.Labels = map[string]string{
-			labelAppName:                "mysql",
-			labelInstance:               fg.Name,
-			v1alpha1.FailoverGroupLabel: fg.Name,
-			labelManagedBy:              managerName,
+			labelAppName:               "mysql",
+			labelInstance:              fg.Name,
+			v1beta1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:             managerName,
 		}
 		applyManagedServiceAnnotations(svc, serviceAnnotations(fg.Spec.ServiceTemplate))
 		mutateServiceSpec(svc, serviceType(fg.Spec.ServiceTemplate), serviceExternalTrafficPolicy(fg.Spec.ServiceTemplate), map[string]string{
-			labelInstance:         fg.Name,
-			v1alpha1.RoleLabel:    "replica",
-			v1alpha1.HealthyLabel: v1alpha1.LabelValueTrue,
+			labelInstance:        fg.Name,
+			v1beta1.RoleLabel:    "replica",
+			v1beta1.HealthyLabel: v1beta1.LabelValueTrue,
 		}, []corev1.ServicePort{
 			{
 				Name:       "mysql",
@@ -2098,7 +2107,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Cont
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcilePDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcilePDB(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	minAvailable := intstr.FromInt32(1)
 	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2112,10 +2121,10 @@ func (r *MysqlFailoverGroupReconciler) reconcilePDB(ctx context.Context, fg *v1a
 			return err
 		}
 		pdb.Labels = map[string]string{
-			labelAppName:                "mysql",
-			labelInstance:               fg.Name,
-			v1alpha1.FailoverGroupLabel: fg.Name,
-			labelManagedBy:              managerName,
+			labelAppName:               "mysql",
+			labelInstance:              fg.Name,
+			v1beta1.FailoverGroupLabel: fg.Name,
+			labelManagedBy:             managerName,
 		}
 		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
 			MinAvailable: &minAvailable,
@@ -2132,7 +2141,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePDB(ctx context.Context, fg *v1a
 }
 
 // serviceType returns the configured service type or ClusterIP as default.
-func serviceType(tmpl *v1alpha1.ServiceTemplate) corev1.ServiceType {
+func serviceType(tmpl *v1beta1.ServiceTemplate) corev1.ServiceType {
 	if tmpl != nil && tmpl.Type != "" {
 		return tmpl.Type
 	}
@@ -2140,35 +2149,35 @@ func serviceType(tmpl *v1alpha1.ServiceTemplate) corev1.ServiceType {
 }
 
 // applyServiceAnnotations merges user-supplied service annotations into the Service.
-func serviceExternalTrafficPolicy(tmpl *v1alpha1.ServiceTemplate) corev1.ServiceExternalTrafficPolicyType {
+func serviceExternalTrafficPolicy(tmpl *v1beta1.ServiceTemplate) corev1.ServiceExternalTrafficPolicyType {
 	if tmpl != nil {
 		return tmpl.ExternalTrafficPolicy
 	}
 	return ""
 }
 
-func effectiveSiteServiceType(group *v1alpha1.ServiceTemplate, site *v1alpha1.SiteServiceTemplate) corev1.ServiceType {
+func effectiveSiteServiceType(group *v1beta1.ServiceTemplate, site *v1beta1.SiteServiceTemplate) corev1.ServiceType {
 	if site != nil && site.Type != "" {
 		return site.Type
 	}
 	return serviceType(group)
 }
 
-func effectiveSiteExternalTrafficPolicy(group *v1alpha1.ServiceTemplate, site *v1alpha1.SiteServiceTemplate) corev1.ServiceExternalTrafficPolicyType {
+func effectiveSiteExternalTrafficPolicy(group *v1beta1.ServiceTemplate, site *v1beta1.SiteServiceTemplate) corev1.ServiceExternalTrafficPolicyType {
 	if site != nil && site.ExternalTrafficPolicy != "" {
 		return site.ExternalTrafficPolicy
 	}
 	return serviceExternalTrafficPolicy(group)
 }
 
-func siteServiceNodePort(site *v1alpha1.SiteServiceTemplate) int32 {
+func siteServiceNodePort(site *v1beta1.SiteServiceTemplate) int32 {
 	if site != nil {
 		return site.NodePort
 	}
 	return 0
 }
 
-func serviceAnnotations(tmpl *v1alpha1.ServiceTemplate) map[string]string {
+func serviceAnnotations(tmpl *v1beta1.ServiceTemplate) map[string]string {
 	if tmpl == nil {
 		return nil
 	}
@@ -2177,7 +2186,7 @@ func serviceAnnotations(tmpl *v1alpha1.ServiceTemplate) map[string]string {
 
 // applyServiceAnnotations is retained for Dragonfly Services, whose resource
 // lifecycle is separate from the MySQL Service mutation contract.
-func applyServiceAnnotations(svc *corev1.Service, tmpl *v1alpha1.ServiceTemplate) {
+func applyServiceAnnotations(svc *corev1.Service, tmpl *v1beta1.ServiceTemplate) {
 	if tmpl == nil {
 		return
 	}
@@ -2189,7 +2198,7 @@ func applyServiceAnnotations(svc *corev1.Service, tmpl *v1alpha1.ServiceTemplate
 	}
 }
 
-func effectiveSiteServiceAnnotations(group *v1alpha1.ServiceTemplate, site *v1alpha1.SiteServiceTemplate) map[string]string {
+func effectiveSiteServiceAnnotations(group *v1beta1.ServiceTemplate, site *v1beta1.SiteServiceTemplate) map[string]string {
 	out := make(map[string]string)
 	if group != nil {
 		for k, v := range group.Annotations {
@@ -2209,7 +2218,7 @@ func applyManagedServiceAnnotations(svc *corev1.Service, desired map[string]stri
 		svc.Annotations = make(map[string]string)
 	}
 	var previous []string
-	_ = json.Unmarshal([]byte(svc.Annotations[v1alpha1.ManagedServiceAnnotationsAnnotation]), &previous)
+	_ = json.Unmarshal([]byte(svc.Annotations[v1beta1.ManagedServiceAnnotationsAnnotation]), &previous)
 	for _, key := range previous {
 		delete(svc.Annotations, key)
 	}
@@ -2220,7 +2229,7 @@ func applyManagedServiceAnnotations(svc *corev1.Service, desired map[string]stri
 	}
 	sort.Strings(keys)
 	encoded, _ := json.Marshal(keys)
-	svc.Annotations[v1alpha1.ManagedServiceAnnotationsAnnotation] = string(encoded)
+	svc.Annotations[v1beta1.ManagedServiceAnnotationsAnnotation] = string(encoded)
 }
 
 func mutateServiceSpec(svc *corev1.Service, serviceType corev1.ServiceType, etp corev1.ServiceExternalTrafficPolicyType, selector map[string]string, ports []corev1.ServicePort) {
@@ -2272,10 +2281,10 @@ func podsNotLabelled(pods []corev1.Pod, key, value string) bool {
 
 // syncPodLabels updates pod labels based on the CR status.
 // It updates replicas first, then primary, to prevent dual-primary in Service endpoints.
-func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	logger := log.FromContext(ctx)
 
-	statusByName := make(map[string]v1alpha1.SiteStatus, len(fg.Status.Sites))
+	statusByName := make(map[string]v1beta1.SiteStatus, len(fg.Status.Sites))
 	for _, siteStatus := range fg.Status.Sites {
 		statusByName[siteStatus.Name] = siteStatus
 	}
@@ -2287,7 +2296,7 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			statusComplete = false
 			continue
 		}
-		if status.State == v1alpha1.SiteStateWritable {
+		if status.State == v1beta1.SiteStateWritable {
 			writableSites++
 		}
 	}
@@ -2302,7 +2311,7 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	authorityValid := false
 	if !restoreWithheld && statusComplete && fg.Status.ActiveSite != "" && writableSites == 1 {
 		for _, site := range fg.Spec.Sites {
-			if site.Name == fg.Status.ActiveSite && site.IsPromotable() && statusByName[site.Name].State == v1alpha1.SiteStateWritable {
+			if site.Name == fg.Status.ActiveSite && site.IsPromotable() && statusByName[site.Name].State == v1beta1.SiteStateWritable {
 				authorityValid = true
 				break
 			}
@@ -2313,8 +2322,8 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	// authority deliberately leaves every site non-primary and every reader
 	// non-serving, shedding stale Service endpoints rather than returning early.
 	type siteInfo struct {
-		spec   v1alpha1.SiteSpec
-		status v1alpha1.SiteStatus
+		spec   v1beta1.SiteSpec
+		status v1beta1.SiteStatus
 		role   string
 	}
 
@@ -2372,14 +2381,14 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	// confirmPending reports whether site is queued for a post-restore
 	// reclone according to an uncached read, taken at most once per call.
 	// An unreadable group counts as queued.
-	var fresh *v1alpha1.MysqlFailoverGroup
+	var fresh *v1beta1.MysqlFailoverGroup
 	var freshErr error
 	confirmPending := func(site string) bool {
 		if r.APIReader == nil {
 			return false
 		}
 		if fresh == nil && freshErr == nil {
-			var got v1alpha1.MysqlFailoverGroup
+			var got v1beta1.MysqlFailoverGroup
 			if freshErr = r.APIReader.Get(ctx, client.ObjectKeyFromObject(fg), &got); freshErr == nil {
 				fresh = &got
 			}
@@ -2392,58 +2401,58 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		if err := r.List(ctx, pods,
 			client.InNamespace(fg.Namespace),
 			client.MatchingLabels{
-				labelAppName:       "mysql",
-				labelInstance:      fg.Name,
-				v1alpha1.SiteLabel: si.spec.Name,
+				labelAppName:      "mysql",
+				labelInstance:     fg.Name,
+				v1beta1.SiteLabel: si.spec.Name,
 			},
 		); err != nil {
 			return fmt.Errorf("list pods for site %s: %w", si.spec.Name, err)
 		}
 
-		healthy := v1alpha1.LabelValueFalse
+		healthy := v1beta1.LabelValueFalse
 		if si.spec.IsReadOnlyReader() {
-			if authorityValid && si.status.State == v1alpha1.SiteStateReadOnly && si.status.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
+			if authorityValid && si.status.State == v1beta1.SiteStateReadOnly && si.status.SourceConvergenceState == v1beta1.SourceConvergenceConverged &&
 				si.status.Replication.Running() && si.status.SecondsBehindSource != nil &&
 				canonicalSourceHost(si.status.SourceHost) == canonicalSourceHost(internalSiteServiceHost(fg.Name, fg.Status.ActiveSite, fg.Namespace)) &&
 				*si.status.SecondsBehindSource <= fg.Spec.EffectiveReadOnlyMaxLagSeconds() {
-				healthy = v1alpha1.LabelValueTrue
+				healthy = v1beta1.LabelValueTrue
 			}
-		} else if si.status.State == v1alpha1.SiteStateWritable || si.status.State == v1alpha1.SiteStateReadOnly {
-			healthy = v1alpha1.LabelValueTrue
+		} else if si.status.State == v1beta1.SiteStateWritable || si.status.State == v1beta1.SiteStateReadOnly {
+			healthy = v1beta1.LabelValueTrue
 		}
 		if restoreWithheld {
-			healthy = v1alpha1.LabelValueFalse
+			healthy = v1beta1.LabelValueFalse
 		}
 		// A peer the in-place restore has not recloned yet still serves
 		// pre-restore data: keep it out of the reader Services.
 		if si.role != "primary" && restoreReclonePending(fg, si.spec.Name) {
-			healthy = v1alpha1.LabelValueFalse
+			healthy = v1beta1.LabelValueFalse
 		}
 		// The cached view may predate the queue: before a pod that is not
 		// in the reader Services yet (labelled unhealthy, or a new pod not
 		// labelled at all) is put in, confirm uncached that the site is not
 		// queued.
-		if healthy == v1alpha1.LabelValueTrue && si.role != "primary" && podsNotLabelled(pods.Items, v1alpha1.HealthyLabel, v1alpha1.LabelValueTrue) && confirmPending(si.spec.Name) {
-			healthy = v1alpha1.LabelValueFalse
+		if healthy == v1beta1.LabelValueTrue && si.role != "primary" && podsNotLabelled(pods.Items, v1beta1.HealthyLabel, v1beta1.LabelValueTrue) && confirmPending(si.spec.Name) {
+			healthy = v1beta1.LabelValueFalse
 		}
 
 		for i := range pods.Items {
 			pod := &pods.Items[i]
 			needsUpdate := false
 
-			if pod.Labels[v1alpha1.RoleLabel] != si.role {
+			if pod.Labels[v1beta1.RoleLabel] != si.role {
 				if pod.Labels == nil {
 					pod.Labels = make(map[string]string)
 				}
-				pod.Labels[v1alpha1.RoleLabel] = si.role
+				pod.Labels[v1beta1.RoleLabel] = si.role
 				needsUpdate = true
 			}
 
-			if pod.Labels[v1alpha1.HealthyLabel] != healthy {
+			if pod.Labels[v1beta1.HealthyLabel] != healthy {
 				if pod.Labels == nil {
 					pod.Labels = make(map[string]string)
 				}
-				pod.Labels[v1alpha1.HealthyLabel] = healthy
+				pod.Labels[v1beta1.HealthyLabel] = healthy
 				needsUpdate = true
 			}
 
@@ -2460,8 +2469,8 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 					if fresh.Labels == nil {
 						fresh.Labels = make(map[string]string)
 					}
-					fresh.Labels[v1alpha1.RoleLabel] = si.role
-					fresh.Labels[v1alpha1.HealthyLabel] = healthy
+					fresh.Labels[v1beta1.RoleLabel] = si.role
+					fresh.Labels[v1beta1.HealthyLabel] = healthy
 					return r.Update(ctx, &fresh)
 				}); err != nil {
 					return fmt.Errorf("update pod %s labels: %w", podName, err)
@@ -2476,7 +2485,7 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 // ComputeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
 // secretDigest is secretContentDigest over specSecretInputs ("" when no Secret is referenced).
 // pitr is the group's resolved PITR render (resolvePITRRender).
-func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, secretDigest string, pitr pitrRenderInputs) string {
+func ComputeSpecHash(fg *v1beta1.MysqlFailoverGroup, site v1beta1.SiteSpec, secretDigest string, pitr pitrRenderInputs) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
@@ -2556,7 +2565,7 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-func sitePeerAddresses(fg *v1alpha1.MysqlFailoverGroup, siteName string) []string {
+func sitePeerAddresses(fg *v1beta1.MysqlFailoverGroup, siteName string) []string {
 	peerNames := fg.Spec.PeerSiteNames(siteName)
 	peerAddrs := make([]string, len(peerNames))
 	for i, name := range peerNames {
@@ -2571,7 +2580,7 @@ func int32Ptr(i int32) *int32 { return &i }
 // This bridges the CRD spec to the internal config used by TopologyManager.
 // It fails on a site role the operator cannot interpret (topologySiteRole),
 // so no topology manager runs on a role it might promote or fence wrongly.
-func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) (TopologyConfig, error) {
+func CRConfigToTopologyConfig(fg *v1beta1.MysqlFailoverGroup) (TopologyConfig, error) {
 	pollInterval := int64(2 * time.Second)
 	if fg.Spec.PollInterval != nil {
 		pollInterval = int64(fg.Spec.PollInterval.Duration)
@@ -2630,7 +2639,7 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) (TopologyConfig, 
 	}, nil
 }
 
-func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
+func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
 	reader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		reader = r.APIReader
@@ -2704,7 +2713,7 @@ func deploymentRolloutComplete(dep *appsv1.Deployment) bool {
 // revisions only after the Deployment has completed the switch to the desired
 // revision and no old pod remains. An interrupted rollout therefore preserves
 // the old pod's exact configuration and remains restartable.
-func (r *MysqlFailoverGroupReconciler) cleanupObsoleteSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
+func (r *MysqlFailoverGroupReconciler) cleanupObsoleteSiteConfigMaps(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pitr pitrRenderInputs) error {
 	if !fg.Spec.EncryptionEnabled() {
 		return nil
 	}
@@ -2733,9 +2742,9 @@ func (r *MysqlFailoverGroupReconciler) cleanupObsoleteSiteConfigMaps(ctx context
 		if err := r.List(ctx, &configs,
 			client.InNamespace(fg.Namespace),
 			client.MatchingLabels{
-				v1alpha1.FailoverGroupLabel: fg.Name,
-				v1alpha1.SiteLabel:          site.Name,
-				labelManagedBy:              managerName,
+				v1beta1.FailoverGroupLabel: fg.Name,
+				v1beta1.SiteLabel:          site.Name,
+				labelManagedBy:             managerName,
 			}); err != nil {
 			return err
 		}
@@ -2803,7 +2812,7 @@ func (r *MysqlFailoverGroupReconciler) applySiteDeployment(ctx context.Context, 
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := reader.Get(ctx, fgName, &fg); err != nil {
 		return fmt.Errorf("get CR: %w", err)
 	}
@@ -2935,7 +2944,7 @@ func (r *MysqlFailoverGroupReconciler) waitForDeploymentRollout(ctx context.Cont
 }
 
 // FailoverGroupNamespacedName creates a NamespacedName from a failover group.
-func FailoverGroupNamespacedName(fg *v1alpha1.MysqlFailoverGroup) types.NamespacedName {
+func FailoverGroupNamespacedName(fg *v1beta1.MysqlFailoverGroup) types.NamespacedName {
 	return types.NamespacedName{
 		Namespace: fg.Namespace,
 		Name:      fg.Name,

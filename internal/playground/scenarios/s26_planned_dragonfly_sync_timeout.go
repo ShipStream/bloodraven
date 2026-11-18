@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -109,7 +109,7 @@ func tightenS26SyncBudget() runner.Step {
 		Name:  "patch maxSyncWait=1s onSyncTimeout=Proceed",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			env.Capture.Note("patching dragonfly sync budget to 1s / proceed")
-			return env.Chaos.PatchDragonflySyncBudget(ctx, "1s", string(v1alpha1.DragonflySyncTimeoutProceed))
+			return env.Chaos.PatchDragonflySyncBudget(ctx, "1s", string(v1beta1.DragonflySyncTimeoutProceed))
 		},
 	}
 }
@@ -161,7 +161,7 @@ func observeS26PlannedFailoverSucceeded() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("plannedFailover.phase==Succeeded with target=%s", target),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					pf := mfg.Status.PlannedFailover
 					if pf == nil {
 						return false, "no plannedFailover status yet", nil
@@ -172,10 +172,10 @@ func observeS26PlannedFailoverSucceeded() runner.Step {
 							pf.StartTime, env.StartTime), nil
 					}
 					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.TargetSite, plannedReason(pf))
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", plannedReason(pf), pf.Message)
 					}
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseSucceeded {
 						if pf.TargetSite != target {
 							return false, msg, fmt.Errorf("plannedFailover succeeded but target=%q want %q", pf.TargetSite, target)
 						}
@@ -206,7 +206,7 @@ func verifyS26MysqlActiveSiteFlipped() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("status.activeSite==%s after the planned failover (Dragonfly degradation must NOT block MySQL failover)", target),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					return mfg.Status.ActiveSite == target, fmt.Sprintf("status.activeSite=%q", mfg.Status.ActiveSite), nil
 				},
 			)
@@ -238,12 +238,12 @@ func verifyS26SessionsNotPreserved() runner.Step {
 			if pf == nil || pf.Dragonfly == nil {
 				return fmt.Errorf("status.plannedFailover.dragonfly missing on Succeeded run")
 			}
-			if pf.Dragonfly.Sessions != v1alpha1.DragonflySessionsLost {
+			if pf.Dragonfly.Sessions != v1beta1.DragonflySessionsLost {
 				return fmt.Errorf("sessions=%q want Lost (reason=%q msg=%q)",
 					pf.Dragonfly.Sessions, pf.Dragonfly.Reason, pf.Dragonfly.Message)
 			}
 			switch pf.Dragonfly.Reason {
-			case v1alpha1.DragonflyPlannedReasonSyncTimeout, v1alpha1.DragonflyPlannedReasonPromotionFailed:
+			case v1beta1.DragonflyPlannedReasonSyncTimeout, v1beta1.DragonflyPlannedReasonPromotionFailed:
 				return nil
 			default:
 				return fmt.Errorf("dragonfly.Reason=%q want DragonflySyncTimeout or DragonflyPromotionFailed (msg=%q)",
@@ -317,7 +317,7 @@ func settleS26SourceDragonflyRejoinsAsReplica() runner.Step {
 			defer cancelPromote()
 			if _, err := env.Wait.UntilCR(promoteCtx, env.Namespace,
 				fmt.Sprintf("dragonfly master moved away from %s", source),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil {
 						return false, "no status.dragonfly", nil
 					}
@@ -334,7 +334,7 @@ func settleS26SourceDragonflyRejoinsAsReplica() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("dragonfly site %s rejoined as healthy replica", source),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil {
 						return false, "no status.dragonfly", nil
 					}
@@ -342,7 +342,7 @@ func settleS26SourceDragonflyRejoinsAsReplica() runner.Step {
 						if s.Name == source {
 							msg := fmt.Sprintf("site %s role=%q linkStatus=%q reachable=%v sync=%s",
 								s.Name, s.Role, s.LinkStatus, s.Reachable, optionalBoolString(s.SyncInProgress))
-							done := s.Role == v1alpha1.DragonflyRoleReplica &&
+							done := s.Role == v1beta1.DragonflyRoleReplica &&
 								s.LinkStatus == "up" &&
 								!dragonflySyncing(s.SyncInProgress) &&
 								s.Reachable

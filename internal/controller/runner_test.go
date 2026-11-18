@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -88,17 +88,17 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 	now := metav1.Now()
 	lastSeen := metav1.NewTime(time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC))
 
-	status := v1alpha1.MysqlFailoverGroupStatus{
+	status := v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
-		Sites: []v1alpha1.SiteStatus{
+		Sites: []v1beta1.SiteStatus{
 			{
 				Name:         "dc1",
-				State:        v1alpha1.SiteStateWritable,
+				State:        v1beta1.SiteStateWritable,
 				LastSeenTime: &lastSeen,
 			},
 			{
 				Name:         "dc2",
-				State:        v1alpha1.SiteStateReadOnly,
+				State:        v1beta1.SiteStateReadOnly,
 				LastSeenTime: &lastSeen,
 			},
 		},
@@ -111,7 +111,7 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 				Message:            "At least one site is writable",
 			},
 		},
-		LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Target: "dc1"}},
+		LastFailover: &v1beta1.FailoverRecord{FailoverRecordRef: v1beta1.FailoverRecordRef{Target: "dc1"}},
 	}
 
 	existing := status.DeepCopy()
@@ -122,11 +122,11 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 }
 
 func TestStatusDeepEqual_DifferentActiveSite(t *testing.T) {
-	status := v1alpha1.MysqlFailoverGroupStatus{
+	status := v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "dc1", State: v1alpha1.SiteStateWritable},
-			{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "dc1", State: v1beta1.SiteStateWritable},
+			{Name: "dc2", State: v1beta1.SiteStateReadOnly},
 		},
 	}
 
@@ -139,16 +139,16 @@ func TestStatusDeepEqual_DifferentActiveSite(t *testing.T) {
 }
 
 func TestStatusDeepEqual_DifferentSiteState(t *testing.T) {
-	status := v1alpha1.MysqlFailoverGroupStatus{
+	status := v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "dc1", State: v1alpha1.SiteStateWritable},
-			{Name: "dc2", State: v1alpha1.SiteStateReadOnly},
+		Sites: []v1beta1.SiteStatus{
+			{Name: "dc1", State: v1beta1.SiteStateWritable},
+			{Name: "dc2", State: v1beta1.SiteStateReadOnly},
 		},
 	}
 
 	existing := status.DeepCopy()
-	status.Sites[0].State = v1alpha1.SiteStateUnreachable
+	status.Sites[0].State = v1beta1.SiteStateUnreachable
 
 	if equality.Semantic.DeepEqual(existing, &status) {
 		t.Error("expected different Sites[0] state to be unequal")
@@ -157,7 +157,7 @@ func TestStatusDeepEqual_DifferentSiteState(t *testing.T) {
 
 func TestStatusDeepEqual_DifferentConditionStatus(t *testing.T) {
 	now := metav1.Now()
-	status := v1alpha1.MysqlFailoverGroupStatus{
+	status := v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
 		Conditions: []metav1.Condition{
 			{
@@ -178,7 +178,7 @@ func TestStatusDeepEqual_DifferentConditionStatus(t *testing.T) {
 }
 
 func TestStatusDeepEqual_LastFailoverChange(t *testing.T) {
-	status := v1alpha1.MysqlFailoverGroupStatus{
+	status := v1beta1.MysqlFailoverGroupStatus{
 		ActiveSite: "dc1",
 	}
 
@@ -194,7 +194,7 @@ func TestStatusDeepEqual_LastFailoverChange(t *testing.T) {
 func TestUpdateCRStatus_IsNotFound_NoPanic(t *testing.T) {
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -221,7 +221,7 @@ func TestUpdateCRStatus_ExistingCR(t *testing.T) {
 	fg := newTestFG()
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -245,7 +245,7 @@ func TestUpdateCRStatus_ExistingCR(t *testing.T) {
 
 	runner.updateCRStatus(context.Background(), nn, snap)
 
-	var updated v1alpha1.MysqlFailoverGroup
+	var updated v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
 		t.Fatalf("failed to get fg: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
 
 	deleteCalled := false
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, underlying client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
@@ -371,7 +371,7 @@ func TestStopManager_NotFound(t *testing.T) {
 func TestSync_RemovesDeletedCRManagers(t *testing.T) {
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -401,7 +401,7 @@ func TestUpdateCRStatus_SetsConditions(t *testing.T) {
 	fg := newTestFG()
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -425,7 +425,7 @@ func TestUpdateCRStatus_SetsConditions(t *testing.T) {
 
 	runner.updateCRStatus(context.Background(), nn, snap)
 
-	var updated v1alpha1.MysqlFailoverGroup
+	var updated v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
 		t.Fatalf("failed to get fg: %v", err)
 	}
@@ -448,10 +448,10 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
 		t.Run(string(role), func(t *testing.T) {
 			fg := newTestFG()
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", ServerID: 103, Role: APISiteRole(role)})
+			fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: "anomaly", ServerID: 103, Role: APISiteRole(role)})
 			scheme := testScheme()
 			c := fake.NewClientBuilder().WithScheme(scheme).
-				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+				WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 				WithObjects(fg).Build()
 			runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
 			nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -461,10 +461,10 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 					{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 					{Name: "anomaly", Role: role, State: state.StateWritable, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 				},
-				DegradedReason: v1alpha1.ReasonSiteUnhealthy,
+				DegradedReason: v1beta1.ReasonSiteUnhealthy,
 				Alert:          "writable non-promotable site requires fencing (anomaly)",
 			})
-			var updated v1alpha1.MysqlFailoverGroup
+			var updated v1beta1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &updated); err != nil {
 				t.Fatal(err)
 			}
@@ -481,7 +481,7 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 			if ready == nil || ready.Status != metav1.ConditionFalse {
 				t.Fatalf("Ready condition = %+v, want False", ready)
 			}
-			if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != v1alpha1.ReasonSiteUnhealthy {
+			if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != v1beta1.ReasonSiteUnhealthy {
 				t.Fatalf("Degraded condition = %+v, want True/SiteUnhealthy", degraded)
 			}
 		})
@@ -492,7 +492,7 @@ func TestUpdateCRStatus_ConvergencePendingWithNilReplicationIsDegraded(t *testin
 	fg := newTestFG()
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).Build()
 	runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -511,7 +511,7 @@ func TestUpdateCRStatus_ConvergencePendingWithNilReplicationIsDegraded(t *testin
 		DegradedReason: "Healthy",
 	})
 
-	var updated v1alpha1.MysqlFailoverGroup
+	var updated v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +530,7 @@ func TestUpdateOnlyStatusCallbackPreservesNoPrimaryCondition(t *testing.T) {
 	fg := newTestFG()
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).Build()
 	runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
 	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: true}, &mockMySQL{readOnly: true})
@@ -541,7 +541,7 @@ func TestUpdateOnlyStatusCallbackPreservesNoPrimaryCondition(t *testing.T) {
 
 	tm.emitStatusSnapshot()
 	tm.emitStatusSnapshot() // update-completion-style callback without a transition
-	var updated v1alpha1.MysqlFailoverGroup
+	var updated v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +573,7 @@ func TestEmitFailoverEvents_FailoverExecuted(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{}
+	existing := &v1beta1.MysqlFailoverGroupStatus{}
 	snap := TopologySnapshot{
 		LastFailoverTarget: "dc2",
 	}
@@ -597,8 +597,8 @@ func TestEmitFailoverEvents_NoEventOnSameTarget(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Target: "dc2"}},
+	existing := &v1beta1.MysqlFailoverGroupStatus{
+		LastFailover: &v1beta1.FailoverRecord{FailoverRecordRef: v1beta1.FailoverRecordRef{Target: "dc2"}},
 	}
 	snap := TopologySnapshot{
 		LastFailoverTarget: "dc2",
@@ -617,8 +617,8 @@ func TestEmitFailoverEvents_DataLossDetected(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		Sites: []v1alpha1.SiteStatus{
+	existing := &v1beta1.MysqlFailoverGroupStatus{
+		Sites: []v1beta1.SiteStatus{
 			{Name: "dc1", RecoveryState: ""},
 			{Name: "dc2", RecoveryState: ""},
 		},
@@ -652,8 +652,8 @@ func TestEmitFailoverEvents_NoDataLossEventWhenAlreadyBlocked(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		Sites: []v1alpha1.SiteStatus{
+	existing := &v1beta1.MysqlFailoverGroupStatus{
+		Sites: []v1beta1.SiteStatus{
 			{Name: "dc1", RecoveryState: "RecoveryBlocked"},
 			{Name: "dc2", RecoveryState: ""},
 		},
@@ -698,8 +698,8 @@ func TestEmitFailoverEvents_DataLossEventWhenDivergenceGrows(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := record.NewFakeRecorder(10)
 			runner := &TopologyManagerRunner{recorder: rec}
-			existing := &v1alpha1.MysqlFailoverGroupStatus{
-				Sites: []v1alpha1.SiteStatus{
+			existing := &v1beta1.MysqlFailoverGroupStatus{
+				Sites: []v1beta1.SiteStatus{
 					{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTransactionCount: tt.prevCount},
 				},
 			}
@@ -739,8 +739,8 @@ func TestEmitFailoverEvents_OldPrimaryRecovered(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: rec}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		Sites: []v1alpha1.SiteStatus{
+	existing := &v1beta1.MysqlFailoverGroupStatus{
+		Sites: []v1beta1.SiteStatus{
 			{Name: "dc1", RecoveryState: "RecoveryBlocked"},
 			{Name: "dc2", RecoveryState: ""},
 		},
@@ -766,7 +766,7 @@ func TestEmitFailoverEvents_OldPrimaryRecovered(t *testing.T) {
 	}
 }
 
-func newDegradedTestRunner(rec *record.FakeRecorder, fg *v1alpha1.MysqlFailoverGroup, lastReason string) (*TopologyManagerRunner, types.NamespacedName) {
+func newDegradedTestRunner(rec *record.FakeRecorder, fg *v1beta1.MysqlFailoverGroup, lastReason string) (*TopologyManagerRunner, types.NamespacedName) {
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	runner := &TopologyManagerRunner{
 		recorder: rec,
@@ -984,7 +984,7 @@ func TestEmitFailoverEvents_NilRecorder(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: nil}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{}
+	existing := &v1beta1.MysqlFailoverGroupStatus{}
 	snap := TopologySnapshot{LastFailoverTarget: "dc2"}
 
 	// Must not panic.
@@ -995,7 +995,7 @@ func TestUpdateCRStatus_EmitsFailoverEvent(t *testing.T) {
 	fg := newTestFG()
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -1105,7 +1105,7 @@ func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
 		t.Fatal("cloneTimeout must not change the connection hash (it is live-updated)")
 	}
 
-	fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
+	fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"}
 	withTLS := mustConnectionMaterialHash(t, ctx, c, fg)
 	if withTLS == "" || withTLS == plain {
 		t.Fatalf("adopting TLS must change the connection hash: plain=%q tls=%q", plain, withTLS)

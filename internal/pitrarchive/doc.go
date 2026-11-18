@@ -15,6 +15,6 @@
 //
 // The package is pure and deliberately free of the Kubernetes API types, so
 // the sidecar binary can import it without linking k8s.io/api. Building a
-// Destination or EncryptionIdentity from a v1alpha1 profile lives in the
+// Destination or EncryptionIdentity from a v1beta1 profile lives in the
 // subpackage pitrprofile.
 package pitrarchive

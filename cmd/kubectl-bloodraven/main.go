@@ -37,6 +37,8 @@ Commands:
                  Acknowledge a planned-failover automation hold via annotation
   backup         Create an on-demand MysqlBackup CR for a profile
   verify-backup  Create an on-demand MysqlBackupVerification CR
+  migrate-storage
+                 Rewrite every object at the CRDs' storage version after an upgrade
   version        Print plugin version metadata
   help           Show this help text
 
@@ -90,6 +92,8 @@ func run(args []string, stdout, stderr *os.File) error {
 		return runBackup(args[1:], stdout, stderr)
 	case "verify-backup":
 		return runVerifyBackup(args[1:], stdout, stderr)
+	case "migrate-storage":
+		return runMigrateStorage(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "unknown command:", args[0])
 		fmt.Fprint(stderr, usage)

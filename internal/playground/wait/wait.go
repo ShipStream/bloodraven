@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -74,11 +74,11 @@ func (h *Helper) interval() time.Duration {
 // CRCondition is the predicate body for UntilCR. It returns whether
 // the wait is satisfied, a human-readable message describing the
 // current observation, and a hard error (which terminates the wait).
-type CRCondition func(*v1alpha1.MysqlFailoverGroup) (done bool, message string, err error)
+type CRCondition func(*v1beta1.MysqlFailoverGroup) (done bool, message string, err error)
 
 // UntilCR polls the playground MFG until cond returns done=true, ctx
 // expires, or cond returns a hard error.
-func (h *Helper) UntilCR(ctx context.Context, namespace, what string, cond CRCondition) (*v1alpha1.MysqlFailoverGroup, error) {
+func (h *Helper) UntilCR(ctx context.Context, namespace, what string, cond CRCondition) (*v1beta1.MysqlFailoverGroup, error) {
 	start := time.Now()
 	tick := time.NewTicker(h.interval())
 	defer tick.Stop()
@@ -87,7 +87,7 @@ func (h *Helper) UntilCR(ctx context.Context, namespace, what string, cond CRCon
 	progress := time.NewTicker(5 * time.Second)
 	defer progress.Stop()
 
-	check := func() (*v1alpha1.MysqlFailoverGroup, bool, error) {
+	check := func() (*v1beta1.MysqlFailoverGroup, bool, error) {
 		mfg, err := h.Kube.GetMFGNamed(ctx, namespace, h.FG)
 		if err != nil {
 			last = "get MFG failed: " + err.Error()

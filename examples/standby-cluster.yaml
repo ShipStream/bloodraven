@@ -12,7 +12,7 @@
 # MySQL is started and nothing is written to the bucket. To bring up a group
 # in the DR cluster, create a MysqlFailoverGroup with spec.initFromBackup
 # pointed at the same prefix (see the multi-cluster DR guide).
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlStandbyCluster
 metadata:
   name: orders-east-from-west

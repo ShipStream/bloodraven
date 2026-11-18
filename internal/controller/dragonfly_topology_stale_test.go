@@ -8,7 +8,7 @@ import (
 
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -77,7 +77,7 @@ func TestDragonflyManager_Tick_StaleReplicaNotPromotedOverEmptyRestartedMaster(t
 	if n := strings.Count(h.logs.String(), staleReplicaMsg); n != 1 {
 		t.Fatalf("the stale replica was logged %d times over three cycles, want once\n%s", n, h.logs.String())
 	}
-	events := h.eventsOf(v1alpha1.EventDragonflyStaleReplicaNotPromoted)
+	events := h.eventsOf(v1beta1.EventDragonflyStaleReplicaNotPromoted)
 	if len(events) != 1 || !strings.Contains(events[0], "0 keys") {
 		t.Fatalf("DragonflyStaleReplicaNotPromoted events = %v, want one that says the cache starts empty", events)
 	}
@@ -237,7 +237,7 @@ func TestDragonflyActiveSiteRecord_LoadingMasterIsNotKnownEmpty(t *testing.T) {
 	zero, some := int64(0), int64(120)
 	t.Run("an unobserved recorded site is held over a loading master, whatever its count", func(t *testing.T) {
 		fg := fgWithDragonflyEnabledAndActive()
-		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+		fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 		for _, keys := range []*int64{&zero, &some} {
 			snaps := []DragonflySiteSnapshot{
 				{Name: "dc1"},
@@ -256,7 +256,7 @@ func TestDragonflyActiveSiteRecord_LoadingMasterIsNotKnownEmpty(t *testing.T) {
 	t.Run("a recorded site that is loading is not displaced as empty", func(t *testing.T) {
 		fg := fgWithDragonflyEnabledAndActive()
 		fg.Status.ActiveSite = "dc2"
-		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+		fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 		snaps := []DragonflySiteSnapshot{
 			{Name: "dc1", Reachable: true, PersistRead: true, Keys: &zero, Persist: dragonfly.PersistenceInfo{Loading: true},
 				Info: dragonfly.ReplicationInfo{Role: "master"}},
@@ -275,7 +275,7 @@ func TestDragonflyActiveSiteRecord_LoadingMasterIsNotKnownEmpty(t *testing.T) {
 // threeSiteRestartHarness is a restart harness with a third site, dc3.
 func threeSiteRestartHarness(t *testing.T, dc3 *fakeDragonflyConn) *restartHarness {
 	t.Helper()
-	h := newRestartHarness(t, func(fg *v1alpha1.MysqlFailoverGroup) {
+	h := newRestartHarness(t, func(fg *v1beta1.MysqlFailoverGroup) {
 		site := *fg.Spec.Sites[1].DeepCopy()
 		site.Name, site.ServerID, site.Zone = "dc3", 103, "lion-dc3"
 		fg.Spec.Sites = append(fg.Spec.Sites, site)

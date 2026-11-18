@@ -10,7 +10,7 @@ import (
 	io_prometheus_client "github.com/prometheus/client_model/go"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 	"github.com/shipstream/bloodraven/internal/metrics"
 )
@@ -45,14 +45,14 @@ func TestDragonflyManager_Tick_MissingReplTakeover(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
 	if got.Status.Dragonfly == nil || got.Status.Dragonfly.ReplTakeoverSupported == nil || *got.Status.Dragonfly.ReplTakeoverSupported {
 		t.Fatalf("ReplTakeoverSupported = %+v, want false", got.Status.Dragonfly)
 	}
-	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseReady {
+	if got.Status.Dragonfly.Phase != v1beta1.DragonflyPhaseReady {
 		t.Errorf("Phase = %q, want Ready (capability must not degrade topology)", got.Status.Dragonfly.Phase)
 	}
 	if got.Status.Dragonfly.ReplTakeoverProbeMessage == "" {
@@ -60,8 +60,8 @@ func TestDragonflyManager_Tick_MissingReplTakeover(t *testing.T) {
 	}
 
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, v1alpha1.EventDragonflyReplTakeoverUnsupported) {
-		t.Errorf("expected %s event, got %v", v1alpha1.EventDragonflyReplTakeoverUnsupported, events)
+	if !eventsContain(events, v1beta1.EventDragonflyReplTakeoverUnsupported) {
+		t.Errorf("expected %s event, got %v", v1beta1.EventDragonflyReplTakeoverUnsupported, events)
 	}
 }
 
@@ -91,7 +91,7 @@ func TestDragonflyManager_Tick_PresentReplTakeoverNoWarning(t *testing.T) {
 
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestDragonflyManager_Tick_PresentReplTakeoverNoWarning(t *testing.T) {
 		t.Fatalf("ReplTakeoverSupported = %+v, want true", got.Status.Dragonfly)
 	}
 	events := drainEventsCh(rec.Events, 4, 50*time.Millisecond)
-	if eventsContain(events, v1alpha1.EventDragonflyReplTakeoverUnsupported) {
+	if eventsContain(events, v1beta1.EventDragonflyReplTakeoverUnsupported) {
 		t.Errorf("unexpected unsupported event on a capable image: %v", events)
 	}
 }
@@ -129,7 +129,7 @@ func TestDragonflyManager_Tick_PreservesProbeAcrossUnreachable(t *testing.T) {
 	conn.dialFails("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", context.DeadlineExceeded)
 	mgr.Tick(context.Background())
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestDragonflyManager_Tick_ProbeTimeDoesNotPatchEveryPoll(t *testing.T) {
 	mgr.SetConnector(conn.connect)
 
 	mgr.Tick(context.Background())
-	var first v1alpha1.MysqlFailoverGroup
+	var first v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &first); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestDragonflyManager_Tick_ProbeTimeDoesNotPatchEveryPoll(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 	mgr.Tick(context.Background())
 
-	var second v1alpha1.MysqlFailoverGroup
+	var second v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &second); err != nil {
 		t.Fatal(err)
 	}
@@ -210,13 +210,13 @@ func TestDragonflyManager_TryEmergencyPromote_FallbackIsLoud(t *testing.T) {
 	}
 
 	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
-	if !eventsContain(events, v1alpha1.EventDragonflySessionsLost) {
-		t.Errorf("expected %s, got %v", v1alpha1.EventDragonflySessionsLost, events)
+	if !eventsContain(events, v1beta1.EventDragonflySessionsLost) {
+		t.Errorf("expected %s, got %v", v1beta1.EventDragonflySessionsLost, events)
 	}
 	// A-75: one Event for one outcome. The sessions-lost fallback is not
 	// also reported as a (Warning) DragonflyPromotionSucceeded.
-	if eventsContain(events, v1alpha1.EventDragonflyPromotionSucceeded) {
-		t.Errorf("the sessions-lost fallback must not also emit %s, got %v", v1alpha1.EventDragonflyPromotionSucceeded, events)
+	if eventsContain(events, v1beta1.EventDragonflyPromotionSucceeded) {
+		t.Errorf("the sessions-lost fallback must not also emit %s, got %v", v1beta1.EventDragonflyPromotionSucceeded, events)
 	}
 	if !eventsContain(events, "REPLICAOF NO ONE") {
 		t.Errorf("expected fallback wording, got %v", events)
@@ -235,15 +235,15 @@ func TestDragonflyManager_TryEmergencyPromote_FallbackIsLoud(t *testing.T) {
 func TestApplyReplTakeoverStatus_KeepsFalseOnPartialProbe(t *testing.T) {
 	no := false
 	yes := true
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Status: v1alpha1.MysqlFailoverGroupStatus{
-			Dragonfly: &v1alpha1.DragonflyStatus{
+	fg := &v1beta1.MysqlFailoverGroup{
+		Status: v1beta1.MysqlFailoverGroupStatus{
+			Dragonfly: &v1beta1.DragonflyStatus{
 				ReplTakeoverSupported:    &no,
 				ReplTakeoverProbeMessage: "REPLTAKEOVER not advertised on dc2",
 			},
 		},
 	}
-	st := v1alpha1.DragonflyStatus{}
+	st := v1beta1.DragonflyStatus{}
 	applyReplTakeoverStatus(&st, fg, []DragonflySiteSnapshot{
 		{Name: "dc1", ReplTakeover: &yes},
 		{Name: "dc2"}, // unprobed
@@ -259,12 +259,12 @@ func TestApplyReplTakeoverStatus_KeepsFalseOnPartialProbe(t *testing.T) {
 func TestApplyReplTakeoverStatus_UpgradesWhenEverySiteProbed(t *testing.T) {
 	no := false
 	yes := true
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Status: v1alpha1.MysqlFailoverGroupStatus{
-			Dragonfly: &v1alpha1.DragonflyStatus{ReplTakeoverSupported: &no},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Status: v1beta1.MysqlFailoverGroupStatus{
+			Dragonfly: &v1beta1.DragonflyStatus{ReplTakeoverSupported: &no},
 		},
 	}
-	st := v1alpha1.DragonflyStatus{}
+	st := v1beta1.DragonflyStatus{}
 	applyReplTakeoverStatus(&st, fg, []DragonflySiteSnapshot{
 		{Name: "dc1", ReplTakeover: &yes},
 		{Name: "dc2", ReplTakeover: &yes},

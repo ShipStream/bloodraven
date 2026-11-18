@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -27,11 +27,11 @@ func TestEmitOwnLossEvents_WitnessCauseAndFailures(t *testing.T) {
 	emit := func(stored string, site SiteSnapshot) string {
 		t.Helper()
 		site.Name = "dc2"
-		r.emitOwnLossEvents(fg, &v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{{Name: "dc2", LostGtid: stored}}},
+		r.emitOwnLossEvents(fg, &v1beta1.MysqlFailoverGroupStatus{Sites: []v1beta1.SiteStatus{{Name: "dc2", LostGtid: stored}}},
 			TopologySnapshot{Sites: []SiteSnapshot{site}})
 		return strings.Join(drainEvents(rec), "\n")
 	}
-	report := SiteSnapshot{State: state.StateReadOnly, RecoveryState: v1alpha1.RecoveryStateRecloneRequired,
+	report := SiteSnapshot{State: state.StateReadOnly, RecoveryState: v1beta1.RecoveryStateRecloneRequired,
 		LostGtid: lossLostGTID, LostTxnCount: 10, LostComparedTo: "dc3", LostToWitness: true,
 		RecloneWaiting: "the transactions are held by dc3 only"}
 
@@ -62,7 +62,7 @@ func TestEmitOwnLossEvents_WitnessCauseAndFailures(t *testing.T) {
 
 	// A report against the primary whose automatic reclone keeps failing:
 	// an Event from the third failure on, once per failure.
-	hole := SiteSnapshot{State: state.StateReadOnly, RecoveryState: v1alpha1.RecoveryStateRecloneRequired,
+	hole := SiteSnapshot{State: state.StateReadOnly, RecoveryState: v1beta1.RecoveryStateRecloneRequired,
 		LostGtid: lossLostGTID, LostTxnCount: 10, LostComparedTo: "dc1",
 		RecloneWaiting: "the last 3 automatic reclones did not complete; the next one is requested at 2026-11-11T10:00:00Z"}
 	if got := emit("", hole); !strings.Contains(got, "Warning OwnTransactionsLost ") || strings.Contains(got, "RecloneFailing") {
@@ -89,34 +89,34 @@ func TestEmitOwnLossEvents_WitnessCauseAndFailures(t *testing.T) {
 // lead to it.
 func TestDegradeStatusForOlderCRD(t *testing.T) {
 	lostCount := int64(10)
-	st := &v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "dc1", Sites: []v1alpha1.SiteStatus{
-		{Name: "dc1", State: v1alpha1.SiteStateWritable},
-		{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired, SourceConvergenceReason: v1alpha1.SourceReasonOwnTransactionsLost, LostGtid: lossLostGTID, LostTransactionCount: &lostCount, LostComparedTo: "dc1"},
-		{Name: "dc3", RecoveryState: v1alpha1.RecoveryStateInProgress, SourceConvergenceReason: v1alpha1.SourceReasonGTIDDiverged},
+	st := &v1beta1.MysqlFailoverGroupStatus{ActiveSite: "dc1", Sites: []v1beta1.SiteStatus{
+		{Name: "dc1", State: v1beta1.SiteStateWritable},
+		{Name: "dc2", RecoveryState: v1beta1.RecoveryStateRecloneRequired, SourceConvergenceReason: v1beta1.SourceReasonOwnTransactionsLost, LostGtid: lossLostGTID, LostTransactionCount: &lostCount, LostComparedTo: "dc1"},
+		{Name: "dc3", RecoveryState: v1beta1.RecoveryStateInProgress, SourceConvergenceReason: v1beta1.SourceReasonGTIDDiverged},
 	}}
 	if !degradeStatusForOlderCRD(st) {
 		t.Fatal("nothing was degraded")
 	}
-	if s := st.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.SourceConvergenceReason != v1alpha1.SourceReasonGTIDDiverged || s.LostGtid != "" || s.LostTransactionCount != nil || s.LostComparedTo != "" {
+	if s := st.Sites[1]; s.RecoveryState != v1beta1.RecoveryStateBlocked || s.SourceConvergenceReason != v1beta1.SourceReasonGTIDDiverged || s.LostGtid != "" || s.LostTransactionCount != nil || s.LostComparedTo != "" {
 		t.Fatalf("dc2 = %+v, want RecoveryBlocked, GTIDDiverged and the fields the older CRD prunes left out", s)
 	}
 
-	sent := statusLostGtid(&v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{{Name: "dc1"}, {Name: "dc2", LostGtid: lossLostGTID}}})
-	if !statusLostGtidPruned(sent, &v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{{Name: "dc1"}, {Name: "dc2"}}}) {
+	sent := statusLostGtid(&v1beta1.MysqlFailoverGroupStatus{Sites: []v1beta1.SiteStatus{{Name: "dc1"}, {Name: "dc2", LostGtid: lossLostGTID}}})
+	if !statusLostGtidPruned(sent, &v1beta1.MysqlFailoverGroupStatus{Sites: []v1beta1.SiteStatus{{Name: "dc1"}, {Name: "dc2"}}}) {
 		t.Fatal("a lostGtid that did not come back was not seen as pruned")
 	}
-	if statusLostGtidPruned(sent, &v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{{Name: "dc2", LostGtid: lossLostGTID}}}) ||
-		statusLostGtidPruned(nil, &v1alpha1.MysqlFailoverGroupStatus{}) {
+	if statusLostGtidPruned(sent, &v1beta1.MysqlFailoverGroupStatus{Sites: []v1beta1.SiteStatus{{Name: "dc2", LostGtid: lossLostGTID}}}) ||
+		statusLostGtidPruned(nil, &v1beta1.MysqlFailoverGroupStatus{}) {
 		t.Fatal("a status that kept its lostGtid, or carried none, was seen as pruned")
 	}
-	if s := st.Sites[2]; s.RecoveryState != v1alpha1.RecoveryStateInProgress || st.ActiveSite != "dc1" {
+	if s := st.Sites[2]; s.RecoveryState != v1beta1.RecoveryStateInProgress || st.ActiveSite != "dc1" {
 		t.Fatalf("values every CRD knows were changed: %+v", st)
 	}
 	if degradeStatusForOlderCRD(st) {
 		t.Fatal("a second pass degraded again")
 	}
 
-	gk := schema.GroupKind{Group: v1alpha1.GroupVersion.Group, Kind: "MysqlFailoverGroup"}
+	gk := schema.GroupKind{Group: v1beta1.GroupVersion.Group, Kind: "MysqlFailoverGroup"}
 	unsupported := apierrors.NewInvalid(gk, "lion", field.ErrorList{
 		field.NotSupported(field.NewPath("status", "sites").Index(1).Child("recoveryState"), "RecloneRequired", []string{"RecoveryInProgress", "RecoveryBlocked"})})
 	other := apierrors.NewInvalid(gk, "lion", field.ErrorList{field.Required(field.NewPath("status", "sites").Index(1).Child("name"), "")})
@@ -144,16 +144,16 @@ func TestKeepConditionTransitionTimes(t *testing.T) {
 	then := metav1.NewTime(time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC))
 	now := metav1.NewTime(then.Add(time.Hour))
 	stored := []metav1.Condition{
-		{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonOwnTransactionsLost, LastTransitionTime: then},
-		{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, LastTransitionTime: then},
+		{Type: v1beta1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonOwnTransactionsLost, LastTransitionTime: then},
+		{Type: v1beta1.ConditionReady, Status: metav1.ConditionTrue, LastTransitionTime: then},
 	}
 	// The writer's two steps: Degraded False from the topology alert,
 	// then True again from the overlay. setCondition stamps both.
-	next := []metav1.Condition{{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, LastTransitionTime: then}}
-	setCondition(&next, metav1.Condition{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonHealthy, LastTransitionTime: now})
-	setCondition(&next, metav1.Condition{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonOwnTransactionsLost, LastTransitionTime: now})
-	setCondition(&next, metav1.Condition{Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, LastTransitionTime: now})
-	setCondition(&next, metav1.Condition{Type: v1alpha1.ConditionRecoveryPending, Status: metav1.ConditionTrue, LastTransitionTime: now})
+	next := []metav1.Condition{{Type: v1beta1.ConditionDegraded, Status: metav1.ConditionTrue, LastTransitionTime: then}}
+	setCondition(&next, metav1.Condition{Type: v1beta1.ConditionDegraded, Status: metav1.ConditionFalse, Reason: v1beta1.ReasonHealthy, LastTransitionTime: now})
+	setCondition(&next, metav1.Condition{Type: v1beta1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonOwnTransactionsLost, LastTransitionTime: now})
+	setCondition(&next, metav1.Condition{Type: v1beta1.ConditionReady, Status: metav1.ConditionFalse, LastTransitionTime: now})
+	setCondition(&next, metav1.Condition{Type: v1beta1.ConditionRecoveryPending, Status: metav1.ConditionTrue, LastTransitionTime: now})
 	if !next[0].LastTransitionTime.Equal(&now) {
 		t.Fatalf("fixture: Degraded lastTransitionTime = %s, want it restamped by the two steps", next[0].LastTransitionTime)
 	}

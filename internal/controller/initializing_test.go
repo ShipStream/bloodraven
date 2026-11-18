@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -136,7 +136,7 @@ func TestPoll_PendingWritableBlocksPromotionOverIt(t *testing.T) {
 
 			if !primaryDies {
 				pollN(tm, 2)
-				if tm.sites[0].state != state.StateWritable || snap.DegradedReason != v1alpha1.ReasonSiteUnhealthy {
+				if tm.sites[0].state != state.StateWritable || snap.DegradedReason != v1beta1.ReasonSiteUnhealthy {
 					t.Fatalf("dc1=%s reason=%q, want writable dc1 and SiteUnhealthy for unreachable dc2", tm.sites[0].state, snap.DegradedReason)
 				}
 				if !isReadOnly(standby) {
@@ -188,7 +188,7 @@ func TestPoll_UnconfirmedSecondWritableIsSplitBrainWithoutFencing(t *testing.T) 
 func TestUpdateCRStatus_InitializingIsUnknownNotNoPrimary(t *testing.T) {
 	fg := newTestFG()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).Build()
 	runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
@@ -201,7 +201,7 @@ func TestUpdateCRStatus_InitializingIsUnknownNotNoPrimary(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var updated v1alpha1.MysqlFailoverGroup
+	var updated v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestUpdateCRStatus_InitializingIsUnknownNotNoPrimary(t *testing.T) {
 		Sites: []SiteSnapshot{
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateUnknown, PendingWritable: true},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly,
-				RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: convergenceTestGTID, DivergentTxnCount: 10,
+				RecoveryState: v1beta1.RecoveryStateBlocked, DivergentGtid: convergenceTestGTID, DivergentTxnCount: 10,
 				DivergenceDetectedBy: divergenceDetectedByAudit, DivergenceComparedTo: "dc1"},
 		},
 		DegradedReason: "Initializing",
@@ -267,7 +267,7 @@ func TestRunner_FirstPollAfterStartRaisesNoNoPrimary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fg := newTestFG()
 			c := fake.NewClientBuilder().WithScheme(testScheme()).
-				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+				WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 				WithObjects(fg).Build()
 			rec := record.NewFakeRecorder(20)
 			runner := &TopologyManagerRunner{client: c, logger: testLogger(), recorder: rec, managers: make(map[types.NamespacedName]*managedTopology)}
@@ -282,7 +282,7 @@ func TestRunner_FirstPollAfterStartRaisesNoNoPrimary(t *testing.T) {
 			}
 
 			tm.Poll(context.Background())
-			var updated v1alpha1.MysqlFailoverGroup
+			var updated v1beta1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &updated); err != nil {
 				t.Fatal(err)
 			}

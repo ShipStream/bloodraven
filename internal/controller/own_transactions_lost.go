@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -186,7 +186,7 @@ type ownLossRecord struct {
 	// detectedBy is the check that made the comparison
 	// (divergenceDetectedByRecovery or divergenceDetectedByAudit), "" for
 	// a record restored from status and not compared again yet.
-	detectedBy v1alpha1.DivergenceDetector
+	detectedBy v1beta1.DivergenceDetector
 	// recloneRetryAfter is when the operator may request the next
 	// automatic reclone: ownLossRecloneBackoff after a clone of the site
 	// failed, zero otherwise. A request that was displaced, withdrawn or
@@ -649,7 +649,7 @@ func (tm *TopologyManager) ownLossHoleSite(site string) bool {
 // It reports whether the report changed, and returns the log call to make
 // once tm.mu is released (nil when there is nothing to say). Caller holds
 // tm.mu.
-func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, comparedTo string, detectedBy v1alpha1.DivergenceDetector, uuids []string, witness bool) (changed bool, log func()) {
+func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, comparedTo string, detectedBy v1beta1.DivergenceDetector, uuids []string, witness bool) (changed bool, log func()) {
 	rec := tm.ownLoss[site]
 	if lost.IsEmpty() {
 		if rec == nil || witness {
@@ -716,7 +716,7 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 	// A routine rejoin that was under way is void: a site with a hole
 	// against the primary is not rejoined. A divergence block stays; it
 	// outranks this report.
-	if r := tm.recovery[site]; !witness && r != nil && r.state == v1alpha1.RecoveryStateInProgress {
+	if r := tm.recovery[site]; !witness && r != nil && r.state == v1beta1.RecoveryStateInProgress {
 		r.state = ""
 	}
 	metrics.OwnTransactionsLost.WithLabelValues(site).Set(float64(count))
@@ -744,7 +744,7 @@ func (tm *TopologyManager) settleOwnLossLocked(site string, lost mysql.GTIDSet, 
 	// the prefix of that set, which the plugin reads from status.
 	recloneCmd := fmt.Sprintf("kubectl bloodraven reclone %s %s --cold", tm.cfg.Name, site)
 	remedy := "the site is not rejoined by replication and not promoted; the operator reclones it, or run: " + recloneCmd
-	if r := tm.recovery[site]; r != nil && r.state == v1alpha1.RecoveryStateBlocked {
+	if r := tm.recovery[site]; r != nil && r.state == v1beta1.RecoveryStateBlocked {
 		remedy = fmt.Sprintf("the site also holds transactions the primary lacks, so it is not recloned automatically; decide about those, then run: kubectl bloodraven reclone %s %s", tm.cfg.Name, site)
 	}
 	return true, func() {
@@ -1579,7 +1579,7 @@ func (tm *TopologyManager) requestOwnLossReclone() {
 			setWaiting(rec, "")
 		case requested:
 			setWaiting(rec, "another site is recloned first")
-		case tm.recovery[name] != nil && tm.recovery[name].state == v1alpha1.RecoveryStateBlocked:
+		case tm.recovery[name] != nil && tm.recovery[name].state == v1beta1.RecoveryStateBlocked:
 			setWaiting(rec, "the site also holds transactions the primary lacks; an administrator decides about them and reclones it")
 		case rec.witness && rec.comparedTo != active:
 			// Nothing to repair against the primary: a clone would only
@@ -1783,7 +1783,7 @@ func (tm *TopologyManager) verifyOwnLossReclone(ctx context.Context, donor, reci
 
 	tm.mu.RLock()
 	rec := tm.ownLoss[site]
-	blocked := tm.recovery[site] != nil && tm.recovery[site].state == v1alpha1.RecoveryStateBlocked
+	blocked := tm.recovery[site] != nil && tm.recovery[site].state == v1beta1.RecoveryStateBlocked
 	epoch := tm.authorityEpoch
 	detectedBy := divergenceDetectedByRecovery
 	if rec != nil && rec.detectedBy != "" {

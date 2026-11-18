@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // --- verificationLoadOptions ---------------------------------------------
@@ -36,33 +36,33 @@ func TestVerificationLoadOptions_SkipsBinlog(t *testing.T) {
 
 // --- buildVerificationJob ------------------------------------------------
 
-func verifyFG() *v1alpha1.MysqlFailoverGroup {
+func verifyFG() *v1beta1.MysqlFailoverGroup {
 	fg := fgWithBackup()
 	// PITR verifications read the archive through its read binding (#203).
 	bindAllTestPITRArchives(fg)
 	return fg
 }
 
-func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
-	return &v1alpha1.MysqlBackup{
+func successfulBackup(name, fg, profile string) *v1beta1.MysqlBackup {
+	return &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: "ns", UID: types.UID("uid-" + name),
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel: fg,
-				v1alpha1.BackupProfileLabel: profile,
+				v1beta1.FailoverGroupLabel: fg,
+				v1beta1.BackupProfileLabel: profile,
 			},
 		},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg},
 			ProfileName:      profile,
 		},
-		Status: v1alpha1.MysqlBackupStatus{
-			Phase:            v1alpha1.BackupPhaseSucceeded,
+		Status: v1beta1.MysqlBackupStatus{
+			Phase:            v1beta1.BackupPhaseSucceeded,
 			GtidExecuted:     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
 			FailoverGroupUID: "lion-uid",
 			// Completed before the fixed PITR targets the tests request.
 			CompletionTime:  &metav1.Time{Time: time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)},
-			ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "lion/nightly/name/"),
+			ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, "lion/nightly/name/"),
 			SizeBytes:       1 * 1024 * 1024 * 1024,
 		},
 	}
@@ -71,10 +71,10 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("happy", "lion", "nightly-s3")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-happy", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -155,10 +155,10 @@ func TestBuildVerificationJob_NoStorageDiskBoundedByResources(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("bounded", "lion", "nightly-s3")
 	limits := corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("50Gi")}
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-bounded", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 			Resources:        corev1.ResourceRequirements{Limits: limits},
 		},
@@ -193,13 +193,13 @@ func TestBuildVerificationJob_PVCBackedBackup_MountsBackupPVC(t *testing.T) {
 	// The fg has two profiles; the second is PVC-backed ("daily-local").
 	profile := fg.Spec.Backup.Profiles[1]
 	backup := successfulBackup("pvc-happy", "lion", profile.Name)
-	setTestArtifactType(backup, v1alpha1.BackupStoragePVC)
+	setTestArtifactType(backup, v1beta1.BackupStoragePVC)
 	setTestArtifactLocation(backup, "/backups/pvc-happy")
 
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pvc", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      profile.Name,
 		},
 	}
@@ -229,10 +229,10 @@ func TestBuildVerificationJob_MissingLocation_Errors(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("missing-loc", "lion", "nightly-s3")
 	setTestArtifactLocation(backup, "")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
 		},
 	}
@@ -256,7 +256,7 @@ func newVerificationReconciler(t *testing.T, objs ...client.Object) (*MysqlBacku
 	scheme := testScheme()
 	cb := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlBackupVerification{}, &v1alpha1.MysqlBackup{}, &v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlBackupVerification{}, &v1beta1.MysqlBackup{}, &v1beta1.MysqlFailoverGroup{}).
 		WithObjects(objs...)
 	c := cb.Build()
 	r := &MysqlBackupVerificationReconciler{
@@ -267,11 +267,11 @@ func newVerificationReconciler(t *testing.T, objs ...client.Object) (*MysqlBacku
 	return r, c
 }
 
-func verifyCR(name, fgName, profile string) *v1alpha1.MysqlBackupVerification {
-	return &v1alpha1.MysqlBackupVerification{
+func verifyCR(name, fgName, profile string) *v1beta1.MysqlBackupVerification {
+	return &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fgName},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fgName},
 			ProfileName:      profile,
 		},
 	}
@@ -294,9 +294,9 @@ func TestVerificationReconciler_GroupNotFound_TransitionsToFailed(t *testing.T) 
 	r, c := newVerificationReconciler(t, v)
 	reconcileVerifUntilStable(t, r, "orphan")
 
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "orphan", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Errorf("want Failed, got %q (message=%s)", got.Status.Phase, got.Status.Message)
 	}
 }
@@ -307,9 +307,9 @@ func TestVerificationReconciler_ProfileNotFound_TransitionsToFailed(t *testing.T
 	r, c := newVerificationReconciler(t, fg, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "bad-prof")
 
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "bad-prof", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Errorf("want Failed, got %q", got.Status.Phase)
 	}
 }
@@ -320,9 +320,9 @@ func TestVerificationReconciler_NoSucceededBackup_TransitionsToFailed(t *testing
 	r, c := newVerificationReconciler(t, fg, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "no-backup")
 
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "no-backup", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Errorf("want Failed (no backup available), got %q", got.Status.Phase)
 	}
 }
@@ -334,14 +334,14 @@ func TestVerificationReconciler_CreatesJobWithEmptyDirDatadir(t *testing.T) {
 	r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "verify-happy")
 
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-happy", Namespace: "ns"}, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got.Status.BackupRef == nil || got.Status.BackupRef.Name != "nightly-happy" {
 		t.Errorf("backupRef not resolved: %+v", got.Status.BackupRef)
 	}
-	if got.Status.Phase != v1alpha1.VerificationPhaseRestoring {
+	if got.Status.Phase != v1beta1.VerificationPhaseRestoring {
 		t.Errorf("want Restoring, got %q", got.Status.Phase)
 	}
 
@@ -402,9 +402,9 @@ func TestVerificationReconciler_JobSucceeded_TransitionsToSucceeded(t *testing.T
 
 	reconcileVerifUntilStable(t, r, "verify-happy")
 
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "verify-happy", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.VerificationPhaseSucceeded {
+	if got.Status.Phase != v1beta1.VerificationPhaseSucceeded {
 		t.Errorf("want Succeeded, got %q (message=%s)", got.Status.Phase, got.Status.Message)
 	}
 	if got.Status.CompletionTime == nil {
@@ -431,9 +431,9 @@ func TestVerificationReconciler_JobFailed_TransitionsToFailed(t *testing.T) {
 
 	reconcileVerifUntilStable(t, r, "verify-sad")
 
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "verify-sad", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Errorf("want Failed, got %q", got.Status.Phase)
 	}
 }
@@ -445,10 +445,10 @@ func TestVerificationReconciler_ConcurrentRun_SecondBlocked(t *testing.T) {
 	earlier := verifyCR("verify-first", "lion", "nightly-s3")
 	earlier.CreationTimestamp = metav1.NewTime(time.Now().Add(-1 * time.Minute))
 	earlier.Labels = map[string]string{
-		v1alpha1.FailoverGroupLabel: "lion",
-		v1alpha1.BackupProfileLabel: "nightly-s3",
+		v1beta1.FailoverGroupLabel: "lion",
+		v1beta1.BackupProfileLabel: "nightly-s3",
 	}
-	earlier.Status.Phase = v1alpha1.VerificationPhaseRestoring
+	earlier.Status.Phase = v1beta1.VerificationPhaseRestoring
 
 	later := verifyCR("verify-second", "lion", "nightly-s3")
 	later.CreationTimestamp = metav1.NewTime(time.Now())
@@ -456,9 +456,9 @@ func TestVerificationReconciler_ConcurrentRun_SecondBlocked(t *testing.T) {
 	r, c := newVerificationReconciler(t, fg, backup, earlier, later, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, "verify-second")
 
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	_ = c.Get(context.Background(), types.NamespacedName{Name: "verify-second", Namespace: "ns"}, &got)
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Errorf("want Failed due to concurrency, got %q", got.Status.Phase)
 	}
 	found := false
@@ -474,10 +474,10 @@ func TestVerificationReconciler_ConcurrentRun_SecondBlocked(t *testing.T) {
 
 func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 	fg := verifyFG()
-	fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
+	fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{
 		Enabled:  true,
 		Schedule: "0 5 * * *",
-		Retention: v1alpha1.VerificationRetention{
+		Retention: v1beta1.VerificationRetention{
 			KeepLast:   new(int32(2)),
 			KeepFailed: new(int32(10)),
 		},
@@ -490,10 +490,10 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 		name := "old-" + string(rune('a'+i))
 		c := verifyCR(name, "lion", "nightly-s3")
 		c.Labels = map[string]string{
-			v1alpha1.FailoverGroupLabel: "lion",
-			v1alpha1.BackupProfileLabel: "nightly-s3",
+			v1beta1.FailoverGroupLabel: "lion",
+			v1beta1.BackupProfileLabel: "nightly-s3",
 		}
-		c.Status.Phase = v1alpha1.VerificationPhaseSucceeded
+		c.Status.Phase = v1beta1.VerificationPhaseSucceeded
 		ct := metav1.NewTime(time.Now().Add(time.Duration(-i) * time.Hour))
 		c.Status.CompletionTime = &ct
 		crs = append(crs, c)
@@ -501,10 +501,10 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 	// Trigger CR (the fresh one to reconcile).
 	trigger := verifyCR("trigger", "lion", "nightly-s3")
 	trigger.Labels = map[string]string{
-		v1alpha1.FailoverGroupLabel: "lion",
-		v1alpha1.BackupProfileLabel: "nightly-s3",
+		v1beta1.FailoverGroupLabel: "lion",
+		v1beta1.BackupProfileLabel: "nightly-s3",
 	}
-	trigger.Status.Phase = v1alpha1.VerificationPhaseSucceeded
+	trigger.Status.Phase = v1beta1.VerificationPhaseSucceeded
 	ct := metav1.NewTime(time.Now().Add(time.Hour))
 	trigger.Status.CompletionTime = &ct
 	crs = append(crs, trigger, operatorCredsSecret())
@@ -512,13 +512,13 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 	r, c := newVerificationReconciler(t, crs...)
 	reconcileVerifUntilStable(t, r, "trigger")
 
-	var list v1alpha1.MysqlBackupVerificationList
+	var list v1beta1.MysqlBackupVerificationList
 	if err := c.List(context.Background(), &list, client.InNamespace("ns")); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	succeeded := 0
 	for _, it := range list.Items {
-		if it.Status.Phase == v1alpha1.VerificationPhaseSucceeded && it.DeletionTimestamp.IsZero() {
+		if it.Status.Phase == v1beta1.VerificationPhaseSucceeded && it.DeletionTimestamp.IsZero() {
 			succeeded++
 		}
 	}
@@ -531,19 +531,19 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 // separately; an omitted field (or verification block) means the default
 // 30 / 10 and an explicit 0 keeps none.
 func TestVerificationRetention(t *testing.T) {
-	withRetention := func(rt v1alpha1.VerificationRetention) *v1alpha1.BackupProfile {
-		return &v1alpha1.BackupProfile{Verification: &v1alpha1.VerificationSpec{Retention: rt}}
+	withRetention := func(rt v1beta1.VerificationRetention) *v1beta1.BackupProfile {
+		return &v1beta1.BackupProfile{Verification: &v1beta1.VerificationSpec{Retention: rt}}
 	}
 	for _, tc := range []struct {
 		name                 string
-		profile              *v1alpha1.BackupProfile
+		profile              *v1beta1.BackupProfile
 		wantLast, wantFailed int32
 	}{
 		{name: "missing profile", profile: nil, wantLast: 30, wantFailed: 10},
-		{name: "no verification block", profile: &v1alpha1.BackupProfile{}, wantLast: 30, wantFailed: 10},
-		{name: "omitted fields", profile: withRetention(v1alpha1.VerificationRetention{}), wantLast: 30, wantFailed: 10},
-		{name: "set", profile: withRetention(v1alpha1.VerificationRetention{KeepLast: new(int32(2)), KeepFailed: new(int32(3))}), wantLast: 2, wantFailed: 3},
-		{name: "explicit zeros keep none", profile: withRetention(v1alpha1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))}), wantLast: 0, wantFailed: 0},
+		{name: "no verification block", profile: &v1beta1.BackupProfile{}, wantLast: 30, wantFailed: 10},
+		{name: "omitted fields", profile: withRetention(v1beta1.VerificationRetention{}), wantLast: 30, wantFailed: 10},
+		{name: "set", profile: withRetention(v1beta1.VerificationRetention{KeepLast: new(int32(2)), KeepFailed: new(int32(3))}), wantLast: 2, wantFailed: 3},
+		{name: "explicit zeros keep none", profile: withRetention(v1beta1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))}), wantLast: 0, wantFailed: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			last, failed := resolveVerificationRetention(tc.profile)
@@ -555,11 +555,11 @@ func TestVerificationRetention(t *testing.T) {
 
 	t.Run("keepLast 0 prunes every success, keepFailed omitted keeps 10", func(t *testing.T) {
 		fg := verifyFG()
-		fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
-			Retention: v1alpha1.VerificationRetention{KeepLast: new(int32(0))},
+		fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{
+			Retention: v1beta1.VerificationRetention{KeepLast: new(int32(0))},
 		}
 		objs := []client.Object{fg}
-		mk := func(name string, phase v1alpha1.VerificationPhase, age time.Duration) {
+		mk := func(name string, phase v1beta1.VerificationPhase, age time.Duration) {
 			v := verifyCR(name, fg.Name, "nightly-s3")
 			v.Status.Phase = phase
 			ct := metav1.NewTime(time.Now().Add(-age))
@@ -568,17 +568,17 @@ func TestVerificationRetention(t *testing.T) {
 		}
 		// Every run completed before terminalRetentionGrace.
 		for i := 0; i < 3; i++ {
-			mk(fmt.Sprintf("ok-%02d", i), v1alpha1.VerificationPhaseSucceeded, time.Duration(i+1)*time.Hour)
+			mk(fmt.Sprintf("ok-%02d", i), v1beta1.VerificationPhaseSucceeded, time.Duration(i+1)*time.Hour)
 		}
 		for i := 0; i < 12; i++ {
-			mk(fmt.Sprintf("bad-%02d", i), v1alpha1.VerificationPhaseFailed, time.Duration(i+1)*time.Hour)
+			mk(fmt.Sprintf("bad-%02d", i), v1beta1.VerificationPhaseFailed, time.Duration(i+1)*time.Hour)
 		}
-		mk("running", v1alpha1.VerificationPhaseRestoring, 0)
+		mk("running", v1beta1.VerificationPhaseRestoring, 0)
 		r, c := newVerificationReconciler(t, objs...)
 		if _, err := r.pruneRetention(context.Background(), verifyCR("trigger", fg.Name, "nightly-s3")); err != nil {
 			t.Fatal(err)
 		}
-		var list v1alpha1.MysqlBackupVerificationList
+		var list v1beta1.MysqlBackupVerificationList
 		if err := c.List(context.Background(), &list, client.InNamespace("ns")); err != nil {
 			t.Fatal(err)
 		}
@@ -601,25 +601,25 @@ func TestVerificationRetention(t *testing.T) {
 	// pass, before `kubectl bloodraven verify --wait` reads the verdict.
 	t.Run("keep none waits out the terminal grace", func(t *testing.T) {
 		fg := verifyFG()
-		fg.Spec.Backup.Profiles[0].Verification = &v1alpha1.VerificationSpec{
-			Retention: v1alpha1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))},
+		fg.Spec.Backup.Profiles[0].Verification = &v1beta1.VerificationSpec{
+			Retention: v1beta1.VerificationRetention{KeepLast: new(int32(0)), KeepFailed: new(int32(0))},
 		}
-		mk := func(name string, phase v1alpha1.VerificationPhase, age time.Duration) *v1alpha1.MysqlBackupVerification {
+		mk := func(name string, phase v1beta1.VerificationPhase, age time.Duration) *v1beta1.MysqlBackupVerification {
 			v := verifyCR(name, fg.Name, "nightly-s3")
 			v.Status.Phase = phase
 			ct := metav1.NewTime(time.Now().Add(-age))
 			v.Status.CompletionTime = &ct
 			return v
 		}
-		justOK := mk("just-ok", v1alpha1.VerificationPhaseSucceeded, 5*time.Second)
-		justBad := mk("just-bad", v1alpha1.VerificationPhaseFailed, 30*time.Second)
-		oldOK := mk("old-ok", v1alpha1.VerificationPhaseSucceeded, time.Hour)
+		justOK := mk("just-ok", v1beta1.VerificationPhaseSucceeded, 5*time.Second)
+		justBad := mk("just-bad", v1beta1.VerificationPhaseFailed, 30*time.Second)
+		oldOK := mk("old-ok", v1beta1.VerificationPhaseSucceeded, time.Hour)
 		r, c := newVerificationReconciler(t, fg, justOK, justBad, oldOK)
 		requeue, err := r.pruneRetention(context.Background(), justOK)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var list v1alpha1.MysqlBackupVerificationList
+		var list v1beta1.MysqlBackupVerificationList
 		if err := c.List(context.Background(), &list, client.InNamespace("ns")); err != nil {
 			t.Fatal(err)
 		}
@@ -642,25 +642,25 @@ func TestVerificationRetention(t *testing.T) {
 func TestVerificationPITRRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		in      *v1alpha1.PointInTimeVerificationSpec
+		in      *v1beta1.PointInTimeVerificationSpec
 		want    *pitrReplayRequest
 		wantErr string
 	}{
 		{name: "nil", in: nil},
 		// A present block needs a mode; none is gone (no block = no replay).
-		{name: "none", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "none"}, wantErr: "not one of"},
-		{name: "lower-case latest", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "latest"}, wantErr: "not one of"},
-		{name: "empty mode", in: &v1alpha1.PointInTimeVerificationSpec{}, wantErr: "not one of"},
-		{name: "latest has no stop", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:1 "},
+		{name: "none", in: &v1beta1.PointInTimeVerificationSpec{Mode: "none"}, wantErr: "not one of"},
+		{name: "lower-case latest", in: &v1beta1.PointInTimeVerificationSpec{Mode: "latest"}, wantErr: "not one of"},
+		{name: "empty mode", in: &v1beta1.PointInTimeVerificationSpec{}, wantErr: "not one of"},
+		{name: "latest has no stop", in: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest, ExcludeGtids: " 3e11fa47-71ca-11e1-9e33-c80aa9429562:1 "},
 			want: &pitrReplayRequest{Mode: "latest", ExcludeGtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1", Verification: true}},
-		{name: "timestamp canonical", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T03:00:00+02:00")},
+		{name: "timestamp canonical", in: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T03:00:00+02:00")},
 			want: &pitrReplayRequest{Mode: "timestamp", Stop: "2026-04-20T01:00:00.000000Z", Verification: true}},
 		// C2 / A-39: whole seconds only.
-		{name: "fraction refused", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00.5Z")}, wantErr: "PITRTargetInvalid"},
-		{name: "timestamp required", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp}, wantErr: "PITRTargetInvalid"},
-		{name: "seven digits", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00.1234567Z")}, wantErr: "PITRTargetInvalid"},
-		{name: "latest forbids stopTime", in: &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest, StopTime: stopAtPtr("2026-04-20T01:00:00Z")}, wantErr: "PITRTargetInvalid"},
-		{name: "unknown mode", in: &v1alpha1.PointInTimeVerificationSpec{Mode: "head"}, wantErr: "not one of"},
+		{name: "fraction refused", in: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00.5Z")}, wantErr: "PITRTargetInvalid"},
+		{name: "timestamp required", in: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeTimestamp}, wantErr: "PITRTargetInvalid"},
+		{name: "seven digits", in: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00.1234567Z")}, wantErr: "PITRTargetInvalid"},
+		{name: "latest forbids stopTime", in: &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest, StopTime: stopAtPtr("2026-04-20T01:00:00Z")}, wantErr: "PITRTargetInvalid"},
+		{name: "unknown mode", in: &v1beta1.PointInTimeVerificationSpec{Mode: "head"}, wantErr: "not one of"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := verificationPITRRequest(tc.in)
@@ -682,15 +682,15 @@ func TestVerificationPITRRequest(t *testing.T) {
 
 func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 	fg := verifyFG()
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 	backup := successfulBackup("happy", "lion", "nightly-s3")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
-			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00Z"),
+			PointInTime: &v1beta1.PointInTimeVerificationSpec{
+				Mode: v1beta1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00Z"),
 			},
 		},
 	}
@@ -744,13 +744,13 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {
 	fg := verifyFG() // no fg.Spec.Backup.PITR set
 	backup := successfulBackup("happy", "lion", "nightly-s3")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-bad-pitr", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
-			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-				Mode: v1alpha1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00Z"),
+			PointInTime: &v1beta1.PointInTimeVerificationSpec{
+				Mode: v1beta1.PointInTimeModeTimestamp, StopTime: stopAtPtr("2026-04-20T01:00:00Z"),
 			},
 		},
 	}
@@ -770,12 +770,12 @@ func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {
 func TestBuildVerificationJob_SanityCheck_SetsEnvVars(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("happy", "lion", "nightly-s3")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-sanity", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
-			SanityCheck: &v1alpha1.SanityCheckSpec{
+			SanityCheck: &v1beta1.SanityCheckSpec{
 				Query:     "SELECT COUNT(*) FROM orders.orders",
 				MinResult: new(int64(5)),
 				Timeout:   &metav1.Duration{Duration: 1500 * time.Millisecond},
@@ -849,12 +849,12 @@ func TestValidateSanityQuery(t *testing.T) {
 func TestBuildVerificationJob_SanityCheck_RejectsMultiStatement(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("happy", "lion", "nightly-s3")
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-bad-sanity", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
-			SanityCheck: &v1alpha1.SanityCheckSpec{
+			SanityCheck: &v1beta1.SanityCheckSpec{
 				Query: "SELECT 1; DROP TABLE orders",
 			},
 		},
@@ -888,7 +888,7 @@ func TestParseSanitySentinel_Scalar(t *testing.T) {
 	if !ok || res == nil {
 		t.Fatal("want ok")
 	}
-	if res.Outcome != v1alpha1.SanityCheckOutcomePassed || res.DurationMilliseconds == nil || *res.DurationMilliseconds != 140 || res.Result != "42" || res.Error != "" {
+	if res.Outcome != v1beta1.SanityCheckOutcomePassed || res.DurationMilliseconds == nil || *res.DurationMilliseconds != 140 || res.Result != "42" || res.Error != "" {
 		t.Errorf("sanity fields: %+v", res)
 	}
 }
@@ -898,7 +898,7 @@ func TestParseSanitySentinel_Timeout(t *testing.T) {
 	if !ok || res == nil {
 		t.Fatal("want ok")
 	}
-	if res.Error != "timeout" || res.Outcome != v1alpha1.SanityCheckOutcomeTimedOut {
+	if res.Error != "timeout" || res.Outcome != v1beta1.SanityCheckOutcomeTimedOut {
 		t.Errorf("want error=timeout outcome=TimedOut, got %+v", res)
 	}
 }
@@ -917,15 +917,15 @@ func TestParseSanitySentinel_WhitespaceEscape(t *testing.T) {
 // refused at build time with PITRBackupIdentityUnknown, before dump-meta.
 func TestBuildVerificationJob_PITRRefusesBackupWithoutIdentity(t *testing.T) {
 	fg := verifyFG()
-	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 	backup := successfulBackup("old", "lion", "nightly-s3")
 	backup.Status.FailoverGroupUID = ""
-	v := &v1alpha1.MysqlBackupVerification{
+	v := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"},
 			ProfileName:      "nightly-s3",
-			PointInTime:      &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest},
+			PointInTime:      &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest},
 		},
 	}
 	_, err := buildVerificationJob(verificationJobInputs{
@@ -942,35 +942,35 @@ func TestBuildVerificationJob_PITRRefusesBackupWithoutIdentity(t *testing.T) {
 func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(fg *v1alpha1.MysqlFailoverGroup, b *v1alpha1.MysqlBackup, v *v1alpha1.MysqlBackupVerification)
+		mutate func(fg *v1beta1.MysqlFailoverGroup, b *v1beta1.MysqlBackup, v *v1beta1.MysqlBackupVerification)
 		want   string
 	}{
-		{name: "backup without source identity", mutate: func(_ *v1alpha1.MysqlFailoverGroup, b *v1alpha1.MysqlBackup, _ *v1alpha1.MysqlBackupVerification) {
+		{name: "backup without source identity", mutate: func(_ *v1beta1.MysqlFailoverGroup, b *v1beta1.MysqlBackup, _ *v1beta1.MysqlBackupVerification) {
 			b.Status.FailoverGroupUID = ""
 		}, want: "PITRBackupIdentityUnknown"},
-		{name: "PITR disabled on the group", mutate: func(fg *v1alpha1.MysqlFailoverGroup, _ *v1alpha1.MysqlBackup, _ *v1alpha1.MysqlBackupVerification) {
+		{name: "PITR disabled on the group", mutate: func(fg *v1beta1.MysqlFailoverGroup, _ *v1beta1.MysqlBackup, _ *v1beta1.MysqlBackupVerification) {
 			fg.Spec.Backup.PITR.Enabled = false
 		}, want: "PITRTargetInvalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := verifyFG()
-			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			fg.Spec.Backup.PITR = &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
 			backup := successfulBackup("nightly-pitr", "lion", "nightly-s3")
 			v := verifyCR("verify-pitr", "lion", "nightly-s3")
-			v.Spec.PointInTime = &v1alpha1.PointInTimeVerificationSpec{Mode: v1alpha1.PointInTimeModeLatest}
+			v.Spec.PointInTime = &v1beta1.PointInTimeVerificationSpec{Mode: v1beta1.PointInTimeModeLatest}
 			tc.mutate(fg, backup, v)
 			r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 			reconcileVerifUntilStable(t, r, "verify-pitr")
-			var got v1alpha1.MysqlBackupVerification
+			var got v1beta1.MysqlBackupVerification
 			if err := c.Get(context.Background(), types.NamespacedName{Name: "verify-pitr", Namespace: "ns"}, &got); err != nil {
 				t.Fatal(err)
 			}
-			cond := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionVerified)
-			if got.Status.Phase != v1alpha1.VerificationPhaseFailed || cond == nil || cond.Reason != tc.want ||
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionVerified)
+			if got.Status.Phase != v1beta1.VerificationPhaseFailed || cond == nil || cond.Reason != tc.want ||
 				!strings.HasPrefix(cond.Message, tc.want+": ") {
 				t.Fatalf("phase %s condition %+v, want Verified=False/%s token first", got.Status.Phase, cond, tc.want)
 			}
-			if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady); ready == nil ||
+			if ready := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionReady); ready == nil ||
 				ready.Status != cond.Status || ready.Reason != cond.Reason || ready.Message != cond.Message {
 				t.Fatalf("Ready %+v, want a mirror of Verified %+v", ready, cond)
 			}
@@ -982,19 +982,19 @@ func TestVerificationReconciler_PITRBuildRefusalKeepsToken(t *testing.T) {
 // False/InProgress until Verified is set, then mirrors it, and carries the
 // generation it was evaluated for.
 func TestSetVerificationReady(t *testing.T) {
-	var st v1alpha1.MysqlBackupVerificationStatus
+	var st v1beta1.MysqlBackupVerificationStatus
 	setVerificationReady(&st, 4)
-	ready := apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != v1alpha1.ReasonInProgress || ready.ObservedGeneration != 4 {
+	ready := apimeta.FindStatusCondition(st.Conditions, v1beta1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != v1beta1.ReasonInProgress || ready.ObservedGeneration != 4 {
 		t.Fatalf("Ready before a verdict = %+v, want False/InProgress at generation 4", ready)
 	}
 	for _, verified := range []metav1.Condition{
-		{Type: v1alpha1.ConditionVerified, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonSucceeded, Message: "restored", LastTransitionTime: metav1.Now()},
-		{Type: v1alpha1.ConditionVerified, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonSanityCheckFailed, Message: "no tables", LastTransitionTime: metav1.Now()},
+		{Type: v1beta1.ConditionVerified, Status: metav1.ConditionTrue, Reason: v1beta1.ReasonSucceeded, Message: "restored", LastTransitionTime: metav1.Now()},
+		{Type: v1beta1.ConditionVerified, Status: metav1.ConditionFalse, Reason: v1beta1.ReasonSanityCheckFailed, Message: "no tables", LastTransitionTime: metav1.Now()},
 	} {
 		apimeta.SetStatusCondition(&st.Conditions, verified)
 		setVerificationReady(&st, 5)
-		ready = apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionReady)
+		ready = apimeta.FindStatusCondition(st.Conditions, v1beta1.ConditionReady)
 		if ready == nil || ready.Status != verified.Status || ready.Reason != verified.Reason || ready.Message != verified.Message || ready.ObservedGeneration != 5 {
 			t.Fatalf("Ready = %+v, want a mirror of %+v at generation 5", ready, verified)
 		}

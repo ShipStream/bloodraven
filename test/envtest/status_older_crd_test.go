@@ -5,7 +5,6 @@ package envtest
 import (
 	"bytes"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -37,14 +36,14 @@ import (
 // status.sites[].lostGtid.
 func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 	oldScheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme, apiextensionsv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1beta1.AddToScheme, apiextensionsv1.AddToScheme} {
 		if err := add(oldScheme); err != nil {
 			t.Fatal(err)
 		}
 	}
 	oldEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("testdata", "crd-pre-own-loss")},
-		Scheme:            oldScheme,
+		CRDs:   olderSchemaCRDs(t, "crd-pre-own-loss"),
+		Scheme: oldScheme,
 	}
 	oldCfg, err := oldEnv.Start()
 	if err != nil {
@@ -66,15 +65,15 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 	nn := types.NamespacedName{Name: fg.Name, Namespace: ns.Name}
 
 	// The premise: this CRD refuses both values on a direct write.
-	for _, site := range []v1alpha1.SiteStatus{
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateRecloneRequired},
-		{Name: "dc2", State: v1alpha1.SiteStateReadOnly, SourceConvergenceReason: v1alpha1.SourceReasonOwnTransactionsLost},
+	for _, site := range []v1beta1.SiteStatus{
+		{Name: "dc2", State: v1beta1.SiteStateReadOnly, RecoveryState: v1beta1.RecoveryStateRecloneRequired},
+		{Name: "dc2", State: v1beta1.SiteStateReadOnly, SourceConvergenceReason: v1beta1.SourceReasonOwnTransactionsLost},
 	} {
-		var cur v1alpha1.MysqlFailoverGroup
+		var cur v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &cur); err != nil {
 			t.Fatal(err)
 		}
-		cur.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, site}
+		cur.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}, site}
 		if err := c.Status().Update(ctx, &cur); !apierrors.IsInvalid(err) {
 			t.Fatalf("direct status write of %+v = %v, want it refused as Invalid by the previous CRD", site, err)
 		}
@@ -86,16 +85,16 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 	runner.SetManagerForTest(nn, &controller.TopologyManager{})
 	snapshot := func(lostGtid string) controller.TopologySnapshot {
 		dc2 := controller.SiteSnapshot{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly}
-		snap := controller.TopologySnapshot{ActiveSite: "dc1", DegradedReason: v1alpha1.ReasonHealthy}
+		snap := controller.TopologySnapshot{ActiveSite: "dc1", DegradedReason: v1beta1.ReasonHealthy}
 		if lostGtid != "" {
-			dc2.RecoveryState = v1alpha1.RecoveryStateRecloneRequired
+			dc2.RecoveryState = v1beta1.RecoveryStateRecloneRequired
 			dc2.LostGtid, dc2.LostTxnCount, dc2.LostComparedTo = lostGtid, 10, "dc1"
-			dc2.SourceConvergenceState = v1alpha1.SourceConvergenceBlocked
-			dc2.SourceConvergenceReason = v1alpha1.SourceReasonOwnTransactionsLost
-			snap.RecoverySite, snap.RecoveryState = "dc2", v1alpha1.RecoveryStateRecloneRequired
+			dc2.SourceConvergenceState = v1beta1.SourceConvergenceBlocked
+			dc2.SourceConvergenceReason = v1beta1.SourceReasonOwnTransactionsLost
+			snap.RecoverySite, snap.RecoveryState = "dc2", v1beta1.RecoveryStateRecloneRequired
 		} else {
 			dc2.ReplicationHealthy = true
-			dc2.SourceConvergenceState = v1alpha1.SourceConvergenceConverged
+			dc2.SourceConvergenceState = v1beta1.SourceConvergenceConverged
 		}
 		snap.Sites = []controller.SiteSnapshot{{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable}, dc2}
 		return snap
@@ -109,9 +108,9 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 		}
 		return n
 	}
-	read := func() v1alpha1.MysqlFailoverGroup {
+	read := func() v1beta1.MysqlFailoverGroup {
 		t.Helper()
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
@@ -127,7 +126,7 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 		t.Fatalf("status = %+v, want the active site and both sites written", got.Status)
 	}
 	dc2 := got.Status.Sites[1]
-	if dc2.RecoveryState != v1alpha1.RecoveryStateBlocked || dc2.SourceConvergenceReason != v1alpha1.SourceReasonGTIDDiverged {
+	if dc2.RecoveryState != v1beta1.RecoveryStateBlocked || dc2.SourceConvergenceReason != v1beta1.SourceReasonGTIDDiverged {
 		t.Fatalf("dc2 = recoveryState %q, sourceConvergenceReason %q; want the values the previous CRD knows (RecoveryBlocked, GTIDDiverged)",
 			dc2.RecoveryState, dc2.SourceConvergenceReason)
 	}
@@ -144,13 +143,13 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 	}
 	// The conditions carry the real reason: the group does not read
 	// healthy, and says what is wrong.
-	for _, ty := range []string{v1alpha1.ConditionDegraded, v1alpha1.ConditionRecoveryPending} {
+	for _, ty := range []string{v1beta1.ConditionDegraded, v1beta1.ConditionRecoveryPending} {
 		cond := apimeta.FindStatusCondition(got.Status.Conditions, ty)
-		if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != v1alpha1.ReasonOwnTransactionsLost || !strings.Contains(cond.Message, "dc2 lacks 10 transactions") {
+		if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != v1beta1.ReasonOwnTransactionsLost || !strings.Contains(cond.Message, "dc2 lacks 10 transactions") {
 			t.Fatalf("%s = %+v, want True/OwnTransactionsLost naming dc2", ty, cond)
 		}
 	}
-	if n := events(v1alpha1.EventOwnTransactionsLost); n != 1 {
+	if n := events(v1beta1.EventOwnTransactionsLost); n != 1 {
 		t.Fatalf("%d OwnTransactionsLost Events after the first write, want 1", n)
 	}
 	if n := strings.Count(logs.String(), "status written with the values an older CRD accepts"); n != 1 {
@@ -171,7 +170,7 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 	if got = read(); got.ResourceVersion != rv {
 		t.Fatalf("resourceVersion moved %s -> %s on unchanged status writes", rv, got.ResourceVersion)
 	}
-	if n := events(v1alpha1.EventOwnTransactionsLost); n != 0 {
+	if n := events(v1beta1.EventOwnTransactionsLost); n != 0 {
 		t.Fatalf("%d more OwnTransactionsLost Events for the same report, want none", n)
 	}
 	if n := strings.Count(logs.String(), "status written with the values an older CRD accepts"); n != 1 {
@@ -186,7 +185,7 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 	if s := got.Status.Sites[1]; s.RecoveryState != "" {
 		t.Fatalf("dc2 recoveryState = %q after the report ended, want none", s.RecoveryState)
 	}
-	if n := events(v1alpha1.EventOwnTransactionsLostResolved); n != 1 {
+	if n := events(v1beta1.EventOwnTransactionsLostResolved); n != 1 {
 		t.Fatalf("%d OwnTransactionsLostResolved Events, want 1", n)
 	}
 }
@@ -198,14 +197,14 @@ func TestEnvtest_StatusWrite_OlderCRD(t *testing.T) {
 // status again on every poll.
 func TestEnvtest_StatusWrite_OlderCRDPrunesLostGtid(t *testing.T) {
 	oldScheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme, apiextensionsv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1beta1.AddToScheme, apiextensionsv1.AddToScheme} {
 		if err := add(oldScheme); err != nil {
 			t.Fatal(err)
 		}
 	}
 	oldEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("testdata", "crd-pre-own-loss")},
-		Scheme:            oldScheme,
+		CRDs:   olderSchemaCRDs(t, "crd-pre-own-loss"),
+		Scheme: oldScheme,
 	}
 	oldCfg, err := oldEnv.Start()
 	if err != nil {
@@ -230,12 +229,12 @@ func TestEnvtest_StatusWrite_OlderCRDPrunesLostGtid(t *testing.T) {
 	runner := controller.NewTopologyManagerRunner(c, nil, nil, rec, slog.New(slog.NewTextHandler(&logs, nil)))
 	runner.SetManagerForTest(nn, &controller.TopologyManager{})
 	const lost, divergent = "22222222-0000-11f1-8000-0000000000b2:91-100", "22222222-0000-11f1-8000-0000000000b2:101-105"
-	snap := controller.TopologySnapshot{ActiveSite: "dc1", DegradedReason: v1alpha1.ReasonHealthy,
-		RecoverySite: "dc2", RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: divergent, DivergentTxnCount: 5,
+	snap := controller.TopologySnapshot{ActiveSite: "dc1", DegradedReason: v1beta1.ReasonHealthy,
+		RecoverySite: "dc2", RecoveryState: v1beta1.RecoveryStateBlocked, DivergentGtid: divergent, DivergentTxnCount: 5,
 		Sites: []controller.SiteSnapshot{
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly,
-				RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: divergent, DivergentTxnCount: 5, DivergenceComparedTo: "dc1",
+				RecoveryState: v1beta1.RecoveryStateBlocked, DivergentGtid: divergent, DivergentTxnCount: 5, DivergenceComparedTo: "dc1",
 				LostGtid: lost, LostTxnCount: 10, LostComparedTo: "dc1"},
 		}}
 	var rv string
@@ -247,11 +246,11 @@ func TestEnvtest_StatusWrite_OlderCRDPrunesLostGtid(t *testing.T) {
 		if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
 			t.Fatalf("status write %d: %v", i, err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &got); err != nil {
 			t.Fatal(err)
 		}
-		if s := got.Status.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateBlocked || s.DivergentGtid != divergent || s.LostGtid != "" || s.LostComparedTo != "" {
+		if s := got.Status.Sites[1]; s.RecoveryState != v1beta1.RecoveryStateBlocked || s.DivergentGtid != divergent || s.LostGtid != "" || s.LostComparedTo != "" {
 			t.Fatalf("write %d: dc2 = %+v, want RecoveryBlocked with its divergent set, and lostGtid and lostComparedTo pruned", i, s)
 		}
 		// The first write finds out; from the second on nothing changes.
@@ -261,7 +260,7 @@ func TestEnvtest_StatusWrite_OlderCRDPrunesLostGtid(t *testing.T) {
 			t.Fatalf("write %d: resourceVersion moved %s -> %s: the same status was written again", i, rv, got.ResourceVersion)
 		}
 		for len(rec.Events) > 0 {
-			if e := <-rec.Events; strings.Contains(e, " "+v1alpha1.EventOwnTransactionsLost+" ") {
+			if e := <-rec.Events; strings.Contains(e, " "+v1beta1.EventOwnTransactionsLost+" ") {
 				ownLossEvents++
 			}
 		}
@@ -286,22 +285,22 @@ func TestEnvtest_StatusWrite_CurrentCRDKeepsRecloneRequired(t *testing.T) {
 	var logs bytes.Buffer
 	runner := controller.NewTopologyManagerRunner(k8sClient, nil, nil, record.NewFakeRecorder(16), slog.New(slog.NewTextHandler(&logs, nil)))
 	runner.SetManagerForTest(nn, &controller.TopologyManager{})
-	snap := controller.TopologySnapshot{ActiveSite: "dc1", DegradedReason: v1alpha1.ReasonHealthy,
-		RecoverySite: "dc2", RecoveryState: v1alpha1.RecoveryStateRecloneRequired,
+	snap := controller.TopologySnapshot{ActiveSite: "dc1", DegradedReason: v1beta1.ReasonHealthy,
+		RecoverySite: "dc2", RecoveryState: v1beta1.RecoveryStateRecloneRequired,
 		Sites: []controller.SiteSnapshot{
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly,
-				RecoveryState: v1alpha1.RecoveryStateRecloneRequired, LostGtid: "22222222-0000-11f1-8000-0000000000b2:91-100", LostTxnCount: 10, LostComparedTo: "dc1",
-				SourceConvergenceState: v1alpha1.SourceConvergenceBlocked, SourceConvergenceReason: v1alpha1.SourceReasonOwnTransactionsLost},
+				RecoveryState: v1beta1.RecoveryStateRecloneRequired, LostGtid: "22222222-0000-11f1-8000-0000000000b2:91-100", LostTxnCount: 10, LostComparedTo: "dc1",
+				SourceConvergenceState: v1beta1.SourceConvergenceBlocked, SourceConvergenceReason: v1beta1.SourceReasonOwnTransactionsLost},
 		}}
 	if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
 		t.Fatal(err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, nn, &got); err != nil {
 		t.Fatal(err)
 	}
-	if s := got.Status.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || s.SourceConvergenceReason != v1alpha1.SourceReasonOwnTransactionsLost || s.LostGtid == "" {
+	if s := got.Status.Sites[1]; s.RecoveryState != v1beta1.RecoveryStateRecloneRequired || s.SourceConvergenceReason != v1beta1.SourceReasonOwnTransactionsLost || s.LostGtid == "" {
 		t.Fatalf("dc2 = %+v, want RecloneRequired, OwnTransactionsLost and the lost set stored", s)
 	}
 	// The site the report was compared with is stored with it: a restarted
@@ -319,15 +318,15 @@ func TestEnvtest_StatusWrite_CurrentCRDKeepsRecloneRequired(t *testing.T) {
 	if err := runner.WriteStatusForTest(ctx, nn, snap); err != nil {
 		t.Fatal(err)
 	}
-	var again v1alpha1.MysqlFailoverGroup
+	var again v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, nn, &again); err != nil {
 		t.Fatal(err)
 	}
 	if again.ResourceVersion != got.ResourceVersion {
 		t.Fatalf("resourceVersion moved %s -> %s on an unchanged status write", got.ResourceVersion, again.ResourceVersion)
 	}
-	before := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionDegraded)
-	after := apimeta.FindStatusCondition(again.Status.Conditions, v1alpha1.ConditionDegraded)
+	before := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionDegraded)
+	after := apimeta.FindStatusCondition(again.Status.Conditions, v1beta1.ConditionDegraded)
 	if before == nil || after == nil || !before.LastTransitionTime.Equal(&after.LastTransitionTime) {
 		t.Fatalf("Degraded = %+v, then %+v: lastTransitionTime moved without a transition", before, after)
 	}

@@ -11,13 +11,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // E13 at admission: the desired state that moved out of annotations and
 // status into spec, and the persisted defaults that went away.
 
-func e13DragonflyFG(ns, name string, df *v1alpha1.DragonflySpec) *v1alpha1.MysqlFailoverGroup {
+func e13DragonflyFG(ns, name string, df *v1beta1.DragonflySpec) *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG(ns)
 	fg.Name = name
 	fg.Spec.Dragonfly = df
@@ -35,14 +35,14 @@ func TestEnvtest_DragonflySnapshotRestoreNeedsSnapshotDir(t *testing.T) {
 
 	for _, tc := range []struct {
 		name     string
-		snapshot *v1alpha1.DragonflySnapshotSpec
+		snapshot *v1beta1.DragonflySnapshotSpec
 	}{
 		{name: "no-snapshot"},
-		{name: "empty-snapshot", snapshot: &v1alpha1.DragonflySnapshotSpec{}},
-		{name: "snapshot-without-dir", snapshot: &v1alpha1.DragonflySnapshotSpec{ServiceAccountName: "dragonfly"}},
+		{name: "empty-snapshot", snapshot: &v1beta1.DragonflySnapshotSpec{}},
+		{name: "snapshot-without-dir", snapshot: &v1beta1.DragonflySnapshotSpec{ServiceAccountName: "dragonfly"}},
 	} {
-		fg := e13DragonflyFG(ns, tc.name, &v1alpha1.DragonflySpec{Enabled: true, Image: image,
-			UpgradeStrategy: v1alpha1.DragonflyUpgradeStrategySnapshotRestore, Snapshot: tc.snapshot})
+		fg := e13DragonflyFG(ns, tc.name, &v1beta1.DragonflySpec{Enabled: true, Image: image,
+			UpgradeStrategy: v1beta1.DragonflyUpgradeStrategySnapshotRestore, Snapshot: tc.snapshot})
 		err := k8sClient.Create(ctx, fg)
 		if err == nil {
 			t.Errorf("%s: accepted, want refused", tc.name)
@@ -56,23 +56,23 @@ func TestEnvtest_DragonflySnapshotRestoreNeedsSnapshotDir(t *testing.T) {
 		}
 	}
 
-	ok := e13DragonflyFG(ns, "snapshot-restore-ok", &v1alpha1.DragonflySpec{Enabled: true, Image: image,
-		UpgradeStrategy: v1alpha1.DragonflyUpgradeStrategySnapshotRestore,
-		Snapshot:        &v1alpha1.DragonflySnapshotSpec{Dir: "s3://bucket/prefix"}})
+	ok := e13DragonflyFG(ns, "snapshot-restore-ok", &v1beta1.DragonflySpec{Enabled: true, Image: image,
+		UpgradeStrategy: v1beta1.DragonflyUpgradeStrategySnapshotRestore,
+		Snapshot:        &v1beta1.DragonflySnapshotSpec{Dir: "s3://bucket/prefix"}})
 	if err := k8sClient.Create(ctx, ok); err != nil {
 		t.Fatalf("SnapshotRestore with snapshot.dir: %v", err)
 	}
 
 	// Rolling is the default and needs no snapshot.
-	rolling := e13DragonflyFG(ns, "rolling-default", &v1alpha1.DragonflySpec{Enabled: true, Image: image})
+	rolling := e13DragonflyFG(ns, "rolling-default", &v1beta1.DragonflySpec{Enabled: true, Image: image})
 	if err := k8sClient.Create(ctx, rolling); err != nil {
 		t.Fatalf("default strategy without a snapshot: %v", err)
 	}
-	if rolling.Spec.Dragonfly.UpgradeStrategy != v1alpha1.DragonflyUpgradeStrategyRolling {
+	if rolling.Spec.Dragonfly.UpgradeStrategy != v1beta1.DragonflyUpgradeStrategyRolling {
 		t.Errorf("upgradeStrategy defaulted to %q, want Rolling", rolling.Spec.Dragonfly.UpgradeStrategy)
 	}
 
-	bad := e13DragonflyFG(ns, "bad-strategy", &v1alpha1.DragonflySpec{Enabled: true, Image: image, UpgradeStrategy: "Recreate"})
+	bad := e13DragonflyFG(ns, "bad-strategy", &v1beta1.DragonflySpec{Enabled: true, Image: image, UpgradeStrategy: "Recreate"})
 	wantRefused(t, "upgradeStrategy=Recreate", k8sClient.Create(ctx, bad), "upgradeStrategy")
 }
 
@@ -91,7 +91,7 @@ func TestEnvtest_SidecarHasNoPersistedImage(t *testing.T) {
 	if err := k8sClient.Create(ctx, u); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	fg := &v1alpha1.MysqlFailoverGroup{}
+	fg := &v1beta1.MysqlFailoverGroup{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "no-sidecar-block"}, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -128,16 +128,16 @@ func TestEnvtest_EncryptionExistingDataPolicy(t *testing.T) {
 	ensureNamespace(t, ns)
 
 	fg := newEncryptionFG(ns, "refuse-default")
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if fg.Spec.EncryptionAtRest.ExistingData != v1alpha1.EncryptionExistingDataRefuse {
+	if fg.Spec.EncryptionAtRest.ExistingData != v1beta1.EncryptionExistingDataRefuse {
 		t.Errorf("existingData defaulted to %q, want Refuse", fg.Spec.EncryptionAtRest.ExistingData)
 	}
 
 	bad := newEncryptionFG(ns, "existing-data-confirm")
-	bad.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, ExistingData: "confirm"}
+	bad.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true, ExistingData: "confirm"}
 	wantRefused(t, "existingData=confirm", k8sClient.Create(ctx, bad), "existingData")
 }
 
@@ -152,10 +152,10 @@ func TestEnvtest_MysqlBackupDeletionPolicy(t *testing.T) {
 	if err := k8sClient.Create(ctx, mb); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if mb.Spec.DeletionPolicy != v1alpha1.DeletionPolicyDelete {
+	if mb.Spec.DeletionPolicy != v1beta1.DeletionPolicyDelete {
 		t.Errorf("deletionPolicy defaulted to %q, want Delete", mb.Spec.DeletionPolicy)
 	}
-	mb.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain
+	mb.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain
 	if err := k8sClient.Update(ctx, mb); err != nil {
 		t.Fatalf("switch to Retain: %v", err)
 	}

@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
@@ -283,7 +283,7 @@ func (p *archiverPoller) anchor(persisted *metav1.Condition) {
 // observeSpec refreshes what the poller takes from the group: the archiver
 // scan interval behind the stuck-error bound, and whether the group's
 // rendered PITR inputs (Δ14) enable an archiver.
-func (p *archiverPoller) observeSpec(fg *v1alpha1.MysqlFailoverGroup, renders bool) {
+func (p *archiverPoller) observeSpec(fg *v1beta1.MysqlFailoverGroup, renders bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.rolloutRenders = renders
@@ -412,7 +412,7 @@ func (p *archiverPoller) clearMetrics() {
 // buildSidecarClients constructs one SidecarClient per site using the
 // same in-cluster DNS pattern that the reconciler uses for the sidecar
 // peer address. Returned slice is aligned with fg.Spec.Sites.
-func buildSidecarClients(fg *v1alpha1.MysqlFailoverGroup) []*internalmysql.SidecarClient {
+func buildSidecarClients(fg *v1beta1.MysqlFailoverGroup) []*internalmysql.SidecarClient {
 	out := make([]*internalmysql.SidecarClient, len(fg.Spec.Sites))
 	for i, site := range fg.Spec.Sites {
 		url := fmt.Sprintf("http://%s:%d", internalSiteServiceHost(fg.Name, site.Name, fg.Namespace), sidecarPort)

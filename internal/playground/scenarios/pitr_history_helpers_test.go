@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -101,13 +101,13 @@ func TestPITRCheckTargetAfterBackup(t *testing.T) {
 	stashSet(env, "backupClear:b2", "2026-11-05T10:00:06.250000Z")
 	cases := []struct {
 		name                    string
-		mode                    v1alpha1.PointInTimeMode
+		mode                    v1beta1.PointInTimeMode
 		backup, target, wantErr string
 	}{
-		{"after clear", v1alpha1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:07Z", ""},
-		{"before clear", v1alpha1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:06Z", "before backup b2's clear time"},
-		{"latest needs no target", v1alpha1.PointInTimeModeLatest, "b2", "", ""},
-		{"untracked backup", v1alpha1.PointInTimeModeTimestamp, "b9", "2026-11-05T10:00:07Z", "no recorded clear time"},
+		{"after clear", v1beta1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:07Z", ""},
+		{"before clear", v1beta1.PointInTimeModeTimestamp, "b2", "2026-11-05T10:00:06Z", "before backup b2's clear time"},
+		{"latest needs no target", v1beta1.PointInTimeModeLatest, "b2", "", ""},
+		{"untracked backup", v1beta1.PointInTimeModeTimestamp, "b9", "2026-11-05T10:00:07Z", "no recorded clear time"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -357,30 +357,30 @@ func TestPITRRecloneRequest(t *testing.T) {
 	const div = "3e11fa47-71ca-11e1-9e33-c80aa9429562:41-60"
 	cases := []struct {
 		name      string
-		site      v1alpha1.SiteStatus
+		site      v1beta1.SiteStatus
 		divergent bool
 		ready     bool
 		value     string
 	}{
-		{"divergent site not yet blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly}, true, false, ""},
-		{"divergent gtid but not RecoveryBlocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, true, false, ""},
-		{"blocked with gtid", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: div}, true, true, "iad:confirm=mfg:uid=u-1:gtidPrefix=3e11fa47"},
-		{"unreachable", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateUnreachable, RecoveryState: v1alpha1.RecoveryStateBlocked, DivergentGtid: div}, true, false, ""},
-		{"healthy replica, cold reclone", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}, false, true, "iad:confirm=mfg:uid=u-1"},
-		{"cold reclone refused while divergence is recorded", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, DivergentGtid: div}, false, false, ""},
-		{"cold reclone refused while blocked", v1alpha1.SiteStatus{Name: "iad", State: v1alpha1.SiteStateReadOnly, RecoveryState: v1alpha1.RecoveryStateBlocked}, false, false, ""},
+		{"divergent site not yet blocked", v1beta1.SiteStatus{Name: "iad", State: v1beta1.SiteStateReadOnly}, true, false, ""},
+		{"divergent gtid but not RecoveryBlocked", v1beta1.SiteStatus{Name: "iad", State: v1beta1.SiteStateReadOnly, DivergentGtid: div}, true, false, ""},
+		{"blocked with gtid", v1beta1.SiteStatus{Name: "iad", State: v1beta1.SiteStateReadOnly, RecoveryState: v1beta1.RecoveryStateBlocked, DivergentGtid: div}, true, true, "iad:confirm=mfg:uid=u-1:gtidPrefix=3e11fa47"},
+		{"unreachable", v1beta1.SiteStatus{Name: "iad", State: v1beta1.SiteStateUnreachable, RecoveryState: v1beta1.RecoveryStateBlocked, DivergentGtid: div}, true, false, ""},
+		{"healthy replica, cold reclone", v1beta1.SiteStatus{Name: "iad", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy}, false, true, "iad:confirm=mfg:uid=u-1"},
+		{"cold reclone refused while divergence is recorded", v1beta1.SiteStatus{Name: "iad", State: v1beta1.SiteStateReadOnly, DivergentGtid: div}, false, false, ""},
+		{"cold reclone refused while blocked", v1beta1.SiteStatus{Name: "iad", State: v1beta1.SiteStateReadOnly, RecoveryState: v1beta1.RecoveryStateBlocked}, false, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			mfg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "mfg", UID: "u-1"},
-				Status: v1alpha1.MysqlFailoverGroupStatus{Sites: []v1alpha1.SiteStatus{{Name: "pdx", State: v1alpha1.SiteStateWritable}, c.site}}}
+			mfg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "mfg", UID: "u-1"},
+				Status: v1beta1.MysqlFailoverGroupStatus{Sites: []v1beta1.SiteStatus{{Name: "pdx", State: v1beta1.SiteStateWritable}, c.site}}}
 			ready, value, msg := pitrRecloneRequest(mfg, "iad", c.divergent)
 			if ready != c.ready || value != c.value {
 				t.Fatalf("ready=%v value=%q, want %v %q (%s)", ready, value, c.ready, c.value, msg)
 			}
 		})
 	}
-	if ready, _, _ := pitrRecloneRequest(&v1alpha1.MysqlFailoverGroup{}, "iad", false); ready {
+	if ready, _, _ := pitrRecloneRequest(&v1beta1.MysqlFailoverGroup{}, "iad", false); ready {
 		t.Error("an absent site is not ready")
 	}
 }
@@ -543,12 +543,12 @@ func TestPITRAssertResultReplayCount(t *testing.T) {
 	env := &runner.Env{Capture: &runner.Capture{}}
 	stashSet(env, "archiveID", "ar1-abc")
 	stashSet(env, "baseline:b1", u+":1-10")
-	res := &v1alpha1.PointInTimeResult{
-		Mode: v1alpha1.PointInTimeModeLatest, Outcome: v1alpha1.PointInTimeArchiveHead,
-		Archive:      &v1alpha1.PITRArchiveIdentity{ArchiveID: "ar1-abc"},
+	res := &v1beta1.PointInTimeResult{
+		Mode: v1beta1.PointInTimeModeLatest, Outcome: v1beta1.PointInTimeArchiveHead,
+		Archive:      &v1beta1.PITRArchiveIdentity{ArchiveID: "ar1-abc"},
 		GtidExecuted: u + ":1-15:18-20", ReplayedTransactionCount: 8,
 	}
-	e := pitrExpectation{Backup: "b1", Mode: v1alpha1.PointInTimeModeLatest, Fence: pitrFence{GTID: u + ":1-20"}, Exclude: u + ":16-17", Outcome: v1alpha1.PointInTimeArchiveHead}
+	e := pitrExpectation{Backup: "b1", Mode: v1beta1.PointInTimeModeLatest, Fence: pitrFence{GTID: u + ":1-20"}, Exclude: u + ":16-17", Outcome: v1beta1.PointInTimeArchiveHead}
 	if err := assertPITRResult(env, "t", res, e); err != nil {
 		t.Fatal(err)
 	}
@@ -593,11 +593,11 @@ func TestPITRScenarioCleanupBudgets(t *testing.T) {
 // TestPITRCleanupOwnership pins F190 and F191's guards: only this run's
 // group is deleted, and only prefixes inside e2e/<scenario>/<run>.
 func TestPITRCleanupOwnership(t *testing.T) {
-	mine := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{pitrRunAnnotation: "s37-20261105T100000Z"}}}
+	mine := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{pitrRunAnnotation: "s37-20261105T100000Z"}}}
 	if !pitrOwnedByRun(mine, "s37-20261105T100000Z") {
 		t.Error("this run's group must be deletable")
 	}
-	if pitrOwnedByRun(mine, "s37-20261104T090000Z") || pitrOwnedByRun(&v1alpha1.MysqlFailoverGroup{}, "s37-20261105T100000Z") || pitrOwnedByRun(mine, "") {
+	if pitrOwnedByRun(mine, "s37-20261104T090000Z") || pitrOwnedByRun(&v1beta1.MysqlFailoverGroup{}, "s37-20261105T100000Z") || pitrOwnedByRun(mine, "") {
 		t.Error("another run's (or an unannotated) group must be left in place")
 	}
 	for prefix, ok := range map[string]bool{
@@ -655,10 +655,10 @@ func TestS70OperatorPollSync(t *testing.T) {
 	if s70OperatorPollWait < 2*pitrOperatorArchiverPollInterval {
 		t.Errorf("s70OperatorPollWait=%s is under two poll intervals", s70OperatorPollWait)
 	}
-	if !s70OperatorPollFailing(&v1alpha1.PITRStatus{Message: "iad: archiver status unavailable: dial tcp: refused"}, "iad") {
+	if !s70OperatorPollFailing(&v1beta1.PITRStatus{Message: "iad: archiver status unavailable: dial tcp: refused"}, "iad") {
 		t.Error("a failed poll of iad must be detected")
 	}
-	if s70OperatorPollFailing(&v1alpha1.PITRStatus{Message: "pdx: archiver status unavailable: x; iad: site iad name ..."}, "iad") {
+	if s70OperatorPollFailing(&v1beta1.PITRStatus{Message: "pdx: archiver status unavailable: x; iad: site iad name ..."}, "iad") {
 		t.Error("another site's failed poll, or iad's own lastError, is not iad's failed poll")
 	}
 }
@@ -688,23 +688,23 @@ func TestPITRDecryptObjectReadsEncryptedManifest(t *testing.T) {
 }
 
 func TestPITRSiteReplicating(t *testing.T) {
-	mfg := &v1alpha1.MysqlFailoverGroup{}
-	mfg.Status.Sites = []v1alpha1.SiteStatus{
-		{Name: "iad", State: v1alpha1.SiteStateWritable},
-		{Name: "pdx", State: v1alpha1.SiteStateReadOnly},
+	mfg := &v1beta1.MysqlFailoverGroup{}
+	mfg.Status.Sites = []v1beta1.SiteStatus{
+		{Name: "iad", State: v1beta1.SiteStateWritable},
+		{Name: "pdx", State: v1beta1.SiteStateReadOnly},
 	}
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
 		t.Fatal("a read-only site that is not replicating counted as replicating")
 	}
-	mfg.Status.Sites[1].Replication = v1alpha1.SiteReplicationHealthy
+	mfg.Status.Sites[1].Replication = v1beta1.SiteReplicationHealthy
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replicating read-only site was not accepted")
 	}
-	mfg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateBlocked
+	mfg.Status.Sites[1].RecoveryState = v1beta1.RecoveryStateBlocked
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); ok {
 		t.Fatal("a RecoveryBlocked replica counted as a planned-failover target")
 	}
-	mfg.Status.Sites[1].RecoveryState = v1alpha1.RecoveryStateInProgress
+	mfg.Status.Sites[1].RecoveryState = v1beta1.RecoveryStateInProgress
 	if ok, _, _ := pitrSiteReplicating(mfg, "pdx"); !ok {
 		t.Fatal("a replica in RecoveryInProgress (not refused by validation) was not accepted")
 	}
@@ -734,22 +734,22 @@ func TestPITRObservedArchiveIDMatchesPrefix(t *testing.T) {
 	)
 	cases := []struct {
 		name   string
-		obs    *v1alpha1.PITRArchiveObservation
+		obs    *v1beta1.PITRArchiveObservation
 		prefix string
 		want   string
 	}{
 		{"no observation", nil, newPrefix, ""},
-		{"verified at the prefix", &v1alpha1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, newPrefix, id},
-		{"slash-trimmed prefix", &v1alpha1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, "/" + newPrefix + "/", id},
-		{"stale observation of the previous prefix", &v1alpha1.PITRArchiveObservation{Destination: dest(oldPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, newPrefix, ""},
-		{"awaiting descriptor", &v1alpha1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1alpha1.PITRArchiveAwaitingDescriptor}, newPrefix, ""},
-		{"unparseable destination", &v1alpha1.PITRArchiveObservation{Destination: "bogus", ArchiveID: id, State: v1alpha1.PITRArchiveVerified}, newPrefix, ""},
+		{"verified at the prefix", &v1beta1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1beta1.PITRArchiveVerified}, newPrefix, id},
+		{"slash-trimmed prefix", &v1beta1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1beta1.PITRArchiveVerified}, "/" + newPrefix + "/", id},
+		{"stale observation of the previous prefix", &v1beta1.PITRArchiveObservation{Destination: dest(oldPrefix), ArchiveID: id, State: v1beta1.PITRArchiveVerified}, newPrefix, ""},
+		{"awaiting descriptor", &v1beta1.PITRArchiveObservation{Destination: dest(newPrefix), ArchiveID: id, State: v1beta1.PITRArchiveAwaitingDescriptor}, newPrefix, ""},
+		{"unparseable destination", &v1beta1.PITRArchiveObservation{Destination: "bogus", ArchiveID: id, State: v1beta1.PITRArchiveVerified}, newPrefix, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			mfg := &v1alpha1.MysqlFailoverGroup{}
+			mfg := &v1beta1.MysqlFailoverGroup{}
 			if c.obs != nil {
-				mfg.Status.PITR = &v1alpha1.PITRStatus{Archive: c.obs}
+				mfg.Status.PITR = &v1beta1.PITRStatus{Archive: c.obs}
 			}
 			if got := pitrObservedArchiveID(mfg, c.prefix); got != c.want {
 				t.Errorf("pitrObservedArchiveID=%q, want %q", got, c.want)
@@ -778,62 +778,62 @@ func TestPITRArchiveBoundReady(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settled := func() *v1alpha1.MysqlFailoverGroup {
+	settled := func() *v1beta1.MysqlFailoverGroup {
 		spec := pitrBackupSpec(newPrefix, "")
-		return &v1alpha1.MysqlFailoverGroup{
+		return &v1beta1.MysqlFailoverGroup{
 			ObjectMeta: metav1.ObjectMeta{Generation: 10},
-			Spec:       v1alpha1.MysqlFailoverGroupSpec{Backup: &spec},
-			Status: v1alpha1.MysqlFailoverGroupStatus{
+			Spec:       v1beta1.MysqlFailoverGroupSpec{Backup: &spec},
+			Status: v1beta1.MysqlFailoverGroupStatus{
 				ActiveSite: "iad",
 				Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 10}},
-				PITR: &v1alpha1.PITRStatus{Archive: &v1alpha1.PITRArchiveObservation{
-					Destination: newDest, ArchiveID: newID, State: v1alpha1.PITRArchiveVerified,
+				PITR: &v1beta1.PITRStatus{Archive: &v1beta1.PITRArchiveObservation{
+					Destination: newDest, ArchiveID: newID, State: v1beta1.PITRArchiveVerified,
 				}},
-				PITRArchiveBindings: []v1alpha1.PITRArchiveBinding{
-					{ID: "pab-new", Destination: newDest, State: v1alpha1.PITRArchiveBindingBound, Reason: "Bound", ArchiveID: newID},
-					{ID: "pab-old", Destination: oldDest, State: v1alpha1.PITRArchiveBindingBound, Reason: "Bound", ArchiveID: oldID},
+				PITRArchiveBindings: []v1beta1.PITRArchiveBinding{
+					{ID: "pab-new", Destination: newDest, State: v1beta1.PITRArchiveBindingBound, Reason: "Bound", ArchiveID: newID},
+					{ID: "pab-old", Destination: oldDest, State: v1beta1.PITRArchiveBindingBound, Reason: "Bound", ArchiveID: oldID},
 				},
 			},
 		}
 	}
 	cases := []struct {
 		name   string
-		mutate func(*v1alpha1.MysqlFailoverGroup)
+		mutate func(*v1beta1.MysqlFailoverGroup)
 		want   bool
 	}{
-		{"bound, verified and settled", func(*v1alpha1.MysqlFailoverGroup) {}, true},
-		{"CI 6f3fc4b: Establishing during the ordered update", func(m *v1alpha1.MysqlFailoverGroup) {
-			m.Status.PITRArchiveBindings[0] = v1alpha1.PITRArchiveBinding{ID: "pab-new", Destination: newDest, State: v1alpha1.PITRArchiveBindingPending, Reason: "Establishing"}
-			m.Status.PITR.Archive = &v1alpha1.PITRArchiveObservation{Destination: newDest, State: v1alpha1.PITRArchiveAwaitingDescriptor}
+		{"bound, verified and settled", func(*v1beta1.MysqlFailoverGroup) {}, true},
+		{"CI 6f3fc4b: Establishing during the ordered update", func(m *v1beta1.MysqlFailoverGroup) {
+			m.Status.PITRArchiveBindings[0] = v1beta1.PITRArchiveBinding{ID: "pab-new", Destination: newDest, State: v1beta1.PITRArchiveBindingPending, Reason: "Establishing"}
+			m.Status.PITR.Archive = &v1beta1.PITRArchiveObservation{Destination: newDest, State: v1beta1.PITRArchiveAwaitingDescriptor}
 			m.Status.UpdatePhase = "UpdateOldPrimary"
 			m.Status.Conditions[0].Status = metav1.ConditionFalse
 		}, false},
-		{"Establishing after the rollout", func(m *v1alpha1.MysqlFailoverGroup) {
-			m.Status.PITRArchiveBindings[0] = v1alpha1.PITRArchiveBinding{ID: "pab-new", Destination: newDest, State: v1alpha1.PITRArchiveBindingPending, Reason: "Establishing"}
+		{"Establishing after the rollout", func(m *v1beta1.MysqlFailoverGroup) {
+			m.Status.PITRArchiveBindings[0] = v1beta1.PITRArchiveBinding{ID: "pab-new", Destination: newDest, State: v1beta1.PITRArchiveBindingPending, Reason: "Establishing"}
 		}, false},
-		{"only the old prefix is bound", func(m *v1alpha1.MysqlFailoverGroup) {
+		{"only the old prefix is bound", func(m *v1beta1.MysqlFailoverGroup) {
 			m.Status.PITRArchiveBindings = m.Status.PITRArchiveBindings[1:]
 		}, false},
-		{"observation still names the old prefix", func(m *v1alpha1.MysqlFailoverGroup) {
-			m.Status.PITR.Archive = &v1alpha1.PITRArchiveObservation{Destination: oldDest, ArchiveID: oldID, State: v1alpha1.PITRArchiveVerified}
+		{"observation still names the old prefix", func(m *v1beta1.MysqlFailoverGroup) {
+			m.Status.PITR.Archive = &v1beta1.PITRArchiveObservation{Destination: oldDest, ArchiveID: oldID, State: v1beta1.PITRArchiveVerified}
 		}, false},
-		{"observation names another archive", func(m *v1alpha1.MysqlFailoverGroup) {
+		{"observation names another archive", func(m *v1beta1.MysqlFailoverGroup) {
 			m.Status.PITR.Archive.ArchiveID = oldID
 		}, false},
-		{"Ready from an older generation", func(m *v1alpha1.MysqlFailoverGroup) {
+		{"Ready from an older generation", func(m *v1beta1.MysqlFailoverGroup) {
 			m.Status.Conditions[0].ObservedGeneration = 9
 		}, false},
-		{"ordered update still in progress", func(m *v1alpha1.MysqlFailoverGroup) {
+		{"ordered update still in progress", func(m *v1beta1.MysqlFailoverGroup) {
 			m.Status.UpdatePhase = "UpdateOldPrimary"
 		}, false},
-		{"spec not on the new prefix", func(m *v1alpha1.MysqlFailoverGroup) {
+		{"spec not on the new prefix", func(m *v1beta1.MysqlFailoverGroup) {
 			spec := pitrBackupSpec(oldPrefix, "")
 			m.Spec.Backup = &spec
 		}, false},
-		{"PITR disabled in the spec", func(m *v1alpha1.MysqlFailoverGroup) {
+		{"PITR disabled in the spec", func(m *v1beta1.MysqlFailoverGroup) {
 			m.Spec.Backup.PITR.Enabled = false
 		}, false},
-		{"no spec.backup", func(m *v1alpha1.MysqlFailoverGroup) {
+		{"no spec.backup", func(m *v1beta1.MysqlFailoverGroup) {
 			m.Spec.Backup = nil
 		}, false},
 	}
@@ -866,7 +866,7 @@ func TestPITRWithdrawRelease(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			mfg := testBaselineMFG(false)
 			if c.current != "" {
-				mfg.Annotations = map[string]string{v1alpha1.ReleasePITRArchiveBindingAnnotation: c.current}
+				mfg.Annotations = map[string]string{v1beta1.ReleasePITRArchiveBindingAnnotation: c.current}
 			}
 			env := testScenarioEnv(t, mfg)
 			env.Capture = &runner.Capture{}
@@ -895,7 +895,7 @@ func TestPITRWithdrawRelease(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if left := got.Annotations[v1alpha1.ReleasePITRArchiveBindingAnnotation]; left != c.wantLeft {
+			if left := got.Annotations[v1beta1.ReleasePITRArchiveBindingAnnotation]; left != c.wantLeft {
 				t.Errorf("release annotation=%q, want %q", left, c.wantLeft)
 			}
 		})
@@ -915,7 +915,7 @@ func TestPITRSnapshotsUnderPrefixes(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := func(name, dest string) corev1.Secret {
-		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{v1alpha1.PITRDestinationAnnotation: dest}}}
+		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: map[string]string{v1beta1.PITRDestinationAnnotation: dest}}}
 	}
 	got := pitrSnapshotsUnderPrefixes([]corev1.Secret{snap("k-b", in), snap("k-x", out), snap("k-a", in), snap("k-none", "")}, []string{mine})
 	if strings.Join(got, ",") != "k-a,k-b" {
@@ -950,11 +950,11 @@ func TestGTIDOverlap(t *testing.T) {
 }
 
 func TestPITRReaderSites(t *testing.T) {
-	mfg := &v1alpha1.MysqlFailoverGroup{}
-	mfg.Spec.Sites = []v1alpha1.SiteSpec{
-		{Name: "iad", ServerID: 101, Role: v1alpha1.SiteRolePrimaryCandidate},
-		{Name: "pdx", ServerID: 102, Role: v1alpha1.SiteRolePrimaryCandidate},
-		{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly},
+	mfg := &v1beta1.MysqlFailoverGroup{}
+	mfg.Spec.Sites = []v1beta1.SiteSpec{
+		{Name: "iad", ServerID: 101, Role: v1beta1.SiteRolePrimaryCandidate},
+		{Name: "pdx", ServerID: 102, Role: v1beta1.SiteRolePrimaryCandidate},
+		{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly},
 	}
 	if got := pitrReaderSites(mfg); len(got) != 1 || got[0] != "reader" {
 		t.Fatalf("pitrReaderSites=%v, want [reader]", got)
@@ -993,8 +993,8 @@ func TestPITRBindingIDsUnderPrefixes(t *testing.T) {
 		}
 		return d.String()
 	}
-	mfg := &v1alpha1.MysqlFailoverGroup{}
-	mfg.Status.PITRArchiveBindings = []v1alpha1.PITRArchiveBinding{
+	mfg := &v1beta1.MysqlFailoverGroup{}
+	mfg.Status.PITRArchiveBindings = []v1beta1.PITRArchiveBinding{
 		{ID: "pab-0000000000000001", Destination: dest(backupE2EBucket, p1, backupE2EEndpoint)},
 		{ID: "pab-0000000000000002", Destination: dest(backupE2EBucket, p1, "http://rustfs.bloodraven-playground.svc:9000")},
 		{ID: "pab-0000000000000003", Destination: dest(backupE2EBucket, p1+"-p2", backupE2EEndpoint)},
@@ -1003,8 +1003,8 @@ func TestPITRBindingIDsUnderPrefixes(t *testing.T) {
 	}
 	snap := func(id, destination string) corev1.Secret {
 		return corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-			Labels:      map[string]string{v1alpha1.PITRBindingIDLabel: id},
-			Annotations: map[string]string{v1alpha1.PITRDestinationAnnotation: destination},
+			Labels:      map[string]string{v1beta1.PITRBindingIDLabel: id},
+			Annotations: map[string]string{v1beta1.PITRDestinationAnnotation: destination},
 		}}
 	}
 	snaps := []corev1.Secret{

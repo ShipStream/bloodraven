@@ -8,7 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // sidecarImageFromEnv is the sidecar image this operator release ships
@@ -31,7 +31,7 @@ var errSidecarImageUnset = errors.New("spec.sidecar.image is empty and the opera
 
 // effectiveSidecarImage returns the group's pinned spec.sidecar.image, or
 // the operator's default when the group pins none.
-func effectiveSidecarImage(fg *v1alpha1.MysqlFailoverGroup) (string, error) {
+func effectiveSidecarImage(fg *v1beta1.MysqlFailoverGroup) (string, error) {
 	if img := strings.TrimSpace(fg.Spec.Sidecar.Image); img != "" {
 		return img, nil
 	}
@@ -67,7 +67,7 @@ func effectiveSidecarImage(fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 // own image. Silent when either tag is unknown — a digest pin, an
 // untagged reference, or an operator that was not told its own image are
 // all legitimate, and guessing would make the event untrustworthy.
-func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) {
+func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) {
 	sidecarImage, err := effectiveSidecarImage(fg)
 	if err != nil {
 		return
@@ -99,7 +99,7 @@ func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Cont
 	if r.Recorder == nil {
 		return
 	}
-	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1alpha1.EventSidecarVersionSkew,
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventSidecarVersionSkew,
 		"%s is tagged %q but the operator is running %q. "+
 			"The operator and sidecar share a rendering contract and are only "+
 			"supported at matching releases.%s",

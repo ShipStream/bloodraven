@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -129,7 +129,7 @@ func s48VerifySealedState(state *s48RunState) runner.Step {
 		Name:  "every site is Sealed and MySQL reports a read-only keyring component",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Wait.UntilCR(ctx, env.Namespace, "all sites sealed",
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					st := m.Status.EncryptionAtRest
 					if st == nil {
 						return false, "status.encryptionAtRest not populated yet", nil
@@ -144,7 +144,7 @@ func s48VerifySealedState(state *s48RunState) runner.Step {
 			}
 
 			for _, s := range mfg.Status.EncryptionAtRest.Sites {
-				if s.Phase != v1alpha1.KeyringPhaseSealed {
+				if s.Phase != v1beta1.KeyringPhaseSealed {
 					return fmt.Errorf("site %s phase=%s (%s), want Sealed", s.Name, s.Phase, s.Message)
 				}
 				if s.KeyringSecret == "" || s.KeyringVersion < 1 {
@@ -290,7 +290,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 			// allows 2s of slack.
 			before := time.Now()
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				v1alpha1.RotateKeyringAnnotation, state.activeSite); err != nil {
+				v1beta1.RotateKeyringAnnotation, state.activeSite); err != nil {
 				return fmt.Errorf("annotate for primary rotation: %w", err)
 			}
 			state.rotated = true
@@ -317,7 +317,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 					return err
 				}
 				if eventSeenAt.IsZero() {
-					ev, ok, err := findMFGEvent(ctx, env, before, v1alpha1.EventKeyringRotationRejected, snippet)
+					ev, ok, err := findMFGEvent(ctx, env, before, v1beta1.EventKeyringRotationRejected, snippet)
 					if err != nil {
 						return fmt.Errorf("list events: %w", err)
 					}
@@ -363,7 +363,7 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 // s48RequirePrimarySealed fails if encryption status is missing or the
 // named site is not Sealed. Used both before annotating and on every
 // poll so an unseal fails fast with the phase error, not a timeout.
-func s48RequirePrimarySealed(mfg *v1alpha1.MysqlFailoverGroup, site string) error {
+func s48RequirePrimarySealed(mfg *v1beta1.MysqlFailoverGroup, site string) error {
 	if mfg.Status.EncryptionAtRest == nil {
 		return fmt.Errorf("no encryption status for the active site")
 	}
@@ -371,7 +371,7 @@ func s48RequirePrimarySealed(mfg *v1alpha1.MysqlFailoverGroup, site string) erro
 	if s == nil {
 		return fmt.Errorf("no encryption status for the active site")
 	}
-	if s.Phase != v1alpha1.KeyringPhaseSealed {
+	if s.Phase != v1beta1.KeyringPhaseSealed {
 		return fmt.Errorf(
 			"active primary %s moved to phase %s — the operator must refuse to unseal the primary for rotation",
 			site, s.Phase)
@@ -391,7 +391,7 @@ func s48RefusalHoldDone(eventSeenAt, now time.Time, hold time.Duration) bool {
 
 func s48ClearRotateAnnotation(ctx context.Context, env *runner.Env, state *s48RunState) error {
 	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-		v1alpha1.RotateKeyringAnnotation, ""); err != nil {
+		v1beta1.RotateKeyringAnnotation, ""); err != nil {
 		return fmt.Errorf("clear rotate annotation: %w", err)
 	}
 	state.rotated = false
@@ -410,14 +410,14 @@ func s48RotateReplica(state *s48RunState) runner.Step {
 				return err
 			}
 			before := mfg.Status.EncryptionAtRest.SiteEncryptionStatusByName(state.replicaSite)
-			if before == nil || before.Phase != v1alpha1.KeyringPhaseSealed {
+			if before == nil || before.Phase != v1beta1.KeyringPhaseSealed {
 				return fmt.Errorf("replica %s is not sealed before rotation: %+v", state.replicaSite, before)
 			}
 			state.sealedSecret = before.KeyringSecret
 			state.sealedVersion = before.KeyringVersion
 
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
-				v1alpha1.RotateKeyringAnnotation, state.replicaSite); err != nil {
+				v1beta1.RotateKeyringAnnotation, state.replicaSite); err != nil {
 				return fmt.Errorf("annotate for replica rotation: %w", err)
 			}
 			state.rotated = true
@@ -427,7 +427,7 @@ func s48RotateReplica(state *s48RunState) runner.Step {
 			// terminal state rather than trying to catch the middle.
 			if _, err := env.Wait.UntilCR(ctx, env.Namespace,
 				fmt.Sprintf("replica %s re-sealed on a new keyring version", state.replicaSite),
-				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(m *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
 					}
@@ -435,7 +435,7 @@ func s48RotateReplica(state *s48RunState) runner.Step {
 					if s == nil {
 						return false, "no status entry for " + state.replicaSite, nil
 					}
-					if s.Phase != v1alpha1.KeyringPhaseSealed {
+					if s.Phase != v1beta1.KeyringPhaseSealed {
 						return false, fmt.Sprintf("phase=%s (%s)", s.Phase, s.Message), nil
 					}
 					if s.KeyringVersion <= state.sealedVersion {
@@ -537,10 +537,10 @@ func s48Cleanup(state *s48RunState) func(context.Context, *runner.Env) error {
 
 // s48UnsealedSummary renders which sites are still not sealed, so a
 // timeout says what was actually blocking rather than just "not sealed".
-func s48UnsealedSummary(st *v1alpha1.EncryptionAtRestStatus) string {
+func s48UnsealedSummary(st *v1beta1.EncryptionAtRestStatus) string {
 	var parts []string
 	for _, s := range st.Sites {
-		if s.Phase != v1alpha1.KeyringPhaseSealed {
+		if s.Phase != v1beta1.KeyringPhaseSealed {
 			parts = append(parts, fmt.Sprintf("%s=%s (%s)", s.Name, s.Phase, s.Message))
 		}
 	}

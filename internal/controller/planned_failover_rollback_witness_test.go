@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -25,10 +25,10 @@ const opsUUIDOld = "0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a"
 // source's server_uuids that no clone has superseded, and not at all while
 // they await the reclone of an in-place restore or do not answer.
 func TestRollback_ComparesTheSourceWithEverySiteThatAnswers(t *testing.T) {
-	hold, leftFenced, rolledBack := v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
-		v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverOutcomeRolledBack
-	notRestored := []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored}
-	lag := v1alpha1.PlannedFailoverReasonLagTimeout
+	hold, leftFenced, rolledBack := v1beta1.PlannedFailoverOutcomeManualRecoveryRequired,
+		v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverOutcomeRolledBack
+	notRestored := []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningTargetReplicationNotRestored}
+	lag := v1beta1.PlannedFailoverReasonLagTimeout
 	// cloned records that dc1 ran under opsUUIDOld and was then cloned, so
 	// that identity is superseded; replaced records the earlier identity
 	// without a clone (a data directory replaced by hand), which stays live.
@@ -54,7 +54,7 @@ func TestRollback_ComparesTheSourceWithEverySiteThatAnswers(t *testing.T) {
 		{name: "writable source lacks its own transactions a disaster-recovery site holds",
 			third:   state.SiteRoleDROnly,
 			mutate:  func(f *opsFixture) { f.third.gtid = opsUUIDA + ":1-13" },
-			outcome: hold, outReason: v1alpha1.PlannedFailoverReasonSourceUnfenced, lost: opsUUIDA + ":11-13"},
+			outcome: hold, outReason: v1beta1.PlannedFailoverReasonSourceUnfenced, lost: opsUUIDA + ":11-13"},
 		{name: "what the fenced set, the target and another site show is one set",
 			third: state.SiteRoleDROnly,
 			mutate: func(f *opsFixture) {
@@ -160,8 +160,8 @@ func TestRollback_ComparesTheSourceWithEverySiteThatAnswers(t *testing.T) {
 func TestRollback_SourceWhoseSetDoesNotParseStaysFenced(t *testing.T) {
 	runRollbackSourceCase(t, rollbackSourceCase{
 		name:    "unparseable",
-		reason:  v1alpha1.PlannedFailoverReasonLagTimeout,
+		reason:  v1beta1.PlannedFailoverReasonLagTimeout,
 		mutate:  func(f *opsFixture) { f.fenced(); f.src.gtid = "not-a-gtid-set" },
-		outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
+		outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
 	})
 }

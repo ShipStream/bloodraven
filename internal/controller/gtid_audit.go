@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -17,11 +17,11 @@ const (
 	// divergenceDetectedByRecovery marks a block recorded by old-primary
 	// recovery: a returning former primary held transactions the new
 	// primary never received.
-	divergenceDetectedByRecovery = v1alpha1.DivergenceDetectorOldPrimaryRecovery
+	divergenceDetectedByRecovery = v1beta1.DivergenceDetectorOldPrimaryRecovery
 	// divergenceDetectedByAudit marks a block recorded by the replica GTID
 	// audit: a follower, possibly replicating normally, holds transactions
 	// the primary lacks.
-	divergenceDetectedByAudit = v1alpha1.DivergenceDetectorReplicaAudit
+	divergenceDetectedByAudit = v1beta1.DivergenceDetectorReplicaAudit
 
 	// gtidAuditInterval is how often each follower is audited. It is the
 	// recovery retry cadence: a divergence report is re-verified at the
@@ -328,7 +328,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 		}
 	}
 	rec := tm.recovery[follower.name]
-	wasBlocked := rec != nil && rec.state == v1alpha1.RecoveryStateBlocked
+	wasBlocked := rec != nil && rec.state == v1beta1.RecoveryStateBlocked
 
 	if extra.IsEmpty() {
 		if !wasBlocked {
@@ -363,7 +363,7 @@ func (tm *TopologyManager) auditFollower(ctx context.Context, epoch uint64, acti
 		rec = &siteRecovery{}
 		tm.recovery[follower.name] = rec
 	}
-	rec.state = v1alpha1.RecoveryStateBlocked
+	rec.state = v1beta1.RecoveryStateBlocked
 	rec.divergentGtid = set
 	rec.divergentCount = count
 	rec.detectedBy = detectedBy

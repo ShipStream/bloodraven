@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -80,7 +80,7 @@ func observeFailoverDuringPartition() runner.Step {
 			defer cancel()
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite flips away from partitioned site %s", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget())
 					if mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original {
 						if mfg.Status.ActiveSite != expected {

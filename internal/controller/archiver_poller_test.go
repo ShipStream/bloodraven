@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -35,12 +35,12 @@ func newRunnerWithArchiverSnapshots(t *testing.T, nn types.NamespacedName, snaps
 	return r
 }
 
-func pitrEnabledFG(ns, name string) *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func pitrEnabledFG(ns, name string) *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Backup: &v1alpha1.BackupSpec{
-				PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly"},
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Backup: &v1beta1.BackupSpec{
+				PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "nightly"},
 			},
 		},
 	}
@@ -50,10 +50,10 @@ func TestPopulatePITRStatus_DisabledClearsField(t *testing.T) {
 	nn := types.NamespacedName{Namespace: "default", Name: "orders"}
 	r := newRunnerWithArchiverSnapshots(t, nn, nil)
 
-	fg := &v1alpha1.MysqlFailoverGroup{
+	fg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Namespace: nn.Namespace, Name: nn.Name},
 	}
-	fg.Status.PITR = &v1alpha1.PITRStatus{ArchivedFileCount: 10}
+	fg.Status.PITR = &v1beta1.PITRStatus{ArchivedFileCount: 10}
 
 	r.populatePITRStatus(context.Background(), nn, fg)
 
@@ -70,7 +70,7 @@ func TestPopulatePITRStatus_NoSnapshotsPreservesExisting(t *testing.T) {
 	})
 
 	fg := pitrEnabledFG(nn.Namespace, nn.Name)
-	existing := &v1alpha1.PITRStatus{ArchivedFileCount: 5}
+	existing := &v1beta1.PITRStatus{ArchivedFileCount: 5}
 	fg.Status.PITR = existing
 
 	r.populatePITRStatus(context.Background(), nn, fg)
@@ -178,7 +178,7 @@ func TestPopulatePITRStatus_EmptySnapshotsLeaveStale(t *testing.T) {
 	r := newRunnerWithArchiverSnapshots(t, nn, map[string]*internalmysql.ArchiverStatus{})
 
 	fg := pitrEnabledFG(nn.Namespace, nn.Name)
-	existing := &v1alpha1.PITRStatus{ArchivedFileCount: 1}
+	existing := &v1beta1.PITRStatus{ArchivedFileCount: 1}
 	fg.Status.PITR = existing
 
 	r.populatePITRStatus(context.Background(), nn, fg)

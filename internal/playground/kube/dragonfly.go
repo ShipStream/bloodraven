@@ -9,7 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // DragonflyStatefulSetName mirrors internal/controller's
@@ -35,7 +35,7 @@ func DragonflyActiveServiceName(fg string) string {
 // DragonflyPodSelector builds a label selector that targets a single
 // site's Dragonfly pod. Mirrors the StatefulSet pod template labels.
 func DragonflyPodSelector(fg, site string) string {
-	return fmt.Sprintf("app.kubernetes.io/name=dragonfly,app.kubernetes.io/instance=%s,%s=%s", fg, v1alpha1.SiteLabel, site)
+	return fmt.Sprintf("app.kubernetes.io/name=dragonfly,app.kubernetes.io/instance=%s,%s=%s", fg, v1beta1.SiteLabel, site)
 }
 
 // ListDragonflyPods returns Dragonfly pods for one site.

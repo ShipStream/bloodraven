@@ -5,7 +5,7 @@ package envtest
 import (
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -23,7 +23,7 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	if backup.Status.Phase != v1alpha1.BackupPhaseRunning || backup.Status.JobName == "" {
+	if backup.Status.Phase != v1beta1.BackupPhaseRunning || backup.Status.JobName == "" {
 		t.Fatalf("expected launched backup, got %+v", backup.Status)
 	}
 	var job batchv1.Job
@@ -51,7 +51,7 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), fg); err != nil {
 		t.Fatal(err)
 	}
-	fg.Spec.Backup.Profiles[0].Encryption = &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "new-passphrase"}}
+	fg.Spec.Backup.Profiles[0].Encryption = &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "new-passphrase"}}
 	if err := k8sClient.Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -72,11 +72,11 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Status.Encryption == nil || *backup.Status.Encryption != (v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModeNone}) {
+	if backup.Status.Phase != v1beta1.BackupPhaseSucceeded || backup.Status.Encryption == nil || *backup.Status.Encryption != (v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModeNone}) {
 		t.Fatalf("plaintext Job misattributed after profile change: %+v", backup.Status)
 	}
 	// Reproduce a historical bad status and repair through a fresh reconciler.
-	backup.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+	backup.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestEnvtest_BackupEncryptionAttributionSurvivesProfileChange(t *testing.T) 
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	if backup.Status.Encryption == nil || backup.Status.Encryption.Mode != v1alpha1.EncryptionModeNone || backup.Status.Encryption.Algorithm != "" {
+	if backup.Status.Encryption == nil || backup.Status.Encryption.Mode != v1beta1.EncryptionModeNone || backup.Status.Encryption.Algorithm != "" {
 		t.Fatalf("historical attribution not repaired: %+v", backup.Status)
 	}
 }

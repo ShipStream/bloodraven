@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/controller"
 	batchv1 "k8s.io/api/batch/v1"
@@ -32,7 +32,7 @@ func TestEnvtest_BackupCompletionMetadataRecoversAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	fg.Status.ActiveSite = "dc1"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestEnvtest_BackupCompletionMetadataRecoversAfterRestart(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded || backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.Location != location || result.RequeueAfter <= 0 {
+	if backup.Status.Phase != v1beta1.BackupPhaseSucceeded || backup.Status.ArtifactStorage == nil || backup.Status.ArtifactStorage.Location != location || result.RequeueAfter <= 0 {
 		t.Fatalf("successful artifact lost during log outage: result=%+v status=%+v", result, backup.Status)
 	}
 	completion := backup.Status.CompletionTime.DeepCopy()
@@ -109,7 +109,7 @@ func TestEnvtest_BackupCompletionMetadataRecoversAfterRestart(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
+	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1beta1.ConditionMetadataComplete)
 	if backup.Status.ArtifactStorage.Location != location || backup.Status.SizeBytes != 42 || backup.Status.GtidExecuted != "uuid:my_tag:1-3" || condition == nil || condition.Status != metav1.ConditionTrue || !backup.Status.CompletionTime.Equal(completion) {
 		t.Fatalf("completion metadata was not durably recovered: %+v", backup.Status)
 	}

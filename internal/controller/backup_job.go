@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
@@ -66,9 +66,9 @@ const (
 // everything in a struct avoids an exploding parameter list as new fields
 // (TLS, extra labels, env overrides) get added.
 type BackupJobInputs struct {
-	FailoverGroup *v1alpha1.MysqlFailoverGroup
-	Profile       v1alpha1.BackupProfile
-	Backup        *v1alpha1.MysqlBackup
+	FailoverGroup *v1beta1.MysqlFailoverGroup
+	Profile       v1beta1.BackupProfile
+	Backup        *v1beta1.MysqlBackup
 	SourceSite    string
 	// CredsSecretName is the name of the derived Secret created by the
 	// MysqlBackupReconciler that holds MYSQL_USER / MYSQL_PASSWORD.
@@ -154,17 +154,17 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	// Labels applied to both Job and pod so listings/queries work.
 	labels := map[string]string{
-		labelAppName:                "mysql-backup",
-		labelInstance:               fg.Name,
-		v1alpha1.FailoverGroupLabel: fg.Name,
-		v1alpha1.SiteLabel:          in.SourceSite,
-		v1alpha1.MysqlBackupLabel:   backup.Name,
-		v1alpha1.BackupProfileLabel: in.Profile.Name,
-		labelManagedBy:              managerName,
-		v1alpha1.ResourceLabel:      "backup",
+		labelAppName:               "mysql-backup",
+		labelInstance:              fg.Name,
+		v1beta1.FailoverGroupLabel: fg.Name,
+		v1beta1.SiteLabel:          in.SourceSite,
+		v1beta1.MysqlBackupLabel:   backup.Name,
+		v1beta1.BackupProfileLabel: in.Profile.Name,
+		labelManagedBy:             managerName,
+		v1beta1.ResourceLabel:      "backup",
 	}
 	if encrypted {
-		labels[v1alpha1.BackupEncryptedLabel] = v1alpha1.LabelValueTrue
+		labels[v1beta1.BackupEncryptedLabel] = v1beta1.LabelValueTrue
 	}
 
 	// --- Shared base envVars / storage / credentials volumes -----------
@@ -219,7 +219,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	var awsCredsVolume *corev1.Volume
 	var awsCredsMount *corev1.VolumeMount
-	if in.Profile.Storage.Type == v1alpha1.BackupStorageS3 && in.Profile.Storage.S3 != nil {
+	if in.Profile.Storage.Type == v1beta1.BackupStorageS3 && in.Profile.Storage.S3 != nil {
 		awsCredsVolume = &corev1.Volume{
 			Name: "aws-creds",
 			VolumeSource: corev1.VolumeSource{
@@ -558,8 +558,8 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	}
 
 	annotations := map[string]string{
-		v1alpha1.BackupJobFailoverGroupUIDAnnotation: string(stamp.Source.UID),
-		v1alpha1.BackupJobPITRArchiveIDAnnotation:    stamp.PITRArchiveID,
+		v1beta1.BackupJobFailoverGroupUIDAnnotation: string(stamp.Source.UID),
+		v1beta1.BackupJobPITRArchiveIDAnnotation:    stamp.PITRArchiveID,
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -607,7 +607,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 // archiveID is the archive the group's rendered writers archive to (K5):
 // a backup is a PITR baseline only for the archive the pods actually
 // write, which a held render can keep on the previous prefix.
-func backupStampTemplate(fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, profile v1alpha1.BackupProfile, sourceSite, archiveID string) (backupmeta.Stamp, error) {
+func backupStampTemplate(fg *v1beta1.MysqlFailoverGroup, backup *v1beta1.MysqlBackup, profile v1beta1.BackupProfile, sourceSite, archiveID string) (backupmeta.Stamp, error) {
 	site := fg.Spec.SiteByName(sourceSite)
 	if site == nil {
 		return backupmeta.Stamp{}, fmt.Errorf("backup job: source site %q is not in spec.sites", sourceSite)
@@ -642,7 +642,7 @@ func backupJobIdentity(job *batchv1.Job) (types.UID, string) {
 	if job == nil {
 		return "", ""
 	}
-	return types.UID(job.Annotations[v1alpha1.BackupJobFailoverGroupUIDAnnotation]), job.Annotations[v1alpha1.BackupJobPITRArchiveIDAnnotation]
+	return types.UID(job.Annotations[v1beta1.BackupJobFailoverGroupUIDAnnotation]), job.Annotations[v1beta1.BackupJobPITRArchiveIDAnnotation]
 }
 
 // mergeSecurityContexts returns the hardened pod- and container-level
@@ -769,7 +769,7 @@ func mergeSecurityContexts(userPod *corev1.PodSecurityContext, userContainer *co
 }
 
 // backupMySQLHost returns the in-cluster hostname of a site's MySQL service.
-func backupMySQLHost(fg *v1alpha1.MysqlFailoverGroup, siteName string) string {
+func backupMySQLHost(fg *v1beta1.MysqlFailoverGroup, siteName string) string {
 	return fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, siteName, fg.Namespace), mysqlPort)
 }
 
@@ -777,11 +777,11 @@ func backupMySQLHost(fg *v1alpha1.MysqlFailoverGroup, siteName string) string {
 // the selected profile storage. For S3 destinations it also encodes the
 // bucket/endpoint as env vars so the static Python script can pick them up
 // without templating.
-func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.BackupProfile, backupName string) (
+func resolveBackupStorage(fg *v1beta1.MysqlFailoverGroup, profile v1beta1.BackupProfile, backupName string) (
 	string, []corev1.EnvVar, []corev1.Volume, []corev1.VolumeMount, error) {
 
 	switch profile.Storage.Type {
-	case v1alpha1.BackupStorageS3:
+	case v1beta1.BackupStorageS3:
 		s3 := profile.Storage.S3
 		if s3 == nil {
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=S3 but storage.s3 is nil", profile.Name)
@@ -815,7 +815,7 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 		}
 		return outputURL, env, nil, nil, nil
 
-	case v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStoragePVC:
 		pvc := profile.Storage.PVC
 		if pvc == nil {
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=PVC but storage.pvc is nil", profile.Name)
@@ -857,7 +857,7 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 // marshalDumpOptions serializes the DumpOptions into the shape expected by
 // mysqlsh util.dumpInstance(). Nil defaults fall back to the script's own
 // defaults (i.e. mysqlsh defaults).
-func marshalDumpOptions(d *v1alpha1.DumpOptions) (string, error) {
+func marshalDumpOptions(d *v1beta1.DumpOptions) (string, error) {
 	if d == nil {
 		return "{}", nil
 	}
@@ -898,7 +898,7 @@ var errDumpGtidBaselineNeedsSkipBinlog = errors.New("installing the dump GTID se
 // marshalLoadOptions and adds updateGtidSet:"replace", which makes
 // util.loadDump() set the target's @@GLOBAL.gtid_purged to the dump's
 // recorded gtidExecuted. It is an internal knob, deliberately not on
-// v1alpha1.LoadOptions.
+// v1beta1.LoadOptions.
 //
 // Use it only for a load into a fresh instance that will then replay
 // archived binlogs with their original GTIDs (bootstrap PITR restore,
@@ -911,7 +911,7 @@ var errDumpGtidBaselineNeedsSkipBinlog = errors.New("installing the dump GTID se
 // errDumpGtidBaselineNeedsSkipBinlog. Never use it on a live server:
 // "replace" requires the dump set to be disjoint from what that server
 // already executed.
-func marshalDumpGtidBaselineLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
+func marshalDumpGtidBaselineLoadOptions(l *v1beta1.LoadOptions) (string, error) {
 	if l != nil && l.SkipBinlog != nil && !*l.SkipBinlog {
 		return "", errDumpGtidBaselineNeedsSkipBinlog
 	}
@@ -934,7 +934,7 @@ func marshalDumpGtidBaselineLoadOptions(l *v1alpha1.LoadOptions) (string, error)
 
 // marshalLoadOptions serializes LoadOptions into the shape expected by
 // mysqlsh util.loadDump().
-func marshalLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
+func marshalLoadOptions(l *v1beta1.LoadOptions) (string, error) {
 	if l == nil {
 		return "{}", nil
 	}

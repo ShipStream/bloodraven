@@ -11,7 +11,7 @@ import (
 	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // groupSiteIdentityStore keeps the server_uuids each site of a group has
@@ -54,7 +54,7 @@ func parseServerUUIDHistory(raw string, logger *slog.Logger, nn types.Namespaced
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		if logger != nil {
 			logger.Warn("ignoring an undecodable server_uuid history", "fg", nn,
-				"annotation", v1alpha1.ServerUUIDHistoryAnnotation, "error", err)
+				"annotation", v1beta1.ServerUUIDHistoryAnnotation, "error", err)
 		}
 		return map[string][]string{}
 	}
@@ -77,11 +77,11 @@ func (s *groupSiteIdentityStore) Load(ctx context.Context) (map[string][]string,
 	if reader == nil {
 		reader = s.client
 	}
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := reader.Get(ctx, s.nn, &fg); err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
-	return s.parseSiteIdentities(fg.Annotations[v1alpha1.ServerUUIDHistoryAnnotation]), nil
+	return s.parseSiteIdentities(fg.Annotations[v1beta1.ServerUUIDHistoryAnnotation]), nil
 }
 
 // Add appends entry to site's timeline with a write conditioned on the
@@ -94,7 +94,7 @@ func (s *groupSiteIdentityStore) Add(ctx context.Context, site, serverUUID strin
 		return nil
 	}
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-		var fresh v1alpha1.MysqlFailoverGroup
+		var fresh v1beta1.MysqlFailoverGroup
 		if err := s.client.Get(ctx, s.nn, &fresh); err != nil {
 			return err
 		}
@@ -117,12 +117,12 @@ func (s *groupSiteIdentityStore) Add(ctx context.Context, site, serverUUID strin
 // record uses it too, so that the server_uuid a clone recipient gives up
 // and the clone itself are stored by the write the clone waits for
 // (groupCloneIdentityStore.Record).
-func addServerUUIDHistory(fg *v1alpha1.MysqlFailoverGroup, site, entry string, logger *slog.Logger, nn types.NamespacedName) (bool, error) {
+func addServerUUIDHistory(fg *v1beta1.MysqlFailoverGroup, site, entry string, logger *slog.Logger, nn types.NamespacedName) (bool, error) {
 	entry = normalizeServerUUID(entry)
 	if site == "" || entry == "" {
 		return false, nil
 	}
-	records := parseServerUUIDHistory(fg.Annotations[v1alpha1.ServerUUIDHistoryAnnotation], logger, nn)
+	records := parseServerUUIDHistory(fg.Annotations[v1beta1.ServerUUIDHistoryAnnotation], logger, nn)
 	next, changed := appendServerUUIDEntry(records[site], entry)
 	if !changed {
 		return false, nil
@@ -136,7 +136,7 @@ func addServerUUIDHistory(fg *v1alpha1.MysqlFailoverGroup, site, entry string, l
 		records[site] = records[site][1:]
 	}
 	for name := range records {
-		if !slices.ContainsFunc(fg.Spec.Sites, func(sp v1alpha1.SiteSpec) bool { return sp.Name == name }) {
+		if !slices.ContainsFunc(fg.Spec.Sites, func(sp v1beta1.SiteSpec) bool { return sp.Name == name }) {
 			delete(records, name)
 		}
 	}
@@ -152,7 +152,7 @@ func addServerUUIDHistory(fg *v1alpha1.MysqlFailoverGroup, site, entry string, l
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	annotations[v1alpha1.ServerUUIDHistoryAnnotation] = string(raw)
+	annotations[v1beta1.ServerUUIDHistoryAnnotation] = string(raw)
 	fg.SetAnnotations(annotations)
 	return true, nil
 }

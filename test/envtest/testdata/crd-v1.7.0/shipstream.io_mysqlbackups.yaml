@@ -1,0 +1,445 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: mysqlbackups.shipstream.io
+spec:
+  group: shipstream.io
+  names:
+    categories:
+    - bloodraven
+    - mysql
+    kind: MysqlBackup
+    listKind: MysqlBackupList
+    plural: mysqlbackups
+    shortNames:
+    - mbk
+    - mbks
+    singular: mysqlbackup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.failoverGroupRef.name
+      name: Group
+      type: string
+    - jsonPath: .spec.profileName
+      name: Profile
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.startTime
+      name: Started
+      type: date
+    - jsonPath: .status.completionTime
+      name: Completed
+      type: date
+    - jsonPath: .status.artifactStorage.location
+      name: Location
+      priority: 1
+      type: string
+    - jsonPath: .status.size
+      name: Size
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          MysqlBackup represents a single backup run against a MysqlFailoverGroup.
+          It may be created directly by an operator (one-off backup) or indirectly
+          by a CronJob materialized from spec.backup.schedules[].
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MysqlBackupSpec defines the desired state of a MysqlBackup.
+            properties:
+              deletionPolicy:
+                default: Delete
+                description: |-
+                  DeletionPolicy controls what happens to the backup's artifact when
+                  this CR is deleted, by hand or by retention:
+                    - Delete (default) removes the artifact from storage, and then the
+                      backup's dump-key snapshot Secret, so retention frees storage.
+                    - Retain leaves the artifact in storage and keeps the dump-key
+                      snapshot Secret that decrypts it; an ArtifactRetained Event names
+                      both. Nothing tracks them afterwards: delete them by hand when
+                      they are no longer needed.
+                  It is read when the deletion is processed, so it can be changed up to
+                  then. Once the deletion has started the cleanup (status.cleanupStartTime
+                  is set just before the first cleanup Job is created), a change to
+                  Retain is not applied: a cleanup Job may already have deleted part of
+                  the artifact, so the cleanup runs to its end.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              failoverGroupRef:
+                description: |-
+                  FailoverGroupRef identifies the MysqlFailoverGroup in the same
+                  namespace whose profile should drive this backup.
+                properties:
+                  name:
+                    description: Name of the MysqlFailoverGroup.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                    type: string
+                required:
+                - name
+                type: object
+              profileName:
+                description: |-
+                  ProfileName is the name of a spec.backup.profiles[] entry on the
+                  referenced failover group.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              sourceSite:
+                description: |-
+                  SourceSite, if set, forces a specific site (a spec.sites[].name of
+                  the referenced group) to be the dump source. Leave empty to let the
+                  reconciler choose (replica-first).
+                maxLength: 20
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - failoverGroupRef
+            - profileName
+            type: object
+          status:
+            description: MysqlBackupStatus tracks the observed state of a MysqlBackup.
+            properties:
+              activeSiteAtStart:
+                description: |-
+                  ActiveSiteAtStart records MysqlFailoverGroup.status.activeSite as
+                  observed when this backup's Job was created. The reconciler uses
+                  this to emit an InFlightFailover warning when the group's active
+                  site drifts while the backup is running.
+                type: string
+              artifactStorage:
+                description: |-
+                  ArtifactStorage records the storage destination the producing Job
+                  wrote to: the storage type and the exact artifact location, plus
+                  bucket, endpoint and region for S3 or the claim for PVC. It is
+                  captured from the Job when the Job is created and never follows later
+                  profile edits, so restores, verifications and artifact cleanup cannot
+                  be redirected to another bucket, claim or prefix. Once its location is
+                  recorded it is immutable. Credentials are deliberately not recorded:
+                  consumers read them from the profile's current credentialsSecretName.
+                  Durable: after the producing Job is gone it is the only record of
+                  where the artifact is and which key encrypted it.
+                properties:
+                  bucket:
+                    description: Bucket is the S3 bucket the artifact was written
+                      to.
+                    type: string
+                  claimName:
+                    description: ClaimName is the PersistentVolumeClaim the artifact
+                      was written to.
+                    type: string
+                  endpointURL:
+                    description: |-
+                      EndpointURL is the S3 endpoint override in effect for the producing
+                      Job, empty for the AWS default endpoint.
+                    type: string
+                  location:
+                    description: |-
+                      Location is the artifact location the producing Job wrote, e.g.
+                      "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
+                    type: string
+                  passphraseSecretKeyRef:
+                    description: |-
+                      PassphraseSecretKeyRef is the passphrase Secret and key the producing Job
+                      mounted, for an encrypted backup: the backup's own immutable dump-key
+                      snapshot (mysqlbackup-<name>-dump-key-<uid8>, key passphrase), which
+                      the operator made from the profile's passphrase before the Job and
+                      deletes only after the backup's artifacts are deleted. Restores,
+                      verifications and cleanup of a backup that never succeeded decrypt
+                      with it, so a profile edited since the launch does not decide which
+                      passphrase is used.
+                    properties:
+                      key:
+                        description: Key is the data key within the Secret.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        description: Name is the Secret name.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  region:
+                    description: Region is the S3 region in effect for the producing
+                      Job.
+                    type: string
+                  type:
+                    description: Type is the storage backend the producing Job wrote
+                      to.
+                    enum:
+                    - S3
+                    - PVC
+                    type: string
+                required:
+                - type
+                type: object
+              attempt:
+                description: |-
+                  Attempt is the retry attempt number for scheduled CRs: 1 for the
+                  original attempt, 2 for the first retry, and so on. 0 is treated
+                  as 1 for older CRs.
+                format: int32
+                type: integer
+              binlogPosition:
+                description: |-
+                  BinlogPosition is the binary-log position at dump time, for
+                  pre-GTID point-in-time tooling. Unset when the dump did not report
+                  one.
+                properties:
+                  file:
+                    description: File is the binary-log file name, e.g. "mysql-bin.000412".
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  position:
+                    description: Position is the byte offset within File.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                required:
+                - file
+                - position
+                type: object
+              cleanupStartTime:
+                description: |-
+                  CleanupStartTime is when the deletion of this backup committed to
+                  removing its artifact. It is recorded just before the first cleanup
+                  Job is created, against the spec that said Delete. It is removed
+                  again only when that Job cannot be created; otherwise it stays, and
+                  a deletionPolicy changed to Retain is no longer applied.
+                format: date-time
+                type: string
+              completionTime:
+                description: CompletionTime is when the backup Job reached a terminal
+                  state.
+                format: date-time
+                type: string
+              conditions:
+                description: |-
+                  Conditions represent the latest available observations of this
+                  backup's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              encryption:
+                description: |-
+                  Encryption attributes the artifact's encryption: Passphrase when the
+                  producing Job encrypted it (artifactStorage.passphraseSecretKeyRef
+                  names the key), None when it wrote plaintext. It is written from the
+                  owned producing Job when the Job is created, and derived again from
+                  that Job at completion. Absent when no owned producing Job attributes
+                  it. Restores and verifications use it to decide whether to decrypt.
+                properties:
+                  algorithm:
+                    description: |-
+                      Algorithm is the algorithm stamped onto the artifact header; empty
+                      for None.
+                    enum:
+                    - AES-256-GCM
+                    type: string
+                  mode:
+                    description: Mode is Passphrase for an encrypted artifact and
+                      None for plaintext.
+                    enum:
+                    - None
+                    - Passphrase
+                    type: string
+                required:
+                - mode
+                type: object
+              failoverGroupUID:
+                description: |-
+                  FailoverGroupUID is the metadata.uid of the source failover group,
+                  pinned in the backup Job's template when the Job is created and
+                  recovered from the Job. The backup's stamp records the same UID.
+                  Durable: after the producing Job is gone it is the only record of
+                  which group incarnation produced the artifact.
+                type: string
+              gtidExecuted:
+                description: |-
+                  GtidExecuted is the value of @@global.gtid_executed captured at
+                  dump time. Empty on non-GTID instances.
+                type: string
+              jobName:
+                description: JobName is the name of the batchv1.Job running the dump.
+                type: string
+              message:
+                description: Message is a human-readable status message.
+                type: string
+              mysqlImage:
+                description: |-
+                  MysqlImage is the resolved MySQL server image (spec.image, or the
+                  controller default) that was in use on the source failover group
+                  when this backup was taken. Captured when the backup Job is
+                  created, and filled from the live spec on a later reconcile when
+                  empty. Verification Jobs run on the backup image (spec.backup.image)
+                  and do not read this field.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation this status was
+                  computed against.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is the lifecycle phase of this backup run.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                type: string
+              pitrArchiveID:
+                description: |-
+                  PITRArchiveID is the archive ID of the source group's active PITR
+                  archive when the Job was created, pinned in the Job's template and
+                  recovered from it. Empty when PITR was disabled.
+                  Durable: PITR replay and binlog retention select the archive by it.
+                pattern: ^(ar1-[a-z2-7]{26})?$
+                type: string
+              size:
+                description: |-
+                  Size is the reported backup size as a human-readable string, best
+                  effort. Empty when the Job log did not report a size.
+                type: string
+              sizeBytes:
+                description: |-
+                  SizeBytes is the structured backup size emitted by the dump
+                  sidecar. 0 when unknown (e.g. remote output where the dump
+                  utility did not return a total).
+                format: int64
+                type: integer
+              sourceSite:
+                description: |-
+                  SourceSite is the site name whose MySQL instance was used as the
+                  dump source.
+                type: string
+              startTime:
+                description: StartTime is when the backup Job was created.
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name must be at most 63 characters: it is a label value
+            on the objects the run creates'
+          rule: size(self.metadata.name) <= 63
+        - message: spec.failoverGroupRef is immutable; create a new object instead
+          rule: self.spec.failoverGroupRef.name == oldSelf.spec.failoverGroupRef.name
+        - message: spec.profileName is immutable; create a new object instead
+          rule: self.spec.profileName == oldSelf.spec.profileName
+        - message: spec.sourceSite is immutable; create a new object instead
+          rule: has(self.spec.sourceSite) == has(oldSelf.spec.sourceSite) && (!has(self.spec.sourceSite)
+            || self.spec.sourceSite == oldSelf.spec.sourceSite)
+        - message: 'metadata.name must not end in .bloodraven-backup.json: that is
+            the backup stamp''s key suffix, and the dump location ends in the backup''s
+            name'
+          rule: '!self.metadata.name.endsWith(''.bloodraven-backup.json'')'
+        - message: status.artifactStorage cannot be changed or removed once its location
+            is recorded
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location)
+            || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage
+            == oldSelf.status.artifactStorage)'
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -11,7 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -159,7 +159,7 @@ func s36CreateBackup() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			b, err := waitForBackupPhase(waitCtx, env, name, v1alpha1.BackupPhaseSucceeded)
+			b, err := waitForBackupPhase(waitCtx, env, name, v1beta1.BackupPhaseSucceeded)
 			if err != nil {
 				return err
 			}
@@ -203,10 +203,10 @@ func s36RejectInvalidConfirm() runner.Step {
 				return err
 			}
 			backupName := ctxFetch(env, "backupName")
-			spec := v1alpha1.RestoreInPlaceSpec{
+			spec := v1beta1.RestoreInPlaceSpec{
 				Confirm:     "not-a-timestamp",
-				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
-				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
+				Source:      v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: backupName}},
+				LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
 			}
 			_, err = patchRestoreInPlace(ctx, env, spec)
 			if err == nil {
@@ -281,10 +281,10 @@ func s36StartRestoreThenOutage() runner.Step {
 				return err
 			}
 			env.Capture.Note("applying fresh confirm=" + confirm)
-			spec := v1alpha1.RestoreInPlaceSpec{
+			spec := v1beta1.RestoreInPlaceSpec{
 				Confirm:     confirm,
-				Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: backupName}},
-				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
+				Source:      v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: backupName}},
+				LoadOptions: &v1beta1.LoadOptions{IncludeSchemas: []string{s36RestoreDB}},
 			}
 			stale, err := patchRestoreInPlace(ctx, env, spec)
 			if err != nil {
@@ -328,7 +328,7 @@ func s36ObserveFailedSafely() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			rip, err := waitRestoreInPlacePhase(waitCtx, env, v1alpha1.RestoreInPlaceFailed)
+			rip, err := waitRestoreInPlacePhase(waitCtx, env, v1beta1.RestoreInPlaceFailed)
 			if err != nil {
 				return fmt.Errorf("restore did not reach terminal Failed: %w", err)
 			}
@@ -402,7 +402,7 @@ func s36RequireStableFailed(ctx context.Context, env *runner.Env, wantConfirm st
 		if rip == nil {
 			return fmt.Errorf("status.restoreInPlace cleared while it must hold terminal Failed")
 		}
-		if rip.Phase != v1alpha1.RestoreInPlaceFailed {
+		if rip.Phase != v1beta1.RestoreInPlaceFailed {
 			return fmt.Errorf("restoreInPlace re-armed off terminal Failed on the same confirm: phase=%q confirmUsed=%q message=%q "+
 				"(a failed-but-executed restore must hold; retrying requires a new monotonic confirm)",
 				rip.Phase, rip.ConfirmTokenUsed, rip.Message)
@@ -436,7 +436,7 @@ func s36VerifySafety() runner.Step {
 				return err
 			}
 			rip := mfg.Status.RestoreInPlace
-			if rip == nil || rip.Phase != v1alpha1.RestoreInPlaceFailed {
+			if rip == nil || rip.Phase != v1beta1.RestoreInPlaceFailed {
 				return fmt.Errorf("restoreInPlace not terminal Failed at verify: %v", rip)
 			}
 			if wantTarget != "" && rip.TargetSite != wantTarget {
@@ -456,15 +456,15 @@ func s36VerifySafety() runner.Step {
 			if mfg.Status.ActiveSite != activeAtRestore {
 				return fmt.Errorf("status.activeSite changed %q -> %q during a frozen in-place restore", activeAtRestore, mfg.Status.ActiveSite)
 			}
-			if _, ok := mfg.Annotations[v1alpha1.RecloneAnnotation]; ok {
-				return fmt.Errorf("unexpected reclone annotation set for a per-schema restore: %q", mfg.Annotations[v1alpha1.RecloneAnnotation])
+			if _, ok := mfg.Annotations[v1beta1.RecloneAnnotation]; ok {
+				return fmt.Errorf("unexpected reclone annotation set for a per-schema restore: %q", mfg.Annotations[v1beta1.RecloneAnnotation])
 			}
 			writable := 0
 			for _, s := range mfg.Status.Sites {
-				if s.State == v1alpha1.SiteStateWritable {
+				if s.State == v1beta1.SiteStateWritable {
 					writable++
 				}
-				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+				if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 					return fmt.Errorf("site %s RecoveryBlocked after failed restore", s.Name)
 				}
 			}

@@ -13,7 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgrustfs "github.com/shipstream/bloodraven/internal/playground/rustfs"
@@ -210,7 +210,7 @@ func (a *Actions) PartitionSite(ctx context.Context, site string) error {
 // The annotation is the public CR-driven trigger documented on
 // PlannedFailoverSpec.OnCooldown.
 func (a *Actions) AnnotatePlannedFailover(ctx context.Context, target string) error {
-	key := v1alpha1.PlannedFailoverAnnotation
+	key := v1beta1.PlannedFailoverAnnotation
 	if err := a.K.AnnotateMFGNamed(ctx, a.Namespace, a.FG, key, target); err != nil {
 		return fmt.Errorf("set planned-failover annotation: %w", err)
 	}
@@ -228,7 +228,7 @@ func (a *Actions) AnnotatePlannedFailover(ctx context.Context, target string) er
 // scenario needs a per-request knob such as a short maxLagWait to force the
 // WaitingForLag → Failed{LagTimeout} rollback.
 func (a *Actions) AnnotatePlannedFailoverRaw(ctx context.Context, rawValue string) error {
-	key := v1alpha1.PlannedFailoverAnnotation
+	key := v1beta1.PlannedFailoverAnnotation
 	if rawValue == "" {
 		return fmt.Errorf("planned-failover raw annotation value must not be empty")
 	}
@@ -351,7 +351,7 @@ func (a *Actions) WipeSiteData(ctx context.Context, site, fgGroup string) error 
 	}
 	// Clear the readonly taint from every node so the local-path-
 	// provisioner helper pod can run when the new PVC is created.
-	taintKey := v1alpha1.ReadOnlyTaintKey(a.Namespace, fgGroup)
+	taintKey := v1beta1.ReadOnlyTaintKey(a.Namespace, fgGroup)
 	nodes, err := a.K.ListNodes(ctx)
 	if err != nil {
 		return fmt.Errorf("list nodes: %w", err)
@@ -713,10 +713,10 @@ func (a *Actions) PatchDragonflySnapshotUpgrade(ctx context.Context, image strin
 	}
 	originalStrategy := mfg.Spec.Dragonfly.UpgradeStrategy
 	if originalStrategy == "" {
-		originalStrategy = v1alpha1.DragonflyUpgradeStrategyRolling
+		originalStrategy = v1beta1.DragonflyUpgradeStrategyRolling
 	}
 	if err := a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{
-		{Op: "add", Path: "/spec/dragonfly/upgradeStrategy", Value: string(v1alpha1.DragonflyUpgradeStrategySnapshotRestore)},
+		{Op: "add", Path: "/spec/dragonfly/upgradeStrategy", Value: string(v1beta1.DragonflyUpgradeStrategySnapshotRestore)},
 		{Op: "replace", Path: "/spec/dragonfly/image", Value: image},
 	}); err != nil {
 		return fmt.Errorf("patch dragonfly snapshot upgrade: %w", err)

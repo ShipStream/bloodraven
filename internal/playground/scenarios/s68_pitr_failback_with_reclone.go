@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -180,7 +180,7 @@ func s68VerifyCycle1() runner.Step {
 					return err
 				}
 				if err := pitrVerify(ctx, env, s68ID, s68DBName, c.label, pitrExpectation{
-					Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered, Markers: c.markers,
+					Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Outcome: v1beta1.PointInTimeTargetCovered, Markers: c.markers,
 				}); err != nil {
 					return err
 				}
@@ -263,7 +263,7 @@ func s68VerifyCycle2Tail() runner.Step {
 					return err
 				}
 				if err := pitrVerify(ctx, env, s68ID, s68DBName, c.label, pitrExpectation{
-					Backup: "b1", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered, Markers: c.markers,
+					Backup: "b1", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Outcome: v1beta1.PointInTimeTargetCovered, Markers: c.markers,
 				}); err != nil {
 					return err
 				}
@@ -290,7 +290,7 @@ func s68VerifyNewBackup() runner.Step {
 				return err
 			}
 			return pitrVerify(ctx, env, s68ID, s68DBName, "c2-b2", pitrExpectation{
-				Backup: "b2", Mode: v1alpha1.PointInTimeModeTimestamp, Fence: f, Outcome: v1alpha1.PointInTimeTargetCovered,
+				Backup: "b2", Mode: v1beta1.PointInTimeModeTimestamp, Fence: f, Outcome: v1beta1.PointInTimeTargetCovered,
 				Markers: []string{"baseline", "M1", "M1b", "M2", "M2b", "M3", "M3b", "M4", "M4b", "M5", "M5b", "M6"},
 			})
 		},

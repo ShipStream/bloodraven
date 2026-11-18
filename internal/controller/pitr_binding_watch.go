@@ -8,7 +8,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // mapVerificationToGroup enqueues the group a MysqlBackupVerification
@@ -17,7 +17,7 @@ import (
 // pass lists the namespace's verifications and filters them in memory
 // (listPITRVerifications).
 func (r *MysqlFailoverGroupReconciler) mapVerificationToGroup(_ context.Context, obj client.Object) []reconcile.Request {
-	v, ok := obj.(*v1alpha1.MysqlBackupVerification)
+	v, ok := obj.(*v1beta1.MysqlBackupVerification)
 	if !ok || v.Spec.FailoverGroupRef.Name == "" {
 		return nil
 	}
@@ -30,10 +30,10 @@ func (r *MysqlFailoverGroupReconciler) mapVerificationToGroup(_ context.Context,
 // label, so a predecessor's snapshot only causes a no-op reconcile.
 func (r *MysqlFailoverGroupReconciler) mapPITRKeySnapshotToGroup(_ context.Context, obj client.Object) []reconcile.Request {
 	l := obj.GetLabels()
-	if l[labelAppName] != appNamePITRKeySnapshot || l[v1alpha1.FailoverGroupLabel] == "" {
+	if l[labelAppName] != appNamePITRKeySnapshot || l[v1beta1.FailoverGroupLabel] == "" {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: l[v1alpha1.FailoverGroupLabel]}}}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: l[v1beta1.FailoverGroupLabel]}}}
 }
 
 // pitrKeySnapshotPredicate admits only archive key snapshots

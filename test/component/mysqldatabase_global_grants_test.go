@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func requireNoTenantRestrictions(t *testing.T, server *fakeSQLServer, username string) {
@@ -39,7 +39,7 @@ func TestMysqlDatabaseGlobalGrantsSurviveCleanupRetries(t *testing.T) {
 			var failReady, failFinalizer bool
 			funcs := interceptor.Funcs{
 				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-					if m, ok := obj.(*v1alpha1.MysqlDatabase); ok && failReady && m.Status.Phase == v1alpha1.MysqlDatabasePhaseReady {
+					if m, ok := obj.(*v1beta1.MysqlDatabase); ok && failReady && m.Status.Phase == v1beta1.MysqlDatabasePhaseReady {
 						failReady = false
 						return errors.New("injected Ready patch failure")
 					}
@@ -47,17 +47,17 @@ func TestMysqlDatabaseGlobalGrantsSurviveCleanupRetries(t *testing.T) {
 				},
 				// The finalizer is removed with a metadata merge patch.
 				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-					if m, ok := obj.(*v1alpha1.MysqlDatabase); ok && failFinalizer && !m.DeletionTimestamp.IsZero() && len(m.Finalizers) == 0 {
+					if m, ok := obj.(*v1beta1.MysqlDatabase); ok && failFinalizer && !m.DeletionTimestamp.IsZero() && len(m.Finalizers) == 0 {
 						failFinalizer = false
 						return errors.New("injected finalizer patch failure")
 					}
 					return c.Patch(ctx, obj, patch, opts...)
 				},
 			}
-			grant := v1alpha1.MysqlDatabaseGrant{Username: username, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}
-			cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
-				m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{grant}
-				m.Spec.DeletionPolicy = v1alpha1.DeletionPolicyDelete
+			grant := v1beta1.MysqlDatabaseGrant{Username: username, Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}
+			cr := mdbCR(func(m *v1beta1.MysqlDatabase) {
+				m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{grant}
+				m.Spec.DeletionPolicy = v1beta1.DeletionPolicyDelete
 			})
 			h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 			if username != "operator" {
@@ -70,7 +70,7 @@ func TestMysqlDatabaseGlobalGrantsSurviveCleanupRetries(t *testing.T) {
 			requireNoTenantRestrictions(t, h.server, username)
 			h.server.seedGrantRow(mdbDatabase, username, "%", "SELECT", "INSERT", "CREATE ROUTINE", "ALTER ROUTINE")
 			h.server.seedGrantRow(`acme\_wms`, username, "%", "SELECT", "DELETE")
-			h.update(func(m *v1alpha1.MysqlDatabase) {})
+			h.update(func(m *v1beta1.MysqlDatabase) {})
 			h.reconcile()
 			h.requireReady()
 			requireNoTenantRestrictions(t, h.server, username)
@@ -78,7 +78,7 @@ func TestMysqlDatabaseGlobalGrantsSurviveCleanupRetries(t *testing.T) {
 				t.Fatalf("surplus explicit grants survived: %v", privileges)
 			}
 			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}}
-			h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Grants = nil })
+			h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Grants = nil })
 			failReady = true
 			if _, err := h.r.Reconcile(context.Background(), req); err == nil {
 				t.Fatal("Ready persistence fault did not fire")
@@ -89,7 +89,7 @@ func TestMysqlDatabaseGlobalGrantsSurviveCleanupRetries(t *testing.T) {
 			if _, ok := h.server.grantRow(mdbDatabase, username, "%"); ok {
 				t.Fatal("removed grants[] row remains")
 			}
-			h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{grant} })
+			h.update(func(m *v1beta1.MysqlDatabase) { m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{grant} })
 			h.reconcile()
 			h.requireReady()
 			h.server.seedGrantRow(`acme\_wms`, username, "%", "SELECT")
@@ -117,7 +117,7 @@ func TestMysqlDatabaseSchemaGrantReadFailureNeverBlindlyRevokes(t *testing.T) {
 	h.reconcile()
 	h.requireReady()
 	h.server.seedGrantRow(mdbDatabase, mdbSupportUser, "%", "SELECT", "DELETE")
-	h.update(func(m *v1alpha1.MysqlDatabase) {})
+	h.update(func(m *v1beta1.MysqlDatabase) {})
 	h.server.queryFault = func(query string, _ []driver.NamedValue) error {
 		if strings.HasPrefix(query, "SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES ") {
 			return &mysqldriver.MySQLError{Number: 2013, Message: "injected schema grant read failure"}
@@ -126,7 +126,7 @@ func TestMysqlDatabaseSchemaGrantReadFailureNeverBlindlyRevokes(t *testing.T) {
 	}
 	start := h.server.statementCount()
 	h.reconcile()
-	if h.get().Status.Phase == v1alpha1.MysqlDatabasePhaseReady {
+	if h.get().Status.Phase == v1beta1.MysqlDatabasePhaseReady {
 		t.Fatal("ignored schema grant read failure")
 	}
 	for _, stmt := range h.server.statementsSince(start) {
@@ -143,8 +143,8 @@ func TestMysqlDatabaseSchemaGrantReadFailureNeverBlindlyRevokes(t *testing.T) {
 }
 
 func TestMysqlDatabaseRepairsOnlyIdentifiableLegacyRestrictions(t *testing.T) {
-	h := newMdbHarness(t, mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "cdc", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+	h := newMdbHarness(t, mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Grants = []v1beta1.MysqlDatabaseGrant{{Username: "cdc", Privileges: []v1beta1.MysqlPrivilege{v1beta1.PrivilegeSelect}}}
 	}), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
 	h.server.addUser("cdc", "shared-pw")
 	h.server.globalPrivileges["cdc@%"] = []string{"SELECT", "INSERT"}
@@ -182,7 +182,7 @@ func TestMysqlDatabaseRepairsOnlyIdentifiableLegacyRestrictions(t *testing.T) {
 	// Once a separate administrator restores the grantor, a later apply can
 	// repair the identifiable artifact without lifting real-schema surplus.
 	delete(h.server.restrictions[`acme\_wms`], "operator@%")
-	h.update(func(m *v1alpha1.MysqlDatabase) {})
+	h.update(func(m *v1beta1.MysqlDatabase) {})
 	h.reconcile()
 	h.requireReady()
 	if len(h.server.restrictions[`acme\_wms`]["cdc@%"]) != 0 || !h.sawEvent("PartialRevokeLifted") {
@@ -191,8 +191,8 @@ func TestMysqlDatabaseRepairsOnlyIdentifiableLegacyRestrictions(t *testing.T) {
 }
 
 func TestMysqlDatabaseHostGrantRowsAreReadSeparately(t *testing.T) {
-	h := newMdbHarness(t, mdbCR(func(m *v1alpha1.MysqlDatabase) {
-		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry(mdbSupportSecretName, hostA, hostB)}
+	h := newMdbHarness(t, mdbCR(func(m *v1beta1.MysqlDatabase) {
+		m.Spec.Users = []v1beta1.MysqlDatabaseUser{selectUserEntry(mdbSupportSecretName, hostA, hostB)}
 	}), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 	h.reconcile()
 	h.requireReady()
@@ -200,7 +200,7 @@ func TestMysqlDatabaseHostGrantRowsAreReadSeparately(t *testing.T) {
 	h.server.seedGrantRow(mdbDatabase, mdbSupportUser, hostB, "SELECT", "CREATE ROUTINE")
 	h.server.globalPrivileges[accountKey(mdbSupportUser, hostA)] = []string{"CREATE ROUTINE"}
 	h.server.globalPrivileges[accountKey(mdbSupportUser, hostB)] = []string{"DELETE"}
-	h.update(func(m *v1alpha1.MysqlDatabase) {})
+	h.update(func(m *v1beta1.MysqlDatabase) {})
 	h.reconcile()
 	h.requireReady()
 	for _, host := range []string{hostA, hostB} {

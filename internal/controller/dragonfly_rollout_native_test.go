@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -74,7 +74,7 @@ func TestDragonflyNativeRolloutKeepsCache(t *testing.T) {
 
 	fg := fgWithDragonflyEnabledAndActive() // sites dc1 (MySQL active) and dc2
 	fg.Spec.Dragonfly.Auth = nil
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	sites := []string{"dc1", "dc2"}
 	host := func(site string) string {
 		h, _ := splitHostPort(dragonflyAddr(fg, site), 6379)
@@ -93,7 +93,7 @@ func TestDragonflyNativeRolloutKeepsCache(t *testing.T) {
 		_ = exec.Command(docker, "rm", "-f", proc["dc1"], proc["dc2"], holder["dc1"], holder["dc2"]).Run()
 		_ = exec.Command(docker, "network", "rm", network).Run()
 	})
-	flags := append(buildDragonflyArgs(&v1alpha1.DragonflySpec{}, 6379, 9999), "--proactor_threads=2")
+	flags := append(buildDragonflyArgs(&v1beta1.DragonflySpec{}, 6379, 9999), "--proactor_threads=2")
 	published := map[string]string{}
 	start := func(site string) {
 		run(append([]string{"run", "-d", "--name", proc[site], "--network", "container:" + holder[site], image}, flags...)...)
@@ -184,7 +184,7 @@ func TestDragonflyNativeRolloutKeepsCache(t *testing.T) {
 	createPod := func(site, role string) {
 		t.Helper()
 		pod := dragonflyPodForTest(fg, site, image, true)
-		pod.Labels[v1alpha1.DragonflyRoleLabel] = role
+		pod.Labels[v1beta1.DragonflyRoleLabel] = role
 		if err := c.Create(ctx, pod); err != nil {
 			t.Fatalf("create pod of %s: %v", site, err)
 		}
@@ -405,12 +405,12 @@ func TestDragonflyNativeRolloutKeepsCache(t *testing.T) {
 		if got := sts.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.String() != "500m" {
 			t.Fatalf("StatefulSet %s cpu request = %s, want the new template", site, got.String())
 		}
-		if v := sts.Annotations[v1alpha1.DragonflyRolloutInFlightAnnotation]; v != "" {
+		if v := sts.Annotations[v1beta1.DragonflyRolloutInFlightAnnotation]; v != "" {
 			t.Fatalf("StatefulSet %s is still marked in flight (%s) after the rollout", site, v)
 		}
 	}
 	events := drainEventsCh(recorder.Events, 4096, 50*time.Millisecond)
-	for _, reason := range []string{v1alpha1.EventDragonflySessionsLost, v1alpha1.EventDragonflyRestartedInPlace, v1alpha1.EventDragonflySyncUnproven} {
+	for _, reason := range []string{v1beta1.EventDragonflySessionsLost, v1beta1.EventDragonflyRestartedInPlace, v1beta1.EventDragonflySyncUnproven} {
 		if eventsContain(events, reason) {
 			t.Fatalf("the rollout emitted %s: %v", reason, events)
 		}

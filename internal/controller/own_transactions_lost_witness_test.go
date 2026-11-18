@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -111,7 +111,7 @@ func TestOwnLoss_AuditFindsASiteThatLacksWhatADivergentFollowerHolds(t *testing.
 	f := newWitnessFixture(t, witnessPrimarySet, witnessPrimarySet, witnessHolderSet)
 	f.poll(t, 6)
 
-	if got := recoveryOf(f.tm, "dc3"); got.state != v1alpha1.RecoveryStateBlocked || got.divergentGtid != lossLostGTID {
+	if got := recoveryOf(f.tm, "dc3"); got.state != v1beta1.RecoveryStateBlocked || got.divergentGtid != lossLostGTID {
 		t.Fatalf("dc3 recovery = %+v, want RecoveryBlocked for %s", got, lossLostGTID)
 	}
 	rec := ownLossOf(f.tm, "dc2")
@@ -129,7 +129,7 @@ func TestOwnLoss_AuditFindsASiteThatLacksWhatADivergentFollowerHolds(t *testing.
 		t.Fatalf("handoff refusal = %v, want dc2 refused", err)
 	}
 	snap := f.tm.buildSnapshot(nil)
-	if s := snap.Sites[1]; s.RecoveryState != v1alpha1.RecoveryStateRecloneRequired || s.LostGtid != lossLostGTID || !s.LostToWitness || s.LostComparedTo != "dc3" {
+	if s := snap.Sites[1]; s.RecoveryState != v1beta1.RecoveryStateRecloneRequired || s.LostGtid != lossLostGTID || !s.LostToWitness || s.LostComparedTo != "dc3" {
 		t.Fatalf("snapshot site = %+v, want RecloneRequired, lost to the witness dc3", s)
 	}
 	// Still a replica: its replication may be started, and no reclone is
@@ -251,7 +251,7 @@ func TestOwnLoss_CrossCheckOnlyForLiveIdentities(t *testing.T) {
 	// dc3 holds transactions of its own the primary lacks.
 	f := newWitnessFixture(t, witnessPrimarySet, witnessPrimarySet, witnessPrimarySet+","+lossUUIDThird+":1-5")
 	f.poll(t, 6)
-	if got := recoveryOf(f.tm, "dc3").state; got != v1alpha1.RecoveryStateBlocked {
+	if got := recoveryOf(f.tm, "dc3").state; got != v1beta1.RecoveryStateBlocked {
 		t.Fatalf("dc3 recovery state = %q, want RecoveryBlocked", got)
 	}
 	if rec := ownLossOf(f.tm, "dc2"); rec != nil {
@@ -267,7 +267,7 @@ func TestOwnLoss_CrossCheckOnlyForLiveIdentities(t *testing.T) {
 	g.tm.knownSiteServerUUIDs("dc2", lossUUIDOld)
 	g.tm.markSiteCloned(context.Background(), "dc2")
 	g.poll(t, 6)
-	if got := recoveryOf(g.tm, "dc3").state; got != v1alpha1.RecoveryStateBlocked {
+	if got := recoveryOf(g.tm, "dc3").state; got != v1beta1.RecoveryStateBlocked {
 		t.Fatalf("dc3 recovery state = %q, want RecoveryBlocked", got)
 	}
 	if rec := ownLossOf(g.tm, "dc2"); rec != nil {

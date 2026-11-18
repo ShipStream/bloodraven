@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -100,7 +100,7 @@ func s12ObserveUpdateStarted() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"updatePhase non-empty",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("updatePhase=%q", mfg.Status.UpdatePhase)
 					return mfg.Status.UpdatePhase != "", msg, nil
 				},
@@ -123,13 +123,13 @@ func s12ObserveUpdateComplete() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"updatePhase=\"\" writable=1 read-only=N-1",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
@@ -207,7 +207,7 @@ func s12VerifyClusterHealthy() runner.Step {
 			if err != nil {
 				return err
 			}
-			c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionReady)
+			c := findCondition(mfg.Status.Conditions, v1beta1.ConditionReady)
 			if c == nil || string(c.Status) != "True" {
 				status := "<missing>"
 				if c != nil {
@@ -216,7 +216,7 @@ func s12VerifyClusterHealthy() runner.Step {
 				return fmt.Errorf("Ready condition status=%q (want True)", status)
 			}
 			for _, s := range mfg.Status.Sites {
-				if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+				if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 					return fmt.Errorf("site %s in RecoveryBlocked after roll", s.Name)
 				}
 			}

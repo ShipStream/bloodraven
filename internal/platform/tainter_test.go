@@ -14,7 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
@@ -83,7 +83,7 @@ func TestNodeTainter_ApplyAndRemoveTaint(t *testing.T) {
 	node1Out, _ := client.CoreV1().Nodes().Get(ctx, "node1", metav1.GetOptions{})
 	count := 0
 	for _, taint := range node1Out.Spec.Taints {
-		if taint.Key == v1alpha1.ReadOnlyTaintKey(testNamespace, "orders") {
+		if taint.Key == v1beta1.ReadOnlyTaintKey(testNamespace, "orders") {
 			count++
 		}
 	}
@@ -188,7 +188,7 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 		},
 		Spec: corev1.NodeSpec{
 			Taints: []corev1.Taint{
-				{Key: v1alpha1.ReadOnlyTaintKey(testNamespace, "orders"), Value: "old", Effect: corev1.TaintEffectNoSchedule},
+				{Key: v1beta1.ReadOnlyTaintKey(testNamespace, "orders"), Value: "old", Effect: corev1.TaintEffectNoSchedule},
 			},
 		},
 	}
@@ -206,7 +206,7 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 	if len(out.Spec.Taints) != 1 {
 		t.Fatalf("expected exactly 1 taint, got %v", out.Spec.Taints)
 	}
-	if taint := out.Spec.Taints[0]; taint.Key != v1alpha1.ReadOnlyTaintKey(testNamespace, "orders") || taint.Value != v1alpha1.ReadOnlyTaintValue || taint.Effect != corev1.TaintEffectNoExecute {
+	if taint := out.Spec.Taints[0]; taint.Key != v1beta1.ReadOnlyTaintKey(testNamespace, "orders") || taint.Value != v1beta1.ReadOnlyTaintValue || taint.Effect != corev1.TaintEffectNoExecute {
 		t.Fatalf("expected canonical NoExecute taint, got %v", taint)
 	}
 }
@@ -215,7 +215,7 @@ func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
 // another namespace has its own taint, which removing ours leaves alone,
 // as it leaves the unscoped key of earlier releases (no legacy stripping).
 func TestNodeTainter_NamespaceScopesTheKey(t *testing.T) {
-	other := v1alpha1.ReadOnlyTaintKey("staging", "orders")
+	other := v1beta1.ReadOnlyTaintKey("staging", "orders")
 	unscoped := "shipstream.io/db-readonly-orders"
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
@@ -227,9 +227,9 @@ func TestNodeTainter_NamespaceScopesTheKey(t *testing.T) {
 		},
 		Spec: corev1.NodeSpec{
 			Taints: []corev1.Taint{
-				{Key: other, Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
-				{Key: unscoped, Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
-				{Key: v1alpha1.ReadOnlyTaintKey(testNamespace, "orders"), Value: v1alpha1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: other, Value: v1beta1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: unscoped, Value: v1beta1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: v1beta1.ReadOnlyTaintKey(testNamespace, "orders"), Value: v1beta1.ReadOnlyTaintValue, Effect: corev1.TaintEffectNoExecute},
 			},
 		},
 	}
@@ -248,7 +248,7 @@ func TestNodeTainter_NamespaceScopesTheKey(t *testing.T) {
 	for _, taint := range out.Spec.Taints {
 		got[taint.Key] = true
 	}
-	if got[v1alpha1.ReadOnlyTaintKey(testNamespace, "orders")] || !got[other] || !got[unscoped] || len(got) != 2 {
+	if got[v1beta1.ReadOnlyTaintKey(testNamespace, "orders")] || !got[other] || !got[unscoped] || len(got) != 2 {
 		t.Fatalf("want only this group's taint removed, got %v", out.Spec.Taints)
 	}
 }
@@ -294,7 +294,7 @@ func installPatchReactor(client *fake.Clientset) {
 const testNamespace = "prod"
 
 func hasTaintForGroup(taints []corev1.Taint, group string) bool {
-	key := v1alpha1.ReadOnlyTaintKey(testNamespace, group)
+	key := v1beta1.ReadOnlyTaintKey(testNamespace, group)
 	for _, t := range taints {
 		if t.Key == key && t.Effect == corev1.TaintEffectNoExecute {
 			return true

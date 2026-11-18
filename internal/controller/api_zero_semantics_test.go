@@ -6,7 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // A-37: only an absent timer takes its default; a present value (bounded at
@@ -40,11 +40,11 @@ func TestTopologyTimerDefaultsApplyToNilOnly(t *testing.T) {
 
 func TestPlannedTimersFallThroughOnlyWhenAbsent(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{}
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{}
 	if effectiveMaxLagWait(fg, PlannedFailoverRequest{}) != defaultPlannedFailoverMaxLagWait || effectiveDrainTimeout(fg) != defaultPlannedFailoverDrainTimeout {
 		t.Fatal("unset planned timers do not take the defaults")
 	}
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{MaxLagWait: &metav1.Duration{Duration: time.Second}, DrainTimeout: &metav1.Duration{Duration: 2 * time.Second}}
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{MaxLagWait: &metav1.Duration{Duration: time.Second}, DrainTimeout: &metav1.Duration{Duration: 2 * time.Second}}
 	if effectiveMaxLagWait(fg, PlannedFailoverRequest{}) != time.Second || effectiveDrainTimeout(fg) != 2*time.Second {
 		t.Fatal("set planned timers are not used as given")
 	}
@@ -52,22 +52,22 @@ func TestPlannedTimersFallThroughOnlyWhenAbsent(t *testing.T) {
 		t.Fatal("the annotation override does not win")
 	}
 	// A zero is never rewritten to the default (admission refuses it).
-	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{MaxLagWait: &metav1.Duration{}}
+	fg.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{MaxLagWait: &metav1.Duration{}}
 	if got := effectiveMaxLagWait(fg, PlannedFailoverRequest{}); got != 0 {
 		t.Fatalf("a zero maxLagWait became %v", got)
 	}
-	fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true, PlannedFailover: &v1alpha1.DragonflyPlannedFailoverSpec{MaxSyncWait: &metav1.Duration{Duration: time.Second}}}
+	fg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true, PlannedFailover: &v1beta1.DragonflyPlannedFailoverSpec{MaxSyncWait: &metav1.Duration{Duration: time.Second}}}
 	if got := effectiveDragonflyMaxSyncWait(fg); got != time.Second {
 		t.Fatalf("maxSyncWait = %v, want 1s", got)
 	}
 }
 
 func TestBackupRetryBackoffBounds(t *testing.T) {
-	initial, maxBackoff := backupRetryBackoffBounds(&v1alpha1.BackupRetrySpec{})
+	initial, maxBackoff := backupRetryBackoffBounds(&v1beta1.BackupRetrySpec{})
 	if initial != time.Minute || maxBackoff != 30*time.Minute {
 		t.Fatalf("defaults %v/%v, want 1m/30m", initial, maxBackoff)
 	}
-	initial, maxBackoff = backupRetryBackoffBounds(&v1alpha1.BackupRetrySpec{InitialBackoff: &metav1.Duration{Duration: 1500 * time.Millisecond}, MaxBackoff: &metav1.Duration{Duration: 4 * time.Second}})
+	initial, maxBackoff = backupRetryBackoffBounds(&v1beta1.BackupRetrySpec{InitialBackoff: &metav1.Duration{Duration: 1500 * time.Millisecond}, MaxBackoff: &metav1.Duration{Duration: 4 * time.Second}})
 	if initial != 1500*time.Millisecond || maxBackoff != 4*time.Second {
 		t.Fatalf("set bounds %v/%v", initial, maxBackoff)
 	}

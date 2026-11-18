@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -133,7 +133,7 @@ func (pl *plannedHarness) tickAcks(p int) {
 		if a.padded {
 			v = " " + v + "\n"
 		}
-		if err := pl.store.PatchAnnotations("holdAck", map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: v}); err == nil {
+		if err := pl.store.PatchAnnotations("holdAck", map[string]string{v1beta1.AcknowledgePlannedFailoverHoldAnnotation: v}); err == nil {
 			pl.counts["holdAcks"]++
 		}
 	}
@@ -228,13 +228,13 @@ var (
 func newPlannedHarness(r *trialRunner) *plannedHarness {
 	t := r.trial
 	nn := types.NamespacedName{Namespace: r.cfg.Namespace, Name: r.cfg.Name}
-	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: nn.Namespace, Name: nn.Name}}
+	obj := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: nn.Namespace, Name: nn.Name}}
 	for i, name := range t.SiteNames {
-		obj.Spec.Sites = append(obj.Spec.Sites, v1alpha1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: controller.APISiteRole(t.Roles[i])})
+		obj.Spec.Sites = append(obj.Spec.Sites, v1beta1.SiteSpec{Name: name, ServerID: int64(101 + i), Role: controller.APISiteRole(t.Roles[i])})
 	}
 	cooldown := metav1.Duration{Duration: time.Duration(t.CooldownSec) * time.Second}
 	obj.Spec.FailoverCooldown = &cooldown
-	obj.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{MaxLagWait: &simMaxLagWait, DrainTimeout: &simDrainTimeout}
+	obj.Spec.PlannedFailover = &v1beta1.PlannedFailoverSpec{MaxLagWait: &simMaxLagWait, DrainTimeout: &simDrainTimeout}
 	if p := r.persisted; p != nil && !p.LastFailover.IsZero() {
 		lf := metav1.NewTime(p.LastFailover.UTC().Truncate(time.Second))
 		obj.Status.SetLastFailover(&lf, p.LastFailoverTarget, "")
@@ -267,7 +267,7 @@ func newPlannedHarness(r *trialRunner) *plannedHarness {
 	pl.store.dead = r.cluster.OperatorDead
 	pl.store.yield = pl.sched.Yield
 	pl.store.clusterStatusDenied = r.cluster.StatusDenied
-	pl.store.onCommit = func(kind string, before, after *v1alpha1.MysqlFailoverGroup) {
+	pl.store.onCommit = func(kind string, before, after *v1beta1.MysqlFailoverGroup) {
 		pl.mon.onCommit(kind, before, after)
 		pl.noteCommit(before, after)
 	}
@@ -446,7 +446,7 @@ func (pl *plannedHarness) attributeReleases(owner string) {
 // whose slot already holds a claim proceeds with no view (nil, true): no
 // hydration, no planned restore. Any other start fails (ok=false) and the
 // reconcile retries it.
-func (pl *plannedHarness) startView(replacing bool) (view *v1alpha1.MysqlFailoverGroup, ok bool) {
+func (pl *plannedHarness) startView(replacing bool) (view *v1beta1.MysqlFailoverGroup, ok bool) {
 	obj, err := pl.store.Load(context.Background(), pl.nn)
 	if err == nil {
 		return obj, true
@@ -499,7 +499,7 @@ func (pl *plannedHarness) retryStart(poll int) {
 // restorePlannedFailoverState does). It returns the record the manager
 // started from.
 func (pl *plannedHarness) restoreManager(tm *controller.TopologyManager, rec controller.FailoverStateRecorder,
-	view *v1alpha1.MysqlFailoverGroup) controller.FailoverRecord {
+	view *v1beta1.MysqlFailoverGroup) controller.FailoverRecord {
 	cached := pl.store.Object()
 	tm.RestoreFailoverStateForSim(cached, rec)
 	tm.RestorePlannedFailoverStateForSim(view)
@@ -509,7 +509,7 @@ func (pl *plannedHarness) restoreManager(tm *controller.TopologyManager, rec con
 
 // wiringFrom builds the ManagerWiring from the start's uncached view, as
 // registerManagerWith does (nil: nothing to hydrate).
-func (pl *plannedHarness) wiringFrom(view *v1alpha1.MysqlFailoverGroup) controller.ManagerWiring {
+func (pl *plannedHarness) wiringFrom(view *v1beta1.MysqlFailoverGroup) controller.ManagerWiring {
 	var w controller.ManagerWiring
 	if view == nil {
 		return w
@@ -523,7 +523,7 @@ func (pl *plannedHarness) wiringFrom(view *v1alpha1.MysqlFailoverGroup) controll
 
 // plannedHoldOf is the controller's PlannedHoldFrom: either durable hold
 // record holds.
-func plannedHoldOf(obj *v1alpha1.MysqlFailoverGroup) *controller.PlannedHold {
+func plannedHoldOf(obj *v1beta1.MysqlFailoverGroup) *controller.PlannedHold {
 	return controller.PlannedHoldFrom(obj)
 }
 
@@ -778,8 +778,8 @@ func (pl *plannedHarness) fireRestart() {
 // split by deadline: a marker landing at least the 2m stall deadline after
 // the run's durable stall-since time is a stallMarker2m, otherwise (the 10s
 // released-run deadline) a stallMarkerReleased.
-func (pl *plannedHarness) noteCommit(before, after *v1alpha1.MysqlFailoverGroup) {
-	key := v1alpha1.PlannedFailoverTerminalAnnotation
+func (pl *plannedHarness) noteCommit(before, after *v1beta1.MysqlFailoverGroup) {
+	key := v1beta1.PlannedFailoverTerminalAnnotation
 	v := after.GetAnnotations()[key]
 	if v == "" || v == before.GetAnnotations()[key] {
 		return
@@ -788,13 +788,13 @@ func (pl *plannedHarness) noteCommit(before, after *v1alpha1.MysqlFailoverGroup)
 	if !ok {
 		return
 	}
-	id, since, ok := parseDeadlineStart(before.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation])
+	id, since, ok := parseDeadlineStart(before.GetAnnotations()[v1beta1.PlannedFailoverStallSinceAnnotation])
 	if !ok || id != m.RunID {
 		return
 	}
 	if pl.r.clk.Now().Sub(since) >= plannedStatusStallDeadline {
 		pl.counts["stallMarker2m"]++
-		if m.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
+		if m.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
 			pl.counts["stallMarker2mNotSucceeded"]++
 		}
 	} else {
@@ -1059,7 +1059,7 @@ func (pl *plannedHarness) result() *PlannedResult {
 	if a := pl.restart; a != nil && a.fired && a.runID != "" {
 		if run := pl.mon.runs[a.runID]; run != nil && run.terminal {
 			counts["restartedRun"+string(run.outcome)]++
-			if a.rewritten && run.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
+			if a.rewritten && run.outcome == v1beta1.PlannedFailoverOutcomeSucceeded {
 				counts["restartedRunRewrittenSucceeded"]++
 			}
 		}
@@ -1101,13 +1101,13 @@ func (pl *plannedHarness) result() *PlannedResult {
 		Counts:      counts,
 		Outcomes:    outcomes,
 		SinkEvents:  append([]string(nil), pl.sink.events...),
-		Terminals:   append([]v1alpha1.PlannedFailoverStatus(nil), pl.sink.terminals...),
+		Terminals:   append([]v1beta1.PlannedFailoverStatus(nil), pl.sink.terminals...),
 	}
 }
 
 // PlannedResult is what a trial with actors reports beyond TrialResult.
 type PlannedResult struct {
-	Object   *v1alpha1.MysqlFailoverGroup
+	Object   *v1beta1.MysqlFailoverGroup
 	StoreLog []storeOp
 	Yields   map[string]int
 	// Steps counts, per yield class, the yields at which another actor
@@ -1126,7 +1126,7 @@ type PlannedResult struct {
 	Outcomes   []string
 	SinkEvents []string
 	// Terminals are the terminal records the engine reported (RunTerminal).
-	Terminals []v1alpha1.PlannedFailoverStatus
+	Terminals []v1beta1.PlannedFailoverStatus
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,16 +1137,16 @@ type PlannedResult struct {
 // engine reports.
 type simSink struct {
 	events    []string
-	terminals []v1alpha1.PlannedFailoverStatus
+	terminals []v1beta1.PlannedFailoverStatus
 }
 
 var _ controller.PlannedFailoverSink = (*simSink)(nil)
 
-func (s *simSink) Event(_ *v1alpha1.MysqlFailoverGroup, eventType, reason, message string) {
+func (s *simSink) Event(_ *v1beta1.MysqlFailoverGroup, eventType, reason, message string) {
 	s.events = append(s.events, eventType+"/"+reason+": "+message)
 }
 
-func (s *simSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
+func (s *simSink) RunTerminal(_ types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) {
 	if pf != nil {
 		s.terminals = append(s.terminals, *pf.DeepCopy())
 	}
@@ -1154,7 +1154,7 @@ func (s *simSink) RunTerminal(_ types.NamespacedName, pf *v1alpha1.PlannedFailov
 
 func (s *simSink) LagWaitObserved(types.NamespacedName, string, time.Duration) {}
 
-func (s *simSink) Deferred(_ types.NamespacedName, reason v1alpha1.PlannedFailoverDeferReason) {
+func (s *simSink) Deferred(_ types.NamespacedName, reason v1beta1.PlannedFailoverDeferReason) {
 	s.events = append(s.events, "deferred/"+string(reason))
 }
 
@@ -1210,7 +1210,7 @@ func (pl *plannedHarness) stalledClaimWithinDeadline() bool {
 	if obj == nil {
 		return false
 	}
-	run, since, ok := parseDeadlineStart(obj.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation])
+	run, since, ok := parseDeadlineStart(obj.GetAnnotations()[v1beta1.PlannedFailoverStallSinceAnnotation])
 	if !ok || run != id {
 		return false
 	}
@@ -1237,7 +1237,7 @@ func (pl *plannedHarness) rollbackClaimWithinDeadline() bool {
 		return false
 	}
 	pf := obj.Status.PlannedFailover
-	if pf.RunID != id || pf.Phase != v1alpha1.PlannedFailoverPhaseRollingBack || pf.Rollback == nil {
+	if pf.RunID != id || pf.Phase != v1beta1.PlannedFailoverPhaseRollingBack || pf.Rollback == nil {
 		return false
 	}
 	return pl.r.clk.Now().Sub(pf.Rollback.IntentTime.Time) <= plannedRollbackDeadline+stalledClaimSlack

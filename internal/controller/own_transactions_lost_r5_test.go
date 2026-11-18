@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // R5-A: dc2 once had a clone issued that never installed (failed/killed): its
@@ -17,7 +17,7 @@ func TestR5_AuditCrossCheckAfterAFailedClone(t *testing.T) {
 	f.tm.noteSiteServerUUID(context.Background(), "dc2", lossUUIDOld)
 	f.tm.markSiteCloned(context.Background(), "dc2")
 	f.poll(t, 6)
-	if got := recoveryOf(f.tm, "dc3"); got.state != v1alpha1.RecoveryStateBlocked {
+	if got := recoveryOf(f.tm, "dc3"); got.state != v1beta1.RecoveryStateBlocked {
 		t.Fatalf("dc3 recovery = %+v", got)
 	}
 	rec := ownLossOf(f.tm, "dc2")

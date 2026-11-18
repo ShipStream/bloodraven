@@ -16,21 +16,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
 func failoverStateScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add v1alpha1 to scheme: %v", err)
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add v1beta1 to scheme: %v", err)
 	}
 	return scheme
 }
 
-func failoverStateFG() *v1alpha1.MysqlFailoverGroup {
-	return &v1alpha1.MysqlFailoverGroup{
+func failoverStateFG() *v1beta1.MysqlFailoverGroup {
+	return &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sim",
 			Namespace: "bloodraven",
@@ -61,7 +61,7 @@ func TestAnnotationFailoverStateRecorder_RoundTrip(t *testing.T) {
 		t.Fatalf("RecordFailoverState: %v", err)
 	}
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestAnnotationRecordTiesWithStatusCopy(t *testing.T) {
 		t.Fatalf("RecordFailoverState: %v", err)
 	}
 
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -133,41 +133,41 @@ func TestFailoverRecordFromAnnotations(t *testing.T) {
 		{name: "unrelated keys only", annotations: map[string]string{"a": "b"}},
 		{
 			name:        "target only",
-			annotations: map[string]string{v1alpha1.LastFailoverTargetAnnotation: "beta"},
+			annotations: map[string]string{v1beta1.LastFailoverTargetAnnotation: "beta"},
 			wantErr:     true,
 		},
 		{
 			name:        "timestamp only",
-			annotations: map[string]string{v1alpha1.LastFailoverAnnotation: stamp.Format(time.RFC3339Nano)},
+			annotations: map[string]string{v1beta1.LastFailoverAnnotation: stamp.Format(time.RFC3339Nano)},
 			wantErr:     true,
 		},
 		{
 			name: "full record",
 			annotations: map[string]string{
-				v1alpha1.LastFailoverAnnotation:       stamp.Format(time.RFC3339Nano),
-				v1alpha1.LastFailoverTargetAnnotation: "gamma",
+				v1beta1.LastFailoverAnnotation:       stamp.Format(time.RFC3339Nano),
+				v1beta1.LastFailoverTargetAnnotation: "gamma",
 			},
 			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
 		},
 		{
 			name: "non-UTC timestamp normalizes to UTC",
 			annotations: map[string]string{
-				v1alpha1.LastFailoverAnnotation:       stamp.In(time.FixedZone("x", 3600)).Format(time.RFC3339Nano),
-				v1alpha1.LastFailoverTargetAnnotation: "gamma",
+				v1beta1.LastFailoverAnnotation:       stamp.In(time.FixedZone("x", 3600)).Format(time.RFC3339Nano),
+				v1beta1.LastFailoverTargetAnnotation: "gamma",
 			},
 			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
 		},
 		{
 			name: "sub-second timestamp normalizes to status precision",
 			annotations: map[string]string{
-				v1alpha1.LastFailoverAnnotation:       stamp.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
-				v1alpha1.LastFailoverTargetAnnotation: "gamma",
+				v1beta1.LastFailoverAnnotation:       stamp.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+				v1beta1.LastFailoverTargetAnnotation: "gamma",
 			},
 			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
 		},
 		{
 			name:        "corrupt timestamp is an error",
-			annotations: map[string]string{v1alpha1.LastFailoverAnnotation: "not-a-time"},
+			annotations: map[string]string{v1beta1.LastFailoverAnnotation: "not-a-time"},
 			wantErr:     true,
 		},
 	}
@@ -217,14 +217,14 @@ func TestNewerFailoverRecord(t *testing.T) {
 func TestEffectiveFailoverRecord(t *testing.T) {
 	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 	statusStamp := metav1.NewTime(now.Add(-10 * time.Minute))
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "alpha", ServerID: 101}, {Name: "beta", ServerID: 102}}},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
-			LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &statusStamp, Target: "alpha"}},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{Sites: []v1beta1.SiteSpec{{Name: "alpha", ServerID: 101}, {Name: "beta", ServerID: 102}}},
+		Status: v1beta1.MysqlFailoverGroupStatus{
+			LastFailover: &v1beta1.FailoverRecord{FailoverRecordRef: v1beta1.FailoverRecordRef{Time: &statusStamp, Target: "alpha"}},
 		},
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-			v1alpha1.LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
-			v1alpha1.LastFailoverTargetAnnotation: "beta",
+			v1beta1.LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
+			v1beta1.LastFailoverTargetAnnotation: "beta",
 		}},
 	}
 
@@ -233,15 +233,15 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 		t.Fatalf("newer annotation: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
 	}
 
-	fg.Annotations = map[string]string{v1alpha1.LastFailoverAnnotation: now.Format(time.RFC3339)}
+	fg.Annotations = map[string]string{v1beta1.LastFailoverAnnotation: now.Format(time.RFC3339)}
 	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
 	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
 		t.Fatalf("unpaired annotation fallback: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
 	}
 
 	fg.Annotations = map[string]string{
-		v1alpha1.LastFailoverAnnotation:       now.Add(24 * time.Hour).Format(time.RFC3339),
-		v1alpha1.LastFailoverTargetAnnotation: "beta",
+		v1beta1.LastFailoverAnnotation:       now.Add(24 * time.Hour).Format(time.RFC3339),
+		v1beta1.LastFailoverTargetAnnotation: "beta",
 	}
 	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
 	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
@@ -249,8 +249,8 @@ func TestEffectiveFailoverRecord(t *testing.T) {
 	}
 
 	fg.Annotations = map[string]string{
-		v1alpha1.LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
-		v1alpha1.LastFailoverTargetAnnotation: "not-in-spec",
+		v1beta1.LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
+		v1beta1.LastFailoverTargetAnnotation: "not-in-spec",
 	}
 	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
 	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
@@ -602,23 +602,23 @@ func TestAnnotationFailoverStateRecorder_MissingObject(t *testing.T) {
 func TestClearFailoverStateDeletesOnlyOwnedAnnotations(t *testing.T) {
 	scheme := failoverStateScheme(t)
 	fg := failoverStateFG()
-	fg.Annotations[v1alpha1.LastFailoverAnnotation] = "2030-01-01T00:00:00Z"
-	fg.Annotations[v1alpha1.LastFailoverTargetAnnotation] = "beta"
+	fg.Annotations[v1beta1.LastFailoverAnnotation] = "2030-01-01T00:00:00Z"
+	fg.Annotations[v1beta1.LastFailoverTargetAnnotation] = "beta"
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fg).Build()
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 
 	if err := ClearFailoverState(context.Background(), c, nn); err != nil {
 		t.Fatalf("ClearFailoverState: %v", err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
-	if _, ok := got.Annotations[v1alpha1.LastFailoverAnnotation]; ok {
-		t.Errorf("%s survived clear", v1alpha1.LastFailoverAnnotation)
+	if _, ok := got.Annotations[v1beta1.LastFailoverAnnotation]; ok {
+		t.Errorf("%s survived clear", v1beta1.LastFailoverAnnotation)
 	}
-	if _, ok := got.Annotations[v1alpha1.LastFailoverTargetAnnotation]; ok {
-		t.Errorf("%s survived clear", v1alpha1.LastFailoverTargetAnnotation)
+	if _, ok := got.Annotations[v1beta1.LastFailoverTargetAnnotation]; ok {
+		t.Errorf("%s survived clear", v1beta1.LastFailoverTargetAnnotation)
 	}
 	if got.Annotations["unrelated.example.com/keep-me"] != "yes" {
 		t.Errorf("clear clobbered unrelated annotations: %v", got.Annotations)

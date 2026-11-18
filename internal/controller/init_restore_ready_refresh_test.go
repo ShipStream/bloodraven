@@ -8,48 +8,48 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestInitRestoreReadyStale: the runner asks for a status write only when
 // the Ready condition disagrees with the restore verdict updateCRStatus
 // would derive, so a settled group is not rewritten on every sync.
 func TestInitRestoreReadyStale(t *testing.T) {
-	withRestore := func(phase v1alpha1.BackupPhase, ready *metav1.Condition) *v1alpha1.MysqlFailoverGroup {
+	withRestore := func(phase v1beta1.BackupPhase, ready *metav1.Condition) *v1beta1.MysqlFailoverGroup {
 		fg := newTestFG()
-		fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
-		fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: phase, JobName: "restore-lion-dc1", TargetSite: "dc1", Message: "load failed"}
+		fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
+		fg.Status.Restore = &v1beta1.RestoreStatus{Phase: phase, JobName: "restore-lion-dc1", TargetSite: "dc1", Message: "load failed"}
 		if ready != nil {
 			fg.Status.Conditions = []metav1.Condition{*ready}
 		}
 		return fg
 	}
-	verdict := func(phase v1alpha1.BackupPhase) *metav1.Condition {
+	verdict := func(phase v1beta1.BackupPhase) *metav1.Condition {
 		reason, message := initRestoreReadyCondition(withRestore(phase, nil))
 		return &metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: reason, Message: message}
 	}
 	topologyReady := &metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy", Message: "ok"}
 	for _, tc := range []struct {
 		name string
-		fg   *v1alpha1.MysqlFailoverGroup
+		fg   *v1beta1.MysqlFailoverGroup
 		want bool
 	}{
-		{"no Ready condition yet", withRestore(v1alpha1.BackupPhaseFailed, nil), false},
-		{"Initializing keeps its Unknown", withRestore(v1alpha1.BackupPhaseFailed,
+		{"no Ready condition yet", withRestore(v1beta1.BackupPhaseFailed, nil), false},
+		{"Initializing keeps its Unknown", withRestore(v1beta1.BackupPhaseFailed,
 			&metav1.Condition{Type: "Ready", Status: metav1.ConditionUnknown, Reason: "Initializing"}), false},
-		{"in progress matches", withRestore(v1alpha1.BackupPhaseRunning, verdict(v1alpha1.BackupPhaseRunning)), false},
-		{"failed matches", withRestore(v1alpha1.BackupPhaseFailed, verdict(v1alpha1.BackupPhaseFailed)), false},
-		{"running to failed", withRestore(v1alpha1.BackupPhaseFailed, verdict(v1alpha1.BackupPhaseRunning)), true},
-		{"pending to running (message)", withRestore(v1alpha1.BackupPhaseRunning, verdict(v1alpha1.BackupPhasePending)), true},
-		{"topology verdict while unfinished", withRestore(v1alpha1.BackupPhaseRunning, topologyReady), true},
-		{"failed to succeeded", withRestore(v1alpha1.BackupPhaseSucceeded, verdict(v1alpha1.BackupPhaseFailed)), true},
-		{"succeeded and settled", withRestore(v1alpha1.BackupPhaseSucceeded, topologyReady), false},
-		{"initFromBackup removed after failure", func() *v1alpha1.MysqlFailoverGroup {
-			fg := withRestore(v1alpha1.BackupPhaseFailed, verdict(v1alpha1.BackupPhaseFailed))
+		{"in progress matches", withRestore(v1beta1.BackupPhaseRunning, verdict(v1beta1.BackupPhaseRunning)), false},
+		{"failed matches", withRestore(v1beta1.BackupPhaseFailed, verdict(v1beta1.BackupPhaseFailed)), false},
+		{"running to failed", withRestore(v1beta1.BackupPhaseFailed, verdict(v1beta1.BackupPhaseRunning)), true},
+		{"pending to running (message)", withRestore(v1beta1.BackupPhaseRunning, verdict(v1beta1.BackupPhasePending)), true},
+		{"topology verdict while unfinished", withRestore(v1beta1.BackupPhaseRunning, topologyReady), true},
+		{"failed to succeeded", withRestore(v1beta1.BackupPhaseSucceeded, verdict(v1beta1.BackupPhaseFailed)), true},
+		{"succeeded and settled", withRestore(v1beta1.BackupPhaseSucceeded, topologyReady), false},
+		{"initFromBackup removed after failure", func() *v1beta1.MysqlFailoverGroup {
+			fg := withRestore(v1beta1.BackupPhaseFailed, verdict(v1beta1.BackupPhaseFailed))
 			fg.Spec.InitFromBackup = nil
 			return fg
 		}(), true},
-		{"no restore at all", func() *v1alpha1.MysqlFailoverGroup {
+		{"no restore at all", func() *v1beta1.MysqlFailoverGroup {
 			fg := newTestFG()
 			fg.Status.Conditions = []metav1.Condition{*topologyReady}
 			return fg
@@ -81,26 +81,26 @@ func TestInitRestoreReady_FollowsRestorePhaseWithoutTopologyEvent(t *testing.T) 
 			if err := c.Get(ctx, nn, fg); err != nil {
 				t.Fatal(err)
 			}
-			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{}
+			fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{}
 			if err := c.Update(ctx, fg); err != nil {
 				t.Fatal(err)
 			}
-			setRestorePhase := func(phase v1alpha1.BackupPhase) {
+			setRestorePhase := func(phase v1beta1.BackupPhase) {
 				t.Helper()
-				var cur v1alpha1.MysqlFailoverGroup
+				var cur v1beta1.MysqlFailoverGroup
 				if err := c.Get(ctx, nn, &cur); err != nil {
 					t.Fatal(err)
 				}
-				cur.Status.Restore = &v1alpha1.RestoreStatus{Phase: phase, JobName: "restore-lion-dc1", TargetSite: "dc1", Message: "BackoffLimitExceeded"}
+				cur.Status.Restore = &v1beta1.RestoreStatus{Phase: phase, JobName: "restore-lion-dc1", TargetSite: "dc1", Message: "BackoffLimitExceeded"}
 				if err := c.Status().Update(ctx, &cur); err != nil {
 					t.Fatal(err)
 				}
 			}
-			setRestorePhase(v1alpha1.BackupPhaseRunning)
+			setRestorePhase(v1beta1.BackupPhaseRunning)
 
 			// A manager registered as live with the group's own config, so
 			// sync takes its update-in-place path rather than restarting it.
-			var cur v1alpha1.MysqlFailoverGroup
+			var cur v1beta1.MysqlFailoverGroup
 			if err := c.Get(ctx, nn, &cur); err != nil {
 				t.Fatal(err)
 			}
@@ -122,7 +122,7 @@ func TestInitRestoreReady_FollowsRestorePhaseWithoutTopologyEvent(t *testing.T) 
 
 			ready := func() *metav1.Condition {
 				t.Helper()
-				var got v1alpha1.MysqlFailoverGroup
+				var got v1beta1.MysqlFailoverGroup
 				if err := c.Get(ctx, nn, &got); err != nil {
 					t.Fatal(err)
 				}
@@ -137,7 +137,7 @@ func TestInitRestoreReady_FollowsRestorePhaseWithoutTopologyEvent(t *testing.T) 
 						t.Fatal(err)
 					}
 				default:
-					var got v1alpha1.MysqlFailoverGroup
+					var got v1beta1.MysqlFailoverGroup
 					if err := c.Get(ctx, nn, &got); err != nil {
 						t.Fatal(err)
 					}
@@ -153,28 +153,28 @@ func TestInitRestoreReady_FollowsRestorePhaseWithoutTopologyEvent(t *testing.T) 
 			for i := 0; i < 6; i++ {
 				tm.Poll(ctx)
 			}
-			if r := ready(); r == nil || r.Reason != v1alpha1.ReasonInitFromBackupInProgress {
-				t.Fatalf("settled Ready = %+v, want %s", r, v1alpha1.ReasonInitFromBackupInProgress)
+			if r := ready(); r == nil || r.Reason != v1beta1.ReasonInitFromBackupInProgress {
+				t.Fatalf("settled Ready = %+v, want %s", r, v1beta1.ReasonInitFromBackupInProgress)
 			}
 
 			// The load fails. The topology does not move, so polling alone
 			// writes nothing.
-			setRestorePhase(v1alpha1.BackupPhaseFailed)
+			setRestorePhase(v1beta1.BackupPhaseFailed)
 			tm.Poll(ctx)
-			if r := ready(); r.Reason != v1alpha1.ReasonInitFromBackupInProgress {
+			if r := ready(); r.Reason != v1beta1.ReasonInitFromBackupInProgress {
 				t.Fatalf("Ready moved to %s without a refresh; the test no longer isolates the restore-only change", r.Reason)
 			}
 			observe()
 			tm.Poll(ctx)
-			if r := ready(); r.Status != metav1.ConditionFalse || r.Reason != v1alpha1.ReasonInitFromBackupFailed {
-				t.Fatalf("after the restore failed Ready = %+v, want False/%s", r, v1alpha1.ReasonInitFromBackupFailed)
+			if r := ready(); r.Status != metav1.ConditionFalse || r.Reason != v1beta1.ReasonInitFromBackupFailed {
+				t.Fatalf("after the restore failed Ready = %+v, want False/%s", r, v1beta1.ReasonInitFromBackupFailed)
 			}
 
 			// Retried and succeeded: Ready returns to the topology's verdict.
-			setRestorePhase(v1alpha1.BackupPhaseSucceeded)
+			setRestorePhase(v1beta1.BackupPhaseSucceeded)
 			observe()
 			tm.Poll(ctx)
-			if r := ready(); r.Reason == v1alpha1.ReasonInitFromBackupFailed || r.Reason == v1alpha1.ReasonInitFromBackupInProgress {
+			if r := ready(); r.Reason == v1beta1.ReasonInitFromBackupFailed || r.Reason == v1beta1.ReasonInitFromBackupInProgress {
 				t.Fatalf("after the restore succeeded Ready = %+v, want the topology's verdict", r)
 			}
 

@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const backupUsage = `Create an on-demand MysqlBackup for a profile.
@@ -77,7 +77,7 @@ func runBackup(args []string, stdout, stderr *os.File) error {
 	// Validate the profile exists so we fail fast with a clean error
 	// instead of letting the operator stamp Failed{ProfileNotFound}
 	// onto a freshly-created CR.
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: group}, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("MysqlFailoverGroup %s/%s not found", ns, group)
@@ -107,23 +107,23 @@ func runBackup(args []string, stdout, stderr *os.File) error {
 	return waitForBackup(stdout, stderr, cl, ns, backup.Name, timeout)
 }
 
-func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1.MysqlBackup {
+func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1beta1.MysqlBackup {
 	if triggeredBy == "" {
 		triggeredBy = "manual"
 	}
-	return &v1alpha1.MysqlBackup{
+	return &v1beta1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: backupGenerateName(group, profile),
 			Namespace:    ns,
-			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: triggeredBy},
+			Annotations:  map[string]string{v1beta1.TriggeredByAnnotation: triggeredBy},
 			Labels: map[string]string{
-				v1alpha1.FailoverGroupLabel:    group,
-				v1alpha1.BackupProfileLabel:    profile,
+				v1beta1.FailoverGroupLabel:     group,
+				v1beta1.BackupProfileLabel:     profile,
 				"app.kubernetes.io/managed-by": "bloodraven",
 			},
 		},
-		Spec: v1alpha1.MysqlBackupSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
+		Spec: v1beta1.MysqlBackupSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: group},
 			ProfileName:      profile,
 			SourceSite:       sourceSite,
 		},
@@ -166,7 +166,7 @@ func generateNameWithInfix(group, profile, infix string) string {
 	return prefix
 }
 
-func groupHasBackupProfile(fg *v1alpha1.MysqlFailoverGroup, profile string) bool {
+func groupHasBackupProfile(fg *v1beta1.MysqlFailoverGroup, profile string) bool {
 	if fg.Spec.Backup == nil {
 		return false
 	}
@@ -185,11 +185,11 @@ func waitForBackup(stdout, stderr io.Writer, cl client.Client, ns, name string, 
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	startedAt := time.Now()
-	last := v1alpha1.BackupPhase("")
+	last := v1beta1.BackupPhase("")
 	consecutiveErrors := 0
 
 	for {
-		var b v1alpha1.MysqlBackup
+		var b v1beta1.MysqlBackup
 		getCtx, getCancel := context.WithTimeout(ctx, 10*time.Second)
 		err := cl.Get(getCtx, client.ObjectKey{Namespace: ns, Name: name}, &b)
 		getCancel()
@@ -219,14 +219,14 @@ func waitForBackup(stdout, stderr io.Writer, cl client.Client, ns, name string, 
 			last = b.Status.Phase
 		}
 		switch b.Status.Phase {
-		case v1alpha1.BackupPhaseSucceeded:
+		case v1beta1.BackupPhaseSucceeded:
 			location := ""
 			if b.Status.ArtifactStorage != nil {
 				location = b.Status.ArtifactStorage.Location
 			}
 			fmt.Fprintf(stdout, "Backup succeeded: %s (size: %s)\n", emptyDash(location), emptyDash(b.Status.Size))
 			return nil
-		case v1alpha1.BackupPhaseFailed:
+		case v1beta1.BackupPhaseFailed:
 			fmt.Fprintf(stderr, "Backup failed: %s\n", b.Status.Message)
 			return fmt.Errorf("backup %s reached Failed", name)
 		}

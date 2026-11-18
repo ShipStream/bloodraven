@@ -14,7 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 )
@@ -28,13 +28,13 @@ func lifecycleSecretData() map[string][]byte {
 // operator secret. The site Services do not resolve; the managers it starts
 // poll MySQL in the background and fail to connect, which is all these tests
 // need.
-func lifecycleRunner(t *testing.T) (*TopologyManagerRunner, client.Client, *v1alpha1.MysqlFailoverGroup, *corev1.Secret) {
+func lifecycleRunner(t *testing.T) (*TopologyManagerRunner, client.Client, *v1beta1.MysqlFailoverGroup, *corev1.Secret) {
 	t.Helper()
 	fg := newTestFG()
 	secret := newTestSecret()
 	secret.Data = lifecycleSecretData()
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg, secret).Build()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	runner := &TopologyManagerRunner{
@@ -191,7 +191,7 @@ func TestSync_UnreadableSecretDoesNotPinChangedTopology(t *testing.T) {
 	if err := c.Delete(ctx, secret); err != nil {
 		t.Fatalf("delete secret: %v", err)
 	}
-	var live v1alpha1.MysqlFailoverGroup
+	var live v1beta1.MysqlFailoverGroup
 	if err := c.Get(ctx, nn, &live); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestSync_UnreadableSecretDoesNotPinChangedTopology(t *testing.T) {
 	}
 }
 
-func mustConnectionMaterialHash(t *testing.T, ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup) string {
+func mustConnectionMaterialHash(t *testing.T, ctx context.Context, c client.Client, fg *v1beta1.MysqlFailoverGroup) string {
 	t.Helper()
 	h, err := connectionMaterialHash(ctx, c, fg)
 	if err != nil {
@@ -228,7 +228,7 @@ func TestConnectionMaterialHash_UnreadableSecretIsAnError(t *testing.T) {
 	}
 
 	c = fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(newTestSecret()).Build()
-	fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
+	fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"}
 	if h, err := connectionMaterialHash(ctx, c, fg); err == nil {
 		t.Fatalf("missing TLS secret: hash %q, want an error", h)
 	}
@@ -244,10 +244,10 @@ func TestRegisterManager_HydratesUncachedBeforeRun(t *testing.T) {
 	r, c, fg, _ := lifecycleRunner(t)
 	nn := FailoverGroupNamespacedName(fg)
 	live := fg.DeepCopy()
-	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-restart", Revision: 4, Phase: v1alpha1.PlannedFailoverPhasePromoting, TargetSite: "dc2", SourceSite: "dc1",
+	live.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		RunID: "run-restart", Revision: 4, Phase: v1beta1.PlannedFailoverPhasePromoting, TargetSite: "dc2", SourceSite: "dc1",
 	}
-	live.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc2", RecoveryState: v1alpha1.RecoveryStateInProgress}}
+	live.Status.Sites = []v1beta1.SiteStatus{{Name: "dc2", RecoveryState: v1beta1.RecoveryStateInProgress}}
 	if err := c.Status().Update(context.Background(), live); err != nil {
 		t.Fatalf("seed status: %v", err)
 	}

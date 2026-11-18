@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -41,8 +41,8 @@ func (c *blockingSaveConn) Save(ctx context.Context) error {
 func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T) {
 	fg := fgWithDragonflySnapshotUpgrade()
 	start := metav1.Now()
-	fg.Status.Dragonfly.Upgrade = &v1alpha1.DragonflyUpgradeStatus{
-		Phase: v1alpha1.DragonflyUpgradePhaseSavingSnapshot, ActiveSite: "dc1", TargetImage: fg.Spec.Dragonfly.Image,
+	fg.Status.Dragonfly.Upgrade = &v1beta1.DragonflyUpgradeStatus{
+		Phase: v1beta1.DragonflyUpgradePhaseSavingSnapshot, ActiveSite: "dc1", TargetImage: fg.Spec.Dragonfly.Image,
 		SpecDigest: dragonflySpecDigest(fg.Spec.Dragonfly), StartTime: &start,
 	}
 	cb, key := newDragonflyFakeClient(fg)
@@ -110,10 +110,10 @@ func TestDragonflySnapshotUpgrade_SaveUnderGateDoesNotWedgeManager(t *testing.T)
 
 func TestDragonflySnapshotUpgrade_DriftDuringPlannedFailoverNoDeadlock(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
-	fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{Dir: "s3://x/y"}
-	fg.Spec.Dragonfly.UpgradeStrategy = v1alpha1.DragonflyUpgradeStrategySnapshotRestore
+	fg.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhasePromotingDragonfly
+	fg.Status.PlannedFailover.Dragonfly = &v1beta1.PlannedFailoverDragonflyStatus{}
+	fg.Spec.Dragonfly.Snapshot = &v1beta1.DragonflySnapshotSpec{Dir: "s3://x/y"}
+	fg.Spec.Dragonfly.UpgradeStrategy = v1beta1.DragonflyUpgradeStrategySnapshotRestore
 	cb, nn := newDragonflyFakeClient(fg)
 	c := cb.Build()
 	runner := &TopologyManagerRunner{}
@@ -154,8 +154,8 @@ func TestDragonflySnapshotUpgrade_DriftDuringPlannedFailoverNoDeadlock(t *testin
 	if after.Dragonfly != nil && after.Dragonfly.Message == plannedDragonflyGateWaitMessage {
 		t.Errorf("planned phase still blocked on the gate after the upgrade released it")
 	}
-	if after.Phase == v1alpha1.PlannedFailoverPhasePromotingDragonfly && (after.Dragonfly == nil || after.Dragonfly.Takeover == nil ||
-		after.Dragonfly.Takeover.State == v1alpha1.DragonflyTakeoverIntended) {
+	if after.Phase == v1beta1.PlannedFailoverPhasePromotingDragonfly && (after.Dragonfly == nil || after.Dragonfly.Takeover == nil ||
+		after.Dragonfly.Takeover.State == v1beta1.DragonflyTakeoverIntended) {
 		t.Errorf("planned phase made no progress after the gate was released")
 	}
 }
@@ -258,7 +258,7 @@ func TestDragonflyManager_PublishedMySQLFollowSurvivesInFlightTickPromotion(t *t
 	mgr.pollInterval = time.Hour
 	fg := get()
 	fg.Status.ActiveSite = "dc2" // MySQL on dc2; Dragonfly still on dc1 (diverged)
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}

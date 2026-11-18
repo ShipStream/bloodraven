@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const (
@@ -52,15 +52,15 @@ type keyringEscrowStore struct {
 }
 
 // listVersions returns every escrow Secret for a site, newest first.
-func (s *keyringEscrowStore) listVersions(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) ([]escrowVersion, error) {
+func (s *keyringEscrowStore) listVersions(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site string) ([]escrowVersion, error) {
 	var list corev1.SecretList
 	if err := s.client.List(ctx, &list,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
-			v1alpha1.FailoverGroupLabel: fg.Name,
-			v1alpha1.SiteLabel:          site,
-			labelManagedBy:              managerName,
-			labelAppName:                "mysql-keyring",
+			v1beta1.FailoverGroupLabel: fg.Name,
+			v1beta1.SiteLabel:          site,
+			labelManagedBy:             managerName,
+			labelAppName:               "mysql-keyring",
 		},
 	); err != nil {
 		return nil, fmt.Errorf("list keyring secrets for site %s: %w", site, err)
@@ -69,14 +69,14 @@ func (s *keyringEscrowStore) listVersions(ctx context.Context, fg *v1alpha1.Mysq
 	out := make([]escrowVersion, 0, len(list.Items))
 	for i := range list.Items {
 		sec := &list.Items[i]
-		raw, ok := sec.Data[v1alpha1.KeyringDataFileName]
+		raw, ok := sec.Data[v1beta1.KeyringDataFileName]
 		if !ok || len(raw) == 0 {
 			// A keyring Secret with no keyring in it is not a version
 			// the operator can seal against. Skip rather than error so
 			// one corrupt Secret cannot wedge the whole site.
 			continue
 		}
-		v, err := strconv.ParseInt(sec.Labels[v1alpha1.KeyringVersionLabel], 10, 32)
+		v, err := strconv.ParseInt(sec.Labels[v1beta1.KeyringVersionLabel], 10, 32)
 		if err != nil {
 			continue
 		}
@@ -93,7 +93,7 @@ func (s *keyringEscrowStore) listVersions(ctx context.Context, fg *v1alpha1.Mysq
 
 // current returns the newest escrow version, or ok=false when the site
 // has never escrowed a keyring.
-func (s *keyringEscrowStore) current(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) (escrowVersion, bool, error) {
+func (s *keyringEscrowStore) current(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site string) (escrowVersion, bool, error) {
 	versions, err := s.listVersions(ctx, fg, site)
 	if err != nil {
 		return escrowVersion{}, false, err
@@ -109,7 +109,7 @@ func (s *keyringEscrowStore) current(ctx context.Context, fg *v1alpha1.MysqlFail
 // case it returns that version. Idempotency matters: the sidecar retries
 // its push until the operator confirms, and a retried push must not
 // mint a new version on every attempt.
-func (s *keyringEscrowStore) put(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string, raw []byte) (escrowVersion, error) {
+func (s *keyringEscrowStore) put(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site string, raw []byte) (escrowVersion, error) {
 	digest := keyringDigest(raw)
 
 	versions, err := s.listVersions(ctx, fg, site)
@@ -127,22 +127,22 @@ func (s *keyringEscrowStore) put(ctx context.Context, fg *v1alpha1.MysqlFailover
 
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      v1alpha1.KeyringSecretName(fg.Name, site, next),
+			Name:      v1beta1.KeyringSecretName(fg.Name, site, next),
 			Namespace: fg.Namespace,
 			Labels: map[string]string{
-				labelAppName:                 "mysql-keyring",
-				labelInstance:                fg.Name,
-				v1alpha1.FailoverGroupLabel:  fg.Name,
-				v1alpha1.SiteLabel:           site,
-				labelManagedBy:               managerName,
-				v1alpha1.KeyringVersionLabel: strconv.FormatInt(int64(next), 10),
+				labelAppName:                "mysql-keyring",
+				labelInstance:               fg.Name,
+				v1beta1.FailoverGroupLabel:  fg.Name,
+				v1beta1.SiteLabel:           site,
+				labelManagedBy:              managerName,
+				v1beta1.KeyringVersionLabel: strconv.FormatInt(int64(next), 10),
 			},
 			Annotations: map[string]string{
-				v1alpha1.KeyringDigestAnnotation: digest,
+				v1beta1.KeyringDigestAnnotation: digest,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{v1alpha1.KeyringDataFileName: raw},
+		Data: map[string][]byte{v1beta1.KeyringDataFileName: raw},
 		// Immutable so a later bug — or a compromised sidecar token —
 		// cannot rewrite a version that a running MySQL is already
 		// sealed against. Rolling a site forward always means minting a
@@ -160,7 +160,7 @@ func (s *keyringEscrowStore) put(ctx context.Context, fg *v1alpha1.MysqlFailover
 			if getErr := s.client.Get(ctx, types.NamespacedName{
 				Namespace: fg.Namespace, Name: sec.Name,
 			}, &existing); getErr == nil {
-				raw := existing.Data[v1alpha1.KeyringDataFileName]
+				raw := existing.Data[v1beta1.KeyringDataFileName]
 				return escrowVersion{
 					Name: existing.Name, Version: next,
 					Digest: keyringDigest(raw), Bytes: raw,
@@ -176,7 +176,7 @@ func (s *keyringEscrowStore) put(ctx context.Context, fg *v1alpha1.MysqlFailover
 // prune deletes escrow versions beyond keyring.retainVersions, oldest
 // first. The version a site is currently sealed against is never
 // deleted, even if retention would otherwise reach it.
-func (s *keyringEscrowStore) prune(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string, inUse string) error {
+func (s *keyringEscrowStore) prune(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site string, inUse string) error {
 	retain := int(fg.Spec.EffectiveKeyring().RetainVersions)
 	versions, err := s.listVersions(ctx, fg, site)
 	if err != nil {
@@ -205,12 +205,12 @@ func (s *keyringEscrowStore) prune(ctx context.Context, fg *v1alpha1.MysqlFailov
 // when pushing a keyring, creating it if absent. The token is only
 // mounted into unsealed pods, so a sealed site carries no credential
 // that could be used to write an escrow Secret.
-func (r *MysqlFailoverGroupReconciler) ensureEscrowToken(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) error {
-	name := v1alpha1.KeyringTokenSecretName(fg.Name, site)
+func (r *MysqlFailoverGroupReconciler) ensureEscrowToken(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, site string) error {
+	name := v1beta1.KeyringTokenSecretName(fg.Name, site)
 	var existing corev1.Secret
 	err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &existing)
 	if err == nil {
-		if len(existing.Data[v1alpha1.KeyringTokenKey]) >= 32 {
+		if len(existing.Data[v1beta1.KeyringTokenKey]) >= 32 {
 			return nil
 		}
 		// Malformed or truncated token: delete and re-mint rather than
@@ -231,16 +231,16 @@ func (r *MysqlFailoverGroupReconciler) ensureEscrowToken(ctx context.Context, fg
 			Name:      name,
 			Namespace: fg.Namespace,
 			Labels: map[string]string{
-				labelAppName:                "mysql-keyring-token",
-				labelInstance:               fg.Name,
-				v1alpha1.FailoverGroupLabel: fg.Name,
-				v1alpha1.SiteLabel:          site,
-				labelManagedBy:              managerName,
+				labelAppName:               "mysql-keyring-token",
+				labelInstance:              fg.Name,
+				v1beta1.FailoverGroupLabel: fg.Name,
+				v1beta1.SiteLabel:          site,
+				labelManagedBy:             managerName,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			v1alpha1.KeyringTokenKey: []byte(hex.EncodeToString(raw)),
+			v1beta1.KeyringTokenKey: []byte(hex.EncodeToString(raw)),
 		},
 	}
 	if err := controllerutil.SetControllerReference(fg, sec, r.Scheme); err != nil {
@@ -255,7 +255,7 @@ func (r *MysqlFailoverGroupReconciler) ensureEscrowToken(ctx context.Context, fg
 // verifyEscrowToken constant-time compares a presented bearer token
 // against the site's minted token.
 func verifyEscrowToken(ctx context.Context, c client.Client, namespace, group, site, presented string) error {
-	name := v1alpha1.KeyringTokenSecretName(group, site)
+	name := v1beta1.KeyringTokenSecretName(group, site)
 	var sec corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &sec); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -263,7 +263,7 @@ func verifyEscrowToken(ctx context.Context, c client.Client, namespace, group, s
 		}
 		return fmt.Errorf("read escrow token: %w", err)
 	}
-	want := sec.Data[v1alpha1.KeyringTokenKey]
+	want := sec.Data[v1beta1.KeyringTokenKey]
 	if len(want) == 0 {
 		return fmt.Errorf("escrow token for site %s is empty", site)
 	}
@@ -281,7 +281,7 @@ func verifyEscrowToken(ctx context.Context, c client.Client, namespace, group, s
 // should reference: the Secret the site is sealed against, or the seed
 // for an unsealed site. Empty means "no keyring escrowed yet", which is
 // only valid on a fresh bootstrap.
-func siteEscrowSecretName(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+func siteEscrowSecretName(fg *v1beta1.MysqlFailoverGroup, site string) string {
 	s := fg.Status.EncryptionAtRest.SiteEncryptionStatusByName(site)
 	if s == nil {
 		return ""
@@ -292,11 +292,11 @@ func siteEscrowSecretName(fg *v1alpha1.MysqlFailoverGroup, site string) string {
 // siteKeyringRotating reports whether the site is unsealed specifically
 // to perform a master-key rotation, which is the only case where the
 // sidecar issues ALTER INSTANCE ROTATE INNODB MASTER KEY.
-func siteKeyringRotating(fg *v1alpha1.MysqlFailoverGroup, site string) bool {
+func siteKeyringRotating(fg *v1beta1.MysqlFailoverGroup, site string) bool {
 	s := fg.Status.EncryptionAtRest.SiteEncryptionStatusByName(site)
 	return s != nil &&
-		s.Phase == v1alpha1.KeyringPhaseUnsealed &&
-		s.UnsealReason == v1alpha1.UnsealReasonRotation
+		s.Phase == v1beta1.KeyringPhaseUnsealed &&
+		s.UnsealReason == v1beta1.UnsealReasonRotation
 }
 
 // deploymentRendersSealedKeyring reports whether a live Deployment is

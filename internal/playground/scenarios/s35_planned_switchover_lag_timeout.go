@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -137,7 +137,7 @@ func s35ObserveLagTimeoutRollback() runner.Step {
 			defer cancel()
 			var sawWaitingForLag bool
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "plannedFailover.phase==Failed reason==LagTimeout",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					pf := mfg.Status.PlannedFailover
 					if pf == nil {
 						return false, "no plannedFailover status yet", nil
@@ -148,15 +148,15 @@ func s35ObserveLagTimeoutRollback() runner.Step {
 					if pf.StartTime.IsZero() || pf.StartTime.Time.Before(staleCutoff) {
 						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v)", pf.StartTime), nil
 					}
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseWaitingForLag {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseWaitingForLag {
 						sawWaitingForLag = true
 					}
 					msg := fmt.Sprintf("phase=%q target=%q reason=%q waitingForLagSeen=%v", pf.Phase, pf.TargetSite, plannedReason(pf), sawWaitingForLag)
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseSucceeded {
 						return false, msg, fmt.Errorf("planned switchover unexpectedly Succeeded (lag budget should have expired): %s", msg)
 					}
-					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
-						if plannedReason(pf) != "LagTimeout" || plannedOutcome(pf) != v1alpha1.PlannedFailoverOutcomeRolledBack {
+					if pf.Phase == v1beta1.PlannedFailoverPhaseFailed {
+						if plannedReason(pf) != "LagTimeout" || plannedOutcome(pf) != v1beta1.PlannedFailoverOutcomeRolledBack {
 							return false, msg, fmt.Errorf("planned switchover Failed with %s/%q, want RolledBack/LagTimeout: %s",
 								plannedOutcome(pf), plannedReason(pf), pf.Message)
 						}
@@ -202,7 +202,7 @@ func s35VerifySourceStaysActive() runner.Step {
 			defer cancel()
 			if _, err := env.Wait.UntilCR(activeCtx, env.Namespace,
 				fmt.Sprintf("status.activeSite==%s restored as sole writer/active after rollback", source),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					return s35RollbackConverged(mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget(), source, target)
 				}); err != nil {
 				return fmt.Errorf("source %s not restored as active after rollback: %w", source, err)
@@ -274,7 +274,7 @@ func s35Cleanup(ctx context.Context, env *runner.Env) error {
 	}
 	readOnly := map[string]bool{}
 	for _, s := range mfg.Status.Sites {
-		if s.State == v1alpha1.SiteStateReadOnly {
+		if s.State == v1beta1.SiteStateReadOnly {
 			readOnly[s.Name] = true
 			if !stringsContain(delayed, s.Name) {
 				delayed = append(delayed, s.Name)
@@ -304,7 +304,7 @@ func s35Cleanup(ctx context.Context, env *runner.Env) error {
 	}
 	// Drop the marker schema from the writable site.
 	for _, s := range mfg.Status.Sites {
-		if s.State != v1alpha1.SiteStateWritable {
+		if s.State != v1beta1.SiteStateWritable {
 			continue
 		}
 		c, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, s.Name, env.Creds)

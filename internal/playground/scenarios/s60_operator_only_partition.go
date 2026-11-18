@@ -8,7 +8,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -145,10 +145,10 @@ func scenario60OperatorOnlyPartition() runner.Scenario {
 					// the current one settles into RecoveryBlocked.
 					waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 					mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "group settles after heal",
-						func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+						func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 							var blocked []string
 							for _, s := range mfg.Status.Sites {
-								if s.RecoveryState == v1alpha1.RecoveryStateBlocked || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
+								if s.RecoveryState == v1beta1.RecoveryStateBlocked || s.SourceConvergenceState == v1beta1.SourceConvergenceBlocked {
 									blocked = append(blocked, s.Name)
 								}
 							}
@@ -167,7 +167,7 @@ func scenario60OperatorOnlyPartition() runner.Scenario {
 					}
 					var blocked []string
 					for _, s := range mfg.Status.Sites {
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked || s.SourceConvergenceState == v1alpha1.SourceConvergenceBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked || s.SourceConvergenceState == v1beta1.SourceConvergenceBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}

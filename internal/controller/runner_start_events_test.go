@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // startEventHarness drives TopologyManagerRunner.sync with a fake clock that
@@ -20,7 +20,7 @@ type startEventHarness struct {
 	t      *testing.T
 	r      *TopologyManagerRunner
 	c      client.Client
-	fg     *v1alpha1.MysqlFailoverGroup
+	fg     *v1beta1.MysqlFailoverGroup
 	secret *corev1.Secret
 	rec    *record.FakeRecorder
 	clock  time.Time
@@ -98,7 +98,7 @@ func countReason(events []string, eventType, reason string) int {
 }
 
 func startFailureWarnings(events []string) int {
-	return countReason(events, corev1.EventTypeWarning, v1alpha1.EventTopologyManagerStartFailed)
+	return countReason(events, corev1.EventTypeWarning, v1beta1.EventTopologyManagerStartFailed)
 }
 
 func (h *startEventHarness) startFailureTracked(nn types.NamespacedName) bool {
@@ -120,7 +120,7 @@ func TestStartFailureEvent_NeverStartedWarnsAfterOneResync(t *testing.T) {
 	}
 	ev := h.sync()
 	if startFailureWarnings(ev) != 1 || len(ev) != 1 {
-		t.Fatalf("second failure: want one %s Warning, got %v", v1alpha1.EventTopologyManagerStartFailed, ev)
+		t.Fatalf("second failure: want one %s Warning, got %v", v1beta1.EventTopologyManagerStartFailed, ev)
 	}
 	if !strings.Contains(ev[0], "no topology manager is running") || !strings.Contains(ev[0], `missing required key "username"`) {
 		t.Fatalf("Warning message lacks the impact or the cause: %q", ev[0])
@@ -219,8 +219,8 @@ func TestStartFailureEvent_RecoveryAnnouncedAndFloorSurvives(t *testing.T) {
 
 	h.fixSecret()
 	ev := h.sync()
-	if countReason(ev, corev1.EventTypeNormal, v1alpha1.EventTopologyManagerStarted) != 1 {
-		t.Fatalf("recovery: want one Normal %s, got %v", v1alpha1.EventTopologyManagerStarted, ev)
+	if countReason(ev, corev1.EventTypeNormal, v1beta1.EventTopologyManagerStarted) != 1 {
+		t.Fatalf("recovery: want one Normal %s, got %v", v1beta1.EventTopologyManagerStarted, ev)
 	}
 	if !strings.Contains(ev[0], "after 2 failed attempts") {
 		t.Fatalf("recovery message lacks the attempt count: %q", ev[0])
@@ -269,7 +269,7 @@ func TestStartFailureEvent_DeletedGroupPruned(t *testing.T) {
 		t.Fatalf("want a Warning, got %v", ev)
 	}
 
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := h.c.Get(ctx, client.ObjectKeyFromObject(h.fg), &cur); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestStartFailureEvent_RecreatedWithinOneSyncGetsFreshFloor(t *testing.T) {
 		t.Fatalf("want a Warning, got %v", ev)
 	}
 
-	var cur v1alpha1.MysqlFailoverGroup
+	var cur v1beta1.MysqlFailoverGroup
 	if err := h.c.Get(ctx, client.ObjectKeyFromObject(h.fg), &cur); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestStartFailureEvent_EmptyUsernameFailsStart(t *testing.T) {
 	h.sync()
 	ev := h.sync()
 	if startFailureWarnings(ev) != 1 || len(ev) != 1 {
-		t.Fatalf("want one %s Warning, got %v", v1alpha1.EventTopologyManagerStartFailed, ev)
+		t.Fatalf("want one %s Warning, got %v", v1beta1.EventTopologyManagerStartFailed, ev)
 	}
 	if !strings.Contains(ev[0], `has an empty value for key "username"`) {
 		t.Fatalf("Warning message lacks the cause: %q", ev[0])

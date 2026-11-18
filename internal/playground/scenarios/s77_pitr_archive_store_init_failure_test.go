@@ -7,7 +7,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
@@ -112,9 +112,9 @@ func TestS77CheckEncryptedBinlog(t *testing.T) {
 
 func TestS77InitFailedCondition(t *testing.T) {
 	msg := "iad: archive store init: refused; pdx: archive store init: refused"
-	mfg := &v1alpha1.MysqlFailoverGroup{Status: v1alpha1.MysqlFailoverGroupStatus{
-		Conditions: []metav1.Condition{{Type: v1alpha1.ConditionPITRArchiveReady, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonArchiveStoreInitFailed, Message: msg}},
-		PITR:       &v1alpha1.PITRStatus{Message: msg},
+	mfg := &v1beta1.MysqlFailoverGroup{Status: v1beta1.MysqlFailoverGroupStatus{
+		Conditions: []metav1.Condition{{Type: v1beta1.ConditionPITRArchiveReady, Status: metav1.ConditionFalse, Reason: v1beta1.ReasonArchiveStoreInitFailed, Message: msg}},
+		PITR:       &v1beta1.PITRStatus{Message: msg},
 	}}
 	if ok, why := s77InitFailedCondition(mfg, []string{"iad", "pdx"}); !ok {
 		t.Fatalf("documented condition refused: %s", why)
@@ -127,7 +127,7 @@ func TestS77InitFailedCondition(t *testing.T) {
 		t.Error("status.pitr.message without pdx was accepted")
 	}
 	mfg.Status.PITR.Message = msg
-	mfg.Status.Conditions[0].Reason = v1alpha1.ReasonArchiverError
+	mfg.Status.Conditions[0].Reason = v1beta1.ReasonArchiverError
 	if ok, _ := s77InitFailedCondition(mfg, []string{"iad", "pdx"}); ok {
 		t.Error("ArchiverError accepted")
 	}

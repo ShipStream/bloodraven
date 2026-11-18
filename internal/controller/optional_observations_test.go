@@ -3,7 +3,7 @@ package controller
 import (
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,7 +30,7 @@ func TestBuildDragonflyStatus_OptionalSyncObservations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			master := DragonflySiteSnapshot{Name: "dc1", Reachable: true, Info: dragonfly.ReplicationInfo{Role: "master"}}
 			st := buildDragonflyStatus(fg, []DragonflySiteSnapshot{master, replica(tc.info)}, false)
-			var site *v1alpha1.DragonflySiteStatus
+			var site *v1beta1.DragonflySiteStatus
 			for i := range st.Sites {
 				if st.Sites[i].Name == "dc2" {
 					site = &st.Sites[i]
@@ -56,8 +56,8 @@ func TestBuildDragonflyStatus_OptionalSyncObservations(t *testing.T) {
 // Equal pointer-valued observations are equal statuses: a re-observed
 // unchanged site does not cause a status write.
 func TestDragonflyStatusEqual_ComparesOptionalValues(t *testing.T) {
-	a := &v1alpha1.DragonflyStatus{Sites: []v1alpha1.DragonflySiteStatus{{Name: "dc2", SyncInProgress: new(false), LastIOSecondsAgo: new(int64(3))}}}
-	b := &v1alpha1.DragonflyStatus{Sites: []v1alpha1.DragonflySiteStatus{{Name: "dc2", SyncInProgress: new(false), LastIOSecondsAgo: new(int64(3))}}}
+	a := &v1beta1.DragonflyStatus{Sites: []v1beta1.DragonflySiteStatus{{Name: "dc2", SyncInProgress: new(false), LastIOSecondsAgo: new(int64(3))}}}
+	b := &v1beta1.DragonflyStatus{Sites: []v1beta1.DragonflySiteStatus{{Name: "dc2", SyncInProgress: new(false), LastIOSecondsAgo: new(int64(3))}}}
 	if !dragonflyStatusEqual(a, b) {
 		t.Fatal("equal observations compared unequal")
 	}
@@ -76,7 +76,7 @@ func TestDragonflyStatusEqual_ComparesOptionalValues(t *testing.T) {
 // of keeping it or recording false.
 func TestApplyCoverage_CopiesUnknownFlagsThrough(t *testing.T) {
 	now := metav1.Now()
-	site := &v1alpha1.SiteEncryptionStatus{Name: "dc1", Coverage: &v1alpha1.SiteEncryptionCoverage{
+	site := &v1beta1.SiteEncryptionStatus{Name: "dc1", Coverage: &v1beta1.SiteEncryptionCoverage{
 		SystemTablespaceEncrypted: new(true), RedoLogEncrypted: new(true), UndoLogEncrypted: new(true), BinlogEncrypted: new(true),
 	}}
 	live := &mysql.KeyringStatus{
@@ -116,24 +116,24 @@ func TestApplyCoverage_EachFlagMissingFalseTrue(t *testing.T) {
 	type flag struct {
 		name   string
 		set    func(*mysql.KeyringStatus, *bool)
-		status func(*v1alpha1.SiteEncryptionCoverage) *bool
+		status func(*v1beta1.SiteEncryptionCoverage) *bool
 	}
 	flags := []flag{
 		{"systemTablespaceEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.SystemTablespaceEncrypted = b },
-			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.SystemTablespaceEncrypted }},
+			func(c *v1beta1.SiteEncryptionCoverage) *bool { return c.SystemTablespaceEncrypted }},
 		{"redoLogEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.RedoLogEncrypted = b },
-			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.RedoLogEncrypted }},
+			func(c *v1beta1.SiteEncryptionCoverage) *bool { return c.RedoLogEncrypted }},
 		{"undoLogEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.UndoLogEncrypted = b },
-			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.UndoLogEncrypted }},
+			func(c *v1beta1.SiteEncryptionCoverage) *bool { return c.UndoLogEncrypted }},
 		{"binlogEncrypted", func(l *mysql.KeyringStatus, b *bool) { l.Coverage.BinlogEncrypted = b },
-			func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.BinlogEncrypted }},
+			func(c *v1beta1.SiteEncryptionCoverage) *bool { return c.BinlogEncrypted }},
 		{"keyringReadOnly", func(l *mysql.KeyringStatus, b *bool) {
 			if b == nil {
 				l.Component = nil
 				return
 			}
 			l.Component.ReadOnly = *b
-		}, func(c *v1alpha1.SiteEncryptionCoverage) *bool { return c.KeyringReadOnly }},
+		}, func(c *v1beta1.SiteEncryptionCoverage) *bool { return c.KeyringReadOnly }},
 	}
 	show := func(b *bool) string {
 		if b == nil {
@@ -150,7 +150,7 @@ func TestApplyCoverage_EachFlagMissingFalseTrue(t *testing.T) {
 				if state != nil {
 					prior = !*state
 				}
-				site := &v1alpha1.SiteEncryptionStatus{Name: "dc1", Coverage: &v1alpha1.SiteEncryptionCoverage{
+				site := &v1beta1.SiteEncryptionStatus{Name: "dc1", Coverage: &v1beta1.SiteEncryptionCoverage{
 					SystemTablespaceEncrypted: new(prior), RedoLogEncrypted: new(prior), UndoLogEncrypted: new(prior),
 					BinlogEncrypted: new(prior), KeyringReadOnly: new(prior),
 				}}

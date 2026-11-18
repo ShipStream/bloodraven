@@ -21,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 )
 
@@ -122,16 +122,16 @@ func ctxCheckingFuncs(listHook func(ctx context.Context)) interceptor.Funcs {
 	}
 }
 
-func getFGByKey(t *testing.T, c client.Client, key types.NamespacedName) *v1alpha1.MysqlFailoverGroup {
+func getFGByKey(t *testing.T, c client.Client, key types.NamespacedName) *v1beta1.MysqlFailoverGroup {
 	t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), key, &fg); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
 	return &fg
 }
 
-func dragonflyActiveSite(fg *v1alpha1.MysqlFailoverGroup) string {
+func dragonflyActiveSite(fg *v1beta1.MysqlFailoverGroup) string {
 	if fg.Status.Dragonfly == nil {
 		return ""
 	}
@@ -140,7 +140,7 @@ func dragonflyActiveSite(fg *v1alpha1.MysqlFailoverGroup) string {
 
 func dragonflyPromotedTo(c client.Client, key types.NamespacedName, site string) func() bool {
 	return func() bool {
-		var fg v1alpha1.MysqlFailoverGroup
+		var fg v1beta1.MysqlFailoverGroup
 		if err := c.Get(context.Background(), key, &fg); err != nil {
 			return false
 		}
@@ -339,7 +339,7 @@ func TestDragonflyManager_StopJoinsRunAndAdmitsNothing(t *testing.T) {
 // a recorded topology with dc2 behind the active Service.
 func TestDragonflyManager_StopAfterAcknowledgedRoleChangeRecordsIt(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	source := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	target := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	cb, key := newDragonflyFakeClient(fg)
@@ -398,7 +398,7 @@ func TestDragonflyManager_StopAfterAcknowledgedRoleChangeRecordsIt(t *testing.T)
 // planned owner starts from labels and status that match the servers.
 func TestDragonflyManager_OwnerWaitingDuringTakeoverGetsRecordedState(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "master", true),
@@ -577,7 +577,7 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 	mgr, get := newEmergencyManager(t)
 	fg := get()
 	fg.Status.ActiveSite = "dc2"
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -596,13 +596,13 @@ func TestDragonflyManager_QueuedEmergencyDoesNotOverridePlannedPromotion(t *test
 	waitUntil(t, "the request to wait for the gate", mgr.gate.contended)
 
 	fg = get()
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromoting, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{Takeover: &v1alpha1.DragonflyTakeoverRecord{
-			State: v1alpha1.DragonflyTakeoverSucceeded, Method: v1alpha1.DragonflyTakeoverMethodReplTakeover}},
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		Phase: v1beta1.PlannedFailoverPhasePromoting, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
+		Dragonfly: &v1beta1.PlannedFailoverDragonflyStatus{Takeover: &v1beta1.DragonflyTakeoverRecord{
+			State: v1beta1.DragonflyTakeoverSucceeded, Method: v1beta1.DragonflyTakeoverMethodReplTakeover}},
 	}
 	now := metav1.Now()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTime: &now, LastPromotionTarget: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1", LastPromotionTime: &now, LastPromotionTarget: "dc1"}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +653,7 @@ func TestDragonflyManager_RequestSkipsTargetPromotedAfterIt(t *testing.T) {
 		t.Errorf("duplicate request re-ran the promotion (%d target dials)", dials)
 	}
 	for _, ev := range drainEventsCh(rec.Events, 4, 50*time.Millisecond) {
-		if strings.Contains(ev, v1alpha1.EventDragonflySessionsLost) {
+		if strings.Contains(ev, v1beta1.EventDragonflySessionsLost) {
 			t.Errorf("duplicate request reported sessions lost: %q", ev)
 		}
 	}
@@ -668,7 +668,7 @@ func TestDragonflyManager_RequestSkipsTargetObservedAsMaster(t *testing.T) {
 	mgr, get := newEmergencyManager(t)
 	fg := get()
 	earlier := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc2", LastPromotionTarget: "dc2", LastPromotionTime: &earlier}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc2", LastPromotionTarget: "dc2", LastPromotionTime: &earlier}
 	if err := mgr.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +836,7 @@ func TestDragonflyManager_TickRepairAndPromotionAreOrdered(t *testing.T) {
 // label sweep keeps dc2 behind the active Service.
 func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	source := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	target := makeDragonflyPod(fg.Name, "dc2", "replica", true)
 	cb, key := newDragonflyFakeClient(fg)
@@ -848,7 +848,7 @@ func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) 
 	var tickGets atomic.Int32
 	c := cb.WithObjects(source, target).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(ctx context.Context, cl client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok && ctx.Value(tickKey{}) != nil && tickGets.Add(1) == 2 {
+			if _, ok := obj.(*v1beta1.MysqlFailoverGroup); ok && ctx.Value(tickKey{}) != nil && tickGets.Add(1) == 2 {
 				close(entered) // observation done; status not yet published
 				<-resume
 			}
@@ -893,7 +893,7 @@ func TestDragonflyManager_TickPublicationCannotOverwritePromotion(t *testing.T) 
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(target), &pod); err != nil {
 		t.Fatal(err)
 	}
-	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+	if pod.Labels[v1beta1.DragonflyRoleLabel] != "master" {
 		t.Errorf("label sweep removed the sole master from the active Service: %v", pod.Labels)
 	}
 }
@@ -993,7 +993,7 @@ func TestDragonflyManager_StopTimeoutKeepsReplacementOut(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: makeDragonflyPod(fg.Name, "dc1", "", false).Name}, &pod); err != nil {
 		t.Fatalf("replacement owner's dc1 master: %v", err)
 	}
-	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+	if pod.Labels[v1beta1.DragonflyRoleLabel] != "master" {
 		t.Errorf("replacement did not label dc1 master: %v", pod.Labels)
 	}
 }
@@ -1045,9 +1045,9 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 
 	live := getFGByKey(t, c, key)
 	live.Status.ActiveSite = "dc2"
-	live.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		Phase: v1alpha1.PlannedFailoverPhasePromotingDragonfly, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{},
+	live.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		Phase: v1beta1.PlannedFailoverPhasePromotingDragonfly, RunID: "run-1", SourceSite: "dc2", TargetSite: "dc1",
+		Dragonfly: &v1beta1.PlannedFailoverDragonflyStatus{},
 	}
 	if err := c.Status().Update(context.Background(), live); err != nil {
 		t.Fatal(err)
@@ -1070,7 +1070,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if err != nil || requeue != dragonflyGateRetry {
 		t.Fatalf("planned phase with the gate held = (%s, %v), want a %s requeue", requeue, err, dragonflyGateRetry)
 	}
-	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), live, "dc1", "dc2", v1alpha1.SiteSpec{Name: "dc2"}); promoted || !deferred {
+	if promoted, deferred := r.promoteDragonflyForRollout(context.Background(), live, "dc1", "dc2", v1beta1.SiteSpec{Name: "dc2"}); promoted || !deferred {
 		t.Fatalf("rollout promotion with the gate held = (promoted %v, deferred %v), want deferred", promoted, deferred)
 	}
 	if _, err := r.syncDragonflyPodLabels(context.Background(), live); err != nil {
@@ -1109,7 +1109,7 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: makeDragonflyPod(fg.Name, "dc1", "", false).Name}, &pod); err != nil {
 		t.Fatalf("planned dc1 master: %v", err)
 	}
-	if pod.Labels[v1alpha1.DragonflyRoleLabel] != "master" {
+	if pod.Labels[v1beta1.DragonflyRoleLabel] != "master" {
 		t.Errorf("planned failover did not label dc1 master: %v", pod.Labels)
 	}
 }
@@ -1120,13 +1120,13 @@ func TestDragonflyWriters_WaitForOldManagerDuringReplacement(t *testing.T) {
 // planned phase dials anything, so the planned phase starts from it.
 func TestPlannedFailoverPromotingDragonfly_WaitsForSentEmergencyTakeover(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("Proceed")
-	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
-	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{}
+	fg.Status.PlannedFailover.Phase = v1beta1.PlannedFailoverPhasePromotingDragonfly
+	fg.Status.PlannedFailover.Dragonfly = &v1beta1.PlannedFailoverDragonflyStatus{}
 	stored := fg.DeepCopy()
 	stored.Status.PlannedFailover = nil // the emergency started before the planned failover got here
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(stored, newTestSecret(), makeDragonflyPod(fg.Name, "iad", "master", true), makeDragonflyPod(fg.Name, "pdx", "replica", true)).
 		Build()
 	nn := fgNN(fg)
@@ -1195,7 +1195,7 @@ func TestPlannedFailoverPromotingDragonfly_WaitsForSentEmergencyTakeover(t *test
 // status must not be undone from the status it is about to replace.
 func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "replica", true),
@@ -1231,7 +1231,7 @@ func TestSyncDragonflyPodLabels_SkipsWhileGateHeld(t *testing.T) {
 // stamped after the reconcile read its copy is honoured.
 func TestSyncDragonflyPodLabels_ReadsStatusAfterTakingGate(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{ActiveSite: "dc1"}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{ActiveSite: "dc1"}
 	cb, key := newDragonflyFakeClient(fg)
 	c := cb.WithObjects(
 		makeDragonflyPod(fg.Name, "dc1", "replica", true),
@@ -1299,7 +1299,7 @@ func TestDragonflyManager_RequestTakesOverFromAThirdSitePromotedSinceIt(t *testi
 }
 
 // threeSiteEmergencyManager is newEmergencyManager with a third site, dc3.
-func threeSiteEmergencyManager(t *testing.T) (*DragonflyManager, func() *v1alpha1.MysqlFailoverGroup) {
+func threeSiteEmergencyManager(t *testing.T) (*DragonflyManager, func() *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	mgr, get := newEmergencyManager(t)
 	fg := get()

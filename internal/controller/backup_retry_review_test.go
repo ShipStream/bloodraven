@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -18,24 +18,24 @@ import (
 func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 	ctx := context.Background()
 	fg := fgWithRetrySpec(3, 1)
-	fg.Spec.Backup.Schedules = append(fg.Spec.Backup.Schedules, v1alpha1.BackupSchedule{Name: "later", ProfileName: "nightly-s3", Schedule: "0 3 * * *"})
+	fg.Spec.Backup.Schedules = append(fg.Spec.Backup.Schedules, v1beta1.BackupSchedule{Name: "later", ProfileName: "nightly-s3", Schedule: "0 3 * * *"})
 	first := failedRetryRun("first", "first-uid", 1, time.Now().Add(-time.Hour))
 	later := failedRetryRun("later", "later-uid", 1, time.Now().Add(-time.Hour))
-	later.Labels[v1alpha1.BackupScheduleLabel] = "later"
+	later.Labels[v1beta1.BackupScheduleLabel] = "later"
 	br, c := newBackupReconciler(t, fg, first, later)
 	recorder := record.NewFakeRecorder(100)
 	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: br.Scheme, Recorder: recorder}
-	var originals []*v1alpha1.MysqlBackup
-	for i, failed := range []*v1alpha1.MysqlBackup{first, later} {
+	var originals []*v1beta1.MysqlBackup
+	for i, failed := range []*v1beta1.MysqlBackup{first, later} {
 		if _, _, _, err := r.maybeScheduleRetry(ctx, fg, fg.Spec.Backup.Schedules[i], failed); err != nil {
 			t.Fatal(err)
 		}
-		var successor v1alpha1.MysqlBackup
+		var successor v1beta1.MysqlBackup
 		if err := c.Get(ctx, client.ObjectKey{Namespace: failed.Namespace, Name: retryBackupName(failed, 2)}, &successor); err != nil {
 			t.Fatal(err)
 		}
 		originals = append(originals, successor.DeepCopy())
-		successor.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
+		successor.Labels[v1beta1.FailoverGroupLabel] = "foreign-group"
 		if err := c.Update(ctx, &successor); err != nil {
 			t.Fatal(err)
 		}
@@ -45,7 +45,7 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 	}
 	patches := 0
 	observed := interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-		if _, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok && sub == "status" {
+		if _, ok := obj.(*v1beta1.MysqlFailoverGroup); ok && sub == "status" {
 			patches++
 		}
 		return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
@@ -81,7 +81,7 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 		t.Fatalf("unchanged conflicts churned status: patches=%d want 1", patches)
 	}
 	// Resolving one conflict clears only that schedule's marker.
-	var firstSuccessor v1alpha1.MysqlBackup
+	var firstSuccessor v1beta1.MysqlBackup
 	if err := c.Get(ctx, client.ObjectKeyFromObject(originals[0]), &firstSuccessor); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 	}
 	reconcile()
 	assertWarnings(0)
-	firstSuccessor.Labels[v1alpha1.FailoverGroupLabel] = "foreign-again"
+	firstSuccessor.Labels[v1beta1.FailoverGroupLabel] = "foreign-again"
 	if err := c.Update(ctx, &firstSuccessor); err != nil {
 		t.Fatal(err)
 	}
@@ -108,11 +108,11 @@ func TestBackupRetryReview_ConflictWarningsOnlyOnTransition(t *testing.T) {
 	if _, _, _, err := r.maybeScheduleRetry(ctx, fg, fg.Spec.Backup.Schedules[0], newFailure); err != nil {
 		t.Fatal(err)
 	}
-	var next v1alpha1.MysqlBackup
+	var next v1beta1.MysqlBackup
 	if err := c.Get(ctx, client.ObjectKey{Namespace: newFailure.Namespace, Name: retryBackupName(newFailure, 2)}, &next); err != nil {
 		t.Fatal(err)
 	}
-	next.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
+	next.Labels[v1beta1.FailoverGroupLabel] = "foreign-group"
 	if err := c.Update(ctx, &next); err != nil {
 		t.Fatal(err)
 	}
@@ -131,11 +131,11 @@ func TestBackupRetryReview_ConflictWarningFollowsStatusPersistence(t *testing.T)
 	if _, _, _, err := r.maybeScheduleRetry(ctx, fg, fg.Spec.Backup.Schedules[0], failed); err != nil {
 		t.Fatal(err)
 	}
-	var successor v1alpha1.MysqlBackup
+	var successor v1beta1.MysqlBackup
 	if err := c.Get(ctx, client.ObjectKey{Namespace: failed.Namespace, Name: retryBackupName(failed, 2)}, &successor); err != nil {
 		t.Fatal(err)
 	}
-	successor.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
+	successor.Labels[v1beta1.FailoverGroupLabel] = "foreign-group"
 	if err := c.Update(ctx, &successor); err != nil {
 		t.Fatal(err)
 	}
@@ -175,29 +175,29 @@ func TestBackupRetryReview_LocalIssuesDoNotBlockOtherSchedules(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			fg := fgWithRetrySpec(3, 600)
-			fg.Spec.Backup.Schedules = append(fg.Spec.Backup.Schedules, v1alpha1.BackupSchedule{Name: "later", ProfileName: "nightly-s3", Schedule: "0 3 * * *"})
-			fg.Spec.Backup.Schedules = append(fg.Spec.Backup.Schedules, v1alpha1.BackupSchedule{Name: "pending", ProfileName: "nightly-s3", Schedule: "0 4 * * *"})
+			fg.Spec.Backup.Schedules = append(fg.Spec.Backup.Schedules, v1beta1.BackupSchedule{Name: "later", ProfileName: "nightly-s3", Schedule: "0 3 * * *"})
+			fg.Spec.Backup.Schedules = append(fg.Spec.Backup.Schedules, v1beta1.BackupSchedule{Name: "pending", ProfileName: "nightly-s3", Schedule: "0 4 * * *"})
 			now := time.Now().Truncate(time.Second)
 			first := failedRetryRun("first", "first-uid", 1, now.Add(-time.Hour))
 			later := failedRetryRun("later", "later-uid", 1, now.Add(-time.Hour))
-			later.Labels[v1alpha1.BackupScheduleLabel] = "later"
+			later.Labels[v1beta1.BackupScheduleLabel] = "later"
 			pending := failedRetryRun("pending", "pending-uid", 1, now.Add(-time.Hour))
-			pending.Labels[v1alpha1.BackupScheduleLabel] = "pending"
+			pending.Labels[v1beta1.BackupScheduleLabel] = "pending"
 			pending.Status.CompletionTime = &metav1.Time{Time: now}
 			old := failedRetryRun("old-success", "old-uid", 1, now.Add(-24*time.Hour))
-			old.Status.Phase = v1alpha1.BackupPhaseSucceeded
+			old.Status.Phase = v1beta1.BackupPhaseSucceeded
 			br, c := newBackupReconciler(t, fg, first, later, pending, old)
 			r := &MysqlFailoverGroupReconciler{Client: c, Scheme: br.Scheme, Recorder: record.NewFakeRecorder(10)}
 			if _, _, _, err := r.maybeScheduleRetry(ctx, fg, fg.Spec.Backup.Schedules[0], first); err != nil {
 				t.Fatal(err)
 			}
 			key := client.ObjectKey{Namespace: first.Namespace, Name: retryBackupName(first, 2)}
-			var existing v1alpha1.MysqlBackup
+			var existing v1beta1.MysqlBackup
 			if err := c.Get(ctx, key, &existing); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "lineage-conflict" {
-				existing.Labels[v1alpha1.FailoverGroupLabel] = "foreign-group"
+				existing.Labels[v1beta1.FailoverGroupLabel] = "foreign-group"
 				if err := c.Update(ctx, &existing); err != nil {
 					t.Fatal(err)
 				}
@@ -207,7 +207,7 @@ func TestBackupRetryReview_LocalIssuesDoNotBlockOtherSchedules(t *testing.T) {
 					if err := c.List(ctx, list, opts...); err != nil {
 						return err
 					}
-					if backups, ok := list.(*v1alpha1.MysqlBackupList); ok {
+					if backups, ok := list.(*v1beta1.MysqlBackupList); ok {
 						visible := backups.Items[:0]
 						for _, b := range backups.Items {
 							if b.Name != key.Name {
@@ -220,7 +220,7 @@ func TestBackupRetryReview_LocalIssuesDoNotBlockOtherSchedules(t *testing.T) {
 				},
 				Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 					if mode == "cache-not-found" && k == key {
-						return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("mysqlbackups").GroupResource(), k.Name)
+						return apierrors.NewNotFound(v1beta1.GroupVersion.WithResource("mysqlbackups").GroupResource(), k.Name)
 					}
 					return c.Get(ctx, k, obj, opts...)
 				},
@@ -237,7 +237,7 @@ func TestBackupRetryReview_LocalIssuesDoNotBlockOtherSchedules(t *testing.T) {
 			if mode == "lineage-conflict" && wait <= 15*time.Second {
 				t.Fatalf("conflict lost another schedule's pending backoff: %s", wait)
 			}
-			var got v1alpha1.MysqlFailoverGroup
+			var got v1beta1.MysqlFailoverGroup
 			if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
 				t.Fatal(err)
 			}
@@ -247,11 +247,11 @@ func TestBackupRetryReview_LocalIssuesDoNotBlockOtherSchedules(t *testing.T) {
 			if got.Status.BackupSchedules[2].Name != "pending" || got.Status.BackupSchedules[2].NextRetryTime == nil {
 				t.Fatalf("pending schedule retry time was lost: %+v", got.Status.BackupSchedules)
 			}
-			var successor v1alpha1.MysqlBackup
+			var successor v1beta1.MysqlBackup
 			if err := c.Get(ctx, client.ObjectKey{Namespace: later.Namespace, Name: retryBackupName(later, 2)}, &successor); err != nil {
 				t.Fatalf("later schedule lost its retry: %v", err)
 			}
-			var unchanged v1alpha1.MysqlBackup
+			var unchanged v1beta1.MysqlBackup
 			if err := c.Get(ctx, key, &unchanged); err != nil || !retryBackupMatches(&unchanged, &existing) {
 				t.Fatalf("existing retry was changed or replaced: %v", err)
 			}
@@ -286,7 +286,7 @@ func TestBackupRetryReview_ReadFailuresRemainErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-		return apierrors.NewForbidden(v1alpha1.GroupVersion.WithResource("mysqlbackups").GroupResource(), k.Name, nil)
+		return apierrors.NewForbidden(v1beta1.GroupVersion.WithResource("mysqlbackups").GroupResource(), k.Name, nil)
 	}})
 	if _, _, _, err := r.maybeScheduleRetry(ctx, fg, fg.Spec.Backup.Schedules[0], failed); !apierrors.IsForbidden(err) {
 		t.Fatalf("non-cache API failure was swallowed: %v", err)

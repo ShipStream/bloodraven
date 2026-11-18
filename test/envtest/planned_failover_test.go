@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
@@ -36,57 +36,57 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 	remaining := int32(2)
 	srcOffset, tgtOffset, syncSecs := int64(100), int64(100), int64(3)
 
-	full := &v1alpha1.PlannedFailoverStatus{
+	full := &v1beta1.PlannedFailoverStatus{
 		RunID:      "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f",
 		Revision:   7,
-		Phase:      v1alpha1.PlannedFailoverPhasePublishing,
+		Phase:      v1beta1.PlannedFailoverPhasePublishing,
 		TargetSite: "dc2",
-		Settings: v1alpha1.PlannedFailoverSettings{
+		Settings: v1beta1.PlannedFailoverSettings{
 			MaxLagWait:   metav1.Duration{Duration: 5 * time.Minute},
 			DrainTimeout: metav1.Duration{Duration: 30 * time.Second},
-			Dragonfly: &v1alpha1.PlannedFailoverDragonflySettings{
-				MaxSyncWait: metav1.Duration{Duration: 30 * time.Second}, OnSyncTimeout: v1alpha1.DragonflySyncTimeoutProceed,
+			Dragonfly: &v1beta1.PlannedFailoverDragonflySettings{
+				MaxSyncWait: metav1.Duration{Duration: 30 * time.Second}, OnSyncTimeout: v1beta1.DragonflySyncTimeoutProceed,
 			},
 		},
 		StartTime:     ts(0),
 		SourceSite:    "dc1",
 		ClaimTime:     ptrTime(1),
-		ClaimBaseline: &v1alpha1.FailoverRecordRef{Time: ptrTime(2), Target: "dc1"},
-		Admission: &v1alpha1.PlannedFailoverAdmission{
-			DeadlineTime: ptrTime(3), WaitReason: v1alpha1.PlannedFailoverWaitRecoveryInFlight,
-			DeferReason: v1alpha1.PlannedFailoverDeferCooldownActive, RetryTime: ptrTime(4),
+		ClaimBaseline: &v1beta1.FailoverRecordRef{Time: ptrTime(2), Target: "dc1"},
+		Admission: &v1beta1.PlannedFailoverAdmission{
+			DeadlineTime: ptrTime(3), WaitReason: v1beta1.PlannedFailoverWaitRecoveryInFlight,
+			DeferReason: v1beta1.PlannedFailoverDeferCooldownActive, RetryTime: ptrTime(4),
 		},
-		Fence: &v1alpha1.PlannedFailoverFenceRecord{
-			State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: ts(5), SourceServerUUID: "uuid-src",
+		Fence: &v1beta1.PlannedFailoverFenceRecord{
+			State: v1beta1.PlannedFailoverFenceApplied, IntentTime: ts(5), SourceServerUUID: "uuid-src",
 			ApplyTime: ptrTime(6), GtidSet: &gtid,
 		},
-		Drain:   &v1alpha1.PlannedFailoverDrainRecord{StartTime: ts(7), CompletionTime: ptrTime(8), RemainingConnections: &remaining},
-		LagWait: &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: ts(9), CatchUpTime: ptrTime(10)},
-		Dragonfly: &v1alpha1.PlannedFailoverDragonflyStatus{
+		Drain:   &v1beta1.PlannedFailoverDrainRecord{StartTime: ts(7), CompletionTime: ptrTime(8), RemainingConnections: &remaining},
+		LagWait: &v1beta1.PlannedFailoverLagWaitRecord{StartTime: ts(9), CatchUpTime: ptrTime(10)},
+		Dragonfly: &v1beta1.PlannedFailoverDragonflyStatus{
 			SyncWaitStartTime: ptrTime(11),
-			SourceOffsetState: v1alpha1.DragonflyOffsetCaptured,
+			SourceOffsetState: v1beta1.DragonflyOffsetCaptured,
 			SourceOffset:      &srcOffset,
 			SyncWaitSeconds:   &syncSecs,
-			Takeover: &v1alpha1.DragonflyTakeoverRecord{
-				State: v1alpha1.DragonflyTakeoverSucceeded, IntentTime: ts(12), CompletionTime: ptrTime(13),
-				Method: v1alpha1.DragonflyTakeoverMethodReplTakeover, TargetOffset: &tgtOffset,
+			Takeover: &v1beta1.DragonflyTakeoverRecord{
+				State: v1beta1.DragonflyTakeoverSucceeded, IntentTime: ts(12), CompletionTime: ptrTime(13),
+				Method: v1beta1.DragonflyTakeoverMethodReplTakeover, TargetOffset: &tgtOffset,
 			},
-			Sessions: v1alpha1.DragonflySessionsPreserved,
+			Sessions: v1beta1.DragonflySessionsPreserved,
 		},
-		Promotion: &v1alpha1.PlannedFailoverPromotionRecord{
-			State: v1alpha1.PlannedFailoverPromotionConfirmed, IntentTime: ts(14), TargetServerUUID: "uuid-tgt",
+		Promotion: &v1beta1.PlannedFailoverPromotionRecord{
+			State: v1beta1.PlannedFailoverPromotionConfirmed, IntentTime: ts(14), TargetServerUUID: "uuid-tgt",
 			ConfirmationTime: ptrTime(15),
 		},
-		DNS:      &v1alpha1.PlannedFailoverDNSRecord{State: v1alpha1.PlannedFailoverDNSFailed, AttemptTime: ts(16), LastError: "timeout"},
-		Rollback: &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonLagTimeout, IntentTime: ts(17)},
-		Result: &v1alpha1.PlannedFailoverResult{
-			Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: ts(18),
-			Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningDNSUpdateFailed, v1alpha1.PlannedFailoverWarningUnreachablePeers},
+		DNS:      &v1beta1.PlannedFailoverDNSRecord{State: v1beta1.PlannedFailoverDNSFailed, AttemptTime: ts(16), LastError: "timeout"},
+		Rollback: &v1beta1.PlannedFailoverRollbackRecord{Reason: v1beta1.PlannedFailoverReasonLagTimeout, IntentTime: ts(17)},
+		Result: &v1beta1.PlannedFailoverResult{
+			Outcome: v1beta1.PlannedFailoverOutcomeSucceeded, CompletionTime: ts(18),
+			Warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningDNSUpdateFailed, v1beta1.PlannedFailoverWarningUnreachablePeers},
 		},
 		Message: "published",
 	}
 
-	create := func(name string) *v1alpha1.MysqlFailoverGroup {
+	create := func(name string) *v1beta1.MysqlFailoverGroup {
 		t.Helper()
 		fg := newTestFG(ns)
 		fg.Name = name
@@ -95,13 +95,13 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 		}
 		return fg
 	}
-	writeStatus := func(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) error {
+	writeStatus := func(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) error {
 		fg.Status.PlannedFailover = pf.DeepCopy()
 		return k8sClient.Status().Update(ctx, fg)
 	}
-	readBack := func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.PlannedFailoverStatus {
+	readBack := func(fg *v1beta1.MysqlFailoverGroup) *v1beta1.PlannedFailoverStatus {
 		t.Helper()
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
 			t.Fatal(err)
 		}
@@ -117,12 +117,12 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 	}
 
 	// Every phase in the enum, and an empty gtidSet, persist.
-	for _, phase := range []v1alpha1.PlannedFailoverPhase{
-		v1alpha1.PlannedFailoverPhaseAdmitting, v1alpha1.PlannedFailoverPhaseDeferred, v1alpha1.PlannedFailoverPhaseFencing,
-		v1alpha1.PlannedFailoverPhaseDraining, v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync, v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting, v1alpha1.PlannedFailoverPhasePublishing,
-		v1alpha1.PlannedFailoverPhaseRollingBack, v1alpha1.PlannedFailoverPhaseSucceeded, v1alpha1.PlannedFailoverPhaseFailed,
+	for _, phase := range []v1beta1.PlannedFailoverPhase{
+		v1beta1.PlannedFailoverPhaseAdmitting, v1beta1.PlannedFailoverPhaseDeferred, v1beta1.PlannedFailoverPhaseFencing,
+		v1beta1.PlannedFailoverPhaseDraining, v1beta1.PlannedFailoverPhaseWaitingForLag,
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync, v1beta1.PlannedFailoverPhasePromotingDragonfly,
+		v1beta1.PlannedFailoverPhasePromoting, v1beta1.PlannedFailoverPhasePublishing,
+		v1beta1.PlannedFailoverPhaseRollingBack, v1beta1.PlannedFailoverPhaseSucceeded, v1beta1.PlannedFailoverPhaseFailed,
 	} {
 		pf := full.DeepCopy()
 		pf.Phase = phase
@@ -140,13 +140,13 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 	// without them, and requiring them would fail every one of its status
 	// writes (TestCRD_PlannedFailoverRollbackWriteBack). The operator always
 	// writes them and refuses a non-terminal block without a runID.
-	for name, mutate := range map[string]func(pf *v1alpha1.PlannedFailoverStatus){
-		"no runID":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.RunID = "" },
-		"no revision":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Revision = 0 },
-		"no phase":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "" },
-		"no target":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.TargetSite = "" },
-		"no settings":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Settings = v1alpha1.PlannedFailoverSettings{} },
-		"no startTime": func(pf *v1alpha1.PlannedFailoverStatus) { pf.StartTime = metav1.Time{} },
+	for name, mutate := range map[string]func(pf *v1beta1.PlannedFailoverStatus){
+		"no runID":     func(pf *v1beta1.PlannedFailoverStatus) { pf.RunID = "" },
+		"no revision":  func(pf *v1beta1.PlannedFailoverStatus) { pf.Revision = 0 },
+		"no phase":     func(pf *v1beta1.PlannedFailoverStatus) { pf.Phase = "" },
+		"no target":    func(pf *v1beta1.PlannedFailoverStatus) { pf.TargetSite = "" },
+		"no settings":  func(pf *v1beta1.PlannedFailoverStatus) { pf.Settings = v1beta1.PlannedFailoverSettings{} },
+		"no startTime": func(pf *v1beta1.PlannedFailoverStatus) { pf.StartTime = metav1.Time{} },
 	} {
 		target := create("optional-" + strings.ToLower(strings.ReplaceAll(name, " ", "-")))
 		pf := full.DeepCopy()
@@ -157,24 +157,24 @@ func TestCRD_PlannedFailoverRoundTrip(t *testing.T) {
 	}
 
 	// Invalid values are rejected server-side.
-	invalid := map[string]func(pf *v1alpha1.PlannedFailoverStatus){
-		"old phase":    func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "Validating" },
-		"phase":        func(pf *v1alpha1.PlannedFailoverStatus) { pf.Phase = "Exploding" },
-		"outcome":      func(pf *v1alpha1.PlannedFailoverStatus) { pf.Result.Outcome = "Partial" },
-		"reason":       func(pf *v1alpha1.PlannedFailoverStatus) { pf.Result.Reason = "SourceCrashed" },
-		"rollback":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Rollback.Reason = "Whatever" },
-		"wait reason":  func(pf *v1alpha1.PlannedFailoverStatus) { pf.Admission.WaitReason = "Sleeping" },
-		"defer reason": func(pf *v1alpha1.PlannedFailoverStatus) { pf.Admission.DeferReason = "LagTimeout" },
-		"warning": func(pf *v1alpha1.PlannedFailoverStatus) {
-			pf.Result.Warnings = []v1alpha1.PlannedFailoverWarning{"Spooky"}
+	invalid := map[string]func(pf *v1beta1.PlannedFailoverStatus){
+		"old phase":    func(pf *v1beta1.PlannedFailoverStatus) { pf.Phase = "Validating" },
+		"phase":        func(pf *v1beta1.PlannedFailoverStatus) { pf.Phase = "Exploding" },
+		"outcome":      func(pf *v1beta1.PlannedFailoverStatus) { pf.Result.Outcome = "Partial" },
+		"reason":       func(pf *v1beta1.PlannedFailoverStatus) { pf.Result.Reason = "SourceCrashed" },
+		"rollback":     func(pf *v1beta1.PlannedFailoverStatus) { pf.Rollback.Reason = "Whatever" },
+		"wait reason":  func(pf *v1beta1.PlannedFailoverStatus) { pf.Admission.WaitReason = "Sleeping" },
+		"defer reason": func(pf *v1beta1.PlannedFailoverStatus) { pf.Admission.DeferReason = "LagTimeout" },
+		"warning": func(pf *v1beta1.PlannedFailoverStatus) {
+			pf.Result.Warnings = []v1beta1.PlannedFailoverWarning{"Spooky"}
 		},
-		"fence state":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.State = "Maybe" },
-		"zero uuid":       func(pf *v1alpha1.PlannedFailoverStatus) { pf.Fence.SourceServerUUID = "" },
-		"revision":        func(pf *v1alpha1.PlannedFailoverStatus) { pf.Revision = -1 },
-		"on sync":         func(pf *v1alpha1.PlannedFailoverStatus) { pf.Settings.Dragonfly.OnSyncTimeout = "proceed" },
-		"df method":       func(pf *v1alpha1.PlannedFailoverStatus) { pf.Dragonfly.Takeover.Method = "REPLTAKEOVER" },
-		"reason spelling": func(pf *v1alpha1.PlannedFailoverStatus) { pf.Result.Reason = "Cancelled" },
-		"df takeover":     func(pf *v1alpha1.PlannedFailoverStatus) { pf.Dragonfly.Takeover.State = "Halfway" },
+		"fence state":     func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.State = "Maybe" },
+		"zero uuid":       func(pf *v1beta1.PlannedFailoverStatus) { pf.Fence.SourceServerUUID = "" },
+		"revision":        func(pf *v1beta1.PlannedFailoverStatus) { pf.Revision = -1 },
+		"on sync":         func(pf *v1beta1.PlannedFailoverStatus) { pf.Settings.Dragonfly.OnSyncTimeout = "proceed" },
+		"df method":       func(pf *v1beta1.PlannedFailoverStatus) { pf.Dragonfly.Takeover.Method = "REPLTAKEOVER" },
+		"reason spelling": func(pf *v1beta1.PlannedFailoverStatus) { pf.Result.Reason = "Cancelled" },
+		"df takeover":     func(pf *v1beta1.PlannedFailoverStatus) { pf.Dragonfly.Takeover.State = "Halfway" },
 	}
 	for name, mutate := range invalid {
 		target := create("invalid-" + strings.ReplaceAll(name, " ", "-"))
@@ -200,10 +200,10 @@ func TestCRD_PlannedFailoverRollbackWriteBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := metav1.NewTime(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC))
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-1", Revision: 9, Phase: v1alpha1.PlannedFailoverPhaseSucceeded, TargetSite: "dc2", StartTime: start,
-		Settings: v1alpha1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute}, DrainTimeout: metav1.Duration{Duration: time.Second}},
-		Result:   &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, CompletionTime: start},
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		RunID: "run-1", Revision: 9, Phase: v1beta1.PlannedFailoverPhaseSucceeded, TargetSite: "dc2", StartTime: start,
+		Settings: v1beta1.PlannedFailoverSettings{MaxLagWait: metav1.Duration{Duration: time.Minute}, DrainTimeout: metav1.Duration{Duration: time.Second}},
+		Result:   &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeSucceeded, CompletionTime: start},
 		Message:  "done",
 	}
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
@@ -214,7 +214,7 @@ func TestCRD_PlannedFailoverRollbackWriteBack(t *testing.T) {
 	// completionTime, reason, message (no runID, revision, targetSite,
 	// settings or result).
 	var u unstructured.Unstructured
-	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("MysqlFailoverGroup"))
+	u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("MysqlFailoverGroup"))
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &u); err != nil {
 		t.Fatal(err)
 	}
@@ -231,11 +231,11 @@ func TestCRD_PlannedFailoverRollbackWriteBack(t *testing.T) {
 	if err := k8sClient.Status().Update(ctx, &u); err != nil {
 		t.Fatalf("an older operator's status write-back was rejected: %v", err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.ActiveSite != "dc2" || got.Status.PlannedFailover == nil || got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseSucceeded ||
+	if got.Status.ActiveSite != "dc2" || got.Status.PlannedFailover == nil || got.Status.PlannedFailover.Phase != v1beta1.PlannedFailoverPhaseSucceeded ||
 		got.Status.PlannedFailover.RunID != "" {
 		t.Fatalf("status after the write-back = activeSite %q plannedFailover %+v", got.Status.ActiveSite, got.Status.PlannedFailover)
 	}
@@ -268,8 +268,8 @@ func pfEnvInterceptedReconciler(t *testing.T, topo controller.PlannedFailoverTop
 
 // enginePFWrite reports whether obj is a planned-failover status write of
 // the given phase by the engine.
-func enginePFWrite(obj client.Object, phase v1alpha1.PlannedFailoverPhase) bool {
-	fg, ok := obj.(*v1alpha1.MysqlFailoverGroup)
+func enginePFWrite(obj client.Object, phase v1beta1.PlannedFailoverPhase) bool {
+	fg, ok := obj.(*v1beta1.MysqlFailoverGroup)
 	return ok && fg.Status.PlannedFailover != nil && fg.Status.PlannedFailover.Phase == phase
 }
 
@@ -277,15 +277,15 @@ func enginePFWrite(obj client.Object, phase v1alpha1.PlannedFailoverPhase) bool 
 // engine's conditioned write; the write conflicts, reloads and lands, the
 // other writer's change survives, and revisions only increase.
 func TestEnvtest_PlannedFailoverStore_ConditionedWriteNeverRegresses(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-cond", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-cond", map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"})
 	raced := false
 	r := pfEnvInterceptedReconciler(t, &pfEnvTopology{}, func(ctx context.Context, c client.Client, obj client.Object, _ ...client.SubResourceUpdateOption) (bool, error) {
-		if raced || !enginePFWrite(obj, v1alpha1.PlannedFailoverPhaseFencing) {
+		if raced || !enginePFWrite(obj, v1beta1.PlannedFailoverPhaseFencing) {
 			return false, nil
 		}
 		raced = true
 		// Another writer (the runner) lands first.
-		var cur v1alpha1.MysqlFailoverGroup
+		var cur v1beta1.MysqlFailoverGroup
 		if err := c.Get(ctx, nn, &cur); err != nil {
 			return true, err
 		}
@@ -296,7 +296,7 @@ func TestEnvtest_PlannedFailoverStore_ConditionedWriteNeverRegresses(t *testing.
 		return false, nil // the engine's write now carries a stale resourceVersion
 	})
 	var revs []int64
-	pfEnvStepUntil(t, r, nn, 40, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	pfEnvStepUntil(t, r, nn, 40, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		if pf := fg.Status.PlannedFailover; pf != nil {
 			revs = append(revs, pf.Revision)
 			return pf.Result != nil
@@ -312,7 +312,7 @@ func TestEnvtest_PlannedFailoverStore_ConditionedWriteNeverRegresses(t *testing.
 		}
 	}
 	got := pfEnvGet(t, nn)
-	if got.Status.PlannedFailover.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
+	if got.Status.PlannedFailover.Result.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("result %+v", got.Status.PlannedFailover.Result)
 	}
 	if got.Status.Sites[1].GtidExecuted != "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-42" {
@@ -323,10 +323,10 @@ func TestEnvtest_PlannedFailoverStore_ConditionedWriteNeverRegresses(t *testing.
 // §15.4 item 3: a write that commits and then times out is settled as
 // committed, and the run proceeds.
 func TestEnvtest_PlannedFailoverStatusFence_CommitThenTimeoutProceeds(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-commit-timeout", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
+	nn := pfEnvGroup(t, "pf-commit-timeout", map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"})
 	done := false
 	r := pfEnvInterceptedReconciler(t, &pfEnvTopology{}, func(ctx context.Context, c client.Client, obj client.Object, opts ...client.SubResourceUpdateOption) (bool, error) {
-		if done || !enginePFWrite(obj, v1alpha1.PlannedFailoverPhaseFencing) {
+		if done || !enginePFWrite(obj, v1beta1.PlannedFailoverPhaseFencing) {
 			return false, nil
 		}
 		done = true
@@ -335,14 +335,14 @@ func TestEnvtest_PlannedFailoverStatusFence_CommitThenTimeoutProceeds(t *testing
 		}
 		return true, context.DeadlineExceeded
 	})
-	pfEnvStepUntil(t, r, nn, 40, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	pfEnvStepUntil(t, r, nn, 40, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		return fg.Status.PlannedFailover != nil && fg.Status.PlannedFailover.Result != nil
 	})
 	got := pfEnvGet(t, nn)
-	if got.Status.PlannedFailover.Result.Outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
+	if got.Status.PlannedFailover.Result.Outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
 		t.Fatalf("result %+v", got.Status.PlannedFailover.Result)
 	}
-	if got.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
+	if got.Annotations[v1beta1.PlannedFailoverStatusFenceAnnotation] != "" {
 		t.Fatal("a committed write was fenced")
 	}
 }
@@ -351,27 +351,27 @@ func TestEnvtest_PlannedFailoverStatusFence_CommitThenTimeoutProceeds(t *testing
 // status fence; replaying the dropped request with its old resourceVersion
 // afterwards is a 409.
 func TestEnvtest_PlannedFailoverStatusFence_DroppedThenReplayed409(t *testing.T) {
-	nn := pfEnvGroup(t, "pf-dropped", map[string]string{v1alpha1.PlannedFailoverAnnotation: "dc2"})
-	var dropped *v1alpha1.MysqlFailoverGroup
+	nn := pfEnvGroup(t, "pf-dropped", map[string]string{v1beta1.PlannedFailoverAnnotation: "dc2"})
+	var dropped *v1beta1.MysqlFailoverGroup
 	topo := &pfEnvTopology{}
 	r := pfEnvInterceptedReconciler(t, topo, func(_ context.Context, _ client.Client, obj client.Object, _ ...client.SubResourceUpdateOption) (bool, error) {
-		if dropped != nil || !enginePFWrite(obj, v1alpha1.PlannedFailoverPhaseFencing) {
+		if dropped != nil || !enginePFWrite(obj, v1beta1.PlannedFailoverPhaseFencing) {
 			return false, nil
 		}
-		dropped = obj.(*v1alpha1.MysqlFailoverGroup).DeepCopy()
+		dropped = obj.(*v1beta1.MysqlFailoverGroup).DeepCopy()
 		return true, context.DeadlineExceeded // never reached the server
 	})
-	pfEnvStepUntil(t, r, nn, 5, func(*v1alpha1.MysqlFailoverGroup) bool { return dropped != nil })
+	pfEnvStepUntil(t, r, nn, 5, func(*v1beta1.MysqlFailoverGroup) bool { return dropped != nil })
 	if _, err := r.StepPlannedFailoverForTest(ctx, nn); err != nil {
 		t.Fatal(err)
 	}
-	if pfEnvGet(t, nn).Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] == "" {
+	if pfEnvGet(t, nn).Annotations[v1beta1.PlannedFailoverStatusFenceAnnotation] == "" {
 		t.Fatal("settlement did not fence the dropped write")
 	}
 	if err := k8sClient.Status().Update(ctx, dropped); !apierrors.IsConflict(err) {
 		t.Fatalf("replaying the dropped write after settlement = %v, want 409", err)
 	}
-	pfEnvStepUntil(t, r, nn, 40, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	pfEnvStepUntil(t, r, nn, 40, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		return fg.Status.PlannedFailover != nil && fg.Status.PlannedFailover.Result != nil
 	})
 }
@@ -414,8 +414,8 @@ func TestCRD_PlannedFailoverHoldRoundTrip(t *testing.T) {
 	if err := k8sClient.Create(ctx, fg); err != nil {
 		t.Fatal(err)
 	}
-	hold := &v1alpha1.PlannedFailoverHold{
-		RunID: "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+	hold := &v1beta1.PlannedFailoverHold{
+		RunID: "6f1d0c3a-5b8e-4c1f-9a2d-0e7b3c4d5e6f", Reason: v1beta1.PlannedFailoverReasonForeignWritable,
 		SourceSite: "dc1", TargetSite: "dc2", AmbiguousSites: []string{"dc1", "dc2"},
 		HoldTime: metav1.NewTime(time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)),
 	}
@@ -423,7 +423,7 @@ func TestCRD_PlannedFailoverHoldRoundTrip(t *testing.T) {
 	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatalf("status update with a hold: %v", err)
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(fg), &got); err != nil {
 		t.Fatal(err)
 	}

@@ -16,14 +16,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 type escrowHarness struct {
 	handler http.Handler
 	client  client.Client
 	token   string
-	fg      *v1alpha1.MysqlFailoverGroup
+	fg      *v1beta1.MysqlFailoverGroup
 }
 
 func newEscrowHarness(t *testing.T) *escrowHarness {
@@ -35,14 +35,14 @@ func newEscrowHarness(t *testing.T) *escrowHarness {
 	}
 	var sec corev1.Secret
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Namespace: fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
+		Namespace: fg.Namespace, Name: v1beta1.KeyringTokenSecretName(fg.Name, "dc1"),
 	}, &sec); err != nil {
 		t.Fatalf("read token: %v", err)
 	}
 	return &escrowHarness{
 		handler: NewKeyringEscrowHandler(c, slog.New(slog.NewTextHandler(io.Discard, nil))),
 		client:  c,
-		token:   string(sec.Data[v1alpha1.KeyringTokenKey]),
+		token:   string(sec.Data[v1beta1.KeyringTokenKey]),
 		fg:      fg,
 	}
 }
@@ -106,7 +106,7 @@ func TestEscrowHandler_HappyPath(t *testing.T) {
 	}, &sec); err != nil {
 		t.Fatalf("secret not stored: %v", err)
 	}
-	if !bytes.Equal(sec.Data[v1alpha1.KeyringDataFileName], raw) {
+	if !bytes.Equal(sec.Data[v1beta1.KeyringDataFileName], raw) {
 		t.Error("stored bytes differ from what was pushed")
 	}
 }
@@ -228,7 +228,7 @@ func TestEscrowHandler_RejectsUnknownSite(t *testing.T) {
 	}
 	var sec corev1.Secret
 	if err := h.client.Get(ctx, types.NamespacedName{
-		Namespace: h.fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(h.fg.Name, "ghost"),
+		Namespace: h.fg.Namespace, Name: v1beta1.KeyringTokenSecretName(h.fg.Name, "ghost"),
 	}, &sec); err != nil {
 		t.Fatalf("get ghost token: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestEscrowHandler_RejectsUnknownSite(t *testing.T) {
 	raw := []byte("k")
 	req := h.req(raw, keyringDigest(raw))
 	req.Site = "ghost"
-	rec := h.post(t, string(sec.Data[v1alpha1.KeyringTokenKey]), req)
+	rec := h.post(t, string(sec.Data[v1beta1.KeyringTokenKey]), req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body)
 	}
@@ -251,7 +251,7 @@ func TestEscrowHandler_RejectsWhenEncryptionDisabled(t *testing.T) {
 	}
 	var sec corev1.Secret
 	if err := c.Get(ctx, types.NamespacedName{
-		Namespace: fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
+		Namespace: fg.Namespace, Name: v1beta1.KeyringTokenSecretName(fg.Name, "dc1"),
 	}, &sec); err != nil {
 		t.Fatalf("get token: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestEscrowHandler_RejectsWhenEncryptionDisabled(t *testing.T) {
 	h := &escrowHarness{
 		handler: NewKeyringEscrowHandler(c, slog.New(slog.NewTextHandler(io.Discard, nil))),
 		client:  c,
-		token:   string(sec.Data[v1alpha1.KeyringTokenKey]),
+		token:   string(sec.Data[v1beta1.KeyringTokenKey]),
 		fg:      fg,
 	}
 	raw := []byte("k")
@@ -290,17 +290,17 @@ func TestEscrowHandler_RejectsSealedSite(t *testing.T) {
 	// window must not be replayable once the site is sealed.
 	for _, tc := range []struct {
 		name   string
-		phase  v1alpha1.SiteKeyringPhase
+		phase  v1beta1.SiteKeyringPhase
 		secret string
-		reason v1alpha1.KeyringUnsealReason
+		reason v1beta1.KeyringUnsealReason
 		want   int
 	}{
-		{name: "sealed", phase: v1alpha1.KeyringPhaseSealed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
-		{name: "escrowed", phase: v1alpha1.KeyringPhaseEscrowed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
-		{name: "failed while sealed", phase: v1alpha1.KeyringPhaseFailed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
-		{name: "unsealed for rotation", phase: v1alpha1.KeyringPhaseUnsealed, secret: "mysql-lion-dc1-keyring-v1", reason: v1alpha1.UnsealReasonRotation, want: http.StatusOK},
-		{name: "failed during rotation", phase: v1alpha1.KeyringPhaseFailed, secret: "mysql-lion-dc1-keyring-v1", reason: v1alpha1.UnsealReasonRotation, want: http.StatusOK},
-		{name: "pending", phase: v1alpha1.KeyringPhasePending, want: http.StatusOK},
+		{name: "sealed", phase: v1beta1.KeyringPhaseSealed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
+		{name: "escrowed", phase: v1beta1.KeyringPhaseEscrowed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
+		{name: "failed while sealed", phase: v1beta1.KeyringPhaseFailed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
+		{name: "unsealed for rotation", phase: v1beta1.KeyringPhaseUnsealed, secret: "mysql-lion-dc1-keyring-v1", reason: v1beta1.UnsealReasonRotation, want: http.StatusOK},
+		{name: "failed during rotation", phase: v1beta1.KeyringPhaseFailed, secret: "mysql-lion-dc1-keyring-v1", reason: v1beta1.UnsealReasonRotation, want: http.StatusOK},
+		{name: "pending", phase: v1beta1.KeyringPhasePending, want: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := encTestFG()
@@ -313,14 +313,14 @@ func TestEscrowHandler_RejectsSealedSite(t *testing.T) {
 			}
 			var sec corev1.Secret
 			if err := c.Get(ctx, types.NamespacedName{
-				Namespace: fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
+				Namespace: fg.Namespace, Name: v1beta1.KeyringTokenSecretName(fg.Name, "dc1"),
 			}, &sec); err != nil {
 				t.Fatalf("get token: %v", err)
 			}
 			h := &escrowHarness{
 				handler: NewKeyringEscrowHandler(c, slog.New(slog.NewTextHandler(io.Discard, nil))),
 				client:  c,
-				token:   string(sec.Data[v1alpha1.KeyringTokenKey]),
+				token:   string(sec.Data[v1beta1.KeyringTokenKey]),
 				fg:      fg,
 			}
 			raw := []byte("replayed-keyring")

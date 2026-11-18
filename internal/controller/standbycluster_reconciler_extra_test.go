@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
@@ -41,7 +41,7 @@ func newTestReconcilerWithSecret(t *testing.T, objs []client.Object, storeFunc f
 	scheme := newStandbyScheme(t)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).
+		WithStatusSubresource(&v1beta1.MysqlStandbyCluster{}).
 		WithObjects(objs...).
 		Build()
 	recorder := record.NewFakeRecorder(32)
@@ -55,7 +55,7 @@ func newTestReconcilerWithSecret(t *testing.T, objs []client.Object, storeFunc f
 }
 
 // standbyCRWithCredsSecret returns a CR that references a credentials secret.
-func standbyCRWithCredsSecret(name, ns, secretName string) *v1alpha1.MysqlStandbyCluster {
+func standbyCRWithCredsSecret(name, ns, secretName string) *v1beta1.MysqlStandbyCluster {
 	cr := minimalStandbyCR(name, ns)
 	cr.Spec.Source.S3.CredentialsSecretName = secretName
 	return cr
@@ -209,7 +209,7 @@ func TestStandbyCluster_SecretNotFound(t *testing.T) {
 		t.Fatal("CR should still be retrievable after config error")
 	}
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
 		return
@@ -252,7 +252,7 @@ func TestStandbyCluster_SecretMissingKey(t *testing.T) {
 		t.Fatal("CR should still be retrievable after config error")
 	}
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
 		return
@@ -309,8 +309,8 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 	cr1, _ := reconcileStandby(t, r, "test-sc", "default")
 	drainEvents()
 
-	brc1 := standbyFindCondition(cr1, v1alpha1.StandbyConditionBucketReadable)
-	skc1 := standbyFindCondition(cr1, v1alpha1.StandbyConditionSourceConfigKnown)
+	brc1 := standbyFindCondition(cr1, v1beta1.StandbyConditionBucketReadable)
+	skc1 := standbyFindCondition(cr1, v1beta1.StandbyConditionSourceConfigKnown)
 	if brc1 == nil || brc1.Status != metav1.ConditionTrue {
 		t.Fatalf("step1: BucketReadable want True, got %v", brc1)
 	}
@@ -334,8 +334,8 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 	cr2, _ := reconcileStandby(t, r, "test-sc", "default")
 	drainEvents()
 
-	brc2 := standbyFindCondition(cr2, v1alpha1.StandbyConditionBucketReadable)
-	skc2 := standbyFindCondition(cr2, v1alpha1.StandbyConditionSourceConfigKnown)
+	brc2 := standbyFindCondition(cr2, v1beta1.StandbyConditionBucketReadable)
+	skc2 := standbyFindCondition(cr2, v1beta1.StandbyConditionSourceConfigKnown)
 	if brc2 == nil || brc2.Status != metav1.ConditionTrue {
 		t.Fatalf("step2: BucketReadable want True, got %v", brc2)
 	}
@@ -362,8 +362,8 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 	cr3, _ := reconcileStandby(t, r, "test-sc", "default")
 	evs3 := drainEvents()
 
-	brc3 := standbyFindCondition(cr3, v1alpha1.StandbyConditionBucketReadable)
-	skc3 := standbyFindCondition(cr3, v1alpha1.StandbyConditionSourceConfigKnown)
+	brc3 := standbyFindCondition(cr3, v1beta1.StandbyConditionBucketReadable)
+	skc3 := standbyFindCondition(cr3, v1beta1.StandbyConditionSourceConfigKnown)
 	if brc3 == nil || brc3.Status != metav1.ConditionTrue {
 		t.Fatalf("step3: BucketReadable want True, got %v", brc3)
 	}
@@ -398,22 +398,22 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 func TestStandbyCluster_BuildStoreCfg_Errors(t *testing.T) {
 	cases := []struct {
 		name       string
-		s3         v1alpha1.StandbyS3Source
+		s3         v1beta1.StandbyS3Source
 		wantErrSub string
 	}{
 		{
 			name:       "empty bucket",
-			s3:         v1alpha1.StandbyS3Source{Prefix: "orders"},
+			s3:         v1beta1.StandbyS3Source{Prefix: "orders"},
 			wantErrSub: "s3 bucket is empty",
 		},
 		{
 			name:       "bucket-root prefix",
-			s3:         v1alpha1.StandbyS3Source{Bucket: "my-bucket", Prefix: "/"},
+			s3:         v1beta1.StandbyS3Source{Bucket: "my-bucket", Prefix: "/"},
 			wantErrSub: "the standby does not scan a bucket root",
 		},
 		{
 			name:       "empty prefix",
-			s3:         v1alpha1.StandbyS3Source{Bucket: "my-bucket"},
+			s3:         v1beta1.StandbyS3Source{Bucket: "my-bucket"},
 			wantErrSub: "the standby does not scan a bucket root",
 		},
 	}
@@ -426,7 +426,7 @@ func TestStandbyCluster_BuildStoreCfg_Errors(t *testing.T) {
 			scheme := newStandbyScheme(t)
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).
+				WithStatusSubresource(&v1beta1.MysqlStandbyCluster{}).
 				WithObjects(cr).
 				Build()
 			recorder := record.NewFakeRecorder(32)
@@ -448,7 +448,7 @@ func TestStandbyCluster_BuildStoreCfg_Errors(t *testing.T) {
 				t.Fatal("CR should still be retrievable after config error")
 			}
 
-			brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+			brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 			if brc == nil {
 				t.Fatal("BucketReadable condition missing")
 				return
@@ -481,12 +481,12 @@ func TestStandbyCluster_ReadDumpAtJSON_MalformedJSON(t *testing.T) {
 
 	updated, _ := reconcileStandby(t, r, "test-sc", "default")
 
-	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
+	brc := standbyFindCondition(updated, v1beta1.StandbyConditionBucketReadable)
 	if brc == nil || brc.Status != metav1.ConditionTrue {
 		t.Errorf("BucketReadable: want True (list succeeded), got %v", brc)
 	}
 
-	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
+	skc := standbyFindCondition(updated, v1beta1.StandbyConditionSourceConfigKnown)
 	if skc == nil || skc.Status != metav1.ConditionFalse {
 		t.Errorf("SourceConfigKnown: want False, got %v", skc)
 	}
@@ -553,7 +553,7 @@ func TestStandbyCluster_DumpSelectionByEndTime(t *testing.T) {
 // Scheme registration helpers
 // =====================================================================
 
-// newStandbySchemeWithCoreV1 ensures both v1alpha1 and corev1 are registered.
+// newStandbySchemeWithCoreV1 ensures both v1beta1 and corev1 are registered.
 // Reuses newStandbyScheme from standbycluster_reconciler_test.go which already
 // registers corev1.
 func newStandbySchemeWithCoreV1(t *testing.T) *runtime.Scheme {
@@ -599,14 +599,14 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 				cr.Spec.Source.S3.Prefix = tt.prefix
 			}
 			if tt.decrypt {
-				cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "pp"}}
+				cr.Spec.Source.Decryption = &v1beta1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "pp"}}
 				objs = append(objs, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"}, Data: map[string][]byte{"passphrase": []byte("k")}})
 			}
 			store := &fakeStore{Objects: tt.objects}
 			store.Objects[atKey] = []byte(atJSON)
 			r, recorder := newTestReconciler(t, objs, store)
 			got, _ := reconcileStandby(t, r, "test-sc", "default")
-			skc := standbyFindCondition(got, v1alpha1.StandbyConditionSourceConfigKnown)
+			skc := standbyFindCondition(got, v1beta1.StandbyConditionSourceConfigKnown)
 			if skc == nil || skc.Reason != tt.wantReason {
 				t.Fatalf("SourceConfigKnown = %v, want reason %s", skc, tt.wantReason)
 			}
@@ -623,11 +623,11 @@ func TestStandbyCluster_ArchiveIdentity(t *testing.T) {
 				}
 				return
 			}
-			want := &v1alpha1.PITRArchiveIdentity{
+			want := &v1beta1.PITRArchiveIdentity{
 				ArchiveID:      standbyTestArchiveID,
 				Destination:    "s3://my-bucket/orders/binlogs?endpoint=aws",
-				Source:         v1alpha1.PITRArchiveSource{Namespace: "prod", Name: "orders", UID: "source-uid"},
-				EncryptionMode: v1alpha1.EncryptionModeNone,
+				Source:         v1beta1.PITRArchiveSource{Namespace: "prod", Name: "orders", UID: "source-uid"},
+				EncryptionMode: v1beta1.EncryptionModeNone,
 			}
 			if d.BinlogArchive == nil || d.BinlogArchive.Identity != *want {
 				t.Fatalf("discovered.binlogArchive = %+v, want identity %+v", d.BinlogArchive, want)
@@ -651,7 +651,7 @@ func TestStandbyCluster_PassphraseUsesTrimPassphrase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pp", Namespace: "default"},
 		Data:       map[string][]byte{"passphrase": []byte("\vkey  \n")},
 	}}, &fakeStore{Objects: map[string][]byte{}})
-	file, dir, err := r.resolvePassphraseToFile(context.Background(), "default", v1alpha1.PassphraseSecretKeyRef{Name: "pp"}, "")
+	file, dir, err := r.resolvePassphraseToFile(context.Background(), "default", v1beta1.PassphraseSecretKeyRef{Name: "pp"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,7 +728,7 @@ func TestStandbyCluster_ManifestRefusalsAndMarks(t *testing.T) {
 			}
 			r, _ := newTestReconciler(t, []client.Object{cr}, store)
 			got, _ := reconcileStandby(t, r, "test-sc", "default")
-			skc := standbyFindCondition(got, v1alpha1.StandbyConditionSourceConfigKnown)
+			skc := standbyFindCondition(got, v1beta1.StandbyConditionSourceConfigKnown)
 			if skc == nil || skc.Reason != tt.wantReason {
 				t.Fatalf("SourceConfigKnown = %+v, want reason %s", skc, tt.wantReason)
 			}
@@ -753,4 +753,56 @@ func TestStandbyCluster_ManifestRefusalsAndMarks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// With the chart's read-only root filesystem and no writable /tmp, staging
+// the bucket's credentials fails. The condition message must be the same on
+// every attempt: it used to carry the temporary directory's random name, so
+// every reconcile changed status, every status write woke the reconciler
+// again, and the operator ran some hundred reconciles a second (found by
+// the upgrade E2E, which creates a MysqlStandbyCluster).
+func TestStandbyCluster_UnwritableTempDirIsAStableConfigError(t *testing.T) {
+	const secretName = "my-s3-creds-readonly"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+		Data:       map[string][]byte{"AWS_ACCESS_KEY_ID": []byte("AKID"), "AWS_SECRET_ACCESS_KEY": []byte("SKEY")},
+	}
+	cr := standbyCRWithCredsSecret("test-sc", "default", secretName)
+	storeFunc := func(context.Context, *sidecar.PITRConfig) (sidecar.ArchiveStore, error) {
+		t.Error("the store was built although the credentials could not be staged")
+		return nil, errors.New("unexpected call")
+	}
+	r, _ := newTestReconcilerWithSecret(t, []client.Object{cr, secret}, storeFunc)
+	c := r.Client
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	ctx := context.Background()
+	read := func() (string, string) {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, controllerRequestFor("test-sc", "default")); err != nil {
+			t.Fatalf("reconcile error: %v", err)
+		}
+		var got v1beta1.MysqlStandbyCluster
+		if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-sc"}, &got); err != nil {
+			t.Fatal(err)
+		}
+		cond := findCondition(got.Status.Conditions, v1beta1.StandbyConditionBucketReadable)
+		if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != v1beta1.ReasonConfigError {
+			t.Fatalf("BucketReadable = %+v, want False/ConfigError", cond)
+		}
+		return cond.Message, got.ResourceVersion
+	}
+	firstMessage, firstVersion := read()
+	if strings.Contains(firstMessage, "bloodraven-standby-creds-") || !strings.Contains(firstMessage, "no writable temporary directory") {
+		t.Fatalf("message = %q, want it to say that no temporary directory is writable, without a random name", firstMessage)
+	}
+	// The fake client counts every patch as a write, so the message is
+	// what can be compared here; the envtest
+	// TestMysqlStandbyCluster_StatusWritesDoNotWakeTheReconciler runs the
+	// controller against a real API server.
+	secondMessage, _ := read()
+	if secondMessage != firstMessage {
+		t.Fatalf("the message changed between two attempts:\n%s\n%s", firstMessage, secondMessage)
+	}
+	_ = firstVersion
 }

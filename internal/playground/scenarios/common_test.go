@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,8 +72,8 @@ func TestAssertHealthyBaselineRejectsOrderedUpdateInProgress(t *testing.T) {
 func TestAssertHealthyBaselineUsesAnnotationFailoverRecord(t *testing.T) {
 	mfg := testBaselineMFG(false)
 	mfg.Annotations = map[string]string{
-		v1alpha1.LastFailoverAnnotation:       time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
-		v1alpha1.LastFailoverTargetAnnotation: "pdx",
+		v1beta1.LastFailoverAnnotation:       time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		v1beta1.LastFailoverTargetAnnotation: "pdx",
 	}
 	env := testScenarioEnv(t, mfg)
 
@@ -87,8 +87,8 @@ func TestAssertHealthyBaselineUsesAnnotationFailoverRecord(t *testing.T) {
 // command as the remediation (O-m2).
 func TestAssertHealthyBaselineRejectsPlannedFailoverHold(t *testing.T) {
 	mfg := testBaselineMFG(false)
-	mfg.Status.PlannedFailoverHold = &v1alpha1.PlannedFailoverHold{RunID: "run-7",
-		Reason: v1alpha1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}
+	mfg.Status.PlannedFailoverHold = &v1beta1.PlannedFailoverHold{RunID: "run-7",
+		Reason: v1beta1.PlannedFailoverReasonForeignWritable, HoldTime: metav1.Now()}
 	err := AssertHealthyBaseline(context.Background(), testScenarioEnv(t, mfg))
 	want := "kubectl bloodraven ack-planned-failover-hold " + mfg.Name + " -n " + mfg.Namespace
 	if err == nil || !strings.Contains(err.Error(), "automation hold stands (run run-7") || !strings.Contains(err.Error(), want) {
@@ -97,8 +97,8 @@ func TestAssertHealthyBaselineRejectsPlannedFailoverHold(t *testing.T) {
 
 	// A hand-edited True condition without the field names no run.
 	mfg = testBaselineMFG(false)
-	mfg.Status.Conditions = append(mfg.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionAutomaticFailoverHeld,
-		Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired, LastTransitionTime: metav1.Now()})
+	mfg.Status.Conditions = append(mfg.Status.Conditions, metav1.Condition{Type: v1beta1.ConditionAutomaticFailoverHeld,
+		Status: metav1.ConditionTrue, Reason: v1beta1.ReasonPlannedFailoverManualRecoveryRequired, LastTransitionTime: metav1.Now()})
 	err = AssertHealthyBaseline(context.Background(), testScenarioEnv(t, mfg))
 	if err == nil || !strings.Contains(err.Error(), "names no planned-failover run") {
 		t.Fatalf("condition-only hold baseline error = %v", err)
@@ -111,13 +111,13 @@ func TestAssertHealthyBaselineRejectsPlannedFailoverHold(t *testing.T) {
 // site and the Ready condition say, and neither is one with a site the
 // operator has not reported yet.
 func TestCheckBaselineRejectsUnreachableNonActiveSite(t *testing.T) {
-	withReader := func() *v1alpha1.MysqlFailoverGroup {
+	withReader := func() *v1beta1.MysqlFailoverGroup {
 		mfg := testBaselineMFG(false)
-		mfg.Spec.Sites = append(mfg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly})
-		mfg.Status.Sites = append(mfg.Status.Sites, v1alpha1.SiteStatus{Name: "reader", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy})
+		mfg.Spec.Sites = append(mfg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly})
+		mfg.Status.Sites = append(mfg.Status.Sites, v1beta1.SiteStatus{Name: "reader", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy})
 		return mfg
 	}
-	check := func(mfg *v1alpha1.MysqlFailoverGroup) error {
+	check := func(mfg *v1beta1.MysqlFailoverGroup) error {
 		env := testScenarioEnv(t, mfg)
 		return CheckBaseline(context.Background(), env.Kube, env.Namespace, env.FG)
 	}
@@ -129,7 +129,7 @@ func TestCheckBaselineRejectsUnreachableNonActiveSite(t *testing.T) {
 	// The run of #262: Ready=True, the active site writable, the reader
 	// (not promotable, not active) unreachable.
 	mfg := withReader()
-	mfg.Status.Sites[2].State = v1alpha1.SiteStateUnreachable
+	mfg.Status.Sites[2].State = v1beta1.SiteStateUnreachable
 	mfg.Status.Sites[2].Replication = ""
 	err := check(mfg)
 	if err == nil || !strings.Contains(err.Error(), `site reader state="Unreachable"`) {
@@ -138,7 +138,7 @@ func TestCheckBaselineRejectsUnreachableNonActiveSite(t *testing.T) {
 
 	// An unreachable promotable standby is the same.
 	mfg = withReader()
-	mfg.Status.Sites[1].State = v1alpha1.SiteStateUnreachable
+	mfg.Status.Sites[1].State = v1beta1.SiteStateUnreachable
 	if err := check(mfg); err == nil || !strings.Contains(err.Error(), "site pdx") {
 		t.Fatalf("unreachable standby: baseline error = %v, want site pdx", err)
 	}
@@ -156,17 +156,17 @@ func TestCheckBaselineRejectsUnreachableNonActiveSite(t *testing.T) {
 // completed one is.
 func TestCheckBaselineRejectsUnfinishedPacedRollout(t *testing.T) {
 	for _, tc := range []struct {
-		phase   v1alpha1.RolloutPhase
+		phase   v1beta1.RolloutPhase
 		healthy bool
 	}{
-		{v1alpha1.RolloutPhasePending, false},
-		{v1alpha1.RolloutPhaseAdmitted, false},
-		{v1alpha1.RolloutPhaseRolling, false},
-		{v1alpha1.RolloutPhaseStalled, false},
-		{v1alpha1.RolloutPhaseComplete, true},
+		{v1beta1.RolloutPhasePending, false},
+		{v1beta1.RolloutPhaseAdmitted, false},
+		{v1beta1.RolloutPhaseRolling, false},
+		{v1beta1.RolloutPhaseStalled, false},
+		{v1beta1.RolloutPhaseComplete, true},
 	} {
 		mfg := testBaselineMFG(false)
-		mfg.Status.Rollout = &v1alpha1.RolloutStatus{Phase: tc.phase, Reason: "WaitingForSlot"}
+		mfg.Status.Rollout = &v1beta1.RolloutStatus{Phase: tc.phase, Reason: "WaitingForSlot"}
 		env := testScenarioEnv(t, mfg)
 		err := CheckBaseline(context.Background(), env.Kube, env.Namespace, env.FG)
 		if tc.healthy && err != nil {
@@ -178,17 +178,17 @@ func TestCheckBaselineRejectsUnfinishedPacedRollout(t *testing.T) {
 	}
 }
 
-func testScenarioEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup) *runner.Env {
+func testScenarioEnv(t *testing.T, mfg *v1beta1.MysqlFailoverGroup) *runner.Env {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	k := &pgkube.Client{
 		Kubernetes: fake.NewSimpleClientset(),
 		Controller: ctrlfake.NewClientBuilder().
 			WithScheme(scheme).
-			WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+			WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 			WithRuntimeObjects(mfg).
 			Build(),
 	}
@@ -199,44 +199,44 @@ func testScenarioEnv(t *testing.T, mfg *v1alpha1.MysqlFailoverGroup) *runner.Env
 	}
 }
 
-func testBaselineMFG(dragonflyEnabled bool) *v1alpha1.MysqlFailoverGroup {
-	mfg := &v1alpha1.MysqlFailoverGroup{
+func testBaselineMFG(dragonflyEnabled bool) *v1beta1.MysqlFailoverGroup {
+	mfg := &v1beta1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pgkube.FailoverGroupName,
 			Namespace: pgkube.PlaygroundNamespace,
 		},
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Sites: []v1alpha1.SiteSpec{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Sites: []v1beta1.SiteSpec{
 				{Name: "iad", ServerID: 101},
 				{Name: "pdx", ServerID: 102},
 			},
 		},
-		Status: v1alpha1.MysqlFailoverGroupStatus{
+		Status: v1beta1.MysqlFailoverGroupStatus{
 			ActiveSite: "iad",
 			Conditions: []metav1.Condition{{
 				Type:   "Ready",
 				Status: metav1.ConditionTrue,
 			}},
-			Sites: []v1alpha1.SiteStatus{
-				{Name: "iad", State: v1alpha1.SiteStateWritable},
-				{Name: "pdx", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy},
+			Sites: []v1beta1.SiteStatus{
+				{Name: "iad", State: v1beta1.SiteStateWritable},
+				{Name: "pdx", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy},
 			},
 		},
 	}
 	if dragonflyEnabled {
-		mfg.Spec.Dragonfly = &v1alpha1.DragonflySpec{Enabled: true}
-		mfg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+		mfg.Spec.Dragonfly = &v1beta1.DragonflySpec{Enabled: true}
+		mfg.Status.Dragonfly = &v1beta1.DragonflyStatus{
 			ActiveSite: "iad",
-			Phase:      v1alpha1.DragonflyPhaseReady,
-			Sites: []v1alpha1.DragonflySiteStatus{
+			Phase:      v1beta1.DragonflyPhaseReady,
+			Sites: []v1beta1.DragonflySiteStatus{
 				{
 					Name:      "iad",
-					Role:      v1alpha1.DragonflyRoleMaster,
+					Role:      v1beta1.DragonflyRoleMaster,
 					Reachable: true,
 				},
 				{
 					Name:             "pdx",
-					Role:             v1alpha1.DragonflyRoleReplica,
+					Role:             v1beta1.DragonflyRoleReplica,
 					Reachable:        true,
 					LinkStatus:       "up",
 					LastIOSecondsAgo: new(int64(0)),

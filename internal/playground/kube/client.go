@@ -4,14 +4,18 @@ package kube
 
 import (
 	"fmt"
+	"os"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // PlaygroundNamespace is the default namespace used by every
@@ -33,6 +37,10 @@ type Client struct {
 	Kubernetes    kubernetes.Interface
 	Controller    client.Client
 	NamespaceHint string
+	// APIVersion is the shipstream.io version Controller reads and writes
+	// the Bloodraven kinds at: v1beta1, or the deprecated v1alpha1 when
+	// the cluster does not serve v1beta1 yet (see apiGroupVersion).
+	APIVersion schema.GroupVersion
 }
 
 // LoadOptions controls how a Client is constructed.
@@ -97,12 +105,20 @@ func New(opts LoadOptions) (*Client, error) {
 		restCfg.Burst = 100
 	}
 
+	// Print each API server warning once. The upgrade E2E talks the
+	// deprecated version for a whole run, and the default handler would
+	// repeat its deprecation warning on every request.
+	if restCfg.WarningHandler == nil {
+		restCfg.WarningHandler = rest.NewWarningWriter(os.Stderr, rest.WarningWriterOptions{Deduplicate: true})
+	}
+
 	kc, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("build kubernetes client: %w", err)
 	}
 
-	scheme, err := newScheme()
+	gv := apiGroupVersion(kc.Discovery())
+	scheme, err := newScheme(gv)
 	if err != nil {
 		return nil, fmt.Errorf("build scheme: %w", err)
 	}
@@ -119,13 +135,32 @@ func New(opts LoadOptions) (*Client, error) {
 		Kubernetes:    kc,
 		Controller:    cc,
 		NamespaceHint: PlaygroundNamespace,
+		APIVersion:    gv,
 	}, nil
 }
 
-func newScheme() (*runtimeScheme, error) {
-	s := defaultScheme()
-	if err := v1alpha1.AddToScheme(s); err != nil {
-		return nil, err
+// apiGroupVersion picks the shipstream.io version the runner talks: the
+// one the Go types are written for, unless the cluster serves only the
+// deprecated one. That is the upgrade E2E, which starts on a release from
+// before v1.8.0 and upgrades it under the running scenario; both versions
+// have one schema, and the deprecated one stays served after the upgrade,
+// so the client chosen at the start works to the end.
+//
+// A cluster that cannot be asked gets the default: the commands that need
+// no cluster (list) must still work.
+func apiGroupVersion(disc discovery.DiscoveryInterface) schema.GroupVersion {
+	if _, err := disc.ServerResourcesForGroupVersion(v1beta1.GroupVersion.String()); !apierrors.IsNotFound(err) {
+		return v1beta1.GroupVersion
 	}
-	return s, nil
+	if _, err := disc.ServerResourcesForGroupVersion(v1beta1.DeprecatedGroupVersion.String()); err == nil {
+		return v1beta1.DeprecatedGroupVersion
+	}
+	return v1beta1.GroupVersion
+}
+
+// newScheme returns the runner's scheme with the Bloodraven kinds
+// registered at gv.
+func newScheme(gv schema.GroupVersion) (*runtimeScheme, error) {
+	s := defaultScheme()
+	return s, v1beta1.AddToSchemeAt(s, gv)
 }

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"unicode"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // kebab returns the lowercase kebab-case form of a CamelCase enum value. A
@@ -38,39 +38,39 @@ func kebab(v string) string {
 // Role is the role label of the site-scoped gauges
 // (bloodraven_site_state, bloodraven_replication_lag_seconds,
 // bloodraven_replication_running): spec.sites[].role.
-func Role(r v1alpha1.SiteRole) string { return kebab(string(r)) }
+func Role(r v1beta1.SiteRole) string { return kebab(string(r)) }
 
 // SiteState is the state label of bloodraven_site_state and the from and
 // to labels of bloodraven_state_transitions_total.
-func SiteState(s v1alpha1.SiteState) string { return kebab(string(s)) }
+func SiteState(s v1beta1.SiteState) string { return kebab(string(s)) }
 
 // SourceState is the state label of bloodraven_replication_source_state.
-func SourceState(s v1alpha1.SourceConvergenceState) string { return kebab(string(s)) }
+func SourceState(s v1beta1.SourceConvergenceState) string { return kebab(string(s)) }
 
 // KeyringPhase is the phase label of bloodraven_keyring_phase.
-func KeyringPhase(p v1alpha1.SiteKeyringPhase) string { return kebab(string(p)) }
+func KeyringPhase(p v1beta1.SiteKeyringPhase) string { return kebab(string(p)) }
 
 // RestoreReclonePhase is the phase label of
 // bloodraven_restore_reclone_pending.
-func RestoreReclonePhase(p v1alpha1.RestoreReclonesPhase) string { return kebab(string(p)) }
+func RestoreReclonePhase(p v1beta1.RestoreReclonesPhase) string { return kebab(string(p)) }
 
 // PlannedFailoverResult is the result label of
 // bloodraven_planned_failovers_total: the run's outcome.
-func PlannedFailoverResult(o v1alpha1.PlannedFailoverOutcome) string { return kebab(string(o)) }
+func PlannedFailoverResult(o v1beta1.PlannedFailoverOutcome) string { return kebab(string(o)) }
 
 // SiteStates are the bloodraven_site_state label values, in the order the
 // state-set is emitted.
 var SiteStates = labelsOf(SiteState,
-	v1alpha1.SiteStateWritable, v1alpha1.SiteStateReadOnly, v1alpha1.SiteStateUnreachable, v1alpha1.SiteStateUnknown)
+	v1beta1.SiteStateWritable, v1beta1.SiteStateReadOnly, v1beta1.SiteStateUnreachable, v1beta1.SiteStateUnknown)
 
 // SourceStates are the bloodraven_replication_source_state label values.
 var SourceStates = labelsOf(SourceState,
-	v1alpha1.SourceConvergenceConverged, v1alpha1.SourceConvergencePending, v1alpha1.SourceConvergenceBlocked)
+	v1beta1.SourceConvergenceConverged, v1beta1.SourceConvergencePending, v1beta1.SourceConvergenceBlocked)
 
 // KeyringPhases are the bloodraven_keyring_phase label values.
 var KeyringPhases = labelsOf(KeyringPhase,
-	v1alpha1.KeyringPhasePending, v1alpha1.KeyringPhaseUnsealed, v1alpha1.KeyringPhaseEscrowed,
-	v1alpha1.KeyringPhaseSealed, v1alpha1.KeyringPhaseFailed)
+	v1beta1.KeyringPhasePending, v1beta1.KeyringPhaseUnsealed, v1beta1.KeyringPhaseEscrowed,
+	v1beta1.KeyringPhaseSealed, v1beta1.KeyringPhaseFailed)
 
 func labelsOf[T ~string](f func(T) string, vs ...T) []string {
 	out := make([]string, len(vs))

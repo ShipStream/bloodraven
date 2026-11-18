@@ -3,7 +3,7 @@ package dragonfly
 // SiteRole is the operator's internal classification of a Dragonfly site
 // from its INFO replication answer. The values are internal tokens, not
 // pod-label or API values: the controller maps each one to the
-// api/v1alpha1.DragonflyRole it writes to status, and the dragonfly-role
+// api/v1beta1.DragonflyRole it writes to status, and the dragonfly-role
 // pod label (master or replica only) is chosen separately, from the
 // routing decision. Kept as a string type here to avoid pulling the API
 // package into a leaf parser package.

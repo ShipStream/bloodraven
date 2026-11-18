@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // e6Case is one transition rule: an object is created from build, an
@@ -39,7 +39,7 @@ type e6Case struct {
 	fragment string
 }
 
-func e6FG(mutate func(*v1alpha1.MysqlFailoverGroup)) func(ns, name string) client.Object {
+func e6FG(mutate func(*v1beta1.MysqlFailoverGroup)) func(ns, name string) client.Object {
 	return func(ns, name string) client.Object {
 		fg := newTestFG(ns)
 		fg.Name = name
@@ -50,15 +50,15 @@ func e6FG(mutate func(*v1alpha1.MysqlFailoverGroup)) func(ns, name string) clien
 	}
 }
 
-func e6OnFG(f func(*v1alpha1.MysqlFailoverGroup)) func(client.Object) {
-	return func(o client.Object) { f(o.(*v1alpha1.MysqlFailoverGroup)) }
+func e6OnFG(f func(*v1beta1.MysqlFailoverGroup)) func(client.Object) {
+	return func(o client.Object) { f(o.(*v1beta1.MysqlFailoverGroup)) }
 }
 
-func e6Backup(mutate func(*v1alpha1.MysqlBackup)) func(ns, name string) client.Object {
+func e6Backup(mutate func(*v1beta1.MysqlBackup)) func(ns, name string) client.Object {
 	return func(ns, name string) client.Object {
-		b := &v1alpha1.MysqlBackup{
+		b := &v1beta1.MysqlBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec:       v1alpha1.MysqlBackupSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
+			Spec:       v1beta1.MysqlBackupSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: "lion"}, ProfileName: "nightly-s3"},
 		}
 		if mutate != nil {
 			mutate(b)
@@ -67,11 +67,11 @@ func e6Backup(mutate func(*v1alpha1.MysqlBackup)) func(ns, name string) client.O
 	}
 }
 
-func e6OnBackup(f func(*v1alpha1.MysqlBackup)) func(client.Object) {
-	return func(o client.Object) { f(o.(*v1alpha1.MysqlBackup)) }
+func e6OnBackup(f func(*v1beta1.MysqlBackup)) func(client.Object) {
+	return func(o client.Object) { f(o.(*v1beta1.MysqlBackup)) }
 }
 
-func e6Verification(mutate func(*v1alpha1.MysqlBackupVerification)) func(ns, name string) client.Object {
+func e6Verification(mutate func(*v1beta1.MysqlBackupVerification)) func(ns, name string) client.Object {
 	return func(ns, name string) client.Object {
 		v := e8Verification(ns, name)
 		if mutate != nil {
@@ -81,14 +81,14 @@ func e6Verification(mutate func(*v1alpha1.MysqlBackupVerification)) func(ns, nam
 	}
 }
 
-func e6OnVerification(f func(*v1alpha1.MysqlBackupVerification)) func(client.Object) {
-	return func(o client.Object) { f(o.(*v1alpha1.MysqlBackupVerification)) }
+func e6OnVerification(f func(*v1beta1.MysqlBackupVerification)) func(client.Object) {
+	return func(o client.Object) { f(o.(*v1beta1.MysqlBackupVerification)) }
 }
 
 // e6StatusPatch is a status write that changes nothing in spec, per kind.
 func e6StatusPatch(o client.Object) []byte {
 	switch o.(type) {
-	case *v1alpha1.MysqlFailoverGroup:
+	case *v1beta1.MysqlFailoverGroup:
 		return []byte(`{"status":{"observedGeneration":1}}`)
 	default:
 		return []byte(`{"status":{"phase":"Pending"}}`)
@@ -135,18 +135,18 @@ func e6Run(t *testing.T, ns string, cases []e6Case) {
 
 // e6WithInit gives the group an initFromBackup block with every field
 // the rule compares.
-func e6WithInit(fg *v1alpha1.MysqlFailoverGroup) {
+func e6WithInit(fg *v1beta1.MysqlFailoverGroup) {
 	// The archive profile the restore reads must exist when the group is
 	// created (E16).
 	if fg.Spec.Backup == nil {
-		fg.Spec.Backup = &v1alpha1.BackupSpec{}
+		fg.Spec.Backup = &v1beta1.BackupSpec{}
 	}
 	fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, pitrS3Profile("nightly-s3", "orders", ""))
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source:      v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "orders-nightly"}},
-		LoadOptions: &v1alpha1.LoadOptions{Threads: 4, ExcludeSchemas: []string{"scratch"}},
-		Decryption:  &v1alpha1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "old-key"}},
-		PointInTime: &v1alpha1.PointInTimeSpec{
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source:      v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "orders-nightly"}},
+		LoadOptions: &v1beta1.LoadOptions{Threads: 4, ExcludeSchemas: []string{"scratch"}},
+		Decryption:  &v1beta1.BackupDecryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "old-key"}},
+		PointInTime: &v1beta1.PointInTimeSpec{
 			ArchiveProfileName: "nightly-s3",
 			StopTime:           metav1.Time{Time: time.Date(2026, 4, 15, 9, 30, 0, 0, time.UTC)},
 			ExcludeGtids:       "3e11fa47-71ca-11e1-9e33-c80aa9429562:5",
@@ -154,53 +154,53 @@ func e6WithInit(fg *v1alpha1.MysqlFailoverGroup) {
 	}
 }
 
-func e6WithS3Init(fg *v1alpha1.MysqlFailoverGroup) {
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
-		Source: v1alpha1.RestoreSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "orders", Region: "us-east-1", CredentialsSecretName: "s3"}},
+func e6WithS3Init(fg *v1beta1.MysqlFailoverGroup) {
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{
+		Source: v1beta1.RestoreSource{S3: &v1beta1.S3Storage{Bucket: "b", Prefix: "orders", Region: "us-east-1", CredentialsSecretName: "s3"}},
 	}
 }
 
-func e6WithEncryption(fg *v1alpha1.MysqlFailoverGroup) {
-	fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+func e6WithEncryption(fg *v1beta1.MysqlFailoverGroup) {
+	fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"}
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 }
 
-func e6WithPVCProfile(pvc v1alpha1.PVCStorage) func(*v1alpha1.MysqlFailoverGroup) {
-	return func(fg *v1alpha1.MysqlFailoverGroup) {
-		fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{{
+func e6WithPVCProfile(pvc v1beta1.PVCStorage) func(*v1beta1.MysqlFailoverGroup) {
+	return func(fg *v1beta1.MysqlFailoverGroup) {
+		fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{{
 			Name:    "local",
-			Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: pvc.DeepCopy()},
+			Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: pvc.DeepCopy()},
 		}}}
 	}
 }
 
-func e6S3Storage() v1alpha1.BackupStorage {
-	return v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "orders", CredentialsSecretName: "s3"}}
+func e6S3Storage() v1beta1.BackupStorage {
+	return v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3, S3: &v1beta1.S3Storage{Bucket: "b", Prefix: "orders", CredentialsSecretName: "s3"}}
 }
 
 // e6WithS3Profile gives fg one S3 profile named "local", the name
 // e6WithPVCProfile uses, so a test can switch the same profile's backend.
-func e6WithS3Profile(fg *v1alpha1.MysqlFailoverGroup) {
-	fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{{Name: "local", Storage: e6S3Storage()}}}
+func e6WithS3Profile(fg *v1beta1.MysqlFailoverGroup) {
+	fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{{Name: "local", Storage: e6S3Storage()}}}
 }
 
-func e6WithPITRProfile(fg *v1alpha1.MysqlFailoverGroup) {
-	fg.Spec.Backup = &v1alpha1.BackupSpec{
-		Profiles: []v1alpha1.BackupProfile{{
+func e6WithPITRProfile(fg *v1beta1.MysqlFailoverGroup) {
+	fg.Spec.Backup = &v1beta1.BackupSpec{
+		Profiles: []v1beta1.BackupProfile{{
 			Name:       "archive",
-			Storage:    v1alpha1.BackupStorage{Type: v1alpha1.BackupStorageS3, S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "orders", CredentialsSecretName: "s3"}},
-			Encryption: &v1alpha1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1alpha1.PassphraseSecretKeyRef{Name: "archive-key"}},
+			Storage:    v1beta1.BackupStorage{Type: v1beta1.BackupStorageS3, S3: &v1beta1.S3Storage{Bucket: "b", Prefix: "orders", CredentialsSecretName: "s3"}},
+			Encryption: &v1beta1.BackupEncryptionSpec{PassphraseSecretKeyRef: v1beta1.PassphraseSecretKeyRef{Name: "archive-key"}},
 		}},
-		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "archive"},
+		PITR: &v1beta1.PITRSpec{Enabled: true, ProfileName: "archive"},
 	}
 }
 
-func e6Provisioned(class string, size v1alpha1.StorageQuantity) v1alpha1.PVCStorage {
-	p := &v1alpha1.ProvisionedVolumeSpec{Size: size}
+func e6Provisioned(class string, size v1beta1.StorageQuantity) v1beta1.PVCStorage {
+	p := &v1beta1.ProvisionedVolumeSpec{Size: size}
 	if class != "" {
 		p.StorageClassName = &class
 	}
-	return v1alpha1.PVCStorage{Provisioned: p}
+	return v1beta1.PVCStorage{Provisioned: p}
 }
 
 // TestE6_TransitionRules: every MysqlFailoverGroup, MysqlBackup and
@@ -208,8 +208,8 @@ func e6Provisioned(class string, size v1alpha1.StorageQuantity) v1alpha1.PVCStor
 // a status write, and refuses the change it guards.
 func TestE6_TransitionRules(t *testing.T) {
 	ns := createNamespace(t, "e6-transitions")
-	withReader := func(fg *v1alpha1.MysqlFailoverGroup) {
-		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly,
+	withReader := func(fg *v1beta1.MysqlFailoverGroup) {
+		fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly,
 			Zone: "lion-reader", Storage: fg.Spec.Sites[0].Storage})
 	}
 	const (
@@ -229,165 +229,165 @@ func TestE6_TransitionRules(t *testing.T) {
 	)
 	cases := []e6Case{
 		// A-16
-		{"site removed", e6FG(withReader), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites = fg.Spec.Sites[:2] }), sites},
-		{"site renamed", e6FG(withReader), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[2].Name = "reader2" }), sites},
+		{"site removed", e6FG(withReader), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites = fg.Spec.Sites[:2] }), sites},
+		{"site renamed", e6FG(withReader), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[2].Name = "reader2" }), sites},
 		// A-17
-		{"zone", e6FG(nil), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Zone = "lion-dc3" }), "zone is immutable"},
-		{"storageClassName", e6FG(nil), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.StorageClassName = "fast" }), "storageClassName is immutable"},
-		{"size", e6FG(nil), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "20Gi" }), "size is immutable"},
+		{"zone", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Zone = "lion-dc3" }), "zone is immutable"},
+		{"storageClassName", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.StorageClassName = "fast" }), "storageClassName is immutable"},
+		{"size", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "20Gi" }), "size is immutable"},
 		// A-23
 		{"initFromBackup added", e6FG(nil), e6OnFG(e6WithInit), initFixed},
-		{"initFromBackup removed", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.InitFromBackup = nil }), initFixed},
-		{"initFromBackup backupRef", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup removed", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.InitFromBackup = nil }), initFixed},
+		{"initFromBackup backupRef", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.Source.BackupRef.Name = "orders-weekly"
 		}), initFixed},
-		{"initFromBackup source backend", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.InitFromBackup.Source = v1alpha1.RestoreSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dumps"}}
+		{"initFromBackup source backend", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.InitFromBackup.Source = v1beta1.RestoreSource{PVC: &v1beta1.InitFromBackupPVCSource{ClaimName: "dumps"}}
 		}), initFixed},
-		{"initFromBackup s3 prefix", e6FG(e6WithS3Init), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup s3 prefix", e6FG(e6WithS3Init), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.Source.S3.Prefix = "orders-2"
 		}), initFixed},
-		{"initFromBackup s3 region removed", e6FG(e6WithS3Init), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup s3 region removed", e6FG(e6WithS3Init), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.Source.S3.Region = ""
 		}), initFixed},
-		{"initFromBackup decryption", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup decryption", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.Decryption.PassphraseSecretKeyRef.Name = "new-key"
 		}), initFixed},
-		{"initFromBackup decryption removed", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup decryption removed", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.Decryption = nil
 		}), initFixed},
-		{"initFromBackup loadOptions threads", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup loadOptions threads", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.LoadOptions.Threads = 8
 		}), initFixed},
-		{"initFromBackup loadOptions skipBinlog", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup loadOptions skipBinlog", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.LoadOptions.SkipBinlog = new(false)
 		}), initFixed},
-		{"initFromBackup loadOptions excludeSchemas", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup loadOptions excludeSchemas", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.LoadOptions.ExcludeSchemas = nil
 		}), initFixed},
-		{"initFromBackup stopTime", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup stopTime", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.StopTime = metav1.Time{Time: time.Date(2026, 4, 15, 9, 30, 1, 0, time.UTC)}
 		}), initFixed},
-		{"initFromBackup allowPartial", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup allowPartial", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.AllowPartial = true
 		}), initFixed},
-		{"initFromBackup excludeGtids", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup excludeGtids", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.ExcludeGtids = ""
 		}), initFixed},
-		{"initFromBackup archiveProfileName", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup archiveProfileName", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime.ArchiveProfileName = "weekly-s3"
 		}), initFixed},
-		{"initFromBackup pointInTime removed", e6FG(e6WithInit), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"initFromBackup pointInTime removed", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.InitFromBackup.PointInTime = nil
 		}), initFixed},
 		// A-24
-		{"encryption disabled", e6FG(e6WithEncryption), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.EncryptionAtRest.Enabled = false }), encOff},
-		{"encryption removed", e6FG(e6WithEncryption), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.EncryptionAtRest = nil }), encOff},
-		{"keyring dataFileDir", e6FG(e6WithEncryption), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{DataFileDir: "/run/keyring-2"}
+		{"encryption disabled", e6FG(e6WithEncryption), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.EncryptionAtRest.Enabled = false }), encOff},
+		{"encryption removed", e6FG(e6WithEncryption), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.EncryptionAtRest = nil }), encOff},
+		{"keyring dataFileDir", e6FG(e6WithEncryption), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{DataFileDir: "/run/keyring-2"}
 		}), keyring},
-		{"keyring pluginDir", e6FG(e6WithEncryption), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{PluginDir: "/usr/lib/mysql/plugin"}
+		{"keyring pluginDir", e6FG(e6WithEncryption), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{PluginDir: "/usr/lib/mysql/plugin"}
 		}), keyring},
-		{"keyring mysqldDir", e6FG(e6WithEncryption), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{MysqldDir: "/usr/local/sbin"}
+		{"keyring mysqldDir", e6FG(e6WithEncryption), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{MysqldDir: "/usr/local/sbin"}
 		}), keyring},
 		// #203, on the kind root (A-25)
-		{"PITR profile encryption", e6FG(e6WithPITRProfile), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"PITR profile encryption", e6FG(e6WithPITRProfile), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Encryption.PassphraseSecretKeyRef.Name = "other-key"
 		}), pitrEnc},
 		// A-18 (R04): presence is compared on the profile's storage, so
 		// provisioned cannot be removed, also by switching storage.type, and
 		// so cannot come back with new values. Removing the whole profile
 		// and adding it back later is runtime-guarded (BackupStorageMismatch).
-		{"provisioned size", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"provisioned size", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "20Gi"
 		}), pvc},
-		{"provisioned class", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"provisioned class", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.StorageClassName = new("slow")
 		}), pvc},
-		{"provisioned class removed", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"provisioned class removed", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.StorageClassName = nil
 		}), pvc},
-		{"provisioned class added", e6FG(e6WithPVCProfile(e6Provisioned("", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"provisioned class added", e6FG(e6WithPVCProfile(e6Provisioned("", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.StorageClassName = new("fast")
 		}), pvc},
-		{"provisioned removed", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"provisioned removed", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned = nil
 		}), pvcUnion},
-		{"provisioned to claimName", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup.Profiles[0].Storage.PVC = &v1alpha1.PVCStorage{ClaimName: "backups"}
+		{"provisioned to claimName", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Profiles[0].Storage.PVC = &v1beta1.PVCStorage{ClaimName: "backups"}
 		}), pvc},
-		{"claimName to provisioned", e6FG(e6WithPVCProfile(v1alpha1.PVCStorage{ClaimName: "backups"})), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"claimName to provisioned", e6FG(e6WithPVCProfile(v1beta1.PVCStorage{ClaimName: "backups"})), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			pvc := e6Provisioned("fast", "10Gi")
 			fg.Spec.Backup.Profiles[0].Storage.PVC = &pvc
 		}), pvc},
-		{"provisioned to S3", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"provisioned to S3", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage = e6S3Storage()
 		}), pvc},
-		{"S3 to provisioned", e6FG(e6WithS3Profile), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"S3 to provisioned", e6FG(e6WithS3Profile), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			pvc := e6Provisioned("fast", "10Gi")
-			fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: &pvc}
+			fg.Spec.Backup.Profiles[0].Storage = v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: &pvc}
 		}), pvc},
 		// A-22, MysqlBackup
-		{"backup failoverGroupRef", e6Backup(nil), e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.FailoverGroupRef.Name = "tiger" }), groupRef},
-		{"backup profileName", e6Backup(nil), e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.ProfileName = "weekly" }), profile},
-		{"backup sourceSite added", e6Backup(nil), e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "dc2" }), sourceSite},
-		{"backup sourceSite changed", e6Backup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "dc1" }), e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "dc2" }), sourceSite},
-		{"backup sourceSite removed", e6Backup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "dc1" }), e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "" }), sourceSite},
+		{"backup failoverGroupRef", e6Backup(nil), e6OnBackup(func(b *v1beta1.MysqlBackup) { b.Spec.FailoverGroupRef.Name = "tiger" }), groupRef},
+		{"backup profileName", e6Backup(nil), e6OnBackup(func(b *v1beta1.MysqlBackup) { b.Spec.ProfileName = "weekly" }), profile},
+		{"backup sourceSite added", e6Backup(nil), e6OnBackup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "dc2" }), sourceSite},
+		{"backup sourceSite changed", e6Backup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "dc1" }), e6OnBackup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "dc2" }), sourceSite},
+		{"backup sourceSite removed", e6Backup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "dc1" }), e6OnBackup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "" }), sourceSite},
 		// A-22, MysqlBackupVerification
-		{"verification failoverGroupRef", e6Verification(nil), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.FailoverGroupRef.Name = "tiger" }), groupRef},
-		{"verification profileName", e6Verification(nil), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.ProfileName = "weekly" }), profile},
-		{"verification backupRef added", e6Verification(nil), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "b1"}
+		{"verification failoverGroupRef", e6Verification(nil), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.FailoverGroupRef.Name = "tiger" }), groupRef},
+		{"verification profileName", e6Verification(nil), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.ProfileName = "weekly" }), profile},
+		{"verification backupRef added", e6Verification(nil), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: "b1"}
 		}), backupRef},
-		{"verification backupRef changed", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "b1"}
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.BackupRef.Name = "b2" }), backupRef},
-		{"verification backupRef removed", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "b1"}
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.BackupRef = nil }), backupRef},
-		{"verification pointInTime added", e6Verification(nil), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.PointInTime = e8VerificationPointInTime(v1alpha1.PointInTimeModeLatest)
+		{"verification backupRef changed", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: "b1"}
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.BackupRef.Name = "b2" }), backupRef},
+		{"verification backupRef removed", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: "b1"}
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.BackupRef = nil }), backupRef},
+		{"verification pointInTime added", e6Verification(nil), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.PointInTime = e8VerificationPointInTime(v1beta1.PointInTimeModeLatest)
 		}), pointInT},
-		{"verification pointInTime removed", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.PointInTime = e8VerificationPointInTime(v1alpha1.PointInTimeModeLatest)
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.PointInTime = nil }), pointInT},
-		{"verification pointInTime mode", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.PointInTime = e8VerificationPointInTime(v1alpha1.PointInTimeModeLatest)
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.PointInTime = e8VerificationPointInTime(v1alpha1.PointInTimeModeTimestamp)
+		{"verification pointInTime removed", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.PointInTime = e8VerificationPointInTime(v1beta1.PointInTimeModeLatest)
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.PointInTime = nil }), pointInT},
+		{"verification pointInTime mode", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.PointInTime = e8VerificationPointInTime(v1beta1.PointInTimeModeLatest)
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.PointInTime = e8VerificationPointInTime(v1beta1.PointInTimeModeTimestamp)
 		}), pointInT},
-		{"verification stopTime", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.PointInTime = e8VerificationPointInTime(v1alpha1.PointInTimeModeTimestamp)
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
+		{"verification stopTime", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.PointInTime = e8VerificationPointInTime(v1beta1.PointInTimeModeTimestamp)
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
 			v.Spec.PointInTime.StopTime = &metav1.Time{Time: v.Spec.PointInTime.StopTime.Add(time.Second)}
 		}), pointInT},
-		{"verification excludeGtids", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.PointInTime = e8VerificationPointInTime(v1alpha1.PointInTimeModeLatest)
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
+		{"verification excludeGtids", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.PointInTime = e8VerificationPointInTime(v1beta1.PointInTimeModeLatest)
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
 			v.Spec.PointInTime.ExcludeGtids = "3e11fa47-71ca-11e1-9e33-c80aa9429562:5"
 		}), pointInT},
-		{"verification archiveProfileName", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.PointInTime = e8VerificationPointInTime(v1alpha1.PointInTimeModeLatest)
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
+		{"verification archiveProfileName", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.PointInTime = e8VerificationPointInTime(v1beta1.PointInTimeModeLatest)
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
 			v.Spec.PointInTime.ArchiveProfileName = "retained"
 		}), pointInT},
-		{"verification sanityCheck added", e6Verification(nil), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1"}
+		{"verification sanityCheck added", e6Verification(nil), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1"}
 		}), sanity},
-		{"verification sanityCheck removed", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1"}
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.SanityCheck = nil }), sanity},
-		{"verification sanityCheck query", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1"}
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.SanityCheck.Query = "SELECT 2" }), sanity},
-		{"verification sanityCheck minResult", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1", MinResult: new(int64(0))}
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.SanityCheck.MinResult = nil }), sanity},
-		{"verification sanityCheck timeout", e6Verification(func(v *v1alpha1.MysqlBackupVerification) {
-			v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1"}
-		}), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.SanityCheck.Timeout = e8Duration(2 * time.Minute) }), sanity},
+		{"verification sanityCheck removed", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1"}
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.SanityCheck = nil }), sanity},
+		{"verification sanityCheck query", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1"}
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.SanityCheck.Query = "SELECT 2" }), sanity},
+		{"verification sanityCheck minResult", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1", MinResult: new(int64(0))}
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.SanityCheck.MinResult = nil }), sanity},
+		{"verification sanityCheck timeout", e6Verification(func(v *v1beta1.MysqlBackupVerification) {
+			v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1"}
+		}), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.SanityCheck.Timeout = e8Duration(2 * time.Minute) }), sanity},
 	}
 	e6Run(t, ns, cases)
 }
@@ -400,45 +400,45 @@ func TestE6_AllowedUpdates(t *testing.T) {
 		build  func(ns, name string) client.Object
 		change func(client.Object)
 	}{
-		{"site added", e6FG(nil), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", ServerID: 103, Role: v1alpha1.SiteRoleReadOnly,
+		{"site added", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{Name: "reader", ServerID: 103, Role: v1beta1.SiteRoleReadOnly,
 				Zone: "lion-reader", Storage: fg.Spec.Sites[0].Storage})
 		})},
-		{"sites reordered", e6FG(nil), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"sites reordered", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Sites[0], fg.Spec.Sites[1] = fg.Spec.Sites[1], fg.Spec.Sites[0]
 		})},
-		{"size respelled", e6FG(nil), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "10240Mi" })},
-		{"provisioned size respelled", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"size respelled", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "10240Mi" })},
+		{"provisioned size respelled", e6FG(e6WithPVCProfile(e6Provisioned("fast", "10Gi"))), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "10240Mi"
 		})},
-		{"claimName subPath", e6FG(e6WithPVCProfile(v1alpha1.PVCStorage{ClaimName: "backups"})), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"claimName subPath", e6FG(e6WithPVCProfile(v1beta1.PVCStorage{ClaimName: "backups"})), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Spec.Backup.Profiles[0].Storage.PVC.SubPath = "orders"
 		})},
-		{"encryption enabled", e6FG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"} }),
-			e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-				fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+		{"encryption enabled", e6FG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.TLS = &v1beta1.TLSSpec{SecretName: "mysql-tls"} }),
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+				fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: true}
 			})},
-		{"keyring changed while disabled", e6FG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{}
-		}), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{PluginDir: "/usr/lib/mysql/plugin"}
+		{"keyring changed while disabled", e6FG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{}
+		}), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{PluginDir: "/usr/lib/mysql/plugin"}
 		})},
-		{"keyring default spelled out", e6FG(e6WithEncryption), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{DataFileDir: "/run/mysql-keyring", MysqldDir: "/usr/sbin", PluginDir: "/usr/lib64/mysql/plugin"}
+		{"keyring default spelled out", e6FG(e6WithEncryption), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.EncryptionAtRest.Keyring = &v1beta1.KeyringSpec{DataFileDir: "/run/mysql-keyring", MysqldDir: "/usr/sbin", PluginDir: "/usr/lib64/mysql/plugin"}
 		})},
-		{"encryption coverage", e6FG(e6WithEncryption), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.EncryptionAtRest.Coverage = &v1alpha1.EncryptionCoverageSpec{SystemTablespace: new(false)}
+		{"encryption coverage", e6FG(e6WithEncryption), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.EncryptionAtRest.Coverage = &v1beta1.EncryptionCoverageSpec{SystemTablespace: new(false)}
 		})},
-		{"restoreInPlace added", e6FG(nil), e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z",
-				Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "b"}}}
+		{"restoreInPlace added", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{Confirm: "2026-01-01T00:00:00Z",
+				Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "b"}}}
 		})},
-		{"backup deletionPolicy", e6Backup(nil), e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.DeletionPolicy = v1alpha1.DeletionPolicyRetain })},
-		{"verification keepOnFailure and TTL", e6Verification(nil), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
+		{"backup deletionPolicy", e6Backup(nil), e6OnBackup(func(b *v1beta1.MysqlBackup) { b.Spec.DeletionPolicy = v1beta1.DeletionPolicyRetain })},
+		{"verification keepOnFailure and TTL", e6Verification(nil), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
 			v.Spec.KeepOnFailure = new(false)
 			v.Spec.TTLSecondsAfterFinished = new(int32(0))
 		})},
-		{"verification resources", e6Verification(nil), e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
+		{"verification resources", e6Verification(nil), e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
 			v.Spec.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")}
 		})},
 	} {
@@ -512,7 +512,7 @@ func TestE6_TypedWritesKeepNonCanonicalValues(t *testing.T) {
 		t.Fatalf("create the verification with non-canonical values: %v", err)
 	}
 
-	mbk := e6Backup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "dc1" })(ns, "canon")
+	mbk := e6Backup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "dc1" })(ns, "canon")
 	if err := k8sClient.Create(ctx, mbk); err != nil {
 		t.Fatal(err)
 	}
@@ -522,27 +522,27 @@ func TestE6_TypedWritesKeepNonCanonicalValues(t *testing.T) {
 		finalizer string
 		changes   []func(client.Object)
 	}{
-		{&v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "canon"}}, v1alpha1.FailoverGroupFinalizer, []func(client.Object){
-			e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "2Gi" }),
-			e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "2Gi" }),
-			e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+		{&v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "canon"}}, v1beta1.FailoverGroupFinalizer, []func(client.Object){
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "2Gi" }),
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "2Gi" }),
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.InitFromBackup.PointInTime.StopTime = metav1.Time{Time: fg.Spec.InitFromBackup.PointInTime.StopTime.Add(time.Second)}
 			}),
-			e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.InitFromBackup.PointInTime.AllowPartial = true }),
-			e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.InitFromBackup.Source.S3.Prefix = "orders" }),
-			e6OnFG(func(fg *v1alpha1.MysqlFailoverGroup) {
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.InitFromBackup.PointInTime.AllowPartial = true }),
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.InitFromBackup.Source.S3.Prefix = "orders" }),
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.InitFromBackup.LoadOptions.ExcludeSchemas = []string{"scratch"}
 			}),
 		}},
-		{&v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "canon"}}, v1alpha1.MysqlBackupVerificationFinalizer, []func(client.Object){
-			e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.SanityCheck.Timeout = e8Duration(61 * time.Second) }),
-			e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) { v.Spec.SanityCheck.MinResult = new(int64(1)) }),
-			e6OnVerification(func(v *v1alpha1.MysqlBackupVerification) {
+		{&v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "canon"}}, v1beta1.MysqlBackupVerificationFinalizer, []func(client.Object){
+			e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.SanityCheck.Timeout = e8Duration(61 * time.Second) }),
+			e6OnVerification(func(v *v1beta1.MysqlBackupVerification) { v.Spec.SanityCheck.MinResult = new(int64(1)) }),
+			e6OnVerification(func(v *v1beta1.MysqlBackupVerification) {
 				v.Spec.PointInTime.StopTime = &metav1.Time{Time: v.Spec.PointInTime.StopTime.Add(-time.Second)}
 			}),
 		}},
-		{&v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "canon"}}, v1alpha1.MysqlBackupFinalizer, []func(client.Object){
-			e6OnBackup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "dc2" }),
+		{&v1beta1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "canon"}}, v1beta1.MysqlBackupFinalizer, []func(client.Object){
+			e6OnBackup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "dc2" }),
 		}},
 	} {
 		kind := typeName(tc.obj)
@@ -579,9 +579,9 @@ func TestE6_TypedWritesKeepNonCanonicalValues(t *testing.T) {
 
 func typeName(o client.Object) string {
 	switch o.(type) {
-	case *v1alpha1.MysqlFailoverGroup:
+	case *v1beta1.MysqlFailoverGroup:
 		return "MysqlFailoverGroup"
-	case *v1alpha1.MysqlBackup:
+	case *v1beta1.MysqlBackup:
 		return "MysqlBackup"
 	default:
 		return "MysqlBackupVerification"
@@ -594,7 +594,7 @@ func typeName(o client.Object) string {
 // names are at most 63.
 func TestE6_NameBounds(t *testing.T) {
 	ns := createNamespace(t, "e6-names")
-	fg := func(name string, mutate func(*v1alpha1.MysqlFailoverGroup)) error {
+	fg := func(name string, mutate func(*v1beta1.MysqlFailoverGroup)) error {
 		o := newTestFG(ns)
 		o.Name = name
 		if mutate != nil {
@@ -610,8 +610,8 @@ func TestE6_NameBounds(t *testing.T) {
 		t.Fatalf("a 38-character group with 3-character sites refused: %v", err)
 	}
 	e4WantInvalid(t, "39-character group", fg("g"+strings.Repeat("x", 38), nil), "at most 41 characters")
-	siteName := func(name string) func(*v1alpha1.MysqlFailoverGroup) {
-		return func(o *v1alpha1.MysqlFailoverGroup) { o.Spec.Sites[1].Name = name }
+	siteName := func(name string) func(*v1beta1.MysqlFailoverGroup) {
+		return func(o *v1beta1.MysqlFailoverGroup) { o.Spec.Sites[1].Name = name }
 	}
 	if err := fg("long-site", siteName("s"+strings.Repeat("x", 19))); err != nil {
 		t.Fatalf("a 20-character site refused: %v", err)
@@ -619,8 +619,8 @@ func TestE6_NameBounds(t *testing.T) {
 	for _, s := range []string{"s" + strings.Repeat("x", 20), "-iad", "iad-", "IAD", "i.ad"} {
 		e4WantInvalid(t, "site "+s, fg("bad-site", siteName(s)), "spec.sites[1].name")
 	}
-	e4WantInvalid(t, "sitePriorities item", fg("bad-priority", func(o *v1alpha1.MysqlFailoverGroup) {
-		o.Spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: []string{"-dc1"}}
+	e4WantInvalid(t, "sitePriorities item", fg("bad-priority", func(o *v1beta1.MysqlFailoverGroup) {
+		o.Spec.SplitBrainPolicy = &v1beta1.SplitBrainPolicySpec{SitePriorities: []string{"-dc1"}}
 	}), "sitePriorities")
 
 	run := func(name string) []client.Object {
@@ -634,7 +634,7 @@ func TestE6_NameBounds(t *testing.T) {
 	for _, o := range run("r" + strings.Repeat("x", 63)) {
 		e4WantInvalid(t, typeName(o)+" with a 64-character name", k8sClient.Create(ctx, o), "metadata.name must be at most 63 characters")
 	}
-	e4WantInvalid(t, "backup sourceSite", k8sClient.Create(ctx, e6Backup(func(b *v1alpha1.MysqlBackup) { b.Spec.SourceSite = "-dc1" })(ns, "bad-source")), "spec.sourceSite")
+	e4WantInvalid(t, "backup sourceSite", k8sClient.Create(ctx, e6Backup(func(b *v1beta1.MysqlBackup) { b.Spec.SourceSite = "-dc1" })(ns, "bad-source")), "spec.sourceSite")
 }
 
 // TestE6_SiteFieldShapes is A-17 and A-19 at creation: loadBalancerIP is
@@ -642,19 +642,19 @@ func TestE6_NameBounds(t *testing.T) {
 // positive quantity string.
 func TestE6_SiteFieldShapes(t *testing.T) {
 	ns := createNamespace(t, "e6-site-fields")
-	fg := func(name string, mutate func(*v1alpha1.MysqlFailoverGroup)) error {
+	fg := func(name string, mutate func(*v1beta1.MysqlFailoverGroup)) error {
 		o := newTestFG(ns)
 		o.Name = name
 		mutate(o)
 		return k8sClient.Create(ctx, o)
 	}
 	for i, ip := range []string{"256.1.1.1", "2001:db8::1", "not-an-ip"} {
-		e4WantInvalid(t, "loadBalancerIP "+ip, fg("bad-ip-"+string(rune('a'+i)), func(o *v1alpha1.MysqlFailoverGroup) { o.Spec.Sites[0].LoadBalancerIP = ip }), "loadBalancerIP")
+		e4WantInvalid(t, "loadBalancerIP "+ip, fg("bad-ip-"+string(rune('a'+i)), func(o *v1beta1.MysqlFailoverGroup) { o.Spec.Sites[0].LoadBalancerIP = ip }), "loadBalancerIP")
 	}
-	e4WantInvalid(t, "candidate without loadBalancerIP", fg("no-ip", func(o *v1alpha1.MysqlFailoverGroup) { o.Spec.Sites[0].LoadBalancerIP = "" }),
+	e4WantInvalid(t, "candidate without loadBalancerIP", fg("no-ip", func(o *v1beta1.MysqlFailoverGroup) { o.Spec.Sites[0].LoadBalancerIP = "" }),
 		"taintNodeSelector and loadBalancerIP are required unless role is ReadOnly")
-	for i, size := range []v1alpha1.StorageQuantity{"0", "-1Gi", "10 Gi"} {
-		e4WantInvalid(t, "size "+string(size), fg("bad-size-"+string(rune('a'+i)), func(o *v1alpha1.MysqlFailoverGroup) { o.Spec.Sites[0].Storage.Size = size }), "size")
+	for i, size := range []v1beta1.StorageQuantity{"0", "-1Gi", "10 Gi"} {
+		e4WantInvalid(t, "size "+string(size), fg("bad-size-"+string(rune('a'+i)), func(o *v1beta1.MysqlFailoverGroup) { o.Spec.Sites[0].Storage.Size = size }), "size")
 	}
 	u := e4Unstructured(t, newTestFG(ns), "MysqlFailoverGroup")
 	u.SetName("int-size")
@@ -668,15 +668,15 @@ func TestE6_SiteFieldShapes(t *testing.T) {
 // provisioned, and provisioned needs a positive size.
 func TestE6_BackupPVCUnion(t *testing.T) {
 	ns := createNamespace(t, "e6-pvc")
-	create := func(name string, pvc v1alpha1.PVCStorage) error {
+	create := func(name string, pvc v1beta1.PVCStorage) error {
 		return k8sClient.Create(ctx, e6FG(e6WithPVCProfile(pvc))(ns, name))
 	}
-	e4WantInvalid(t, "empty pvc", create("empty", v1alpha1.PVCStorage{}), "exactly one of claimName or provisioned must be set")
+	e4WantInvalid(t, "empty pvc", create("empty", v1beta1.PVCStorage{}), "exactly one of claimName or provisioned must be set")
 	both := e6Provisioned("fast", "10Gi")
 	both.ClaimName = "backups"
 	e4WantInvalid(t, "claimName and provisioned", create("both", both), "exactly one of claimName or provisioned must be set")
 	e4WantInvalid(t, "zero provisioned size", create("zero", e6Provisioned("", "0")), "greater than 0")
-	for name, pvc := range map[string]v1alpha1.PVCStorage{
+	for name, pvc := range map[string]v1beta1.PVCStorage{
 		"claim":         {ClaimName: "backups", SubPath: "orders"},
 		"default-class": e6Provisioned("", "50Gi"),
 		"class":         e6Provisioned("fast", "1.5Ti"),
@@ -695,18 +695,18 @@ func TestE6_BackupPVCUnion(t *testing.T) {
 func TestE6_ProvisionedAcrossStorageTypeSwitch(t *testing.T) {
 	ns := createNamespace(t, "e6-pvc-switch")
 	const pvcMsg = "pvc.provisioned is immutable"
-	update := func(name string, f func(*v1alpha1.MysqlFailoverGroup)) error {
-		var fg v1alpha1.MysqlFailoverGroup
+	update := func(name string, f func(*v1beta1.MysqlFailoverGroup)) error {
+		var fg v1beta1.MysqlFailoverGroup
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &fg); err != nil {
 			t.Fatal(err)
 		}
 		f(&fg)
 		return k8sClient.Update(ctx, &fg)
 	}
-	toS3 := func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage = e6S3Storage() }
-	toPVC := func(pvc v1alpha1.PVCStorage) func(*v1alpha1.MysqlFailoverGroup) {
-		return func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: pvc.DeepCopy()}
+	toS3 := func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage = e6S3Storage() }
+	toPVC := func(pvc v1beta1.PVCStorage) func(*v1beta1.MysqlFailoverGroup) {
+		return func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Spec.Backup.Profiles[0].Storage = v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: pvc.DeepCopy()}
 		}
 	}
 
@@ -714,22 +714,22 @@ func TestE6_ProvisionedAcrossStorageTypeSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	e4WantInvalid(t, "provisioned profile to S3", update("owned", toS3), pvcMsg)
-	e4WantInvalid(t, "provisioned profile to claimName", update("owned", toPVC(v1alpha1.PVCStorage{ClaimName: "backups"})), pvcMsg)
-	if err := update("owned", func(fg *v1alpha1.MysqlFailoverGroup) {
-		fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, v1alpha1.BackupProfile{Name: "local-2",
-			Storage: v1alpha1.BackupStorage{Type: v1alpha1.BackupStoragePVC, PVC: new(e6Provisioned("slow", "20Gi"))}})
+	e4WantInvalid(t, "provisioned profile to claimName", update("owned", toPVC(v1beta1.PVCStorage{ClaimName: "backups"})), pvcMsg)
+	if err := update("owned", func(fg *v1beta1.MysqlFailoverGroup) {
+		fg.Spec.Backup.Profiles = append(fg.Spec.Backup.Profiles, v1beta1.BackupProfile{Name: "local-2",
+			Storage: v1beta1.BackupStorage{Type: v1beta1.BackupStoragePVC, PVC: new(e6Provisioned("slow", "20Gi"))}})
 	}); err != nil {
 		t.Fatalf("a provisioned profile under a new name refused: %v", err)
 	}
 
-	if err := k8sClient.Create(ctx, e6FG(e6WithPVCProfile(v1alpha1.PVCStorage{ClaimName: "backups"}))(ns, "claim")); err != nil {
+	if err := k8sClient.Create(ctx, e6FG(e6WithPVCProfile(v1beta1.PVCStorage{ClaimName: "backups"}))(ns, "claim")); err != nil {
 		t.Fatal(err)
 	}
 	if err := update("claim", toS3); err != nil {
 		t.Fatalf("claimName profile to S3 refused: %v", err)
 	}
 	e4WantInvalid(t, "S3 profile to provisioned", update("claim", toPVC(e6Provisioned("slow", "20Gi"))), pvcMsg)
-	if err := update("claim", toPVC(v1alpha1.PVCStorage{ClaimName: "other"})); err != nil {
+	if err := update("claim", toPVC(v1beta1.PVCStorage{ClaimName: "other"})); err != nil {
 		t.Fatalf("S3 profile back to a claimName refused: %v", err)
 	}
 }
@@ -742,22 +742,22 @@ func TestE6_ProvisionedAcrossStorageTypeSwitch(t *testing.T) {
 func TestE6_ZoneAndStorageClassGrammar(t *testing.T) {
 	ns := createNamespace(t, "e6-grammar")
 	n := 0
-	create := func(mutate func(*v1alpha1.MysqlFailoverGroup)) error {
+	create := func(mutate func(*v1beta1.MysqlFailoverGroup)) error {
 		n++
 		return k8sClient.Create(ctx, e6FG(mutate)(ns, fmt.Sprintf("g%d", n)))
 	}
-	zone := func(z string) func(*v1alpha1.MysqlFailoverGroup) {
-		return func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Zone = z }
+	zone := func(z string) func(*v1beta1.MysqlFailoverGroup) {
+		return func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Zone = z }
 	}
-	siteClass := func(c string) func(*v1alpha1.MysqlFailoverGroup) {
-		return func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.StorageClassName = c }
+	siteClass := func(c string) func(*v1beta1.MysqlFailoverGroup) {
+		return func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.StorageClassName = c }
 	}
-	backupClass := func(c string) func(*v1alpha1.MysqlFailoverGroup) {
+	backupClass := func(c string) func(*v1beta1.MysqlFailoverGroup) {
 		return e6WithPVCProfile(e6Provisioned(c, "10Gi"))
 	}
 	for _, tc := range []struct {
 		what     string
-		mutate   func(*v1alpha1.MysqlFailoverGroup)
+		mutate   func(*v1beta1.MysqlFailoverGroup)
 		fragment string
 	}{
 		{"zone with spaces", zone("us east 1"), "spec.sites[0].zone"},
@@ -774,7 +774,7 @@ func TestE6_ZoneAndStorageClassGrammar(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		what   string
-		mutate func(*v1alpha1.MysqlFailoverGroup)
+		mutate func(*v1beta1.MysqlFailoverGroup)
 	}{
 		{"zone us-east-1a", zone("us-east-1a")},
 		{"zone with dots, underscores and capitals", zone("EU_West.1a")},
@@ -796,8 +796,8 @@ func TestE6_ConfirmTimestamp(t *testing.T) {
 	create := func(name, confirm string) error {
 		fg := newTestFG(ns)
 		fg.Name = name
-		fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: confirm,
-			Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "b"}}}
+		fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{Confirm: confirm,
+			Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "b"}}}
 		return k8sClient.Create(ctx, fg)
 	}
 	for i, bad := range []string{
@@ -811,7 +811,7 @@ func TestE6_ConfirmTimestamp(t *testing.T) {
 		if err := create(name, good); err != nil {
 			t.Fatalf("confirm %q refused: %v", good, err)
 		}
-		var got v1alpha1.MysqlFailoverGroup
+		var got v1beta1.MysqlFailoverGroup
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &got); err != nil {
 			t.Fatal(err)
 		}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -102,12 +102,12 @@ func observeDragonflyDegraded() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"status.dragonfly.phase != Ready",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.Dragonfly == nil {
 						return false, "no status.dragonfly", nil
 					}
 					phase := mfg.Status.Dragonfly.Phase
-					return phase != v1alpha1.DragonflyPhaseReady,
+					return phase != v1beta1.DragonflyPhaseReady,
 						fmt.Sprintf("dragonfly.phase=%q", phase), nil
 				},
 			)
@@ -147,7 +147,7 @@ func observeMysqlFailoverSucceeded() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("MySQL status.activeSite==%s", target),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					return mfg.Status.ActiveSite == target,
 						fmt.Sprintf("status.activeSite=%q (target=%q dragonfly.phase=%q)",
 							mfg.Status.ActiveSite, target, dragonflyPhaseOrNone(mfg)),
@@ -177,7 +177,7 @@ func verifyMysqlActiveSiteFlipped() runner.Step {
 	}
 }
 
-func dragonflyPhaseOrNone(mfg *v1alpha1.MysqlFailoverGroup) v1alpha1.DragonflyPhase {
+func dragonflyPhaseOrNone(mfg *v1beta1.MysqlFailoverGroup) v1beta1.DragonflyPhase {
 	if mfg.Status.Dragonfly == nil {
 		return ""
 	}

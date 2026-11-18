@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func deploymentLeaseFixture(t *testing.T) (*DeploymentLeaseManager, *v1alpha1.MysqlFailoverGroup, *time.Time) {
+func deploymentLeaseFixture(t *testing.T) (*DeploymentLeaseManager, *v1beta1.MysqlFailoverGroup, *time.Time) {
 	t.Helper()
 	fg := plannedFailoverFG("")
 	fg.UID = "lease-group-uid"
@@ -42,7 +42,7 @@ func deploymentLeaseFixture(t *testing.T) (*DeploymentLeaseManager, *v1alpha1.My
 	return m, fg, &now
 }
 
-func grantDeploymentLease(t *testing.T, m *DeploymentLeaseManager, fg *v1alpha1.MysqlFailoverGroup, kind, operation string, ttl int) DeploymentLeaseResult {
+func grantDeploymentLease(t *testing.T, m *DeploymentLeaseManager, fg *v1beta1.MysqlFailoverGroup, kind, operation string, ttl int) DeploymentLeaseResult {
 	t.Helper()
 	r, err := m.Grant(context.Background(), fg, kind, operation, "tenant", "tenant-ns", "deployer", ttl)
 	if err != nil {
@@ -345,7 +345,7 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	m, fg, now := deploymentLeaseFixture(t)
 	grantDeploymentLease(t, m, fg, "migration", "op1", 120)
 	hold := grantDeploymentLease(t, m, fg, "failover-hold", "op1", 30)
-	fg.Annotations = map[string]string{v1alpha1.PlannedFailoverAnnotation: "pdx"}
+	fg.Annotations = map[string]string{v1beta1.PlannedFailoverAnnotation: "pdx"}
 	if err := m.client.Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 	}
 	fresh := fetchFG(t, r, client.ObjectKeyFromObject(fg))
 	pf := fresh.Status.PlannedFailover
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold ||
+	if pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseDeferred || pf.Admission == nil || pf.Admission.DeferReason != v1beta1.PlannedFailoverDeferDeploymentHold ||
 		pf.Admission.RetryTime == nil || !pf.Admission.RetryTime.Time.Equal(hold.ExpiresAt.UTC().Truncate(time.Second)) ||
 		!strings.Contains(pf.Message, "op1") || !strings.Contains(pf.Message, "tenant") {
 		t.Fatalf("deferral = %+v", pf)
@@ -376,7 +376,7 @@ func TestDeploymentLeasePlannedDeferral(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh = fetchFG(t, r, client.ObjectKeyFromObject(fg))
-	if fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseAdmitting {
+	if fresh.Status.PlannedFailover.Phase != v1beta1.PlannedFailoverPhaseAdmitting {
 		t.Fatalf("did not resume: %+v", fresh.Status.PlannedFailover)
 	}
 }
@@ -412,7 +412,7 @@ func TestDeploymentLeaseRestoreWaitAndSameSiteInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	createRestoreSeedBackup(t, m.client, fg.Namespace)
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlacePreflight, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
+	fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlacePreflight, Scope: &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull}}
 	if err := m.client.Status().Update(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
@@ -423,14 +423,14 @@ func TestDeploymentLeaseRestoreWaitAndSameSiteInvalidation(t *testing.T) {
 	if _, err := r.inPlacePreflight(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlacePreflight || !strings.Contains(fg.Status.RestoreInPlace.Message, "DeploymentHold") || inPlaceRestoreFreezesTopology(fg) {
+	if fg.Status.RestoreInPlace.Phase != v1beta1.RestoreInPlacePreflight || !strings.Contains(fg.Status.RestoreInPlace.Message, "DeploymentHold") || inPlaceRestoreFreezesTopology(fg) {
 		t.Fatalf("restore did not wait safely: %+v", fg.Status.RestoreInPlace)
 	}
 	*now = hold.ExpiresAt.Add(time.Nanosecond)
 	if _, err := r.inPlacePreflight(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}
-	if fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing || fg.Status.TopologyGeneration != 8 || fg.Status.ActiveSite != "iad" {
+	if fg.Status.RestoreInPlace.Phase != v1beta1.RestoreInPlaceFencing || fg.Status.TopologyGeneration != 8 || fg.Status.ActiveSite != "iad" {
 		t.Fatalf("same-site invalidation missing: %+v", fg.Status)
 	}
 	if !r.setInPlaceRestoreStatus(context.Background(), fg, fg.Status.RestoreInPlace.DeepCopy()) || fg.Status.TopologyGeneration != 8 {
@@ -464,20 +464,20 @@ func TestDeploymentLeaseUpdaterDefersAndReserves(t *testing.T) {
 
 func TestDeploymentLeaseStatusRetryPreservesNewerOperations(t *testing.T) {
 	m, fg, _ := deploymentLeaseFixture(t)
-	var persisted *v1alpha1.MysqlFailoverGroup
+	var persisted *v1beta1.MysqlFailoverGroup
 	reads := 0
 	c := interceptor.NewClient(m.client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-		if _, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+		if _, ok := obj.(*v1beta1.MysqlFailoverGroup); ok {
 			reads++
 			if reads == 2 {
-				fresh := &v1alpha1.MysqlFailoverGroup{}
+				fresh := &v1beta1.MysqlFailoverGroup{}
 				if err := c.Get(ctx, key, fresh); err != nil {
 					return err
 				}
 				fresh.Status.TopologyGeneration = 9
 				fresh.Status.ActiveSite = "pdx"
-				fresh.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhasePublishing, TargetSite: "pdx"}
-				fresh.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing}
+				fresh.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Revision: 1, Phase: v1beta1.PlannedFailoverPhasePublishing, TargetSite: "pdx"}
+				fresh.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceFencing}
 				if err := c.Status().Update(ctx, fresh); err != nil {
 					return err
 				}
@@ -491,11 +491,11 @@ func TestDeploymentLeaseStatusRetryPreservesNewerOperations(t *testing.T) {
 	if err := runner.updateCRStatus(context.Background(), client.ObjectKeyFromObject(fg), snap); err != nil {
 		t.Fatal(err)
 	}
-	fresh := &v1alpha1.MysqlFailoverGroup{}
+	fresh := &v1beta1.MysqlFailoverGroup{}
 	if err := m.reader.Get(context.Background(), client.ObjectKeyFromObject(fg), fresh); err != nil {
 		t.Fatal(err)
 	}
-	if persisted == nil || fresh.Status.TopologyGeneration != 9 || fresh.Status.ActiveSite != "pdx" || fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePublishing || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing {
+	if persisted == nil || fresh.Status.TopologyGeneration != 9 || fresh.Status.ActiveSite != "pdx" || fresh.Status.PlannedFailover.Phase != v1beta1.PlannedFailoverPhasePublishing || fresh.Status.RestoreInPlace.Phase != v1beta1.RestoreInPlaceFencing {
 		t.Fatalf("retry clobbered newer state: %+v", fresh.Status)
 	}
 }
@@ -557,28 +557,28 @@ func TestDeploymentLeaseHoldsSurviveMigrationHandoff(t *testing.T) {
 func TestDeploymentLeaseStability(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		change func(*v1alpha1.MysqlFailoverGroup)
+		change func(*v1beta1.MysqlFailoverGroup)
 	}{
-		{"missing site", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites = fg.Status.Sites[:1] }},
-		{"primary read-only", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[0].State = v1alpha1.SiteStateReadOnly }},
-		{"recovery in progress", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryInProgress" }},
-		{"recovery blocked", func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryBlocked" }},
-		{"source convergence", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.Sites[1].SourceConvergenceState = v1alpha1.SourceConvergencePending
+		{"missing site", func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.Sites = fg.Status.Sites[:1] }},
+		{"primary read-only", func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.Sites[0].State = v1beta1.SiteStateReadOnly }},
+		{"recovery in progress", func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryInProgress" }},
+		{"recovery blocked", func(fg *v1beta1.MysqlFailoverGroup) { fg.Status.Sites[1].RecoveryState = "RecoveryBlocked" }},
+		{"source convergence", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Status.Sites[1].SourceConvergenceState = v1beta1.SourceConvergencePending
 		}},
-		{"restore", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.Restore = &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning}
+		{"restore", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Status.Restore = &v1beta1.RestoreStatus{Phase: v1beta1.BackupPhaseRunning}
 		}},
-		{"dragonfly reconciling", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Phase: v1alpha1.DragonflyPhaseReconciling}
+		{"dragonfly reconciling", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Status.Dragonfly = &v1beta1.DragonflyStatus{Phase: v1beta1.DragonflyPhaseReconciling}
 		}},
-		{"dragonfly promoting", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Phase: v1alpha1.DragonflyPhasePromoting}
+		{"dragonfly promoting", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Status.Dragonfly = &v1beta1.DragonflyStatus{Phase: v1beta1.DragonflyPhasePromoting}
 		}},
-		{"dragonfly degraded", func(fg *v1alpha1.MysqlFailoverGroup) {
-			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Phase: v1alpha1.DragonflyPhaseDegraded}
+		{"dragonfly degraded", func(fg *v1beta1.MysqlFailoverGroup) {
+			fg.Status.Dragonfly = &v1beta1.DragonflyStatus{Phase: v1beta1.DragonflyPhaseDegraded}
 		}},
-		{"empty degraded reason", func(fg *v1alpha1.MysqlFailoverGroup) {
+		{"empty degraded reason", func(fg *v1beta1.MysqlFailoverGroup) {
 			fg.Status.Conditions = append(fg.Status.Conditions, metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue})
 		}},
 	} {
@@ -606,7 +606,7 @@ func TestDeploymentLeaseGenerationChangesDuringWrite(t *testing.T) {
 				token = grantDeploymentLease(t, m, fg, "migration", "op1", 30).Token
 			}
 			change := func(ctx context.Context, c client.Client) error {
-				fresh := &v1alpha1.MysqlFailoverGroup{}
+				fresh := &v1beta1.MysqlFailoverGroup{}
 				if err := c.Get(ctx, client.ObjectKeyFromObject(fg), fresh); err != nil {
 					return err
 				}
@@ -661,7 +661,7 @@ func TestDeploymentLeaseSnapshotRejectsTornObservation(t *testing.T) {
 					if pending {
 						m.TopologyPending(client.ObjectKeyFromObject(fg))
 					} else {
-						fresh := &v1alpha1.MysqlFailoverGroup{}
+						fresh := &v1beta1.MysqlFailoverGroup{}
 						if err := c.Get(ctx, client.ObjectKeyFromObject(fg), fresh); err != nil {
 							return err
 						}
@@ -898,11 +898,11 @@ func TestDeploymentLeaseGrantRechecksStabilityAfterWrite(t *testing.T) {
 		if err := c.Create(ctx, obj, opts...); err != nil {
 			return err
 		}
-		fresh := &v1alpha1.MysqlFailoverGroup{}
+		fresh := &v1beta1.MysqlFailoverGroup{}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(fg), fresh); err != nil {
 			return err
 		}
-		fresh.Status.Dragonfly = &v1alpha1.DragonflyStatus{Phase: v1alpha1.DragonflyPhasePromoting}
+		fresh.Status.Dragonfly = &v1beta1.DragonflyStatus{Phase: v1beta1.DragonflyPhasePromoting}
 		return c.Status().Update(ctx, fresh)
 	}})
 	_, err := m.Grant(context.Background(), fg, "migration", "op1", "tenant", "tenant-ns", "deployer", 30)

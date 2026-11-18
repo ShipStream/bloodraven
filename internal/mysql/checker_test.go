@@ -7,7 +7,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// defaultLeaseTimeout mirrors api/v1alpha1 LeaseTimeout default (20s).
+// defaultLeaseTimeout mirrors api/v1beta1 LeaseTimeout default (20s).
 // Duplicated here as a literal to avoid a dependency from this low-level
 // package onto the API types.
 const defaultLeaseTimeout = 20 * time.Second

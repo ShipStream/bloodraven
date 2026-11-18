@@ -10,7 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // dragonflyGate is the single ownership gate for one group's Dragonfly
@@ -129,8 +129,8 @@ func (r *MysqlFailoverGroupReconciler) tryDragonflyGate(nn types.NamespacedName)
 // freshFailoverGroup reads the group bypassing the informer cache when an
 // uncached reader is configured, so a writer that has just taken the gate
 // acts on the latest status (including what the previous holder wrote).
-func (r *MysqlFailoverGroupReconciler) freshFailoverGroup(ctx context.Context, nn types.NamespacedName) (*v1alpha1.MysqlFailoverGroup, error) {
-	var fg v1alpha1.MysqlFailoverGroup
+func (r *MysqlFailoverGroupReconciler) freshFailoverGroup(ctx context.Context, nn types.NamespacedName) (*v1beta1.MysqlFailoverGroup, error) {
+	var fg v1beta1.MysqlFailoverGroup
 	if err := r.authorityReader().Get(ctx, nn, &fg); err != nil {
 		return nil, err
 	}

@@ -14,31 +14,31 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 var fixtureFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "fixture_failures_total",
 }, []string{"group", "reason"})
 
-func warn(r record.EventRecorder, fg *v1alpha1.MysqlFailoverGroup, reason string) {
+func warn(r record.EventRecorder, fg *v1beta1.MysqlFailoverGroup, reason string) {
 	r.Event(fg, corev1.EventTypeWarning, reason, "fixture")
 }
 
 // emit forwards both the type and the reason: each call is paired on its own.
-func emit(r record.EventRecorder, fg *v1alpha1.MysqlFailoverGroup, eventType, reason string) {
+func emit(r record.EventRecorder, fg *v1beta1.MysqlFailoverGroup, eventType, reason string) {
 	r.Event(fg, eventType, reason, "fixture")
 }
 
 // Emit exercises the failures.
-func Emit(r record.EventRecorder, fg *v1alpha1.MysqlFailoverGroup, detail string) metav1.Condition {
+func Emit(r record.EventRecorder, fg *v1beta1.MysqlFailoverGroup, detail string) metav1.Condition {
 	warn(r, fg, "FixtureUndeclaredEvent")
-	warn(r, fg, v1alpha1.EventPlannedFailoverStarted)
+	warn(r, fg, v1beta1.EventPlannedFailoverStarted)
 	r.Event(fg, corev1.EventTypeNormal, fmt.Sprint(detail), "fixture")
 	fixtureFailures.WithLabelValues("g", "FixtureUndeclaredMetricReason").Inc()
-	fixtureFailures.WithLabelValues("g", v1alpha1.ReasonProfileReadOnly).Inc()
-	emit(r, fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped)
-	emit(r, fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverSkipped)
-	emit(r, fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected)
-	return metav1.Condition{Type: v1alpha1.ConditionReady, Reason: "Bound"}
+	fixtureFailures.WithLabelValues("g", v1beta1.ReasonProfileReadOnly).Inc()
+	emit(r, fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverSkipped)
+	emit(r, fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverSkipped)
+	emit(r, fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverRejected)
+	return metav1.Condition{Type: v1beta1.ConditionReady, Reason: "Bound"}
 }

@@ -1,0 +1,35 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlStandbyCluster
+metadata:
+  annotations: {}
+  name: upgrade-e2e
+spec:
+  source:
+    s3:
+      bucket: bloodraven
+      credentialsSecretName: dragonfly-s3-credentials
+      endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
+      prefix: playground
+      region: us-east-1
+  transport: ObjectStore
+status:
+  conditions:
+    - lastTransitionTime: "2026-11-16T23:34:05Z"
+      message: 'resolve S3 credentials from secret "dragonfly-s3-credentials": create S3 creds tempdir: mkdir /tmp/bloodraven-standby-creds-1201935635: read-only file system'
+      observedGeneration: 1
+      reason: ConfigError
+      status: "False"
+      type: BucketReadable
+    - lastTransitionTime: "2026-11-16T23:34:05Z"
+      message: storage backend unresolvable
+      observedGeneration: 1
+      reason: ConfigError
+      status: "False"
+      type: SourceConfigKnown
+    - lastTransitionTime: "2026-11-16T23:34:05Z"
+      message: 'resolve S3 credentials from secret "dragonfly-s3-credentials": create S3 creds tempdir: mkdir /tmp/bloodraven-standby-creds-1201935635: read-only file system'
+      observedGeneration: 1
+      reason: ConfigError
+      status: "False"
+      type: Ready
+  observedGeneration: 1

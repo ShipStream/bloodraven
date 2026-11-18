@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -338,21 +338,21 @@ func (f *opsFixture) fenced() {
 }
 
 // opsRun is the run's block in phase.
-func opsRun(phase v1alpha1.PlannedFailoverPhase) *v1alpha1.PlannedFailoverStatus {
+func opsRun(phase v1beta1.PlannedFailoverPhase) *v1beta1.PlannedFailoverStatus {
 	gtid := opsF
 	t0 := metav1.NewTime(time.Date(2026, 11, 4, 11, 59, 0, 0, time.UTC))
-	pf := &v1alpha1.PlannedFailoverStatus{
+	pf := &v1beta1.PlannedFailoverStatus{
 		RunID: "run-1", Revision: 3, Phase: phase, TargetSite: "dc2", SourceSite: "dc1", StartTime: t0, ClaimTime: &t0,
-		ClaimBaseline: &v1alpha1.FailoverRecordRef{},
-		Fence:         &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: t0, SourceServerUUID: opsUUIDA, GtidSet: &gtid},
+		ClaimBaseline: &v1beta1.FailoverRecordRef{},
+		Fence:         &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceApplied, IntentTime: t0, SourceServerUUID: opsUUIDA, GtidSet: &gtid},
 	}
-	if phase == v1alpha1.PlannedFailoverPhasePromoting {
-		pf.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{State: v1alpha1.PlannedFailoverPromotionIntended, IntentTime: t0, TargetServerUUID: opsUUIDB}
+	if phase == v1beta1.PlannedFailoverPhasePromoting {
+		pf.Promotion = &v1beta1.PlannedFailoverPromotionRecord{State: v1beta1.PlannedFailoverPromotionIntended, IntentTime: t0, TargetServerUUID: opsUUIDB}
 	}
 	return pf
 }
 
-func opsGroup(pf *v1alpha1.PlannedFailoverStatus) *v1alpha1.MysqlFailoverGroup {
+func opsGroup(pf *v1beta1.PlannedFailoverStatus) *v1beta1.MysqlFailoverGroup {
 	fg := newTestFG()
 	fg.Status.PlannedFailover = pf
 	return fg
@@ -383,34 +383,34 @@ func TestClassifyPromotionStage_EveryRow(t *testing.T) {
 		cleared  bool // memo says this process sent an SRO clear (neither: no memo, another process's run)
 		stage    PromotionStage
 		kind     PromoteOutcomeKind
-		reason   v1alpha1.PlannedFailoverReason
-		terminal v1alpha1.PlannedFailoverOutcome
+		reason   v1beta1.PlannedFailoverReason
+		terminal v1beta1.PlannedFailoverOutcome
 	}{
-		{"uuid changed, memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
-		{"uuid changed, no memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"writable with channel, memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"uuid changed, memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonTargetChanged, ""},
+		{"uuid changed, no memo", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable with channel, memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonForeignWritable, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
 		// A channel on a writable target: no process of the run cleared the
 		// flags (the clears follow RESET REPLICA ALL and the gate's
 		// no-channel read), so a process without a memo ends as the one whose
 		// memo proves no clear; only a process that sent a clear holds.
-		{"writable with channel, no memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"writable with stopped channel, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"writable with channel and own extras, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: own}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{"writable with channel, memo of a clear", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
-		{"writable with channel, another server, no memo", promotionLive{uuid: opsUUIDC, repl: running, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"uuid changed, memo of a clear", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable with channel, no memo", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonForeignWritable, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with stopped channel, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: opsF}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonForeignWritable, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with channel and own extras, no memo", promotionLive{uuid: opsUUIDB, repl: stopped, gtidRaw: own}, false, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonForeignWritable, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable with channel, memo of a clear", promotionLive{uuid: opsUUIDB, repl: running, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable, ""},
+		{"writable with channel, another server, no memo", promotionLive{uuid: opsUUIDC, repl: running, gtidRaw: opsF}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonExecuteFailed, ""},
+		{"uuid changed, memo of a clear", promotionLive{uuid: opsUUIDC, readOnly: true, gtidRaw: opsF}, false, true, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonExecuteFailed, ""},
 		{"writable, own extras", promotionLive{uuid: opsUUIDB, gtidRaw: own}, false, false, PromotionStageWritable, 0, "", ""},
-		{"writable, foreign extras", promotionLive{uuid: opsUUIDB, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
-		{"writable, missing F", promotionLive{uuid: opsUUIDB, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"writable, memo proves no write", promotionLive{uuid: opsUUIDB, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonForeignWritable, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"writable, foreign extras", promotionLive{uuid: opsUUIDB, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable, ""},
+		{"writable, missing F", promotionLive{uuid: opsUUIDB, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonExecuteFailed, ""},
+		{"writable, memo proves no write", promotionLive{uuid: opsUUIDB, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonForeignWritable, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
 		{"read-only, channel running", promotionLive{uuid: opsUUIDB, readOnly: true, repl: running, gtidRaw: opsF}, false, false, PromotionStageNotStarted, 0, "", ""},
 		{"read-only, channel stopped", promotionLive{uuid: opsUUIDB, readOnly: true, repl: stopped, gtidRaw: opsF}, false, false, PromotionStageReplicaStopped, 0, "", ""},
 		{"read-only, no channel, = F", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: opsF}, false, false, PromotionStageReplicaReset, 0, "", ""},
-		{"read-only, own extras, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonAuthorityChanged, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
+		{"read-only, own extras, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonAuthorityChanged, v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
 		{"read-only, own extras, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: own}, false, false, PromotionStageWasWritable, 0, "", ""},
-		{"read-only, missing F, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1alpha1.PlannedFailoverReasonTargetChanged, ""},
-		{"read-only, missing F, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonExecuteFailed, ""},
-		{"read-only, foreign extras", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1alpha1.PlannedFailoverReasonForeignWritable, ""},
+		{"read-only, missing F, memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, true, false, PromotionStageTargetReplaced, PromoteAborted, v1beta1.PlannedFailoverReasonTargetChanged, ""},
+		{"read-only, missing F, no memo", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: missing}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonExecuteFailed, ""},
+		{"read-only, foreign extras", promotionLive{uuid: opsUUIDB, readOnly: true, gtidRaw: foreign}, false, false, PromotionStageInconsistent, PromoteInconsistent, v1beta1.PlannedFailoverReasonForeignWritable, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -504,7 +504,7 @@ func TestPromote_FromNotStartedConfirms(t *testing.T) {
 	if _, err := f.topo.ReadTargetServerUUID(context.Background(), f.ref); err != nil {
 		t.Fatal(err)
 	}
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if err != nil || out.Kind != PromoteConfirmed {
 		t.Fatalf("Promote = %+v, %v; want Confirmed", out, err)
 	}
@@ -515,7 +515,7 @@ func TestPromote_FromNotStartedConfirms(t *testing.T) {
 		t.Fatalf("Promote sent %v to the source; it must send nothing to any other site", got)
 	}
 	// A re-run of the confirmed promotion repeats nothing (row 15).
-	out, err = f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err = f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if err != nil || out.Kind != PromoteConfirmed || out.Stage != PromotionStageWritable {
 		t.Fatalf("re-run = %+v, %v; want Confirmed from Writable", out, err)
 	}
@@ -534,7 +534,7 @@ func TestPF_CrossProcessOwnUUIDExtrasPromote(t *testing.T) {
 	f.tgt.repl = nil
 	f.tgt.sro = false // mysqld boot state after a restart
 	f.tgt.gtid = opsF + "," + opsUUIDB + ":1-3"
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 	if err != nil || out.Kind != PromoteConfirmed || out.Stage != PromotionStageWasWritable {
 		t.Fatalf("Promote = %+v, %v; want Confirmed from WasWritable", out, err)
 	}
@@ -554,8 +554,8 @@ func TestPF_SameProcessOwnUUIDExtrasAreForeign(t *testing.T) {
 	}
 	f.tgt.repl = nil
 	f.tgt.gtid = opsF + "," + opsUUIDB + ":1"
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-	if err != nil || out.Kind != PromoteAborted || out.Terminal != v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+	if err != nil || out.Kind != PromoteAborted || out.Terminal != v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 		t.Fatalf("Promote = %+v, %v; want Aborted -> SourceLeftFenced", out, err)
 	}
 	if got := f.tgt.statements(); len(got) != 0 {
@@ -569,11 +569,11 @@ func TestPromote_PreWriteGate(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(f *opsFixture)
-		reason v1alpha1.PlannedFailoverReason
+		reason v1beta1.PlannedFailoverReason
 	}{
-		{"writable third site", func(f *opsFixture) { f.third.ro, f.third.sro = false, false }, v1alpha1.PlannedFailoverReasonForeignWritable},
-		{"unreadable dr-only site", func(f *opsFixture) { f.third.down = true }, v1alpha1.PlannedFailoverReasonPeerUnreadable},
-		{"source unfenced", func(f *opsFixture) { f.src.sro = false }, v1alpha1.PlannedFailoverReasonSourceUnfenced},
+		{"writable third site", func(f *opsFixture) { f.third.ro, f.third.sro = false, false }, v1beta1.PlannedFailoverReasonForeignWritable},
+		{"unreadable dr-only site", func(f *opsFixture) { f.third.down = true }, v1beta1.PlannedFailoverReasonPeerUnreadable},
+		{"source unfenced", func(f *opsFixture) { f.src.sro = false }, v1beta1.PlannedFailoverReasonSourceUnfenced},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -582,7 +582,7 @@ func TestPromote_PreWriteGate(t *testing.T) {
 			f.fenced()
 			f.tgt.repl, f.tgt.gtid = nil, opsF
 			tc.mutate(f)
-			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
+			out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
 			if err != nil || out.Kind != PromoteAborted || out.Reason != tc.reason {
 				t.Fatalf("Promote = %+v, %v; want Aborted{%s}", out, err, tc.reason)
 			}
@@ -596,8 +596,8 @@ func TestPromote_PreWriteGate(t *testing.T) {
 		f.hold(false)
 		f.fenced()
 		f.third.down = true
-		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-		if err != nil || out.Kind != PromoteConfirmed || !slices.Contains(out.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers) {
+		out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+		if err != nil || out.Kind != PromoteConfirmed || !slices.Contains(out.Warnings, v1beta1.PlannedFailoverWarningUnreachablePeers) {
 			t.Fatalf("Promote = %+v, %v; want Confirmed with UnreachablePeers", out, err)
 		}
 	})
@@ -616,8 +616,8 @@ func TestPF_ConfirmWithLateUnreadablePeerSucceeds(t *testing.T) {
 		f.third.down = true
 		f.third.mu.Unlock()
 	}
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-	if err != nil || out.Kind != PromoteConfirmed || !slices.Contains(out.Warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers) {
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+	if err != nil || out.Kind != PromoteConfirmed || !slices.Contains(out.Warnings, v1beta1.PlannedFailoverWarningUnreachablePeers) {
 		t.Fatalf("Promote = %+v, %v; want Confirmed with UnreachablePeers", out, err)
 	}
 }
@@ -634,8 +634,8 @@ func TestPromote_ConfirmSeesForeignWritable(t *testing.T) {
 		f.third.ro, f.third.sro = false, false
 		f.third.mu.Unlock()
 	}
-	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhasePromoting))
-	if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1alpha1.PlannedFailoverReasonForeignWritable {
+	out, err := f.topo.Promote(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhasePromoting))
+	if err != nil || out.Kind != PromoteInconsistent || out.Reason != v1beta1.PlannedFailoverReasonForeignWritable {
 		t.Fatalf("Promote = %+v, %v; want Inconsistent{ForeignWritable}", out, err)
 	}
 }
@@ -644,13 +644,13 @@ func TestPromote_ConfirmSeesForeignWritable(t *testing.T) {
 // claim refuses everything but the re-proof.
 func TestPlannedFacade_RequiresClaim(t *testing.T) {
 	f := newOpsFixture(t, "")
-	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+	pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 	calls := map[string]func() error{
 		"Fence":   func() error { _, err := f.topo.Fence(context.Background(), f.ref, opsUUIDA); return err },
 		"Kill":    func() error { _, err := f.topo.KillAppConnections(context.Background(), f.ref); return err },
 		"Promote": func() error { _, err := f.topo.Promote(context.Background(), f.ref, pf); return err },
 		"Rollback": func() error {
-			_, err := f.topo.Rollback(context.Background(), f.ref, opsRun(v1alpha1.PlannedFailoverPhaseRollingBack))
+			_, err := f.topo.Rollback(context.Background(), f.ref, opsRun(v1beta1.PlannedFailoverPhaseRollingBack))
 			return err
 		},
 		"Record": func() error { return f.topo.RecordPlannedPromotion(context.Background(), f.ref, f.clk.Now(), opsF) },
@@ -684,7 +684,7 @@ func TestFence_SendsOnlyToTheIntentServer(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.hold(false)
 	proof, err := f.topo.Fence(context.Background(), f.ref, "replaced-uuid")
-	if err != nil || proof.Kind != FenceNotSent || proof.Reason != v1alpha1.PlannedFailoverReasonAuthorityChanged || !proof.SourceWritable {
+	if err != nil || proof.Kind != FenceNotSent || proof.Reason != v1beta1.PlannedFailoverReasonAuthorityChanged || !proof.SourceWritable {
 		t.Fatalf("Fence with a stale uuid = %+v, %v; want NotSent{AuthorityChanged}, source writable", proof, err)
 	}
 	if len(f.src.statements()) != 0 {
@@ -702,7 +702,7 @@ func TestPF_I20d_CrossProcessFenceRequiresIntentAndUUID(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.hold(false)
 	f.fenced()
-	rec := *opsRun(v1alpha1.PlannedFailoverPhaseFencing).Fence
+	rec := *opsRun(v1beta1.PlannedFailoverPhaseFencing).Fence
 	proof, err := f.topo.ProveFence(context.Background(), f.ref, rec)
 	if err != nil || proof.Kind != FenceApplied || proof.Attribution != FenceByIntentAndUUID {
 		t.Fatalf("ProveFence = %+v, %v; want Applied by intent+uuid", proof, err)
@@ -720,49 +720,49 @@ func TestRollbackPreconditions(t *testing.T) {
 	cases := []struct {
 		name     string
 		third    state.SiteRole
-		phase    v1alpha1.PlannedFailoverPhase
-		reason   v1alpha1.PlannedFailoverReason
+		phase    v1beta1.PlannedFailoverPhase
+		reason   v1beta1.PlannedFailoverReason
 		mutate   func(f *opsFixture)
-		outcome  v1alpha1.PlannedFailoverOutcome
-		warning  v1alpha1.PlannedFailoverWarning
+		outcome  v1beta1.PlannedFailoverOutcome
+		warning  v1beta1.PlannedFailoverWarning
 		unfenced bool
 	}{
-		{name: "source already writable", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			mutate: func(f *opsFixture) {}, outcome: v1alpha1.PlannedFailoverOutcomeRolledBack},
-		{name: "attributable fence, no writable peer", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			mutate: func(f *opsFixture) { f.fenced() }, outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, unfenced: true},
-		{name: "unreadable peer does not block", third: state.SiteRoleDROnly, reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			mutate: func(f *opsFixture) { f.fenced(); f.third.down = true }, outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, unfenced: true},
-		{name: "replaced source pod", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			mutate: func(f *opsFixture) { f.fenced(); f.src.uuid = "replaced" }, outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-			warning: v1alpha1.PlannedFailoverWarningFenceNotAttributable},
-		{name: "writable reader", third: state.SiteRoleReadOnly, reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			mutate: func(f *opsFixture) { f.fenced(); f.third.ro, f.third.sro = false, false }, outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{name: "source lost", reason: v1alpha1.PlannedFailoverReasonSourceLost,
-			mutate: func(f *opsFixture) { f.fenced(); f.src.down = true }, outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced},
-		{name: "source unreachable retries", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+		{name: "source already writable", reason: v1beta1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) {}, outcome: v1beta1.PlannedFailoverOutcomeRolledBack},
+		{name: "attributable fence, no writable peer", reason: v1beta1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced() }, outcome: v1beta1.PlannedFailoverOutcomeRolledBack, unfenced: true},
+		{name: "unreadable peer does not block", third: state.SiteRoleDROnly, reason: v1beta1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced(); f.third.down = true }, outcome: v1beta1.PlannedFailoverOutcomeRolledBack, unfenced: true},
+		{name: "replaced source pod", reason: v1beta1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced(); f.src.uuid = "replaced" }, outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+			warning: v1beta1.PlannedFailoverWarningFenceNotAttributable},
+		{name: "writable reader", third: state.SiteRoleReadOnly, reason: v1beta1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced(); f.third.ro, f.third.sro = false, false }, outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{name: "source lost", reason: v1beta1.PlannedFailoverReasonSourceLost,
+			mutate: func(f *opsFixture) { f.fenced(); f.src.down = true }, outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced},
+		{name: "source unreachable retries", reason: v1beta1.PlannedFailoverReasonLagTimeout,
 			mutate: func(f *opsFixture) { f.fenced(); f.src.down = true }, outcome: ""},
 		// One failed read opens the target-loss window (K053); the source
 		// stays fenced. TestPF_RollbackTargetLossWindow pins the expiry.
-		{name: "possible write, target unreachable retries", phase: v1alpha1.PlannedFailoverPhasePromoting, reason: v1alpha1.PlannedFailoverReasonPromotionAborted,
+		{name: "possible write, target unreachable retries", phase: v1beta1.PlannedFailoverPhasePromoting, reason: v1beta1.PlannedFailoverReasonPromotionAborted,
 			mutate: func(f *opsFixture) { f.fenced(); f.tgt.down = true }, outcome: ""},
-		{name: "possible write, target extras", phase: v1alpha1.PlannedFailoverPhasePromoting, reason: v1alpha1.PlannedFailoverReasonPromotionAborted,
-			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDB + ":1" }, outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired},
+		{name: "possible write, target extras", phase: v1beta1.PlannedFailoverPhasePromoting, reason: v1beta1.PlannedFailoverReasonPromotionAborted,
+			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDB + ":1" }, outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired},
 		// The source restarted during the run on an older data directory
 		// under the same server_uuid: it is not unfenced, and the target is
 		// not pointed at it.
-		{name: "source no longer holds the set it was fenced with", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+		{name: "source no longer holds the set it was fenced with", reason: v1beta1.PlannedFailoverReasonLagTimeout,
 			mutate:  func(f *opsFixture) { f.fenced(); f.src.gtid, f.tgt.gtid = opsUUIDA+":1-7", opsUUIDA+":1-7" },
-			outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored},
+			outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+			warning: v1beta1.PlannedFailoverWarningTargetReplicationNotRestored},
 		// ... or before the fence was read, so the recorded set is the
 		// short one: the target holds what the source issued and lost.
-		{name: "source lacks its own transactions the target holds", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsUUIDA + ":1-13" }, outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored},
-		{name: "divergent target before Promoting still unfences", reason: v1alpha1.PlannedFailoverReasonDivergentTarget,
-			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDC + ":1" }, outcome: v1alpha1.PlannedFailoverOutcomeRolledBack,
-			warning: v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored, unfenced: true},
+		{name: "source lacks its own transactions the target holds", reason: v1beta1.PlannedFailoverReasonLagTimeout,
+			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsUUIDA + ":1-13" }, outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+			warning: v1beta1.PlannedFailoverWarningTargetReplicationNotRestored},
+		{name: "divergent target before Promoting still unfences", reason: v1beta1.PlannedFailoverReasonDivergentTarget,
+			mutate: func(f *opsFixture) { f.fenced(); f.tgt.gtid = opsF + "," + opsUUIDC + ":1" }, outcome: v1beta1.PlannedFailoverOutcomeRolledBack,
+			warning: v1beta1.PlannedFailoverWarningTargetReplicationNotRestored, unfenced: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -770,11 +770,11 @@ func TestRollbackPreconditions(t *testing.T) {
 			f.hold(false)
 			f.tgt.repl = nil
 			tc.mutate(f)
-			pf := opsRun(v1alpha1.PlannedFailoverPhaseRollingBack)
-			if tc.phase == v1alpha1.PlannedFailoverPhasePromoting {
+			pf := opsRun(v1beta1.PlannedFailoverPhaseRollingBack)
+			if tc.phase == v1beta1.PlannedFailoverPhasePromoting {
 				pf.Promotion = opsRun(tc.phase).Promotion
 			}
-			pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: tc.reason, IntentTime: metav1.NewTime(f.clk.Now())}
+			pf.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: tc.reason, IntentTime: metav1.NewTime(f.clk.Now())}
 			res, err := f.topo.Rollback(context.Background(), f.ref, pf)
 			if err != nil || res.Outcome != tc.outcome {
 				t.Fatalf("Rollback = %+v, %v; want outcome %q", res, err, tc.outcome)
@@ -797,7 +797,7 @@ func TestRollbackPreconditions(t *testing.T) {
 
 // --- re-proof (§4.4) ------------------------------------------------------
 
-func opsReproveGroup(f *opsFixture, pf *v1alpha1.PlannedFailoverStatus, last time.Time, target string) *v1alpha1.MysqlFailoverGroup {
+func opsReproveGroup(f *opsFixture, pf *v1beta1.PlannedFailoverStatus, last time.Time, target string) *v1beta1.MysqlFailoverGroup {
 	fg := opsGroup(pf)
 	if !last.IsZero() {
 		t := metav1.NewTime(last)
@@ -810,7 +810,7 @@ func TestReprove_PreWritePhases(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.hold(true)
 	f.fenced()
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseWaitingForLag)
+	pf := opsRun(v1beta1.PlannedFailoverPhaseWaitingForLag)
 	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(pf))
 	if err != nil || !res.OK {
 		t.Fatalf("Reprove = %+v, %v; want OK", res, err)
@@ -823,7 +823,7 @@ func TestReprove_PreWritePhases(t *testing.T) {
 	f.reg.slot.update(f.ref.RunID, func(c *plannedClaim) { c.needsReprove = true })
 	moved := opsReproveGroup(f, pf, f.clk.Now().Add(-10*time.Second), "dc2")
 	res, err = f.topo.Reprove(context.Background(), f.ref, moved)
-	if err != nil || res.RollBack == nil || *res.RollBack != v1alpha1.PlannedFailoverReasonAuthorityChanged {
+	if err != nil || res.RollBack == nil || *res.RollBack != v1beta1.PlannedFailoverReasonAuthorityChanged {
 		t.Fatalf("Reprove after a gap failover = %+v, %v; want RollBack{AuthorityChanged}", res, err)
 	}
 }
@@ -834,8 +834,8 @@ func TestPF_HydratedClaimReprovesAfterGapPromotion(t *testing.T) {
 	f := newOpsFixture(t, "")
 	f.hold(true)
 	f.src.ro, f.src.sro = true, false
-	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1alpha1.PlannedFailoverPhaseDraining)))
-	if err != nil || res.RollBack == nil || *res.RollBack != v1alpha1.PlannedFailoverReasonSourceUnfenced {
+	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1beta1.PlannedFailoverPhaseDraining)))
+	if err != nil || res.RollBack == nil || *res.RollBack != v1beta1.PlannedFailoverReasonSourceUnfenced {
 		t.Fatalf("Reprove = %+v, %v; want RollBack{SourceUnfenced}", res, err)
 	}
 }
@@ -848,9 +848,9 @@ func TestPF_PromotingReproveTargetSubsetRollsBack(t *testing.T) {
 	f.hold(true)
 	f.fenced()
 	f.tgt.repl, f.tgt.sro = nil, false
-	fg := opsReproveGroup(f, opsRun(v1alpha1.PlannedFailoverPhasePromoting), f.clk.Now().Add(-10*time.Second), "dc1")
+	fg := opsReproveGroup(f, opsRun(v1beta1.PlannedFailoverPhasePromoting), f.clk.Now().Add(-10*time.Second), "dc1")
 	res, err := f.topo.Reprove(context.Background(), f.ref, fg)
-	if err != nil || res.RollBack == nil || *res.RollBack != v1alpha1.PlannedFailoverReasonAuthorityChanged || res.Hold != nil {
+	if err != nil || res.RollBack == nil || *res.RollBack != v1beta1.PlannedFailoverReasonAuthorityChanged || res.Hold != nil {
 		t.Fatalf("Reprove = %+v, %v; want RollBack{AuthorityChanged}", res, err)
 	}
 	if !slices.Contains(f.tgt.statements(), "sro=ON") {
@@ -866,9 +866,9 @@ func TestReprove_PromotingChangedRecordHolds(t *testing.T) {
 	f.fenced()
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
 	f.tgt.gtid = opsF + "," + opsUUIDB + ":1-4"
-	fg := opsReproveGroup(f, opsRun(v1alpha1.PlannedFailoverPhasePromoting), f.clk.Now().Add(-10*time.Second), "dc1")
+	fg := opsReproveGroup(f, opsRun(v1beta1.PlannedFailoverPhasePromoting), f.clk.Now().Add(-10*time.Second), "dc1")
 	res, err := f.topo.Reprove(context.Background(), f.ref, fg)
-	if err != nil || res.Hold == nil || *res.Hold != v1alpha1.PlannedFailoverReasonAuthorityChanged {
+	if err != nil || res.Hold == nil || *res.Hold != v1beta1.PlannedFailoverReasonAuthorityChanged {
 		t.Fatalf("Reprove = %+v, %v; want Hold{AuthorityChanged}", res, err)
 	}
 	if err := f.topo.NameUnconfirmedTarget(f.ref); err != nil {
@@ -886,7 +886,7 @@ func TestPF_ReproveLackOfEvidenceNeverHolds(t *testing.T) {
 	f.src.sro = false // rebooted
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
 	f.tgt.gtid = opsF + "," + opsUUIDB + ":1"
-	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1alpha1.PlannedFailoverPhasePromoting)))
+	res, err := f.topo.Reprove(context.Background(), f.ref, opsGroup(opsRun(v1beta1.PlannedFailoverPhasePromoting)))
 	if err != nil || res.HandOff == nil || res.Hold != nil || res.RollBack != nil {
 		t.Fatalf("Reprove = %+v, %v; want HandOff and never a hold", res, err)
 	}
@@ -902,13 +902,13 @@ func TestReprove_RecognisesOwnRecord(t *testing.T) {
 	f.hold(true)
 	f.fenced()
 	f.tgt.repl, f.tgt.ro, f.tgt.sro = nil, false, false
-	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+	pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 	fg := opsReproveGroup(f, pf, pf.Promotion.IntentTime.Add(2*time.Second), "dc2")
 	fg.Annotations = map[string]string{
-		v1alpha1.LastFailoverAnnotation:             failoverStampFormat(pf.Promotion.IntentTime.Add(2 * time.Second)),
-		v1alpha1.LastFailoverTargetAnnotation:       "dc2",
-		v1alpha1.PromotionGtidExecutedAnnotation:    opsF,
-		v1alpha1.PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(pf.Promotion.IntentTime.Add(2*time.Second), "dc2"),
+		v1beta1.LastFailoverAnnotation:             failoverStampFormat(pf.Promotion.IntentTime.Add(2 * time.Second)),
+		v1beta1.LastFailoverTargetAnnotation:       "dc2",
+		v1beta1.PromotionGtidExecutedAnnotation:    opsF,
+		v1beta1.PromotionGtidExecutedForAnnotation: failoverWatermarkBinding(pf.Promotion.IntentTime.Add(2*time.Second), "dc2"),
 	}
 	res, err := f.topo.Reprove(context.Background(), f.ref, fg)
 	if err != nil || !res.OK {
@@ -1000,33 +1000,33 @@ func TestPF_FenceIntentWithoutServerNamesNothing(t *testing.T) {
 // planned half names the source of the latest SourceLeftFenced run with an
 // attributable fence, by its terminal record or its terminal marker.
 func TestPF_SourceLeftFencedNamingSurvivesRestart(t *testing.T) {
-	end := func(mut func(pf *v1alpha1.PlannedFailoverStatus, fg *v1alpha1.MysqlFailoverGroup)) *v1alpha1.MysqlFailoverGroup {
-		pf := opsRun(v1alpha1.PlannedFailoverPhaseFailed)
-		pf.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-			Reason: v1alpha1.PlannedFailoverReasonStatusStalled, CompletionTime: metav1.Now()}
+	end := func(mut func(pf *v1beta1.PlannedFailoverStatus, fg *v1beta1.MysqlFailoverGroup)) *v1beta1.MysqlFailoverGroup {
+		pf := opsRun(v1beta1.PlannedFailoverPhaseFailed)
+		pf.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+			Reason: v1beta1.PlannedFailoverReasonStatusStalled, CompletionTime: metav1.Now()}
 		fg := opsGroup(pf)
 		mut(pf, fg)
 		return fg
 	}
 	cases := []struct {
 		name  string
-		fg    *v1alpha1.MysqlFailoverGroup
+		fg    *v1beta1.MysqlFailoverGroup
 		last  time.Time
 		named bool
 	}{
-		{"terminal record", end(func(*v1alpha1.PlannedFailoverStatus, *v1alpha1.MysqlFailoverGroup) {}), time.Time{}, true},
-		{"terminal marker", end(func(pf *v1alpha1.PlannedFailoverStatus, fg *v1alpha1.MysqlFailoverGroup) {
-			pf.Result, pf.Phase = nil, v1alpha1.PlannedFailoverPhaseWaitingForLag
-			fg.Annotations = map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
-				Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}.String()}
+		{"terminal record", end(func(*v1beta1.PlannedFailoverStatus, *v1beta1.MysqlFailoverGroup) {}), time.Time{}, true},
+		{"terminal marker", end(func(pf *v1beta1.PlannedFailoverStatus, fg *v1beta1.MysqlFailoverGroup) {
+			pf.Result, pf.Phase = nil, v1beta1.PlannedFailoverPhaseWaitingForLag
+			fg.Annotations = map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
+				Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1beta1.PlannedFailoverReasonStatusStalled}.String()}
 		}), time.Time{}, true},
-		{"fence not attributable", end(func(pf *v1alpha1.PlannedFailoverStatus, _ *v1alpha1.MysqlFailoverGroup) {
-			pf.Result.Warnings = []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable}
+		{"fence not attributable", end(func(pf *v1beta1.PlannedFailoverStatus, _ *v1beta1.MysqlFailoverGroup) {
+			pf.Result.Warnings = []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningFenceNotAttributable}
 		}), time.Time{}, false},
-		{"failover after the run started", end(func(*v1alpha1.PlannedFailoverStatus, *v1alpha1.MysqlFailoverGroup) {}),
+		{"failover after the run started", end(func(*v1beta1.PlannedFailoverStatus, *v1beta1.MysqlFailoverGroup) {}),
 			time.Date(2026, 11, 4, 12, 30, 0, 0, time.UTC), false},
-		{"authority moved before the fence", end(func(pf *v1alpha1.PlannedFailoverStatus, _ *v1alpha1.MysqlFailoverGroup) {
-			pf.Result.Reason, pf.Fence.State = v1alpha1.PlannedFailoverReasonAuthorityChanged, v1alpha1.PlannedFailoverFenceIntended
+		{"authority moved before the fence", end(func(pf *v1beta1.PlannedFailoverStatus, _ *v1beta1.MysqlFailoverGroup) {
+			pf.Result.Reason, pf.Fence.State = v1beta1.PlannedFailoverReasonAuthorityChanged, v1beta1.PlannedFailoverFenceIntended
 		}), time.Time{}, false},
 	}
 	for _, tc := range cases {
@@ -1062,7 +1062,7 @@ func TestRecordPlannedPromotion_OncePerRunAndCarriedToReplacement(t *testing.T) 
 	}
 	repl := newOpsFixture(t, "")
 	repl.tm.SetLastFailover(at.Add(-time.Hour))
-	pf := opsRun(v1alpha1.PlannedFailoverPhasePromoting)
+	pf := opsRun(v1beta1.PlannedFailoverPhasePromoting)
 	WireRegisteredManager(repl.tm, ManagerWiring{Slot: f.reg.slot, HydrateFrom: pf})
 	repl.tm.mu.RLock()
 	defer repl.tm.mu.RUnlock()

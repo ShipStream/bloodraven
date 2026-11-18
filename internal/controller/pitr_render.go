@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	"github.com/shipstream/bloodraven/internal/pitrarchive/pitrprofile"
 )
@@ -30,10 +30,10 @@ import (
 // APIReader where the decision must not rest on a lagging cache). The
 // result still contains whatever matched the selector; sitePITRRenders and
 // groupPITRHold keep only the site Deployments.
-func listPITRSiteDeployments(ctx context.Context, reader client.Reader, fg *v1alpha1.MysqlFailoverGroup) ([]appsv1.Deployment, error) {
+func listPITRSiteDeployments(ctx context.Context, reader client.Reader, fg *v1beta1.MysqlFailoverGroup) ([]appsv1.Deployment, error) {
 	var list appsv1.DeploymentList
 	if err := reader.List(ctx, &list, client.InNamespace(fg.Namespace),
-		client.MatchingLabels{labelAppName: "mysql", v1alpha1.FailoverGroupLabel: fg.Name}); err != nil {
+		client.MatchingLabels{labelAppName: "mysql", v1beta1.FailoverGroupLabel: fg.Name}); err != nil {
 		return nil, fmt.Errorf("list site deployments: %w", err)
 	}
 	return list.Items, nil
@@ -42,7 +42,7 @@ func listPITRSiteDeployments(ctx context.Context, reader client.Reader, fg *v1al
 // activePITRProfile returns the profile spec.backup.pitr names and its
 // normalized destination, or ok=false when PITR is disabled or the profile
 // is missing or invalid (§4.6 row 1).
-func activePITRProfile(fg *v1alpha1.MysqlFailoverGroup) (*v1alpha1.BackupProfile, pitrarchive.Destination, bool) {
+func activePITRProfile(fg *v1beta1.MysqlFailoverGroup) (*v1beta1.BackupProfile, pitrarchive.Destination, bool) {
 	if !pitrEnabled(fg) || fg.Spec.Backup.PITR.ProfileName == "" {
 		return nil, pitrarchive.Destination{}, false
 	}
@@ -55,7 +55,7 @@ func activePITRProfile(fg *v1alpha1.MysqlFailoverGroup) (*v1alpha1.BackupProfile
 		return nil, pitrarchive.Destination{}, false
 	}
 	switch profile.Storage.Type {
-	case v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC:
+	case v1beta1.BackupStorageS3, v1beta1.BackupStoragePVC:
 	default:
 		return nil, pitrarchive.Destination{}, false
 	}
@@ -67,7 +67,7 @@ func activePITRProfile(fg *v1alpha1.MysqlFailoverGroup) (*v1alpha1.BackupProfile
 // destination, plus the raw PVC subPath), and the access fields (S3
 // region, raw endpointURL, credentials Secret, and the group's archive poll
 // interval). It never carries a profile name (K7).
-func pitrProfileRender(fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.BackupProfile, dest pitrarchive.Destination) pitrRenderInputs {
+func pitrProfileRender(fg *v1beta1.MysqlFailoverGroup, profile *v1beta1.BackupProfile, dest pitrarchive.Destination) pitrRenderInputs {
 	in := pitrRenderInputs{
 		SchemaVersion: pitrRenderSchemaVersion,
 		Enabled:       true,
@@ -96,7 +96,7 @@ func pitrProfileRender(fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.Backup
 }
 
 // withEncryption sets in's encryption identity from a binding's.
-func (p pitrRenderInputs) withEncryption(enc v1alpha1.PITRArchiveBindingEncryption) pitrRenderInputs {
+func (p pitrRenderInputs) withEncryption(enc v1beta1.PITRArchiveBindingEncryption) pitrRenderInputs {
 	p.EncryptionMode = string(enc.Mode)
 	p.Algorithm = string(enc.Algorithm)
 	p.KeySecretName = enc.KeySecretName
@@ -114,10 +114,10 @@ func (p pitrRenderInputs) withAccess(src pitrRenderInputs) pitrRenderInputs {
 
 // pitrBindingEncryptionFor converts a profile's encryption identity to the
 // binding form with the given snapshot (empty for None).
-func pitrBindingEncryptionFor(ident pitrarchive.EncryptionIdentity, keySecretName string) v1alpha1.PITRArchiveBindingEncryption {
-	enc := v1alpha1.PITRArchiveBindingEncryption{Mode: v1alpha1.EncryptionMode(ident.Mode)}
+func pitrBindingEncryptionFor(ident pitrarchive.EncryptionIdentity, keySecretName string) v1beta1.PITRArchiveBindingEncryption {
+	enc := v1beta1.PITRArchiveBindingEncryption{Mode: v1beta1.EncryptionMode(ident.Mode)}
 	if ident.Mode == pitrarchive.EncryptionPassphrase {
-		enc.Algorithm = v1alpha1.EncryptionAlgorithm(ident.Algorithm)
+		enc.Algorithm = v1beta1.EncryptionAlgorithm(ident.Algorithm)
 		enc.KeySecretName = keySecretName
 	}
 	return enc
@@ -129,7 +129,7 @@ func pitrBindingEncryptionFor(ident pitrarchive.EncryptionIdentity, keySecretNam
 // profile's own identity when it is plaintext (no snapshot needed). An
 // encrypted profile with no candidate snapshot yet has none (O13: the
 // group renders {enabled:false} until one exists).
-func pitrRenderCandidate(profile *v1alpha1.BackupProfile, entry *v1alpha1.PITRArchiveBinding) (v1alpha1.PITRArchiveBindingEncryption, bool) {
+func pitrRenderCandidate(profile *v1beta1.BackupProfile, entry *v1beta1.PITRArchiveBinding) (v1beta1.PITRArchiveBindingEncryption, bool) {
 	ident := pitrprofile.EncryptionIdentityFor(profile)
 	if entry != nil && pitrKeyRevision(entry.Encryption) != "" &&
 		string(entry.Encryption.Mode) == string(ident.Mode) && string(entry.Encryption.Algorithm) == ident.Algorithm {
@@ -138,12 +138,12 @@ func pitrRenderCandidate(profile *v1alpha1.BackupProfile, entry *v1alpha1.PITRAr
 	if ident.Mode == pitrarchive.EncryptionNone {
 		return pitrBindingEncryptionFor(ident, ""), true
 	}
-	return v1alpha1.PITRArchiveBindingEncryption{}, false
+	return v1beta1.PITRArchiveBindingEncryption{}, false
 }
 
 // pitrEstablishingRenderable reports whether an Establishing entry's
 // candidate is complete and still matches profile's mode and algorithm.
-func pitrEstablishingRenderable(profile *v1alpha1.BackupProfile, entry *v1alpha1.PITRArchiveBinding) bool {
+func pitrEstablishingRenderable(profile *v1beta1.BackupProfile, entry *v1beta1.PITRArchiveBinding) bool {
 	ident := pitrprofile.EncryptionIdentityFor(profile)
 	return pitrKeyRevision(entry.Encryption) != "" &&
 		string(entry.Encryption.Mode) == string(ident.Mode) && string(entry.Encryption.Algorithm) == ident.Algorithm
@@ -172,7 +172,7 @@ func pitrEstablishingRenderable(profile *v1alpha1.BackupProfile, entry *v1alpha1
 // destination that has no binding (U14): its archive would have no
 // retention authorization and no reader could use it. Every returned
 // render validates.
-func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment) (pitrRenderInputs, pitrRenderAction) {
+func resolvePITRRender(fg *v1beta1.MysqlFailoverGroup, deploys []appsv1.Deployment) (pitrRenderInputs, pitrRenderAction) {
 	profile, dest, ok := activePITRProfile(fg)
 	if !ok {
 		return pitrRenderDisabled(), pitrRenderApply
@@ -201,7 +201,7 @@ func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploym
 		return checkedPITRRender(out)
 	}
 
-	if entry != nil && entry.State == v1alpha1.PITRArchiveBindingBound {
+	if entry != nil && entry.State == v1beta1.PITRArchiveBindingBound {
 		if eligible, _ := pitrWriterEligible(fg, entry); eligible {
 			out := desired.withEncryption(entry.Encryption)
 			out.ArchiveID = entry.ArchiveID
@@ -216,7 +216,7 @@ func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploym
 	// profile's identity (G3): once the profile's mode or algorithm
 	// changed, the binding pass supersedes it, and until then the rows
 	// below hold the previous writer render instead of disabling PITR.
-	if entry != nil && entry.State == v1alpha1.PITRArchiveBindingPending && entry.Reason == v1alpha1.PITRArchiveBindingReasonEstablishing &&
+	if entry != nil && entry.State == v1beta1.PITRArchiveBindingPending && entry.Reason == v1beta1.PITRArchiveBindingReasonEstablishing &&
 		pitrEstablishingRenderable(profile, entry) {
 		return candidateRender(), pitrRenderApply
 	}
@@ -240,10 +240,10 @@ func resolvePITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deploym
 // pitrBindingSlotsTaken is the number of fg's bindings that hold a slot of
 // the binding limit for sure: Bound entries, which only a release removes.
 // A non-Bound entry no target uses is dropped by the next binding pass.
-func pitrBindingSlotsTaken(fg *v1alpha1.MysqlFailoverGroup) int {
+func pitrBindingSlotsTaken(fg *v1beta1.MysqlFailoverGroup) int {
 	n := 0
 	for i := range fg.Status.PITRArchiveBindings {
-		if fg.Status.PITRArchiveBindings[i].State == v1alpha1.PITRArchiveBindingBound {
+		if fg.Status.PITRArchiveBindings[i].State == v1beta1.PITRArchiveBindingBound {
 			n++
 		}
 	}
@@ -266,7 +266,7 @@ func checkedPITRRender(in pitrRenderInputs) pitrRenderInputs {
 // of its site Deployments among deploys (cached reads are fine: it only
 // labels sidecar reports), else, when no site Deployment carries a
 // decodable annotation, the render the group would create now.
-func renderedPITRInputs(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment) pitrRenderInputs {
+func renderedPITRInputs(fg *v1beta1.MysqlFailoverGroup, deploys []appsv1.Deployment) pitrRenderInputs {
 	if hold, kind := groupPITRHold(fg, deploys); kind == pitrHeld {
 		return hold
 	}
@@ -297,7 +297,7 @@ func pitrRendersArchiver(in pitrRenderInputs) bool {
 // renders again, counts only while it may still run a writer (U08): once
 // it is scaled to zero with no pod left it is ignored; until then the
 // reason names it and the way out.
-func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment) (string, bool, string) {
+func renderedWriterArchiveID(fg *v1beta1.MysqlFailoverGroup, deploys []appsv1.Deployment) (string, bool, string) {
 	renders := sitePITRRenders(fg, deploys)
 	ids := map[string][]string{}
 	var unreadable, removed []string
@@ -327,7 +327,7 @@ func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.D
 		ids[id] = append(ids[id], r.Deployment)
 	}
 	if len(unreadable) > 0 {
-		return "", false, fmt.Sprintf("site Deployments %s carry no readable %s annotation yet", strings.Join(unreadable, ", "), v1alpha1.PITRRenderAnnotation)
+		return "", false, fmt.Sprintf("site Deployments %s carry no readable %s annotation yet", strings.Join(unreadable, ", "), v1beta1.PITRRenderAnnotation)
 	}
 	if len(ids) > 1 {
 		parts := make([]string, 0, len(ids))
@@ -357,7 +357,7 @@ func renderedWriterArchiveID(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.D
 // is not deferred). Under the pre-#203 deferral (some site Deployment has
 // no decodable render) nothing ends the disagreement without the user, so
 // the backup runs unstamped instead of pending indefinitely.
-func pitrBackupWaitsForRollout(fg *v1alpha1.MysqlFailoverGroup, profileName string, deploys []appsv1.Deployment) bool {
+func pitrBackupWaitsForRollout(fg *v1beta1.MysqlFailoverGroup, profileName string, deploys []appsv1.Deployment) bool {
 	if !pitrEnabled(fg) || fg.Spec.Backup.PITR.ProfileName != profileName {
 		return false
 	}
@@ -371,7 +371,7 @@ func pitrBackupWaitsForRollout(fg *v1alpha1.MysqlFailoverGroup, profileName stri
 // the entry is Bound/Bound (§4.7, Δ22), or a plain error when the profile
 // is missing or its destination is invalid. With no entry and a full list,
 // the reason is BindingLimitReached (no entry can be made for it).
-func pitrReadBinding(fg *v1alpha1.MysqlFailoverGroup, profileName string) (*v1alpha1.PITRArchiveBinding, error) {
+func pitrReadBinding(fg *v1beta1.MysqlFailoverGroup, profileName string) (*v1beta1.PITRArchiveBinding, error) {
 	profile := findProfile(fg, profileName)
 	if profile == nil {
 		return nil, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", profileName)
@@ -389,9 +389,9 @@ func pitrReadBinding(fg *v1alpha1.MysqlFailoverGroup, profileName string) (*v1al
 		switch {
 		case entry != nil || len(fg.Status.PITRArchiveBindings) < pitrArchiveBindingsMax:
 		case pitrBindingSlotsTaken(fg) >= pitrArchiveBindingsMax:
-			notReady.reason = v1alpha1.ReasonBindingLimitReached
+			notReady.reason = v1beta1.ReasonBindingLimitReached
 			notReady.message = fmt.Sprintf("the group already has %d Bound archive bindings; release one (annotation %s) so %s can be bound",
-				pitrArchiveBindingsMax, v1alpha1.ReleasePITRArchiveBindingAnnotation, dest.String())
+				pitrArchiveBindingsMax, v1beta1.ReleasePITRArchiveBindingAnnotation, dest.String())
 		default:
 			notReady.message = fmt.Sprintf("the binding list is full of entries that are not Bound; waiting for the group's binding pass to make room for %s", dest.String())
 		}
@@ -409,9 +409,9 @@ func pitrReadBinding(fg *v1alpha1.MysqlFailoverGroup, profileName string) (*v1al
 // (U19: a plaintext read binding is not rebuilt after a status loss, and
 // whose archive it is must be established again, by the writer check of a
 // write target, before anything writes there).
-func pitrProfileReadOnly(fg *v1alpha1.MysqlFailoverGroup, profileName string) (bool, string) {
+func pitrProfileReadOnly(fg *v1beta1.MysqlFailoverGroup, profileName string) (bool, string) {
 	if ifb := fg.Spec.InitFromBackup; ifb != nil && ifb.PointInTime != nil && ifb.PointInTime.ArchiveProfileName == profileName &&
-		(fg.Status.Restore == nil || fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded) {
+		(fg.Status.Restore == nil || fg.Status.Restore.Phase != v1beta1.BackupPhaseSucceeded) {
 		return true, fmt.Sprintf("profile %q is the initFromBackup point-in-time archive profile, which is read-only until the restore succeeds", profileName)
 	}
 	profile := findProfile(fg, profileName)
@@ -434,8 +434,8 @@ func pitrProfileReadOnly(fg *v1alpha1.MysqlFailoverGroup, profileName string) (b
 		return true, fmt.Sprintf("profile %q resolves to %s, an archive created by group %s/%s; it is read-only for this group",
 			profileName, dest.String(), entry.Source.Namespace, entry.Source.Name)
 	}
-	if entry.State == v1alpha1.PITRArchiveBindingRefused &&
-		(entry.Reason == v1alpha1.PITRArchiveBindingReasonArchiveForeign || entry.Reason == v1alpha1.PITRArchiveBindingReasonArchiveCopy) {
+	if entry.State == v1beta1.PITRArchiveBindingRefused &&
+		(entry.Reason == v1beta1.PITRArchiveBindingReasonArchiveForeign || entry.Reason == v1beta1.PITRArchiveBindingReasonArchiveCopy) {
 		return true, fmt.Sprintf("profile %q resolves to %s, whose archive binding was refused (%s); it is read-only for this group",
 			profileName, dest.String(), entry.Reason)
 	}
@@ -446,7 +446,7 @@ func pitrProfileReadOnly(fg *v1alpha1.MysqlFailoverGroup, profileName string) (b
 // creates at the destination of one of its bindings (Δ12): the /pitr-cutoff
 // gate. The ID is derived from fg's UID, so another group's archive, or a
 // copy, never matches.
-func PITRRetentionArchiveAllowed(fg *v1alpha1.MysqlFailoverGroup, archive string) bool {
+func PITRRetentionArchiveAllowed(fg *v1beta1.MysqlFailoverGroup, archive string) bool {
 	if fg == nil || fg.UID == "" || !pitrarchive.ValidArchiveID(archive) {
 		return false
 	}
@@ -490,7 +490,7 @@ func containsString(list []string, s string) bool {
 // (Δ15, O10): username and password of the five role
 // Secrets, and the operator Secret's MYSQL_ROOT_PASSWORD. Nothing else of
 // those Secrets (a passphrase sharing one, say) enters the pod hash.
-func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
+func credentialRoleSecretNames(fg *v1beta1.MysqlFailoverGroup) consumedSecretKeys {
 	out := consumedSecretKeys{}
 	c := fg.Spec.Credentials
 	out.add(c.OperatorSecretName, "username", "password", "MYSQL_ROOT_PASSWORD")
@@ -504,7 +504,7 @@ func credentialRoleSecretNames(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKe
 // role keys of credentialRoleSecretNames and the operator Secret's
 // replication account (a reserved principal). No passphrase or decryption
 // Secret enters it.
-func credentialHashSecretKeys(fg *v1alpha1.MysqlFailoverGroup) consumedSecretKeys {
+func credentialHashSecretKeys(fg *v1beta1.MysqlFailoverGroup) consumedSecretKeys {
 	out := credentialRoleSecretNames(fg)
 	out.add(fg.Spec.Credentials.OperatorSecretName, replicationUserKey, replicationPasswordKey)
 	return out
@@ -548,7 +548,7 @@ func (g groupPITRRender) defers(deployName string) bool {
 // A group whose PITR is disabled (or whose active profile does not
 // resolve) renders {enabled:false} whatever its Deployments carry, so no
 // Deployment is listed (U63).
-func (r *MysqlFailoverGroupReconciler) resolveGroupPITRRender(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (groupPITRRender, error) {
+func (r *MysqlFailoverGroupReconciler) resolveGroupPITRRender(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (groupPITRRender, error) {
 	if _, _, ok := activePITRProfile(fg); !ok {
 		r.forgetPITRRenderLog(fg)
 		return groupPITRRender{inputs: pitrRenderDisabled(), action: pitrRenderApply}, nil
@@ -577,7 +577,7 @@ type pitrRenderLogState struct {
 }
 
 // logPITRRender writes the render log lines when they change.
-func (r *MysqlFailoverGroupReconciler) logPITRRender(fg *v1alpha1.MysqlFailoverGroup, deploys []appsv1.Deployment, action pitrRenderAction) {
+func (r *MysqlFailoverGroupReconciler) logPITRRender(fg *v1beta1.MysqlFailoverGroup, deploys []appsv1.Deployment, action pitrRenderAction) {
 	logger := r.licenseLogger()
 	key := fg.Namespace + "/" + fg.Name + "/" + string(fg.UID)
 	next := pitrRenderLogState{ignored: map[string]string{}}
@@ -636,7 +636,7 @@ func (r *MysqlFailoverGroupReconciler) forgetGroupMemos(nn types.NamespacedName)
 
 // forgetPITRRenderLog drops what logPITRRender remembers of fg (a group
 // that renders nothing).
-func (r *MysqlFailoverGroupReconciler) forgetPITRRenderLog(fg *v1alpha1.MysqlFailoverGroup) {
+func (r *MysqlFailoverGroupReconciler) forgetPITRRenderLog(fg *v1beta1.MysqlFailoverGroup) {
 	r.pitrRenderLogMu.Lock()
 	defer r.pitrRenderLogMu.Unlock()
 	delete(r.pitrRenderLog, fg.Namespace+"/"+fg.Name+"/"+string(fg.UID))

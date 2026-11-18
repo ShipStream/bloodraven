@@ -17,7 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 )
@@ -33,16 +33,16 @@ func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing
 	fg := plannedFailoverFG("")
 	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
 	fenced := restoreRoundTwoUUID + ":1-10"
-	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-		RunID: "run-before-restore", Revision: 3, Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "pdx", SourceSite: "iad",
-		StartTime: start, ClaimTime: &start, ClaimBaseline: &v1alpha1.FailoverRecordRef{},
-		Settings: v1alpha1.PlannedFailoverSettings{DrainTimeout: metav1.Duration{Duration: 30 * time.Second}, MaxLagWait: metav1.Duration{Duration: time.Nanosecond}},
-		Fence:    &v1alpha1.PlannedFailoverFenceRecord{State: v1alpha1.PlannedFailoverFenceApplied, IntentTime: start, SourceServerUUID: restoreRoundTwoUUID, GtidSet: &fenced},
-		Drain:    &v1alpha1.PlannedFailoverDrainRecord{StartTime: start},
+	fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{
+		RunID: "run-before-restore", Revision: 3, Phase: v1beta1.PlannedFailoverPhaseDraining, TargetSite: "pdx", SourceSite: "iad",
+		StartTime: start, ClaimTime: &start, ClaimBaseline: &v1beta1.FailoverRecordRef{},
+		Settings: v1beta1.PlannedFailoverSettings{DrainTimeout: metav1.Duration{Duration: 30 * time.Second}, MaxLagWait: metav1.Duration{Duration: time.Nanosecond}},
+		Fence:    &v1beta1.PlannedFailoverFenceRecord{State: v1beta1.PlannedFailoverFenceApplied, IntentTime: start, SourceServerUUID: restoreRoundTwoUUID, GtidSet: &fenced},
+		Drain:    &v1beta1.PlannedFailoverDrainRecord{StartTime: start},
 	}
-	fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
+	fg.Spec.RestoreInPlace = &v1beta1.RestoreInPlaceSpec{
 		Confirm: testRestoreConfirm,
-		Source:  v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: "seed"}},
+		Source:  v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: "seed"}},
 	}
 	nn := fgNN(fg)
 	iad := &mockMySQL{readOnly: false, gtidExecuted: restoreRoundTwoUUID + ":1-10"}
@@ -63,7 +63,7 @@ func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing
 		}
 		cur := getFG(t, c, fg)
 		pfDone := cur.Status.PlannedFailover != nil && plannedFailoverTerminal(cur.Status.PlannedFailover)
-		if rip := cur.Status.RestoreInPlace; rip != nil && rip.Phase == v1alpha1.RestoreInPlaceFencing {
+		if rip := cur.Status.RestoreInPlace; rip != nil && rip.Phase == v1beta1.RestoreInPlaceFencing {
 			pfTerminalBeforeFencing = pfDone
 			break
 		}
@@ -73,16 +73,16 @@ func TestReconcile_PlannedFailoverInFlightFinishesBeforeRestoreFences(t *testing
 	if pf := cur.Status.PlannedFailover; pf == nil || !plannedFailoverTerminal(pf) {
 		t.Fatalf("planned failover = %+v, want it driven to a terminal phase (it deadlocked behind the restore's Preflight)", pf)
 	}
-	if rip := cur.Status.RestoreInPlace; rip == nil || rip.Phase != v1alpha1.RestoreInPlaceFencing || !pfTerminalBeforeFencing {
+	if rip := cur.Status.RestoreInPlace; rip == nil || rip.Phase != v1beta1.RestoreInPlaceFencing || !pfTerminalBeforeFencing {
 		t.Fatalf("restore = %+v (planned failover terminal before Fencing: %v), want Fencing only after the failover finished", rip, pfTerminalBeforeFencing)
 	}
 }
 
 // guardsRunner returns a runner whose cached list (client) and uncached
 // reader (apiReader) hold different views of the group.
-func guardsRunner(cached, authoritative *v1alpha1.MysqlFailoverGroup) *TopologyManagerRunner {
-	cachedClient := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(cached).Build()
-	reader := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
+func guardsRunner(cached, authoritative *v1beta1.MysqlFailoverGroup) *TopologyManagerRunner {
+	cachedClient := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(cached).Build()
+	reader := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
 	return &TopologyManagerRunner{client: cachedClient, apiReader: reader, logger: testLogger(),
 		managers: map[types.NamespacedName]*managedTopology{}}
 }
@@ -90,11 +90,11 @@ func guardsRunner(cached, authoritative *v1alpha1.MysqlFailoverGroup) *TopologyM
 // heldGroupViews returns a group whose authoritative status holds dc2 after
 // a failed full-instance restore, and a stale cached copy without any
 // restore state.
-func heldGroupViews() (cached, authoritative *v1alpha1.MysqlFailoverGroup) {
+func heldGroupViews() (cached, authoritative *v1beta1.MysqlFailoverGroup) {
 	authoritative = newTestFG()
 	authoritative.Status.ActiveSite = "dc1"
-	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}}
-	authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}
+	authoritative.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceFailed, TargetSite: "dc1", Scope: &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull}}
+	authoritative.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1beta1.RestoreReclonesHeld, Pending: []string{"dc2"}}
 	cached = authoritative.DeepCopy()
 	cached.Status.RestoreInPlace, cached.Status.RestoreReclones = nil, nil
 	return cached, authoritative
@@ -143,9 +143,9 @@ func TestRestoreGuards_StaleCacheKeepsFreezeAndFence(t *testing.T) {
 	no := false
 	authoritative := newTestFG()
 	authoritative.Status.ActiveSite = "dc1"
-	authoritative.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring, TargetSite: "dc1", Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, RunID: "run-1"}
-	authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"dc2"}}
-	authoritative.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: "dc1", ConfirmToken: testRestoreConfirm, RunID: "run-1", PriorOfflineMode: &no, SessionsEvicted: true}
+	authoritative.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{Phase: v1beta1.RestoreInPlaceRestoring, TargetSite: "dc1", Scope: &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull}, RunID: "run-1"}
+	authoritative.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: testRestoreConfirm, Phase: v1beta1.RestoreReclonesArmed, Pending: []string{"dc2"}}
+	authoritative.Status.RestoreOfflineFence = &v1beta1.RestoreOfflineFenceStatus{Site: "dc1", ConfirmToken: testRestoreConfirm, RunID: "run-1", PriorOfflineMode: &no, SessionsEvicted: true}
 	cached := authoritative.DeepCopy()
 	cached.Status.RestoreInPlace, cached.Status.RestoreReclones, cached.Status.RestoreOfflineFence = nil, nil, nil
 	runner := guardsRunner(cached, authoritative)
@@ -185,8 +185,8 @@ func TestSync_NewManagerTakesRestoreGuardsFromUncachedRead(t *testing.T) {
 	cached, authoritative := heldGroupViews()
 	secret := newTestSecret()
 	secret.Data = lifecycleSecretData()
-	cachedClient := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(cached, secret).Build()
-	reader := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
+	cachedClient := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(cached, secret).Build()
+	reader := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	runner := &TopologyManagerRunner{client: cachedClient, apiReader: reader, logger: logger, hub: platform.NewHub(logger),
 		managers: map[types.NamespacedName]*managedTopology{}}
@@ -222,12 +222,12 @@ func TestEarlierRunQueueHeldWhenNextRunEndsInPreflight(t *testing.T) {
 	const confirmA, confirmB = "2026-04-17T14:00:00Z", "2026-04-18T10:00:00Z"
 	for _, tc := range []struct {
 		name  string
-		setup func(fg *v1alpha1.MysqlFailoverGroup, peer *mockMySQL)
+		setup func(fg *v1beta1.MysqlFailoverGroup, peer *mockMySQL)
 	}{
-		{"invalid spec", func(fg *v1alpha1.MysqlFailoverGroup, _ *mockMySQL) {
-			fg.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{"a", "b"}}
+		{"invalid spec", func(fg *v1beta1.MysqlFailoverGroup, _ *mockMySQL) {
+			fg.Spec.RestoreInPlace.LoadOptions = &v1beta1.LoadOptions{IncludeSchemas: []string{"a", "b"}}
 		}},
-		{"peer privilege rejection", func(_ *v1alpha1.MysqlFailoverGroup, peer *mockMySQL) {
+		{"peer privilege rejection", func(_ *v1beta1.MysqlFailoverGroup, peer *mockMySQL) {
 			peer.missingIOStopPriv = []string{"REPLICATION_SLAVE_ADMIN"}
 		}},
 		{"confirm reverted after B started", nil},
@@ -238,13 +238,13 @@ func TestEarlierRunQueueHeldWhenNextRunEndsInPreflight(t *testing.T) {
 			site, peerName := fg.Spec.Sites[0].Name, fg.Spec.Sites[1].Name
 			no := false
 			now := metav1.Now()
-			fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-				Phase: v1alpha1.RestoreInPlaceFailed, TargetSite: site, Scope: &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull}, JobName: inPlaceRestoreJobName(fg.Name, site),
+			fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{
+				Phase: v1beta1.RestoreInPlaceFailed, TargetSite: site, Scope: &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull}, JobName: inPlaceRestoreJobName(fg.Name, site),
 				ConfirmTokenUsed: confirmA, CompletionTime: &now,
 			}
-			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1alpha1.RestoreReclonesArmed,
+			fg.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{ConfirmToken: confirmA, Phase: v1beta1.RestoreReclonesArmed,
 				Pending: []string{peerName}, FencedGtidExecuted: peerGTID("1-10")}
-			fg.Status.RestoreOfflineFence = &v1alpha1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: confirmA, RunID: "run-a", PriorOfflineMode: &no, SessionsEvicted: true}
+			fg.Status.RestoreOfflineFence = &v1beta1.RestoreOfflineFenceStatus{Site: site, ConfirmToken: confirmA, RunID: "run-a", PriorOfflineMode: &no, SessionsEvicted: true}
 			r, c := newReconciler(fg, succeededSeedBackup(), operatorCredsSecret())
 			tm, mocks := withFenceRunner(r, c, fg)
 			r.Recorder = record.NewFakeRecorder(100)
@@ -283,7 +283,7 @@ func TestEarlierRunQueueHeldWhenNextRunEndsInPreflight(t *testing.T) {
 			}
 			fresh := getFG(t, c, fg)
 			q := fresh.Status.RestoreReclones
-			if q == nil || q.Phase != v1alpha1.RestoreReclonesHeld || !slices.Contains(q.Pending, peerName) {
+			if q == nil || q.Phase != v1beta1.RestoreReclonesHeld || !slices.Contains(q.Pending, peerName) {
 				t.Fatalf("queue = %+v (restore %+v), want A's peers Held", q, fresh.Status.RestoreInPlace)
 			}
 			if !tm.restorePeerHeldSite(peerName) {
@@ -300,7 +300,7 @@ func TestEarlierRunQueueHeldWhenNextRunEndsInPreflight(t *testing.T) {
 // queue itself, even when the observed status still says it replicates.
 func TestValidatePlannedFailover_RefusesQueuedTarget(t *testing.T) {
 	fg := plannedFailoverFG("")
-	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: v1alpha1.RestoreReclonesDraining, Pending: []string{"pdx"}}
+	fg.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{Phase: v1beta1.RestoreReclonesDraining, Pending: []string{"pdx"}}
 	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" || err == nil || !strings.Contains(err.Error(), "post-restore reclone") {
 		t.Fatalf("result=%v reason=%q err=%v, want TargetUnhealthy for a queued target", result, reason, err)
@@ -315,21 +315,21 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 		queued      bool
 		wantHealthy string
 	}{
-		{"still queued", true, v1alpha1.LabelValueFalse},
-		{"queue gone", false, v1alpha1.LabelValueTrue},
+		{"still queued", true, v1beta1.LabelValueFalse},
+		{"queue gone", false, v1beta1.LabelValueTrue},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cached := newTestFG()
 			cached.Status.ActiveSite = "dc1"
-			cached.Status.Sites = []v1alpha1.SiteStatus{{Name: "dc1", State: v1alpha1.SiteStateWritable}, {Name: "dc2", State: v1alpha1.SiteStateReadOnly, Replication: v1alpha1.SiteReplicationHealthy}}
+			cached.Status.Sites = []v1beta1.SiteStatus{{Name: "dc1", State: v1beta1.SiteStateWritable}, {Name: "dc2", State: v1beta1.SiteStateReadOnly, Replication: v1beta1.SiteReplicationHealthy}}
 			authoritative := cached.DeepCopy()
 			if tc.queued {
-				authoritative.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{Phase: v1alpha1.RestoreReclonesHeld, Pending: []string{"dc2"}}
+				authoritative.Status.RestoreReclones = &v1beta1.RestoreReclonesStatus{Phase: v1beta1.RestoreReclonesHeld, Pending: []string{"dc2"}}
 			}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mysql-lion-dc2-x", Namespace: cached.Namespace, Labels: map[string]string{
-				labelAppName: "mysql", labelInstance: cached.Name, v1alpha1.SiteLabel: "dc2", v1alpha1.RoleLabel: "replica", v1alpha1.HealthyLabel: v1alpha1.LabelValueFalse}}}
+				labelAppName: "mysql", labelInstance: cached.Name, v1beta1.SiteLabel: "dc2", v1beta1.RoleLabel: "replica", v1beta1.HealthyLabel: v1beta1.LabelValueFalse}}}
 			r, c := newReconciler(cached, pod)
-			r.APIReader = fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
+			r.APIReader = fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(authoritative).Build()
 			if err := r.syncPodLabels(context.Background(), getFG(t, c, cached)); err != nil {
 				t.Fatal(err)
 			}
@@ -337,8 +337,8 @@ func TestSyncPodLabels_StaleCacheKeepsQueuedSiteOutOfReaderServices(t *testing.T
 			if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Labels[v1alpha1.HealthyLabel] != tc.wantHealthy {
-				t.Fatalf("healthy = %q, want %q", got.Labels[v1alpha1.HealthyLabel], tc.wantHealthy)
+			if got.Labels[v1beta1.HealthyLabel] != tc.wantHealthy {
+				t.Fatalf("healthy = %q, want %q", got.Labels[v1beta1.HealthyLabel], tc.wantHealthy)
 			}
 		})
 	}

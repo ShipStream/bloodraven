@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 const (
@@ -110,7 +110,7 @@ func mysqlServerArgs(serverID uint32, tls bool) []string {
 //
 // Part 1 runs first and cannot fail the container; a failure in part 2
 // leaves the clone staged, and the next start repeats part 1.
-func mysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
+func mysqlLauncher(fg *v1beta1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
 	keyringFile, binlogEncrypted := "", false
 	if fg.Spec.EncryptionEnabled() {
 		keyringFile = fg.Spec.KeyringDataFilePath()

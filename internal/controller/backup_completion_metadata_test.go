@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 	batchv1 "k8s.io/api/batch/v1"
@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func backupMetadataFixture(t *testing.T, encrypted bool) (*MysqlBackupReconciler, client.Client, *v1alpha1.MysqlFailoverGroup, *v1alpha1.MysqlBackup, *batchv1.Job) {
+func backupMetadataFixture(t *testing.T, encrypted bool) (*MysqlBackupReconciler, client.Client, *v1beta1.MysqlFailoverGroup, *v1beta1.MysqlBackup, *batchv1.Job) {
 	t.Helper()
 	fg := fgWithBackup()
 	if encrypted {
@@ -35,7 +35,7 @@ func backupMetadataFixture(t *testing.T, encrypted bool) (*MysqlBackupReconciler
 	}
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = "prod_backups/db dumps"
 	fg.Status.ActiveSite = "iad"
-	fg.Status.Sites = []v1alpha1.SiteStatus{{Name: "iad", State: v1alpha1.SiteStateWritable}}
+	fg.Status.Sites = []v1beta1.SiteStatus{{Name: "iad", State: v1beta1.SiteStateWritable}}
 	mb := backupCR("metadata", fg.Name, "nightly-s3")
 	mb.UID = types.UID("metadata-backup-uid")
 	r, c := newBackupReconciler(t, fg, mb, operatorCredsSecret())
@@ -62,13 +62,13 @@ func backupMetadataFixture(t *testing.T, encrypted bool) (*MysqlBackupReconciler
 
 // backupJobPod returns a pod that job owns, labelled as the Job controller
 // and the backup template label it.
-func backupJobPod(name string, mb *v1alpha1.MysqlBackup, job *batchv1.Job, phase corev1.PodPhase) *corev1.Pod {
+func backupJobPod(name string, mb *v1beta1.MysqlBackup, job *batchv1.Job, phase corev1.PodPhase) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: mb.Namespace,
 			Labels: map[string]string{
-				v1alpha1.MysqlBackupLabel:      mb.Name,
+				v1beta1.MysqlBackupLabel:       mb.Name,
 				"batch.kubernetes.io/job-name": job.Name,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
@@ -137,7 +137,7 @@ func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	condition := apiMeta.FindStatusCondition(mb.Status.Conditions, "MetadataComplete")
-	if mb.Status.Phase != v1alpha1.BackupPhaseSucceeded || testArtifactLocation(mb) != location || mb.Status.GtidExecuted != "uuid:my_tag:1-3" || mb.Status.BinlogPosition == nil || *mb.Status.BinlogPosition != (v1alpha1.BinlogCoordinate{File: "mysql_bin.000001", Position: 118}) || mb.Status.SizeBytes != 42 || condition == nil || condition.Status != metav1.ConditionTrue {
+	if mb.Status.Phase != v1beta1.BackupPhaseSucceeded || testArtifactLocation(mb) != location || mb.Status.GtidExecuted != "uuid:my_tag:1-3" || mb.Status.BinlogPosition == nil || *mb.Status.BinlogPosition != (v1beta1.BinlogCoordinate{File: "mysql_bin.000001", Position: 118}) || mb.Status.SizeBytes != 42 || condition == nil || condition.Status != metav1.ConditionTrue {
 		t.Fatalf("completion metadata not recovered: %+v", mb.Status)
 	}
 	if !mb.Status.CompletionTime.Equal(firstCompletion) || !mb.Status.CompletionTime.Equal(job.Status.CompletionTime) {
@@ -166,7 +166,7 @@ func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
 	if err != nil || envMap(cleanup.Spec.Template.Spec.Containers[0].Env)["BLOODRAVEN_OUTPUT_URL"] != location {
 		t.Fatalf("cleanup did not use recovered artifact: err=%v", err)
 	}
-	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: v1alpha1.RestoreSource{BackupRef: &v1alpha1.LocalMysqlBackupRef{Name: mb.Name}}}
+	fg.Spec.InitFromBackup = &v1beta1.InitFromBackupSpec{Source: v1beta1.RestoreSource{BackupRef: &v1beta1.LocalMysqlBackupRef{Name: mb.Name}}}
 	rr, _ := newReconciler(fg, mb)
 	if _, err := rr.buildRestoreJob(context.Background(), fg, "iad", "creds"); err != nil {
 		t.Fatalf("recovered backup cannot build a restore: %v", err)
@@ -175,7 +175,7 @@ func TestMysqlBackupReconciler_RecoversCompletionAfterLogFailure(t *testing.T) {
 
 func TestMysqlBackupReconciler_RecoversMissingArtifactStorage(t *testing.T) {
 	r, c, _, mb, _ := backupMetadataFixture(t, false)
-	mb.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	mb.Status.Phase = v1beta1.BackupPhaseSucceeded
 	mb.Status.ArtifactStorage = nil
 	if err := c.Status().Update(context.Background(), mb); err != nil {
 		t.Fatal(err)
@@ -280,8 +280,8 @@ func TestMysqlBackupReconciler_CompletionFallbackUsesJob(t *testing.T) {
 				t.Fatal(err)
 			}
 			condition := apiMeta.FindStatusCondition(mb.Status.Conditions, "MetadataComplete")
-			ready := apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
-			if mb.Status.Phase != v1alpha1.BackupPhaseSucceeded || testArtifactLocation(mb) != location || testArtifactType(mb) != v1alpha1.BackupStorageS3 || condition == nil || condition.Reason != tc.reason || ready == nil || ready.Status != metav1.ConditionTrue || (result.RequeueAfter > 0) != tc.requeue {
+			ready := apiMeta.FindStatusCondition(mb.Status.Conditions, v1beta1.ConditionReady)
+			if mb.Status.Phase != v1beta1.BackupPhaseSucceeded || testArtifactLocation(mb) != location || testArtifactType(mb) != v1beta1.BackupStorageS3 || condition == nil || condition.Reason != tc.reason || ready == nil || ready.Status != metav1.ConditionTrue || (result.RequeueAfter > 0) != tc.requeue {
 				t.Fatalf("incorrect completion fallback: result=%+v status=%+v", result, mb.Status)
 			}
 			if tc.name == "interrupted-stream" && mb.Status.SizeBytes != 0 {
@@ -324,7 +324,7 @@ func TestMysqlBackupReconciler_RecoversLocationBeforeFinalization(t *testing.T) 
 				if err := c.Status().Update(context.Background(), job); err != nil {
 					t.Fatal(err)
 				}
-				mb.Status.Phase = v1alpha1.BackupPhaseFailed
+				mb.Status.Phase = v1beta1.BackupPhaseFailed
 			}
 			if err := c.Status().Update(context.Background(), mb); err != nil {
 				t.Fatal(err)
@@ -359,7 +359,7 @@ func TestMysqlBackupReconciler_RecoversLocationBeforeFinalization(t *testing.T) 
 func TestBackupJobDestinationUsesMainContainer(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	for _, storage := range []v1alpha1.BackupStorageType{v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC} {
+	for _, storage := range []v1beta1.BackupStorageType{v1beta1.BackupStorageS3, v1beta1.BackupStoragePVC} {
 		for _, encrypted := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s-encrypted-%v", storage, encrypted), func(t *testing.T) {
 				fg := fgWithBackup()
@@ -368,8 +368,8 @@ func TestBackupJobDestinationUsesMainContainer(t *testing.T) {
 				}
 				profile := fg.Spec.Backup.Profiles[0]
 				want := "prod_backups/db dumps/metadata"
-				if storage == v1alpha1.BackupStoragePVC {
-					profile.Storage = v1alpha1.BackupStorage{Type: storage, PVC: &v1alpha1.PVCStorage{ClaimName: "backups", SubPath: "prod_backups/db dumps"}}
+				if storage == v1beta1.BackupStoragePVC {
+					profile.Storage = v1beta1.BackupStorage{Type: storage, PVC: &v1beta1.PVCStorage{ClaimName: "backups", SubPath: "prod_backups/db dumps"}}
 					want = "/backups/" + want
 				} else {
 					profile.Storage.S3.Prefix = "prod_backups/db dumps"
@@ -408,8 +408,8 @@ func TestMysqlBackupReconciler_UnknownDestinationNeverBecomesReady(t *testing.T)
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(mb), mb); err != nil {
 		t.Fatal(err)
 	}
-	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, v1alpha1.ConditionReady)
-	if mb.Status.Phase == v1alpha1.BackupPhaseSucceeded || ready == nil || ready.Status != metav1.ConditionFalse {
+	ready := apiMeta.FindStatusCondition(mb.Status.Conditions, v1beta1.ConditionReady)
+	if mb.Status.Phase == v1beta1.BackupPhaseSucceeded || ready == nil || ready.Status != metav1.ConditionFalse {
 		t.Fatalf("unknown artifact became usable: %+v", mb.Status)
 	}
 }
@@ -531,9 +531,9 @@ func TestFinalize_DoesNotAdoptCleanupPodLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
-	mb.Status.Phase, mb.Status.CompletionTime = v1alpha1.BackupPhaseSucceeded, &now
+	mb.Status.Phase, mb.Status.CompletionTime = v1beta1.BackupPhaseSucceeded, &now
 	setTestArtifactLocation(mb, location)
-	setCondition(&mb.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionMetadataComplete, Status: metav1.ConditionFalse,
+	setCondition(&mb.Status.Conditions, metav1.Condition{Type: v1beta1.ConditionMetadataComplete, Status: metav1.ConditionFalse,
 		Reason: "SentinelUnavailable", Message: "logs not read yet", LastTransitionTime: now})
 	if err := c.Status().Update(ctx, mb); err != nil {
 		t.Fatal(err)

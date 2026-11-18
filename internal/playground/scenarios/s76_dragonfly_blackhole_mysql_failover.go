@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
@@ -404,7 +404,7 @@ func s76ObserveMySQLFailover() runner.Step {
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite changes from %s and is observed writable", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					done, msg := failoverObserved(mfg, original)
 					return done, msg, nil
 				})
@@ -435,7 +435,7 @@ func s76ObserveDragonflyFollows() runner.Step {
 			defer cancel()
 			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("status.dragonfly.activeSite==%s with a promotion stamped after the fault", peer),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					df := mfg.Status.Dragonfly
 					if df == nil {
 						return false, "no status.dragonfly", nil
@@ -736,7 +736,7 @@ func s76SettleBothRejoin() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("old primary %s replicates from %s", oldSite, peer),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					if mfg.Status.ActiveSite != peer {
 						return false, "", fmt.Errorf("activeSite moved to %q while the old primary rejoined", mfg.Status.ActiveSite)
 					}
@@ -745,10 +745,10 @@ func s76SettleBothRejoin() runner.Step {
 							continue
 						}
 						msg := fmt.Sprintf("state=%q replication=%q recovery=%q", s.State, s.Replication, s.RecoveryState)
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							return false, msg, fmt.Errorf("old primary %s is RecoveryBlocked: it did not rejoin by replication (%s)", oldSite, msg)
 						}
-						return s.State == v1alpha1.SiteStateReadOnly && s.Replication.Running() && s.RecoveryState == "", msg, nil
+						return s.State == v1beta1.SiteStateReadOnly && s.Replication.Running() && s.RecoveryState == "", msg, nil
 					}
 					return false, fmt.Sprintf("site %s not in status yet", oldSite), nil
 				})

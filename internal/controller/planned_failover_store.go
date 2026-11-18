@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 )
 
@@ -58,8 +58,8 @@ func newAPIPlannedFailoverStore(c client.Client, reader client.Reader, clk clock
 }
 
 // Load returns the uncached object, or (nil, nil) when it is gone.
-func (s *apiPlannedFailoverStore) Load(ctx context.Context, nn types.NamespacedName) (*v1alpha1.MysqlFailoverGroup, error) {
-	var fg v1alpha1.MysqlFailoverGroup
+func (s *apiPlannedFailoverStore) Load(ctx context.Context, nn types.NamespacedName) (*v1beta1.MysqlFailoverGroup, error) {
+	var fg v1beta1.MysqlFailoverGroup
 	if err := s.reader.Get(ctx, nn, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -71,8 +71,8 @@ func (s *apiPlannedFailoverStore) Load(ctx context.Context, nn types.NamespacedN
 
 // Write commits next (and mutate) with Status().Update conditioned on
 // base.ResourceVersion. base is not modified.
-func (s *apiPlannedFailoverStore) Write(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, next v1alpha1.PlannedFailoverStatus,
-	mutate func(*v1alpha1.MysqlFailoverGroupStatus)) (WriteOutcome, error) {
+func (s *apiPlannedFailoverStore) Write(ctx context.Context, base *v1beta1.MysqlFailoverGroup, next v1beta1.PlannedFailoverStatus,
+	mutate func(*v1beta1.MysqlFailoverGroupStatus)) (WriteOutcome, error) {
 	obj := base.DeepCopy()
 	obj.Status.PlannedFailover = next.DeepCopy()
 	if mutate != nil {
@@ -86,7 +86,7 @@ func (s *apiPlannedFailoverStore) Write(ctx context.Context, base *v1alpha1.Mysq
 	nn := client.ObjectKeyFromObject(base)
 	log.FromContext(ctx).Info("planned failover: status write ambiguous; settling",
 		"fg", nn.String(), "runId", next.RunID, "revision", next.Revision, "error", err.Error())
-	settled, serr := s.settle(ctx, nn, base.ResourceVersion, func(cur *v1alpha1.MysqlFailoverGroup) bool {
+	settled, serr := s.settle(ctx, nn, base.ResourceVersion, func(cur *v1beta1.MysqlFailoverGroup) bool {
 		return plannedWriteLanded(cur.Status.PlannedFailover, &next)
 	})
 	if settled == WriteCommitted {
@@ -103,7 +103,7 @@ func (s *apiPlannedFailoverStore) Write(ctx context.Context, base *v1alpha1.Mysq
 // revision with next's phase and outcome. A different transition another
 // pass computed from the same base reaches the same (runID, revision), so
 // the pair alone proves nothing about which write landed (K017).
-func plannedWriteLanded(cur, next *v1alpha1.PlannedFailoverStatus) bool {
+func plannedWriteLanded(cur, next *v1beta1.PlannedFailoverStatus) bool {
 	if cur == nil || next == nil || cur.RunID != next.RunID {
 		return false
 	}
@@ -121,7 +121,7 @@ func plannedWriteLanded(cur, next *v1alpha1.PlannedFailoverStatus) bool {
 
 // Settle decides an ambiguous write of (runID, revision) made against baseRV.
 func (s *apiPlannedFailoverStore) Settle(ctx context.Context, nn types.NamespacedName, baseRV, runID string, revision int64) (WriteOutcome, error) {
-	return s.settle(ctx, nn, baseRV, func(cur *v1alpha1.MysqlFailoverGroup) bool {
+	return s.settle(ctx, nn, baseRV, func(cur *v1beta1.MysqlFailoverGroup) bool {
 		pf := cur.Status.PlannedFailover
 		return pf != nil && pf.RunID == runID && pf.Revision >= revision
 	})
@@ -133,7 +133,7 @@ func (s *apiPlannedFailoverStore) Settle(ctx context.Context, nn types.Namespace
 // is moved by a conditioned metadata fence. Each attempt is detached from
 // ctx's cancellation and bounded at 10s.
 func (s *apiPlannedFailoverStore) settle(ctx context.Context, nn types.NamespacedName, baseRV string,
-	committed func(*v1alpha1.MysqlFailoverGroup) bool) (WriteOutcome, error) {
+	committed func(*v1beta1.MysqlFailoverGroup) bool) (WriteOutcome, error) {
 	detached := context.WithoutCancel(ctx)
 	var lastErr error
 	for attempt := 0; attempt < plannedStoreSettleAttempts; attempt++ {
@@ -150,7 +150,7 @@ func (s *apiPlannedFailoverStore) settle(ctx context.Context, nn types.Namespace
 }
 
 func (s *apiPlannedFailoverStore) settleOnce(ctx context.Context, nn types.NamespacedName, baseRV string,
-	committed func(*v1alpha1.MysqlFailoverGroup) bool) (WriteOutcome, error, bool) {
+	committed func(*v1beta1.MysqlFailoverGroup) bool) (WriteOutcome, error, bool) {
 	actx, cancel := context.WithTimeout(ctx, plannedStoreSettleAttemptTimeout)
 	defer cancel()
 	cur, err := s.Load(actx, nn)
@@ -170,7 +170,7 @@ func (s *apiPlannedFailoverStore) settleOnce(ctx context.Context, nn types.Names
 	if fenced.Annotations == nil {
 		fenced.Annotations = map[string]string{}
 	}
-	fenced.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation] = nextStatusFenceValue(cur.Annotations[v1alpha1.PlannedFailoverStatusFenceAnnotation], s.clk.Now())
+	fenced.Annotations[v1beta1.PlannedFailoverStatusFenceAnnotation] = nextStatusFenceValue(cur.Annotations[v1beta1.PlannedFailoverStatusFenceAnnotation], s.clk.Now())
 	patch := client.MergeFromWithOptions(cur.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	switch err := s.client.Patch(actx, fenced, patch); {
 	case err == nil && (fenced.ResourceVersion == "" || fenced.ResourceVersion == baseRV):
@@ -228,7 +228,7 @@ func classifyPlannedMetaWrite(err error) WriteOutcome {
 
 // patchAnnotations applies edit to a copy of base's annotations and, if it
 // changed anything, patches them conditioned on base.ResourceVersion.
-func (s *apiPlannedFailoverStore) patchAnnotations(ctx context.Context, base *v1alpha1.MysqlFailoverGroup,
+func (s *apiPlannedFailoverStore) patchAnnotations(ctx context.Context, base *v1beta1.MysqlFailoverGroup,
 	edit func(map[string]string) bool) (WriteOutcome, error) {
 	obj := base.DeepCopy()
 	if obj.Annotations == nil {
@@ -249,49 +249,49 @@ var errTerminalMarkerHeld = errors.New("planned failover: the terminal marker ho
 // WriteTerminalMarker records m in the planned-failover-terminal annotation.
 // It never replaces another run's ManualRecoveryRequired marker, which may
 // be that hold's only durable evidence (K166): NotCommitted.
-func (s *apiPlannedFailoverStore) WriteTerminalMarker(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, m TerminalMarker) (WriteOutcome, error) {
-	if cur, ok := ParseTerminalMarker(base.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]); ok && cur.RunID != m.RunID &&
-		cur.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+func (s *apiPlannedFailoverStore) WriteTerminalMarker(ctx context.Context, base *v1beta1.MysqlFailoverGroup, m TerminalMarker) (WriteOutcome, error) {
+	if cur, ok := ParseTerminalMarker(base.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]); ok && cur.RunID != m.RunID &&
+		cur.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 		return WriteNotCommitted, errTerminalMarkerHeld
 	}
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		if a[v1alpha1.PlannedFailoverTerminalAnnotation] == m.String() {
+		if a[v1beta1.PlannedFailoverTerminalAnnotation] == m.String() {
 			return false
 		}
-		a[v1alpha1.PlannedFailoverTerminalAnnotation] = m.String()
+		a[v1beta1.PlannedFailoverTerminalAnnotation] = m.String()
 		return true
 	})
 }
 
 // ClearTerminalMarker removes the marker only if it names runID.
-func (s *apiPlannedFailoverStore) ClearTerminalMarker(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error) {
+func (s *apiPlannedFailoverStore) ClearTerminalMarker(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string) (WriteOutcome, error) {
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		v, ok := a[v1alpha1.PlannedFailoverTerminalAnnotation]
+		v, ok := a[v1beta1.PlannedFailoverTerminalAnnotation]
 		if !ok {
 			return false
 		}
 		if !TerminalMarkerNames(v, runID) {
 			return false
 		}
-		delete(a, v1alpha1.PlannedFailoverTerminalAnnotation)
+		delete(a, v1beta1.PlannedFailoverTerminalAnnotation)
 		return true
 	})
 }
 
 // ConsumeRequest removes the planned-failover request annotation.
-func (s *apiPlannedFailoverStore) ConsumeRequest(ctx context.Context, base *v1alpha1.MysqlFailoverGroup) (WriteOutcome, error) {
+func (s *apiPlannedFailoverStore) ConsumeRequest(ctx context.Context, base *v1beta1.MysqlFailoverGroup) (WriteOutcome, error) {
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		if _, ok := a[v1alpha1.PlannedFailoverAnnotation]; !ok {
+		if _, ok := a[v1beta1.PlannedFailoverAnnotation]; !ok {
 			return false
 		}
-		delete(a, v1alpha1.PlannedFailoverAnnotation)
+		delete(a, v1beta1.PlannedFailoverAnnotation)
 		return true
 	})
 }
 
 // MarkDeadlineStart records now for (kind, runID) unless the annotation
 // already names runID, and returns the durable start.
-func (s *apiPlannedFailoverStore) MarkDeadlineStart(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, kind DeadlineKind, runID string,
+func (s *apiPlannedFailoverStore) MarkDeadlineStart(ctx context.Context, base *v1beta1.MysqlFailoverGroup, kind DeadlineKind, runID string,
 	now time.Time) (time.Time, WriteOutcome, error) {
 	key := kind.Annotation()
 	if key == "" {
@@ -312,7 +312,7 @@ func (s *apiPlannedFailoverStore) MarkDeadlineStart(ctx context.Context, base *v
 }
 
 // ClearDeadlineStart removes the deadline annotation if it names runID.
-func (s *apiPlannedFailoverStore) ClearDeadlineStart(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, kind DeadlineKind, runID string) (WriteOutcome, error) {
+func (s *apiPlannedFailoverStore) ClearDeadlineStart(ctx context.Context, base *v1beta1.MysqlFailoverGroup, kind DeadlineKind, runID string) (WriteOutcome, error) {
 	key := kind.Annotation()
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
 		if _, ok := parseDeadlineStart(a[key], runID); !ok {
@@ -327,8 +327,8 @@ func (s *apiPlannedFailoverStore) ClearDeadlineStart(ctx context.Context, base *
 // status.plannedFailoverHold naming runID, with the AutomaticFailoverHeld
 // condition set False/PlannedFailoverHoldAcknowledged, in one conditioned
 // status write. Nothing to change is a no-op success.
-func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string,
-	final *v1alpha1.PlannedFailoverStatus) (WriteOutcome, error) {
+func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string,
+	final *v1beta1.PlannedFailoverStatus) (WriteOutcome, error) {
 	obj := base.DeepCopy()
 	changed := false
 	if final != nil {
@@ -346,7 +346,7 @@ func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.
 	if definite {
 		return outcome, err
 	}
-	settled, serr := s.settle(ctx, client.ObjectKeyFromObject(base), base.ResourceVersion, func(cur *v1alpha1.MysqlFailoverGroup) bool {
+	settled, serr := s.settle(ctx, client.ObjectKeyFromObject(base), base.ResourceVersion, func(cur *v1beta1.MysqlFailoverGroup) bool {
 		if statusHoldNames(&cur.Status, runID) {
 			return false
 		}
@@ -366,13 +366,13 @@ func (s *apiPlannedFailoverStore) ClearHold(ctx context.Context, base *v1alpha1.
 }
 
 // DeleteHoldAck removes the acknowledgement annotation if it names runID.
-func (s *apiPlannedFailoverStore) DeleteHoldAck(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) (WriteOutcome, error) {
+func (s *apiPlannedFailoverStore) DeleteHoldAck(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string) (WriteOutcome, error) {
 	return s.patchAnnotations(ctx, base, func(a map[string]string) bool {
-		v, ok := a[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]
+		v, ok := a[v1beta1.AcknowledgePlannedFailoverHoldAnnotation]
 		if !ok || strings.TrimSpace(v) != runID {
 			return false
 		}
-		delete(a, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation)
+		delete(a, v1beta1.AcknowledgePlannedFailoverHoldAnnotation)
 		return true
 	})
 }

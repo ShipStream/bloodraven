@@ -7,7 +7,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupmeta"
 )
 
@@ -83,7 +83,7 @@ func TestBackupStampKeyAgreesForSlashedS3Prefix(t *testing.T) {
 					t.Fatal(err)
 				}
 				setTestArtifactLocation(mb, storage.Location)
-				setTestArtifactType(mb, v1alpha1.BackupStorageS3)
+				setTestArtifactType(mb, v1beta1.BackupStorageS3)
 				mb.Status.FailoverGroupUID = fg.UID
 				src, err := pitrDumpSourceForBackup(mb, &profile, nil)
 				if err != nil {

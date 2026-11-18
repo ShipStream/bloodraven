@@ -5,7 +5,7 @@ package envtest
 import (
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -30,7 +30,7 @@ func TestEnvtest_UnrecoverableHistoricalBackupCanBeDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := metav1.Now()
-	backup.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &now}
+	backup.Status = v1beta1.MysqlBackupStatus{Phase: v1beta1.BackupPhaseSucceeded, CompletionTime: &now}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestEnvtest_UnrecoverableHistoricalBackupCanBeDeleted(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, backup); err != nil {
 		t.Fatal(err)
 	}
-	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1alpha1.ConditionMetadataComplete)
+	condition := apiMeta.FindStatusCondition(backup.Status.Conditions, v1beta1.ConditionMetadataComplete)
 	if condition == nil || condition.Reason != "DestinationUnavailable" {
 		t.Fatalf("missing durable repair outcome: %+v", backup.Status)
 	}

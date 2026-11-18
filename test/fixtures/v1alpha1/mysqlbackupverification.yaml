@@ -1,0 +1,49 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackupVerification
+metadata:
+  annotations: {}
+  finalizers:
+    - bloodraven.shipstream.io/mysqlbackup-verification
+  labels:
+    app.kubernetes.io/managed-by: bloodraven
+    bloodraven.shipstream.io/backup-profile: rustfs
+    bloodraven.shipstream.io/failover-group: playground
+    playground.bloodraven.shipstream.io/after-backup: "true"
+  name: upgrade-e2e
+spec:
+  backupRef:
+    name: upgrade-e2e
+  failoverGroupRef:
+    name: playground
+  keepOnFailure: true
+  profileName: rustfs
+status:
+  backupRef:
+    artifactStorage:
+      bucket: bloodraven
+      endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
+      location: playground/upgrade-e2e
+      region: us-east-1
+      type: S3
+    name: upgrade-e2e
+    uid: ee6c82d0-4a22-4e1b-b446-b9674cb2b028
+  completionTime: "2026-11-16T23:44:04Z"
+  conditions:
+    - lastTransitionTime: "2026-11-16T23:44:04Z"
+      message: verification completed successfully
+      observedGeneration: 1
+      reason: Succeeded
+      status: "True"
+      type: Ready
+    - lastTransitionTime: "2026-11-16T23:44:04Z"
+      message: verification completed successfully
+      observedGeneration: 1
+      reason: Succeeded
+      status: "True"
+      type: Verified
+  durationSeconds: 12
+  jobName: mysqlverify-upgrade-e2e
+  message: verification completed successfully
+  observedGeneration: 1
+  phase: Succeeded
+  startTime: "2026-11-16T23:43:52Z"

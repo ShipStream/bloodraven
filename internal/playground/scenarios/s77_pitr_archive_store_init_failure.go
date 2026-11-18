@@ -13,7 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/pitrarchive"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
@@ -157,8 +157,8 @@ func s77WaitRolledDegraded() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, pitrArchiveSwitchWait)
 			defer cancel()
-			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR rollout done with storage down", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation)
+			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR rollout done with storage down", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+				ready := conditionTrueForGeneration(mfg.Status.Conditions, v1beta1.ConditionReady, mfg.Generation)
 				idle, updating := orderedUpdateIdleAtGeneration(mfg)
 				rolled, rollout := s77RolloutLive(waitCtx, env, mfg)
 				pods, podsMsg := s77PodsServingLive(waitCtx, env, mfg)
@@ -207,14 +207,14 @@ func s77AssertInitFailureReported() runner.Step {
 
 			waitCtx, cancel := context.WithTimeout(ctx, s77ConditionWait)
 			defer cancel()
-			mfg, err = env.Wait.UntilCR(waitCtx, env.Namespace, "PITRArchiveReady=False/ArchiveStoreInitFailed naming every site", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			mfg, err = env.Wait.UntilCR(waitCtx, env.Namespace, "PITRArchiveReady=False/ArchiveStoreInitFailed naming every site", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 				ok, msg := s77InitFailedCondition(mfg, candidates)
 				return ok, msg, nil
 			})
 			if err != nil {
 				return err
 			}
-			c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveReady)
+			c := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveReady)
 			env.Capture.Note(fmt.Sprintf("PITRArchiveReady=%s/%s %q; status.pitr.message=%q", c.Status, c.Reason, c.Message, mfg.Status.PITR.Message))
 
 			enabledAt, err := time.Parse(time.RFC3339Nano, ctxFetch(env, "pitrEnabledAt"))
@@ -223,7 +223,7 @@ func s77AssertInitFailureReported() runner.Step {
 			}
 			evCtx, evCancel := context.WithTimeout(ctx, time.Minute)
 			defer evCancel()
-			ev, err := waitForMFGEvent(evCtx, env, enabledAt, v1alpha1.EventPITRArchiveNotReady, "("+v1alpha1.ReasonArchiveStoreInitFailed+")")
+			ev, err := waitForMFGEvent(evCtx, env, enabledAt, v1beta1.EventPITRArchiveNotReady, "("+v1beta1.ReasonArchiveStoreInitFailed+")")
 			if err != nil {
 				return err
 			}
@@ -271,7 +271,7 @@ func s77AssertServingWhileDegraded() runner.Step {
 				if mfg.Status.ActiveSite != active || s77FailoverRecord(mfg) != lastFailover {
 					return fmt.Errorf("the group failed over while degraded: active %s -> %s, lastFailover %s -> %s", active, mfg.Status.ActiveSite, lastFailover, s77FailoverRecord(mfg))
 				}
-				if !conditionTrueForGeneration(mfg.Status.Conditions, v1alpha1.ConditionReady, mfg.Generation) {
+				if !conditionTrueForGeneration(mfg.Status.Conditions, v1beta1.ConditionReady, mfg.Generation) {
 					return fmt.Errorf("group not Ready while degraded: %s", conditionsSummary(mfg.Status.Conditions))
 				}
 				if ok, msg := s77InitFailedCondition(mfg, candidates); !ok {
@@ -343,7 +343,7 @@ func s77AssertRecoveredInPlace() runner.Step {
 			if err != nil {
 				return err
 			}
-			if binding.Encryption.Mode != v1alpha1.EncryptionModePassphrase || binding.Encryption.KeySecretName == "" {
+			if binding.Encryption.Mode != v1beta1.EncryptionModePassphrase || binding.Encryption.KeySecretName == "" {
 				return fmt.Errorf("binding %s is not an encrypted identity: %s", binding.ID, s77BindingSummary(mfg))
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, s77ConditionWait)
@@ -355,12 +355,12 @@ func s77AssertRecoveredInPlace() runner.Step {
 				}
 				env.Capture.Note(fmt.Sprintf("%s archiver recovered: %s archive=%+v", site, archiverSummary(st), *st.Archive))
 			}
-			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITRArchiveReady=True/Archiving", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-				c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveReady)
+			if _, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITRArchiveReady=True/Archiving", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
+				c := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveReady)
 				if c == nil {
 					return false, "no PITRArchiveReady condition", nil
 				}
-				return c.Status == metav1.ConditionTrue && c.Reason == v1alpha1.ReasonArchiving, fmt.Sprintf("%s/%s %q", c.Status, c.Reason, c.Message), nil
+				return c.Status == metav1.ConditionTrue && c.Reason == v1beta1.ReasonArchiving, fmt.Sprintf("%s/%s %q", c.Status, c.Reason, c.Message), nil
 			}); err != nil {
 				return err
 			}
@@ -368,7 +368,7 @@ func s77AssertRecoveredInPlace() runner.Step {
 			if err != nil {
 				return fmt.Errorf("parse storageBackAt: %w", err)
 			}
-			ev, err := waitForMFGEvent(waitCtx, env, backAt, v1alpha1.EventPITRArchiveRecovered, "")
+			ev, err := waitForMFGEvent(waitCtx, env, backAt, v1beta1.EventPITRArchiveRecovered, "")
 			if err != nil {
 				return err
 			}
@@ -458,7 +458,7 @@ func s77Cleanup(ctx context.Context, env *runner.Env) error {
 
 // s77Sites lists every site in spec order. Every site's sidecar runs the
 // archiver, ReadOnly reader sites included.
-func s77Sites(mfg *v1alpha1.MysqlFailoverGroup) []string {
+func s77Sites(mfg *v1beta1.MysqlFailoverGroup) []string {
 	out := make([]string, 0, len(mfg.Spec.Sites))
 	for _, s := range mfg.Spec.Sites {
 		out = append(out, s.Name)
@@ -487,7 +487,7 @@ func s77AssertWritable(ctx context.Context, env *runner.Env, site string) error 
 
 // s77RolloutLive is pitrRolloutRestored for the run's
 // profile, with the site Deployments read from the cluster.
-func s77RolloutLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (bool, string) {
+func s77RolloutLive(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup) (bool, string) {
 	deployments, err := pitrSiteDeploymentsLive(ctx, env, mfg)
 	if err != nil {
 		return false, err.Error()
@@ -533,7 +533,7 @@ func s77AssertRustFSDown(ctx context.Context, env *runner.Env) error {
 
 // s77PodsServingLive reports whether every site's MySQL pod is running,
 // Ready, not being deleted, and has every container ready.
-func s77PodsServingLive(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (bool, string) {
+func s77PodsServingLive(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup) (bool, string) {
 	var pending []string
 	for _, site := range mfg.Spec.Sites {
 		pod, err := env.Kube.GetSiteMysqlPod(ctx, env.Namespace, env.FG, site.Name)
@@ -580,7 +580,7 @@ type s77Pod struct {
 	Restarts map[string]int32 `json:"restarts"`
 }
 
-func s77TakePods(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (map[string]s77Pod, error) {
+func s77TakePods(ctx context.Context, env *runner.Env, mfg *v1beta1.MysqlFailoverGroup) (map[string]s77Pod, error) {
 	out := map[string]s77Pod{}
 	for _, site := range mfg.Spec.Sites {
 		pod, err := env.Kube.GetSiteMysqlPod(ctx, env.Namespace, env.FG, site.Name)
@@ -666,7 +666,7 @@ func s77AssertPodsSinceDegraded(ctx context.Context, env *runner.Env) error {
 	return nil
 }
 
-func s77FailoverRecord(mfg *v1alpha1.MysqlFailoverGroup) string {
+func s77FailoverRecord(mfg *v1beta1.MysqlFailoverGroup) string {
 	if mfg.Status.LastFailover == nil {
 		return "<none>"
 	}
@@ -717,7 +717,7 @@ func s77CheckStoreInitFailure(st *pgsidecar.ArchiverStatusResponse, wantPrefix s
 	if !strings.HasPrefix(st.LastError, s77StorageInitPrefix) {
 		problems = append(problems, fmt.Sprintf("lastError=%q, want %q...", st.LastError, s77StorageInitPrefix))
 	}
-	if st.StorageType != string(v1alpha1.BackupStorageS3) {
+	if st.StorageType != string(v1beta1.BackupStorageS3) {
 		problems = append(problems, "storageType="+st.StorageType)
 	}
 	if strings.Trim(st.ManifestPrefix, "/") != strings.Trim(wantPrefix, "/") {
@@ -774,13 +774,13 @@ func s77WaitRetried(ctx context.Context, env *runner.Env, site, wantPrefix strin
 // s77InitFailedCondition reports PITRArchiveReady=False with reason
 // ArchiveStoreInitFailed, a message naming every site's init error, and
 // status.pitr.message carrying them too.
-func s77InitFailedCondition(mfg *v1alpha1.MysqlFailoverGroup, sites []string) (bool, string) {
-	c := findCondition(mfg.Status.Conditions, v1alpha1.ConditionPITRArchiveReady)
+func s77InitFailedCondition(mfg *v1beta1.MysqlFailoverGroup, sites []string) (bool, string) {
+	c := findCondition(mfg.Status.Conditions, v1beta1.ConditionPITRArchiveReady)
 	if c == nil {
 		return false, "no PITRArchiveReady condition"
 	}
 	summary := fmt.Sprintf("%s/%s %q", c.Status, c.Reason, c.Message)
-	if c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonArchiveStoreInitFailed {
+	if c.Status != metav1.ConditionFalse || c.Reason != v1beta1.ReasonArchiveStoreInitFailed {
 		return false, summary
 	}
 	pitrMsg := ""
@@ -827,7 +827,7 @@ func s77SidecarServing(ctx context.Context, env *runner.Env, site string) error 
 // s77WaitArchiverVerified waits until site's archiver reports a ready
 // store, no error, and the binding's archive Verified under its key
 // snapshot.
-func s77WaitArchiverVerified(ctx context.Context, env *runner.Env, site, wantPrefix string, b *v1alpha1.PITRArchiveBinding) (*pgsidecar.ArchiverStatusResponse, error) {
+func s77WaitArchiverVerified(ctx context.Context, env *runner.Env, site, wantPrefix string, b *v1beta1.PITRArchiveBinding) (*pgsidecar.ArchiverStatusResponse, error) {
 	var last string
 	for {
 		st, err := s77ArchiverStatus(ctx, env, site)
@@ -875,7 +875,7 @@ func s77CheckEncryptedBinlog(data, passphrase []byte) error {
 	return nil
 }
 
-func s77BindingSummary(mfg *v1alpha1.MysqlFailoverGroup) string {
+func s77BindingSummary(mfg *v1beta1.MysqlFailoverGroup) string {
 	parts := make([]string, 0, len(mfg.Status.PITRArchiveBindings))
 	for _, b := range mfg.Status.PITRArchiveBindings {
 		parts = append(parts, fmt.Sprintf("{%s %s %s/%s key=%s archive=%q msg=%q}", b.ID, b.Destination, b.State, b.Reason, b.Encryption.KeySecretName, b.ArchiveID, b.Message))

@@ -12,7 +12,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
@@ -475,9 +475,9 @@ func TestPlannedTrial_ExercisesTheActorOps(t *testing.T) {
 	if replacedPods == 0 || regressed == 0 {
 		t.Errorf("pod replacements %d, regressed %d", replacedPods, regressed)
 	}
-	for _, o := range []v1alpha1.PlannedFailoverOutcome{
-		v1alpha1.PlannedFailoverOutcomeSucceeded, v1alpha1.PlannedFailoverOutcomeNotStarted,
-		v1alpha1.PlannedFailoverOutcomeRolledBack,
+	for _, o := range []v1beta1.PlannedFailoverOutcome{
+		v1beta1.PlannedFailoverOutcomeSucceeded, v1beta1.PlannedFailoverOutcomeNotStarted,
+		v1beta1.PlannedFailoverOutcomeRolledBack,
 	} {
 		if outcomes[string(o)] == 0 {
 			t.Errorf("no run ended %s (outcomes %v)", o, outcomes)
@@ -592,13 +592,13 @@ func TestPlannedSweep_ReachesEveryOutcome(t *testing.T) {
 	if counts["lateCommitAfterUnknown"] == 0 {
 		t.Errorf("no late commit landed after a settlement ended Unknown (counts %v)", counts)
 	}
-	outcomes := []v1alpha1.PlannedFailoverOutcome{
-		v1alpha1.PlannedFailoverOutcomeSucceeded, v1alpha1.PlannedFailoverOutcomeNotStarted,
-		v1alpha1.PlannedFailoverOutcomeRolledBack, v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-		v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
+	outcomes := []v1beta1.PlannedFailoverOutcome{
+		v1beta1.PlannedFailoverOutcomeSucceeded, v1beta1.PlannedFailoverOutcomeNotStarted,
+		v1beta1.PlannedFailoverOutcomeRolledBack, v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+		v1beta1.PlannedFailoverOutcomePromotedUnconfirmed, v1beta1.PlannedFailoverOutcomeManualRecoveryRequired,
 	}
-	missing := func() []v1alpha1.PlannedFailoverOutcome {
-		var out []v1alpha1.PlannedFailoverOutcome
+	missing := func() []v1beta1.PlannedFailoverOutcome {
+		var out []v1beta1.PlannedFailoverOutcome
 		for _, o := range outcomes {
 			if counts["outcome:"+string(o)] == 0 {
 				out = append(out, o)
@@ -681,7 +681,7 @@ func TestRetiringPollAfterReplacement(t *testing.T) {
 // run of the trial) finishes Succeeded, never rolling back (K028).
 func TestRestartPromotedTargetReachesWasWritable(t *testing.T) {
 	_, _, counts := plannedSweep()
-	if n := counts["restartedRun"+string(v1alpha1.PlannedFailoverOutcomeRolledBack)]; n > 0 {
+	if n := counts["restartedRun"+string(v1beta1.PlannedFailoverOutcomeRolledBack)]; n > 0 {
 		t.Fatalf("%d runs whose target restarted holding its own writes rolled back", n)
 	}
 	if counts["restartedRunRewrittenSucceeded"] == 0 {
@@ -726,7 +726,7 @@ func TestPlannedTrial_LongOutagesReachTheDeadlines(t *testing.T) {
 	if counts["stallMarker2m"] == 0 {
 		t.Errorf("no run ended by the 2m status-stall marker (counts %v)", counts)
 	}
-	if counts["reason:"+string(v1alpha1.PlannedFailoverReasonManagerUnavailable)] == 0 {
+	if counts["reason:"+string(v1beta1.PlannedFailoverReasonManagerUnavailable)] == 0 {
 		t.Errorf("no run ended ManagerUnavailable (counts %v)", counts)
 	}
 }

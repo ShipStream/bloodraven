@@ -5,25 +5,25 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 	truePtr := true
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Backup: &v1alpha1.BackupSpec{
-				Profiles: []v1alpha1.BackupProfile{
+	fg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Backup: &v1beta1.BackupSpec{
+				Profiles: []v1beta1.BackupProfile{
 					{
 						Name: "nightly",
-						Verification: &v1alpha1.VerificationSpec{
+						Verification: &v1beta1.VerificationSpec{
 							Enabled:                 true,
 							KeepOnFailure:           &truePtr,
 							TTLSecondsAfterFinished: new(int32(600)),
-							PointInTime: &v1alpha1.PointInTimeVerificationSpec{
-								Mode: v1alpha1.PointInTimeModeLatest,
+							PointInTime: &v1beta1.PointInTimeVerificationSpec{
+								Mode: v1beta1.PointInTimeModeLatest,
 							},
-							SanityCheck: &v1alpha1.SanityCheckSpec{
+							SanityCheck: &v1beta1.SanityCheckSpec{
 								Query: "SELECT 1",
 							},
 						},
@@ -40,7 +40,7 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 	if cr.Spec.FailoverGroupRef.Name != "orders" {
 		t.Errorf("FailoverGroupRef = %q, want orders", cr.Spec.FailoverGroupRef.Name)
 	}
-	if got := cr.Annotations[v1alpha1.TriggeredByAnnotation]; got != "manual" {
+	if got := cr.Annotations[v1beta1.TriggeredByAnnotation]; got != "manual" {
 		t.Errorf("triggered-by annotation = %q, want manual", got)
 	}
 	if cr.Spec.KeepOnFailure == nil || !*cr.Spec.KeepOnFailure {
@@ -49,7 +49,7 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 	if cr.Spec.TTLSecondsAfterFinished == nil || *cr.Spec.TTLSecondsAfterFinished != 600 {
 		t.Errorf("TTLSecondsAfterFinished = %v, want 600", cr.Spec.TTLSecondsAfterFinished)
 	}
-	if cr.Spec.PointInTime == nil || cr.Spec.PointInTime.Mode != v1alpha1.PointInTimeModeLatest {
+	if cr.Spec.PointInTime == nil || cr.Spec.PointInTime.Mode != v1beta1.PointInTimeModeLatest {
 		t.Errorf("PointInTime not deep-copied from VerificationSpec; got %+v", cr.Spec.PointInTime)
 	}
 	if cr.Spec.SanityCheck == nil || cr.Spec.SanityCheck.Query != "SELECT 1" {
@@ -61,10 +61,10 @@ func TestBuildVerificationCR_InheritsProfileDefaults(t *testing.T) {
 }
 
 func TestBuildVerificationCR_PinsBackupRef(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Backup: &v1alpha1.BackupSpec{
-				Profiles: []v1alpha1.BackupProfile{{Name: "nightly"}},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Backup: &v1beta1.BackupSpec{
+				Profiles: []v1beta1.BackupProfile{{Name: "nightly"}},
 			},
 		},
 	}
@@ -75,10 +75,10 @@ func TestBuildVerificationCR_PinsBackupRef(t *testing.T) {
 }
 
 func TestBuildVerificationCR_HandlesMissingVerificationSpec(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{
-		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Backup: &v1alpha1.BackupSpec{
-				Profiles: []v1alpha1.BackupProfile{{Name: "nightly"}},
+	fg := &v1beta1.MysqlFailoverGroup{
+		Spec: v1beta1.MysqlFailoverGroupSpec{
+			Backup: &v1beta1.BackupSpec{
+				Profiles: []v1beta1.BackupProfile{{Name: "nightly"}},
 			},
 		},
 	}
@@ -105,8 +105,8 @@ func TestBuildVerificationCR_KeepsTTLPresence(t *testing.T) {
 		ttl  *int32
 	}{{name: "omitted"}, {name: "zero", ttl: new(int32(0))}} {
 		t.Run(tc.name, func(t *testing.T) {
-			fg := &v1alpha1.MysqlFailoverGroup{Spec: v1alpha1.MysqlFailoverGroupSpec{Backup: &v1alpha1.BackupSpec{
-				Profiles: []v1alpha1.BackupProfile{{Name: "nightly", Verification: &v1alpha1.VerificationSpec{Enabled: true, TTLSecondsAfterFinished: tc.ttl}}},
+			fg := &v1beta1.MysqlFailoverGroup{Spec: v1beta1.MysqlFailoverGroupSpec{Backup: &v1beta1.BackupSpec{
+				Profiles: []v1beta1.BackupProfile{{Name: "nightly", Verification: &v1beta1.VerificationSpec{Enabled: true, TTLSecondsAfterFinished: tc.ttl}}},
 			}}}
 			cr := buildVerificationCR(fg, "default", "orders", "nightly", "", "manual")
 			got := cr.Spec.TTLSecondsAfterFinished

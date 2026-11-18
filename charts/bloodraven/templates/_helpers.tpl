@@ -115,3 +115,14 @@ silently, and a lossy int64 coercion would turn junk into 0 (unlimited).
 {{- fail $msg -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+bloodraven.userMountsTmp is non-empty when extraVolumeMounts already mounts
+something at /tmp. The chart then leaves /tmp to that volume instead of
+adding its own (two mounts at one path make the pod invalid).
+*/}}
+{{- define "bloodraven.userMountsTmp" -}}
+{{- range (.Values.extraVolumeMounts | default list) -}}
+{{- if eq (trimSuffix "/" (.mountPath | default "")) "/tmp" -}}true{{- end -}}
+{{- end -}}
+{{- end -}}

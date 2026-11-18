@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,14 +25,14 @@ import (
 // render-version bump changes the hash of every group without any spec edit.
 const oldReleaseHash = "0ldre1ease0hash0"
 
-func rolloutReconcile(t *testing.T, r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup) {
+func rolloutReconcile(t *testing.T, r *MysqlFailoverGroupReconciler, fg *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(fg)}); err != nil {
 		t.Fatalf("Reconcile(%s): %v", fg.Name, err)
 	}
 }
 
-func siteDeployment(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) *appsv1.Deployment {
+func siteDeployment(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) *appsv1.Deployment {
 	t.Helper()
 	var d appsv1.Deployment
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: resourceName(fg.Name, site)}, &d); err != nil {
@@ -41,7 +41,7 @@ func siteDeployment(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGro
 	return &d
 }
 
-func siteConfigMapData(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, site string) map[string]string {
+func siteConfigMapData(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, site string) map[string]string {
 	t.Helper()
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: fg.Namespace, Name: siteConfigMapName(fg.Name, site)}, &cm); err != nil {
@@ -53,14 +53,14 @@ func siteConfigMapData(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailover
 // ageDeployments makes fg's site Deployments look as an earlier operator
 // release left them: no renderer annotation, their rollout complete and,
 // with oldHash set, another spec hash.
-func ageDeployments(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup, oldHash string) {
+func ageDeployments(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup, oldHash string) {
 	t.Helper()
 	for _, site := range fg.Spec.Sites {
 		d := siteDeployment(t, c, fg, site.Name)
-		delete(d.Annotations, v1alpha1.RenderedByAnnotation)
+		delete(d.Annotations, v1beta1.RenderedByAnnotation)
 		if oldHash != "" {
-			d.Annotations[v1alpha1.SpecHashAnnotation] = oldHash
-			d.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation] = oldHash
+			d.Annotations[v1beta1.SpecHashAnnotation] = oldHash
+			d.Spec.Template.Annotations[v1beta1.SpecHashAnnotation] = oldHash
 		}
 		if err := c.Update(context.Background(), d); err != nil {
 			t.Fatalf("age deployment %s: %v", d.Name, err)
@@ -72,9 +72,9 @@ func ageDeployments(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGro
 	}
 }
 
-func freshGroup(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlFailoverGroup {
+func freshGroup(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup) *v1beta1.MysqlFailoverGroup {
 	t.Helper()
-	var out v1alpha1.MysqlFailoverGroup
+	var out v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(fg), &out); err != nil {
 		t.Fatalf("get group %s: %v", fg.Name, err)
 	}
@@ -82,11 +82,11 @@ func freshGroup(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) 
 }
 
 // admitGroup writes the admission the pacer would.
-func admitGroup(t *testing.T, c client.Client, fg *v1alpha1.MysqlFailoverGroup) {
+func admitGroup(t *testing.T, c client.Client, fg *v1beta1.MysqlFailoverGroup) {
 	t.Helper()
 	fresh := freshGroup(t, c, fg)
-	fresh.Status.Rollout = &v1alpha1.RolloutStatus{
-		Renderer: rendererIdentity(), Phase: v1alpha1.RolloutPhaseAdmitted, Reason: rolloutReasonAdmitted,
+	fresh.Status.Rollout = &v1beta1.RolloutStatus{
+		Renderer: rendererIdentity(), Phase: v1beta1.RolloutPhaseAdmitted, Reason: rolloutReasonAdmitted,
 		AdmittedTime: rolloutTime(time.Now()),
 	}
 	if err := c.Status().Update(context.Background(), fresh); err != nil {
@@ -100,7 +100,7 @@ func rolloutRunner(c client.Client) *TopologyManagerRunner {
 	return runner
 }
 
-func driftView(t *testing.T, runner *TopologyManagerRunner, c client.Client, fg *v1alpha1.MysqlFailoverGroup) (drift, held []string) {
+func driftView(t *testing.T, runner *TopologyManagerRunner, c client.Client, fg *v1beta1.MysqlFailoverGroup) (drift, held []string) {
 	t.Helper()
 	drift, _, held, ok := runner.specDriftView(context.Background(), c, freshGroup(t, c, fg))
 	if !ok {
@@ -148,7 +148,7 @@ func TestRollout_UnadmittedGroupKeepsItsPods(t *testing.T) {
 
 	// An unrelated spec edit: it changes my.cnf and the hash.
 	edited := freshGroup(t, c, fg)
-	edited.Spec.MysqlConf = map[string]v1alpha1.MysqlConfValue{"max_connections": "999"}
+	edited.Spec.MysqlConf = map[string]v1beta1.MysqlConfValue{"max_connections": "999"}
 	if err := c.Update(context.Background(), edited); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestRollout_UnadmittedGroupKeepsItsPods(t *testing.T) {
 		t.Fatalf("applySiteDeployment on the admitted group: %v", err)
 	}
 	rolled := siteDeployment(t, c, fg, "dc2")
-	if rolled.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() || rolled.Annotations[v1alpha1.SpecHashAnnotation] == oldReleaseHash {
+	if rolled.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() || rolled.Annotations[v1beta1.SpecHashAnnotation] == oldReleaseHash {
 		t.Fatalf("dc2 annotations = %v, want this renderer and a new hash", rolled.Annotations)
 	}
 	if conf := siteConfigMapData(t, c, fg, "dc2")["bloodraven.cnf"]; !containsLine(conf, "max-connections=999") {
@@ -187,7 +187,7 @@ func TestRollout_UnadmittedGroupKeepsItsPods(t *testing.T) {
 		t.Fatal("dc1's ConfigMap changed before its pod was rolled")
 	}
 	rec := freshGroup(t, c, fg).Status.Rollout
-	if !rec.Started() || rec.Phase != v1alpha1.RolloutPhaseRolling {
+	if !rec.Started() || rec.Phase != v1beta1.RolloutPhaseRolling {
 		t.Fatalf("rollout record after the first write = %+v, want the start latched", rec)
 	}
 	if drift, held := driftView(t, runner, c, fg); !slices.Equal(drift, []string{"dc1"}) || len(held) != 0 {
@@ -219,7 +219,7 @@ func splitLines(s string) []string {
 // A release that changes nothing a group renders only restamps the group's
 // workloads: one annotation, no template write, no admission.
 func TestRollout_RestampsWhenNothingChanges(t *testing.T) {
-	for _, strategy := range []v1alpha1.UpdateStrategyType{v1alpha1.UpdateStrategyOrderedUpdate, v1alpha1.UpdateStrategyRecreate} {
+	for _, strategy := range []v1beta1.UpdateStrategyType{v1beta1.UpdateStrategyOrderedUpdate, v1beta1.UpdateStrategyRecreate} {
 		t.Run(string(strategy), func(t *testing.T) {
 			fg := newTestFG()
 			fg.Spec.UpdateStrategy.Type = strategy
@@ -232,7 +232,7 @@ func TestRollout_RestampsWhenNothingChanges(t *testing.T) {
 			rolloutReconcile(t, r, fg)
 			for _, site := range fg.Spec.Sites {
 				d := siteDeployment(t, c, fg, site.Name)
-				if d.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() {
+				if d.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() {
 					t.Fatalf("%s was not restamped: %v", site.Name, d.Annotations)
 				}
 			}
@@ -257,7 +257,7 @@ func TestRollout_RestampsWhenNothingChanges(t *testing.T) {
 // writes every site in one pass, but only once the group holds the slot.
 func TestRollout_RecreateGroupWaitsForAdmission(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	r, c := newReconciler(fg)
 	rolloutReconcile(t, r, fg)
 	ageDeployments(t, c, fg, oldReleaseHash)
@@ -267,7 +267,7 @@ func TestRollout_RecreateGroupWaitsForAdmission(t *testing.T) {
 	rolloutReconcile(t, r, fg)
 	for _, site := range fg.Spec.Sites {
 		d := siteDeployment(t, c, fg, site.Name)
-		if d.Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash || d.Annotations[v1alpha1.RenderedByAnnotation] != "" {
+		if d.Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash || d.Annotations[v1beta1.RenderedByAnnotation] != "" {
 			t.Fatalf("%s was written before the group was admitted: %v", site.Name, d.Annotations)
 		}
 	}
@@ -283,7 +283,7 @@ func TestRollout_RecreateGroupWaitsForAdmission(t *testing.T) {
 	rolloutReconcile(t, r, fg)
 	for _, site := range fg.Spec.Sites {
 		d := siteDeployment(t, c, fg, site.Name)
-		if d.Annotations[v1alpha1.SpecHashAnnotation] == oldReleaseHash || d.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() {
+		if d.Annotations[v1beta1.SpecHashAnnotation] == oldReleaseHash || d.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() {
 			t.Fatalf("%s was not rolled after admission: %v", site.Name, d.Annotations)
 		}
 	}
@@ -297,7 +297,7 @@ func TestRollout_RecreateGroupWaitsForAdmission(t *testing.T) {
 // every such group at once. The dry run finds it and the group waits.
 func TestRollout_RecreateTemplateOnlyChangeIsPaced(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	r, c := newReconciler(fg)
 	rolloutReconcile(t, r, fg)
 	ageDeployments(t, c, fg, "")
@@ -311,10 +311,10 @@ func TestRollout_RecreateTemplateOnlyChangeIsPaced(t *testing.T) {
 	r.RolloutPacing = true
 	rolloutReconcile(t, r, fg)
 	got := siteDeployment(t, c, fg, "dc1")
-	if !equality.Semantic.DeepEqual(got.Spec.Template, d.Spec.Template) || got.Annotations[v1alpha1.RenderedByAnnotation] != "" {
+	if !equality.Semantic.DeepEqual(got.Spec.Template, d.Spec.Template) || got.Annotations[v1beta1.RenderedByAnnotation] != "" {
 		t.Fatal("dc1's template was rewritten without admission")
 	}
-	if other := siteDeployment(t, c, fg, "dc2"); other.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() {
+	if other := siteDeployment(t, c, fg, "dc2"); other.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() {
 		t.Fatal("dc2, which does not change, was not restamped")
 	}
 	st, err := r.RolloutGroupState(context.Background(), c, freshGroup(t, c, fg))
@@ -325,7 +325,7 @@ func TestRollout_RecreateTemplateOnlyChangeIsPaced(t *testing.T) {
 	admitGroup(t, c, fg)
 	rolloutReconcile(t, r, fg)
 	got = siteDeployment(t, c, fg, "dc1")
-	if got.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() {
+	if got.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() {
 		t.Fatal("dc1 was not rolled after admission")
 	}
 	for _, e := range got.Spec.Template.Spec.Containers[0].Env {
@@ -353,15 +353,15 @@ func TestRollout_SidecarDefaultAndRenderVersionChangeTogether(t *testing.T) {
 	r, c := newReconciler(unpinned, pinned)
 	rolloutReconcile(t, r, unpinned)
 	rolloutReconcile(t, r, pinned)
-	for _, fg := range []*v1alpha1.MysqlFailoverGroup{unpinned, pinned} {
+	for _, fg := range []*v1beta1.MysqlFailoverGroup{unpinned, pinned} {
 		ageDeployments(t, c, fg, "")
 		// Stamped by the old release.
 		for _, site := range fg.Spec.Sites {
 			d := siteDeployment(t, c, fg, site.Name)
-			d.Annotations[v1alpha1.RenderedByAnnotation] = oldRenderer
+			d.Annotations[v1beta1.RenderedByAnnotation] = oldRenderer
 			if fg == pinned {
 				// The pin keeps the sidecar image; the render version moved.
-				d.Annotations[v1alpha1.SpecHashAnnotation] = oldReleaseHash
+				d.Annotations[v1beta1.SpecHashAnnotation] = oldReleaseHash
 			}
 			if err := c.Update(context.Background(), d); err != nil {
 				t.Fatal(err)
@@ -376,13 +376,13 @@ func TestRollout_SidecarDefaultAndRenderVersionChangeTogether(t *testing.T) {
 	}
 	r.RolloutPacing = true
 	runner := rolloutRunner(c)
-	for _, fg := range []*v1alpha1.MysqlFailoverGroup{unpinned, pinned} {
+	for _, fg := range []*v1beta1.MysqlFailoverGroup{unpinned, pinned} {
 		rolloutReconcile(t, r, fg)
 		if drift, held := driftView(t, runner, c, fg); len(drift) != 0 || len(held) != 2 {
 			t.Fatalf("%s: drift = %v, held = %v; want both sites held", fg.Name, drift, held)
 		}
 		for _, site := range fg.Spec.Sites {
-			if d := siteDeployment(t, c, fg, site.Name); d.Annotations[v1alpha1.RenderedByAnnotation] != oldRenderer {
+			if d := siteDeployment(t, c, fg, site.Name); d.Annotations[v1beta1.RenderedByAnnotation] != oldRenderer {
 				t.Fatalf("%s/%s was written without admission", fg.Name, site.Name)
 			}
 		}
@@ -401,10 +401,10 @@ func TestRollout_NewSiteIsCreatedWhileGroupWaits(t *testing.T) {
 	}
 	r.RolloutPacing = true
 	rolloutReconcile(t, r, fg)
-	if d := siteDeployment(t, c, fg, "dc2"); d.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() {
+	if d := siteDeployment(t, c, fg, "dc2"); d.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() {
 		t.Fatalf("dc2 annotations = %v", d.Annotations)
 	}
-	if d := siteDeployment(t, c, fg, "dc1"); d.Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash {
+	if d := siteDeployment(t, c, fg, "dc1"); d.Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash {
 		t.Fatal("dc1 was rolled with the new site")
 	}
 }
@@ -412,13 +412,13 @@ func TestRollout_NewSiteIsCreatedWhileGroupWaits(t *testing.T) {
 // With pacing off the operator rolls as releases before v1.8.0 did.
 func TestRollout_PacingOffRollsAtOnce(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	r, c := newReconciler(fg)
 	rolloutReconcile(t, r, fg)
 	ageDeployments(t, c, fg, oldReleaseHash)
 	rolloutReconcile(t, r, fg)
 	for _, site := range fg.Spec.Sites {
-		if d := siteDeployment(t, c, fg, site.Name); d.Annotations[v1alpha1.SpecHashAnnotation] == oldReleaseHash {
+		if d := siteDeployment(t, c, fg, site.Name); d.Annotations[v1beta1.SpecHashAnnotation] == oldReleaseHash {
 			t.Fatalf("%s was not rolled with pacing off", site.Name)
 		}
 	}
@@ -450,7 +450,7 @@ func TestRolloutHoldsSite(t *testing.T) {
 	if rolloutHoldsSite(true, fg, "dc1", mine) {
 		t.Fatal("a site this renderer wrote is held: its change comes from the group")
 	}
-	fg.Status.Rollout = &v1alpha1.RolloutStatus{Renderer: rendererIdentity(), AdmittedTime: rolloutTime(time.Now())}
+	fg.Status.Rollout = &v1beta1.RolloutStatus{Renderer: rendererIdentity(), AdmittedTime: rolloutTime(time.Now())}
 	if rolloutHoldsSite(true, fg, "dc1", other) {
 		t.Fatal("an admitted group's site is held")
 	}
@@ -467,9 +467,9 @@ func TestRolloutHoldsSite(t *testing.T) {
 	// A clone recipient's pod is rolled without admission.
 	enabled := true
 	fg.Status.Rollout = nil
-	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: enabled}
-	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{
-		{Name: "dc2", UnsealReason: v1alpha1.UnsealReasonClone},
+	fg.Spec.EncryptionAtRest = &v1beta1.EncryptionAtRestSpec{Enabled: enabled}
+	fg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{Sites: []v1beta1.SiteEncryptionStatus{
+		{Name: "dc2", UnsealReason: v1beta1.UnsealReasonClone},
 	}}
 	if rolloutHoldsSite(true, fg, "dc2", other) {
 		t.Fatal("a clone recipient that must restart with a writable keyring is held")
@@ -505,18 +505,18 @@ func TestRendererIdentity(t *testing.T) {
 // topology manager.
 type stubUnstable map[string]string
 
-func (s stubUnstable) reason(fg *v1alpha1.MysqlFailoverGroup) string { return s[fg.Name] }
+func (s stubUnstable) reason(fg *v1beta1.MysqlFailoverGroup) string { return s[fg.Name] }
 
 // The pacer against the API: it admits one group, the reconciler rolls it,
 // and the roll completes once the workloads report it.
 func TestRolloutPacer_AdmitsRollsAndCompletes(t *testing.T) {
 	lion := newTestFG()
-	lion.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	lion.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	tiger := newTestFG()
 	tiger.Name, tiger.UID = "tiger", "uid-tiger"
-	tiger.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	tiger.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	r, c := newReconciler(lion, tiger)
-	for _, fg := range []*v1alpha1.MysqlFailoverGroup{lion, tiger} {
+	for _, fg := range []*v1beta1.MysqlFailoverGroup{lion, tiger} {
 		rolloutReconcile(t, r, fg)
 		ageDeployments(t, c, fg, oldReleaseHash)
 	}
@@ -532,7 +532,7 @@ func TestRolloutPacer_AdmitsRollsAndCompletes(t *testing.T) {
 			t.Fatalf("Tick: %v", err)
 		}
 	}
-	phase := func(fg *v1alpha1.MysqlFailoverGroup) v1alpha1.RolloutPhase {
+	phase := func(fg *v1beta1.MysqlFailoverGroup) v1beta1.RolloutPhase {
 		if rec := freshGroup(t, c, fg).Status.Rollout; rec != nil {
 			return rec.Phase
 		}
@@ -540,15 +540,15 @@ func TestRolloutPacer_AdmitsRollsAndCompletes(t *testing.T) {
 	}
 
 	tick()
-	if phase(lion) != v1alpha1.RolloutPhaseAdmitted || phase(tiger) != v1alpha1.RolloutPhasePending {
+	if phase(lion) != v1beta1.RolloutPhaseAdmitted || phase(tiger) != v1beta1.RolloutPhasePending {
 		t.Fatalf("after the first pass: lion %q, tiger %q", phase(lion), phase(tiger))
 	}
 	rolloutReconcile(t, r, lion)
 	rolloutReconcile(t, r, tiger)
-	if phase(lion) != v1alpha1.RolloutPhaseRolling {
+	if phase(lion) != v1beta1.RolloutPhaseRolling {
 		t.Fatalf("lion = %q after its reconcile, want Rolling", phase(lion))
 	}
-	if d := siteDeployment(t, c, tiger, "dc1"); d.Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash {
+	if d := siteDeployment(t, c, tiger, "dc1"); d.Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash {
 		t.Fatal("tiger was rolled while lion holds the slot")
 	}
 
@@ -560,10 +560,10 @@ func TestRolloutPacer_AdmitsRollsAndCompletes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	unstable["lion"] = v1alpha1.UnstableReasonNoPrimary
+	unstable["lion"] = v1beta1.UnstableReasonNoPrimary
 	now = now.Add(time.Minute)
 	tick()
-	if phase(lion) != v1alpha1.RolloutPhaseRolling || phase(tiger) != v1alpha1.RolloutPhasePending {
+	if phase(lion) != v1beta1.RolloutPhaseRolling || phase(tiger) != v1beta1.RolloutPhasePending {
 		t.Fatalf("mid-roll: lion %q, tiger %q", phase(lion), phase(tiger))
 	}
 
@@ -578,20 +578,20 @@ func TestRolloutPacer_AdmitsRollsAndCompletes(t *testing.T) {
 	delete(unstable, "lion")
 	now = now.Add(time.Minute)
 	tick()
-	if phase(lion) != v1alpha1.RolloutPhaseComplete {
+	if phase(lion) != v1beta1.RolloutPhaseComplete {
 		t.Fatalf("lion = %q, want Complete", phase(lion))
 	}
 	tick()
-	if phase(tiger) != v1alpha1.RolloutPhasePending {
+	if phase(tiger) != v1beta1.RolloutPhasePending {
 		t.Fatalf("tiger = %q during the soak, want Pending", phase(tiger))
 	}
 	now = now.Add(time.Minute)
 	tick()
-	if phase(tiger) != v1alpha1.RolloutPhaseAdmitted {
+	if phase(tiger) != v1beta1.RolloutPhaseAdmitted {
 		t.Fatalf("tiger = %q after the soak, want Admitted", phase(tiger))
 	}
 	rolloutReconcile(t, r, tiger)
-	if d := siteDeployment(t, c, tiger, "dc1"); d.Annotations[v1alpha1.RenderedByAnnotation] != rendererIdentity() {
+	if d := siteDeployment(t, c, tiger, "dc1"); d.Annotations[v1beta1.RenderedByAnnotation] != rendererIdentity() {
 		t.Fatal("tiger was not rolled after its admission")
 	}
 
@@ -599,7 +599,7 @@ func TestRolloutPacer_AdmitsRollsAndCompletes(t *testing.T) {
 	for len(recorder.Events) > 0 {
 		reasons = append(reasons, eventReason(<-recorder.Events))
 	}
-	want := []string{v1alpha1.EventRolloutAdmitted, v1alpha1.EventRolloutCompleted, v1alpha1.EventRolloutAdmitted}
+	want := []string{v1beta1.EventRolloutAdmitted, v1beta1.EventRolloutCompleted, v1beta1.EventRolloutAdmitted}
 	if !slices.Equal(reasons, want) {
 		t.Fatalf("events = %v, want %v", reasons, want)
 	}
@@ -642,10 +642,10 @@ func TestRolloutPacer_RecordPrunedByOldCRD(t *testing.T) {
 	fg := newTestFG()
 	scheme := testScheme()
 	objs := withTestPassphraseSecrets([]client.Object{newTestSecret(), fg})
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(objs...).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).WithObjects(objs...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-				if g, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok {
+				if g, ok := obj.(*v1beta1.MysqlFailoverGroup); ok {
 					g.Status.Rollout = nil
 				}
 				return cl.SubResource(sub).Update(ctx, obj, opts...)
@@ -666,13 +666,13 @@ func TestRolloutPacer_RecordPrunedByOldCRD(t *testing.T) {
 	if len(recorder.Events) != 1 {
 		t.Fatalf("%d events, want one RolloutRecordNotStored", len(recorder.Events))
 	}
-	if got := eventReason(<-recorder.Events); got != v1alpha1.EventRolloutRecordNotStored {
+	if got := eventReason(<-recorder.Events); got != v1beta1.EventRolloutRecordNotStored {
 		t.Fatalf("event = %s", got)
 	}
 	if err := r.ReconcileSiteDeployment(context.Background(), client.ObjectKeyFromObject(fg), "dc2"); !errors.Is(err, errRolloutHeld) {
 		t.Fatalf("site write with no stored admission = %v, want errRolloutHeld", err)
 	}
-	if d := siteDeployment(t, c, fg, "dc2"); d.Annotations[v1alpha1.SpecHashAnnotation] != oldReleaseHash {
+	if d := siteDeployment(t, c, fg, "dc2"); d.Annotations[v1beta1.SpecHashAnnotation] != oldReleaseHash {
 		t.Fatal("dc2 was rolled without a stored admission")
 	}
 }
@@ -684,7 +684,7 @@ func TestRolloutPacer_DefaultStabilityCheck(t *testing.T) {
 	if got := p.unstable(fg); got != DeploymentUnstableReason(fg) || got == "" {
 		t.Fatalf("unstable = %q, want %q", got, DeploymentUnstableReason(fg))
 	}
-	fg.Status.Rollout = &v1alpha1.RolloutStatus{AdmittedTime: &metav1.Time{Time: rolloutT0}}
+	fg.Status.Rollout = &v1beta1.RolloutStatus{AdmittedTime: &metav1.Time{Time: rolloutT0}}
 	if !fg.Status.Rollout.InFlight() {
 		t.Fatal("an admission without completion is not in flight")
 	}
@@ -696,9 +696,9 @@ func TestRolloutPacer_AnnotationValueMustBeTrue(t *testing.T) {
 	lion := newTestFG()
 	tiger := newTestFG()
 	tiger.Name, tiger.UID = "tiger", "uid-tiger"
-	tiger.Annotations = map[string]string{v1alpha1.RolloutAdmitAnnotation: "false"}
+	tiger.Annotations = map[string]string{v1beta1.RolloutAdmitAnnotation: "false"}
 	r, c := newReconciler(lion, tiger)
-	for _, fg := range []*v1alpha1.MysqlFailoverGroup{lion, tiger} {
+	for _, fg := range []*v1beta1.MysqlFailoverGroup{lion, tiger} {
 		rolloutReconcile(t, r, fg)
 		ageDeployments(t, c, fg, oldReleaseHash)
 	}
@@ -711,12 +711,12 @@ func TestRolloutPacer_AnnotationValueMustBeTrue(t *testing.T) {
 		}
 	}
 	tick()
-	if rec := freshGroup(t, c, tiger).Status.Rollout; rec == nil || rec.Phase != v1alpha1.RolloutPhasePending {
+	if rec := freshGroup(t, c, tiger).Status.Rollout; rec == nil || rec.Phase != v1beta1.RolloutPhasePending {
 		t.Fatalf("tiger with rollout-admit=false: %+v, want Pending behind lion", rec)
 	}
 
 	fresh := freshGroup(t, c, tiger)
-	fresh.Annotations[v1alpha1.RolloutAdmitAnnotation] = "true"
+	fresh.Annotations[v1beta1.RolloutAdmitAnnotation] = "true"
 	if err := c.Update(context.Background(), fresh); err != nil {
 		t.Fatal(err)
 	}
@@ -733,13 +733,13 @@ func TestRolloutPacer_AnnotationValueMustBeTrue(t *testing.T) {
 // while its sites still run the old template.
 func TestRolloutGroupState_RecreateSiteWithoutAVerdictIsNotDone(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+	fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 	r, c := newReconciler(fg)
 	rolloutReconcile(t, r, fg)
 	r.RolloutPacing = true
 	for _, site := range fg.Spec.Sites {
 		d := siteDeployment(t, c, fg, site.Name)
-		delete(d.Annotations, v1alpha1.RenderedByAnnotation)
+		delete(d.Annotations, v1beta1.RenderedByAnnotation)
 		if err := c.Update(context.Background(), d); err != nil {
 			t.Fatal(err)
 		}

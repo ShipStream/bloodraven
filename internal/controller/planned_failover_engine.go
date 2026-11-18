@@ -35,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
@@ -125,7 +125,7 @@ const (
 // lease's admission reservation (BeginPlanned/EndPlanned). hold non-nil:
 // a deployment failover-hold is standing.
 type plannedAdmissionGuard interface {
-	BeginPlanned(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (hold *DeploymentLeaseView, release func(), err error)
+	BeginPlanned(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (hold *DeploymentLeaseView, release func(), err error)
 	// Now is the clock the lease holds are evaluated on, so a deferral
 	// wakes exactly when the hold that caused it expires.
 	Now() time.Time
@@ -150,7 +150,7 @@ type PlannedFailoverEngine struct {
 	// the object the conditioned write replaced; nil in tests and the DST.
 	// Production: the D-46 PITR archive reissue warning
 	// (emitPITRArchiveReissueRisk), which fires only when the two differ.
-	activeSitePersisted func(committed *v1alpha1.MysqlFailoverGroup, from string)
+	activeSitePersisted func(committed *v1beta1.MysqlFailoverGroup, from string)
 
 	// runIDSource mints run IDs; nil is uuid.NewUUID. The simulator sets
 	// a deterministic one (SetRunIDSourceForSim).
@@ -182,7 +182,7 @@ type pfPromoteMemo struct {
 	confirmed      bool
 	confirmedAt    time.Time
 	recorded       bool
-	dns            *v1alpha1.PlannedFailoverDNSRecord
+	dns            *v1beta1.PlannedFailoverDNSRecord
 	// released: the confirmed tail recorded the promotion, published DNS
 	// and released the claim (the DST-4 ruling); the Publishing write that
 	// follows is bookkeeping and is retried without the claim.
@@ -198,7 +198,7 @@ type plannedRunMemo struct {
 
 	dragonfly pfDragonflyMemo // the Dragonfly takeover (planned_failover_df.go)
 
-	warnings []v1alpha1.PlannedFailoverWarning
+	warnings []v1beta1.PlannedFailoverWarning
 
 	sourceLossSince time.Time
 	targetLossSince time.Time
@@ -216,7 +216,7 @@ type plannedRunMemo struct {
 
 	// pendingTerminal is the terminal record this process computed for the
 	// run but has not seen commit (a stalled status, or a marker-ended run).
-	pendingTerminal *v1alpha1.PlannedFailoverStatus
+	pendingTerminal *v1beta1.PlannedFailoverStatus
 	holdSites       []string
 	reported        bool // RunTerminal and the terminal event were emitted
 
@@ -228,8 +228,8 @@ type plannedRunMemo struct {
 	// commits or a settlement decides it.
 	unsettled *plannedUnsettledWrite
 
-	confirmedPhases map[v1alpha1.PlannedFailoverPhase]bool // "confirming recorded side effect" logged
-	writtenPhase    v1alpha1.PlannedFailoverPhase          // the last phase this process committed
+	confirmedPhases map[v1beta1.PlannedFailoverPhase]bool // "confirming recorded side effect" logged
+	writtenPhase    v1beta1.PlannedFailoverPhase          // the last phase this process committed
 	cannotWriteAt   time.Time
 	holdAcked       bool
 }
@@ -238,7 +238,7 @@ type plannedRunMemo struct {
 type plannedUnsettledWrite struct {
 	baseRV   string
 	revision int64
-	phase    v1alpha1.PlannedFailoverPhase
+	phase    v1beta1.PlannedFailoverPhase
 }
 
 // plannedGroupMemo is the engine memo for one group.
@@ -284,7 +284,7 @@ func (e *PlannedFailoverEngine) runMemo(runID string) *plannedRunMemo {
 	defer e.mu.Unlock()
 	m := e.runs[runID]
 	if m == nil {
-		m = &plannedRunMemo{confirmedPhases: make(map[v1alpha1.PlannedFailoverPhase]bool)}
+		m = &plannedRunMemo{confirmedPhases: make(map[v1beta1.PlannedFailoverPhase]bool)}
 		e.runs[runID] = m
 	}
 	return m
@@ -377,11 +377,11 @@ func (e *PlannedFailoverEngine) step(ctx context.Context, nn types.NamespacedNam
 }
 
 // passBound returns the wall-time bound of a pass over pf (§2.4 step 8).
-func (e *PlannedFailoverEngine) passBound(pf *v1alpha1.PlannedFailoverStatus) time.Duration {
-	if pf != nil && pf.Phase == v1alpha1.PlannedFailoverPhasePromotingDragonfly {
+func (e *PlannedFailoverEngine) passBound(pf *v1beta1.PlannedFailoverStatus) time.Duration {
+	if pf != nil && pf.Phase == v1beta1.PlannedFailoverPhasePromotingDragonfly {
 		return plannedDragonflyPassBound(pf)
 	}
-	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+	if pf == nil || pf.Phase != v1beta1.PlannedFailoverPhasePromoting {
 		return plannedPassOrdinary
 	}
 	if e.runMemo(pf.RunID).promote.confirmed {
@@ -390,7 +390,7 @@ func (e *PlannedFailoverEngine) passBound(pf *v1alpha1.PlannedFailoverStatus) ti
 	return plannedPassPromoting
 }
 
-func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, start time.Time, admit bool) (time.Duration, error) {
+func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, start time.Time, admit bool) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	pf, marked := plannedFailoverRun(fg)
 	hold := PlannedHoldFrom(fg)
@@ -398,7 +398,7 @@ func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1alpha1.MysqlFail
 	ctx, cancel := context.WithDeadline(ctx, start.Add(e.passBound(pf)))
 	defer cancel()
 
-	if ack := strings.TrimSpace(fg.GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]); ack != "" {
+	if ack := strings.TrimSpace(fg.GetAnnotations()[v1beta1.AcknowledgePlannedFailoverHoldAnnotation]); ack != "" {
 		if d, done := e.ackPass(ctx, fg, hold, ack); done {
 			return d, nil
 		}
@@ -419,15 +419,15 @@ func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1alpha1.MysqlFail
 
 	switch {
 	case pf == nil || plannedFailoverTerminal(pf):
-		if _, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok && admit {
+		if _, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; ok && admit {
 			return e.admitNew(ctx, fg)
 		}
 		return 0, nil
-	case pf.Phase == v1alpha1.PlannedFailoverPhaseDeferred:
+	case pf.Phase == v1beta1.PlannedFailoverPhaseDeferred:
 		return e.deferredPass(ctx, fg, pf)
-	case pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting:
+	case pf.Phase == v1beta1.PlannedFailoverPhaseAdmitting:
 		return e.admittingPass(ctx, fg, pf)
-	case pf.Phase == v1alpha1.PlannedFailoverPhasePublishing:
+	case pf.Phase == v1beta1.PlannedFailoverPhasePublishing:
 		e.consumeStaleRequest(ctx, fg, pf)
 		return e.publishingPass(ctx, fg, pf)
 	default:
@@ -439,49 +439,49 @@ func (e *PlannedFailoverEngine) pass(ctx context.Context, fg *v1alpha1.MysqlFail
 // ---------- predicates on the block ----------
 
 // plannedEnginePhases are the non-terminal phases this engine writes.
-var plannedEnginePhases = []v1alpha1.PlannedFailoverPhase{
-	v1alpha1.PlannedFailoverPhaseAdmitting,
-	v1alpha1.PlannedFailoverPhaseDeferred,
-	v1alpha1.PlannedFailoverPhaseFencing,
-	v1alpha1.PlannedFailoverPhaseDraining,
-	v1alpha1.PlannedFailoverPhaseWaitingForLag,
-	v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-	v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-	v1alpha1.PlannedFailoverPhasePromoting,
-	v1alpha1.PlannedFailoverPhasePublishing,
-	v1alpha1.PlannedFailoverPhaseRollingBack,
+var plannedEnginePhases = []v1beta1.PlannedFailoverPhase{
+	v1beta1.PlannedFailoverPhaseAdmitting,
+	v1beta1.PlannedFailoverPhaseDeferred,
+	v1beta1.PlannedFailoverPhaseFencing,
+	v1beta1.PlannedFailoverPhaseDraining,
+	v1beta1.PlannedFailoverPhaseWaitingForLag,
+	v1beta1.PlannedFailoverPhaseWaitingForDragonflySync,
+	v1beta1.PlannedFailoverPhasePromotingDragonfly,
+	v1beta1.PlannedFailoverPhasePromoting,
+	v1beta1.PlannedFailoverPhasePublishing,
+	v1beta1.PlannedFailoverPhaseRollingBack,
 }
 
 // Phases only an older operator wrote; they are outside the API enum, but a
 // block stored before the upgrade can still carry them (§13).
 const (
-	plannedLegacyPhaseNone       v1alpha1.PlannedFailoverPhase = ""
-	plannedLegacyPhasePending    v1alpha1.PlannedFailoverPhase = "Pending"
-	plannedLegacyPhaseValidating v1alpha1.PlannedFailoverPhase = "Validating"
-	plannedLegacyPhaseResuming   v1alpha1.PlannedFailoverPhase = "Resuming"
+	plannedLegacyPhaseNone       v1beta1.PlannedFailoverPhase = ""
+	plannedLegacyPhasePending    v1beta1.PlannedFailoverPhase = "Pending"
+	plannedLegacyPhaseValidating v1beta1.PlannedFailoverPhase = "Validating"
+	plannedLegacyPhaseResuming   v1beta1.PlannedFailoverPhase = "Resuming"
 )
 
 // plannedLegacyBlock reports a non-terminal block an older operator wrote:
 // no runId, or a phase this engine never writes (§13).
-func plannedLegacyBlock(pf *v1alpha1.PlannedFailoverStatus) bool {
+func plannedLegacyBlock(pf *v1beta1.PlannedFailoverStatus) bool {
 	if pf == nil || plannedFailoverTerminal(pf) {
 		return false
 	}
 	return pf.RunID == "" || !slices.Contains(plannedEnginePhases, pf.Phase)
 }
 
-func plannedRunRef(nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) PlannedRunRef {
+func plannedRunRef(nn types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) PlannedRunRef {
 	return PlannedRunRef{Group: nn, RunID: pf.RunID, Source: pf.SourceSite, Target: pf.TargetSite}
 }
 
-func plannedFenceSet(pf *v1alpha1.PlannedFailoverStatus) string {
+func plannedFenceSet(pf *v1beta1.PlannedFailoverStatus) string {
 	if pf == nil || pf.Fence == nil || pf.Fence.GtidSet == nil {
 		return ""
 	}
 	return *pf.Fence.GtidSet
 }
 
-func addPlannedWarnings(dst []v1alpha1.PlannedFailoverWarning, ws ...v1alpha1.PlannedFailoverWarning) []v1alpha1.PlannedFailoverWarning {
+func addPlannedWarnings(dst []v1beta1.PlannedFailoverWarning, ws ...v1beta1.PlannedFailoverWarning) []v1beta1.PlannedFailoverWarning {
 	for _, w := range ws {
 		if w != "" && !slices.Contains(dst, w) {
 			dst = append(dst, w)
@@ -490,22 +490,22 @@ func addPlannedWarnings(dst []v1alpha1.PlannedFailoverWarning, ws ...v1alpha1.Pl
 	return dst
 }
 
-func reasonPtr(r v1alpha1.PlannedFailoverReason) *v1alpha1.PlannedFailoverReason { return &r }
+func reasonPtr(r v1beta1.PlannedFailoverReason) *v1beta1.PlannedFailoverReason { return &r }
 
 // ---------- writes ----------
 
 // plannedBuild computes the next block (and the status mutation) from a
 // freshly loaded base. ok=false means the block moved on and the write is
 // abandoned.
-type plannedBuild func(base *v1alpha1.MysqlFailoverGroup) (next *v1alpha1.PlannedFailoverStatus,
-	mutate func(*v1alpha1.MysqlFailoverGroupStatus), ok bool)
+type plannedBuild func(base *v1beta1.MysqlFailoverGroup) (next *v1beta1.PlannedFailoverStatus,
+	mutate func(*v1beta1.MysqlFailoverGroupStatus), ok bool)
 
 var errPlannedBlockMoved = errors.New("planned failover: the block moved on since this pass loaded it")
 
 // freshRunBuild writes the first record of a new run, refusing when the
 // (re)loaded base already carries a live run.
-func freshRunBuild(next *v1alpha1.PlannedFailoverStatus) plannedBuild {
-	return func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus, func(*v1alpha1.MysqlFailoverGroupStatus), bool) {
+func freshRunBuild(next *v1beta1.PlannedFailoverStatus) plannedBuild {
+	return func(base *v1beta1.MysqlFailoverGroup) (*v1beta1.PlannedFailoverStatus, func(*v1beta1.MysqlFailoverGroupStatus), bool) {
 		if cur, marked := plannedFailoverRun(base); cur != nil && !marked && !plannedFailoverTerminal(cur) && cur.RunID != next.RunID {
 			return nil, nil, false
 		}
@@ -544,12 +544,12 @@ func plannedWriteStalled(out WriteOutcome, err error) bool {
 // whether the run holds a claim, so a non-commit (plannedWriteStalled)
 // counts toward the status stall (§6.4). It returns the outcome and the
 // next record it wrote.
-func (e *PlannedFailoverEngine) commit(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, claimHeld bool,
-	build plannedBuild) (WriteOutcome, *v1alpha1.PlannedFailoverStatus, error) {
+func (e *PlannedFailoverEngine) commit(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, claimHeld bool,
+	build plannedBuild) (WriteOutcome, *v1beta1.PlannedFailoverStatus, error) {
 	base := fg
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	var lastErr error
-	var last *v1alpha1.PlannedFailoverStatus
+	var last *v1beta1.PlannedFailoverStatus
 	for attempt := 0; attempt < plannedWriteConflictRetries; attempt++ {
 		next, mutate, ok := build(base)
 		if !ok {
@@ -565,10 +565,10 @@ func (e *PlannedFailoverEngine) commit(ctx context.Context, fg *v1alpha1.MysqlFa
 		// move of status.activeSite (the Succeeded terminal write's
 		// MergePlannedAuthority) is reported against base, the object the
 		// conditioned write replaced, settled writes included.
-		var written *v1alpha1.MysqlFailoverGroupStatus
+		var written *v1beta1.MysqlFailoverGroupStatus
 		capture := mutate
 		if mutate != nil && e.activeSitePersisted != nil {
-			capture = func(st *v1alpha1.MysqlFailoverGroupStatus) {
+			capture = func(st *v1beta1.MysqlFailoverGroupStatus) {
 				mutate(st)
 				written = st.DeepCopy()
 			}
@@ -629,8 +629,8 @@ func (e *PlannedFailoverEngine) dropPendingTerminal(runID string) {
 
 // afterCommit clears the stall deadline once a status write of the run
 // commits (§6.4).
-func (e *PlannedFailoverEngine) afterCommit(ctx context.Context, nn types.NamespacedName, base *v1alpha1.MysqlFailoverGroup,
-	next *v1alpha1.PlannedFailoverStatus) {
+func (e *PlannedFailoverEngine) afterCommit(ctx context.Context, nn types.NamespacedName, base *v1beta1.MysqlFailoverGroup,
+	next *v1beta1.PlannedFailoverStatus) {
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	e.bindRun(nn, next.RunID)
@@ -638,7 +638,7 @@ func (e *PlannedFailoverEngine) afterCommit(ctx context.Context, nn types.Namesp
 	m.writtenPhase = next.Phase
 	m.stallSince = time.Time{}
 	m.unsettled = nil
-	if _, ok := parseDeadlineStart(base.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation], next.RunID); !ok {
+	if _, ok := parseDeadlineStart(base.GetAnnotations()[v1beta1.PlannedFailoverStallSinceAnnotation], next.RunID); !ok {
 		return
 	}
 	if fresh, err := e.store.Load(ctx, nn); err == nil && fresh != nil {
@@ -651,11 +651,11 @@ func (e *PlannedFailoverEngine) afterCommit(ctx context.Context, nn types.Namesp
 
 // noteStall records the durable stall start for the run (never moving it
 // forward).
-func (e *PlannedFailoverEngine) noteStall(ctx context.Context, base *v1alpha1.MysqlFailoverGroup, runID string) {
+func (e *PlannedFailoverEngine) noteStall(ctx context.Context, base *v1beta1.MysqlFailoverGroup, runID string) {
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	m := e.runMemo(runID)
-	if start, ok := parseDeadlineStart(base.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation], runID); ok {
+	if start, ok := parseDeadlineStart(base.GetAnnotations()[v1beta1.PlannedFailoverStallSinceAnnotation], runID); ok {
 		m.stallSince = start
 		return
 	}
@@ -682,7 +682,7 @@ func errString(err error) string {
 
 // reload re-reads the object after a commit, for the metadata writes that
 // follow it in the same pass.
-func (e *PlannedFailoverEngine) reload(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlFailoverGroup {
+func (e *PlannedFailoverEngine) reload(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) *v1beta1.MysqlFailoverGroup {
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	fresh, err := e.store.Load(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name})
@@ -694,8 +694,8 @@ func (e *PlannedFailoverEngine) reload(ctx context.Context, fg *v1alpha1.MysqlFa
 
 // sameRun returns base's block when it is still the run of pf in one of
 // phases (any phase when none is given).
-func sameRun(base *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	phases ...v1alpha1.PlannedFailoverPhase) (*v1alpha1.PlannedFailoverStatus, bool) {
+func sameRun(base *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	phases ...v1beta1.PlannedFailoverPhase) (*v1beta1.PlannedFailoverStatus, bool) {
 	cur, marked := plannedFailoverRun(base)
 	if cur == nil || marked || cur.RunID != pf.RunID {
 		return nil, false
@@ -708,12 +708,12 @@ func sameRun(base *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStat
 
 // advance writes the run's next phase, built by edit on a copy of the
 // current block (revision bumped). It returns the outcome.
-func (e *PlannedFailoverEngine) advance(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	edit func(next *v1alpha1.PlannedFailoverStatus)) (WriteOutcome, error) {
+func (e *PlannedFailoverEngine) advance(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	edit func(next *v1beta1.PlannedFailoverStatus)) (WriteOutcome, error) {
 	from := pf.Phase
-	claimHeld := plannedFailoverOwnsSitesPhase(from) || (from == v1alpha1.PlannedFailoverPhaseAdmitting && e.runMemo(pf.RunID).granted)
-	out, _, err := e.commit(ctx, fg, claimHeld, func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus,
-		func(*v1alpha1.MysqlFailoverGroupStatus), bool) {
+	claimHeld := plannedFailoverOwnsSitesPhase(from) || (from == v1beta1.PlannedFailoverPhaseAdmitting && e.runMemo(pf.RunID).granted)
+	out, _, err := e.commit(ctx, fg, claimHeld, func(base *v1beta1.MysqlFailoverGroup) (*v1beta1.PlannedFailoverStatus,
+		func(*v1beta1.MysqlFailoverGroupStatus), bool) {
 		cur, ok := sameRun(base, pf, from)
 		if !ok {
 			return nil, nil, false
@@ -728,15 +728,15 @@ func (e *PlannedFailoverEngine) advance(ctx context.Context, fg *v1alpha1.MysqlF
 
 // plannedFailoverOwnsSitesPhase reports whether a run in phase holds the
 // claim durably.
-func plannedFailoverOwnsSitesPhase(p v1alpha1.PlannedFailoverPhase) bool {
+func plannedFailoverOwnsSitesPhase(p v1beta1.PlannedFailoverPhase) bool {
 	switch p {
-	case v1alpha1.PlannedFailoverPhaseFencing,
-		v1alpha1.PlannedFailoverPhaseDraining,
-		v1alpha1.PlannedFailoverPhaseWaitingForLag,
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
-		v1alpha1.PlannedFailoverPhasePromoting,
-		v1alpha1.PlannedFailoverPhaseRollingBack:
+	case v1beta1.PlannedFailoverPhaseFencing,
+		v1beta1.PlannedFailoverPhaseDraining,
+		v1beta1.PlannedFailoverPhaseWaitingForLag,
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync,
+		v1beta1.PlannedFailoverPhasePromotingDragonfly,
+		v1beta1.PlannedFailoverPhasePromoting,
+		v1beta1.PlannedFailoverPhaseRollingBack:
 		return true
 	}
 	return false
@@ -758,11 +758,11 @@ func requeueFor(out WriteOutcome) time.Duration {
 // ---------- admission (owns nothing) ----------
 
 // newRunBlock is the first record of a run.
-func (e *PlannedFailoverEngine) newRunBlock(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest,
-	phase v1alpha1.PlannedFailoverPhase, msg string) *v1alpha1.PlannedFailoverStatus {
+func (e *PlannedFailoverEngine) newRunBlock(fg *v1beta1.MysqlFailoverGroup, req PlannedFailoverRequest,
+	phase v1beta1.PlannedFailoverPhase, msg string) *v1beta1.PlannedFailoverStatus {
 	now := metav1.NewTime(e.clk.Now())
 	settings := plannedFailoverSettingsFor(fg, req)
-	return &v1alpha1.PlannedFailoverStatus{
+	return &v1beta1.PlannedFailoverStatus{
 		RunID:      e.newRunID(),
 		Revision:   1,
 		Phase:      phase,
@@ -774,14 +774,14 @@ func (e *PlannedFailoverEngine) newRunBlock(fg *v1alpha1.MysqlFailoverGroup, req
 }
 
 // admitNew handles a request annotation with no live run.
-func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
+func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	raw := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+	raw := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
 	req, perr := parsePlannedFailoverAnnotation(raw)
 	if perr != nil {
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, perr.Error())
-		e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{Result: &v1alpha1.PlannedFailoverResult{
-			Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonInvalidAnnotation}})
+		e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverRejected, perr.Error())
+		e.sink.RunTerminal(nn, &v1beta1.PlannedFailoverStatus{Result: &v1beta1.PlannedFailoverResult{
+			Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonInvalidAnnotation}})
 		return e.consumeRequest(ctx, fg, "invalid"), nil
 	}
 
@@ -804,7 +804,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 	}
 	fg = fresh
 	if hold != nil {
-		next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseDeferred, "")
+		next := e.newRunBlock(fg, req, v1beta1.PlannedFailoverPhaseDeferred, "")
 		return e.writeDeferredHold(ctx, fg, nil, next, hold)
 	}
 
@@ -812,32 +812,32 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, now, false)
 	switch result {
 	case PlannedFailoverSkip:
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("planned-failover: site %q is already the active primary; nothing to do", req.Site))
 		return e.consumeRequest(ctx, fg, "idempotent"), nil
 	case PlannedFailoverReject:
-		if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1alpha1.PlannedFailoverCooldownDefer {
-			next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseDeferred, "")
+		if reason == v1beta1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1beta1.PlannedFailoverCooldownDefer {
+			next := e.newRunBlock(fg, req, v1beta1.PlannedFailoverPhaseDeferred, "")
 			return e.writeDeferredCooldown(ctx, fg, nil, next, verr.Error(), true)
 		}
 		if unsettled, why := plannedAuthorityUnsettled(fg, nil, now); unsettled && !plannedStaticRejection(reason) {
 			// The refusal was read from mid-failover status: admit into a
 			// bounded wait instead, as a Deferred or Admitting run does.
-			return e.admitIntoWait(ctx, fg, req, v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why)
+			return e.admitIntoWait(ctx, fg, req, v1beta1.PlannedFailoverWaitAuthorityUnsettled, why)
 		}
 		return e.rejectNew(ctx, fg, req, reason, verr.Error())
 	}
 
-	next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseAdmitting,
+	next := e.newRunBlock(fg, req, v1beta1.PlannedFailoverPhaseAdmitting,
 		fmt.Sprintf("admin requested graceful switchover to %q", req.Site))
 	deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
-	next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline}
+	next.Admission = &v1beta1.PlannedFailoverAdmission{DeadlineTime: &deadline}
 	out, _, _ := e.commit(ctx, fg, false, freshRunBuild(next))
 	if out != WriteCommitted {
 		return requeueFor(out), nil
 	}
 	e.consumeRequest(ctx, fg, "accepted")
-	e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverStarted,
+	e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverStarted,
 		fmt.Sprintf("planned failover from %q to %q accepted (maxLagWait=%s, drainTimeout=%s)",
 			fg.Status.ActiveSite, req.Site, next.Settings.MaxLagWait.Duration, next.Settings.DrainTimeout.Duration))
 	return plannedRequeueNext, nil
@@ -851,7 +851,7 @@ func (e *PlannedFailoverEngine) admitNew(ctx context.Context, fg *v1alpha1.Mysql
 // writable again, a failover was recorded after the run started (the
 // restart would not name it then either), or the source is no longer in
 // spec.sites.
-func plannedFencedSourceAwaitingHeal(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (*v1alpha1.PlannedFailoverStatus, bool) {
+func plannedFencedSourceAwaitingHeal(fg *v1beta1.MysqlFailoverGroup, now time.Time) (*v1beta1.PlannedFailoverStatus, bool) {
 	src, ok := plannedFenceAttributableEnd(fg)
 	if !ok || !failoverTargetInSpec(fg, src.SourceSite) {
 		return nil, false
@@ -861,59 +861,59 @@ func plannedFencedSourceAwaitingHeal(fg *v1alpha1.MysqlFailoverGroup, now time.T
 		return nil, false
 	}
 	for i := range fg.Status.Sites {
-		if fg.Status.Sites[i].Name == src.SourceSite && fg.Status.Sites[i].State == v1alpha1.SiteStateWritable {
+		if fg.Status.Sites[i].Name == src.SourceSite && fg.Status.Sites[i].State == v1beta1.SiteStateWritable {
 			return nil, false
 		}
 	}
 	return src, true
 }
 
-func plannedFencedSourceRefusal(src *v1alpha1.PlannedFailoverStatus) string {
+func plannedFencedSourceRefusal(src *v1beta1.PlannedFailoverStatus) string {
 	return fmt.Sprintf("planned failover refused: planned failover %s left source %q fenced and the fence has not healed yet; "+
 		"the topology manager re-asserts it, or unfence it by hand, then re-annotate", src.RunID, src.SourceSite)
 }
 
 // refuseKeepingBlock refuses a request with an Event only, leaving the
 // current block in place, and consumes the request.
-func (e *PlannedFailoverEngine) refuseKeepingBlock(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, msg string) time.Duration {
+func (e *PlannedFailoverEngine) refuseKeepingBlock(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, req PlannedFailoverRequest, msg string) time.Duration {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected, msg)
-	e.sink.RunTerminal(nn, &v1alpha1.PlannedFailoverStatus{TargetSite: req.Site, Result: &v1alpha1.PlannedFailoverResult{
-		Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonConcurrentOperation}})
+	e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverRejected, msg)
+	e.sink.RunTerminal(nn, &v1beta1.PlannedFailoverStatus{TargetSite: req.Site, Result: &v1beta1.PlannedFailoverResult{
+		Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonConcurrentOperation}})
 	return e.consumeRequest(ctx, fg, "fenced-source")
 }
 
 // rejectNew ends a new request with a Failed{NotStarted, reason} record.
-func (e *PlannedFailoverEngine) rejectNew(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest,
-	reason v1alpha1.PlannedFailoverReason, msg string) (time.Duration, error) {
+func (e *PlannedFailoverEngine) rejectNew(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, req PlannedFailoverRequest,
+	reason v1beta1.PlannedFailoverReason, msg string) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseFailed, msg)
-	next.Result = &v1alpha1.PlannedFailoverResult{Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: reason,
+	next := e.newRunBlock(fg, req, v1beta1.PlannedFailoverPhaseFailed, msg)
+	next.Result = &v1beta1.PlannedFailoverResult{Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: reason,
 		CompletionTime: metav1.NewTime(e.clk.Now())}
 	out, _, _ := e.commit(ctx, fg, false, freshRunBuild(next))
 	if out != WriteCommitted {
 		return requeueFor(out), nil
 	}
-	e.reportTerminal(nn, fg, next, v1alpha1.EventPlannedFailoverRejected)
+	e.reportTerminal(nn, fg, next, v1beta1.EventPlannedFailoverRejected)
 	return e.consumeRequest(ctx, fg, "rejected"), nil
 }
 
 // admitIntoWait admits a new request into Admitting with waitReason
 // recorded: a visible wait, bounded by the admission deadline, which the
 // Admitting run's own passes re-validate and resolve.
-func (e *PlannedFailoverEngine) admitIntoWait(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest,
-	waitReason v1alpha1.PlannedFailoverWaitReason, why string) (time.Duration, error) {
-	next := e.newRunBlock(fg, req, v1alpha1.PlannedFailoverPhaseAdmitting,
+func (e *PlannedFailoverEngine) admitIntoWait(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, req PlannedFailoverRequest,
+	waitReason v1beta1.PlannedFailoverWaitReason, why string) (time.Duration, error) {
+	next := e.newRunBlock(fg, req, v1beta1.PlannedFailoverPhaseAdmitting,
 		fmt.Sprintf("waiting for admission (%s): %s", waitReason, why))
 	deadline := metav1.NewTime(e.clk.Now().Add(plannedFailoverAdmissionTimeout))
-	next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline, WaitReason: waitReason}
+	next.Admission = &v1beta1.PlannedFailoverAdmission{DeadlineTime: &deadline, WaitReason: waitReason}
 	out, _, _ := e.commit(ctx, fg, false, freshRunBuild(next))
 	if out != WriteCommitted {
 		return requeueFor(out), nil
 	}
 	// The request annotation stays until the Admitting run's validation
 	// accepts it: a cooldown deferral then still has it to retain (K050).
-	e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverAdmissionDelayed,
+	e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverAdmissionDelayed,
 		fmt.Sprintf("planned failover to %q waiting: %s %s", req.Site, waitReason, why))
 	return plannedRequeuePoll, nil
 }
@@ -926,13 +926,13 @@ func (e *PlannedFailoverEngine) admitIntoWait(ctx context.Context, fg *v1alpha1.
 // of waiting invisibly with the request annotation for as long as the
 // other operation runs. Neither record owns anything, so neither needs the
 // reservation; the Admitting run takes it on its own passes.
-func (e *PlannedFailoverEngine) admitDuringReservationRefusal(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
+func (e *PlannedFailoverEngine) admitDuringReservationRefusal(ctx context.Context, fg *v1beta1.MysqlFailoverGroup,
 	req PlannedFailoverRequest, err error) (time.Duration, error) {
 	e.noteAdmissionBlocked(ctx, fg, "", err)
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, e.clk.Now(), false)
 	switch {
 	case result == PlannedFailoverSkip:
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("planned-failover: site %q is already the active primary; nothing to do", req.Site))
 		return e.consumeRequest(ctx, fg, "idempotent"), nil
 	case result == PlannedFailoverReject && plannedStaticRejection(reason):
@@ -946,37 +946,37 @@ func (e *PlannedFailoverEngine) admitDuringReservationRefusal(ctx context.Contex
 // the wait reason it is recorded under. fg is the object the refusal was
 // for: BeginPlanned's ConcurrentOperation covers an in-place restore and an
 // ordered update alike, and fg tells them apart.
-func plannedAdmissionWaitReason(fg *v1alpha1.MysqlFailoverGroup, err error) (v1alpha1.PlannedFailoverWaitReason, string) {
+func plannedAdmissionWaitReason(fg *v1beta1.MysqlFailoverGroup, err error) (v1beta1.PlannedFailoverWaitReason, string) {
 	var le *DeploymentLeaseError
 	if errors.As(err, &le) {
 		switch le.Reason {
-		case v1alpha1.UnstableReasonTopologyPersistencePending:
-			return v1alpha1.PlannedFailoverWaitAuthorityUnsettled, "the last topology change is not yet persisted"
-		case v1alpha1.UnstableReasonConcurrentOperation:
+		case v1beta1.UnstableReasonTopologyPersistencePending:
+			return v1beta1.PlannedFailoverWaitAuthorityUnsettled, "the last topology change is not yet persisted"
+		case v1beta1.UnstableReasonConcurrentOperation:
 			if inPlaceRestoreInFlight(fg) {
-				return v1alpha1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"
+				return v1beta1.PlannedFailoverWaitRestoreInFlight, "an in-place restore holds the sites"
 			}
-			return v1alpha1.PlannedFailoverWaitUpdateInFlight, "an ordered update holds the sites"
+			return v1beta1.PlannedFailoverWaitUpdateInFlight, "an ordered update holds the sites"
 		case deploymentOperationRestoreInPlace:
-			return v1alpha1.PlannedFailoverWaitRestoreInFlight, "an in-place restore is being admitted"
+			return v1beta1.PlannedFailoverWaitRestoreInFlight, "an in-place restore is being admitted"
 		case deploymentOperationOrderedUpdate:
-			return v1alpha1.PlannedFailoverWaitUpdateInFlight, "an ordered update is being admitted"
+			return v1beta1.PlannedFailoverWaitUpdateInFlight, "an ordered update is being admitted"
 		}
-		return v1alpha1.PlannedFailoverWaitClaimHeld, fmt.Sprintf("deployment admission refused (%s)", le.Reason)
+		return v1beta1.PlannedFailoverWaitClaimHeld, fmt.Sprintf("deployment admission refused (%s)", le.Reason)
 	}
-	return v1alpha1.PlannedFailoverWaitAuthorityUnsettled, fmt.Sprintf("deployment admission could not be checked: %v", err)
+	return v1beta1.PlannedFailoverWaitAuthorityUnsettled, fmt.Sprintf("deployment admission could not be checked: %v", err)
 }
 
 // noteAdmissionBlocked logs a deployment-lease refusal for a request with
 // no Admitting record to carry it.
-func (e *PlannedFailoverEngine) noteAdmissionBlocked(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, runID string, err error) {
+func (e *PlannedFailoverEngine) noteAdmissionBlocked(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, runID string, err error) {
 	reason, msg := plannedAdmissionWaitReason(fg, err)
 	log.FromContext(ctx).Info("planned failover: admission waiting", "fg", fg.Namespace+"/"+fg.Name, "runId", runID,
 		"waitReason", string(reason), "detail", msg)
 }
 
 // beginAdmission takes the deployment admission reservation.
-func (e *PlannedFailoverEngine) beginAdmission(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*DeploymentLeaseView, func(), error) {
+func (e *PlannedFailoverEngine) beginAdmission(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) (*DeploymentLeaseView, func(), error) {
 	if e.admission == nil {
 		return nil, func() {}, nil
 	}
@@ -1001,11 +1001,11 @@ func (e *PlannedFailoverEngine) beginAdmission(ctx context.Context, fg *v1alpha1
 // would otherwise return no requeue must return it: nothing else re-runs
 // the engine for an annotation left behind, and a request that outlives
 // its rejection can start a switchover long after it was refused.
-func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, why string) time.Duration {
+func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, why string) time.Duration {
 	if fg == nil {
 		return plannedRequeuePoll
 	}
-	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+	raw, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
 	if !ok {
 		return 0
 	}
@@ -1015,7 +1015,7 @@ func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1
 	if fresh == nil {
 		return plannedRequeuePoll
 	}
-	if cur, ok := fresh.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; !ok || cur != raw {
+	if cur, ok := fresh.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; !ok || cur != raw {
 		if !ok {
 			return 0
 		}
@@ -1033,7 +1033,7 @@ func (e *PlannedFailoverEngine) consumeRequest(ctx context.Context, fg *v1alpha1
 
 // plannedRequestIsRuns reports whether req is the request pf was built
 // from: the same target, and no maxLagWait override other than the run's.
-func plannedRequestIsRuns(req PlannedFailoverRequest, pf *v1alpha1.PlannedFailoverStatus) bool {
+func plannedRequestIsRuns(req PlannedFailoverRequest, pf *v1beta1.PlannedFailoverStatus) bool {
 	return req.Site == pf.TargetSite && (req.MaxLagWait == 0 || req.MaxLagWait == plannedSettings(pf).MaxLagWait.Duration)
 }
 
@@ -1042,26 +1042,26 @@ func plannedRequestIsRuns(req PlannedFailoverRequest, pf *v1alpha1.PlannedFailov
 // consumption that failed earlier, K099); an Admitting run keeps it until
 // its validation accepts the run, so a cooldown deferral can still retain
 // it (K050). Any other request is refused with a Warning and consumed.
-func (e *PlannedFailoverEngine) consumeStaleRequest(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) {
-	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+func (e *PlannedFailoverEngine) consumeStaleRequest(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) {
+	raw, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
 	if !ok {
 		return
 	}
 	req, err := parsePlannedFailoverAnnotation(raw)
 	own := err == nil && plannedRequestIsRuns(req, pf)
-	if own && pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting {
+	if own && pf.Phase == v1beta1.PlannedFailoverPhaseAdmitting {
 		return
 	}
 	if !own {
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRejected,
+		e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverRejected,
 			fmt.Sprintf("planned-failover annotation ignored: a previous planned failover is still running (phase=%q)", pf.Phase))
 	}
 	e.consumeRequest(ctx, fg, "stale")
 }
 
 // ownRequestPresent reports whether fg still carries pf's own request.
-func ownRequestPresent(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) bool {
-	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+func ownRequestPresent(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) bool {
+	raw, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
 	if !ok {
 		return false
 	}
@@ -1070,25 +1070,25 @@ func ownRequestPresent(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFail
 }
 
 // writeDeferredCooldown writes (or keeps) Deferred{CooldownActive}.
-func (e *PlannedFailoverEngine) writeDeferredCooldown(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
-	cur, fresh *v1alpha1.PlannedFailoverStatus, rejectMsg string, initial bool) (time.Duration, error) {
+func (e *PlannedFailoverEngine) writeDeferredCooldown(ctx context.Context, fg *v1beta1.MysqlFailoverGroup,
+	cur, fresh *v1beta1.PlannedFailoverStatus, rejectMsg string, initial bool) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	now := e.clk.Now()
 	retry := cooldownRetryAfter(fg, now)
 	msg := rejectMsg + " — annotation retained for automatic retry"
-	out, _ := e.writeDeferred(ctx, fg, cur, fresh, v1alpha1.PlannedFailoverDeferCooldownActive, retry, msg)
+	out, _ := e.writeDeferred(ctx, fg, cur, fresh, v1beta1.PlannedFailoverDeferCooldownActive, retry, msg)
 	if out != WriteCommitted {
 		return requeueFor(out), nil
 	}
 	if initial {
-		e.sink.Deferred(nn, v1alpha1.PlannedFailoverDeferCooldownActive)
+		e.sink.Deferred(nn, v1beta1.PlannedFailoverDeferCooldownActive)
 		target := ""
 		if fresh != nil {
 			target = fresh.TargetSite
 		} else if cur != nil {
 			target = cur.TargetSite
 		}
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverDeferred,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverDeferred,
 			fmt.Sprintf("planned failover to %q deferred: cooldown active, retrying at %s", target, retry.UTC().Format(time.RFC3339)))
 	}
 	if retry.IsZero() {
@@ -1098,8 +1098,8 @@ func (e *PlannedFailoverEngine) writeDeferredCooldown(ctx context.Context, fg *v
 }
 
 // writeDeferredHold writes (or keeps) Deferred{DeploymentHold}.
-func (e *PlannedFailoverEngine) writeDeferredHold(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
-	cur, fresh *v1alpha1.PlannedFailoverStatus, hold *DeploymentLeaseView) (time.Duration, error) {
+func (e *PlannedFailoverEngine) writeDeferredHold(ctx context.Context, fg *v1beta1.MysqlFailoverGroup,
+	cur, fresh *v1beta1.PlannedFailoverStatus, hold *DeploymentLeaseView) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	now := e.clk.Now()
 	if e.admission != nil {
@@ -1107,30 +1107,30 @@ func (e *PlannedFailoverEngine) writeDeferredHold(ctx context.Context, fg *v1alp
 	}
 	msg := fmt.Sprintf("planned-failover held by operation %s instance %s until %s", hold.OperationID, hold.Instance,
 		hold.ExpiresAt.UTC().Format(time.RFC3339))
-	initial := cur == nil || cur.Admission == nil || cur.Admission.DeferReason != v1alpha1.PlannedFailoverDeferDeploymentHold
-	out, _ := e.writeDeferred(ctx, fg, cur, fresh, v1alpha1.PlannedFailoverDeferDeploymentHold, hold.ExpiresAt, msg)
+	initial := cur == nil || cur.Admission == nil || cur.Admission.DeferReason != v1beta1.PlannedFailoverDeferDeploymentHold
+	out, _ := e.writeDeferred(ctx, fg, cur, fresh, v1beta1.PlannedFailoverDeferDeploymentHold, hold.ExpiresAt, msg)
 	if out != WriteCommitted {
 		return requeueFor(out), nil
 	}
 	if initial {
-		e.sink.Deferred(nn, v1alpha1.PlannedFailoverDeferDeploymentHold)
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverDeferred, msg)
+		e.sink.Deferred(nn, v1beta1.PlannedFailoverDeferDeploymentHold)
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverDeferred, msg)
 	}
 	return max(time.Second, hold.ExpiresAt.Sub(now)+time.Nanosecond), nil
 }
 
 // writeDeferred writes a Deferred record: fresh (a new run) or an update of
 // cur. An unchanged record is not rewritten.
-func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
-	cur, fresh *v1alpha1.PlannedFailoverStatus, reason v1alpha1.PlannedFailoverDeferReason, retry time.Time, msg string) (WriteOutcome, error) {
+func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1beta1.MysqlFailoverGroup,
+	cur, fresh *v1beta1.PlannedFailoverStatus, reason v1beta1.PlannedFailoverDeferReason, retry time.Time, msg string) (WriteOutcome, error) {
 	var retryMeta *metav1.Time
 	if !retry.IsZero() {
 		t := metav1.NewTime(retry.UTC().Truncate(time.Second))
 		retryMeta = &t
 	}
 	if fresh != nil {
-		fresh.Phase = v1alpha1.PlannedFailoverPhaseDeferred
-		fresh.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: reason, RetryTime: retryMeta}
+		fresh.Phase = v1beta1.PlannedFailoverPhaseDeferred
+		fresh.Admission = &v1beta1.PlannedFailoverAdmission{DeferReason: reason, RetryTime: retryMeta}
 		fresh.Message = msg
 		out, _, err := e.commit(ctx, fg, false, freshRunBuild(fresh))
 		return out, err
@@ -1139,18 +1139,18 @@ func (e *PlannedFailoverEngine) writeDeferred(ctx context.Context, fg *v1alpha1.
 		((a.RetryTime == nil && retryMeta == nil) || (a.RetryTime != nil && retryMeta != nil && a.RetryTime.Equal(retryMeta))) {
 		return WriteCommitted, nil
 	}
-	return e.advance(ctx, fg, cur, func(next *v1alpha1.PlannedFailoverStatus) {
-		next.Phase = v1alpha1.PlannedFailoverPhaseDeferred
-		next.Admission = &v1alpha1.PlannedFailoverAdmission{DeferReason: reason, RetryTime: retryMeta}
+	return e.advance(ctx, fg, cur, func(next *v1beta1.PlannedFailoverStatus) {
+		next.Phase = v1beta1.PlannedFailoverPhaseDeferred
+		next.Admission = &v1beta1.PlannedFailoverAdmission{DeferReason: reason, RetryTime: retryMeta}
 		next.Message = msg
 	})
 }
 
 // endNotStarted ends a run that owns nothing: Failed{NotStarted, reason}.
-func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	reason v1alpha1.PlannedFailoverReason, msg string, why ClaimReleaseReason, consume bool) (time.Duration, error) {
-	d, err := e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, msg: msg,
-		why: why, failedReason: v1alpha1.EventPlannedFailoverRejected})
+func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	reason v1beta1.PlannedFailoverReason, msg string, why ClaimReleaseReason, consume bool) (time.Duration, error) {
+	d, err := e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeNotStarted, reason: reason, msg: msg,
+		why: why, failedReason: v1beta1.EventPlannedFailoverRejected})
 	if consume && d == 0 && err == nil {
 		d = e.consumeRequest(ctx, fg, "rejected")
 	}
@@ -1168,7 +1168,7 @@ func (e *PlannedFailoverEngine) endNotStarted(ctx context.Context, fg *v1alpha1.
 // nothing, so waiting costs only the admission deadline. pf may be nil
 // for a request with no run yet; then only an empty activeSite counts,
 // because a record older than the request proves nothing about it.
-func plannedAuthorityUnsettled(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) (bool, string) {
+func plannedAuthorityUnsettled(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus, now time.Time) (bool, string) {
 	if fg.Status.ActiveSite == "" {
 		return true, "status.activeSite is empty; a failover is in flight"
 	}
@@ -1194,14 +1194,14 @@ func plannedAuthorityUnsettled(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.Pla
 // not as of the pass's load: a topology publication that reopened the
 // deployment gate in between is seen (K149). ok=false: the request or
 // the block changed meanwhile, and the next pass decides on it.
-func (e *PlannedFailoverEngine) reloadAfterReservation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
-	pf *v1alpha1.PlannedFailoverStatus) (*v1alpha1.MysqlFailoverGroup, bool) {
+func (e *PlannedFailoverEngine) reloadAfterReservation(ctx context.Context, fg *v1beta1.MysqlFailoverGroup,
+	pf *v1beta1.PlannedFailoverStatus) (*v1beta1.MysqlFailoverGroup, bool) {
 	fresh := e.reload(ctx, fg)
 	if fresh == nil {
 		return nil, false
 	}
-	before, hadReq := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
-	after, hasReq := fresh.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+	before, hadReq := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
+	after, hasReq := fresh.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
 	if hadReq != hasReq || before != after {
 		return nil, false
 	}
@@ -1214,26 +1214,26 @@ func (e *PlannedFailoverEngine) reloadAfterReservation(ctx context.Context, fg *
 
 // plannedStaticRejection reports whether a validation refusal depends on
 // the spec and the request alone, so unsettled authority cannot change it.
-func plannedStaticRejection(reason v1alpha1.PlannedFailoverReason) bool {
+func plannedStaticRejection(reason v1beta1.PlannedFailoverReason) bool {
 	switch reason {
-	case v1alpha1.PlannedFailoverReasonInvalidAnnotation,
-		v1alpha1.PlannedFailoverReasonUnknownSite,
-		v1alpha1.PlannedFailoverReasonTargetNotPromotable:
+	case v1beta1.PlannedFailoverReasonInvalidAnnotation,
+		v1beta1.PlannedFailoverReasonUnknownSite,
+		v1beta1.PlannedFailoverReasonTargetNotPromotable:
 		return true
 	}
 	return false
 }
 
 // deferredPass re-validates a Deferred run.
-func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
-	raw, ok := fg.GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]
+func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
+	raw, ok := fg.GetAnnotations()[v1beta1.PlannedFailoverAnnotation]
 	if !ok {
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonCanceled,
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonCanceled,
 			"planned-failover annotation removed while deferred; run cancelled", ReleaseTerminal, false)
 	}
 	req, perr := parsePlannedFailoverAnnotation(raw)
 	if perr != nil {
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonInvalidAnnotation, perr.Error(), ReleaseTerminal, true)
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonInvalidAnnotation, perr.Error(), ReleaseTerminal, true)
 	}
 	hold, release, err := e.beginAdmission(ctx, fg)
 	if err != nil {
@@ -1243,10 +1243,10 @@ func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.M
 		waitReason, why := plannedAdmissionWaitReason(fg, err)
 		msg := fmt.Sprintf("deferred; admission waiting (%s): %s", waitReason, why)
 		if pf.Message != msg || pf.Admission == nil || pf.Admission.WaitReason != waitReason {
-			out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
+			out, _ := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
 				next.Admission = next.Admission.DeepCopy()
 				if next.Admission == nil {
-					next.Admission = &v1alpha1.PlannedFailoverAdmission{}
+					next.Admission = &v1beta1.PlannedFailoverAdmission{}
 				}
 				next.Admission.WaitReason = waitReason
 				next.Message = msg
@@ -1272,61 +1272,61 @@ func (e *PlannedFailoverEngine) deferredPass(ctx context.Context, fg *v1alpha1.M
 		// deadline (a Deferred run has none); Admitting re-validates once
 		// authority settles.
 		settings := plannedFailoverSettingsFor(fg, req)
-		out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-			next.Phase = v1alpha1.PlannedFailoverPhaseAdmitting
+		out, _ := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+			next.Phase = v1beta1.PlannedFailoverPhaseAdmitting
 			next.TargetSite = req.Site
 			next.Settings = settings
 			deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
-			next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline,
-				WaitReason: v1alpha1.PlannedFailoverWaitAuthorityUnsettled}
-			next.Message = fmt.Sprintf("waiting for admission (%s): %s", v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why)
+			next.Admission = &v1beta1.PlannedFailoverAdmission{DeadlineTime: &deadline,
+				WaitReason: v1beta1.PlannedFailoverWaitAuthorityUnsettled}
+			next.Message = fmt.Sprintf("waiting for admission (%s): %s", v1beta1.PlannedFailoverWaitAuthorityUnsettled, why)
 		})
 		if out != WriteCommitted {
 			return requeueFor(out), nil
 		}
 		// The request stays until the Admitting run's validation accepts
 		// it (K050).
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverAdmissionDelayed,
-			fmt.Sprintf("planned failover to %q waiting: %s %s", req.Site, v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why))
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverAdmissionDelayed,
+			fmt.Sprintf("planned failover to %q waiting: %s %s", req.Site, v1beta1.PlannedFailoverWaitAuthorityUnsettled, why))
 		return plannedRequeuePoll, nil
 	}
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, now, true)
 	switch result {
 	case PlannedFailoverAccept:
 		settings := plannedFailoverSettingsFor(fg, req)
-		out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-			next.Phase = v1alpha1.PlannedFailoverPhaseAdmitting
+		out, _ := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+			next.Phase = v1beta1.PlannedFailoverPhaseAdmitting
 			next.TargetSite = req.Site
 			next.Settings = settings
 			deadline := metav1.NewTime(now.Add(plannedFailoverAdmissionTimeout))
-			next.Admission = &v1alpha1.PlannedFailoverAdmission{DeadlineTime: &deadline}
+			next.Admission = &v1beta1.PlannedFailoverAdmission{DeadlineTime: &deadline}
 			next.Message = fmt.Sprintf("proceeding with deferred planned failover to %q", req.Site)
 		})
 		if out != WriteCommitted {
 			return requeueFor(out), nil
 		}
 		e.consumeRequest(ctx, fg, "resumed")
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverStarted,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverStarted,
 			fmt.Sprintf("deferred planned failover to %q resumed (maxLagWait=%s, drainTimeout=%s)",
 				req.Site, settings.MaxLagWait.Duration, settings.DrainTimeout.Duration))
 		return plannedRequeueNext, nil
 	case PlannedFailoverSkip:
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSkipped,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverSkipped,
 			fmt.Sprintf("deferred planned failover: site %q is already the active primary; clearing annotation", req.Site))
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAlreadyActive,
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonAlreadyActive,
 			fmt.Sprintf("deferred planned failover to %q resolved as no-op: target is already active", req.Site), ReleaseTerminal, true)
 	}
-	if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1alpha1.PlannedFailoverCooldownDefer {
+	if reason == v1beta1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1beta1.PlannedFailoverCooldownDefer {
 		// A switch from another deferral (a deployment hold that expired
 		// before the cooldown) is reported like a new one (K146).
-		initial := pf.Admission == nil || pf.Admission.DeferReason != v1alpha1.PlannedFailoverDeferCooldownActive
+		initial := pf.Admission == nil || pf.Admission.DeferReason != v1beta1.PlannedFailoverDeferCooldownActive
 		return e.writeDeferredCooldown(ctx, fg, pf, nil, verr.Error(), initial)
 	}
 	return e.endNotStarted(ctx, fg, pf, reason, verr.Error(), ReleaseTerminal, true)
 }
 
 // admittingPass validates and asks for the claim (§3.2, §6.1).
-func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	m := e.runMemo(pf.RunID)
 	now := e.clk.Now()
@@ -1344,11 +1344,11 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 	e.consumeStaleRequest(ctx, fg, pf)
 
 	if pf.Admission != nil && pf.Admission.DeadlineTime != nil && !now.Before(pf.Admission.DeadlineTime.Time) {
-		last := v1alpha1.PlannedFailoverWaitReason("none")
+		last := v1beta1.PlannedFailoverWaitReason("none")
 		if pf.Admission.WaitReason != "" {
 			last = pf.Admission.WaitReason
 		}
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAdmissionTimeout,
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonAdmissionTimeout,
 			fmt.Sprintf("planned failover to %q was not admitted within %s (last wait reason: %s)", pf.TargetSite,
 				plannedFailoverAdmissionTimeout, last), ReleaseAdmissionTimeout, true)
 	}
@@ -1368,23 +1368,23 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 	}
 	fg = fresh
 	if hold != nil {
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonConcurrentOperation,
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonConcurrentOperation,
 			fmt.Sprintf("planned-failover held by operation %s instance %s until %s; re-annotate once it is released",
 				hold.OperationID, hold.Instance, hold.ExpiresAt.UTC().Format(time.RFC3339)), ReleaseTerminal, true)
 	}
 	if unsettled, why := plannedAuthorityUnsettled(fg, pf, now); unsettled {
 		// Validation would judge the target from mid-failover status;
 		// wait (bounded by the deadline) and validate once it settles.
-		return e.noteWait(ctx, fg, pf, v1alpha1.PlannedFailoverWaitAuthorityUnsettled, why)
+		return e.noteWait(ctx, fg, pf, v1beta1.PlannedFailoverWaitAuthorityUnsettled, why)
 	}
 	req := PlannedFailoverRequest{Site: pf.TargetSite}
 	result, reason, verr := validatePlannedFailoverRequest(fg, req, now, true)
 	switch result {
 	case PlannedFailoverSkip:
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAlreadyActive,
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonAlreadyActive,
 			fmt.Sprintf("planned-failover: target %q is already the active primary; nothing to do", pf.TargetSite), ReleaseTerminal, true)
 	case PlannedFailoverReject:
-		if reason == v1alpha1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1alpha1.PlannedFailoverCooldownDefer &&
+		if reason == v1beta1.PlannedFailoverReasonCooldownActive && effectiveOnCooldown(fg) == v1beta1.PlannedFailoverCooldownDefer &&
 			ownRequestPresent(fg, pf) && !m.granted {
 			// A request that waited in Admitting before its validation (an
 			// unsettled authority, a refused reservation) is deferred as
@@ -1398,13 +1398,13 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 		e.consumeRequest(ctx, fg, "accepted")
 	}
 	if d := fg.Status.Dragonfly; d != nil && dragonflyUpgradeInFlight(d.Upgrade) {
-		return e.noteWait(ctx, fg, pf, v1alpha1.PlannedFailoverWaitDragonflyUpgradeInFlight,
+		return e.noteWait(ctx, fg, pf, v1beta1.PlannedFailoverWaitDragonflyUpgradeInFlight,
 			"a Dragonfly snapshot upgrade is in flight")
 	}
 
 	baseline, berr := durableFailoverRecord(fg, now)
 	if berr != nil && baseline.LastFailover.IsZero() && baseline.LastFailoverTarget == "" {
-		return e.endNotStarted(ctx, fg, pf, v1alpha1.PlannedFailoverReasonInvalidFailoverState,
+		return e.endNotStarted(ctx, fg, pf, v1beta1.PlannedFailoverReasonInvalidFailoverState,
 			fmt.Sprintf("planned-failover: durable failover record is invalid: %v", berr), ReleaseTerminal, false)
 	}
 	dec, err := e.topo.ClaimPlannedFailover(ctx, nn, PlannedClaimRequest{RunID: pf.RunID, Target: pf.TargetSite, DurableBaseline: baseline})
@@ -1433,13 +1433,13 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 	m.granted = true
 	m.fence = pfFenceMemo{}
 	claimedAt := metav1.NewTime(e.clk.Now())
-	out, _ := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-		next.Phase = v1alpha1.PlannedFailoverPhaseFencing
+	out, _ := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+		next.Phase = v1beta1.PlannedFailoverPhaseFencing
 		next.SourceSite = dec.Source
 		next.ClaimTime = &claimedAt
 		next.ClaimBaseline = dec.Baseline.toAPI()
-		next.Fence = &v1alpha1.PlannedFailoverFenceRecord{
-			State: v1alpha1.PlannedFailoverFenceIntended, IntentTime: claimedAt, SourceServerUUID: dec.SourceServerUUID,
+		next.Fence = &v1beta1.PlannedFailoverFenceRecord{
+			State: v1beta1.PlannedFailoverFenceIntended, IntentTime: claimedAt, SourceServerUUID: dec.SourceServerUUID,
 		}
 		next.Message = fmt.Sprintf("claim granted; fencing source %q", dec.Source)
 	})
@@ -1459,7 +1459,7 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 	}
 	log.FromContext(ctx).Info("planned failover: claim granted", "fg", nn.String(), "runId", pf.RunID,
 		"source", dec.Source, "target", pf.TargetSite)
-	e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverClaimGranted,
+	e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverClaimGranted,
 		fmt.Sprintf("planned failover %s claimed %q → %q", pf.RunID, dec.Source, pf.TargetSite))
 	return plannedRequeueNext, nil
 }
@@ -1467,11 +1467,11 @@ func (e *PlannedFailoverEngine) admittingPass(ctx context.Context, fg *v1alpha1.
 // settleProvisionalGrant resolves the provisional grant of an Admitting
 // block this process was granted the claim for. done=true: the pass ends
 // with d.
-func (e *PlannedFailoverEngine) settleProvisionalGrant(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup,
-	pf *v1alpha1.PlannedFailoverStatus) (time.Duration, bool) {
+func (e *PlannedFailoverEngine) settleProvisionalGrant(ctx context.Context, fg *v1beta1.MysqlFailoverGroup,
+	pf *v1beta1.PlannedFailoverStatus) (time.Duration, bool) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	m := e.runMemo(pf.RunID)
-	if u := m.unsettled; u != nil && u.phase == v1alpha1.PlannedFailoverPhaseFencing {
+	if u := m.unsettled; u != nil && u.phase == v1beta1.PlannedFailoverPhaseFencing {
 		sctx, cancel := persistCtx(ctx)
 		out, err := e.store.Settle(sctx, nn, u.baseRV, pf.RunID, u.revision)
 		cancel()
@@ -1502,8 +1502,8 @@ func (e *PlannedFailoverEngine) settleProvisionalGrant(ctx context.Context, fg *
 
 // noteWait records an admission wait reason when it changes, with a
 // PlannedFailoverAdmissionDelayed Event.
-func (e *PlannedFailoverEngine) noteWait(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	reason v1alpha1.PlannedFailoverWaitReason, msg string) (time.Duration, error) {
+func (e *PlannedFailoverEngine) noteWait(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	reason v1beta1.PlannedFailoverWaitReason, msg string) (time.Duration, error) {
 	message := fmt.Sprintf("waiting for admission (%s)", reason)
 	if msg != "" {
 		message += ": " + msg
@@ -1513,9 +1513,9 @@ func (e *PlannedFailoverEngine) noteWait(ctx context.Context, fg *v1alpha1.Mysql
 	if pf.Admission != nil && pf.Admission.WaitReason == reason && pf.Message == message {
 		return plannedRequeuePoll, nil
 	}
-	out, err := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
+	out, err := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
 		if next.Admission == nil {
-			next.Admission = &v1alpha1.PlannedFailoverAdmission{}
+			next.Admission = &v1beta1.PlannedFailoverAdmission{}
 		} else {
 			next.Admission = next.Admission.DeepCopy()
 		}
@@ -1524,7 +1524,7 @@ func (e *PlannedFailoverEngine) noteWait(ctx context.Context, fg *v1alpha1.Mysql
 	})
 	switch out {
 	case WriteCommitted:
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverAdmissionDelayed,
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverAdmissionDelayed,
 			fmt.Sprintf("planned failover to %q waiting: %s %s", pf.TargetSite, reason, msg))
 	case WriteGone:
 		return 0, nil
@@ -1538,7 +1538,7 @@ func (e *PlannedFailoverEngine) noteWait(ctx context.Context, fg *v1alpha1.Mysql
 // ---------- claim phases ----------
 
 // claimPass runs one pass of a run that owns sites.
-func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	ref := plannedRunRef(nn, pf)
 	if e.terminated(pf.RunID) {
@@ -1548,7 +1548,7 @@ func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1alpha1.Mysq
 		// hydrated back for it is released (K150).
 		return e.retryTerminatedRun(ctx, fg, pf)
 	}
-	if m := e.runMemo(pf.RunID); pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && m.promote.released {
+	if m := e.runMemo(pf.RunID); pf.Phase == v1beta1.PlannedFailoverPhasePromoting && m.promote.released {
 		if held, ok := e.topo.HeldRunClaim(nn); !ok || held != pf.RunID {
 			// The claim was released after the promotion was recorded and
 			// published: only the Publishing write is left, and it must not
@@ -1560,14 +1560,14 @@ func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1alpha1.Mysq
 		// into it, then release again.
 		m.promote.released, m.promote.recorded = false, false
 	}
-	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting {
+	if pf.Phase == v1beta1.PlannedFailoverPhasePromoting {
 		if held, ok := e.topo.HeldRunClaim(nn); (!ok || held != pf.RunID) && plannedPromotionRecorded(fg, pf, e.clk.Now()) {
 			return e.publishRecorded(ctx, fg, pf)
 		}
 	}
 	dec, err := e.topo.EnsureClaim(ctx, ref, fg)
 	switch {
-	case errors.Is(err, errManagerAbsent) || (err == nil && dec.Kind == ClaimWait && dec.WaitReason == v1alpha1.PlannedFailoverWaitManagerAbsent):
+	case errors.Is(err, errManagerAbsent) || (err == nil && dec.Kind == ClaimWait && dec.WaitReason == v1beta1.PlannedFailoverWaitManagerAbsent):
 		return e.managerAbsent(ctx, fg, pf)
 	case errors.Is(err, errLeaderLost):
 		return plannedRequeueBackoff, nil
@@ -1579,7 +1579,7 @@ func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1alpha1.Mysq
 	case dec.Kind == ClaimReject:
 		reason := dec.RejectReason
 		if reason == "" {
-			reason = v1alpha1.PlannedFailoverReasonAuthorityChanged
+			reason = v1beta1.PlannedFailoverReasonAuthorityChanged
 		}
 		return e.endWithoutMySQL(ctx, fg, pf, reason, "the claim could not be re-established: "+dec.Message, ReleaseTerminal)
 	}
@@ -1587,19 +1587,19 @@ func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1alpha1.Mysq
 	e.noteConfirming(ctx, nn, pf)
 
 	switch pf.Phase {
-	case v1alpha1.PlannedFailoverPhaseFencing:
+	case v1beta1.PlannedFailoverPhaseFencing:
 		return e.fencingStep(ctx, fg, pf, ref)
-	case v1alpha1.PlannedFailoverPhaseDraining:
+	case v1beta1.PlannedFailoverPhaseDraining:
 		return e.drainingStep(ctx, fg, pf, ref)
-	case v1alpha1.PlannedFailoverPhaseWaitingForLag:
+	case v1beta1.PlannedFailoverPhaseWaitingForLag:
 		return e.lagStep(ctx, fg, pf, ref)
-	case v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync:
+	case v1beta1.PlannedFailoverPhaseWaitingForDragonflySync:
 		return e.dragonflySyncStep(ctx, fg, pf, ref)
-	case v1alpha1.PlannedFailoverPhasePromotingDragonfly:
+	case v1beta1.PlannedFailoverPhasePromotingDragonfly:
 		return e.dragonflyTakeoverStep(ctx, fg, pf, ref)
-	case v1alpha1.PlannedFailoverPhasePromoting:
+	case v1beta1.PlannedFailoverPhasePromoting:
 		return e.promotingStep(ctx, fg, pf, ref)
-	case v1alpha1.PlannedFailoverPhaseRollingBack:
+	case v1beta1.PlannedFailoverPhaseRollingBack:
 		return e.rollbackStep(ctx, fg, pf, ref)
 	}
 	return 0, nil
@@ -1607,7 +1607,7 @@ func (e *PlannedFailoverEngine) claimPass(ctx context.Context, fg *v1alpha1.Mysq
 
 // noteConfirming logs that a pass found a record this process did not
 // write, so its side effect is confirmed live (§2.3).
-func (e *PlannedFailoverEngine) noteConfirming(ctx context.Context, nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
+func (e *PlannedFailoverEngine) noteConfirming(ctx context.Context, nn types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) {
 	m := e.runMemo(pf.RunID)
 	if m.writtenPhase == pf.Phase || m.confirmedPhases[pf.Phase] {
 		return
@@ -1617,21 +1617,21 @@ func (e *PlannedFailoverEngine) noteConfirming(ctx context.Context, nn types.Nam
 		"phase", string(pf.Phase), "effect", plannedPhaseEffect(pf.Phase))
 }
 
-func plannedPhaseEffect(p v1alpha1.PlannedFailoverPhase) string {
+func plannedPhaseEffect(p v1beta1.PlannedFailoverPhase) string {
 	switch p {
-	case v1alpha1.PlannedFailoverPhaseFencing:
+	case v1beta1.PlannedFailoverPhaseFencing:
 		return "fence"
-	case v1alpha1.PlannedFailoverPhaseDraining:
+	case v1beta1.PlannedFailoverPhaseDraining:
 		return "drain"
-	case v1alpha1.PlannedFailoverPhaseWaitingForLag:
+	case v1beta1.PlannedFailoverPhaseWaitingForLag:
 		return "lagWait"
-	case v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync:
+	case v1beta1.PlannedFailoverPhaseWaitingForDragonflySync:
 		return "dragonflySync"
-	case v1alpha1.PlannedFailoverPhasePromotingDragonfly:
+	case v1beta1.PlannedFailoverPhasePromotingDragonfly:
 		return "dragonflyTakeover"
-	case v1alpha1.PlannedFailoverPhasePromoting:
+	case v1beta1.PlannedFailoverPhasePromoting:
 		return "promotion"
-	case v1alpha1.PlannedFailoverPhaseRollingBack:
+	case v1beta1.PlannedFailoverPhaseRollingBack:
 		return "rollback"
 	}
 	return string(p)
@@ -1639,7 +1639,7 @@ func plannedPhaseEffect(p v1alpha1.PlannedFailoverPhase) string {
 
 // facadeErr maps a facade sentinel. handled=false: a MySQL or transport
 // error the caller counts toward its loss window or deadline.
-func (e *PlannedFailoverEngine) facadeErr(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) facadeErr(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	err error) (time.Duration, error, bool) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	switch {
@@ -1670,8 +1670,8 @@ func (e *PlannedFailoverEngine) facadeErr(ctx context.Context, fg *v1alpha1.Mysq
 // ends at once without MySQL access, like a manager absence (§6.3):
 // SourceLeftFenced, or PromotedUnconfirmed in Promoting, with nothing
 // named.
-func (e *PlannedFailoverEngine) endSiteRemoved(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
-	return e.endWithoutMySQL(ctx, fg, pf, v1alpha1.PlannedFailoverReasonUnknownSite,
+func (e *PlannedFailoverEngine) endSiteRemoved(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
+	return e.endWithoutMySQL(ctx, fg, pf, v1beta1.PlannedFailoverReasonUnknownSite,
 		fmt.Sprintf("the run's source %q or target %q is no longer in spec.sites; the run ended without MySQL access", pf.SourceSite, pf.TargetSite),
 		ReleaseTerminal)
 }
@@ -1691,7 +1691,7 @@ func (e *PlannedFailoverEngine) lossWindow(since *time.Time, reachable bool) (lo
 }
 
 // reprove runs the hydrated claim's re-proof (§4.4) and maps its result.
-func (e *PlannedFailoverEngine) reprove(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) reprove(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	res, err := e.topo.Reprove(ctx, plannedRunRef(nn, pf), fg)
 	if err != nil {
@@ -1713,7 +1713,7 @@ func (e *PlannedFailoverEngine) reprove(ctx context.Context, fg *v1alpha1.MysqlF
 	switch {
 	case res.SourceUnreachable:
 		if e.lossWindow(&m.sourceLossSince, false) {
-			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonSourceLost)
+			return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonSourceLost)
 		}
 		return plannedRequeuePoll, nil
 	case res.OK:
@@ -1729,11 +1729,11 @@ func (e *PlannedFailoverEngine) reprove(ctx context.Context, fg *v1alpha1.MysqlF
 }
 
 // fencingStep sends (or confirms) the fence and writes Draining.
-func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
 	if pf.Fence == nil {
-		return e.endWithoutMySQL(ctx, fg, pf, v1alpha1.PlannedFailoverReasonInternalError, "Fencing record has no fence intent", ReleaseTerminal)
+		return e.endWithoutMySQL(ctx, fg, pf, v1beta1.PlannedFailoverReasonInternalError, "Fencing record has no fence intent", ReleaseTerminal)
 	}
 	var proof FenceProof
 	var err error
@@ -1763,7 +1763,7 @@ func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.My
 		m.sourceLossSince = time.Time{}
 	}
 	if len(proof.UnreadablePeers) > 0 {
-		m.warnings = addPlannedWarnings(m.warnings, v1alpha1.PlannedFailoverWarningUnreachablePeers)
+		m.warnings = addPlannedWarnings(m.warnings, v1beta1.PlannedFailoverWarningUnreachablePeers)
 	}
 	reason := proof.Reason
 	switch proof.Kind {
@@ -1771,63 +1771,63 @@ func (e *PlannedFailoverEngine) fencingStep(ctx context.Context, fg *v1alpha1.My
 		m.fence = pfFenceMemo{sent: true, setSent: m.fence.setSent}
 		now := metav1.NewTime(e.clk.Now())
 		gtid := proof.GtidSet
-		out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-			next.Phase = v1alpha1.PlannedFailoverPhaseDraining
+		out, werr := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+			next.Phase = v1beta1.PlannedFailoverPhaseDraining
 			next.Fence = next.Fence.DeepCopy()
-			next.Fence.State = v1alpha1.PlannedFailoverFenceApplied
+			next.Fence.State = v1beta1.PlannedFailoverFenceApplied
 			next.Fence.ApplyTime = &now
 			next.Fence.GtidSet = &gtid
-			next.Drain = &v1alpha1.PlannedFailoverDrainRecord{StartTime: now}
+			next.Drain = &v1beta1.PlannedFailoverDrainRecord{StartTime: now}
 			next.Message = fmt.Sprintf("source %q fenced at %s; draining connections", pf.SourceSite, plannedGtidHint(gtid))
 			if len(proof.UnreadablePeers) > 0 {
 				next.Message += fmt.Sprintf(" (unreadable peers: %s)", strings.Join(proof.UnreadablePeers, ", "))
 			}
 		})
 		if out == WriteCommitted {
-			e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverDrainStarted,
+			e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverDrainStarted,
 				fmt.Sprintf("fenced source primary %q; draining application connections (timeout %s)",
 					pf.SourceSite, plannedSettings(pf).DrainTimeout.Duration))
 		}
 		return e.afterAdvance(ctx, fg, pf, out, werr)
 	case FenceNotSent:
 		if reason == "" {
-			reason = v1alpha1.PlannedFailoverReasonAuthorityChanged
+			reason = v1beta1.PlannedFailoverReasonAuthorityChanged
 		}
-		outcome := v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
+		outcome := v1beta1.PlannedFailoverOutcomeSourceLeftFenced
 		if proof.SourceWritable {
-			outcome = v1alpha1.PlannedFailoverOutcomeRolledBack
+			outcome = v1beta1.PlannedFailoverOutcomeRolledBack
 		}
 		msg := fmt.Sprintf("authority moved before the fence was sent to %q; nothing was sent", pf.SourceSite)
 		if m.fence.setSent {
 			msg = fmt.Sprintf("authority moved after a fence was sent to %q; the source no longer holds the run's fence", pf.SourceSite)
 		}
-		var warnings []v1alpha1.PlannedFailoverWarning
-		if outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+		var warnings []v1beta1.PlannedFailoverWarning
+		if outcome == v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 			// Whatever this process sent earlier, the source's read-only
 			// state is not the run's fence now (a replaced source, say):
 			// it is never named for re-assert, here or after a restart
 			// (K143).
-			warnings = []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable}
+			warnings = []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningFenceNotAttributable}
 		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: outcome, reason: reason, msg: msg, warnings: warnings})
 	case FenceForeignWritable:
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonForeignWritable)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonForeignWritable)
 	case FenceNotAttributable:
 		if reason == "" {
-			reason = v1alpha1.PlannedFailoverReasonAuthorityChanged
+			reason = v1beta1.PlannedFailoverReasonAuthorityChanged
 		}
-		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
-			warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable},
+		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
+			warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningFenceNotAttributable},
 			msg:      fmt.Sprintf("source %q is read-only, but the fence is not this run's; %s", pf.SourceSite, plannedManualUnfenceAdvice)})
 	case FenceSourceUnreachable:
 		if e.lossWindow(&m.sourceLossSince, false) {
-			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonSourceLost)
+			return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonSourceLost)
 		}
 		return plannedRequeuePoll, nil
 	}
 	// FenceRetry, or a transport error.
 	if pastDeadline {
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonFenceFailed)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonFenceFailed)
 	}
 	return plannedRequeuePoll, nil
 }
@@ -1841,7 +1841,7 @@ func plannedGtidHint(gtid string) string {
 
 // drainingStep kills application connections on the fenced source until it
 // is idle or drainTimeout passes.
-func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
 	remaining, err := e.topo.KillAppConnections(ctx, ref)
@@ -1861,7 +1861,7 @@ func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1alpha1.M
 			"sourceReachable", reachable, "error", err.Error())
 	}
 	if e.lossWindow(&m.sourceLossSince, reachable) {
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonSourceLost)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonSourceLost)
 	}
 	start := e.clk.Now()
 	if pf.Drain != nil {
@@ -1882,10 +1882,10 @@ func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1alpha1.M
 		msg = fmt.Sprintf("drain budget exhausted after %s with %d connection(s) remaining on %q; proceeding",
 			truncateDur(elapsed), remaining, pf.SourceSite)
 	}
-	out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-		next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
+	out, werr := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+		next.Phase = v1beta1.PlannedFailoverPhaseWaitingForLag
 		if next.Drain == nil {
-			next.Drain = &v1alpha1.PlannedFailoverDrainRecord{StartTime: now}
+			next.Drain = &v1beta1.PlannedFailoverDrainRecord{StartTime: now}
 		} else {
 			next.Drain = next.Drain.DeepCopy()
 		}
@@ -1896,7 +1896,7 @@ func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1alpha1.M
 			left := remaining
 			next.Drain.RemainingConnections = &left
 		}
-		next.LagWait = &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: now}
+		next.LagWait = &v1beta1.PlannedFailoverLagWaitRecord{StartTime: now}
 		next.Message = fmt.Sprintf("%s; waiting for target %q to catch up", msg, pf.TargetSite)
 	})
 	return e.afterAdvance(ctx, fg, pf, out, werr)
@@ -1904,7 +1904,7 @@ func (e *PlannedFailoverEngine) drainingStep(ctx context.Context, fg *v1alpha1.M
 
 // afterAdvance maps the outcome of a claim-phase transition, ending the run
 // with a terminal marker once status writes have stalled (§6.4).
-func (e *PlannedFailoverEngine) afterAdvance(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) afterAdvance(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	out WriteOutcome, err error) (time.Duration, error) {
 	if plannedWriteStalled(out, err) {
 		if d, done := e.maybeStallFinish(ctx, fg, pf); done {
@@ -1920,7 +1920,7 @@ func (e *PlannedFailoverEngine) afterAdvance(ctx context.Context, fg *v1alpha1.M
 }
 
 // lagStep waits for the target to apply the fenced set.
-func (e *PlannedFailoverEngine) lagStep(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) lagStep(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
 	nn := ref.Group
 	m := e.runMemo(pf.RunID)
@@ -1931,7 +1931,7 @@ func (e *PlannedFailoverEngine) lagStep(ctx context.Context, fg *v1alpha1.MysqlF
 		// (K097).
 		log.FromContext(ctx).Info("planned failover: the fenced GTID set is invalid; rolling back", "fg", nn.String(),
 			"runId", pf.RunID, "error", perr.Error())
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonInvalidGTID)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonInvalidGTID)
 	}
 	probe, err := e.topo.ProbeLag(ctx, ref, plannedFenceSet(pf))
 	if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
@@ -1943,13 +1943,13 @@ func (e *PlannedFailoverEngine) lagStep(ctx context.Context, fg *v1alpha1.MysqlF
 		probe = LagProbe{SourceReachable: true}
 	}
 	if e.lossWindow(&m.sourceLossSince, probe.SourceReachable) {
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonSourceLost)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonSourceLost)
 	}
 	if e.lossWindow(&m.targetLossSince, probe.TargetReachable) {
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonTargetLost)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonTargetLost)
 	}
 	if probe.Divergent {
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonDivergentTarget)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonDivergentTarget)
 	}
 	start := e.clk.Now()
 	if pf.LagWait != nil {
@@ -1968,42 +1968,42 @@ func (e *PlannedFailoverEngine) lagStep(ctx context.Context, fg *v1alpha1.MysqlF
 	if probe.CaughtUp {
 		now := metav1.NewTime(e.clk.Now())
 		if settings.Dragonfly != nil {
-			out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-				next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync
+			out, werr := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+				next.Phase = v1beta1.PlannedFailoverPhaseWaitingForDragonflySync
 				next.LagWait = plannedLagCaughtUp(next.LagWait, now)
-				next.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{SyncWaitStartTime: &now,
+				next.Dragonfly = &v1beta1.PlannedFailoverDragonflyStatus{SyncWaitStartTime: &now,
 					Message: fmt.Sprintf("waiting for target %q replica to catch up", pf.TargetSite)}
 				next.Message = fmt.Sprintf("target %q caught up in %s; waiting for Dragonfly replica", pf.TargetSite, truncateDur(elapsed))
 			})
 			observe(out == WriteCommitted)
 			if out == WriteCommitted {
-				e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverTargetCaughtUp,
+				e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverTargetCaughtUp,
 					fmt.Sprintf("target %q caught up after %s; proceeding", pf.TargetSite, truncateDur(elapsed)))
 			}
 			return e.afterAdvance(ctx, fg, pf, out, werr)
 		}
-		d, perr := e.enterPromoting(ctx, fg, pf, ref, func(next *v1alpha1.PlannedFailoverStatus) {
+		d, perr := e.enterPromoting(ctx, fg, pf, ref, func(next *v1beta1.PlannedFailoverStatus) {
 			next.LagWait = plannedLagCaughtUp(next.LagWait, now)
 			next.Message = fmt.Sprintf("target %q caught up in %s; promoting", pf.TargetSite, truncateDur(elapsed))
 		})
 		observe(d == plannedRequeueNext && perr == nil)
 		if d == plannedRequeueNext {
-			e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverTargetCaughtUp,
+			e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverTargetCaughtUp,
 				fmt.Sprintf("target %q caught up after %s; proceeding", pf.TargetSite, truncateDur(elapsed)))
 		}
 		return d, perr
 	}
 	if elapsed >= settings.MaxLagWait.Duration {
-		d, err := e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonLagTimeout)
+		d, err := e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonLagTimeout)
 		observe(d == plannedRequeueNext && err == nil)
 		return d, err
 	}
 	return plannedRequeuePoll, nil
 }
 
-func plannedLagCaughtUp(lw *v1alpha1.PlannedFailoverLagWaitRecord, now metav1.Time) *v1alpha1.PlannedFailoverLagWaitRecord {
+func plannedLagCaughtUp(lw *v1beta1.PlannedFailoverLagWaitRecord, now metav1.Time) *v1beta1.PlannedFailoverLagWaitRecord {
 	if lw == nil {
-		lw = &v1alpha1.PlannedFailoverLagWaitRecord{StartTime: now}
+		lw = &v1beta1.PlannedFailoverLagWaitRecord{StartTime: now}
 	} else {
 		lw = lw.DeepCopy()
 	}
@@ -2013,8 +2013,8 @@ func plannedLagCaughtUp(lw *v1alpha1.PlannedFailoverLagWaitRecord, now metav1.Ti
 
 // enterPromoting reads the target's server_uuid on a pinned session and
 // writes the Promoting intent with it.
-func (e *PlannedFailoverEngine) enterPromoting(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	ref PlannedRunRef, edit func(next *v1alpha1.PlannedFailoverStatus)) (time.Duration, error) {
+func (e *PlannedFailoverEngine) enterPromoting(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	ref PlannedRunRef, edit func(next *v1beta1.PlannedFailoverStatus)) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
 	targetUUID, err := e.topo.ReadTargetServerUUID(ctx, ref)
 	if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
@@ -2022,25 +2022,25 @@ func (e *PlannedFailoverEngine) enterPromoting(ctx context.Context, fg *v1alpha1
 	}
 	if err != nil || targetUUID == "" {
 		if e.lossWindow(&m.targetIdentityLossSince, false) {
-			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonTargetLost)
+			return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonTargetLost)
 		}
 		return plannedRequeuePoll, nil
 	}
 	m.targetLossSince, m.targetIdentityLossSince = time.Time{}, time.Time{}
 	now := metav1.NewTime(e.clk.Now())
 	m.promote = pfPromoteMemo{}
-	out, werr := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
+	out, werr := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
 		edit(next)
-		next.Phase = v1alpha1.PlannedFailoverPhasePromoting
-		next.Promotion = &v1alpha1.PlannedFailoverPromotionRecord{
-			State: v1alpha1.PlannedFailoverPromotionIntended, IntentTime: now, TargetServerUUID: targetUUID,
+		next.Phase = v1beta1.PlannedFailoverPhasePromoting
+		next.Promotion = &v1beta1.PlannedFailoverPromotionRecord{
+			State: v1beta1.PlannedFailoverPromotionIntended, IntentTime: now, TargetServerUUID: targetUUID,
 		}
 	})
 	return e.afterAdvance(ctx, fg, pf, out, werr)
 }
 
 // promotingStep runs one staged promotion attempt, or the confirmed tail.
-func (e *PlannedFailoverEngine) promotingStep(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) promotingStep(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
 	if m.promote.confirmed {
@@ -2059,7 +2059,7 @@ func (e *PlannedFailoverEngine) promotingStep(ctx context.Context, fg *v1alpha1.
 }
 
 // applyPromoteOutcome is the §7.4 mapping.
-func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	out PromoteOutcome) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
 	m.promote.mayHaveWritten = m.promote.mayHaveWritten || out.MayHaveWritten
@@ -2075,10 +2075,10 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 	case PromoteAborted:
 		reason := out.Reason
 		if reason == "" {
-			reason = v1alpha1.PlannedFailoverReasonPromotionAborted
+			reason = v1beta1.PlannedFailoverReasonPromotionAborted
 		}
 		if out.Terminal != "" {
-			if out.Terminal == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+			if out.Terminal == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 				return e.endManualRecovery(ctx, fg, pf, reason, "the promotion found the target in a state the run cannot explain", out.Sites...)
 			}
 			msg := fmt.Sprintf("promotion of %q aborted (%s); nothing was written to the target", pf.TargetSite, reason)
@@ -2102,7 +2102,7 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 	case PromoteInconsistent:
 		reason := out.Reason
 		if reason == "" {
-			reason = v1alpha1.PlannedFailoverReasonExecuteFailed
+			reason = v1beta1.PlannedFailoverReasonExecuteFailed
 		}
 		if out.RollbackIfUnrecorded && !plannedOwnRecordDurable(fg, pf, e.clk.Now()) {
 			// The DST-3 ruling: the target was replaced (another server_uuid,
@@ -2116,7 +2116,7 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 			// unfenced.
 			log.FromContext(ctx).Info("planned failover: target replaced before the promotion was recorded; rolling back",
 				"fg", fg.Namespace+"/"+fg.Name, "runId", pf.RunID, "target", pf.TargetSite, "targetServerUUID", out.TargetServerUUID)
-			return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonTargetChanged)
+			return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonTargetChanged)
 		}
 		return e.endManualRecovery(ctx, fg, pf, reason, fmt.Sprintf("target %q is in a state the run cannot explain (stage %s)", pf.TargetSite, out.Stage),
 			out.Sites...)
@@ -2132,18 +2132,18 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 		return plannedRequeueBackoff, nil
 	}
 	if m.promote.mayHaveWritten || out.MayHaveWritten {
-		reason := v1alpha1.PlannedFailoverReasonPromotionUnconfirmed
+		reason := v1beta1.PlannedFailoverReasonPromotionUnconfirmed
 		if targetLost {
-			reason = v1alpha1.PlannedFailoverReasonTargetLost
+			reason = v1beta1.PlannedFailoverReasonTargetLost
 		}
-		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, reason: reason,
+		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomePromotedUnconfirmed, reason: reason,
 			msg: fmt.Sprintf("super_read_only=OFF may have been sent to %q but the promotion cannot be confirmed; %q is named as the last failover target only",
 				pf.TargetSite, pf.TargetSite)})
 	}
 	if targetLost {
-		return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonTargetLost)
+		return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonTargetLost)
 	}
-	return e.toRollingBack(ctx, fg, pf, v1alpha1.PlannedFailoverReasonPromotionAborted)
+	return e.toRollingBack(ctx, fg, pf, v1beta1.PlannedFailoverReasonPromotionAborted)
 }
 
 // confirmedTail records the confirmed promotion in the topology manager,
@@ -2154,7 +2154,7 @@ func (e *PlannedFailoverEngine) applyPromoteOutcome(ctx context.Context, fg *v1a
 // writer made writable, say) blocked. A restart before Publishing commits
 // re-derives the confirmation from the live Promoting block (§7.1 Writable)
 // and recognises the run's own failover record by content (§4.4).
-func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
 	nn := ref.Group
 	m := e.runMemo(pf.RunID)
@@ -2165,7 +2165,7 @@ func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1alpha1.
 		// claim; a changed record means a second writer, so the run never
 		// records over it.
 		if !plannedRecordUnchanged(fg, pf, e.clk.Now()) {
-			return e.endManualRecovery(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAuthorityChanged,
+			return e.endManualRecovery(ctx, fg, pf, v1beta1.PlannedFailoverReasonAuthorityChanged,
 				"a failover was recorded during the run, so its confirmed promotion is not recorded over it")
 		}
 		err := e.topo.RecordPlannedPromotion(ctx, ref, m.promote.confirmedAt, plannedFenceSet(pf))
@@ -2184,17 +2184,17 @@ func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1alpha1.
 		if d, ferr, handled := e.facadeErr(ctx, fg, pf, err); handled {
 			return d, ferr
 		}
-		rec := &v1alpha1.PlannedFailoverDNSRecord{State: state, AttemptTime: metav1.NewTime(e.clk.Now())}
+		rec := &v1beta1.PlannedFailoverDNSRecord{State: state, AttemptTime: metav1.NewTime(e.clk.Now())}
 		if err != nil {
-			rec.State = v1alpha1.PlannedFailoverDNSFailed
+			rec.State = v1beta1.PlannedFailoverDNSFailed
 			rec.LastError = err.Error()
 		}
 		if rec.State == "" {
-			rec.State = v1alpha1.PlannedFailoverDNSSkipped
+			rec.State = v1beta1.PlannedFailoverDNSSkipped
 		}
-		if rec.State == v1alpha1.PlannedFailoverDNSFailed {
-			m.warnings = addPlannedWarnings(m.warnings, v1alpha1.PlannedFailoverWarningDNSUpdateFailed)
-			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverDNSUpdateFailed,
+		if rec.State == v1beta1.PlannedFailoverDNSFailed {
+			m.warnings = addPlannedWarnings(m.warnings, v1beta1.PlannedFailoverWarningDNSUpdateFailed)
+			e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverDNSUpdateFailed,
 				fmt.Sprintf("planned failover promoted %q but the DNS update failed (%s); the topology manager retries it", pf.TargetSite, rec.LastError))
 		}
 		m.promote.dns = rec
@@ -2215,7 +2215,7 @@ func (e *PlannedFailoverEngine) confirmedTail(ctx context.Context, fg *v1alpha1.
 // markConfirmed records the run's confirmation time in the
 // planned-failover-confirmed annotation, reloading on a conflict. false:
 // it is not durable; the caller keeps the claim and retries.
-func (e *PlannedFailoverEngine) markConfirmed(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) markConfirmed(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	confirmedAt time.Time) bool {
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
@@ -2247,7 +2247,7 @@ func (e *PlannedFailoverEngine) markConfirmed(ctx context.Context, fg *v1alpha1.
 // defer automation again, and a re-proof after a later emergency failover
 // would hold the group. DNS is left to the topology manager's reconcile,
 // which no claim defers any more.
-func (e *PlannedFailoverEngine) publishRecorded(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) publishRecorded(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
 	if !m.promote.released {
 		m.promote.confirmed, m.promote.confirmedAt = true, plannedOwnRecordTime(fg, pf, e.clk.Now())
@@ -2261,16 +2261,16 @@ func (e *PlannedFailoverEngine) publishRecorded(ctx context.Context, fg *v1alpha
 // writePublishing writes the Publishing record of a confirmed, recorded
 // and released run. It holds no claim; a non-commit is retried, and the
 // status stall (§6.4) may end the run once its failover record is durable.
-func (e *PlannedFailoverEngine) writePublishing(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) writePublishing(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
 	confirmedAt := metav1.NewTime(m.promote.confirmedAt)
 	dns := m.promote.dns.DeepCopy()
 	warnings := slices.Clone(m.warnings)
 	slices.Sort(warnings)
-	out, err := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-		next.Phase = v1alpha1.PlannedFailoverPhasePublishing
+	out, err := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+		next.Phase = v1beta1.PlannedFailoverPhasePublishing
 		next.Promotion = next.Promotion.DeepCopy()
-		next.Promotion.State = v1alpha1.PlannedFailoverPromotionConfirmed
+		next.Promotion.State = v1beta1.PlannedFailoverPromotionConfirmed
 		next.Promotion.ConfirmationTime = &confirmedAt
 		next.Promotion.Warnings = warnings
 		next.DNS = dns
@@ -2290,7 +2290,7 @@ func (e *PlannedFailoverEngine) writePublishing(ctx context.Context, fg *v1alpha
 // drops an invalid copy (a malformed annotation, a target removed from
 // spec.sites) and still selects the valid one, so the selected winner is
 // compared. Only when no valid copy is left does the check fail closed.
-func plannedRecordUnchanged(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) bool {
+func plannedRecordUnchanged(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus, now time.Time) bool {
 	rec, _, err := EffectiveFailoverRecord(fg, now)
 	if err != nil && rec.IsZero() {
 		return false
@@ -2300,37 +2300,37 @@ func plannedRecordUnchanged(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.Planne
 }
 
 // publishingPass writes the Succeeded record with the failover record.
-func (e *PlannedFailoverEngine) publishingPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) publishingPass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	// The confirmed tail released the claim before it wrote Publishing
 	// (the DST-4 ruling); this release is an idempotent cleanup for a
 	// claim hydrated again in between (a restart), harmless to repeat.
 	e.release(ctx, nn, pf.RunID, ReleasePublishing, "")
-	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded,
+	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSucceeded,
 		msg: fmt.Sprintf("promoted %q", pf.TargetSite), why: ReleasePublishing})
 }
 
 // toRollingBack writes the rollback intent.
-func (e *PlannedFailoverEngine) toRollingBack(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	reason v1alpha1.PlannedFailoverReason) (time.Duration, error) {
+func (e *PlannedFailoverEngine) toRollingBack(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	reason v1beta1.PlannedFailoverReason) (time.Duration, error) {
 	now := metav1.NewTime(e.clk.Now())
-	out, err := e.advance(ctx, fg, pf, func(next *v1alpha1.PlannedFailoverStatus) {
-		next.Phase = v1alpha1.PlannedFailoverPhaseRollingBack
-		next.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: reason, IntentTime: now}
+	out, err := e.advance(ctx, fg, pf, func(next *v1beta1.PlannedFailoverStatus) {
+		next.Phase = v1beta1.PlannedFailoverPhaseRollingBack
+		next.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: reason, IntentTime: now}
 		next.Message = fmt.Sprintf("rolling back (%s)", reason)
 	})
 	if out == WriteCommitted {
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverRollbackStarted,
+		e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverRollbackStarted,
 			fmt.Sprintf("planned failover to %q rolling back (%s)", pf.TargetSite, reason))
 	}
 	return e.afterAdvance(ctx, fg, pf, out, err)
 }
 
 // rollbackStep runs one preconditioned rollback attempt (§9).
-func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	ref PlannedRunRef) (time.Duration, error) {
 	m := e.runMemo(pf.RunID)
-	reason := v1alpha1.PlannedFailoverReasonInternalError
+	reason := v1beta1.PlannedFailoverReasonInternalError
 	intended := e.clk.Now()
 	if pf.Rollback != nil {
 		reason = pf.Rollback.Reason
@@ -2346,10 +2346,10 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 			r = reason
 		}
 		m.warnings = addPlannedWarnings(m.warnings, res.Warnings...)
-		if res.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+		if res.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 			why := "the rollback found writes on the target outside the fenced set"
 			switch {
-			case r == v1alpha1.PlannedFailoverReasonForeignWritable:
+			case r == v1beta1.PlannedFailoverReasonForeignWritable:
 				why = "the rollback found another writable site beside the writable source"
 			case res.LostGtid != "":
 				why = plannedSourceLostMessage(pf, res.LostGtid)
@@ -2357,7 +2357,7 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 			return e.endManualRecovery(ctx, fg, pf, r, why)
 		}
 		msg := plannedRollbackMessage(pf, res.Outcome, r)
-		if res.Outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+		if res.Outcome == v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 			msg = fmt.Sprintf("planned failover to %q rolled back (%s); %s", pf.TargetSite, r, e.sourceLeftClause(pf))
 		}
 		return e.finish(ctx, fg, pf, plannedEnd{outcome: res.Outcome, reason: r, msg: msg})
@@ -2377,12 +2377,12 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 			// it; a record that said "left fenced" over a source that is
 			// writable and serving would be wrong. The rollback's own
 			// reason stays in status.plannedFailover.rollback.
-			return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-				reason: v1alpha1.PlannedFailoverReasonSourceLost,
+			return e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+				reason: v1beta1.PlannedFailoverReasonSourceLost,
 				msg: fmt.Sprintf("rollback (%s) could not reach the source %q within %s, so whether it is fenced or writable is not known: an earlier attempt of this rollback may have unfenced it",
 					reason, pf.SourceSite, plannedFailoverRollbackDeadline)})
 		}
-		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
+		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason,
 			msg: fmt.Sprintf("rollback (%s) could not confirm the source %q writable within %s; %s",
 				reason, pf.SourceSite, plannedFailoverRollbackDeadline, e.sourceLeftClause(pf))})
 	}
@@ -2396,10 +2396,10 @@ func (e *PlannedFailoverEngine) rollbackStep(ctx context.Context, fg *v1alpha1.M
 // that cannot know whether an earlier one sent it, and then the source may
 // be writable, or read-only by someone else's doing. The record says which
 // of these the run knows.
-func (e *PlannedFailoverEngine) sourceLeftClause(pf *v1alpha1.PlannedFailoverStatus) string {
+func (e *PlannedFailoverEngine) sourceLeftClause(pf *v1beta1.PlannedFailoverStatus) string {
 	m := e.runMemo(pf.RunID)
 	switch {
-	case (pf.Fence != nil && pf.Fence.State == v1alpha1.PlannedFailoverFenceApplied) || m.fence.sent:
+	case (pf.Fence != nil && pf.Fence.State == v1beta1.PlannedFailoverFenceApplied) || m.fence.sent:
 		return fmt.Sprintf("source %q left fenced", pf.SourceSite)
 	case m.fence.setSent:
 		return fmt.Sprintf("source %q left as it is: the run's fence was sent to it but never read back", pf.SourceSite)
@@ -2414,7 +2414,7 @@ func (e *PlannedFailoverEngine) sourceLeftClause(pf *v1alpha1.PlannedFailoverSta
 // writable without transactions it held (lost) ends with the hold. It names
 // the lost transactions, because the comparison that found them stops
 // working once the source has issued as many again.
-func plannedSourceLostMessage(pf *v1alpha1.PlannedFailoverStatus, lost string) string {
+func plannedSourceLostMessage(pf *v1beta1.PlannedFailoverStatus, lost string) string {
 	// The whole set matters here, so it is cut later than a hint is.
 	const maxLost = 256
 	if len(lost) > maxLost {
@@ -2427,13 +2427,13 @@ func plannedSourceLostMessage(pf *v1alpha1.PlannedFailoverStatus, lost string) s
 		pf.SourceSite, lost, pf.TargetSite)
 }
 
-func plannedRollbackMessage(pf *v1alpha1.PlannedFailoverStatus, outcome v1alpha1.PlannedFailoverOutcome, reason v1alpha1.PlannedFailoverReason) string {
+func plannedRollbackMessage(pf *v1beta1.PlannedFailoverStatus, outcome v1beta1.PlannedFailoverOutcome, reason v1beta1.PlannedFailoverReason) string {
 	switch outcome {
-	case v1alpha1.PlannedFailoverOutcomeRolledBack:
+	case v1beta1.PlannedFailoverOutcomeRolledBack:
 		return fmt.Sprintf("planned failover to %q rolled back (%s); source %q is writable", pf.TargetSite, reason, pf.SourceSite)
-	case v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
+	case v1beta1.PlannedFailoverOutcomeSourceLeftFenced:
 		return fmt.Sprintf("planned failover to %q rolled back (%s); source %q left fenced", pf.TargetSite, reason, pf.SourceSite)
-	case v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed:
+	case v1beta1.PlannedFailoverOutcomePromotedUnconfirmed:
 		return fmt.Sprintf("planned failover to %q ended unconfirmed (%s); %q is named as the last failover target only", pf.TargetSite, reason, pf.TargetSite)
 	}
 	return fmt.Sprintf("planned failover to %q ended %s (%s)", pf.TargetSite, outcome, reason)
@@ -2443,10 +2443,10 @@ func plannedRollbackMessage(pf *v1alpha1.PlannedFailoverStatus, outcome v1alpha1
 
 // managerAbsent waits for a manager while the run holds the claim, ending
 // it without MySQL access 5 minutes after the durable absent-since time.
-func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	m := e.runMemo(pf.RunID)
-	start, ok := parseDeadlineStart(fg.GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID)
+	start, ok := parseDeadlineStart(fg.GetAnnotations()[v1beta1.PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID)
 	if !ok {
 		var out WriteOutcome
 		var err error
@@ -2462,30 +2462,30 @@ func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.
 	elapsed := e.clk.Now().Sub(start)
 	if elapsed >= plannedFailoverManagerAbsentWarnAfter && !m.absentWarned {
 		m.absentWarned = true
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStalledManagerAbsent,
+		e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverStalledManagerAbsent,
 			fmt.Sprintf("planned failover %s (phase %s) has had no topology manager for %s; it ends after %s",
 				pf.RunID, pf.Phase, truncateDur(elapsed), plannedFailoverManagerAbsentDeadline))
 	}
 	if elapsed < plannedFailoverManagerAbsentDeadline {
 		return plannedRequeueBackoff, nil
 	}
-	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting && m.promote.confirmed {
+	if pf.Phase == v1beta1.PlannedFailoverPhasePromoting && m.promote.confirmed {
 		// This process confirmed the promotion before the manager went
 		// away (K152): end it Succeeded with its confirmation, so the
 		// terminal write applies the run's failover record and a new
 		// manager restores it, after the same §4.4 check 1 the confirmed
 		// tail runs.
 		if !plannedRecordUnchanged(fg, pf, e.clk.Now()) {
-			return e.endManualRecovery(ctx, fg, pf, v1alpha1.PlannedFailoverReasonAuthorityChanged,
+			return e.endManualRecovery(ctx, fg, pf, v1beta1.PlannedFailoverReasonAuthorityChanged,
 				"a failover was recorded during the run, so its confirmed promotion is not recorded over it")
 		}
-		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, confirmedAt: m.promote.confirmedAt,
+		return e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSucceeded, confirmedAt: m.promote.confirmedAt,
 			msg: fmt.Sprintf("promoted %q; no topology manager for %s, so the failover record is applied by this terminal write and DNS is left to the next manager",
 				pf.TargetSite, plannedFailoverManagerAbsentDeadline),
 			why: ReleaseManagerAbsent, noNaming: true})
 	}
-	reason := v1alpha1.PlannedFailoverReasonManagerUnavailable
-	if pf.Phase == v1alpha1.PlannedFailoverPhaseRollingBack && pf.Rollback != nil {
+	reason := v1beta1.PlannedFailoverReasonManagerUnavailable
+	if pf.Phase == v1beta1.PlannedFailoverPhaseRollingBack && pf.Rollback != nil {
 		reason = pf.Rollback.Reason
 	}
 	return e.endWithoutMySQL(ctx, fg, pf, reason,
@@ -2494,10 +2494,10 @@ func (e *PlannedFailoverEngine) managerAbsent(ctx context.Context, fg *v1alpha1.
 
 // clearAbsence removes the run's manager-absent-since annotation once a
 // manager is back.
-func (e *PlannedFailoverEngine) clearAbsence(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) {
+func (e *PlannedFailoverEngine) clearAbsence(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) {
 	m := e.runMemo(pf.RunID)
 	m.absentWarned = false
-	if _, ok := parseDeadlineStart(fg.GetAnnotations()[v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID); !ok {
+	if _, ok := parseDeadlineStart(fg.GetAnnotations()[v1beta1.PlannedFailoverManagerAbsentSinceAnnotation], pf.RunID); !ok {
 		return
 	}
 	if out, err := e.store.ClearDeadlineStart(ctx, fg, DeadlineManagerAbsent, pf.RunID); out != WriteCommitted {
@@ -2508,13 +2508,13 @@ func (e *PlannedFailoverEngine) clearAbsence(ctx context.Context, fg *v1alpha1.M
 
 // endWithoutMySQL ends a claim-holding run with no MySQL access: the source
 // stays as it is, a possible promotion stays unconfirmed (and unnamed).
-func (e *PlannedFailoverEngine) endWithoutMySQL(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	reason v1alpha1.PlannedFailoverReason, msg string, why ClaimReleaseReason) (time.Duration, error) {
-	outcome := v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
-	if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting {
-		outcome = v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed
+func (e *PlannedFailoverEngine) endWithoutMySQL(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	reason v1beta1.PlannedFailoverReason, msg string, why ClaimReleaseReason) (time.Duration, error) {
+	outcome := v1beta1.PlannedFailoverOutcomeSourceLeftFenced
+	if pf.Phase == v1beta1.PlannedFailoverPhasePromoting {
+		outcome = v1beta1.PlannedFailoverOutcomePromotedUnconfirmed
 	}
-	if outcome == v1alpha1.PlannedFailoverOutcomeSourceLeftFenced {
+	if outcome == v1beta1.PlannedFailoverOutcomeSourceLeftFenced {
 		msg += "; " + e.sourceLeftClause(pf)
 	}
 	return e.finish(ctx, fg, pf, plannedEnd{outcome: outcome, reason: reason, msg: msg, why: why, noNaming: true})
@@ -2524,9 +2524,9 @@ func (e *PlannedFailoverEngine) endWithoutMySQL(ctx context.Context, fg *v1alpha
 
 // plannedEnd describes a terminal record.
 type plannedEnd struct {
-	outcome  v1alpha1.PlannedFailoverOutcome
-	reason   v1alpha1.PlannedFailoverReason
-	warnings []v1alpha1.PlannedFailoverWarning
+	outcome  v1beta1.PlannedFailoverOutcome
+	reason   v1beta1.PlannedFailoverReason
+	warnings []v1beta1.PlannedFailoverWarning
 	msg      string
 	// why is the release reason (default terminal).
 	why ClaimReleaseReason
@@ -2544,17 +2544,17 @@ type plannedEnd struct {
 // endManualRecovery ends the run ManualRecoveryRequired and sets the hold.
 // The hold lists the run's target and source and every site the failing
 // operation classified (observed: a writable or unreadable peer).
-func (e *PlannedFailoverEngine) endManualRecovery(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
-	reason v1alpha1.PlannedFailoverReason, why string, observed ...string) (time.Duration, error) {
+func (e *PlannedFailoverEngine) endManualRecovery(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
+	reason v1beta1.PlannedFailoverReason, why string, observed ...string) (time.Duration, error) {
 	sites := plannedHoldSites(pf, observed...)
-	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, reason: reason,
-		msg: fmt.Sprintf("%s (%s); automatic failover is held until %s=%s", why, reason, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, pf.RunID),
+	return e.finish(ctx, fg, pf, plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, reason: reason,
+		msg: fmt.Sprintf("%s (%s); automatic failover is held until %s=%s", why, reason, v1beta1.AcknowledgePlannedFailoverHoldAnnotation, pf.RunID),
 		why: ReleaseToHold, holdSites: sites})
 }
 
 // plannedHoldSites is the run's target and source, then the observed
 // sites, without repeats or empty names.
-func plannedHoldSites(pf *v1alpha1.PlannedFailoverStatus, observed ...string) []string {
+func plannedHoldSites(pf *v1beta1.PlannedFailoverStatus, observed ...string) []string {
 	sites := []string{}
 	for _, s := range append([]string{pf.TargetSite, pf.SourceSite}, observed...) {
 		if s != "" && !slices.Contains(sites, s) {
@@ -2569,7 +2569,7 @@ func plannedHoldSites(pf *v1alpha1.PlannedFailoverStatus, observed ...string) []
 // in another process): every site in spec.sites, the run's target and
 // source first. Listing fewer would tell an operator that a site is
 // unaffected when nothing was observed about it.
-func plannedHoldSitesUnknown(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) []string {
+func plannedHoldSitesUnknown(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) []string {
 	all := make([]string, 0, len(fg.Spec.Sites))
 	for i := range fg.Spec.Sites {
 		all = append(all, fg.Spec.Sites[i].Name)
@@ -2597,32 +2597,32 @@ func plannedHoldSitesUnknown(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.Plann
 // was applied (AuthorityChanged with only an intent, when this process did
 // not send it either). A rollback that ends SourceLost at its deadline is
 // judged by the reason it rolled back for (plannedFenceAttributionReason).
-func (e *PlannedFailoverEngine) fenceAttributable(pf *v1alpha1.PlannedFailoverStatus, warnings []v1alpha1.PlannedFailoverWarning,
-	reason v1alpha1.PlannedFailoverReason) bool {
-	if slices.Contains(warnings, v1alpha1.PlannedFailoverWarningFenceNotAttributable) {
+func (e *PlannedFailoverEngine) fenceAttributable(pf *v1beta1.PlannedFailoverStatus, warnings []v1beta1.PlannedFailoverWarning,
+	reason v1beta1.PlannedFailoverReason) bool {
+	if slices.Contains(warnings, v1beta1.PlannedFailoverWarningFenceNotAttributable) {
 		return false
 	}
 	if pf.Fence == nil || pf.Fence.SourceServerUUID == "" {
 		return false
 	}
-	if pf.Fence.State == v1alpha1.PlannedFailoverFenceApplied {
+	if pf.Fence.State == v1beta1.PlannedFailoverFenceApplied {
 		return true
 	}
 	if m := e.runMemo(pf.RunID); m.fence.sent || m.fence.setSent {
 		return true
 	}
 	reason = plannedFenceAttributionReason(pf, reason)
-	return reason != v1alpha1.PlannedFailoverReasonAuthorityChanged && reason != v1alpha1.PlannedFailoverReasonLegacyRunRefused
+	return reason != v1beta1.PlannedFailoverReasonAuthorityChanged && reason != v1beta1.PlannedFailoverReasonLegacyRunRefused
 }
 
 // terminalRecord builds the terminal block of pf for end.
-func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatus, end plannedEnd) *v1alpha1.PlannedFailoverStatus {
+func (e *PlannedFailoverEngine) terminalRecord(pf *v1beta1.PlannedFailoverStatus, end plannedEnd) *v1beta1.PlannedFailoverStatus {
 	m := e.runMemo(pf.RunID)
 	next := pf.DeepCopy()
 	next.Revision = pf.Revision + 1
-	next.Phase = v1alpha1.PlannedFailoverPhaseFailed
-	if end.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
-		next.Phase = v1alpha1.PlannedFailoverPhaseSucceeded
+	next.Phase = v1beta1.PlannedFailoverPhaseFailed
+	if end.outcome == v1beta1.PlannedFailoverOutcomeSucceeded {
+		next.Phase = v1beta1.PlannedFailoverPhaseSucceeded
 	}
 	warnings := addPlannedWarnings(slices.Clone(m.warnings), end.warnings...)
 	// What the durable records carry, so a terminal record written by
@@ -2630,23 +2630,23 @@ func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatu
 	if pf.Promotion != nil {
 		warnings = addPlannedWarnings(warnings, pf.Promotion.Warnings...)
 	}
-	if pf.DNS != nil && pf.DNS.State == v1alpha1.PlannedFailoverDNSFailed {
-		warnings = addPlannedWarnings(warnings, v1alpha1.PlannedFailoverWarningDNSUpdateFailed)
+	if pf.DNS != nil && pf.DNS.State == v1beta1.PlannedFailoverDNSFailed {
+		warnings = addPlannedWarnings(warnings, v1beta1.PlannedFailoverWarningDNSUpdateFailed)
 	}
-	if end.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && !end.confirmedAt.IsZero() && next.Promotion != nil &&
+	if end.outcome == v1beta1.PlannedFailoverOutcomeSucceeded && !end.confirmedAt.IsZero() && next.Promotion != nil &&
 		next.Promotion.ConfirmationTime == nil {
 		// A Succeeded record ended before Publishing committed (the status
 		// stall, or a marker): it carries the confirmation, so its terminal
 		// write applies the run's failover record (§5.3).
 		next.Promotion = next.Promotion.DeepCopy()
-		next.Promotion.State = v1alpha1.PlannedFailoverPromotionConfirmed
+		next.Promotion.State = v1beta1.PlannedFailoverPromotionConfirmed
 		at := metav1.NewTime(end.confirmedAt.UTC().Truncate(time.Second))
 		next.Promotion.ConfirmationTime = &at
 	}
 	e.applyPendingTakeoverOutcome(next)
-	if next.Dragonfly != nil && next.Dragonfly.Takeover != nil && next.Dragonfly.Takeover.State == v1alpha1.DragonflyTakeoverSucceeded &&
-		end.outcome != v1alpha1.PlannedFailoverOutcomeSucceeded {
-		warnings = addPlannedWarnings(warnings, v1alpha1.PlannedFailoverWarningDragonflySessionsLost)
+	if next.Dragonfly != nil && next.Dragonfly.Takeover != nil && next.Dragonfly.Takeover.State == v1beta1.DragonflyTakeoverSucceeded &&
+		end.outcome != v1beta1.PlannedFailoverOutcomeSucceeded {
+		warnings = addPlannedWarnings(warnings, v1beta1.PlannedFailoverWarningDragonflySessionsLost)
 	}
 	slices.Sort(warnings)
 	if next.Admission != nil && next.Admission.RetryTime != nil {
@@ -2654,7 +2654,7 @@ func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatu
 		next.Admission = next.Admission.DeepCopy()
 		next.Admission.RetryTime = nil
 	}
-	next.Result = &v1alpha1.PlannedFailoverResult{
+	next.Result = &v1beta1.PlannedFailoverResult{
 		Outcome: end.outcome, Reason: end.reason, CompletionTime: metav1.NewTime(e.clk.Now()), Warnings: warnings,
 	}
 	if end.msg != "" {
@@ -2672,26 +2672,26 @@ func (e *PlannedFailoverEngine) terminalRecord(pf *v1alpha1.PlannedFailoverStatu
 // MergePlannedAuthority, the rule the runner's snapshot writes use, so the
 // terminal record never lands beside an activeSite that still names the
 // source (§5.3, §12).
-func (e *PlannedFailoverEngine) terminalMutate(base *v1alpha1.MysqlFailoverGroup, next *v1alpha1.PlannedFailoverStatus, sites []string) func(*v1alpha1.MysqlFailoverGroupStatus) {
+func (e *PlannedFailoverEngine) terminalMutate(base *v1beta1.MysqlFailoverGroup, next *v1beta1.PlannedFailoverStatus, sites []string) func(*v1beta1.MysqlFailoverGroupStatus) {
 	nn := types.NamespacedName{Namespace: base.Namespace, Name: base.Name}
 	switch next.Result.Outcome {
-	case v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
-		hold := v1alpha1.PlannedFailoverHold{
+	case v1beta1.PlannedFailoverOutcomeManualRecoveryRequired:
+		hold := v1beta1.PlannedFailoverHold{
 			RunID: next.RunID, Reason: next.Result.Reason, SourceSite: next.SourceSite, TargetSite: next.TargetSite,
 			AmbiguousSites: slices.Clone(sites), HoldTime: metav1.NewTime(e.clk.Now()),
 		}
 		generation := base.Generation
-		return func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		return func(st *v1beta1.MysqlFailoverGroupStatus) {
 			setPlannedHold(st, hold, generation)
 		}
-	case v1alpha1.PlannedFailoverOutcomeSucceeded:
+	case v1beta1.PlannedFailoverOutcomeSucceeded:
 		if next.Promotion == nil || next.Promotion.ConfirmationTime == nil {
 			return nil
 		}
 		confirmedAt, target, watermark := next.Promotion.ConfirmationTime.Time, next.TargetSite, plannedFenceSet(next)
 		authority, haveAuthority := e.topo.ManagerAuthority(nn)
 		now := e.clk.Now()
-		return func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		return func(st *v1beta1.MysqlFailoverGroupStatus) {
 			if haveAuthority {
 				MergePlannedAuthority(st, authority)
 			}
@@ -2705,7 +2705,7 @@ func (e *PlannedFailoverEngine) terminalMutate(base *v1alpha1.MysqlFailoverGroup
 // {confirmedAt, target, watermark} to status under the timestamp-monotonic
 // rule (§5.3): never to a strictly older lastFailover; on an equal one
 // (second precision) only the target and watermark may change.
-func applyPlannedFailoverRecord(st *v1alpha1.MysqlFailoverGroupStatus, confirmedAt time.Time, target, watermark string, now time.Time) {
+func applyPlannedFailoverRecord(st *v1beta1.MysqlFailoverGroupStatus, confirmedAt time.Time, target, watermark string, now time.Time) {
 	rec := newFailoverRecordRef(confirmedAt, target)
 	if lf := st.LastFailoverTime(); lf != nil {
 		stored := lf.UTC().Truncate(time.Second)
@@ -2719,7 +2719,7 @@ func applyPlannedFailoverRecord(st *v1alpha1.MysqlFailoverGroupStatus, confirmed
 
 // finish writes the terminal record and, once it has committed, releases
 // the claim (or converts it into a hold) and reports the run.
-func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	end plannedEnd) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	ref := plannedRunRef(nn, pf)
@@ -2727,10 +2727,10 @@ func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1alpha1.MysqlFa
 	if end.why == "" {
 		end.why = ReleaseTerminal
 	}
-	claimHeld := plannedFailoverOwnsSitesPhase(pf.Phase) || (pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting && m.granted)
-	var written *v1alpha1.PlannedFailoverStatus
-	out, next, err := e.commit(ctx, fg, claimHeld, func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus,
-		func(*v1alpha1.MysqlFailoverGroupStatus), bool) {
+	claimHeld := plannedFailoverOwnsSitesPhase(pf.Phase) || (pf.Phase == v1beta1.PlannedFailoverPhaseAdmitting && m.granted)
+	var written *v1beta1.PlannedFailoverStatus
+	out, next, err := e.commit(ctx, fg, claimHeld, func(base *v1beta1.MysqlFailoverGroup) (*v1beta1.PlannedFailoverStatus,
+		func(*v1beta1.MysqlFailoverGroupStatus), bool) {
 		cur, ok := sameRun(base, pf, pf.Phase)
 		if !ok {
 			return nil, nil, false
@@ -2770,12 +2770,12 @@ func (e *PlannedFailoverEngine) finish(ctx context.Context, fg *v1alpha1.MysqlFa
 // topology manager (§6.2, §6.5). Callers run it after the terminal record
 // or the terminal marker has committed and before the claim is released,
 // so the run can no longer continue past a name it handed out.
-func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus,
+func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus,
 	ref PlannedRunRef, end plannedEnd) {
 	nn := ref.Group
 	m := e.runMemo(pf.RunID)
 	switch end.outcome {
-	case v1alpha1.PlannedFailoverOutcomeSourceLeftFenced:
+	case v1beta1.PlannedFailoverOutcomeSourceLeftFenced:
 		if ref.Source == "" || !e.fenceAttributable(pf, addPlannedWarnings(slices.Clone(m.warnings), end.warnings...), end.reason) {
 			return
 		}
@@ -2783,8 +2783,8 @@ func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1alpha1
 			log.FromContext(ctx).Info("planned failover: named fenced source for re-assert", "fg", nn.String(),
 				"runId", pf.RunID, "site", ref.Source)
 		}
-	case v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed:
-		if end.reason == v1alpha1.PlannedFailoverReasonManagerUnavailable {
+	case v1beta1.PlannedFailoverOutcomePromotedUnconfirmed:
+		if end.reason == v1beta1.PlannedFailoverReasonManagerUnavailable {
 			return
 		}
 		// §4.4 check 1 on an uncached read first, as for recording a
@@ -2805,14 +2805,14 @@ func (e *PlannedFailoverEngine) nameForOutcome(ctx context.Context, fg *v1alpha1
 // afterTerminal runs once a terminal record (or the terminal marker) of the
 // run has committed: release or hold, report, and clean the durable
 // deadline annotations.
-func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup,
-	final *v1alpha1.PlannedFailoverStatus, why ClaimReleaseReason, failedReason string) {
+func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.NamespacedName, fg *v1beta1.MysqlFailoverGroup,
+	final *v1beta1.PlannedFailoverStatus, why ClaimReleaseReason, failedReason string) {
 	ctx, cancel := persistCtx(ctx)
 	defer cancel()
 	m := e.runMemo(final.RunID)
 	e.markTerminated(final.RunID)
 	outcome := final.Result.Outcome
-	if outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired {
+	if outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired {
 		e.topo.ConvertToHold(nn, final.RunID, m.holdSites...)
 		log.FromContext(ctx).Info("planned failover: automation held pending acknowledgement", "fg", nn.String(),
 			"runId", final.RunID, "sites", strings.Join(m.holdSites, ","))
@@ -2843,7 +2843,7 @@ func (e *PlannedFailoverEngine) afterTerminal(ctx context.Context, nn types.Name
 // once no run is live (the terminal cleanup lost a conflict, or the
 // operator restarted in between), so they do not keep a pass due on every
 // reconcile (J002). It returns the object to continue with.
-func (e *PlannedFailoverEngine) clearStaleRunAnnotations(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlFailoverGroup {
+func (e *PlannedFailoverEngine) clearStaleRunAnnotations(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) *v1beta1.MysqlFailoverGroup {
 	for _, kind := range plannedRunAnnotationKinds {
 		runID, _, ok := ParseDeadlineStart(fg.GetAnnotations()[kind.Annotation()])
 		if !ok {
@@ -2872,32 +2872,32 @@ var plannedRunAnnotationKinds = []DeadlineKind{DeadlineManagerAbsent, DeadlineSt
 // failedReason, when set, replaces PlannedFailoverFailed as the Event
 // reason of a run that did not succeed (PlannedFailoverRejected for a run
 // that never started).
-func (e *PlannedFailoverEngine) reportTerminal(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup,
-	final *v1alpha1.PlannedFailoverStatus, failedReason string) {
+func (e *PlannedFailoverEngine) reportTerminal(nn types.NamespacedName, fg *v1beta1.MysqlFailoverGroup,
+	final *v1beta1.PlannedFailoverStatus, failedReason string) {
 	e.sink.RunTerminal(nn, final)
 	r := final.Result
 	switch {
-	case r.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded:
-		e.sink.Event(fg, corev1.EventTypeNormal, v1alpha1.EventPlannedFailoverSucceeded,
+	case r.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded:
+		e.sink.Event(fg, corev1.EventTypeNormal, v1beta1.EventPlannedFailoverSucceeded,
 			fmt.Sprintf("planned failover to %q complete (warnings: %s)", final.TargetSite, plannedWarningList(r.Warnings)))
-	case r.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired:
-		e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverManualRecoveryRequired,
+	case r.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired:
+		e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverManualRecoveryRequired,
 			fmt.Sprintf("planned failover %s ended ManualRecoveryRequired (%s): resolve the split brain by hand, then annotate %s=%s",
-				final.RunID, r.Reason, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation, final.RunID))
+				final.RunID, r.Reason, v1beta1.AcknowledgePlannedFailoverHoldAnnotation, final.RunID))
 	default:
-		reason := v1alpha1.EventPlannedFailoverFailed
+		reason := v1beta1.EventPlannedFailoverFailed
 		if failedReason != "" {
 			reason = failedReason
 		}
-		if r.Outcome == v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed {
-			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverPromotionConfirmationFailed, final.Message)
+		if r.Outcome == v1beta1.PlannedFailoverOutcomePromotedUnconfirmed {
+			e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverPromotionConfirmationFailed, final.Message)
 		}
 		e.sink.Event(fg, corev1.EventTypeWarning, reason,
 			fmt.Sprintf("planned failover %s (%s): %s", r.Outcome, r.Reason, final.Message))
 	}
 }
 
-func plannedWarningList(ws []v1alpha1.PlannedFailoverWarning) string {
+func plannedWarningList(ws []v1beta1.PlannedFailoverWarning) string {
 	if len(ws) == 0 {
 		return "none"
 	}
@@ -2911,7 +2911,7 @@ func plannedWarningList(ws []v1alpha1.PlannedFailoverWarning) string {
 // release releases the run's claim and logs it when it held one. outcome
 // is the run's outcome when it is terminal, "" otherwise.
 func (e *PlannedFailoverEngine) release(ctx context.Context, nn types.NamespacedName, runID string, why ClaimReleaseReason,
-	outcome v1alpha1.PlannedFailoverOutcome) {
+	outcome v1beta1.PlannedFailoverOutcome) {
 	if runID == "" {
 		return
 	}
@@ -2932,7 +2932,7 @@ func (e *PlannedFailoverEngine) release(ctx context.Context, nn types.Namespaced
 // recreated group, or rebuilt from a run-less condition since removed by
 // hand. It is released (why=orphanHold) rather than left to hold
 // automation with nothing to acknowledge.
-func (e *PlannedFailoverEngine) releaseZombie(ctx context.Context, nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) {
+func (e *PlannedFailoverEngine) releaseZombie(ctx context.Context, nn types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) {
 	if holdRun, held := e.topo.HeldHoldClaim(nn); held {
 		if e.topo.ReleasePlannedFailoverClaim(nn, holdRun, ReleaseOrphanHold) {
 			log.FromContext(ctx).Info("planned failover: released an automation hold no durable record backs",
@@ -2955,7 +2955,7 @@ func (e *PlannedFailoverEngine) releaseZombie(ctx context.Context, nn types.Name
 // maybeStallFinish ends the run with a terminal marker once its status
 // writes have failed for plannedFailoverStatusStallDeadline from the
 // durable stall-since time. done=false: keep retrying the status write.
-func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, bool) {
+func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, bool) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	m := e.runMemo(pf.RunID)
 	// The stall bookkeeping reads and the marker write keep their own
@@ -2964,7 +2964,7 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 	defer cancel()
 	fresh := e.reload(sctx, fg)
 	if fresh != nil {
-		if start, ok := parseDeadlineStart(fresh.GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation], pf.RunID); ok {
+		if start, ok := parseDeadlineStart(fresh.GetAnnotations()[v1beta1.PlannedFailoverStallSinceAnnotation], pf.RunID); ok {
 			m.stallSince = start
 		}
 	}
@@ -2997,13 +2997,13 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 	if p := m.pendingTerminal; p != nil && p.RunID == cur.RunID && p.Result != nil && p.Revision == cur.Revision+1 {
 		// The stalled write was this run's terminal record: keep its outcome.
 		end = plannedEnd{outcome: p.Result.Outcome, reason: p.Result.Reason,
-			warnings: addPlannedWarnings(slices.Clone(p.Result.Warnings), v1alpha1.PlannedFailoverWarningStatusStalled), msg: p.Message,
+			warnings: addPlannedWarnings(slices.Clone(p.Result.Warnings), v1beta1.PlannedFailoverWarningStatusStalled), msg: p.Message,
 			confirmedAt: end.confirmedAt}
 		if p.Promotion != nil && p.Promotion.ConfirmationTime != nil {
 			end.confirmedAt = p.Promotion.ConfirmationTime.Time
 		}
 	}
-	if end.outcome == v1alpha1.PlannedFailoverOutcomeSucceeded && cur.Phase != v1alpha1.PlannedFailoverPhasePublishing {
+	if end.outcome == v1beta1.PlannedFailoverOutcomeSucceeded && cur.Phase != v1beta1.PlannedFailoverPhasePublishing {
 		// A confirmed run whose Publishing record never committed is ended
 		// by the marker only once its failover record, watermark included,
 		// is durable outside this process (the out-of-band annotation or
@@ -3041,22 +3041,22 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 	if out != WriteCommitted {
 		if e.clk.Now().Sub(m.cannotWriteAt) >= time.Minute {
 			m.cannotWriteAt = e.clk.Now()
-			e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStatusStalled,
+			e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverStatusStalled,
 				fmt.Sprintf("the operator cannot write MysqlFailoverGroup %s (status and metadata writes fail: %s); the planned-failover claim stays held",
 					nn, errString(err)))
 		}
 		return plannedRequeueBackoff, true
 	}
-	if final.Result.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired && len(m.holdSites) == 0 {
+	if final.Result.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired && len(m.holdSites) == 0 {
 		m.holdSites = plannedHoldSitesUnknown(fresh, cur)
 	}
 	m.pendingTerminal = final.DeepCopy()
 	e.nameForOutcome(sctx, fresh, cur, plannedRunRef(nn, cur), end)
 	log.FromContext(ctx).Error(err, "planned failover: status stalled; ended the run with a terminal marker",
 		"fg", nn.String(), "runId", cur.RunID, "outcome", string(final.Result.Outcome), "reason", string(final.Result.Reason))
-	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverStatusStalled,
+	e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverStatusStalled,
 		fmt.Sprintf("status writes for planned failover %s failed for %s; the run ended %s (%s) with the %s annotation",
-			cur.RunID, deadline, final.Result.Outcome, final.Result.Reason, v1alpha1.PlannedFailoverTerminalAnnotation))
+			cur.RunID, deadline, final.Result.Outcome, final.Result.Reason, v1beta1.PlannedFailoverTerminalAnnotation))
 	why := ReleaseStatusStalled
 	e.afterTerminal(sctx, nn, fg, final, why, "")
 	return plannedFailoverMarkerRetryInterval, true
@@ -3065,13 +3065,13 @@ func (e *PlannedFailoverEngine) maybeStallFinish(ctx context.Context, fg *v1alph
 // stallOutcome is §6.4 step 1: finish in memory only (no MySQL rollback).
 // A confirmed promotion is still recorded in the topology manager and
 // published before the release.
-func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.NamespacedName, pf *v1alpha1.PlannedFailoverStatus) plannedEnd {
+func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.NamespacedName, pf *v1beta1.PlannedFailoverStatus) plannedEnd {
 	m := e.runMemo(pf.RunID)
-	stalled := []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningStatusStalled}
-	reason := v1alpha1.PlannedFailoverReasonStatusStalled
+	stalled := []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningStatusStalled}
+	reason := v1beta1.PlannedFailoverReasonStatusStalled
 	switch {
-	case pf.Phase == v1alpha1.PlannedFailoverPhasePublishing:
-		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, warnings: stalled,
+	case pf.Phase == v1beta1.PlannedFailoverPhasePublishing:
+		return plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSucceeded, warnings: stalled,
 			msg: fmt.Sprintf("promoted %q; status writes stalled", pf.TargetSite)}
 	case m.promote.confirmed:
 		ref := plannedRunRef(nn, pf)
@@ -3085,39 +3085,39 @@ func (e *PlannedFailoverEngine) stallOutcome(ctx context.Context, nn types.Names
 			// recorded run published without the claim) leaves DNS to the
 			// topology manager.
 			state, err := e.topo.ApplyDNS(ctx, ref)
-			if err != nil || state == v1alpha1.PlannedFailoverDNSFailed {
-				stalled = addPlannedWarnings(stalled, v1alpha1.PlannedFailoverWarningDNSUpdateFailed)
+			if err != nil || state == v1beta1.PlannedFailoverDNSFailed {
+				stalled = addPlannedWarnings(stalled, v1beta1.PlannedFailoverWarningDNSUpdateFailed)
 			}
 		}
-		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSucceeded, warnings: stalled, confirmedAt: m.promote.confirmedAt,
+		return plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSucceeded, warnings: stalled, confirmedAt: m.promote.confirmedAt,
 			msg: fmt.Sprintf("promoted %q; status writes stalled", pf.TargetSite)}
 	case m.promote.mayHaveWritten:
-		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed, reason: reason, warnings: stalled,
+		return plannedEnd{outcome: v1beta1.PlannedFailoverOutcomePromotedUnconfirmed, reason: reason, warnings: stalled,
 			msg: fmt.Sprintf("status writes stalled after super_read_only=OFF may have been sent to %q", pf.TargetSite)}
-	case pf.Phase == v1alpha1.PlannedFailoverPhaseAdmitting:
-		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, reason: reason, warnings: stalled,
+	case pf.Phase == v1beta1.PlannedFailoverPhaseAdmitting:
+		return plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeNotStarted, reason: reason, warnings: stalled,
 			msg: "status writes stalled before the claim was durable; nothing was sent"}
-	case pf.Phase == v1alpha1.PlannedFailoverPhaseFencing && pf.Fence != nil && pf.Fence.State == v1alpha1.PlannedFailoverFenceIntended &&
+	case pf.Phase == v1beta1.PlannedFailoverPhaseFencing && pf.Fence != nil && pf.Fence.State == v1beta1.PlannedFailoverFenceIntended &&
 		m.granted && !m.fence.setSent && !m.fence.sent:
 		// The facade's memo is the authority on "a SET was sent": a fence
 		// attempt that returned before its SET (an unreadable peer, say)
 		// left the source untouched.
-		return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, reason: reason, warnings: stalled,
+		return plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeRolledBack, reason: reason, warnings: stalled,
 			msg: fmt.Sprintf("status writes stalled before the fence was sent; source %q is untouched", pf.SourceSite)}
 	}
-	return plannedEnd{outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason, warnings: stalled,
+	return plannedEnd{outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, reason: reason, warnings: stalled,
 		msg: "status writes stalled; " + e.sourceLeftClause(pf)}
 }
 
 // markedRunPass handles a run the terminal marker ended: retry its
 // terminal status record every 10s, then delete a non-hold marker (§6.4
 // step 4). The claim is released (or held) whatever status says.
-func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	marker, _ := ParseTerminalMarker(fg.GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation])
+	marker, _ := ParseTerminalMarker(fg.GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation])
 	m := e.runMemo(pf.RunID)
 	e.markTerminated(pf.RunID)
-	isHold := marker.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
+	isHold := marker.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired
 	if isHold {
 		e.topo.ConvertToHold(nn, pf.RunID)
 	} else {
@@ -3144,9 +3144,9 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 	final := m.pendingTerminal
 	if final == nil || final.RunID != pf.RunID {
 		end := plannedEnd{outcome: marker.Outcome, reason: marker.Reason,
-			warnings: addPlannedWarnings(slices.Clone(marker.Warnings), v1alpha1.PlannedFailoverWarningStatusStalled),
+			warnings: addPlannedWarnings(slices.Clone(marker.Warnings), v1beta1.PlannedFailoverWarningStatusStalled),
 			msg:      fmt.Sprintf("ended %s (%s) by the terminal marker after status writes stalled", marker.Outcome, marker.Reason)}
-		if marker.Outcome == v1alpha1.PlannedFailoverOutcomeSucceeded {
+		if marker.Outcome == v1beta1.PlannedFailoverOutcomeSucceeded {
 			// The marker was written only once the run's own failover record
 			// was durable: recover its confirmation from it, so the terminal
 			// write applies the record (§5.3).
@@ -3158,8 +3158,8 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 	if isHold && len(sites) == 0 {
 		sites = plannedHoldSitesUnknown(fg, pf)
 	}
-	out, _, _ := e.commit(ctx, fg, false, func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus,
-		func(*v1alpha1.MysqlFailoverGroupStatus), bool) {
+	out, _, _ := e.commit(ctx, fg, false, func(base *v1beta1.MysqlFailoverGroup) (*v1beta1.PlannedFailoverStatus,
+		func(*v1beta1.MysqlFailoverGroupStatus), bool) {
 		cur := base.Status.PlannedFailover
 		if cur == nil || cur.RunID != pf.RunID || plannedFailoverTerminal(cur) {
 			return nil, nil, false
@@ -3190,20 +3190,20 @@ func (e *PlannedFailoverEngine) markedRunPass(ctx context.Context, fg *v1alpha1.
 // removed by hand): the remembered terminal record, or one rebuilt without
 // MySQL access. The slot is released (or held, for a hold outcome)
 // whatever status says.
-func (e *PlannedFailoverEngine) retryTerminatedRun(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) retryTerminatedRun(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	m := e.runMemo(pf.RunID)
 	final := m.pendingTerminal
 	if final == nil || final.RunID != pf.RunID || final.Result == nil {
-		outcome := v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
-		if pf.Phase == v1alpha1.PlannedFailoverPhasePromoting {
-			outcome = v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed
+		outcome := v1beta1.PlannedFailoverOutcomeSourceLeftFenced
+		if pf.Phase == v1beta1.PlannedFailoverPhasePromoting {
+			outcome = v1beta1.PlannedFailoverOutcomePromotedUnconfirmed
 		}
-		final = e.terminalRecord(pf, plannedEnd{outcome: outcome, reason: v1alpha1.PlannedFailoverReasonStatusStalled,
-			warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningStatusStalled},
+		final = e.terminalRecord(pf, plannedEnd{outcome: outcome, reason: v1beta1.PlannedFailoverReasonStatusStalled,
+			warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningStatusStalled},
 			msg:      fmt.Sprintf("ended %s by this operator earlier; its terminal record is written late", outcome)})
 	}
-	isHold := final.Result.Outcome == v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired
+	isHold := final.Result.Outcome == v1beta1.PlannedFailoverOutcomeManualRecoveryRequired
 	if isHold {
 		e.topo.ConvertToHold(nn, pf.RunID)
 	} else {
@@ -3213,8 +3213,8 @@ func (e *PlannedFailoverEngine) retryTerminatedRun(ctx context.Context, fg *v1al
 	if isHold && len(sites) == 0 {
 		sites = plannedHoldSitesUnknown(fg, pf)
 	}
-	out, _, _ := e.commit(ctx, fg, false, func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus,
-		func(*v1alpha1.MysqlFailoverGroupStatus), bool) {
+	out, _, _ := e.commit(ctx, fg, false, func(base *v1beta1.MysqlFailoverGroup) (*v1beta1.PlannedFailoverStatus,
+		func(*v1beta1.MysqlFailoverGroupStatus), bool) {
 		cur, ok := sameRun(base, pf)
 		if !ok || plannedFailoverTerminal(cur) {
 			return nil, nil, false
@@ -3233,7 +3233,7 @@ func (e *PlannedFailoverEngine) retryTerminatedRun(ctx context.Context, fg *v1al
 
 // plannedOwnRecordDurable reports whether the durable failover record of fg
 // is the run's own, recognised by content (§4.4 check 1).
-func plannedOwnRecordDurable(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) bool {
+func plannedOwnRecordDurable(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus, now time.Time) bool {
 	return !plannedOwnRecordTime(fg, pf, now).IsZero()
 }
 
@@ -3243,12 +3243,12 @@ func plannedOwnRecordDurable(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.Plann
 // The run's planned-failover-confirmed annotation counts too: the confirmed
 // tail writes it before it releases the claim, so it outlives a later
 // failover that replaces the run's record (K014).
-func plannedOwnRecordTime(fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus, now time.Time) time.Time {
+func plannedOwnRecordTime(fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus, now time.Time) time.Time {
 	if pf.Promotion != nil && pf.Promotion.ConfirmationTime != nil {
 		return pf.Promotion.ConfirmationTime.Time
 	}
 	if pf.Promotion != nil && pf.RunID != "" {
-		if t, ok := parseDeadlineStart(fg.GetAnnotations()[v1alpha1.PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
+		if t, ok := parseDeadlineStart(fg.GetAnnotations()[v1beta1.PlannedFailoverConfirmedAnnotation], pf.RunID); ok {
 			return t
 		}
 	}
@@ -3269,24 +3269,24 @@ const plannedManualUnfenceAdvice = "check which site is writable; if none is, un
 	"(confirm no other site is writable first); re-annotate only once a site is writable"
 
 // refuseLegacy ends a block an older operator wrote: nothing is hydrated.
-func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, pf *v1alpha1.PlannedFailoverStatus) (time.Duration, error) {
+func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1beta1.MysqlFailoverGroup, pf *v1beta1.PlannedFailoverStatus) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	outcome := v1alpha1.PlannedFailoverOutcomeNotStarted
+	outcome := v1beta1.PlannedFailoverOutcomeNotStarted
 	msg := fmt.Sprintf("planned failover in phase %q was written by an older operator and is refused; re-annotate to run it again", pf.Phase)
 	switch pf.Phase {
 	case plannedLegacyPhaseNone, plannedLegacyPhasePending, plannedLegacyPhaseValidating,
-		v1alpha1.PlannedFailoverPhaseDeferred, v1alpha1.PlannedFailoverPhaseAdmitting:
-	case v1alpha1.PlannedFailoverPhasePromoting, plannedLegacyPhaseResuming:
+		v1beta1.PlannedFailoverPhaseDeferred, v1beta1.PlannedFailoverPhaseAdmitting:
+	case v1beta1.PlannedFailoverPhasePromoting, plannedLegacyPhaseResuming:
 		// The older operator may already have made the target writable
 		// (its promotion ran before these status writes): nothing says
 		// the source is the only candidate, so the outcome must not claim
 		// that nothing was written to the target (K096, a deviation from
 		// §13's SourceLeftFenced for these two phases).
-		outcome = v1alpha1.PlannedFailoverOutcomePromotedUnconfirmed
+		outcome = v1beta1.PlannedFailoverOutcomePromotedUnconfirmed
 		msg = fmt.Sprintf("planned failover in phase %q was written by an older operator and is refused: "+
 			"its promotion may have made the target writable; %s", pf.Phase, plannedManualUnfenceAdvice)
 	default:
-		outcome = v1alpha1.PlannedFailoverOutcomeSourceLeftFenced
+		outcome = v1beta1.PlannedFailoverOutcomeSourceLeftFenced
 		msg = fmt.Sprintf("planned failover in phase %q was written by an older operator and is refused: "+
 			"%s", pf.Phase, plannedManualUnfenceAdvice)
 	}
@@ -3302,15 +3302,15 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 	// The older operator's target and sourcePrimary are pruned on read
 	// (they are targetSite and sourceSite now): neither site is known, which
 	// is why the message asks a human to check.
-	next := &v1alpha1.PlannedFailoverStatus{
-		RunID: e.newRunID(), Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseFailed,
+	next := &v1beta1.PlannedFailoverStatus{
+		RunID: e.newRunID(), Revision: 1, Phase: v1beta1.PlannedFailoverPhaseFailed,
 		TargetSite: target, SourceSite: pf.SourceSite, StartTime: start, Message: msg,
 		Settings: plannedFailoverSettingsFor(fg, PlannedFailoverRequest{Site: target}),
-		Result:   &v1alpha1.PlannedFailoverResult{Outcome: outcome, Reason: v1alpha1.PlannedFailoverReasonLegacyRunRefused, CompletionTime: now},
+		Result:   &v1beta1.PlannedFailoverResult{Outcome: outcome, Reason: v1beta1.PlannedFailoverReasonLegacyRunRefused, CompletionTime: now},
 	}
 	phase := pf.Phase
-	out, _, _ := e.commit(ctx, fg, false, func(base *v1alpha1.MysqlFailoverGroup) (*v1alpha1.PlannedFailoverStatus,
-		func(*v1alpha1.MysqlFailoverGroupStatus), bool) {
+	out, _, _ := e.commit(ctx, fg, false, func(base *v1beta1.MysqlFailoverGroup) (*v1beta1.PlannedFailoverStatus,
+		func(*v1beta1.MysqlFailoverGroupStatus), bool) {
 		cur := base.Status.PlannedFailover
 		if cur == nil || !plannedLegacyBlock(cur) || cur.Phase != phase {
 			return nil, nil, false
@@ -3322,6 +3322,6 @@ func (e *PlannedFailoverEngine) refuseLegacy(ctx context.Context, fg *v1alpha1.M
 	}
 	log.FromContext(ctx).Info("planned failover: legacy status refused", "fg", nn.String(), "phase", string(phase))
 	e.sink.RunTerminal(nn, next)
-	e.sink.Event(fg, corev1.EventTypeWarning, v1alpha1.EventPlannedFailoverLegacyRunRefused, msg)
+	e.sink.Event(fg, corev1.EventTypeWarning, v1beta1.EventPlannedFailoverLegacyRunRefused, msg)
 	return plannedRequeueNext, nil
 }

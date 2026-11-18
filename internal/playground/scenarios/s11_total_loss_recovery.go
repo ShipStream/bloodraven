@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -137,18 +137,18 @@ func observeTotalLossReconvergence() runner.Step {
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				"sites: writable=1 read-only=N-1 blocked=0 active!=\"\"",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+				func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
 						switch s.State {
-						case v1alpha1.SiteStateWritable:
+						case v1beta1.SiteStateWritable:
 							writable = append(writable, s.Name)
-						case v1alpha1.SiteStateReadOnly:
+						case v1beta1.SiteStateReadOnly:
 							readOnly = append(readOnly, s.Name)
 						default:
 							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
 						}
-						if s.RecoveryState == v1alpha1.RecoveryStateBlocked {
+						if s.RecoveryState == v1beta1.RecoveryStateBlocked {
 							blocked = append(blocked, s.Name)
 						}
 					}

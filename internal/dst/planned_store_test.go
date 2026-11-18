@@ -9,7 +9,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 )
@@ -17,11 +17,11 @@ import (
 func newTestStore(t *testing.T) (*simPlannedStore, *clock.FakeClock) {
 	t.Helper()
 	clk := clock.NewFakeClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
-	obj := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "sim", Name: "sim"}}
+	obj := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "sim", Name: "sim"}}
 	return newSimPlannedStore(obj, clk), clk
 }
 
-func mustLoad(t *testing.T, s *simPlannedStore) *v1alpha1.MysqlFailoverGroup {
+func mustLoad(t *testing.T, s *simPlannedStore) *v1beta1.MysqlFailoverGroup {
 	t.Helper()
 	obj, err := s.Load(context.Background(), s.nn)
 	if err != nil || obj == nil {
@@ -30,8 +30,8 @@ func mustLoad(t *testing.T, s *simPlannedStore) *v1alpha1.MysqlFailoverGroup {
 	return obj
 }
 
-func block(run string, rev int64, phase v1alpha1.PlannedFailoverPhase) v1alpha1.PlannedFailoverStatus {
-	return v1alpha1.PlannedFailoverStatus{RunID: run, Revision: rev, Phase: phase, TargetSite: "beta"}
+func block(run string, rev int64, phase v1beta1.PlannedFailoverPhase) v1beta1.PlannedFailoverStatus {
+	return v1beta1.PlannedFailoverStatus{RunID: run, Revision: rev, Phase: phase, TargetSite: "beta"}
 }
 
 func wantOutcome(t *testing.T, got, want controller.WriteOutcome, err error) {
@@ -49,14 +49,14 @@ func TestSimStore_ConditionedWrite(t *testing.T) {
 	ctx := context.Background()
 	base := mustLoad(t, s)
 
-	out, err := s.Write(ctx, base, block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+	out, err := s.Write(ctx, base, block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 	wantOutcome(t, out, controller.WriteCommitted, err)
 	if s.ResourceVersion() != 2 {
 		t.Fatalf("rv %d after a commit", s.ResourceVersion())
 	}
 
 	// The stale base conflicts and changes nothing.
-	out, err = s.Write(ctx, base, block("r1", 2, v1alpha1.PlannedFailoverPhaseFencing), nil)
+	out, err = s.Write(ctx, base, block("r1", 2, v1beta1.PlannedFailoverPhaseFencing), nil)
 	wantOutcome(t, out, controller.WriteConflict, err)
 	if got := mustLoad(t, s).Status.PlannedFailover; got.Revision != 1 {
 		t.Fatalf("conflicting write landed: %+v", got)
@@ -71,7 +71,7 @@ func TestSimStore_ConditionedWrite(t *testing.T) {
 	}
 
 	// mutate applies to the same write.
-	out, err = s.Write(ctx, cur, block("r1", 2, v1alpha1.PlannedFailoverPhaseSucceeded), func(st *v1alpha1.MysqlFailoverGroupStatus) {
+	out, err = s.Write(ctx, cur, block("r1", 2, v1beta1.PlannedFailoverPhaseSucceeded), func(st *v1beta1.MysqlFailoverGroupStatus) {
 		st.SetLastFailover(st.LastFailoverTime(), "beta", st.PromotionGtidExecuted())
 	})
 	wantOutcome(t, out, controller.WriteCommitted, err)
@@ -86,9 +86,9 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		s, _ := newTestStore(t)
 		s.ConflictWrites(1)
 		s.DefiniteWrites(1)
-		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteConflict, err)
-		out, err = s.Write(ctx, mustLoad(t, s), block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err = s.Write(ctx, mustLoad(t, s), block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteNotCommitted, err)
 		if mustLoad(t, s).Status.PlannedFailover != nil || s.ResourceVersion() != 1 {
 			t.Fatal("an injected refusal committed")
@@ -97,29 +97,29 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 	t.Run("lostIsFencedNotCommitted", func(t *testing.T) {
 		s, _ := newTestStore(t)
 		s.LoseWrites(1)
-		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteNotCommitted, err)
 		obj := mustLoad(t, s)
 		if obj.Status.PlannedFailover != nil {
 			t.Fatal("a lost write committed")
 		}
-		if obj.GetAnnotations()[v1alpha1.PlannedFailoverStatusFenceAnnotation] == "" || s.ResourceVersion() != 2 {
+		if obj.GetAnnotations()[v1beta1.PlannedFailoverStatusFenceAnnotation] == "" || s.ResourceVersion() != 2 {
 			t.Fatalf("settlement did not fence (rv %d, annotations %v)", s.ResourceVersion(), obj.GetAnnotations())
 		}
 	})
 	t.Run("ambiguousCommittedSettlesCommitted", func(t *testing.T) {
 		s, _ := newTestStore(t)
 		s.AmbiguousWrites(1)
-		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteCommitted, err)
-		if mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverStatusFenceAnnotation] != "" {
+		if mustLoad(t, s).GetAnnotations()[v1beta1.PlannedFailoverStatusFenceAnnotation] != "" {
 			t.Fatal("a committed write was fenced")
 		}
 	})
 	t.Run("lateCommitKilledByTheFence", func(t *testing.T) {
 		s, _ := newTestStore(t)
 		s.LateWrites(1, 2)
-		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, mustLoad(t, s), block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteNotCommitted, err)
 		s.BeginPoll(2)
 		if mustLoad(t, s).Status.PlannedFailover != nil {
@@ -131,7 +131,7 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		s.LateWrites(1, 2)
 		base := mustLoad(t, s)
 		s.ReadOutage(1)
-		out, err := s.Write(ctx, base, block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, base, block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteUnknown, err)
 		s.BeginPoll(1) // read outage over; the late commit is not due yet
 		if mustLoad(t, s).Status.PlannedFailover != nil {
@@ -150,7 +150,7 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		s.LateWrites(1, 1)
 		base := mustLoad(t, s)
 		s.ReadOutage(1)
-		_, _ = s.Write(ctx, base, block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		_, _ = s.Write(ctx, base, block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		s.ClearFaults()
 		if err := s.MergeSnapshot(controller.TopologySnapshot{ActiveSite: "alpha"}); err != nil {
 			t.Fatal(err)
@@ -164,17 +164,17 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		s, _ := newTestStore(t)
 		s.DenyStatus(3)
 		base := mustLoad(t, s)
-		out, err := s.Write(ctx, base, block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, base, block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteNotCommitted, err)
 		if err := s.MergeSnapshot(controller.TopologySnapshot{ActiveSite: "alpha"}); err == nil {
 			t.Fatal("the topology manager's status write was not denied")
 		}
-		m := controller.TerminalMarker{RunID: "r1", Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted,
-			Reason: v1alpha1.PlannedFailoverReasonStatusStalled}
+		m := controller.TerminalMarker{RunID: "r1", Outcome: v1beta1.PlannedFailoverOutcomeNotStarted,
+			Reason: v1beta1.PlannedFailoverReasonStatusStalled}
 		out, err = s.WriteTerminalMarker(ctx, base, m)
 		wantOutcome(t, out, controller.WriteCommitted, err)
 		s.BeginPoll(3)
-		out, err = s.Write(ctx, mustLoad(t, s), block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err = s.Write(ctx, mustLoad(t, s), block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteCommitted, err)
 	})
 	t.Run("readOutageIsUnknown", func(t *testing.T) {
@@ -190,7 +190,7 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		s, _ := newTestStore(t)
 		base := mustLoad(t, s)
 		s.dead = func() bool { return true }
-		out, err := s.Write(ctx, base, block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, base, block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteUnknown, err)
 		if _, err := s.Load(ctx, s.nn); err == nil {
 			t.Fatal("a dead operator loaded the object")
@@ -200,7 +200,7 @@ func TestSimStore_InjectedOutcomes(t *testing.T) {
 		s, _ := newTestStore(t)
 		base := mustLoad(t, s)
 		s.obj = nil
-		out, err := s.Write(ctx, base, block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+		out, err := s.Write(ctx, base, block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 		wantOutcome(t, out, controller.WriteGone, err)
 		if obj, err := s.Load(ctx, s.nn); obj != nil || err != nil {
 			t.Fatalf("load of a gone object: %v %v", obj, err)
@@ -216,7 +216,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	base := mustLoad(t, s)
 	out, err := s.ConsumeRequest(ctx, base)
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if _, ok := mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverAnnotation]; ok {
+	if _, ok := mustLoad(t, s).GetAnnotations()[v1beta1.PlannedFailoverAnnotation]; ok {
 		t.Fatal("request not consumed")
 	}
 	// Conditioned: the old base now conflicts.
@@ -224,7 +224,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	wantOutcome(t, out, controller.WriteConflict, err)
 
 	// Terminal marker: written, cleared only by its own run.
-	m := controller.TerminalMarker{RunID: "r1", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}
+	m := controller.TerminalMarker{RunID: "r1", Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}
 	out, err = s.WriteTerminalMarker(ctx, mustLoad(t, s), m)
 	wantOutcome(t, out, controller.WriteCommitted, err)
 	if !holdStands(mustLoad(t, s)) || plannedHoldOf(mustLoad(t, s)).RunID != "r1" {
@@ -233,7 +233,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	rv := s.ResourceVersion()
 	out, err = s.ClearTerminalMarker(ctx, mustLoad(t, s), "r2")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if s.ResourceVersion() != rv || markerRunID(mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverTerminalAnnotation]) != "r1" {
+	if s.ResourceVersion() != rv || markerRunID(mustLoad(t, s).GetAnnotations()[v1beta1.PlannedFailoverTerminalAnnotation]) != "r1" {
 		t.Fatal("another run cleared the marker")
 	}
 	out, err = s.ClearTerminalMarker(ctx, mustLoad(t, s), "r1")
@@ -257,7 +257,7 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 	}
 	out, err = s.ClearDeadlineStart(ctx, mustLoad(t, s), controller.DeadlineStatusStall, "r1")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if v := mustLoad(t, s).GetAnnotations()[v1alpha1.PlannedFailoverStallSinceAnnotation]; !strings.HasPrefix(v, "r2:since=") {
+	if v := mustLoad(t, s).GetAnnotations()[v1beta1.PlannedFailoverStallSinceAnnotation]; !strings.HasPrefix(v, "r2:since=") {
 		t.Fatalf("r1 cleared r2's deadline: %q", v)
 	}
 	if _, out, _ := s.MarkDeadlineStart(ctx, mustLoad(t, s), controller.DeadlineKind("bogus"), "r1", clk.Now()); out == controller.WriteCommitted {
@@ -266,16 +266,16 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 
 	// Hold acknowledgement.
 	s.mu.Lock()
-	s.patchAnnotationsLocked("ack", map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: "r1"})
+	s.patchAnnotationsLocked("ack", map[string]string{v1beta1.AcknowledgePlannedFailoverHoldAnnotation: "r1"})
 	s.mu.Unlock()
 	out, err = s.DeleteHoldAck(ctx, mustLoad(t, s), "r9")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if mustLoad(t, s).GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation] != "r1" {
+	if mustLoad(t, s).GetAnnotations()[v1beta1.AcknowledgePlannedFailoverHoldAnnotation] != "r1" {
 		t.Fatal("a non-matching ack delete removed the ack")
 	}
 	out, err = s.DeleteHoldAck(ctx, mustLoad(t, s), "r1")
 	wantOutcome(t, out, controller.WriteCommitted, err)
-	if _, ok := mustLoad(t, s).GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
+	if _, ok := mustLoad(t, s).GetAnnotations()[v1beta1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Fatal("ack not deleted")
 	}
 }
@@ -283,8 +283,8 @@ func TestSimStore_MetadataWrites(t *testing.T) {
 func TestSimStore_ClearHold(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	held := block("r1", 4, v1alpha1.PlannedFailoverPhaseFailed)
-	out, err := s.Write(ctx, mustLoad(t, s), held, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+	held := block("r1", 4, v1beta1.PlannedFailoverPhaseFailed)
+	out, err := s.Write(ctx, mustLoad(t, s), held, func(st *v1beta1.MysqlFailoverGroupStatus) {
 		setHoldRecord(st, "r1", "alpha")
 	})
 	wantOutcome(t, out, controller.WriteCommitted, err)
@@ -301,16 +301,16 @@ func TestSimStore_ClearHold(t *testing.T) {
 
 	// Ambiguous but committed: the settlement recognises the removal.
 	s.AmbiguousWrites(1)
-	final := block("r1", 5, v1alpha1.PlannedFailoverPhaseFailed)
+	final := block("r1", 5, v1beta1.PlannedFailoverPhaseFailed)
 	out, err = s.ClearHold(ctx, mustLoad(t, s), "r1", &final)
 	wantOutcome(t, out, controller.WriteCommitted, err)
 	obj := mustLoad(t, s)
 	if holdStands(obj) || obj.Status.PlannedFailover.Revision != 5 {
 		t.Fatalf("hold not cleared in one write: %+v", obj.Status)
 	}
-	if c := apimeta.FindStatusCondition(obj.Status.Conditions, v1alpha1.ConditionAutomaticFailoverHeld); c == nil ||
-		c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged {
-		t.Fatalf("hold condition after the acknowledgement = %+v, want False/%s", c, v1alpha1.ReasonPlannedFailoverHoldAcknowledged)
+	if c := apimeta.FindStatusCondition(obj.Status.Conditions, v1beta1.ConditionAutomaticFailoverHeld); c == nil ||
+		c.Status != metav1.ConditionFalse || c.Reason != v1beta1.ReasonPlannedFailoverHoldAcknowledged {
+		t.Fatalf("hold condition after the acknowledgement = %+v, want False/%s", c, v1beta1.ReasonPlannedFailoverHoldAcknowledged)
 	}
 }
 
@@ -318,12 +318,12 @@ func TestSimStore_SnapshotMergeContends(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	var kinds []string
-	s.onCommit = func(kind string, _, _ *v1alpha1.MysqlFailoverGroup) { kinds = append(kinds, kind) }
+	s.onCommit = func(kind string, _, _ *v1beta1.MysqlFailoverGroup) { kinds = append(kinds, kind) }
 	base := mustLoad(t, s)
 	if err := s.MergeSnapshot(controller.TopologySnapshot{ActiveSite: "alpha", TopologyGeneration: 2}); err != nil {
 		t.Fatal(err)
 	}
-	out, err := s.Write(ctx, base, block("r1", 1, v1alpha1.PlannedFailoverPhaseAdmitting), nil)
+	out, err := s.Write(ctx, base, block("r1", 1, v1beta1.PlannedFailoverPhaseAdmitting), nil)
 	wantOutcome(t, out, controller.WriteConflict, err)
 	// An identical snapshot is a no-op; an older generation is refused.
 	rv := s.ResourceVersion()
@@ -387,7 +387,7 @@ func TestOOBReplay_RegressionIsDetected(t *testing.T) {
 // NotCommitted always rests on a fence that landed (K029).
 func TestSettle_TwoFencesInOneTickBothMoveTheResourceVersion(t *testing.T) {
 	s, _ := newTestStore(t)
-	never := func(*v1alpha1.MysqlFailoverGroup) bool { return false }
+	never := func(*v1beta1.MysqlFailoverGroup) bool { return false }
 	for i := range 2 {
 		base := mustLoad(t, s)
 		rv := s.ResourceVersion()
@@ -424,18 +424,18 @@ func TestMetadataNoOpsAreDecidedFromBase(t *testing.T) {
 	if out, _ := s.ClearHold(ctx, mustLoad(t, s), "r1", nil); out != controller.WriteCommitted {
 		t.Fatalf("no-op ClearHold: %s, want Committed", out)
 	}
-	if out, _ := s.Write(ctx, mustLoad(t, s), v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: 1,
-		Phase: v1alpha1.PlannedFailoverPhaseAdmitting}, nil); out != controller.WriteConflict {
+	if out, _ := s.Write(ctx, mustLoad(t, s), v1beta1.PlannedFailoverStatus{RunID: "r1", Revision: 1,
+		Phase: v1beta1.PlannedFailoverPhaseAdmitting}, nil); out != controller.WriteConflict {
 		t.Fatalf("the scripted conflict was consumed by a no-op ClearHold (next write: %s)", out)
 	}
 
-	if err := s.PatchAnnotations("ack", map[string]string{v1alpha1.AcknowledgePlannedFailoverHoldAnnotation: " r1 \n"}); err != nil {
+	if err := s.PatchAnnotations("ack", map[string]string{v1beta1.AcknowledgePlannedFailoverHoldAnnotation: " r1 \n"}); err != nil {
 		t.Fatal(err)
 	}
 	if out, _ := s.DeleteHoldAck(ctx, mustLoad(t, s), "r1"); out != controller.WriteCommitted {
 		t.Fatalf("delete ack: %s", out)
 	}
-	if _, ok := s.Object().GetAnnotations()[v1alpha1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
+	if _, ok := s.Object().GetAnnotations()[v1beta1.AcknowledgePlannedFailoverHoldAnnotation]; ok {
 		t.Fatal("a whitespace-padded acknowledgement survived its deletion")
 	}
 }
@@ -448,7 +448,7 @@ func TestMetadataNoOpsAreDecidedFromBase(t *testing.T) {
 func TestMergeSnapshot_TwoStepWrite(t *testing.T) {
 	ctx := context.Background()
 	s, clk := newTestStore(t)
-	pf := v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseDraining, TargetSite: "beta"}
+	pf := v1beta1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1beta1.PlannedFailoverPhaseDraining, TargetSite: "beta"}
 	yielded := false
 	s.yield = func(point string) {
 		if point != YieldSnapshotCommit || yielded {
@@ -456,7 +456,7 @@ func TestMergeSnapshot_TwoStepWrite(t *testing.T) {
 		}
 		yielded = true
 		// A planned write lands between the snapshot's read and its commit.
-		if out, err := s.Write(ctx, mustLoad(t, s), pf, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		if out, err := s.Write(ctx, mustLoad(t, s), pf, func(st *v1beta1.MysqlFailoverGroupStatus) {
 			setHoldRecord(st, "r1", "alpha")
 		}); out != controller.WriteCommitted {
 			t.Fatalf("concurrent write: %s %v", out, err)
@@ -473,7 +473,7 @@ func TestMergeSnapshot_TwoStepWrite(t *testing.T) {
 		t.Fatalf("computed fields not written: %+v", st)
 	}
 	if st.PlannedFailover == nil || st.PlannedFailover.RunID != "r1" || st.PlannedFailoverHold == nil ||
-		apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionAutomaticFailoverHeld) == nil {
+		apimeta.FindStatusCondition(st.Conditions, v1beta1.ConditionAutomaticFailoverHeld) == nil {
 		t.Fatalf("the concurrent planned block, hold or condition was overwritten: %+v", st)
 	}
 }
@@ -495,14 +495,14 @@ func TestMergeSnapshot_ReMergesTheFailoverRecord(t *testing.T) {
 	}
 	confirmed := metav1.NewTime(clk.Now())
 	const watermark = "00000000-0000-0000-0000-000000000001:1-9"
-	pf := v1alpha1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1alpha1.PlannedFailoverPhaseSucceeded, TargetSite: "beta"}
+	pf := v1beta1.PlannedFailoverStatus{RunID: "r1", Revision: 1, Phase: v1beta1.PlannedFailoverPhaseSucceeded, TargetSite: "beta"}
 	yielded := false
 	s.yield = func(point string) {
 		if point != YieldSnapshotCommit || yielded {
 			return
 		}
 		yielded = true
-		if out, err := s.Write(ctx, mustLoad(t, s), pf, func(st *v1alpha1.MysqlFailoverGroupStatus) {
+		if out, err := s.Write(ctx, mustLoad(t, s), pf, func(st *v1beta1.MysqlFailoverGroupStatus) {
 			st.SetLastFailover(&confirmed, "beta", watermark)
 		}); out != controller.WriteCommitted {
 			t.Fatalf("concurrent terminal write: %s %v", out, err)

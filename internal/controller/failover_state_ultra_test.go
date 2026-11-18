@@ -11,7 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -31,7 +31,7 @@ func TestUltraK023_FutureDatedRecordDoesNotBlockWriters(t *testing.T) {
 	} {
 		t.Run(tc.name+"/status merge", func(t *testing.T) {
 			stored := metav1.NewTime(tc.storedAt)
-			st := v1alpha1.MysqlFailoverGroupStatus{LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &stored, Target: "dc1"}, PromotionGtidExecuted: "old"}}
+			st := v1beta1.MysqlFailoverGroupStatus{LastFailover: &v1beta1.FailoverRecord{FailoverRecordRef: v1beta1.FailoverRecordRef{Time: &stored, Target: "dc1"}, PromotionGtidExecuted: "old"}}
 			snap := TopologySnapshot{LastFailover: now, LastFailoverTarget: "dc2", PromotionGtidExecuted: "new", ObservedAt: now}
 			MergeTopologySnapshotStatus(&st, snap)
 			if got := st.LastFailoverTarget() == "dc2" && st.PromotionGtidExecuted() == "new"; got != tc.overwrite {
@@ -40,7 +40,7 @@ func TestUltraK023_FutureDatedRecordDoesNotBlockWriters(t *testing.T) {
 		})
 		t.Run(tc.name+"/planned record", func(t *testing.T) {
 			stored := metav1.NewTime(tc.storedAt)
-			st := v1alpha1.MysqlFailoverGroupStatus{LastFailover: &v1alpha1.FailoverRecord{FailoverRecordRef: v1alpha1.FailoverRecordRef{Time: &stored, Target: "dc1"}, PromotionGtidExecuted: "old"}}
+			st := v1beta1.MysqlFailoverGroupStatus{LastFailover: &v1beta1.FailoverRecord{FailoverRecordRef: v1beta1.FailoverRecordRef{Time: &stored, Target: "dc1"}, PromotionGtidExecuted: "old"}}
 			applyPlannedFailoverRecord(&st, now, "dc2", "new", now)
 			if got := st.LastFailoverTarget() == "dc2" && st.PromotionGtidExecuted() == "new"; got != tc.overwrite {
 				t.Fatalf("applied triple = %v %q %q; overwrite=%v", st.LastFailover, st.LastFailoverTarget(), st.PromotionGtidExecuted(), tc.overwrite)
@@ -62,7 +62,7 @@ func TestUltraK023_FutureDatedRecordDoesNotBlockWriters(t *testing.T) {
 			if err := rec.RecordFailoverState(context.Background(), want); err != nil {
 				t.Fatal(err)
 			}
-			var got v1alpha1.MysqlFailoverGroup
+			var got v1beta1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &got); err != nil {
 				t.Fatal(err)
 			}
@@ -91,8 +91,8 @@ func TestUltraK095_WatermarkBoundToItsEvent(t *testing.T) {
 		t.Fatalf("own watermark not read back: %+v, %v", rec, err)
 	}
 	// A two-key writer advances the event and leaves the watermark.
-	ann[v1alpha1.LastFailoverAnnotation] = failoverStampFormat(t1.Add(time.Hour))
-	ann[v1alpha1.LastFailoverTargetAnnotation] = "dc2"
+	ann[v1beta1.LastFailoverAnnotation] = failoverStampFormat(t1.Add(time.Hour))
+	ann[v1beta1.LastFailoverTargetAnnotation] = "dc2"
 	rec, err = FailoverRecordFromAnnotations(ann)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestUltraK095_WatermarkBoundToItsEvent(t *testing.T) {
 		t.Fatalf("record = %+v; want the newer event with no watermark", rec)
 	}
 	// A watermark with no binding at all is no watermark either.
-	delete(ann, v1alpha1.PromotionGtidExecutedForAnnotation)
+	delete(ann, v1beta1.PromotionGtidExecutedForAnnotation)
 	if rec, _ := FailoverRecordFromAnnotations(ann); rec.PromotionGtidExecuted != "" {
 		t.Fatalf("an unbound watermark was read: %+v", rec)
 	}
@@ -120,14 +120,14 @@ func TestUltraK058_StatusRetryKeepsNewerFailoverTriple(t *testing.T) {
 	fg.Status.TopologyGeneration = 4
 	injected := false
 	c := fake.NewClientBuilder().WithScheme(testScheme()).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 		WithObjects(fg).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, underlying client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 				if !injected {
 					injected = true
 					// The engine's Succeeded write lands first.
-					var cur v1alpha1.MysqlFailoverGroup
+					var cur v1beta1.MysqlFailoverGroup
 					if err := underlying.Get(ctx, client.ObjectKeyFromObject(obj), &cur); err != nil {
 						return err
 					}
@@ -152,7 +152,7 @@ func TestUltraK058_StatusRetryKeepsNewerFailoverTriple(t *testing.T) {
 	if !injected {
 		t.Fatal("the conflict was not injected")
 	}
-	var got v1alpha1.MysqlFailoverGroup
+	var got v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestUltraK058_StatusRetryKeepsNewerFailoverTriple(t *testing.T) {
 // disagrees, and still repairs a pause the live state no longer backs.
 func TestUltraK121_SyncPauseFollowsUncachedState(t *testing.T) {
 	fg := newTestFG()
-	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Upgrade: &v1alpha1.DragonflyUpgradeStatus{Phase: v1alpha1.DragonflyUpgradePhaseFailed}}
+	fg.Status.Dragonfly = &v1beta1.DragonflyStatus{Upgrade: &v1beta1.DragonflyUpgradeStatus{Phase: v1beta1.DragonflyUpgradePhaseFailed}}
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(fg).Build()
 	r := &TopologyManagerRunner{client: c, apiReader: c, logger: testLogger(), managers: map[types.NamespacedName]*managedTopology{}}
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}

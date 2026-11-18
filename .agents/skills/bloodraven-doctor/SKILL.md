@@ -18,7 +18,7 @@ When an operator or developer encounters issues with a cluster, replication, fai
 ## Safety & Non-Destructive Operation Rules
 
 1. **Read-Only First**: Initial triage and diagnostics MUST ONLY query cluster state, metrics, logs, and sidecar endpoints. Do NOT modify CRDs, trigger promotions, restart pods, or wipe PVCs during investigation without explicit user approval.
-2. **First-Party Tools**: Use `kubectl bloodraven <command>` (the official day-2 plugin) wherever applicable (`status`, `promote`, `reclone`, `backup`, `verify-backup`).
+2. **First-Party Tools**: Use `kubectl bloodraven <command>` (the official day-2 plugin) wherever applicable (`status`, `promote`, `reclone`, `backup`, `verify-backup`, and `migrate-storage` after an upgrade that changes the CRDs' storage version).
 3. **Transparent Remediation**: Before executing any state-changing command:
    - State the **Root Cause**.
    - State the **Blast Radius & Downtime Impact**.

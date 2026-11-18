@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // TestCRDsInstallWithRatchetingGateOff: the CRDs install, and a group with
@@ -28,7 +28,7 @@ func TestCRDsInstallWithRatchetingGateOff(t *testing.T) {
 		t.Skip("CRDValidationRatcheting is GA and locked on from Kubernetes 1.33")
 	}
 	gateScheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1alpha1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{clientgoscheme.AddToScheme, v1beta1.AddToScheme} {
 		if err := add(gateScheme); err != nil {
 			t.Fatal(err)
 		}
@@ -52,12 +52,12 @@ func TestCRDsInstallWithRatchetingGateOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	fg := newTestFG(ns.Name)
-	fg.Spec.Backup = &v1alpha1.BackupSpec{Profiles: []v1alpha1.BackupProfile{pitrS3Profile("source", "orders", ""), pitrS3Profile("own", "p1", "")}}
+	fg.Spec.Backup = &v1beta1.BackupSpec{Profiles: []v1beta1.BackupProfile{pitrS3Profile("source", "orders", ""), pitrS3Profile("own", "p1", "")}}
 	fg.Spec.InitFromBackup = e16InitPITR("source")
 	if err := c.Create(ctx, fg); err != nil {
 		t.Fatalf("create a group with a point-in-time initFromBackup: %v", err)
 	}
-	cur := &v1alpha1.MysqlFailoverGroup{}
+	cur := &v1beta1.MysqlFailoverGroup{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(fg), cur); err != nil {
 		t.Fatal(err)
 	}

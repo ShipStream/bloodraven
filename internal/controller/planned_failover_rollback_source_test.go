@@ -8,7 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -20,16 +20,16 @@ type rollbackSourceCase struct {
 	// promoting: the rollback started from Promoting (a promotion intent
 	// exists), else from WaitingForLag.
 	promoting bool
-	reason    v1alpha1.PlannedFailoverReason
+	reason    v1beta1.PlannedFailoverReason
 	third     state.SiteRole
 	// fence replaces the run's fenced set (opsF) when set.
 	fence  string
 	mutate func(f *opsFixture)
 
-	outcome   v1alpha1.PlannedFailoverOutcome
-	outReason v1alpha1.PlannedFailoverReason
+	outcome   v1beta1.PlannedFailoverOutcome
+	outReason v1beta1.PlannedFailoverReason
 	lost      string
-	warnings  []v1alpha1.PlannedFailoverWarning
+	warnings  []v1beta1.PlannedFailoverWarning
 	// target is every statement the target may receive, in order.
 	target []string
 	// unfenced: the source's read-only flags were cleared.
@@ -41,18 +41,18 @@ func runRollbackSourceCase(t *testing.T, tc rollbackSourceCase) {
 	f := newOpsFixture(t, tc.third)
 	f.hold(false)
 	tc.mutate(f)
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseRollingBack)
+	pf := opsRun(v1beta1.PlannedFailoverPhaseRollingBack)
 	if tc.promoting {
-		pf.Promotion = opsRun(v1alpha1.PlannedFailoverPhasePromoting).Promotion
+		pf.Promotion = opsRun(v1beta1.PlannedFailoverPhasePromoting).Promotion
 	}
 	if tc.fence != "" {
 		pf.Fence.GtidSet = &tc.fence
 	}
 	reason := tc.reason
 	if reason == "" {
-		reason = v1alpha1.PlannedFailoverReasonSourceUnfenced
+		reason = v1beta1.PlannedFailoverReasonSourceUnfenced
 	}
-	pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: reason, IntentTime: metav1.NewTime(f.clk.Now())}
+	pf.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: reason, IntentTime: metav1.NewTime(f.clk.Now())}
 	res, err := f.topo.Rollback(context.Background(), f.ref, pf)
 	if err != nil {
 		t.Fatal(err)
@@ -92,18 +92,18 @@ func TestRollback_NeverPointsTargetAtSourceThatLostHistory(t *testing.T) {
 	stopped := func(f *opsFixture) {
 		f.tgt.repl = &mysql.ReplicaStatus{SourceHost: "mysql-dc1"}
 	}
-	hold, leftFenced, rolledBack := v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
-		v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, v1alpha1.PlannedFailoverOutcomeRolledBack
-	notRestored := []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored}
+	hold, leftFenced, rolledBack := v1beta1.PlannedFailoverOutcomeManualRecoveryRequired,
+		v1beta1.PlannedFailoverOutcomeSourceLeftFenced, v1beta1.PlannedFailoverOutcomeRolledBack
+	notRestored := []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningTargetReplicationNotRestored}
 	cases := []rollbackSourceCase{
 		// The source is writable (the fixture's default) under the run's
 		// server_uuid, on a data directory that lacks 9-10 of the fenced set.
 		{name: "writable source lacks part of the fenced set, target without a channel",
 			mutate:  func(f *opsFixture) { noChannel(f); f.src.gtid = opsUUIDA + ":1-8" },
-			outcome: hold, outReason: v1alpha1.PlannedFailoverReasonSourceUnfenced, lost: opsUUIDA + ":9-10", warnings: notRestored},
+			outcome: hold, outReason: v1beta1.PlannedFailoverReasonSourceUnfenced, lost: opsUUIDA + ":9-10", warnings: notRestored},
 		{name: "the same after a promotion intent", promoting: true,
 			mutate:  func(f *opsFixture) { noChannel(f); f.src.gtid = opsUUIDA + ":1-8" },
-			outcome: hold, outReason: v1alpha1.PlannedFailoverReasonSourceUnfenced, lost: opsUUIDA + ":9-10", warnings: notRestored},
+			outcome: hold, outReason: v1beta1.PlannedFailoverReasonSourceUnfenced, lost: opsUUIDA + ":9-10", warnings: notRestored},
 		{name: "writable source lacks part of the fenced set, target channel stopped", promoting: true,
 			mutate:  func(f *opsFixture) { stopped(f); f.src.gtid = opsUUIDA + ":1-8" },
 			outcome: hold, lost: opsUUIDA + ":9-10", warnings: notRestored},
@@ -112,7 +112,7 @@ func TestRollback_NeverPointsTargetAtSourceThatLostHistory(t *testing.T) {
 			outcome: hold, lost: opsUUIDA + ":9-10"},
 		// The target lags and does not hold the lost part either: the fenced
 		// set alone proves the loss.
-		{name: "writable source lacks part of the fenced set that the target lacks too", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+		{name: "writable source lacks part of the fenced set that the target lacks too", reason: v1beta1.PlannedFailoverReasonLagTimeout,
 			mutate:  func(f *opsFixture) { f.src.gtid, f.tgt.gtid = opsUUIDA+":1-8", opsUUIDA+":1-6" },
 			outcome: hold, lost: opsUUIDA + ":9-10"},
 		// The source restarted on the older directory before the fence was
@@ -126,7 +126,7 @@ func TestRollback_NeverPointsTargetAtSourceThatLostHistory(t *testing.T) {
 			outcome: hold, lost: opsUUIDA + ":9-13", warnings: notRestored},
 		{name: "a replaced writable source lacks part of the fenced set",
 			mutate:  func(f *opsFixture) { noChannel(f); f.src.uuid, f.src.gtid = "replaced", opsUUIDA+":1-8" },
-			outcome: hold, lost: opsUUIDA + ":9-10", warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningSourceReplaced}},
+			outcome: hold, lost: opsUUIDA + ":9-10", warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningSourceReplaced}},
 		// The target at read_only=ON, super_read_only=OFF goes back behind
 		// super_read_only before the hold; nothing else is sent to it.
 		{name: "the hold re-fences a target left at super_read_only=OFF", promoting: true,
@@ -135,14 +135,14 @@ func TestRollback_NeverPointsTargetAtSourceThatLostHistory(t *testing.T) {
 
 		// A read-only source in that state is left fenced, as before; a
 		// channel the promotion stopped is no longer started toward it.
-		{name: "fenced source lacks part of the fenced set, target channel stopped", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+		{name: "fenced source lacks part of the fenced set, target channel stopped", reason: v1beta1.PlannedFailoverReasonLagTimeout,
 			mutate:  func(f *opsFixture) { f.fenced(); stopped(f); f.src.gtid = opsUUIDA + ":1-8" },
 			outcome: leftFenced, warnings: notRestored},
-		{name: "fenced source lacks its own transactions, target channel stopped", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+		{name: "fenced source lacks its own transactions, target channel stopped", reason: v1beta1.PlannedFailoverReasonLagTimeout,
 			mutate:  func(f *opsFixture) { f.fenced(); stopped(f); f.tgt.gtid = opsUUIDA + ":1-13" },
 			outcome: leftFenced, warnings: notRestored},
 		{name: "fenced source lacks part of the fenced set beside a writable reader", third: state.SiteRoleReadOnly,
-			reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+			reason: v1beta1.PlannedFailoverReasonLagTimeout,
 			mutate: func(f *opsFixture) {
 				f.fenced()
 				stopped(f)
@@ -150,7 +150,7 @@ func TestRollback_NeverPointsTargetAtSourceThatLostHistory(t *testing.T) {
 				f.third.ro, f.third.sro = false, false
 			},
 			outcome: leftFenced, warnings: notRestored},
-		{name: "fenced source lacks part of the fenced set, source lost", reason: v1alpha1.PlannedFailoverReasonSourceLost,
+		{name: "fenced source lacks part of the fenced set, source lost", reason: v1beta1.PlannedFailoverReasonSourceLost,
 			mutate:  func(f *opsFixture) { f.fenced(); stopped(f); f.src.gtid = opsUUIDA + ":1-8" },
 			outcome: leftFenced, warnings: notRestored},
 
@@ -161,16 +161,16 @@ func TestRollback_NeverPointsTargetAtSourceThatLostHistory(t *testing.T) {
 		{name: "writable source holds everything: stopped channel started",
 			mutate:  stopped,
 			outcome: rolledBack, target: []string{"start"}},
-		{name: "fenced source holds everything: channel created, source unfenced", reason: v1alpha1.PlannedFailoverReasonLagTimeout,
+		{name: "fenced source holds everything: channel created, source unfenced", reason: v1beta1.PlannedFailoverReasonLagTimeout,
 			mutate:  func(f *opsFixture) { f.fenced(); noChannel(f) },
 			outcome: rolledBack, target: []string{"change:mysql-dc1", "start"}, unfenced: true},
 		// A source that does not answer proves nothing either way: the
 		// channel the promotion stopped is started again, which puts back
 		// what the run found, and none is created.
-		{name: "unreachable source: stopped channel started", reason: v1alpha1.PlannedFailoverReasonSourceLost,
+		{name: "unreachable source: stopped channel started", reason: v1beta1.PlannedFailoverReasonSourceLost,
 			mutate:  func(f *opsFixture) { f.fenced(); stopped(f); f.src.down = true },
 			outcome: leftFenced, target: []string{"start"}},
-		{name: "unreachable source: no channel created", reason: v1alpha1.PlannedFailoverReasonSourceLost,
+		{name: "unreachable source: no channel created", reason: v1beta1.PlannedFailoverReasonSourceLost,
 			mutate:  func(f *opsFixture) { f.fenced(); noChannel(f); f.src.down = true },
 			outcome: leftFenced, warnings: notRestored},
 		// A writable source ahead of the fenced set (its fence was lifted
@@ -180,7 +180,7 @@ func TestRollback_NeverPointsTargetAtSourceThatLostHistory(t *testing.T) {
 			outcome: rolledBack, target: []string{"change:mysql-dc1", "start"}},
 		// A target that holds transactions of a third server is a divergent
 		// target: no channel is created, and that is not the source's loss.
-		{name: "divergent target: no channel created, no hold", reason: v1alpha1.PlannedFailoverReasonDivergentTarget,
+		{name: "divergent target: no channel created, no hold", reason: v1beta1.PlannedFailoverReasonDivergentTarget,
 			mutate:  func(f *opsFixture) { noChannel(f); f.tgt.gtid = opsF + "," + opsUUIDC + ":1" },
 			outcome: rolledBack, warnings: notRestored},
 	}
@@ -198,8 +198,8 @@ func TestRollback_SourceMadeWritableBetweenTheReads(t *testing.T) {
 	f.fenced()
 	f.tgt.repl = nil
 	f.src.gtid = opsUUIDA + ":1-8"
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseRollingBack)
-	pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonLagTimeout, IntentTime: metav1.NewTime(f.clk.Now())}
+	pf := opsRun(v1beta1.PlannedFailoverPhaseRollingBack)
+	pf.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: v1beta1.PlannedFailoverReasonLagTimeout, IntentTime: metav1.NewTime(f.clk.Now())}
 	// The target is read twice before the source is pinned: for the
 	// rollback's precondition, before the pooled read of the source, and
 	// by the peer probe after it. The source turns writable at the second.
@@ -219,7 +219,7 @@ func TestRollback_SourceMadeWritableBetweenTheReads(t *testing.T) {
 	if reads < 2 {
 		t.Fatalf("setup: the target was read %d times, want the peer probe after the source's pooled read", reads)
 	}
-	if res.Outcome != v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired || res.Reason != v1alpha1.PlannedFailoverReasonSourceUnfenced ||
+	if res.Outcome != v1beta1.PlannedFailoverOutcomeManualRecoveryRequired || res.Reason != v1beta1.PlannedFailoverReasonSourceUnfenced ||
 		res.LostGtid != opsUUIDA+":9-10" {
 		t.Fatalf("Rollback = %+v, want ManualRecoveryRequired{SourceUnfenced} naming %s:9-10", res, opsUUIDA)
 	}
@@ -256,13 +256,13 @@ func (h *opsReadHook) PinSession(context.Context) (mysql.Session, error) {
 // facade's verdict into ManualRecoveryRequired with the hold, and the
 // record names the lost transactions.
 func TestPF_SourceLostTransactionsEndsWithTheHold(t *testing.T) {
-	msg := plannedSourceLostMessage(&v1alpha1.PlannedFailoverStatus{SourceSite: "dc1", TargetSite: "dc2"}, opsUUIDA+":9-10")
+	msg := plannedSourceLostMessage(&v1beta1.PlannedFailoverStatus{SourceSite: "dc1", TargetSite: "dc2"}, opsUUIDA+":9-10")
 	for _, want := range []string{`"dc1"`, `"dc2"`, opsUUIDA + ":9-10", "second history", "Do not reclone"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("message %q lacks %q", msg, want)
 		}
 	}
-	long := plannedSourceLostMessage(&v1alpha1.PlannedFailoverStatus{}, strings.Repeat("a", 2000))
+	long := plannedSourceLostMessage(&v1beta1.PlannedFailoverStatus{}, strings.Repeat("a", 2000))
 	if len(long) > 800 {
 		t.Fatalf("a long lost set is not cut: %d bytes", len(long))
 	}
@@ -279,27 +279,27 @@ func TestPF_SourceLostTransactionsEndsWithTheHold(t *testing.T) {
 func TestRollback_NeverGivesAChannelToATargetThatLacksItsOwnTransactions(t *testing.T) {
 	fence := opsUUIDA + ":1-10," + opsUUIDB + ":1-5"
 	short := opsUUIDA + ":1-10," + opsUUIDB + ":1-3"
-	notRestored := []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningTargetReplicationNotRestored}
+	notRestored := []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningTargetReplicationNotRestored}
 	for _, tc := range []rollbackSourceCase{
 		{name: "no channel: none is created", fence: fence,
 			mutate:  func(f *opsFixture) { f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, short, nil },
-			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, warnings: notRestored},
+			outcome: v1beta1.PlannedFailoverOutcomeRolledBack, warnings: notRestored},
 		{name: "a stopped channel is not started", fence: fence,
 			mutate: func(f *opsFixture) {
 				f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, short, &mysql.ReplicaStatus{SourceHost: "mysql-dc1"}
 			},
-			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, warnings: notRestored},
+			outcome: v1beta1.PlannedFailoverOutcomeRolledBack, warnings: notRestored},
 		// The control: the same target holding everything it issued.
 		{name: "control: complete, the channel is created", fence: fence,
 			mutate:  func(f *opsFixture) { f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, fence, nil },
-			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, target: []string{"change:mysql-dc1", "start"}},
+			outcome: v1beta1.PlannedFailoverOutcomeRolledBack, target: []string{"change:mysql-dc1", "start"}},
 		// Short of the fenced set by the source's transactions only: that
 		// is lag, which the channel repairs.
 		{name: "control: behind by the source's transactions, the channel is created", fence: fence,
 			mutate: func(f *opsFixture) {
 				f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, opsUUIDA+":1-8,"+opsUUIDB+":1-5", nil
 			},
-			outcome: v1alpha1.PlannedFailoverOutcomeRolledBack, target: []string{"change:mysql-dc1", "start"}},
+			outcome: v1beta1.PlannedFailoverOutcomeRolledBack, target: []string{"change:mysql-dc1", "start"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) { runRollbackSourceCase(t, tc) })
 	}
@@ -308,9 +308,9 @@ func TestRollback_NeverGivesAChannelToATargetThatLacksItsOwnTransactions(t *test
 	f := newOpsFixture(t, "")
 	f.hold(false)
 	f.src.gtid, f.tgt.gtid, f.tgt.repl = fence, short, nil
-	pf := opsRun(v1alpha1.PlannedFailoverPhaseRollingBack)
+	pf := opsRun(v1beta1.PlannedFailoverPhaseRollingBack)
 	pf.Fence.GtidSet = &fence
-	pf.Rollback = &v1alpha1.PlannedFailoverRollbackRecord{Reason: v1alpha1.PlannedFailoverReasonSourceUnfenced, IntentTime: metav1.NewTime(f.clk.Now())}
+	pf.Rollback = &v1beta1.PlannedFailoverRollbackRecord{Reason: v1beta1.PlannedFailoverReasonSourceUnfenced, IntentTime: metav1.NewTime(f.clk.Now())}
 	if _, err := f.topo.Rollback(context.Background(), f.ref, pf); err != nil {
 		t.Fatal(err)
 	}

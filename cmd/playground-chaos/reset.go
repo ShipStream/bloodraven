@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -49,7 +49,7 @@ type resetter struct {
 
 type resetPhase struct {
 	name string
-	fn   func(context.Context, []v1alpha1.SiteSpec) error
+	fn   func(context.Context, []v1beta1.SiteSpec) error
 }
 
 func resetPlayground(kubeconfig, kctx, namespace, fg, resultsDir string, logger *slog.Logger) int {
@@ -128,7 +128,7 @@ func (r *resetter) resetPhases() []resetPhase {
 	}
 }
 
-func (r *resetter) runPhases(ctx context.Context, sites []v1alpha1.SiteSpec, phases []resetPhase) error {
+func (r *resetter) runPhases(ctx context.Context, sites []v1beta1.SiteSpec, phases []resetPhase) error {
 	for _, phase := range phases {
 		r.info("%s...", phase.name)
 		if err := phase.fn(ctx, sites); err != nil {
@@ -142,7 +142,7 @@ func (r *resetter) runPhases(ctx context.Context, sites []v1alpha1.SiteSpec, pha
 // operator resolves the all-writable shape of newly initialized MySQL pods.
 // Restarting after the cluster has converged lets the manager discover the
 // existing primary without recording bootstrap as an operational failover.
-func (r *resetter) normalizeFreshBaseline(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) normalizeFreshBaseline(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	return r.runPhases(ctx, sites, r.normalizationPhases())
 }
 
@@ -155,14 +155,14 @@ func (r *resetter) normalizationPhases() []resetPhase {
 	}
 }
 
-func (r *resetter) scaleOperatorDown(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) scaleOperatorDown(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	if err := r.scaleDeploymentIfExists(ctx, operatorDeployment, 0); err != nil {
 		return err
 	}
 	return r.waitPodsGone(ctx, operatorSelector, 45*time.Second)
 }
 
-func (r *resetter) scaleMysqlDown(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) scaleMysqlDown(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	for _, site := range sites {
 		if err := r.scaleDeploymentIfExists(ctx, pgkube.MysqlDeploymentName(r.fg, site.Name), 0); err != nil {
 			return err
@@ -185,7 +185,7 @@ func (r *resetter) scaleMysqlDown(ctx context.Context, sites []v1alpha1.SiteSpec
 	return nil
 }
 
-func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	mfg, err := r.k.GetMFGNamed(ctx, r.namespace, r.fg)
 	if err != nil {
 		return fmt.Errorf("get MFG: %w", err)
@@ -215,14 +215,14 @@ func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1alpha1.Si
 	return nil
 }
 
-func (r *resetter) clearTransientState(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) clearTransientState(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	if err := r.k.ClearChaosMarkerNamed(ctx, r.namespace, r.fg); err != nil {
 		return fmt.Errorf("clear chaos marker: %w", err)
 	}
 	return nil
 }
 
-func (r *resetter) deleteStorage(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) deleteStorage(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	var errs []error
 	pvcs, err := r.k.Kubernetes.CoreV1().PersistentVolumeClaims(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: mysqlSelector})
 	if err != nil {
@@ -271,7 +271,7 @@ func (r *resetter) deleteStorage(ctx context.Context, _ []v1alpha1.SiteSpec) err
 	return errors.Join(errs...)
 }
 
-func (r *resetter) wipeNodeStorage(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) wipeNodeStorage(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	if r.runtime == "" {
 		r.warn("no docker/podman runtime found; skipping node hostPath wipe")
 		return nil
@@ -317,7 +317,7 @@ func (r *resetter) nodeIsLocalContainer(ctx context.Context, node string) bool {
 	return exec.CommandContext(ctx, r.runtime, "container", "inspect", node).Run() == nil
 }
 
-func (r *resetter) restartLocalPathProvisioner(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) restartLocalPathProvisioner(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	dep, err := r.k.Kubernetes.AppsV1().Deployments("kube-system").Get(ctx, "local-path-provisioner", metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		r.warn("local-path-provisioner not found; skipping")
@@ -333,7 +333,7 @@ func (r *resetter) restartLocalPathProvisioner(ctx context.Context, _ []v1alpha1
 	return r.waitDeploymentAvailable(ctx, "kube-system", dep.Name, 60*time.Second)
 }
 
-func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	path := filepath.Join(r.repoRoot, "playground", "manifests", "mysql-secret.yaml")
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -394,7 +394,7 @@ const (
 func staleKeySnapshots(secrets []corev1.Secret, liveBackups map[types.UID]bool) []corev1.Secret {
 	var out []corev1.Secret
 	for _, s := range secrets {
-		if s.Labels[keySnapshotAppLabel] == dumpKeySnapshotApp && liveBackups[types.UID(s.Labels[v1alpha1.MysqlBackupUIDLabel])] {
+		if s.Labels[keySnapshotAppLabel] == dumpKeySnapshotApp && liveBackups[types.UID(s.Labels[v1beta1.MysqlBackupUIDLabel])] {
 			continue
 		}
 		out = append(out, s)
@@ -406,12 +406,12 @@ func staleKeySnapshots(secrets []corev1.Secret, liveBackups map[types.UID]bool) 
 // Δ20). It runs with the operator down, right after clearMFGStatus has
 // removed the bindings that named them; the order does not matter, since
 // no operator runs to act on either half.
-func (r *resetter) deleteKeySnapshots(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) deleteKeySnapshots(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	secrets, err := r.k.Kubernetes.CoreV1().Secrets(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: keySnapshotSelector})
 	if err != nil {
 		return fmt.Errorf("list key snapshots: %w", err)
 	}
-	var backups v1alpha1.MysqlBackupList
+	var backups v1beta1.MysqlBackupList
 	if err := r.k.Controller.List(ctx, &backups, client.InNamespace(r.namespace)); err != nil {
 		return fmt.Errorf("list MysqlBackups: %w", err)
 	}
@@ -433,13 +433,13 @@ func (r *resetter) deleteKeySnapshots(ctx context.Context, _ []v1alpha1.SiteSpec
 }
 
 // clearMFGStatus is the wipe pass's status clear.
-func (r *resetter) clearMFGStatus(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) clearMFGStatus(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	return r.clearMFGStatusFields(ctx, mfgStatusFieldsToClear(false))
 }
 
 // clearMFGFailoverStatus is the normalization pass's status clear. It keeps
 // encryptionAtRest; see mfgStatusFieldsToClear.
-func (r *resetter) clearMFGFailoverStatus(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) clearMFGFailoverStatus(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	return r.clearMFGStatusFields(ctx, mfgStatusFieldsToClear(true))
 }
 
@@ -485,7 +485,7 @@ func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) err
 	if err != nil {
 		return err
 	}
-	target := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: r.fg, Namespace: r.namespace}}
+	target := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: r.fg, Namespace: r.namespace}}
 	return r.k.Controller.Status().Patch(ctx, target, client.RawPatch(types.JSONPatchType, body))
 }
 
@@ -494,15 +494,15 @@ func (r *resetter) clearMFGStatusFields(ctx context.Context, names []string) err
 // has consumed it.
 func (r *resetter) clearPlannedFailoverRequest(ctx context.Context) error {
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]any{
-		v1alpha1.PlannedFailoverAnnotation: nil}}})
+		v1beta1.PlannedFailoverAnnotation: nil}}})
 	if err != nil {
 		return err
 	}
-	target := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: r.fg, Namespace: r.namespace}}
+	target := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: r.fg, Namespace: r.namespace}}
 	return r.k.Controller.Patch(ctx, target, client.RawPatch(types.MergePatchType, patch))
 }
 
-func (r *resetter) recreatePVCs(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) recreatePVCs(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	if err := r.scaleDeploymentIfExists(ctx, operatorDeployment, 1); err != nil {
 		return err
 	}
@@ -518,7 +518,7 @@ func (r *resetter) recreatePVCs(ctx context.Context, sites []v1alpha1.SiteSpec) 
 	return nil
 }
 
-func (r *resetter) bindPVs(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) bindPVs(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	for _, site := range sites {
 		node, err := r.siteNode(ctx, site.Name)
 		if err != nil {
@@ -542,7 +542,7 @@ func (r *resetter) bindPVs(ctx context.Context, sites []v1alpha1.SiteSpec) error
 	return r.waitPVCsBound(ctx, sites, 90*time.Second)
 }
 
-func (r *resetter) startMySQL(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) startMySQL(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	for _, site := range sites {
 		if err := r.scaleDeploymentIfExists(ctx, pgkube.MysqlDeploymentName(r.fg, site.Name), 1); err != nil {
 			return err
@@ -551,7 +551,7 @@ func (r *resetter) startMySQL(ctx context.Context, sites []v1alpha1.SiteSpec) er
 	return r.waitMysqlReady(ctx, sites, 5*time.Minute)
 }
 
-func (r *resetter) createReplicationUsers(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) createReplicationUsers(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	creds, err := r.loadReplicationCredentials(ctx)
 	if err != nil {
 		return err
@@ -571,7 +571,7 @@ func (r *resetter) createReplicationUsers(ctx context.Context, sites []v1alpha1.
 	return nil
 }
 
-func (r *resetter) startOperator(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) startOperator(ctx context.Context, _ []v1beta1.SiteSpec) error {
 	if err := r.clearReadOnlyTaints(ctx); err != nil {
 		return err
 	}
@@ -581,7 +581,7 @@ func (r *resetter) startOperator(ctx context.Context, _ []v1alpha1.SiteSpec) err
 	return r.waitDeploymentAvailable(ctx, r.namespace, operatorDeployment, 2*time.Minute)
 }
 
-func (r *resetter) waitBaseline(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) waitBaseline(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	deadline := time.Now().Add(4 * time.Minute)
 	var last error
 	var healthySince time.Time
@@ -615,7 +615,7 @@ func (r *resetter) waitBaseline(ctx context.Context, sites []v1alpha1.SiteSpec) 
 	return fmt.Errorf("timed out waiting for healthy baseline: %w", last)
 }
 
-func (r *resetter) mysqlDeploymentsStable(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+func (r *resetter) mysqlDeploymentsStable(ctx context.Context, sites []v1beta1.SiteSpec) error {
 	for _, site := range sites {
 		name := pgkube.MysqlDeploymentName(r.fg, site.Name)
 		dep, err := r.k.Kubernetes.AppsV1().Deployments(r.namespace).Get(ctx, name, metav1.GetOptions{})
@@ -719,21 +719,21 @@ func (r *resetter) waitNamedPVsGone(ctx context.Context, names map[string]struct
 	})
 }
 
-func (r *resetter) waitPVCsPresent(ctx context.Context, sites []v1alpha1.SiteSpec, timeout time.Duration) error {
+func (r *resetter) waitPVCsPresent(ctx context.Context, sites []v1beta1.SiteSpec, timeout time.Duration) error {
 	return pollUntil(ctx, timeout, time.Second, func(ctx context.Context) (bool, string, error) {
 		missing := r.missingPVCs(ctx, sites, false)
 		return len(missing) == 0, fmt.Sprintf("missing=%v", missing), nil
 	})
 }
 
-func (r *resetter) waitPVCsBound(ctx context.Context, sites []v1alpha1.SiteSpec, timeout time.Duration) error {
+func (r *resetter) waitPVCsBound(ctx context.Context, sites []v1beta1.SiteSpec, timeout time.Duration) error {
 	return pollUntil(ctx, timeout, time.Second, func(ctx context.Context) (bool, string, error) {
 		missing := r.missingPVCs(ctx, sites, true)
 		return len(missing) == 0, fmt.Sprintf("notBound=%v", missing), nil
 	})
 }
 
-func (r *resetter) missingPVCs(ctx context.Context, sites []v1alpha1.SiteSpec, requireBound bool) []string {
+func (r *resetter) missingPVCs(ctx context.Context, sites []v1beta1.SiteSpec, requireBound bool) []string {
 	var missing []string
 	for _, site := range sites {
 		name := pgkube.MysqlPVCName(r.fg, site.Name)
@@ -749,7 +749,7 @@ func (r *resetter) missingPVCs(ctx context.Context, sites []v1alpha1.SiteSpec, r
 	return missing
 }
 
-func (r *resetter) waitMysqlReady(ctx context.Context, sites []v1alpha1.SiteSpec, timeout time.Duration) error {
+func (r *resetter) waitMysqlReady(ctx context.Context, sites []v1beta1.SiteSpec, timeout time.Duration) error {
 	want := len(sites)
 	return pollUntil(ctx, timeout, 2*time.Second, func(ctx context.Context) (bool, string, error) {
 		_ = r.clearReadOnlyTaints(ctx)
@@ -792,7 +792,7 @@ func (r *resetter) siteNode(ctx context.Context, site string) (string, error) {
 	return nodes.Items[0].Name, nil
 }
 
-func (r *resetter) createManualPV(ctx context.Context, site v1alpha1.SiteSpec, node string) error {
+func (r *resetter) createManualPV(ctx context.Context, site v1beta1.SiteSpec, node string) error {
 	pvcName := pgkube.MysqlPVCName(r.fg, site.Name)
 	pvName := "manual-" + pvcName
 	if err := r.k.Kubernetes.CoreV1().PersistentVolumes().Delete(ctx, pvName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
@@ -828,7 +828,7 @@ func (r *resetter) createManualPV(ctx context.Context, site v1alpha1.SiteSpec, n
 }
 
 func (r *resetter) clearReadOnlyTaints(ctx context.Context) error {
-	readonlyTaintKey := v1alpha1.ReadOnlyTaintKey(r.namespace, r.fg)
+	readonlyTaintKey := v1beta1.ReadOnlyTaintKey(r.namespace, r.fg)
 	nodes, err := r.k.ListNodes(ctx)
 	if err != nil {
 		return err
@@ -937,7 +937,7 @@ func (r *resetter) forceDeleteStuckPVs(ctx context.Context, names map[string]str
 	return errors.Join(errs...)
 }
 
-func (r *resetter) nodeStorageWipePaths(sites []v1alpha1.SiteSpec) []string {
+func (r *resetter) nodeStorageWipePaths(sites []v1beta1.SiteSpec) []string {
 	paths := make([]string, 0, len(sites))
 	for _, site := range sites {
 		path := "/var/lib/rancher/k3s/storage/manual-" + pgkube.MysqlPVCName(r.fg, site.Name)

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 func TestS48RefusalHoldDone(t *testing.T) {
@@ -36,25 +36,25 @@ func TestS48RefusalHoldDone(t *testing.T) {
 
 func TestS48RequirePrimarySealed(t *testing.T) {
 	site := "pdx"
-	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg := &v1beta1.MysqlFailoverGroup{}
 	if err := s48RequirePrimarySealed(mfg, site); err == nil {
 		t.Fatal("nil encryption status must fail")
 	}
 
-	mfg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{}
+	mfg.Status.EncryptionAtRest = &v1beta1.EncryptionAtRestStatus{}
 	if err := s48RequirePrimarySealed(mfg, site); err == nil {
 		t.Fatal("missing site entry must fail")
 	}
 
-	mfg.Status.EncryptionAtRest.Sites = []v1alpha1.SiteEncryptionStatus{{
+	mfg.Status.EncryptionAtRest.Sites = []v1beta1.SiteEncryptionStatus{{
 		Name:  site,
-		Phase: v1alpha1.KeyringPhaseUnsealed,
+		Phase: v1beta1.KeyringPhaseUnsealed,
 	}}
 	if err := s48RequirePrimarySealed(mfg, site); err == nil || !strings.Contains(err.Error(), "Unsealed") {
 		t.Fatalf("unsealed primary must fail with phase: %v", err)
 	}
 
-	mfg.Status.EncryptionAtRest.Sites[0].Phase = v1alpha1.KeyringPhaseSealed
+	mfg.Status.EncryptionAtRest.Sites[0].Phase = v1beta1.KeyringPhaseSealed
 	if err := s48RequirePrimarySealed(mfg, site); err != nil {
 		t.Fatalf("sealed primary: %v", err)
 	}

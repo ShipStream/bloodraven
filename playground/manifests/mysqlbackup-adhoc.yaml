@@ -6,7 +6,7 @@
 #
 # Watch progress with:
 #   kubectl get mysqlbackups -n bloodraven-playground -w
-apiVersion: shipstream.io/v1alpha1
+apiVersion: shipstream.io/v1beta1
 kind: MysqlBackup
 metadata:
   generateName: playground-adhoc-

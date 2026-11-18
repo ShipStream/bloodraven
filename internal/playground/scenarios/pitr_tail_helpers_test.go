@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	brmysql "github.com/shipstream/bloodraven/internal/mysql"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -174,7 +174,7 @@ func tailNotArchivedEvent(uid, site string, count int32) corev1.Event {
 		ObjectMeta:     metav1.ObjectMeta{Name: "ev-" + uid, Namespace: "bloodraven-playground", UID: types.UID(uid)},
 		InvolvedObject: corev1.ObjectReference{Kind: "MysqlFailoverGroup", Name: "playground"},
 		Type:           corev1.EventTypeWarning,
-		Reason:         v1alpha1.EventPITRArchiveTailNotArchived,
+		Reason:         v1beta1.EventPITRArchiveTailNotArchived,
 		Message: "site " + site + " is being recloned although its binary log tail was not confirmed archived in time: the site's archiver still had 1 sealed binary log(s) to archive. " +
 			"CLONE wipes the site's binary logs; a point-in-time restore whose window needs transactions only they held refuses PITRArchiveGap.",
 		Count: count,
@@ -206,7 +206,7 @@ func TestPITRNewTailNotArchived(t *testing.T) {
 		t.Error("another group's Event must not count")
 	}
 	rejected := tailNotArchivedEvent("u3", "iad", 1)
-	rejected.Reason = v1alpha1.EventRecloneRejected
+	rejected.Reason = v1beta1.EventRecloneRejected
 	if _, ok := pitrNewTailNotArchived(before, []corev1.Event{rejected}, "playground", "iad"); ok {
 		t.Error("an Event of another reason must not count")
 	}
@@ -238,7 +238,7 @@ func TestPITRRecloneTailCheck(t *testing.T) {
 	}
 	ev := tailNotArchivedEvent("u1", "iad", 1)
 	_, err = pitrRecloneTailCheck(map[string]int32{}, []corev1.Event{ev}, logLines(archived), "playground", "iad")
-	if err == nil || !strings.Contains(err.Error(), v1alpha1.EventPITRArchiveTailNotArchived) || !strings.Contains(err.Error(), "still had 1 sealed binary log") {
+	if err == nil || !strings.Contains(err.Error(), v1beta1.EventPITRArchiveTailNotArchived) || !strings.Contains(err.Error(), "still had 1 sealed binary log") {
 		t.Fatalf("the Event must fail the reclone and its message be printed: %v", err)
 	}
 	// An Event from an earlier reclone of the same site (s68 reclones a
@@ -299,7 +299,7 @@ func TestPITRAssertRecloneTailArchived(t *testing.T) {
 			t.Fatal(err)
 		}
 		err = pitrAssertRecloneTailArchived(context.Background(), env, lines(archived), before, "iad", time.Second)
-		if err == nil || !strings.Contains(err.Error(), v1alpha1.EventPITRArchiveTailNotArchived) {
+		if err == nil || !strings.Contains(err.Error(), v1beta1.EventPITRArchiveTailNotArchived) {
 			t.Fatalf("a new PITRArchiveTailNotArchived Event must fail the reclone: %v", err)
 		}
 	})
@@ -321,7 +321,7 @@ func TestPITRAssertRecloneTailArchived(t *testing.T) {
 func TestPITRRecloneEventSnapshotCountsBothReasons(t *testing.T) {
 	env := testScenarioEnv(t, testBaselineMFG(false))
 	rejected := tailNotArchivedEvent("r1", "iad", 3)
-	rejected.Reason = v1alpha1.EventRecloneRejected
+	rejected.Reason = v1beta1.EventRecloneRejected
 	other := tailNotArchivedEvent("o1", "iad", 1)
 	other.Reason = "FailoverCompleted"
 	for _, ev := range []corev1.Event{tailNotArchivedEvent("t1", "iad", 2), rejected, other} {
@@ -390,7 +390,7 @@ func TestPITRScenariosAssertArchivedTail(t *testing.T) {
 			t.Errorf("s68 still expects a PITRArchiveGap refusal: %q", text)
 		}
 	}
-	if !strings.Contains(s68.Hypothesis, v1alpha1.EventPITRArchiveTailNotArchived) {
+	if !strings.Contains(s68.Hypothesis, v1beta1.EventPITRArchiveTailNotArchived) {
 		t.Errorf("s68 hypothesis must state the absent Event: %s", s68.Hypothesis)
 	}
 

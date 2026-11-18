@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // UpdatePhase tracks the current phase of an ordered update; it is
 // status.updatePhase.
-type UpdatePhase = v1alpha1.UpdatePhase
+type UpdatePhase = v1beta1.UpdatePhase
 
 // UpdatePhaseNone means no ordered update is running. An update that
 // finishes returns to it directly, so no status write carries a
@@ -287,21 +287,21 @@ func (u *UpdateController) Execute(ctx context.Context,
 	}()
 
 	// Phase 1: Update standby site
-	u.setPhase(v1alpha1.UpdatePhaseUpdateReplica)
+	u.setPhase(v1beta1.UpdatePhaseUpdateReplica)
 	u.logger.Info("ordered update: updating standby", "site", standbySiteName)
 	if err := applyUpdate(ctx, standbySiteName); err != nil {
 		return fmt.Errorf("update standby deployment: %w", err)
 	}
 
 	// Phase 2: Wait for standby to be ready and replication caught up
-	u.setPhase(v1alpha1.UpdatePhaseWaitReplica)
+	u.setPhase(v1beta1.UpdatePhaseWaitReplica)
 	u.logger.Info("ordered update: waiting for standby to be ready", "site", standbySiteName)
 	if err := u.waitForReplicaReady(ctx, UpdateTarget{Name: standbySiteName, Checker: standbyChecker}, activeChecker, 5*time.Minute); err != nil {
 		return fmt.Errorf("wait for standby ready: %w", err)
 	}
 
 	// Phase 3: Hand off to the (now-updated) standby
-	u.setPhase(v1alpha1.UpdatePhaseFailover)
+	u.setPhase(v1beta1.UpdatePhaseFailover)
 	u.logger.Info("ordered update: failing over to updated standby", "site", standbySiteName)
 	handoffOpts := u.handoffOptions()
 	handoffOpts.SourceSite = activeSiteName
@@ -310,14 +310,14 @@ func (u *UpdateController) Execute(ctx context.Context,
 	}
 
 	// Phase 4: Update the old active (now a standby)
-	u.setPhase(v1alpha1.UpdatePhaseUpdateOldPrimary)
+	u.setPhase(v1beta1.UpdatePhaseUpdateOldPrimary)
 	u.logger.Info("ordered update: updating old active", "site", activeSiteName)
 	if err := applyUpdate(ctx, activeSiteName); err != nil {
 		return fmt.Errorf("update old active deployment: %w", err)
 	}
 
 	// Phase 5: Wait for old active to be ready
-	u.setPhase(v1alpha1.UpdatePhaseWaitOldPrimary)
+	u.setPhase(v1beta1.UpdatePhaseWaitOldPrimary)
 	u.logger.Info("ordered update: waiting for old active to be ready", "site", activeSiteName)
 	if err := u.waitForSiteReady(ctx, activeChecker, 5*time.Minute); err != nil {
 		u.logger.Warn("old active not ready after update, continuing", "site", activeSiteName, "error", err)
@@ -368,12 +368,12 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		if err := u.requirePodsReady(ctx, onTemplate, "updating follower "+follower.Name); err != nil {
 			return processed, err
 		}
-		u.setPhase(v1alpha1.UpdatePhaseUpdateReplica)
+		u.setPhase(v1beta1.UpdatePhaseUpdateReplica)
 		u.logger.Info("ordered update: updating follower", "site", follower.Name)
 		if err := applyUpdate(ctx, follower.Name); err != nil {
 			return processed, fmt.Errorf("update follower %s: %w", follower.Name, u.rolloutError(ctx, follower, err))
 		}
-		u.setPhase(v1alpha1.UpdatePhaseWaitReplica)
+		u.setPhase(v1beta1.UpdatePhaseWaitReplica)
 		if err := u.waitForRolledSite(ctx, follower, follower.ExpectedSource, active.Checker, u.rolledSiteTimeout); err != nil {
 			return processed, fmt.Errorf("wait for follower %s: %w", follower.Name, err)
 		}
@@ -457,7 +457,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		return processed, fmt.Errorf("promotable standby %s has no replication host", handoff.Name)
 	}
 
-	u.setPhase(v1alpha1.UpdatePhaseFailover)
+	u.setPhase(v1beta1.UpdatePhaseFailover)
 	// The active site is healthy, so this is a maintenance handoff, not an
 	// emergency: promote only a standby that provably holds every
 	// transaction the fenced source committed. On failure the source has its
@@ -492,7 +492,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	if err != nil || readOnly {
 		return processed, fmt.Errorf("updated standby %s was not confirmed writable after handoff", handoff.Name)
 	}
-	u.setPhase(v1alpha1.UpdatePhaseUpdateOldPrimary)
+	u.setPhase(v1beta1.UpdatePhaseUpdateOldPrimary)
 	if err := applyUpdate(ctx, active.Name); err != nil {
 		return processed, fmt.Errorf("update old active %s: %w", active.Name, u.rolloutError(ctx, active, err))
 	}
@@ -509,7 +509,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	}); err != nil {
 		return processed, fmt.Errorf("configure old active %s as replica of %s: %w", active.Name, handoff.Name, err)
 	}
-	u.setPhase(v1alpha1.UpdatePhaseWaitOldPrimary)
+	u.setPhase(v1beta1.UpdatePhaseWaitOldPrimary)
 	// The new primary is the source now. If it dies while the old active
 	// catches up, end the update so emergency failover is not held off for
 	// the full wait.
@@ -856,12 +856,12 @@ func (u *UpdateController) rolloutError(ctx context.Context, target UpdateTarget
 func (u *UpdateController) HandoffPhase() (active bool, entered uint64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.phase == v1alpha1.UpdatePhaseFailover, u.handoffs
+	return u.phase == v1beta1.UpdatePhaseFailover, u.handoffs
 }
 
 func (u *UpdateController) setPhase(p UpdatePhase) {
 	u.mu.Lock()
-	if p == v1alpha1.UpdatePhaseFailover && u.phase != p {
+	if p == v1beta1.UpdatePhaseFailover && u.phase != p {
 		u.handoffs++
 	}
 	u.phase = p

@@ -10,7 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 )
 
@@ -20,10 +20,10 @@ func TestLoadPassword(t *testing.T) {
 
 	t.Run("no auth returns empty password", func(t *testing.T) {
 		k := testKubeClient(t,
-			&v1alpha1.MysqlFailoverGroup{
+			&v1beta1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: pgkube.FailoverGroupName, Namespace: ns},
-				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Dragonfly: &v1alpha1.DragonflySpec{Enabled: true},
+				Spec: v1beta1.MysqlFailoverGroupSpec{
+					Dragonfly: &v1beta1.DragonflySpec{Enabled: true},
 				},
 			},
 		)
@@ -38,12 +38,12 @@ func TestLoadPassword(t *testing.T) {
 
 	t.Run("auth secret password", func(t *testing.T) {
 		k := testKubeClient(t,
-			&v1alpha1.MysqlFailoverGroup{
+			&v1beta1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: pgkube.FailoverGroupName, Namespace: ns},
-				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Dragonfly: &v1alpha1.DragonflySpec{
+				Spec: v1beta1.MysqlFailoverGroupSpec{
+					Dragonfly: &v1beta1.DragonflySpec{
 						Enabled: true,
-						Auth:    &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth", Key: "pw"}},
+						Auth:    &v1beta1.DragonflyAuthSpec{PasswordSecretKeyRef: v1beta1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth", Key: "pw"}},
 					},
 				},
 			},
@@ -63,12 +63,12 @@ func TestLoadPassword(t *testing.T) {
 
 	t.Run("auth default password key", func(t *testing.T) {
 		k := testKubeClient(t,
-			&v1alpha1.MysqlFailoverGroup{
+			&v1beta1.MysqlFailoverGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: pgkube.FailoverGroupName, Namespace: ns},
-				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Dragonfly: &v1alpha1.DragonflySpec{
+				Spec: v1beta1.MysqlFailoverGroupSpec{
+					Dragonfly: &v1beta1.DragonflySpec{
 						Enabled: true,
-						Auth:    &v1alpha1.DragonflyAuthSpec{PasswordSecretKeyRef: v1alpha1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth"}},
+						Auth:    &v1beta1.DragonflyAuthSpec{PasswordSecretKeyRef: v1beta1.DragonflyPasswordSecretKeyRef{Name: "dragonfly-auth"}},
 					},
 				},
 			},
@@ -90,7 +90,7 @@ func TestLoadPassword(t *testing.T) {
 func testKubeClient(t *testing.T, objects ...runtime.Object) *pgkube.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {

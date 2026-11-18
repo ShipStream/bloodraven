@@ -6,6 +6,19 @@ Namespace: {{ .Release.Namespace }}
 The operator is running with:
   - Leader election: {{ .Values.leaderElection.enabled }}
   - Replicas: {{ .Values.replicaCount }}
+{{- if .Release.IsUpgrade }}
+
+This was an upgrade. Helm does not upgrade the CRDs in the chart's crds/
+directory. If the operator pod does not become Ready, its log names the CRD
+that is older than it needs ("CRD check"): apply this release's CRDs with
+server-side apply.
+
+After an upgrade from a release before v1.8.0, run once, when every group's
+status.rollout.phase is Complete:
+  kubectl bloodraven migrate-storage
+It moves the stored objects to shipstream.io/v1beta1. See
+https://bloodraven.dev/docs/operations/upgrade-policy#upgrading-from-v170-to-v180
+{{- end }}
 
 {{- if .Values.metrics.service.enabled }}
 
@@ -87,7 +100,7 @@ Next steps:
   3. Create a MysqlFailoverGroup custom resource:
 
      kubectl apply -f - <<EOF
-     apiVersion: shipstream.io/v1alpha1
+     apiVersion: shipstream.io/v1beta1
      kind: MysqlFailoverGroup
      metadata:
        name: orders

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,7 +63,7 @@ func TestVerificationSanitySkippedNeedsProof(t *testing.T) {
 			backup := successfulBackup("nightly-happy", "lion", "nightly-s3")
 			v := verifyCR("verify-skip", "lion", "nightly-s3")
 			if tt.query {
-				v.Spec.SanityCheck = &v1alpha1.SanityCheckSpec{Query: "SELECT 1"}
+				v.Spec.SanityCheck = &v1beta1.SanityCheckSpec{Query: "SELECT 1"}
 			}
 			r, c := newVerificationReconciler(t, fg, backup, v, operatorCredsSecret())
 			if tt.clientset {
@@ -82,8 +82,8 @@ func TestVerificationSanitySkippedNeedsProof(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: job.Name + "-abcde", Namespace: "ns",
 						Labels: map[string]string{
-							"batch.kubernetes.io/job-name":        job.Name,
-							v1alpha1.MysqlBackupVerificationLabel: v.Name,
+							"batch.kubernetes.io/job-name":       job.Name,
+							v1beta1.MysqlBackupVerificationLabel: v.Name,
 						},
 					},
 					Status: *tt.pod,
@@ -106,15 +106,15 @@ func TestVerificationSanitySkippedNeedsProof(t *testing.T) {
 			}
 			reconcileVerifUntilStable(t, r, "verify-skip")
 
-			var got v1alpha1.MysqlBackupVerification
+			var got v1beta1.MysqlBackupVerification
 			if err := c.Get(ctx, types.NamespacedName{Name: "verify-skip", Namespace: "ns"}, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+			if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 				t.Fatalf("phase %q, want Failed", got.Status.Phase)
 			}
 			switch {
-			case tt.wantSkip && (got.Status.SanityCheck == nil || got.Status.SanityCheck.Outcome != v1alpha1.SanityCheckOutcomeSkipped):
+			case tt.wantSkip && (got.Status.SanityCheck == nil || got.Status.SanityCheck.Outcome != v1beta1.SanityCheckOutcomeSkipped):
 				t.Fatalf("sanityCheck %+v, want Skipped", got.Status.SanityCheck)
 			case !tt.wantSkip && got.Status.SanityCheck != nil:
 				t.Fatalf("sanityCheck %+v, want unset", got.Status.SanityCheck)
@@ -151,7 +151,7 @@ func TestVerificationGraceRecordedBeforeTerminalWrite(t *testing.T) {
 			if err := c.SubResource(sub).Patch(ctx, obj, patch, opts...); err != nil {
 				return err
 			}
-			if mv, ok := obj.(*v1alpha1.MysqlBackupVerification); ok && !lost && mv.Status.Phase == v1alpha1.VerificationPhaseFailed {
+			if mv, ok := obj.(*v1beta1.MysqlBackupVerification); ok && !lost && mv.Status.Phase == v1beta1.VerificationPhaseFailed {
 				lost = true
 				return errors.New("injected: response lost after commit")
 			}
@@ -164,11 +164,11 @@ func TestVerificationGraceRecordedBeforeTerminalWrite(t *testing.T) {
 	if !lost {
 		t.Fatal("the terminal status Patch was never attempted")
 	}
-	var got v1alpha1.MysqlBackupVerification
+	var got v1beta1.MysqlBackupVerification
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != v1alpha1.VerificationPhaseFailed {
+	if got.Status.Phase != v1beta1.VerificationPhaseFailed {
 		t.Fatalf("phase %q, want the committed Failed", got.Status.Phase)
 	}
 	if left := r.graceClock.left(&got, got.Status.CompletionTime, time.Now()); left < terminalRetentionGrace-time.Minute {

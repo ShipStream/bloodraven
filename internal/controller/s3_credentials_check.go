@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sretry "k8s.io/client-go/util/retry"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // requiredS3CredentialKeys are the Secret keys the Job scripts and the
@@ -31,7 +31,7 @@ type s3CredentialRef struct {
 // Job reads it again then (reconcileRestoreJob returns early), and it is
 // left out so that retiring the import Secret does not report the group's
 // live credentials as incomplete.
-func s3CredentialRefs(fg *v1alpha1.MysqlFailoverGroup) []s3CredentialRef {
+func s3CredentialRefs(fg *v1beta1.MysqlFailoverGroup) []s3CredentialRef {
 	var refs []s3CredentialRef
 	if fg.Spec.Backup != nil {
 		for _, p := range fg.Spec.Backup.Profiles {
@@ -54,14 +54,14 @@ func s3CredentialRefs(fg *v1alpha1.MysqlFailoverGroup) []s3CredentialRef {
 
 // initRestoreSucceeded reports whether fg's bootstrap restore has
 // succeeded, after which nothing reads spec.initFromBackup's source.
-func initRestoreSucceeded(fg *v1alpha1.MysqlFailoverGroup) bool {
-	return fg.Status.Restore != nil && fg.Status.Restore.Phase == v1alpha1.BackupPhaseSucceeded
+func initRestoreSucceeded(fg *v1beta1.MysqlFailoverGroup) bool {
+	return fg.Status.Restore != nil && fg.Status.Restore.Phase == v1beta1.BackupPhaseSucceeded
 }
 
 // s3CredentialProblems checks each referenced Secret and returns one
 // message per Secret that a Job would reject. A read error other than
 // NotFound is returned as an error, not a problem.
-func (r *MysqlFailoverGroupReconciler) s3CredentialProblems(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) ([]string, error) {
+func (r *MysqlFailoverGroupReconciler) s3CredentialProblems(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) ([]string, error) {
 	var problems []string
 	for _, ref := range s3CredentialRefs(fg) {
 		var s corev1.Secret
@@ -93,7 +93,7 @@ func (r *MysqlFailoverGroupReconciler) s3CredentialProblems(ctx context.Context,
 // reconcileS3CredentialsCondition reports incomplete S3 credentials Secrets
 // as a Warning event and the S3CredentialsReady condition, and drops the
 // condition when the group references no S3 storage.
-func (r *MysqlFailoverGroupReconciler) reconcileS3CredentialsCondition(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileS3CredentialsCondition(ctx context.Context, fg *v1beta1.MysqlFailoverGroup) error {
 	var cond *metav1.Condition
 	if len(s3CredentialRefs(fg)) > 0 {
 		problems, err := r.s3CredentialProblems(ctx, fg)
@@ -101,26 +101,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileS3CredentialsCondition(ctx conte
 			return err
 		}
 		cond = &metav1.Condition{
-			Type:               v1alpha1.ConditionS3CredentialsReady,
+			Type:               v1beta1.ConditionS3CredentialsReady,
 			Status:             metav1.ConditionTrue,
-			Reason:             v1alpha1.ReasonCredentialsComplete,
+			Reason:             v1beta1.ReasonCredentialsComplete,
 			Message:            "every S3 credentialsSecretName has AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
 			ObservedGeneration: fg.Generation,
 			LastTransitionTime: metav1.Now(),
 		}
 		if len(problems) > 0 {
 			cond.Status = metav1.ConditionFalse
-			cond.Reason = v1alpha1.ReasonCredentialsIncomplete
+			cond.Reason = v1beta1.ReasonCredentialsIncomplete
 			cond.Message = "backup, restore and cleanup Jobs will fail; they do not fall back to ambient credentials: " +
 				strings.Join(problems, "; ")
 			if r.Recorder != nil {
-				r.Recorder.Event(fg, corev1.EventTypeWarning, v1alpha1.EventS3CredentialsIncomplete, cond.Message)
+				r.Recorder.Event(fg, corev1.EventTypeWarning, v1beta1.EventS3CredentialsIncomplete, cond.Message)
 			}
 		}
 	}
 
 	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-		var fresh v1alpha1.MysqlFailoverGroup
+		var fresh v1beta1.MysqlFailoverGroup
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &fresh); err != nil {
 			return err
 		}
@@ -128,7 +128,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileS3CredentialsCondition(ctx conte
 		if cond != nil {
 			setCondition(&fresh.Status.Conditions, *cond)
 		} else {
-			removeCondition(&fresh.Status.Conditions, v1alpha1.ConditionS3CredentialsReady)
+			removeCondition(&fresh.Status.Conditions, v1beta1.ConditionS3CredentialsReady)
 		}
 		if equality.Semantic.DeepEqual(before, &fresh.Status) {
 			return nil

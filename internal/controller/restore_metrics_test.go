@@ -13,7 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
@@ -69,7 +69,7 @@ func TestBuildRestoreJob_AddsSourceMetadataEnv(t *testing.T) {
 	seed := succeededSeedBackup()
 	seed.Status.SizeBytes = 1024
 	seed.Status.GtidExecuted = "uuid:1-10"
-	seed.Status.BinlogPosition = &v1alpha1.BinlogCoordinate{File: "mysql-bin.000004", Position: 99}
+	seed.Status.BinlogPosition = &v1beta1.BinlogCoordinate{File: "mysql-bin.000004", Position: 99}
 	r, _ := newReconciler(fg, seed)
 
 	job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
@@ -108,7 +108,7 @@ func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 	fg.Spec.Sites[1].Name = "pdx"
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = fggroup
 	seed := succeededSeedBackup()
-	seed.Labels[v1alpha1.FailoverGroupLabel] = fggroup
+	seed.Labels[v1beta1.FailoverGroupLabel] = fggroup
 	seed.Spec.FailoverGroupRef.Name = fggroup
 	setTestArtifactLocation(seed, fggroup+"/seed/")
 	seed.Status.SizeBytes = 2048
@@ -132,7 +132,7 @@ func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 	if err := c.Status().Update(context.Background(), &job); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: fggroup, Namespace: "ns"}, &fresh); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestReconcileRestoreJob_JobSucceeded_EmitsMetricsOnce(t *testing.T) {
 		t.Fatalf("duration sum = %v, want about 120s", sum)
 	}
 
-	var terminal v1alpha1.MysqlFailoverGroup
+	var terminal v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: fggroup, Namespace: "ns"}, &terminal); err != nil {
 		t.Fatalf("get terminal fg: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 	fg.Spec.Sites[1].Name = "pdx"
 	fg.Spec.Backup.Profiles[0].Storage.S3.Prefix = fggroup
 	seed := succeededSeedBackup()
-	seed.Labels[v1alpha1.FailoverGroupLabel] = fggroup
+	seed.Labels[v1beta1.FailoverGroupLabel] = fggroup
 	seed.Spec.FailoverGroupRef.Name = fggroup
 	setTestArtifactLocation(seed, fggroup+"/seed/")
 	seed.Status.SizeBytes = 4096
@@ -198,7 +198,7 @@ func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 	if err := c.Status().Update(context.Background(), &job); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: fggroup, Namespace: "ns"}, &fresh); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 }
 
 func TestEmitRestoreSuccessMetrics_UnknownSizeClearsStaleSourceSize(t *testing.T) {
-	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "lion-metrics-unknown-size", Namespace: "ns"}}
+	fg := &v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "lion-metrics-unknown-size", Namespace: "ns"}}
 	labels := []string{"ns", fg.Name, "init_from_backup", "iad"}
 	defer bmetrics.RestoreDurationSeconds.DeleteLabelValues(labels...)
 	defer bmetrics.RestoreLastSuccessTimestamp.DeleteLabelValues(labels...)
@@ -245,15 +245,15 @@ func TestInPlaceRestorePreservesMetadataThroughResuming(t *testing.T) {
 	fg.Status.ActiveSite = "iad"
 	fg.Status.Sites[0].Name = "iad"
 	fg.Status.Sites[1].Name = "pdx"
-	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
-		Phase:      v1alpha1.RestoreInPlaceResuming,
+	fg.Status.RestoreInPlace = &v1beta1.RestoreInPlaceStatus{
+		Phase:      v1beta1.RestoreInPlaceResuming,
 		JobName:    "job",
 		TargetSite: "iad",
-		Scope:      &v1alpha1.RestoreScope{Type: v1alpha1.RestoreScopeFull},
+		Scope:      &v1beta1.RestoreScope{Type: v1beta1.RestoreScopeFull},
 		StartTime:  ptrTime(time.Now()),
-		Provenance: &v1alpha1.RestoreProvenance{
-			Source: &v1alpha1.RestoreSourceProvenance{SizeBytes: new(int64(777))},
-			Target: &v1alpha1.RestoreTargetProvenance{GtidExecuted: "uuid:1-7"},
+		Provenance: &v1beta1.RestoreProvenance{
+			Source: &v1beta1.RestoreSourceProvenance{SizeBytes: new(int64(777))},
+			Target: &v1beta1.RestoreTargetProvenance{GtidExecuted: "uuid:1-7"},
 		},
 	}
 	seed := succeededSeedBackup()
@@ -262,7 +262,7 @@ func TestInPlaceRestorePreservesMetadataThroughResuming(t *testing.T) {
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	var fresh v1alpha1.MysqlFailoverGroup
+	var fresh v1beta1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &fresh); err != nil {
 		t.Fatalf("get fg: %v", err)
 	}

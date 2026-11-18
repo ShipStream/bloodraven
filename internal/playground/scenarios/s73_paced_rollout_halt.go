@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -47,7 +47,7 @@ type s73Run struct {
 	base     pacedSample // every group (auxiliary and playground) before the bad release
 	first    string      // the group the pacer admitted
 	second   string      // the group that waits
-	started  *v1alpha1.RolloutStatus
+	started  *v1beta1.RolloutStatus
 	// Times for the measurements.
 	badAt, stalledAt, fixAt, firstDoneAt, secondDoneAt time.Time
 }
@@ -240,7 +240,7 @@ func s73BadRelease(ctx context.Context, env *runner.Env, run *s73Run) error {
 	}
 	for _, name := range run.groups {
 		g := base.Groups[name]
-		if g.Rollout != nil && g.Rollout.Phase != v1alpha1.RolloutPhaseComplete {
+		if g.Rollout != nil && g.Rollout.Phase != v1beta1.RolloutPhaseComplete {
 			return fmt.Errorf("group %s already has a rollout record before the release: %s", name, pacedRolloutString(g.Rollout))
 		}
 		for site, w := range g.Workloads {
@@ -316,9 +316,9 @@ func s73ObserveOneAdmitted(ctx context.Context, env *runner.Env, run *s73Run) er
 	env.Capture.Measure(fmt.Sprintf("first group %s started its roll %s after the bad release", run.first, time.Since(run.badAt).Round(time.Second)))
 
 	// The other group waits, with a record that says so.
-	if _, err := pacedWaitRollout(ctx, env, run.second, "status.rollout.phase=Pending", time.Minute, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if _, err := pacedWaitRollout(ctx, env, run.second, "status.rollout.phase=Pending", time.Minute, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		r := fg.Status.Rollout
-		return r != nil && r.Phase == v1alpha1.RolloutPhasePending
+		return r != nil && r.Phase == v1beta1.RolloutPhasePending
 	}); err != nil {
 		return err
 	}
@@ -352,17 +352,17 @@ func s73Records(ctx context.Context, env *runner.Env, run *s73Run) string {
 func s73ObserveStalled(ctx context.Context, env *runner.Env, run *s73Run) error {
 	// The ordered update rolls the follower first; its pod cannot pull the
 	// sidecar image and never becomes Ready.
-	if _, err := pacedWaitRollout(ctx, env, run.first, "status.rollout.phase=Stalled", 4*time.Minute, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if _, err := pacedWaitRollout(ctx, env, run.first, "status.rollout.phase=Stalled", 4*time.Minute, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		r := fg.Status.Rollout
-		return r != nil && r.Phase == v1alpha1.RolloutPhaseStalled && r.StalledTime != nil
+		return r != nil && r.Phase == v1beta1.RolloutPhaseStalled && r.StalledTime != nil
 	}); err != nil {
 		return err
 	}
 	run.stalledAt = time.Now()
 	env.Capture.Measure(fmt.Sprintf("rollout halted: %s reported Stalled %s after the bad release", run.first, run.stalledAt.Sub(run.badAt).Round(time.Second)))
-	_, err := pacedWaitRollout(ctx, env, run.second, "status.rollout Pending/RolloutHalted", time.Minute, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	_, err := pacedWaitRollout(ctx, env, run.second, "status.rollout Pending/RolloutHalted", time.Minute, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		r := fg.Status.Rollout
-		return r != nil && r.Phase == v1alpha1.RolloutPhasePending && r.Reason == "RolloutHalted"
+		return r != nil && r.Phase == v1beta1.RolloutPhasePending && r.Reason == "RolloutHalted"
 	})
 	return err
 }
@@ -384,7 +384,7 @@ func s73HaltProblemsIn(run *s73Run, mainGroup string, now pacedSample) []string 
 	first, second := now.Groups[run.first], now.Groups[run.second]
 	baseFirst, baseSecond := run.base.Groups[run.first], run.base.Groups[run.second]
 
-	if r := first.Rollout; r == nil || r.Phase != v1alpha1.RolloutPhaseStalled || r.StalledTime == nil || r.StartedTime == nil {
+	if r := first.Rollout; r == nil || r.Phase != v1beta1.RolloutPhaseStalled || r.StalledTime == nil || r.StartedTime == nil {
 		bad = append(bad, fmt.Sprintf("%s is not Stalled: %s", run.first, pacedRolloutString(r)))
 	} else if run.started != nil && run.started.StartedTime != nil && !r.StartedTime.Equal(run.started.StartedTime) {
 		bad = append(bad, fmt.Sprintf("%s: startedTime moved from %s to %s", run.first, run.started.StartedTime.UTC().Format(time.RFC3339), r.StartedTime.UTC().Format(time.RFC3339)))
@@ -419,7 +419,7 @@ func s73HaltProblemsIn(run *s73Run, mainGroup string, now pacedSample) []string 
 		bad = append(bad, fmt.Sprintf("%s: no follower Deployment carries the bad release %s", run.first, run.bad))
 	}
 
-	if r := second.Rollout; r == nil || r.Phase != v1alpha1.RolloutPhasePending || r.Reason != "RolloutHalted" {
+	if r := second.Rollout; r == nil || r.Phase != v1beta1.RolloutPhasePending || r.Reason != "RolloutHalted" {
 		bad = append(bad, fmt.Sprintf("%s is not Pending/RolloutHalted: %s", run.second, pacedRolloutString(r)))
 	}
 	if diff := pacedPodsUnchanged(baseSecond.Pods, second.Pods); diff != "" {
@@ -534,9 +534,9 @@ func s73GoodRelease(ctx context.Context, env *runner.Env, run *s73Run) error {
 }
 
 func s73ObserveFirstCompletes(ctx context.Context, env *runner.Env, run *s73Run) error {
-	fg, err := pacedWaitRollout(ctx, env, run.first, "status.rollout.phase=Complete", 8*time.Minute, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	fg, err := pacedWaitRollout(ctx, env, run.first, "status.rollout.phase=Complete", 8*time.Minute, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		r := fg.Status.Rollout
-		return r != nil && r.Phase == v1alpha1.RolloutPhaseComplete && r.CompletedTime != nil
+		return r != nil && r.Phase == v1beta1.RolloutPhaseComplete && r.CompletedTime != nil
 	})
 	if err != nil {
 		return err
@@ -553,9 +553,9 @@ func s73ObserveFirstCompletes(ctx context.Context, env *runner.Env, run *s73Run)
 }
 
 func s73ObserveSecondCompletes(ctx context.Context, env *runner.Env, run *s73Run) error {
-	if _, err := pacedWaitRollout(ctx, env, run.second, "status.rollout.phase=Complete", 8*time.Minute, func(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if _, err := pacedWaitRollout(ctx, env, run.second, "status.rollout.phase=Complete", 8*time.Minute, func(fg *v1beta1.MysqlFailoverGroup) bool {
 		r := fg.Status.Rollout
-		return r != nil && r.Phase == v1alpha1.RolloutPhaseComplete && r.CompletedTime != nil
+		return r != nil && r.Phase == v1beta1.RolloutPhaseComplete && r.CompletedTime != nil
 	}); err != nil {
 		return err
 	}

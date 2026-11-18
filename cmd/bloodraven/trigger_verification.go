@@ -15,7 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/util"
 )
 
@@ -48,7 +48,7 @@ func runTriggerVerification(args []string) {
 
 	scheme := k8sruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(v1beta1.AddToScheme(scheme))
 
 	cfg := ctrl.GetConfigOrDie()
 	cl, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -64,7 +64,7 @@ func runTriggerVerification(args []string) {
 	// spec.pointInTime / spec.sanityCheck. The Phase 1 reconciler was
 	// happy to leave these unset, but Phase 2 uses them to drive PITR
 	// replay and sanity-check evaluation.
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: *group}, &fg); err != nil {
 		logger.Error("get failover group", "error", err, "group", *group)
 		os.Exit(1)
@@ -83,8 +83,8 @@ func runTriggerVerification(args []string) {
 // block; every optional pointer is copied so an unset field stays unset
 // (ttlSecondsAfterFinished: unset keeps resources until retention, 0 cleans
 // up at once).
-func buildScheduledVerification(fg *v1alpha1.MysqlFailoverGroup, group, profile, ns string) *v1alpha1.MysqlBackupVerification {
-	var verifSpec *v1alpha1.VerificationSpec
+func buildScheduledVerification(fg *v1beta1.MysqlFailoverGroup, group, profile, ns string) *v1beta1.MysqlBackupVerification {
+	var verifSpec *v1beta1.VerificationSpec
 	if fg.Spec.Backup != nil {
 		for i := range fg.Spec.Backup.Profiles {
 			if fg.Spec.Backup.Profiles[i].Name == profile {
@@ -97,21 +97,21 @@ func buildScheduledVerification(fg *v1alpha1.MysqlFailoverGroup, group, profile,
 	// A profile has one verification schedule, named after the profile,
 	// so the schedule label carries the profile name, as on its CronJob.
 	labels := map[string]string{
-		v1alpha1.FailoverGroupLabel:        group,
-		v1alpha1.BackupProfileLabel:        profile,
-		v1alpha1.VerificationScheduleLabel: profile,
-		"app.kubernetes.io/managed-by":     "bloodraven",
+		v1beta1.FailoverGroupLabel:        group,
+		v1beta1.BackupProfileLabel:        profile,
+		v1beta1.VerificationScheduleLabel: profile,
+		"app.kubernetes.io/managed-by":    "bloodraven",
 	}
 
-	verify := &v1alpha1.MysqlBackupVerification{
+	verify := &v1beta1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-%s-verify-", group, profile),
 			Namespace:    ns,
 			Labels:       labels,
-			Annotations:  map[string]string{v1alpha1.TriggeredByAnnotation: "schedule"},
+			Annotations:  map[string]string{v1beta1.TriggeredByAnnotation: "schedule"},
 		},
-		Spec: v1alpha1.MysqlBackupVerificationSpec{
-			FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: group},
+		Spec: v1beta1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: group},
 			ProfileName:      profile,
 		},
 	}

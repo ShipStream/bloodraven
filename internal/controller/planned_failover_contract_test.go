@@ -14,7 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 )
 
 // contractEnumValues returns the values of the kubebuilder Enum marker that
@@ -22,7 +22,7 @@ import (
 // tests below fail when an enum value is added without classifying it.
 func contractEnumValues(t *testing.T, typeName string) []string {
 	t.Helper()
-	src, err := os.ReadFile("../../api/v1alpha1/planned_failover_types.go")
+	src, err := os.ReadFile("../../api/v1beta1/planned_failover_types.go")
 	if err != nil {
 		t.Fatalf("read API source: %v", err)
 	}
@@ -38,8 +38,8 @@ func contractEnumValues(t *testing.T, typeName string) []string {
 	return out
 }
 
-func contractGroup(pf *v1alpha1.PlannedFailoverStatus, annotations map[string]string) *v1alpha1.MysqlFailoverGroup {
-	fg := &v1alpha1.MysqlFailoverGroup{}
+func contractGroup(pf *v1beta1.PlannedFailoverStatus, annotations map[string]string) *v1beta1.MysqlFailoverGroup {
+	fg := &v1beta1.MysqlFailoverGroup{}
 	fg.Annotations = annotations
 	fg.Status.PlannedFailover = pf
 	return fg
@@ -52,31 +52,31 @@ func contractGroup(pf *v1alpha1.PlannedFailoverStatus, annotations map[string]st
 // naming the run makes every phase terminal.
 func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 	type want struct{ pending, owns, active bool }
-	table := map[v1alpha1.PlannedFailoverPhase]want{
-		plannedLegacyPhaseNone:                               {},
-		plannedLegacyPhasePending:                            {},
-		plannedLegacyPhaseValidating:                         {},
-		plannedLegacyPhaseResuming:                           {},
-		v1alpha1.PlannedFailoverPhaseAdmitting:               {pending: true, active: true},
-		v1alpha1.PlannedFailoverPhaseDeferred:                {pending: true, active: true},
-		v1alpha1.PlannedFailoverPhaseFencing:                 {owns: true, active: true},
-		v1alpha1.PlannedFailoverPhaseDraining:                {owns: true, active: true},
-		v1alpha1.PlannedFailoverPhaseWaitingForLag:           {owns: true, active: true},
-		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync: {owns: true, active: true},
-		v1alpha1.PlannedFailoverPhasePromotingDragonfly:      {owns: true, active: true},
-		v1alpha1.PlannedFailoverPhasePromoting:               {owns: true, active: true},
-		v1alpha1.PlannedFailoverPhaseRollingBack:             {owns: true, active: true},
-		v1alpha1.PlannedFailoverPhasePublishing:              {active: true},
-		v1alpha1.PlannedFailoverPhaseSucceeded:               {},
-		v1alpha1.PlannedFailoverPhaseFailed:                  {},
+	table := map[v1beta1.PlannedFailoverPhase]want{
+		plannedLegacyPhaseNone:                              {},
+		plannedLegacyPhasePending:                           {},
+		plannedLegacyPhaseValidating:                        {},
+		plannedLegacyPhaseResuming:                          {},
+		v1beta1.PlannedFailoverPhaseAdmitting:               {pending: true, active: true},
+		v1beta1.PlannedFailoverPhaseDeferred:                {pending: true, active: true},
+		v1beta1.PlannedFailoverPhaseFencing:                 {owns: true, active: true},
+		v1beta1.PlannedFailoverPhaseDraining:                {owns: true, active: true},
+		v1beta1.PlannedFailoverPhaseWaitingForLag:           {owns: true, active: true},
+		v1beta1.PlannedFailoverPhaseWaitingForDragonflySync: {owns: true, active: true},
+		v1beta1.PlannedFailoverPhasePromotingDragonfly:      {owns: true, active: true},
+		v1beta1.PlannedFailoverPhasePromoting:               {owns: true, active: true},
+		v1beta1.PlannedFailoverPhaseRollingBack:             {owns: true, active: true},
+		v1beta1.PlannedFailoverPhasePublishing:              {active: true},
+		v1beta1.PlannedFailoverPhaseSucceeded:               {},
+		v1beta1.PlannedFailoverPhaseFailed:                  {},
 	}
 	enum := contractEnumValues(t, "PlannedFailoverPhase")
 	for _, v := range enum {
-		if _, ok := table[v1alpha1.PlannedFailoverPhase(v)]; !ok {
+		if _, ok := table[v1beta1.PlannedFailoverPhase(v)]; !ok {
 			t.Errorf("phase %q is in the API enum but not classified here", v)
 		}
 	}
-	legacyPhases := []v1alpha1.PlannedFailoverPhase{plannedLegacyPhaseNone, plannedLegacyPhasePending, plannedLegacyPhaseValidating, plannedLegacyPhaseResuming}
+	legacyPhases := []v1beta1.PlannedFailoverPhase{plannedLegacyPhaseNone, plannedLegacyPhasePending, plannedLegacyPhaseValidating, plannedLegacyPhaseResuming}
 	for phase := range table {
 		if inEnum := slices.Contains(enum, string(phase)); inEnum == slices.Contains(legacyPhases, phase) {
 			t.Errorf("phase %q: in the API enum = %v, but it is legacy = %v", phase, inEnum, !inEnum)
@@ -84,7 +84,7 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 	}
 
 	for phase, w := range table {
-		pf := &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, SourceSite: "iad", TargetSite: "pdx"}
+		pf := &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: phase, SourceSite: "iad", TargetSite: "pdx"}
 		fg := contractGroup(pf, nil)
 		if got := plannedFailoverPending(fg); got != w.pending {
 			t.Errorf("%q: pending = %v, want %v", phase, got, w.pending)
@@ -107,9 +107,9 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 		}
 
 		// A marker naming the run ends it, whatever the phase.
-		marker := TerminalMarker{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced,
-			Reason: v1alpha1.PlannedFailoverReasonStatusStalled}
-		fg = contractGroup(pf, map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: marker.String()})
+		marker := TerminalMarker{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced,
+			Reason: v1beta1.PlannedFailoverReasonStatusStalled}
+		fg = contractGroup(pf, map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: marker.String()})
 		if got, marked := plannedFailoverRun(fg); got != pf || !marked {
 			t.Errorf("%q: plannedFailoverRun = %p, %v; want the block, marked", phase, got, marked)
 		}
@@ -119,7 +119,7 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 
 		// A marker naming another run, or a malformed one, does not.
 		for _, v := range []string{`{"schemaVersion":1,"runID":"run-2","outcome":"SourceLeftFenced","reason":"StatusStalled"}`, `{"schemaVersion":1,"runID":"run-1","outcome":"Bogus","reason":"StatusStalled"}`, "run-1"} {
-			fg = contractGroup(pf, map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: v})
+			fg = contractGroup(pf, map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: v})
 			if _, marked := plannedFailoverRun(fg); marked {
 				t.Errorf("%q: marker %q marks the run", phase, v)
 			}
@@ -130,7 +130,7 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 	}
 
 	// No block, or no group: nothing.
-	for _, fg := range []*v1alpha1.MysqlFailoverGroup{nil, contractGroup(nil, nil)} {
+	for _, fg := range []*v1beta1.MysqlFailoverGroup{nil, contractGroup(nil, nil)} {
 		if pf, marked := plannedFailoverRun(fg); pf != nil || marked {
 			t.Errorf("plannedFailoverRun(no block) = %v, %v", pf, marked)
 		}
@@ -140,8 +140,8 @@ func TestPlannedFailoverPhasePredicates_Exhaustive(t *testing.T) {
 	}
 
 	// A legacy block has no runId, so no marker can name it.
-	legacy := &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDraining}
-	fg := contractGroup(legacy, map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: "/SourceLeftFenced/"})
+	legacy := &v1beta1.PlannedFailoverStatus{Phase: v1beta1.PlannedFailoverPhaseDraining}
+	fg := contractGroup(legacy, map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: "/SourceLeftFenced/"})
 	if _, marked := plannedFailoverRun(fg); marked {
 		t.Error("a legacy block without a runId is marked")
 	}
@@ -174,18 +174,18 @@ func TestPlannedFailoverEnumListsMatchAPI(t *testing.T) {
 
 func TestTerminalMarker_RoundTrip(t *testing.T) {
 	for _, m := range []TerminalMarker{
-		{RunID: "3f1c2a9e-0000-4000-8000-000000000001", Outcome: v1alpha1.PlannedFailoverOutcomeSucceeded},
-		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled},
-		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1alpha1.PlannedFailoverReasonForeignWritable},
-		{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonLagTimeout,
-			Warnings: []v1alpha1.PlannedFailoverWarning{v1alpha1.PlannedFailoverWarningFenceNotAttributable, v1alpha1.PlannedFailoverWarningStatusStalled}},
+		{RunID: "3f1c2a9e-0000-4000-8000-000000000001", Outcome: v1beta1.PlannedFailoverOutcomeSucceeded},
+		{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1beta1.PlannedFailoverReasonStatusStalled},
+		{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired, Reason: v1beta1.PlannedFailoverReasonForeignWritable},
+		{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1beta1.PlannedFailoverReasonLagTimeout,
+			Warnings: []v1beta1.PlannedFailoverWarning{v1beta1.PlannedFailoverWarningFenceNotAttributable, v1beta1.PlannedFailoverWarningStatusStalled}},
 	} {
 		got, ok := ParseTerminalMarker(m.String())
 		if !ok || !reflect.DeepEqual(got, m) {
 			t.Errorf("ParseTerminalMarker(%q) = %+v, %v; want %+v", m.String(), got, ok, m)
 		}
 	}
-	if s := (TerminalMarker{RunID: "r", Outcome: v1alpha1.PlannedFailoverOutcomeNotStarted, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}).String(); s != `{"schemaVersion":1,"runID":"r","outcome":"NotStarted","reason":"StatusStalled"}` {
+	if s := (TerminalMarker{RunID: "r", Outcome: v1beta1.PlannedFailoverOutcomeNotStarted, Reason: v1beta1.PlannedFailoverReasonStatusStalled}).String(); s != `{"schemaVersion":1,"runID":"r","outcome":"NotStarted","reason":"StatusStalled"}` {
 		t.Errorf("String() = %q", s)
 	}
 	for _, bad := range []string{
@@ -229,8 +229,8 @@ func TestSameFailoverRecord_NanosecondClock(t *testing.T) {
 	}
 	// The annotation copy is RFC3339 at second precision.
 	oob, err := FailoverRecordFromAnnotations(map[string]string{
-		v1alpha1.LastFailoverAnnotation:       failoverStampFormat(nanos),
-		v1alpha1.LastFailoverTargetAnnotation: "pdx",
+		v1beta1.LastFailoverAnnotation:       failoverStampFormat(nanos),
+		v1beta1.LastFailoverTargetAnnotation: "pdx",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -259,13 +259,13 @@ func TestSameFailoverRecord_NanosecondClock(t *testing.T) {
 func TestDurableFailoverRecord(t *testing.T) {
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	older := metav1.NewTime(now.Add(-time.Hour))
-	fg := &v1alpha1.MysqlFailoverGroup{}
-	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
+	fg := &v1beta1.MysqlFailoverGroup{}
+	fg.Spec.Sites = []v1beta1.SiteSpec{{Name: "iad", ServerID: 101}, {Name: "pdx", ServerID: 102}}
 	fg.Status.SetLastFailover(&older, fg.Status.LastFailoverTarget(), fg.Status.PromotionGtidExecuted())
 	fg.Status.SetLastFailover(fg.Status.LastFailoverTime(), "iad", fg.Status.PromotionGtidExecuted())
 	fg.Annotations = map[string]string{
-		v1alpha1.LastFailoverAnnotation:       failoverStampFormat(now.Add(-time.Minute)),
-		v1alpha1.LastFailoverTargetAnnotation: "pdx",
+		v1beta1.LastFailoverAnnotation:       failoverStampFormat(now.Add(-time.Minute)),
+		v1beta1.LastFailoverTargetAnnotation: "pdx",
 	}
 	got, err := durableFailoverRecord(fg, now)
 	if err != nil {
@@ -277,14 +277,14 @@ func TestDurableFailoverRecord(t *testing.T) {
 }
 
 func TestPlannedHoldFrom(t *testing.T) {
-	hold := v1alpha1.PlannedFailoverHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable,
+	hold := v1beta1.PlannedFailoverHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonForeignWritable,
 		SourceSite: "iad", TargetSite: "pdx", AmbiguousSites: []string{"iad", "pdx"}, HoldTime: metav1.Now()}
-	held := func() v1alpha1.MysqlFailoverGroupStatus {
-		var st v1alpha1.MysqlFailoverGroupStatus
+	held := func() v1beta1.MysqlFailoverGroupStatus {
+		var st v1beta1.MysqlFailoverGroupStatus
 		setPlannedHold(&st, hold, 7)
 		return st
 	}
-	acknowledged := func() v1alpha1.MysqlFailoverGroupStatus {
+	acknowledged := func() v1beta1.MysqlFailoverGroupStatus {
 		st := held()
 		if !ClearPlannedHold(&st, "run-1", 8, time.Now()) {
 			t.Fatal("ClearPlannedHold did not clear the hold it names")
@@ -292,29 +292,29 @@ func TestPlannedHoldFrom(t *testing.T) {
 		return st
 	}
 	st := held()
-	c := apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
-	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonPlannedFailoverManualRecoveryRequired ||
-		c.ObservedGeneration != 7 || !strings.Contains(c.Message, v1alpha1.AcknowledgePlannedFailoverHoldAnnotation+"=run-1") ||
+	c := apimeta.FindStatusCondition(st.Conditions, v1beta1.ConditionAutomaticFailoverHeld)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != v1beta1.ReasonPlannedFailoverManualRecoveryRequired ||
+		c.ObservedGeneration != 7 || !strings.Contains(c.Message, v1beta1.AcknowledgePlannedFailoverHoldAnnotation+"=run-1") ||
 		!strings.Contains(c.Message, "iad, pdx") {
 		t.Fatalf("hold condition = %+v, want True/%s at generation 7 naming the ack and the sites", c,
-			v1alpha1.ReasonPlannedFailoverManualRecoveryRequired)
+			v1beta1.ReasonPlannedFailoverManualRecoveryRequired)
 	}
 	if ClearPlannedHold(&st, "run-2", 8, time.Now()) || st.PlannedFailoverHold == nil {
 		t.Fatal("ClearPlannedHold cleared a hold of another run")
 	}
 	st = acknowledged()
-	c = apimeta.FindStatusCondition(st.Conditions, v1alpha1.ConditionAutomaticFailoverHeld)
+	c = apimeta.FindStatusCondition(st.Conditions, v1beta1.ConditionAutomaticFailoverHeld)
 	if st.PlannedFailoverHold != nil || c == nil || c.Status != metav1.ConditionFalse ||
-		c.Reason != v1alpha1.ReasonPlannedFailoverHoldAcknowledged || c.ObservedGeneration != 8 {
+		c.Reason != v1beta1.ReasonPlannedFailoverHoldAcknowledged || c.ObservedGeneration != 8 {
 		t.Fatalf("acknowledged hold = %+v, condition %+v; want no hold and False/%s at generation 8",
-			st.PlannedFailoverHold, c, v1alpha1.ReasonPlannedFailoverHoldAcknowledged)
+			st.PlannedFailoverHold, c, v1beta1.ReasonPlannedFailoverHoldAcknowledged)
 	}
-	holdMarker := TerminalMarker{RunID: "run-1", Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired,
-		Reason: v1alpha1.PlannedFailoverReasonExecuteFailed}
+	holdMarker := TerminalMarker{RunID: "run-1", Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired,
+		Reason: v1beta1.PlannedFailoverReasonExecuteFailed}
 
 	cases := []struct {
 		name        string
-		status      v1alpha1.MysqlFailoverGroupStatus
+		status      v1beta1.MysqlFailoverGroupStatus
 		annotations map[string]string
 		want        *PlannedHold
 	}{
@@ -322,56 +322,56 @@ func TestPlannedHoldFrom(t *testing.T) {
 		{
 			name:   "status hold",
 			status: held(),
-			want:   &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true},
+			want:   &PlannedHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true},
 		},
 		{name: "acknowledged (condition False)", status: acknowledged()},
 		{
 			name:        "marker",
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: holdMarker.String()},
-			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonExecuteFailed, FromMarker: true},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: holdMarker.String()},
+			want:        &PlannedHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonExecuteFailed, FromMarker: true},
 		},
 		{
 			name: "marker with another outcome",
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
-				Outcome: v1alpha1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1alpha1.PlannedFailoverReasonStatusStalled}.String()},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-1",
+				Outcome: v1beta1.PlannedFailoverOutcomeSourceLeftFenced, Reason: v1beta1.PlannedFailoverReasonStatusStalled}.String()},
 		},
 		{
 			name:        "both",
 			status:      held(),
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: holdMarker.String()},
-			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true, FromMarker: true},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: holdMarker.String()},
+			want:        &PlannedHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true, FromMarker: true},
 		},
 		{
 			name:   "both, different runs",
 			status: held(),
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-2",
-				Outcome: v1alpha1.PlannedFailoverOutcomeManualRecoveryRequired}.String()},
-			want: &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: TerminalMarker{RunID: "run-2",
+				Outcome: v1beta1.PlannedFailoverOutcomeManualRecoveryRequired}.String()},
+			want: &PlannedHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonForeignWritable, Sites: []string{"iad", "pdx"}, FromStatus: true},
 		},
 		// K085: hold detection fails closed on a marker the strict parse
 		// rejects but which still names a run ending ManualRecoveryRequired.
 		{
 			name:        "hold marker with an unknown field",
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"ExecuteFailed","writer":"v2"}`},
-			want:        &PlannedHold{RunID: "run-1", Reason: v1alpha1.PlannedFailoverReasonExecuteFailed, FromMarker: true},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"ExecuteFailed","writer":"v2"}`},
+			want:        &PlannedHold{RunID: "run-1", Reason: v1beta1.PlannedFailoverReasonExecuteFailed, FromMarker: true},
 		},
 		{
 			name:        "hold marker with an unfamiliar reason and schemaVersion",
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":2,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"SomethingNew"}`},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":2,"runID":"run-1","outcome":"ManualRecoveryRequired","reason":"SomethingNew"}`},
 			want:        &PlannedHold{RunID: "run-1", FromMarker: true},
 		},
 		{
 			name:        "lenient marker with another outcome holds nothing",
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","extra":true}`},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `{"schemaVersion":1,"runID":"run-1","outcome":"RolledBack","extra":true}`},
 		},
 		{
 			name:        "garbage marker holds nothing",
-			annotations: map[string]string{v1alpha1.PlannedFailoverTerminalAnnotation: `ManualRecoveryRequired`},
+			annotations: map[string]string{v1beta1.PlannedFailoverTerminalAnnotation: `ManualRecoveryRequired`},
 		},
 		{
 			name: "True condition without the status hold still holds, naming no run",
-			status: v1alpha1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{Type: v1alpha1.ConditionAutomaticFailoverHeld,
-				Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPlannedFailoverManualRecoveryRequired, Message: "edited by hand"}}},
+			status: v1beta1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{Type: v1beta1.ConditionAutomaticFailoverHeld,
+				Status: metav1.ConditionTrue, Reason: v1beta1.ReasonPlannedFailoverManualRecoveryRequired, Message: "edited by hand"}}},
 			want: &PlannedHold{FromStatus: true},
 		},
 	}
@@ -395,8 +395,8 @@ func TestPlannedHoldFrom(t *testing.T) {
 }
 
 func TestDeadlineKindAnnotation(t *testing.T) {
-	if DeadlineStatusStall.Annotation() != v1alpha1.PlannedFailoverStallSinceAnnotation ||
-		DeadlineManagerAbsent.Annotation() != v1alpha1.PlannedFailoverManagerAbsentSinceAnnotation ||
+	if DeadlineStatusStall.Annotation() != v1beta1.PlannedFailoverStallSinceAnnotation ||
+		DeadlineManagerAbsent.Annotation() != v1beta1.PlannedFailoverManagerAbsentSinceAnnotation ||
 		DeadlineKind("other").Annotation() != "" {
 		t.Fatal("DeadlineKind.Annotation maps the wrong annotation")
 	}
@@ -436,7 +436,7 @@ func TestRunnerPlannedClaim_NoManager(t *testing.T) {
 		t.Errorf("ActiveSite = %q, %v", site, ok)
 	}
 	d, err := r.ClaimPlannedFailover(t.Context(), nn, PlannedClaimRequest{RunID: "run-1", Target: "pdx"})
-	if err != nil || d.Kind != ClaimWait || d.WaitReason != v1alpha1.PlannedFailoverWaitManagerAbsent {
+	if err != nil || d.Kind != ClaimWait || d.WaitReason != v1beta1.PlannedFailoverWaitManagerAbsent {
 		t.Errorf("ClaimPlannedFailover = %+v, %v; want Wait{ManagerAbsent}", d, err)
 	}
 	r.Slot(nn).hydrate(plannedClaim{mode: claimModeRun, runID: "run-1", source: "iad", target: "pdx"})

@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -124,7 +124,7 @@ func newPacedFleet(t *testing.T, specs ...pacedGroupSpec) *pacedFleet {
 	if err := clientgoscheme.AddToScheme(f.scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1alpha1.AddToScheme(f.scheme); err != nil {
+	if err := v1beta1.AddToScheme(f.scheme); err != nil {
 		t.Fatal(err)
 	}
 	objs := []client.Object{&corev1.Secret{
@@ -132,21 +132,21 @@ func newPacedFleet(t *testing.T, specs ...pacedGroupSpec) *pacedFleet {
 		Data:       map[string][]byte{"username": []byte("bloodraven"), "password": []byte("password"), "MYSQL_ROOT_PASSWORD": []byte("root-password")},
 	}}
 	for gi, spec := range specs {
-		fg := &v1alpha1.MysqlFailoverGroup{
+		fg := &v1beta1.MysqlFailoverGroup{
 			ObjectMeta: metav1.ObjectMeta{Name: spec.name, Namespace: "default", UID: types.UID("uid-" + spec.name), Generation: 1},
-			Spec: v1alpha1.MysqlFailoverGroupSpec{
+			Spec: v1beta1.MysqlFailoverGroupSpec{
 				Image:       "mysql:9.7",
-				Credentials: v1alpha1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
-				Sidecar:     v1alpha1.SidecarSpec{Image: spec.pinnedSidecar},
+				Credentials: v1beta1.CredentialsSpec{OperatorSecretName: "mysql-credentials"},
+				Sidecar:     v1beta1.SidecarSpec{Image: spec.pinnedSidecar},
 			},
 		}
 		if spec.recreate {
-			fg.Spec.UpdateStrategy.Type = v1alpha1.UpdateStrategyRecreate
+			fg.Spec.UpdateStrategy.Type = v1beta1.UpdateStrategyRecreate
 		}
 		for si, site := range pacedSites() {
-			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{
+			fg.Spec.Sites = append(fg.Spec.Sites, v1beta1.SiteSpec{
 				Name: site, ServerID: int64(100*(gi+1) + si), Zone: spec.name + "-" + site,
-				LoadBalancerIP: fmt.Sprintf("203.0.113.%d", 10*(gi+1)+si), Storage: v1alpha1.StorageSpec{Size: "1Gi"},
+				LoadBalancerIP: fmt.Sprintf("203.0.113.%d", 10*(gi+1)+si), Storage: v1beta1.StorageSpec{Size: "1Gi"},
 			})
 		}
 		cfg, err := controller.CRConfigToTopologyConfig(fg)
@@ -162,7 +162,7 @@ func newPacedFleet(t *testing.T, specs ...pacedGroupSpec) *pacedFleet {
 		objs = append(objs, fg)
 	}
 	f.c = fake.NewClientBuilder().WithScheme(f.scheme).
-		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}, &appsv1.Deployment{}).WithObjects(objs...).
+		WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}, &appsv1.Deployment{}).WithObjects(objs...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if err := c.Create(ctx, obj, opts...); err != nil {
@@ -200,14 +200,14 @@ func newPacedFleet(t *testing.T, specs ...pacedGroupSpec) *pacedFleet {
 // pod template was written gets a new pod, which is Ready at once unless
 // the test said this pod cannot run the new template.
 func (f *pacedFleet) rolled(ctx context.Context, c client.Client, d *appsv1.Deployment, created bool) {
-	key := d.Labels[v1alpha1.FailoverGroupLabel] + "/" + d.Labels[v1alpha1.SiteLabel]
+	key := d.Labels[v1beta1.FailoverGroupLabel] + "/" + d.Labels[v1beta1.SiteLabel]
 	f.mu.Lock()
 	f.podNotReady[key] = !created && f.notReadyAfterRoll[key]
 	down := !created && f.mysqlDownOnRoll
 	f.mu.Unlock()
 	if down {
 		for _, g := range f.groups {
-			if m := g.mysql[d.Labels[v1alpha1.SiteLabel]]; m != nil && g.spec.name == d.Labels[v1alpha1.FailoverGroupLabel] {
+			if m := g.mysql[d.Labels[v1beta1.SiteLabel]]; m != nil && g.spec.name == d.Labels[v1beta1.FailoverGroupLabel] {
 				m.setError(errors.New("dial tcp: connect: connection refused (the pod is being replaced)"))
 			}
 		}
@@ -227,7 +227,7 @@ func (f *pacedFleet) podsBack(group string) {
 
 func (f *pacedFleet) writeDeploymentStatus(ctx context.Context, c client.Client, d *appsv1.Deployment) {
 	f.mu.Lock()
-	notReady := f.podNotReady[d.Labels[v1alpha1.FailoverGroupLabel]+"/"+d.Labels[v1alpha1.SiteLabel]]
+	notReady := f.podNotReady[d.Labels[v1beta1.FailoverGroupLabel]+"/"+d.Labels[v1beta1.SiteLabel]]
 	f.mu.Unlock()
 	d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
 	if notReady {
@@ -259,21 +259,21 @@ func (f *pacedFleet) group(name string) *pacedGroup {
 	return nil
 }
 
-func (f *pacedFleet) failoverGroup(name string) *v1alpha1.MysqlFailoverGroup {
+func (f *pacedFleet) failoverGroup(name string) *v1beta1.MysqlFailoverGroup {
 	f.t.Helper()
-	var fg v1alpha1.MysqlFailoverGroup
+	var fg v1beta1.MysqlFailoverGroup
 	if err := f.c.Get(context.Background(), f.group(name).key, &fg); err != nil {
 		f.t.Fatalf("get group %s: %v", name, err)
 	}
 	return &fg
 }
 
-func (f *pacedFleet) record(name string) *v1alpha1.RolloutStatus {
+func (f *pacedFleet) record(name string) *v1beta1.RolloutStatus {
 	f.t.Helper()
 	if rec := f.failoverGroup(name).Status.Rollout; rec != nil {
 		return rec
 	}
-	return &v1alpha1.RolloutStatus{}
+	return &v1beta1.RolloutStatus{}
 }
 
 func (f *pacedFleet) deployment(group, site string) *appsv1.Deployment {
@@ -308,8 +308,8 @@ func (f *pacedFleet) upgrade(sidecar string) {
 		}
 		for _, site := range pacedSites() {
 			d := f.deployment(g.spec.name, site)
-			d.Annotations[v1alpha1.SpecHashAnnotation] = pacedHashBeforeBump
-			d.Spec.Template.Annotations[v1alpha1.SpecHashAnnotation] = pacedHashBeforeBump
+			d.Annotations[v1beta1.SpecHashAnnotation] = pacedHashBeforeBump
+			d.Spec.Template.Annotations[v1beta1.SpecHashAnnotation] = pacedHashBeforeBump
 			if err := f.c.Update(context.Background(), d); err != nil {
 				f.t.Fatalf("stamp %s with the earlier render version: %v", d.Name, err)
 			}
@@ -560,7 +560,7 @@ func TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart(t *testing.T)
 			name:         "ordered updates and a new default sidecar image",
 			lion:         pacedGroupSpec{name: "lion"},
 			tiger:        pacedGroupSpec{name: "tiger"},
-			stallReason:  v1alpha1.ReasonOrderedUpdateStalled,
+			stallReason:  v1beta1.ReasonOrderedUpdateStalled,
 			lionRolled:   []string{"dc2"},
 			tigerSidecar: pacedSidecarBefore,
 		},
@@ -591,7 +591,7 @@ func TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart(t *testing.T)
 						controller.DeploymentUnstableReason(fg), fg.Status.Rollout)
 				}
 			}
-			earlierRenderer := f.deployment("lion", "dc1").Annotations[v1alpha1.RenderedByAnnotation]
+			earlierRenderer := f.deployment("lion", "dc1").Annotations[v1beta1.RenderedByAnnotation]
 
 			f.notReadyAfterRoll["lion/dc2"] = true
 			release := pacedSidecarAfter
@@ -602,13 +602,13 @@ func TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart(t *testing.T)
 			halted := func(when string, stalledAt *metav1.Time) {
 				t.Helper()
 				rec := f.record("lion")
-				if rec.Phase != v1alpha1.RolloutPhaseStalled || rec.Reason != tc.stallReason || !rec.Started() {
+				if rec.Phase != v1beta1.RolloutPhaseStalled || rec.Reason != tc.stallReason || !rec.Started() {
 					t.Fatalf("%s: lion's record is %+v, want its roll started and Stalled/%s", when, rec, tc.stallReason)
 				}
 				if stalledAt != nil && !rec.StalledTime.Equal(stalledAt) {
 					t.Fatalf("%s: lion's stall moved from %s to %s", when, stalledAt, rec.StalledTime)
 				}
-				if rec := f.record("tiger"); rec.Phase != v1alpha1.RolloutPhasePending || rec.Reason != "RolloutHalted" || rec.InFlight() {
+				if rec := f.record("tiger"); rec.Phase != v1beta1.RolloutPhasePending || rec.Reason != "RolloutHalted" || rec.InFlight() {
 					t.Fatalf("%s: tiger's record is %+v, want Pending/RolloutHalted", when, rec)
 				}
 				for _, site := range pacedSites() {
@@ -621,10 +621,10 @@ func TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart(t *testing.T)
 				// lion: the sites the release reached, and no further.
 				for _, site := range pacedSites() {
 					d := f.deployment("lion", site)
-					rolled := d.Annotations[v1alpha1.RenderedByAnnotation] != earlierRenderer && slices.Contains(podImages(d), release)
+					rolled := d.Annotations[v1beta1.RenderedByAnnotation] != earlierRenderer && slices.Contains(podImages(d), release)
 					if rolled != slices.Contains(tc.lionRolled, site) {
 						t.Fatalf("%s: lion/%s rolled=%v (renderer %q, images %v), want the release on %v only", when, site, rolled,
-							d.Annotations[v1alpha1.RenderedByAnnotation], podImages(d), tc.lionRolled)
+							d.Annotations[v1beta1.RenderedByAnnotation], podImages(d), tc.lionRolled)
 					}
 				}
 				f.requirePrimaryServing("lion", when)
@@ -688,9 +688,9 @@ func TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart(t *testing.T)
 			// The pod is fixed: lion finishes, then tiger gets the slot.
 			f.fixPod("lion", "dc2")
 			f.passUntil("both groups complete", func() bool {
-				return f.record("lion").Phase == v1alpha1.RolloutPhaseComplete && f.record("tiger").Phase == v1alpha1.RolloutPhaseComplete
+				return f.record("lion").Phase == v1beta1.RolloutPhaseComplete && f.record("tiger").Phase == v1beta1.RolloutPhaseComplete
 			})
-			renderer := f.deployment("lion", "dc1").Annotations[v1alpha1.RenderedByAnnotation]
+			renderer := f.deployment("lion", "dc1").Annotations[v1beta1.RenderedByAnnotation]
 			if renderer == earlierRenderer || renderer == "" {
 				t.Fatalf("lion/dc1 is rendered by %q after its roll (the earlier release was %q)", renderer, earlierRenderer)
 			}
@@ -704,10 +704,10 @@ func TestPacedRollout_BadBuildHaltsTheFleetAcrossAnOperatorRestart(t *testing.T)
 					if name == "tiger" && tc.tigerSidecarAfter != "" {
 						want = tc.tigerSidecarAfter
 					}
-					if d.Annotations[v1alpha1.RenderedByAnnotation] != renderer || d.Annotations[v1alpha1.SpecHashAnnotation] == pacedHashBeforeBump ||
+					if d.Annotations[v1beta1.RenderedByAnnotation] != renderer || d.Annotations[v1beta1.SpecHashAnnotation] == pacedHashBeforeBump ||
 						!slices.Contains(podImages(d), want) {
 						t.Fatalf("%s/%s after the rollout: renderer %q, hash %q, images %v; want the release's template with sidecar %s",
-							name, site, d.Annotations[v1alpha1.RenderedByAnnotation], d.Annotations[v1alpha1.SpecHashAnnotation], podImages(d), want)
+							name, site, d.Annotations[v1beta1.RenderedByAnnotation], d.Annotations[v1beta1.SpecHashAnnotation], podImages(d), want)
 					}
 				}
 			}
@@ -792,7 +792,7 @@ func TestKnownLimitationOperatorRestartDuringRecreateRollLeavesNoPrimary(t *test
 						lion.mysql["dc1"].isReadOnly(), fg.Status.ActiveSite)
 				}
 				f.passUntil("both groups complete", func() bool {
-					return f.record("lion").Phase == v1alpha1.RolloutPhaseComplete && f.record("tiger").Phase == v1alpha1.RolloutPhaseComplete
+					return f.record("lion").Phase == v1beta1.RolloutPhaseComplete && f.record("tiger").Phase == v1beta1.RolloutPhaseComplete
 				})
 				return
 			}
@@ -801,7 +801,7 @@ func TestKnownLimitationOperatorRestartDuringRecreateRollLeavesNoPrimary(t *test
 					"update this test, internal/dst/README.md and rolloutSim.needsHuman",
 					lion.mysql["dc1"].isReadOnly(), lion.mysql["dc2"].isReadOnly())
 			}
-			if got := controller.DeploymentUnstableReason(fg); got != v1alpha1.UnstableReasonNoPrimary || fg.Status.ActiveSite != "" {
+			if got := controller.DeploymentUnstableReason(fg); got != v1beta1.UnstableReasonNoPrimary || fg.Status.ActiveSite != "" {
 				t.Fatalf("lion: unstable=%q status.activeSite=%q, want NoPrimary and no active site", got, fg.Status.ActiveSite)
 			}
 			// The rollout is halted behind it, as behind any roll that
@@ -809,7 +809,7 @@ func TestKnownLimitationOperatorRestartDuringRecreateRollLeavesNoPrimary(t *test
 			if rec := f.record("lion"); !rec.Started() || rec.StalledTime == nil {
 				t.Fatalf("lion's record is %+v, want its roll started and stalled", rec)
 			}
-			if rec := f.record("tiger"); rec.Phase != v1alpha1.RolloutPhasePending || rec.Reason != "RolloutHalted" {
+			if rec := f.record("tiger"); rec.Phase != v1beta1.RolloutPhasePending || rec.Reason != "RolloutHalted" {
 				t.Fatalf("tiger's record is %+v, want Pending/RolloutHalted", rec)
 			}
 			f.requireUntouched("tiger", tiger, "behind the group without a primary")

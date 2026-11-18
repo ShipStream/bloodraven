@@ -12,7 +12,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -47,7 +47,7 @@ func startHandoff(tm *TopologyManager) *UpdateController {
 	u.mu.Lock()
 	u.updating = true
 	u.mu.Unlock()
-	u.setPhase(v1alpha1.UpdatePhaseFailover)
+	u.setPhase(v1beta1.UpdatePhaseFailover)
 	tm.mu.Lock()
 	tm.updater = u
 	tm.mu.Unlock()
@@ -67,7 +67,7 @@ func requireVerdict(t *testing.T, tm *TopologyManager, wantReason, wantPauseCont
 	if snap.DegradedReason != wantReason {
 		t.Fatalf("degraded reason = %q (alert %q, write pause %q), want %q", snap.DegradedReason, snap.Alert, snap.WritePause, wantReason)
 	}
-	if wantReason == v1alpha1.ReasonPlannedWritePause {
+	if wantReason == v1beta1.ReasonPlannedWritePause {
 		if snap.Alert != "" {
 			t.Fatalf("a planned write pause carries the alert %q", snap.Alert)
 		}
@@ -87,7 +87,7 @@ func TestWritePause_HandoffFencedWindow(t *testing.T) {
 	fence(dc1)
 
 	tm.Poll(ctx)
-	snap := requireVerdict(t, tm, v1alpha1.ReasonPlannedWritePause, "maintenance handoff")
+	snap := requireVerdict(t, tm, v1beta1.ReasonPlannedWritePause, "maintenance handoff")
 	if snap.ActiveSite != "" {
 		t.Fatalf("active site = %q in the fenced window, want none: no site is writable", snap.ActiveSite)
 	}
@@ -105,7 +105,7 @@ func TestWritePause_HandoffFencedWindow(t *testing.T) {
 	// same topology is now nobody's plan, and it is reported and logged.
 	endUpdate(u)
 	tm.Poll(ctx)
-	requireVerdict(t, tm, v1alpha1.ReasonNoPrimary, "")
+	requireVerdict(t, tm, v1beta1.ReasonNoPrimary, "")
 	if !strings.Contains(logs.String(), "NO PRIMARY") {
 		t.Fatalf("no ALERT was logged once the pause was nobody's:\n%s", logs.String())
 	}
@@ -117,7 +117,7 @@ func TestWritePause_HandoffBeforeTheFenceIsHealthy(t *testing.T) {
 	tm, _, _, _ := writePauseManager(t)
 	startHandoff(tm)
 	tm.Poll(context.Background())
-	requireVerdict(t, tm, v1alpha1.ReasonHealthy, "")
+	requireVerdict(t, tm, v1beta1.ReasonHealthy, "")
 }
 
 func TestWritePause_PlannedFailoverRunAndHold(t *testing.T) {
@@ -133,7 +133,7 @@ func TestWritePause_PlannedFailoverRunAndHold(t *testing.T) {
 	fence(dc1)
 
 	tm.Poll(ctx)
-	snap := requireVerdict(t, tm, v1alpha1.ReasonPlannedWritePause, "planned failover run-1 from dc1 to dc2")
+	snap := requireVerdict(t, tm, v1beta1.ReasonPlannedWritePause, "planned failover run-1 from dc1 to dc2")
 	if strings.Contains(logs.String(), "ALERT") {
 		t.Fatalf("the fenced window of a planned failover logged an ALERT:\n%s", logs.String())
 	}
@@ -145,14 +145,14 @@ func TestWritePause_PlannedFailoverRunAndHold(t *testing.T) {
 		t.Fatal("toHold refused")
 	}
 	tm.Poll(ctx)
-	requireVerdict(t, tm, v1alpha1.ReasonNoPrimary, "")
+	requireVerdict(t, tm, v1beta1.ReasonNoPrimary, "")
 }
 
 func TestWritePause_AllReadOnlyWithoutAnOperationIsNoPrimary(t *testing.T) {
 	tm, dc1, _, logs := writePauseManager(t)
 	fence(dc1)
 	tm.Poll(context.Background())
-	requireVerdict(t, tm, v1alpha1.ReasonNoPrimary, "")
+	requireVerdict(t, tm, v1beta1.ReasonNoPrimary, "")
 	if !strings.Contains(logs.String(), "NO PRIMARY: both sites are read-only") {
 		t.Fatalf("no ALERT for an unexplained topology without a writable site:\n%s", logs.String())
 	}
@@ -167,7 +167,7 @@ func TestWritePause_HandoffPromotionAwaitingItsFirstPoll(t *testing.T) {
 	u := startHandoff(tm)
 	fence(dc1)
 	tm.Poll(ctx)
-	requireVerdict(t, tm, v1alpha1.ReasonPlannedWritePause, "maintenance handoff")
+	requireVerdict(t, tm, v1beta1.ReasonPlannedWritePause, "maintenance handoff")
 
 	// The handoff promoted dc2 and moved on; dc2 does not answer the next
 	// probe.
@@ -175,15 +175,15 @@ func TestWritePause_HandoffPromotionAwaitingItsFirstPoll(t *testing.T) {
 	dc2.readOnly, dc2.err = false, errors.New("i/o timeout")
 	dc2.mu.Unlock()
 	tm.recordHandoffPromotion(ctx, "dc1", "dc2", "")
-	u.setPhase(v1alpha1.UpdatePhaseUpdateOldPrimary)
+	u.setPhase(v1beta1.UpdatePhaseUpdateOldPrimary)
 	tm.Poll(ctx)
-	requireVerdict(t, tm, v1alpha1.ReasonPlannedWritePause, "promotion of dc2")
+	requireVerdict(t, tm, v1beta1.ReasonPlannedWritePause, "promotion of dc2")
 
 	dc2.mu.Lock()
 	dc2.err = nil
 	dc2.mu.Unlock()
 	tm.Poll(ctx)
-	requireVerdict(t, tm, v1alpha1.ReasonHealthy, "")
+	requireVerdict(t, tm, v1beta1.ReasonHealthy, "")
 	if strings.Contains(logs.String(), "ALERT") {
 		t.Fatalf("a handoff whose target answered one poll late logged an ALERT:\n%s", logs.String())
 	}
@@ -242,42 +242,42 @@ func TestUpdateCRStatus_PlannedWritePause(t *testing.T) {
 			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly},
 			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly},
 		},
-		DegradedReason: v1alpha1.ReasonPlannedWritePause,
+		DegradedReason: v1beta1.ReasonPlannedWritePause,
 		WritePause:     pause,
 	}
 	for _, tc := range []struct {
 		name         string
-		prepare      func(*v1alpha1.MysqlFailoverGroup, *TopologySnapshot)
+		prepare      func(*v1beta1.MysqlFailoverGroup, *TopologySnapshot)
 		wantUnstable string
 	}{
-		{name: "ordered update", prepare: func(_ *v1alpha1.MysqlFailoverGroup, s *TopologySnapshot) {
-			s.UpdatePhase = v1alpha1.UpdatePhaseFailover
+		{name: "ordered update", prepare: func(_ *v1beta1.MysqlFailoverGroup, s *TopologySnapshot) {
+			s.UpdatePhase = v1beta1.UpdatePhaseFailover
 		},
-			wantUnstable: v1alpha1.UnstableReasonOrderedUpdate},
-		{name: "planned failover", prepare: func(fg *v1alpha1.MysqlFailoverGroup, _ *TopologySnapshot) {
-			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{RunID: "run-1", Phase: v1alpha1.PlannedFailoverPhaseDraining, SourceSite: "dc1", TargetSite: "dc2"}
-		}, wantUnstable: v1alpha1.UnstableReasonPlannedFailover},
-		{name: "status shows neither", prepare: func(*v1alpha1.MysqlFailoverGroup, *TopologySnapshot) {}, wantUnstable: v1alpha1.UnstableReasonNotReady},
+			wantUnstable: v1beta1.UnstableReasonOrderedUpdate},
+		{name: "planned failover", prepare: func(fg *v1beta1.MysqlFailoverGroup, _ *TopologySnapshot) {
+			fg.Status.PlannedFailover = &v1beta1.PlannedFailoverStatus{RunID: "run-1", Phase: v1beta1.PlannedFailoverPhaseDraining, SourceSite: "dc1", TargetSite: "dc2"}
+		}, wantUnstable: v1beta1.UnstableReasonPlannedFailover},
+		{name: "status shows neither", prepare: func(*v1beta1.MysqlFailoverGroup, *TopologySnapshot) {}, wantUnstable: v1beta1.UnstableReasonNotReady},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := newTestFG()
 			s := snap
 			tc.prepare(fg, &s)
 			c := fake.NewClientBuilder().WithScheme(testScheme()).
-				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+				WithStatusSubresource(&v1beta1.MysqlFailoverGroup{}).
 				WithObjects(fg).Build()
 			runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
 			nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 			if err := runner.updateCRStatus(context.Background(), nn, s); err != nil {
 				t.Fatal(err)
 			}
-			var updated v1alpha1.MysqlFailoverGroup
+			var updated v1beta1.MysqlFailoverGroup
 			if err := c.Get(context.Background(), nn, &updated); err != nil {
 				t.Fatal(err)
 			}
-			for _, typ := range []string{v1alpha1.ConditionReady, v1alpha1.ConditionDegraded} {
+			for _, typ := range []string{v1beta1.ConditionReady, v1beta1.ConditionDegraded} {
 				cond := findCondition(updated.Status.Conditions, typ)
-				if cond == nil || cond.Status != "False" || cond.Reason != v1alpha1.ReasonPlannedWritePause || cond.Message != pause {
+				if cond == nil || cond.Status != "False" || cond.Reason != v1beta1.ReasonPlannedWritePause || cond.Message != pause {
 					t.Fatalf("%s = %+v, want False/PlannedWritePause with the pause message", typ, cond)
 				}
 			}
@@ -294,7 +294,7 @@ func TestUpdateCRStatus_PlannedWritePause(t *testing.T) {
 func TestEmitDegradedTransitionEvents_PlannedWritePauseIsSilent(t *testing.T) {
 	rec := record.NewFakeRecorder(10)
 	fg := newTestFG()
-	pause := TopologySnapshot{DegradedReason: v1alpha1.ReasonPlannedWritePause, WritePause: "Writes are paused"}
+	pause := TopologySnapshot{DegradedReason: v1beta1.ReasonPlannedWritePause, WritePause: "Writes are paused"}
 
 	// A pause the operator opened and closed: no Warning, and no
 	// SiteRecovered for a group that was never degraded.

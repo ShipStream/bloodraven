@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,11 +31,11 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 	if err := k8sClient.Create(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
+	a.Status = v1beta1.MysqlBackupStatus{Phase: v1beta1.BackupPhaseSucceeded, ArtifactStorage: &v1beta1.BackupArtifactStorage{Type: v1beta1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
 	if err := k8sClient.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3", TTLSecondsAfterFinished: new(int32(3600))}}
+	v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3", TTLSecondsAfterFinished: new(int32(3600))}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
 	}
@@ -45,9 +45,9 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 		if err := k8sClient.Get(ctx, key, v); err != nil {
 			t.Fatal(err)
 		}
-		return v.Status.Phase == v1alpha1.VerificationPhaseProvisioning
+		return v.Status.Phase == v1beta1.VerificationPhaseProvisioning
 	})
-	want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), ArtifactStorage: a.Status.ArtifactStorage.DeepCopy()}
+	want := &v1beta1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), ArtifactStorage: a.Status.ArtifactStorage.DeepCopy()}
 	b := newSucceededBackup(ns, fg.Name, "nightly-s3")
 	b.Name = "backup-b"
 	if err := k8sClient.Create(ctx, b); err != nil {
@@ -64,13 +64,13 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 		if err := k8sClient.Get(ctx, key, v); err != nil {
 			t.Fatal(err)
 		}
-		return v.Status.Phase == v1alpha1.VerificationPhaseRestoring
+		return v.Status.Phase == v1beta1.VerificationPhaseRestoring
 	})
 	var job batchv1.Job
 	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: v.Status.JobName}, &job); err != nil {
 		t.Fatal(err)
 	}
-	var snapshot v1alpha1.VerificationBackupRef
+	var snapshot v1beta1.VerificationBackupRef
 	if err := json.Unmarshal([]byte(job.Spec.Template.Annotations["bloodraven.shipstream.io/verification-backup"]), &snapshot); err != nil || !reflect.DeepEqual(&snapshot, want) {
 		t.Fatalf("Job snapshot does not match persisted pin: err=%v snapshot=%+v want=%+v", err, snapshot, want)
 	}
@@ -97,7 +97,7 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 	// spec.backupRef is immutable, so a running verification cannot be
 	// retargeted at all.
 	retarget := v.DeepCopy()
-	retarget.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: b.Name}
+	retarget.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: b.Name}
 	e4WantInvalid(t, "retarget a running verification", k8sClient.Update(ctx, retarget), "spec.backupRef is immutable")
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 	if err := k8sClient.Get(ctx, key, v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Status.Phase != v1alpha1.VerificationPhaseRestoring || !reflect.DeepEqual(v.Status.BackupRef, want) {
+	if v.Status.Phase != v1beta1.VerificationPhaseRestoring || !reflect.DeepEqual(v.Status.BackupRef, want) {
 		t.Fatalf("running Job lost original source: %+v", v.Status)
 	}
 	now := metav1.Now()
@@ -122,7 +122,7 @@ func TestEnvtest_VerificationSourcePinnedAcrossLaunchAndCompletion(t *testing.T)
 	if err := k8sClient.Get(ctx, key, v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Status.Phase != v1alpha1.VerificationPhaseSucceeded || !reflect.DeepEqual(v.Status.BackupRef, want) {
+	if v.Status.Phase != v1beta1.VerificationPhaseSucceeded || !reflect.DeepEqual(v.Status.BackupRef, want) {
 		t.Fatalf("verification certified the wrong persisted identity: %+v", v.Status)
 	}
 }
@@ -138,11 +138,11 @@ func TestEnvtest_VerificationRejectsRecreatedSourceBeforeLaunch(t *testing.T) {
 	if err := k8sClient.Create(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	a.Status = v1alpha1.MysqlBackupStatus{Phase: v1alpha1.BackupPhaseSucceeded, ArtifactStorage: &v1alpha1.BackupArtifactStorage{Type: v1alpha1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
+	a.Status = v1beta1.MysqlBackupStatus{Phase: v1beta1.BackupPhaseSucceeded, ArtifactStorage: &v1beta1.BackupArtifactStorage{Type: v1beta1.BackupStorageS3, Location: "prod_backups/a", Bucket: "bloodraven"}, CompletionTime: &metav1.Time{Time: time.Now().Add(-time.Hour)}}
 	if err := k8sClient.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"}}
+	v := &v1beta1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "pinned", Namespace: ns}, Spec: v1beta1.MysqlBackupVerificationSpec{FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"}}
 	if err := k8sClient.Create(ctx, v); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestEnvtest_VerificationRejectsRecreatedSourceBeforeLaunch(t *testing.T) {
 		if err := k8sClient.Get(ctx, key, v); err != nil {
 			t.Fatal(err)
 		}
-		return v.Status.Phase == v1alpha1.VerificationPhaseProvisioning
+		return v.Status.Phase == v1beta1.VerificationPhaseProvisioning
 	})
 	if err := k8sClient.Delete(ctx, a); err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestEnvtest_VerificationRejectsRecreatedSourceBeforeLaunch(t *testing.T) {
 	if err := k8sClient.Get(ctx, key, v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Status.Phase != v1alpha1.VerificationPhaseFailed || v.Status.BackupRef.UID != string(a.UID) || v.Status.BackupRef.UID == string(replacement.UID) {
+	if v.Status.Phase != v1beta1.VerificationPhaseFailed || v.Status.BackupRef.UID != string(a.UID) || v.Status.BackupRef.UID == string(replacement.UID) {
 		t.Fatalf("recreated source was accepted: %+v", v.Status)
 	}
 	var job batchv1.Job

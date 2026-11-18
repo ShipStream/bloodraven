@@ -280,7 +280,7 @@ points:
       A documented matrix of faults, what the operator does, how long it takes, and what
       it costs you.
 yaml: |-
-  apiVersion: shipstream.io/v1alpha1
+  apiVersion: shipstream.io/v1beta1
   kind: MysqlFailoverGroup
   metadata:
     name: orders

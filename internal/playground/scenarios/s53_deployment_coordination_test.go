@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	corev1 "k8s.io/api/core/v1"
@@ -159,18 +159,18 @@ func TestDeploymentCleanupPreservesCredentialsOnDatabaseDeleteFailure(t *testing
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1alpha1.AddToScheme(scheme); err != nil {
+	if err := v1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	for _, fail := range []bool{false, true} {
 		t.Run(map[bool]string{false: "success", true: "delete failure"}[fail], func(t *testing.T) {
 			meta := metav1.ObjectMeta{Name: "fixture", Namespace: "sandbox"}
 			secret := &corev1.Secret{ObjectMeta: meta}
-			db := &v1alpha1.MysqlDatabase{ObjectMeta: meta}
+			db := &v1beta1.MysqlDatabase{ObjectMeta: meta}
 			denied := errors.New("database deletion denied")
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, db).WithInterceptorFuncs(interceptor.Funcs{
 				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-					if _, ok := obj.(*v1alpha1.MysqlDatabase); ok && fail {
+					if _, ok := obj.(*v1beta1.MysqlDatabase); ok && fail {
 						return denied
 					}
 					return c.Delete(ctx, obj, opts...)

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -145,7 +145,7 @@ func deploymentCoordinationScenario(mode string) runner.Scenario {
 		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		if mode == "emergency" || mode == "renew" {
-			if _, err := waitForMFGEvent(waitCtx, env, env.StartTime, v1alpha1.EventDeploymentLeaseRevoked, ""); err != nil {
+			if _, err := waitForMFGEvent(waitCtx, env, env.StartTime, v1beta1.EventDeploymentLeaseRevoked, ""); err != nil {
 				return err
 			}
 		}
@@ -176,10 +176,10 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 	if len(ca.Data["ca.crt"]) == 0 {
 		return fmt.Errorf("playground TLS Secret has no ca.crt")
 	}
-	mdb := &v1alpha1.MysqlDatabase{ObjectMeta: meta, Spec: v1alpha1.MysqlDatabaseSpec{
-		FailoverGroupRef: v1alpha1.LocalFailoverGroupRef{Name: env.FG}, DatabaseName: strings.ReplaceAll(s.name, "-", "_"),
-		Owner: v1alpha1.MysqlDatabaseOwner{SecretName: s.name}, DeletionPolicy: v1alpha1.DeletionPolicyDelete,
-		DeploymentClients: []v1alpha1.DeploymentClient{{Namespace: env.Namespace, ServiceAccount: s.name}},
+	mdb := &v1beta1.MysqlDatabase{ObjectMeta: meta, Spec: v1beta1.MysqlDatabaseSpec{
+		FailoverGroupRef: v1beta1.LocalFailoverGroupRef{Name: env.FG}, DatabaseName: strings.ReplaceAll(s.name, "-", "_"),
+		Owner: v1beta1.MysqlDatabaseOwner{SecretName: s.name}, DeletionPolicy: v1beta1.DeletionPolicyDelete,
+		DeploymentClients: []v1beta1.DeploymentClient{{Namespace: env.Namespace, ServiceAccount: s.name}},
 	}}
 	for _, obj := range []client.Object{
 		&corev1.ServiceAccount{ObjectMeta: meta},
@@ -193,14 +193,14 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 	}
 	// Wait for actual reconciliation before granting access or changing topology.
 	if err := deployPoll(ctx, 2*time.Minute, func() (bool, error) {
-		var db v1alpha1.MysqlDatabase
+		var db v1beta1.MysqlDatabase
 		if err := env.Kube.Controller.Get(ctx, client.ObjectKeyFromObject(mdb), &db); err != nil {
 			return false, err
 		}
-		if db.Status.Phase == v1alpha1.MysqlDatabasePhaseFailed {
+		if db.Status.Phase == v1beta1.MysqlDatabasePhaseFailed {
 			return false, fmt.Errorf("deployment fixture failed: %s", db.Status.Message)
 		}
-		return db.Status.Phase == v1alpha1.MysqlDatabasePhaseReady && db.Status.ObservedGeneration == db.Generation, nil
+		return db.Status.Phase == v1beta1.MysqlDatabasePhaseReady && db.Status.ObservedGeneration == db.Generation, nil
 	}); err != nil {
 		return err
 	}
@@ -244,11 +244,11 @@ func (s *deployScenarioState) create(ctx context.Context, env *runner.Env, mode 
 
 func deploymentClientPod(meta metav1.ObjectMeta, operation, group, mode string) *corev1.Pod {
 	no, seconds, deadline := false, int64(3600), int64(600)
-	meta.Labels = map[string]string{v1alpha1.DeployClientLabel: v1alpha1.LabelValueTrue}
+	meta.Labels = map[string]string{v1beta1.DeployClientLabel: v1beta1.LabelValueTrue}
 	return &corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{
 		ServiceAccountName: meta.Name, AutomountServiceAccountToken: &no, RestartPolicy: corev1.RestartPolicyNever,
 		ActiveDeadlineSeconds: &deadline,
-		Tolerations:           []corev1.Toleration{{Key: v1alpha1.ReadOnlyTaintKey(meta.Namespace, group), Operator: corev1.TolerationOpExists}},
+		Tolerations:           []corev1.Toleration{{Key: v1beta1.ReadOnlyTaintKey(meta.Namespace, group), Operator: corev1.TolerationOpExists}},
 		Containers: []corev1.Container{{Name: "client", Image: "python:3.13-alpine", Command: []string{"python", "-u", "-c", deployClientScript},
 			Env: []corev1.EnvVar{{Name: "DEPLOY_URL", Value: "https://bloodraven." + meta.Namespace + ".svc.cluster.local:8443/deploy/v1/groups/" + group},
 				{Name: "OPERATION_ID", Value: operation}, {Name: "INSTANCE", Value: meta.Name}, {Name: "MODE", Value: mode}},
@@ -316,12 +316,12 @@ func (s *deployScenarioState) waitClient(ctx context.Context, env *runner.Env, p
 func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, kill bool) error {
 	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Deferred/DeploymentHold", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "Deferred/DeploymentHold", func(mfg *v1beta1.MysqlFailoverGroup) (bool, string, error) {
 		pf := mfg.Status.PlannedFailover
 		if pf == nil || pf.StartTime.IsZero() || pf.StartTime.Time.Before(env.StartTime.Add(-2*time.Second)) {
 			return false, "waiting for current planned request", nil
 		}
-		if pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
+		if pf.Phase != v1beta1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
 			return false, fmt.Sprintf("phase=%s reason=%s", pf.Phase, plannedReason(pf)), nil
 		}
 		if pf.Admission.RetryTime == nil || !strings.Contains(pf.Message, s.operation) || !strings.Contains(pf.Message, s.name) {
@@ -368,7 +368,7 @@ func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, 
 			return false, err
 		}
 		pf := mfg.Status.PlannedFailover
-		if mfg.Status.ActiveSite != ctxFetch(env, "originalPrimary") || pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
+		if mfg.Status.ActiveSite != ctxFetch(env, "originalPrimary") || pf == nil || pf.Phase != v1beta1.PlannedFailoverPhaseDeferred || plannedReason(pf) != "DeploymentHold" {
 			return false, fmt.Errorf("planned failover advanced before hold expiry %s", s.expiry)
 		}
 		return false, nil
@@ -401,12 +401,12 @@ func (s *deployScenarioState) cleanup(ctx context.Context, env *runner.Env) erro
 		obj := s.objects[i]
 		if err := env.Kube.Controller.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, err)
-			if _, ok := obj.(*v1alpha1.MysqlDatabase); ok {
+			if _, ok := obj.(*v1beta1.MysqlDatabase); ok {
 				return errors.Join(errs...)
 			}
 			continue
 		}
-		if _, ok := obj.(*v1alpha1.MysqlDatabase); ok {
+		if _, ok := obj.(*v1beta1.MysqlDatabase); ok {
 			if err := deployPoll(ctx, 2*time.Minute, func() (bool, error) {
 				live := obj.DeepCopyObject().(client.Object)
 				err := env.Kube.Controller.Get(ctx, client.ObjectKeyFromObject(obj), live)

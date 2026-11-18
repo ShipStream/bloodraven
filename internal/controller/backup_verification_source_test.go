@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	v1beta1 "github.com/shipstream/bloodraven/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -39,14 +39,14 @@ func TestVerificationSource_RemainsPinnedWhenNewBackupCompletes(t *testing.T) {
 					if err := c.Get(ctx, key, v); err != nil {
 						t.Fatal(err)
 					}
-					if v.Status.Phase == v1alpha1.VerificationPhaseProvisioning {
+					if v.Status.Phase == v1beta1.VerificationPhaseProvisioning {
 						break
 					}
 				}
 			} else {
 				reconcileVerifUntilStable(t, r, v.Name)
 			}
-			want := &v1alpha1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), ArtifactStorage: a.Status.ArtifactStorage.DeepCopy()}
+			want := &v1beta1.VerificationBackupRef{Name: a.Name, UID: string(a.UID), ArtifactStorage: a.Status.ArtifactStorage.DeepCopy()}
 			b := successfulBackup("backup-b", fg.Name, "nightly-s3")
 			setTestArtifactLocation(b, "prod_backups/backup-b")
 			if err := c.Create(ctx, b); err != nil {
@@ -75,14 +75,14 @@ func TestVerificationSource_RemainsPinnedWhenNewBackupCompletes(t *testing.T) {
 			if err := c.Get(ctx, key, v); err != nil {
 				t.Fatal(err)
 			}
-			if v.Status.Phase != v1alpha1.VerificationPhaseSucceeded || !reflect.DeepEqual(v.Status.BackupRef, want) {
+			if v.Status.Phase != v1beta1.VerificationPhaseSucceeded || !reflect.DeepEqual(v.Status.BackupRef, want) {
 				t.Fatalf("verification certified an untested backup: %+v", v.Status)
 			}
 		})
 	}
 }
 
-func provisionVerificationSource(t *testing.T, r *MysqlBackupVerificationReconciler, c client.Client, v *v1alpha1.MysqlBackupVerification) {
+func provisionVerificationSource(t *testing.T, r *MysqlBackupVerificationReconciler, c client.Client, v *v1beta1.MysqlBackupVerification) {
 	t.Helper()
 	for i := 0; i < 6; i++ {
 		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(v)}); err != nil {
@@ -91,7 +91,7 @@ func provisionVerificationSource(t *testing.T, r *MysqlBackupVerificationReconci
 		if err := c.Get(context.Background(), client.ObjectKeyFromObject(v), v); err != nil {
 			t.Fatal(err)
 		}
-		if v.Status.Phase == v1alpha1.VerificationPhaseProvisioning {
+		if v.Status.Phase == v1beta1.VerificationPhaseProvisioning {
 			return
 		}
 	}
@@ -106,7 +106,7 @@ func TestVerificationSource_RejectsMissingOrReplacedPinBeforeLaunch(t *testing.T
 			a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 			v := verifyCR("pinned", fg.Name, "nightly-s3")
 			if mode == "replaced-explicit" {
-				v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: a.Name}
+				v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: a.Name}
 			}
 			r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 			provisionVerificationSource(t, r, c, v)
@@ -126,8 +126,8 @@ func TestVerificationSource_RejectsMissingOrReplacedPinBeforeLaunch(t *testing.T
 			if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 				t.Fatal(err)
 			}
-			condition := apiMeta.FindStatusCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
-			if v.Status.Phase != v1alpha1.VerificationPhaseFailed || v.Status.BackupRef.UID != string(a.UID) || condition == nil || condition.Reason != "BackupNotAvailable" {
+			condition := apiMeta.FindStatusCondition(v.Status.Conditions, v1beta1.ConditionVerified)
+			if v.Status.Phase != v1beta1.VerificationPhaseFailed || v.Status.BackupRef.UID != string(a.UID) || condition == nil || condition.Reason != "BackupNotAvailable" {
 				t.Fatalf("unavailable pin was replaced: %+v", v.Status)
 			}
 			var jobs batchv1.JobList
@@ -151,11 +151,11 @@ func TestVerificationSource_BuildsFromPinnedDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestArtifactLocation(a, "changed/artifact")
-	setTestArtifactType(a, v1alpha1.BackupStoragePVC)
+	setTestArtifactType(a, v1beta1.BackupStoragePVC)
 	if err := c.Status().Update(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: "new-explicit-ref"}
+	v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: "new-explicit-ref"}
 	if err := c.Update(ctx, v); err != nil {
 		t.Fatal(err)
 	}
@@ -188,10 +188,10 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			if strings.Contains(mode, "legacy") {
-				delete(job.Spec.Template.Annotations, v1alpha1.VerificationBackupAnnotation)
+				delete(job.Spec.Template.Annotations, v1beta1.VerificationBackupAnnotation)
 			}
 			if mode == "invalid-snapshot" {
-				job.Spec.Template.Annotations[v1alpha1.VerificationBackupAnnotation] = "invalid JSON"
+				job.Spec.Template.Annotations[v1beta1.VerificationBackupAnnotation] = "invalid JSON"
 			}
 			if err := c.Update(ctx, &job); err != nil {
 				t.Fatal(err)
@@ -203,7 +203,7 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 			if mode == "missing-status" {
 				v.Status.BackupRef = nil
 			} else if mode == "drifted-status" || mode == "mismatched-legacy" {
-				v.Status.BackupRef = &v1alpha1.VerificationBackupRef{Name: "backup-b", UID: "uid-b", ArtifactStorage: testArtifactStorage(v1alpha1.BackupStorageS3, "backup-b/artifact")}
+				v.Status.BackupRef = &v1beta1.VerificationBackupRef{Name: "backup-b", UID: "uid-b", ArtifactStorage: testArtifactStorage(v1beta1.BackupStorageS3, "backup-b/artifact")}
 			}
 			if err := c.Status().Update(ctx, v); err != nil {
 				t.Fatal(err)
@@ -216,11 +216,11 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			if mode == "mismatched-legacy" || mode == "invalid-snapshot" {
-				condition := apiMeta.FindStatusCondition(v.Status.Conditions, v1alpha1.ConditionVerified)
-				if v.Status.Phase != v1alpha1.VerificationPhaseFailed || condition == nil || condition.Reason != "BackupIdentityMismatch" {
+				condition := apiMeta.FindStatusCondition(v.Status.Conditions, v1beta1.ConditionVerified)
+				if v.Status.Phase != v1beta1.VerificationPhaseFailed || condition == nil || condition.Reason != "BackupIdentityMismatch" {
 					t.Fatalf("unprovable execution source was certified: %+v", v.Status)
 				}
-			} else if v.Status.Phase != v1alpha1.VerificationPhaseSucceeded || v.Status.BackupRef.Name != a.Name || v.Status.BackupRef.UID != string(a.UID) {
+			} else if v.Status.Phase != v1beta1.VerificationPhaseSucceeded || v.Status.BackupRef.Name != a.Name || v.Status.BackupRef.UID != string(a.UID) {
 				t.Fatalf("Job execution identity was lost: %+v", v.Status)
 			}
 		})
@@ -230,7 +230,7 @@ func TestVerificationSource_JobSnapshotAndLegacySafety(t *testing.T) {
 func TestVerificationSource_StorageInputMatchesSnapshot(t *testing.T) {
 	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
-	for _, storage := range []v1alpha1.BackupStorageType{v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC} {
+	for _, storage := range []v1beta1.BackupStorageType{v1beta1.BackupStorageS3, v1beta1.BackupStoragePVC} {
 		for _, encrypted := range []bool{false, true} {
 			t.Run(string(storage)+map[bool]string{true: "-encrypted", false: "-plain"}[encrypted], func(t *testing.T) {
 				fg := verifyFG()
@@ -240,11 +240,11 @@ func TestVerificationSource_StorageInputMatchesSnapshot(t *testing.T) {
 				a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 				setTestArtifactType(a, storage)
 				if encrypted {
-					a.Status.Encryption = &v1alpha1.BackupEncryptionStatus{Mode: v1alpha1.EncryptionModePassphrase, Algorithm: v1alpha1.EncryptionAlgorithmAES256GCM}
+					a.Status.Encryption = &v1beta1.BackupEncryptionStatus{Mode: v1beta1.EncryptionModePassphrase, Algorithm: v1beta1.EncryptionAlgorithmAES256GCM}
 					recordTestDumpKey(a)
 				}
-				if storage == v1alpha1.BackupStoragePVC {
-					fg.Spec.Backup.Profiles[0].Storage = v1alpha1.BackupStorage{Type: storage, PVC: &v1alpha1.PVCStorage{ClaimName: "backups"}}
+				if storage == v1beta1.BackupStoragePVC {
+					fg.Spec.Backup.Profiles[0].Storage = v1beta1.BackupStorage{Type: storage, PVC: &v1beta1.PVCStorage{ClaimName: "backups"}}
 					setTestArtifactLocation(a, "/backups/prod_backups/db dumps/a/")
 				} else {
 					setTestArtifactLocation(a, "s3://bloodraven-backups/prod_backups/a/")
@@ -286,8 +286,8 @@ func TestVerificationSource_StatusFailuresRemainRetryable(t *testing.T) {
 			}
 			r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
 				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-					if verification, ok := obj.(*v1alpha1.MysqlBackupVerification); ok && sub == "status" {
-						if stage != "after-job-create" || verification.Status.Phase == v1alpha1.VerificationPhaseRestoring {
+					if verification, ok := obj.(*v1beta1.MysqlBackupVerification); ok && sub == "status" {
+						if stage != "after-job-create" || verification.Status.Phase == v1beta1.VerificationPhaseRestoring {
 							return fmt.Errorf("injected source status failure")
 						}
 					}
@@ -306,7 +306,7 @@ func TestVerificationSource_StatusFailuresRemainRetryable(t *testing.T) {
 			if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 				t.Fatal(err)
 			}
-			if v.Status.Phase == v1alpha1.VerificationPhaseFailed {
+			if v.Status.Phase == v1beta1.VerificationPhaseFailed {
 				t.Fatal("transient status failure terminally failed verification")
 			}
 			if stage == "before-launch" {
@@ -320,7 +320,7 @@ func TestVerificationSource_StatusFailuresRemainRetryable(t *testing.T) {
 			if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 				t.Fatal(err)
 			}
-			if v.Status.Phase != v1alpha1.VerificationPhaseRestoring || v.Status.BackupRef == nil || v.Status.BackupRef.UID != string(a.UID) {
+			if v.Status.Phase != v1beta1.VerificationPhaseRestoring || v.Status.BackupRef == nil || v.Status.BackupRef.UID != string(a.UID) {
 				t.Fatalf("verification did not recover after status writes returned: %+v", v.Status)
 			}
 		})
@@ -332,7 +332,7 @@ func TestVerificationSource_ObservesJobAfterLaunchInputsDisappear(t *testing.T) 
 	fg := verifyFG()
 	a := successfulBackup("backup-a", fg.Name, "nightly-s3")
 	v := verifyCR("pinned", fg.Name, "nightly-s3")
-	v.Spec.BackupRef = &v1alpha1.LocalMysqlBackupRef{Name: a.Name}
+	v.Spec.BackupRef = &v1beta1.LocalMysqlBackupRef{Name: a.Name}
 	r, c := newVerificationReconciler(t, fg, a, v, operatorCredsSecret())
 	reconcileVerifUntilStable(t, r, v.Name)
 	if err := c.Delete(ctx, a); err != nil {
@@ -354,7 +354,7 @@ func TestVerificationSource_ObservesJobAfterLaunchInputsDisappear(t *testing.T) 
 	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
 		t.Fatal(err)
 	}
-	if v.Status.Phase != v1alpha1.VerificationPhaseRestoring || v.Status.BackupRef == nil || v.Status.BackupRef.UID != string(a.UID) {
+	if v.Status.Phase != v1beta1.VerificationPhaseRestoring || v.Status.BackupRef == nil || v.Status.BackupRef.UID != string(a.UID) {
 		t.Fatalf("launch-input removal interrupted an existing Job: %+v", v.Status)
 	}
 }
