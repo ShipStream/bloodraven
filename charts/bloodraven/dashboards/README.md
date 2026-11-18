@@ -9,7 +9,7 @@ The chart ships six dashboards. The MySQL Workload dashboard adds per-site metri
 | `replication.json` | `bloodraven-replication` | Replication lag per site, IO/SQL thread up/down state timeline, divergent transactions, reclones, poll latency. |
 | `backups.json` | `bloodraven-backups` | Backup runs by result, duration p50/p95, size, verification freshness and PITR replay lag. |
 | `archiver.json` | `bloodraven-archiver` | Per-site PITR archiver: age of last upload, backlog files, upload failure rate. |
-| `mysql-workload.json` | `bloodraven-mysql-workload` | Per-site connection use against `max_connections`, row lock waits, query throughput and site role. Needs the opt-in `mysqld_exporter` (see Prerequisites); the other five do not. |
+| `mysql-workload.json` | `bloodraven-mysql-workload` | Per-site connection use against `max_connections`, row lock waits, query throughput, replication lag, and site role. Needs the opt-in `mysqld_exporter` (see Prerequisites); the other five do not. |
 
 The dashboards share datasource, namespace, group, and site filters. Links keep the selected time range and filters.
 
@@ -50,7 +50,7 @@ A Prometheus scraping the operator. The chart ships a `ServiceMonitor` — enabl
 
 ### MySQL workload dashboard
 
-The MySQL Workload dashboard uses `bloodraven_site_state` for site role and the optional exporter for workload measurements.
+The MySQL Workload dashboard uses Bloodraven metrics for site role and replication lag. The optional exporter supplies workload measurements.
 
 1. Deploy the exporter and configure the scrape job. [`examples/mysqld-exporter.yaml`](../../../examples/mysqld-exporter.yaml) and [`examples/mysqld-exporter-scrape.yaml`](../../../examples/mysqld-exporter-scrape.yaml). Setup steps are in [`site/content/docs/8.observability/3.monitoring-prometheus.md`](../../../site/content/docs/8.observability/3.monitoring-prometheus.md).
 2. Set the Prometheus datasource's scrape interval to `30s`, the interval of the example job.

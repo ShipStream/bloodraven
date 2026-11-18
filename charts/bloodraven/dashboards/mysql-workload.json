@@ -7,7 +7,7 @@
     "workload"
   ],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "timezone": "",
   "refresh": "30s",
@@ -17,7 +17,7 @@
   },
   "timepicker": {},
   "graphTooltip": 1,
-  "description": "Per-site MySQL workload from mysqld_exporter (job bloodraven-mysql) beside the site role and state from the operator. Optional: the HA dashboards work without the exporter.",
+  "description": "Per-site MySQL workload from mysqld_exporter (job bloodraven-mysql) alongside site role, state, and replication lag from Bloodraven.",
   "links": [
     {
       "title": "Overview",
@@ -790,6 +790,56 @@
             "showPoints": "auto"
           },
           "noValue": "No exporter data",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Replication lag by site",
+      "description": "MySQL's Seconds_Behind_Source as reported by Bloodraven. The panel plots lag for read-only sites. A gap means the site was writable, unreachable, or reporting no lag measurement.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "targets": [
+        {
+          "expr": "(bloodraven_replication_lag_seconds{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"} >= 0) and on (namespace, group, site, role) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", state=\"read-only\"} == 1)",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}} ({{role}})",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "showPoints": "auto"
+          },
+          "noValue": "No lag measurement",
           "min": 0
         },
         "overrides": []
