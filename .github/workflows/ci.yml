@@ -26,6 +26,7 @@ jobs:
       course: ${{ steps.classify.outputs.course }}
       pitr: ${{ steps.classify.outputs.pitr }}
       dragonfly: ${{ steps.classify.outputs.dragonfly }}
+      workload: ${{ steps.classify.outputs.workload }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,7 +38,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          all() { printf 'go=true\nsite=true\ncourse=true\npitr=true\ndragonfly=true\n' | tee -a "$GITHUB_OUTPUT"; }
+          all() { printf 'go=true\nsite=true\ncourse=true\npitr=true\ndragonfly=true\nworkload=true\n' | tee -a "$GITHUB_OUTPUT"; }
           # Release calls inherit the caller's push event; every non-PR runs all jobs.
           if [ "$EVENT_NAME" != pull_request ]; then echo "non-PR event: full run"; all; exit 0; fi
           # HEAD^1 is the PR merge commit's base; include old paths when files move.
@@ -250,6 +251,26 @@ jobs:
       - name: Run native Dragonfly tests
         run: go test ./internal/dragonfly ./internal/controller -run 'TestDragonflyNative' -v -timeout 10m
 
+  test-mysql-workload:
+    needs: changes
+    if: needs.changes.outputs.workload == 'true'
+    name: Test / MySQL workload
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BLOODRAVEN_MYSQL_NATIVE_TEST: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-cache
+        with:
+          flavor: plain
+      - name: Validate the workload scrape and dashboard against MySQL
+        run: go test ./internal/controller -run '^TestMySQLWorkloadNative$' -count=1 -v -timeout 7m
+
   test-envtest:
     needs: changes
     if: needs.changes.outputs.go == 'true'
@@ -448,7 +469,7 @@ jobs:
   all-checks:
     name: All Checks
     runs-on: ubuntu-latest
-    needs: [changes, lint, build, test-unit, test-component, test-pitr-native, test-dragonfly-native, test-envtest, generate-check, license-roundtrip, docs-build, course-check]
+    needs: [changes, lint, build, test-unit, test-component, test-pitr-native, test-dragonfly-native, test-mysql-workload, test-envtest, generate-check, license-roundtrip, docs-build, course-check]
     if: always()
     steps:
       - name: Check all jobs passed

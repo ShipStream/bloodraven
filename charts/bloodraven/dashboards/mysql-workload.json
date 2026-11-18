@@ -1,0 +1,849 @@
+{
+  "title": "Bloodraven — MySQL Workload",
+  "uid": "bloodraven-mysql-workload",
+  "tags": [
+    "bloodraven",
+    "mysql",
+    "workload"
+  ],
+  "schemaVersion": 39,
+  "version": 2,
+  "editable": true,
+  "timezone": "",
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "graphTooltip": 1,
+  "description": "Per-site MySQL workload from mysqld_exporter (job bloodraven-mysql) alongside site role, state, and replication lag from Bloodraven.",
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/bloodraven-overview",
+      "icon": "external link",
+      "tags": [
+        "bloodraven"
+      ],
+      "keepTime": true,
+      "includeVars": true
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0,
+        "refresh": 1,
+        "regex": ""
+      },
+      {
+        "name": "ns",
+        "label": "namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(bloodraven_site_state, namespace)",
+          "refId": "ns"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "group",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(bloodraven_site_state{namespace=~\"$ns\"}, group)",
+          "refId": "group"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "site",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\"}, site)",
+          "refId": "site"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Site role and exporter availability",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "state-timeline",
+      "title": "Exporter availability per site",
+      "description": "Reporting means mysqld_exporter connected to MySQL and both workload collectors returned successfully. MySQL unreachable means the exporter could not connect to MySQL. Scrape failing means Prometheus could not scrape the exporter. Collector unavailable means one or both collectors failed or are disabled. No target or no data means no scrape series matches the site labels.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "((max by (namespace, group, site) (mysql_up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) == 1) and on (namespace, group, site) (count by (namespace, group, site) (max by (namespace, group, site, collector) (mysql_exporter_collector_success{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", collector=~\"collect.global_(status|variables)\"} == 1)) == 2)) or on (namespace, group, site) ((max by (namespace, group, site) (mysql_up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) == 1 unless on (namespace, group, site) (count by (namespace, group, site) (max by (namespace, group, site, collector) (mysql_exporter_collector_success{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", collector=~\"collect.global_(status|variables)\"} == 1)) == 2)) * 0 - 3) or on (namespace, group, site) (max by (namespace, group, site) (mysql_up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) == 0) or on (namespace, group, site) (max by (namespace, group, site) (up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"} == 0) * 0 - 1) or on (namespace, group, site) (group by (namespace, group, site) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) * 0 - 2)",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "showValue": "auto",
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "alignValue": "left"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "axisWidth": 165
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "Reporting",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "MySQL unreachable",
+                  "color": "red",
+                  "index": 1
+                },
+                "-1": {
+                  "text": "Scrape failing",
+                  "color": "orange",
+                  "index": 2
+                },
+                "-3": {
+                  "text": "Collector unavailable",
+                  "color": "yellow",
+                  "index": 3
+                },
+                "-2": {
+                  "text": "No target or no data",
+                  "color": "purple",
+                  "index": 4
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "state-timeline",
+      "title": "Site role and state",
+      "description": "The configured Bloodraven role appears beside each site. The operator reports whether the site is writable, read-only, unreachable, or unknown. During a handoff, the writable state moves to the promoted site.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "links": [
+        {
+          "title": "Open the HA overview",
+          "url": "/d/bloodraven-overview?${__url_time_range}&${__all_variables}",
+          "targetBlank": false
+        }
+      ],
+      "targets": [
+        {
+          "expr": "(max by (namespace, group, site, role) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", state=\"writable\"} == 1) * 3) or on (namespace, group, site, role) (max by (namespace, group, site, role) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", state=\"read-only\"} == 1) * 2) or on (namespace, group, site, role) (max by (namespace, group, site, role) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", state=\"unreachable\"} == 1) * 1) or on (namespace, group, site, role) (max by (namespace, group, site, role) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", state=\"unknown\"} == 1) * 0)",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}} ({{role}})",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "showValue": "auto",
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "axisWidth": 280
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "3": {
+                  "text": "Writable",
+                  "color": "green",
+                  "index": 0
+                },
+                "2": {
+                  "text": "Read-only",
+                  "color": "blue",
+                  "index": 1
+                },
+                "1": {
+                  "text": "Unreachable",
+                  "color": "red",
+                  "index": 2
+                },
+                "0": {
+                  "text": "Unknown",
+                  "color": "orange",
+                  "index": 3
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Workload now",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Connection utilization",
+      "description": "Client threads as a percentage of max_connections. The count includes exporter connections. If MySQL refuses new connections at its limit, the exporter may be unable to take a reading.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "(100 * max by (namespace, group, site) (mysql_global_status_threads_connected{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) / max by (namespace, group, site) (mysql_global_variables_max_connections{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"})) or on (namespace, group, site) (group by (namespace, group, site) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) * NaN)",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "noValue": "No exporter data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "orange",
+                "value": 85
+              },
+              {
+                "color": "red",
+                "value": 95
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "text": "No exporter data",
+                  "color": "purple",
+                  "index": 9
+                }
+              }
+            }
+          ],
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "InnoDB row lock waits now",
+      "description": "mysql_global_status_innodb_row_lock_current_waits: number of row lock requests waiting right now. 0 is a measured zero; No exporter data means nothing was measured.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "(max by (namespace, group, site) (mysql_global_status_innodb_row_lock_current_waits{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"})) or on (namespace, group, site) (group by (namespace, group, site) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) * NaN)",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No exporter data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "0",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "text": "No exporter data",
+                  "color": "purple",
+                  "index": 9
+                }
+              }
+            }
+          ],
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Client SQL throughput",
+      "description": "Client statements per second averaged over two minutes. This includes monitoring SQL. The rate is available after two samples and requires a current measurement.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "max by (namespace, group, site) (rate(mysql_global_status_questions{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[2m]) and mysql_global_status_questions{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) or on (namespace, group, site) (group by (namespace, group, site) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) * NaN)",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: queries/s",
+          "noValue": "No exporter data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "text": "No exporter data",
+                  "color": "purple",
+                  "index": 9
+                }
+              }
+            }
+          ],
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Workload over time",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Connection utilization (%)",
+      "description": "Threads_connected as a percentage of max_connections. Gaps mean the exporter returned nothing for that site.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "100 * max by (namespace, group, site) (mysql_global_status_threads_connected{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}) / max by (namespace, group, site) (mysql_global_variables_max_connections{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"})",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            },
+            "axisSoftMax": 100
+          },
+          "noValue": "No exporter data",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "orange",
+                "value": 85
+              },
+              {
+                "color": "red",
+                "value": 95
+              }
+            ]
+          },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Connections used and configured limit",
+      "description": "mysql_global_status_threads_connected (used) against mysql_global_variables_max_connections (limit).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "max by (namespace, group, site) (mysql_global_status_threads_connected{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"})",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}} used",
+          "range": true,
+          "instant": false
+        },
+        {
+          "expr": "max by (namespace, group, site) (mysql_global_variables_max_connections{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"})",
+          "refId": "B",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}} limit",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "showPoints": "auto"
+          },
+          "noValue": "No exporter data",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* limit$"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "InnoDB row lock waits (waits/s)",
+      "description": "New row lock waits per second. The InnoDB counter includes waits that start and end between scrapes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "targets": [
+        {
+          "expr": "max by (namespace, group, site) (rate(mysql_global_status_innodb_row_lock_waits{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[$__rate_interval]) and on (namespace, group, site) (min_over_time(mysql_up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[$__rate_interval]) == 1) and on (namespace, group, site) (min_over_time(up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[$__rate_interval]) == 1))",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: waits/s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "showPoints": "auto"
+          },
+          "noValue": "No exporter data",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Client SQL throughput (queries/s)",
+      "description": "rate(mysql_global_status_questions[$__rate_interval]), gated by mysql_up and up so the line breaks at an exporter or MySQL failure. Includes monitoring SQL.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "targets": [
+        {
+          "expr": "max by (namespace, group, site) (rate(mysql_global_status_questions{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[$__rate_interval]) and on (namespace, group, site) (min_over_time(mysql_up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[$__rate_interval]) == 1) and on (namespace, group, site) (min_over_time(up{job=\"bloodraven-mysql\", namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[$__rate_interval]) == 1))",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: queries/s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "showPoints": "auto"
+          },
+          "noValue": "No exporter data",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Replication lag by site",
+      "description": "MySQL's Seconds_Behind_Source as reported by Bloodraven. The panel plots lag for read-only sites. A gap means the site was writable, unreachable, or reporting no lag measurement.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "targets": [
+        {
+          "expr": "(bloodraven_replication_lag_seconds{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"} >= 0) and on (namespace, group, site, role) (bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\", state=\"read-only\"} == 1)",
+          "refId": "A",
+          "legendFormat": "{{namespace}}/{{group}}/{{site}} ({{role}})",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "showPoints": "auto"
+          },
+          "noValue": "No lag measurement",
+          "min": 0
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

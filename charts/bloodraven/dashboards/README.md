@@ -1,6 +1,6 @@
 # Bloodraven Grafana dashboards
 
-Five dashboards covering every metric the operator publishes on `:8080/metrics`.
+The chart ships six dashboards. The MySQL Workload dashboard adds per-site metrics from the optional `mysqld_exporter`.
 
 | File | UID | Purpose |
 |---|---|---|
@@ -9,8 +9,9 @@ Five dashboards covering every metric the operator publishes on `:8080/metrics`.
 | `replication.json` | `bloodraven-replication` | Replication lag per site, IO/SQL thread up/down state timeline, divergent transactions, reclones, poll latency. |
 | `backups.json` | `bloodraven-backups` | Backup runs by result, duration p50/p95, size, verification freshness and PITR replay lag. |
 | `archiver.json` | `bloodraven-archiver` | Per-site PITR archiver: age of last upload, backlog files, upload failure rate. |
+| `mysql-workload.json` | `bloodraven-mysql-workload` | Per-site connection use against `max_connections`, row lock waits, query throughput, replication lag, and site role. Needs the opt-in `mysqld_exporter` (see Prerequisites); the other five do not. |
 
-All five dashboards use a `datasource` template variable, share a sensible `site` / `group` / `namespace` filter set, and cross-link in the top-left so you can roam between them without losing the time range.
+The dashboards share datasource, namespace, group, and site filters. Links keep the selected time range and filters.
 
 ## Install — three paths
 
@@ -46,6 +47,16 @@ Grafana → Dashboards → New → Import → paste JSON → pick datasource. Re
 ## Prerequisites
 
 A Prometheus scraping the operator. The chart ships a `ServiceMonitor` — enable with `--set metrics.serviceMonitor.enabled=true`. See [`../templates/servicemonitor.yaml`](../templates/servicemonitor.yaml) and [`site/content/docs/8.observability/2.monitoring.md`](../../../site/content/docs/8.observability/2.monitoring.md) for alternatives (`PodMonitor`, raw scrape job).
+
+### MySQL workload dashboard
+
+The MySQL Workload dashboard uses Bloodraven metrics for site role and replication lag. The optional exporter supplies workload measurements.
+
+1. Deploy the exporter and configure the scrape job. [`examples/mysqld-exporter.yaml`](../../../examples/mysqld-exporter.yaml) and [`examples/mysqld-exporter-scrape.yaml`](../../../examples/mysqld-exporter-scrape.yaml). Setup steps are in [`site/content/docs/8.observability/3.monitoring-prometheus.md`](../../../site/content/docs/8.observability/3.monitoring-prometheus.md).
+2. Set the Prometheus datasource's scrape interval to `30s`, the interval of the example job.
+3. If a panel is empty, check `up{job="bloodraven-mysql"}`, `mysql_up` and `mysql_exporter_collector_success`. A gap means no value was produced; a line at `0` is a measured zero. The states are in [`site/content/docs/8.observability/2.monitoring.md`](../../../site/content/docs/8.observability/2.monitoring.md) and the troubleshooting table in [`4.monitoring-grafana.md`](../../../site/content/docs/8.observability/4.monitoring-grafana.md).
+
+The dashboard holds no credentials. Only the exporter reads the group's `monitorSecretName` Secret.
 
 ## Updating the dashboards
 

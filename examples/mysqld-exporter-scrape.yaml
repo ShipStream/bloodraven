@@ -1,0 +1,43 @@
+# Complete standalone Prometheus configuration that scrapes the two sites of
+# failover group "orders" (namespace "warehouse") through the exporter in
+# examples/mysqld-exporter.yaml. Load it as prometheus.yml, or copy the job
+# into your own configuration (for kube-prometheus-stack, under
+# prometheus.prometheusSpec.additionalScrapeConfigs).
+#
+# Prometheus calls
+#   http://orders-mysqld-exporter.warehouse.svc.cluster.local:9104/probe?target=<site address>
+# once per site. The target is the site's stable -internal Service, which keeps
+# its endpoints while a pod is not ready, so a restarting site shows as
+# mysql_up 0 and not as a missing target.
+#
+# The target labels namespace, group, and site are the label names the
+# bloodraven_* series use, so the two families join on them. "instance" is the
+# MySQL address that was probed.
+scrape_configs:
+  - job_name: bloodraven-mysql-warehouse-orders
+    metrics_path: /probe
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - mysql-orders-iad-internal.warehouse.svc.cluster.local:3306
+        labels:
+          namespace: warehouse
+          group: orders
+          site: iad
+      - targets:
+          - mysql-orders-pdx-internal.warehouse.svc.cluster.local:3306
+        labels:
+          namespace: warehouse
+          group: orders
+          site: pdx
+    relabel_configs:
+      # Keep the label Grafana selects fixed as scrape job names vary by group.
+      - target_label: job
+        replacement: bloodraven-mysql
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: orders-mysqld-exporter.warehouse.svc.cluster.local:9104
