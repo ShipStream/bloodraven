@@ -176,12 +176,21 @@ func TestServedVersions_ConfirmationAndImmutabilityThroughBoth(t *testing.T) {
 				t.Fatalf("a confirmed restoreInPlace is refused through %s: %v", gv.Version, err)
 			}
 
-			// A site cannot be removed (A-16): removing one would orphan
-			// its data volume.
 			fg := newTestFG(ns)
 			if err := c.Create(ctx, fg); err != nil {
 				t.Fatal(err)
 			}
+			oldSize := fg.Spec.Sites[0].Storage.Size
+			fg.Spec.Sites[0].Storage.Size = "20Gi"
+			if err := c.Update(ctx, fg); err != nil {
+				t.Fatalf("growing site storage through %s: %v", gv.Version, err)
+			}
+			shrunk := fg.DeepCopy()
+			shrunk.Spec.Sites[0].Storage.Size = oldSize
+			e4WantInvalid(t, "restoring the original size", c.Update(ctx, shrunk), "storage size cannot decrease")
+
+			// A site cannot be removed (A-16): removing one would orphan
+			// its data volume.
 			fg.Spec.Sites = fg.Spec.Sites[:1]
 			if err := c.Update(ctx, fg); !apierrors.IsInvalid(err) {
 				t.Fatalf("removing a site through %s = %v, want Invalid", gv.Version, err)

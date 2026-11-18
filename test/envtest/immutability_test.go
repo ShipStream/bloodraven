@@ -234,7 +234,7 @@ func TestE6_TransitionRules(t *testing.T) {
 		// A-17
 		{"zone", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Zone = "lion-dc3" }), "zone is immutable"},
 		{"storageClassName", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.StorageClassName = "fast" }), "storageClassName is immutable"},
-		{"size", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "20Gi" }), "size is immutable"},
+		{"size decreased", e6FG(nil), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "9Gi" }), "storage size cannot decrease"},
 		// A-23
 		{"initFromBackup added", e6FG(nil), e6OnFG(e6WithInit), initFixed},
 		{"initFromBackup removed", e6FG(e6WithInit), e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.InitFromBackup = nil }), initFixed},
@@ -461,7 +461,7 @@ func TestE6_AllowedUpdates(t *testing.T) {
 // Duration 60s, a stopTime with a +05:00 offset, an explicit false or
 // empty value the typed client drops) survives the operator's own typed
 // finalizer Update and an annotation consumer's typed Update, and a real
-// change to each field is still refused.
+// forbidden change to each field is still refused.
 func TestE6_TypedWritesKeepNonCanonicalValues(t *testing.T) {
 	ns := createNamespace(t, "e6-typed-writes")
 
@@ -523,7 +523,7 @@ func TestE6_TypedWritesKeepNonCanonicalValues(t *testing.T) {
 		changes   []func(client.Object)
 	}{
 		{&v1beta1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "canon"}}, v1beta1.FailoverGroupFinalizer, []func(client.Object){
-			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "2Gi" }),
+			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Sites[0].Storage.Size = "1Gi" }),
 			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) { fg.Spec.Backup.Profiles[0].Storage.PVC.Provisioned.Size = "2Gi" }),
 			e6OnFG(func(fg *v1beta1.MysqlFailoverGroup) {
 				fg.Spec.InitFromBackup.PointInTime.StopTime = metav1.Time{Time: fg.Spec.InitFromBackup.PointInTime.StopTime.Add(time.Second)}

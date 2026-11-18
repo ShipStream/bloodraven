@@ -6936,17 +6936,16 @@ spec:
                       properties:
                         size:
                           description: |-
-                            Size is the requested storage size, such as "100Gi". Immutable; it is
-                            compared by value, so 1Gi and 1024Mi are the same size.
+                            Size is the storage requested for the site's data PVC, including a
+                            replacement after PVC loss. It can increase. Sizes are compared by
+                            quantity, so 1Gi and 1024Mi are equivalent.
                           maxLength: 64
                           minLength: 1
                           pattern: ^(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           type: string
                           x-kubernetes-validations:
-                          - message: 'size is immutable: the operator does not resize
-                              a site''s volume; expand the PVC itself, or see the
-                              site-replacement procedure'
-                            rule: quantity(self).compareTo(quantity(oldSelf)) == 0
+                          - message: storage size cannot decrease
+                            rule: quantity(self).compareTo(quantity(oldSelf)) >= 0
                           - message: a storage size must be greater than 0
                             rule: quantity(self).isGreaterThan(quantity('0'))
                         storageClassName:
@@ -16643,17 +16642,16 @@ spec:
                       properties:
                         size:
                           description: |-
-                            Size is the requested storage size, such as "100Gi". Immutable; it is
-                            compared by value, so 1Gi and 1024Mi are the same size.
+                            Size is the storage requested for the site's data PVC, including a
+                            replacement after PVC loss. It can increase. Sizes are compared by
+                            quantity, so 1Gi and 1024Mi are equivalent.
                           maxLength: 64
                           minLength: 1
                           pattern: ^(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                           type: string
                           x-kubernetes-validations:
-                          - message: 'size is immutable: the operator does not resize
-                              a site''s volume; expand the PVC itself, or see the
-                              site-replacement procedure'
-                            rule: quantity(self).compareTo(quantity(oldSelf)) == 0
+                          - message: storage size cannot decrease
+                            rule: quantity(self).compareTo(quantity(oldSelf)) >= 0
                           - message: a storage size must be greater than 0
                             rule: quantity(self).isGreaterThan(quantity('0'))
                         storageClassName:
