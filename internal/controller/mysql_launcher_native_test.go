@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -450,6 +451,67 @@ func (s *launcherNativeServer) clone(donor *launcherNativeServer) {
 	s.waitExited()
 }
 
+func (s *launcherNativeServer) killClone(donor *launcherNativeServer) {
+	e := s.env
+	t := e.t
+	t.Helper()
+	// Give the clone 256 MiB of payload so both rollback markers stay
+	// observable well past the poll deadline at 1 MiB/s. MySQL can exceed
+	// that rate with multiple threads. The fixture stays out of the binlog
+	// and is dropped before the subsequent clones.
+	donor.sql(`SET SESSION sql_log_bin = 0;
+CREATE TABLE app.clone_filler (id INT AUTO_INCREMENT PRIMARY KEY, pad VARBINARY(1024) NOT NULL) ENGINE=InnoDB;
+INSERT INTO app.clone_filler (pad)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 512)
+SELECT RANDOM_BYTES(1024) FROM seq a CROSS JOIN seq b`)
+	s.prepareClone(donor, 1)
+	s.sql("SET GLOBAL clone_max_concurrency = 1")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	type cloneResult struct {
+		output  string
+		err     error
+		elapsed time.Duration
+	}
+	cloneDone := make(chan cloneResult, 1)
+	started := time.Now()
+	go func() {
+		out, err := s.trySQL(e.cloneStatement(donor))
+		cloneDone <- cloneResult{output: out, err: err, elapsed: time.Since(started)}
+	}()
+
+	probe := fmt.Sprintf(`test -e "%[1]s/%[2]s/%[3]s" && test -e "%[1]s/%[2]s/%[4]s"`, mysqlDataDir, mysqlCloneDir, mysqlCloneReplaceFiles, mysqlCloneStatusError)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	polls := 0
+	for {
+		polls++
+		if exec.CommandContext(ctx, e.docker, "exec", s.name, "/bin/bash", "-c", probe).Run() == nil {
+			break
+		}
+		select {
+		case result := <-cloneDone:
+			t.Fatalf("clone ended after %s and %d polls before it could be killed: %v %s (%s holds %v)",
+				result.elapsed, polls, result.err, result.output, mysqlCloneDir, s.cloneFiles())
+		case <-ctx.Done():
+			t.Fatalf("after %s and %d polls, the running clone never showed %s and %s in %s: %v",
+				time.Since(started), polls, mysqlCloneReplaceFiles, mysqlCloneStatusError, mysqlCloneDir, s.cloneFiles())
+		case <-ticker.C:
+		}
+	}
+	if out, err := exec.CommandContext(ctx, e.docker, "kill", s.name).CombinedOutput(); err != nil {
+		t.Fatalf("kill %s after %s and %d polls: %v %s", s.name, time.Since(started), polls, err, out)
+	}
+	select {
+	case result := <-cloneDone:
+		t.Logf("clone interrupted after %s and %d marker polls", result.elapsed, polls)
+	case <-ctx.Done():
+		t.Fatalf("clone client still running after %s and %d polls: %v", time.Since(started), polls, ctx.Err())
+	}
+	s.waitExited()
+	donor.sql("SET SESSION sql_log_bin = 0; DROP TABLE app.clone_filler")
+}
+
 func tailLines(s string, n int) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	if len(lines) > n {
@@ -607,36 +669,8 @@ func (e *launcherNativeEnv) run() {
 		t.Fatalf("launcher rotation lines = %d after an ordinary restart, want 1: %q", n, recipient.launcherLines())
 	}
 
-	// A clone killed mid-copy. The throttle keeps the copy of the system
-	// tablespaces running for about a minute.
-	recipient.prepareClone(donor, 1)
-	cloneDone := make(chan string, 1)
-	go func() {
-		out, _ := recipient.trySQL(e.cloneStatement(donor))
-		cloneDone <- out
-	}()
-	deadline = time.Now().Add(time.Minute)
-	for {
-		probe := fmt.Sprintf(`test -e "%[1]s/%[2]s/%[3]s" && test -e "%[1]s/%[2]s/%[4]s"`, mysqlDataDir, mysqlCloneDir, mysqlCloneReplaceFiles, mysqlCloneStatusError)
-		if exec.Command(e.docker, "exec", recipient.name, "/bin/bash", "-c", probe).Run() == nil {
-			break
-		}
-		select {
-		case out := <-cloneDone:
-			t.Fatalf("the throttled clone ended before it could be killed: %s (%s holds %v)", out, mysqlCloneDir, recipient.cloneFiles())
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("a running clone never showed %s and %s in %s: %v (the launcher's evidence of an unfinished clone)",
-				mysqlCloneReplaceFiles, mysqlCloneStatusError, mysqlCloneDir, recipient.cloneFiles())
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if out, err := exec.Command(e.docker, "kill", recipient.name).CombinedOutput(); err != nil {
-		t.Fatalf("kill %s: %v %s", recipient.name, err, out)
-	}
-	<-cloneDone
-	recipient.waitExited()
+	// Kill the clone and verify what the launcher sees on restart.
+	recipient.killClone(donor)
 	if killed := recipient.cloneFiles(); !killed[mysqlCloneReplaceFiles] || !killed[mysqlCloneStatusError] {
 		t.Fatalf("after a killed clone %s holds %v; want %s and %s", mysqlCloneDir, killed, mysqlCloneReplaceFiles, mysqlCloneStatusError)
 	}
