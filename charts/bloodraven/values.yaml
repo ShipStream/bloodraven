@@ -99,6 +99,17 @@ affinity: {}
 # spec.license overrides this. Never gates operator behavior.
 license: ""
 
+telemetry:
+  # -- Send the daily anonymous usage report: a random install ID, the
+  # operator version, and the number of failover groups, sites and cluster
+  # nodes. Nothing else. The answer names the latest release, which the
+  # operator logs and exports as bloodraven_update_available. Set false to
+  # turn it off. See https://bloodraven.dev/docs/configuration/usage-reporting
+  enabled: true
+  # -- Override the report endpoint (for example a forwarding proxy). Empty
+  # uses https://telemetry.bloodraven.dev/v1/report.
+  endpoint: ""
+
 # -- Additional environment variables for the operator container
 extraEnv: []
 # - name: LOG_LEVEL

@@ -172,6 +172,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The operator's main.Version (the sidecar target ignores it).
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -268,6 +271,15 @@ jobs:
     # The site follows the latest plain release; a prerelease never deploys it.
     if: ${{ !contains(github.ref_name, '-') }}
     uses: ./.github/workflows/deploy-site.yml
+    secrets: inherit
+
+  # The usage report server answers operators with the latest release, which
+  # is baked into its image, so every plain release redeploys it.
+  deploy-telemetry:
+    name: Deploy telemetry server
+    needs: [publish-release]
+    if: ${{ !contains(github.ref_name, '-') }}
+    uses: ./.github/workflows/deploy-telemetry.yml
     secrets: inherit
 
   # Post-release full E2E — runs the complete release-profile suite (real

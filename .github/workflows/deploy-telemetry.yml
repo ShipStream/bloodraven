@@ -1,0 +1,122 @@
+name: Deploy Telemetry
+
+# Builds and deploys the usage report server under `telemetry-server/` to the
+# Railway service `bloodraven-telemetry` (telemetry.bloodraven.dev), in the
+# same Railway project as bloodraven.dev, so it uses the same project token
+# (`RAILWAY_TOKEN`, see deploy-site.yml). Set the repo variable
+# `RAILWAY_TELEMETRY_SERVICE` if the service has another name.
+#
+# The server answers every report with the latest release, which is baked
+# into the image: each run writes the latest plain vX.Y.Z GitHub Release into
+# telemetry-server/latest-version before uploading. So it runs:
+#
+#   * after every release (release.yml calls it once the release is
+#     published), so operators learn about the new release;
+#   * when telemetry-server/ changes on main;
+#   * by hand: gh workflow run deploy-telemetry.yml
+#
+# The server's code is not versioned with the operator: every run deploys it
+# from the default branch, whatever triggered the run.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'telemetry-server/**'
+      - '.github/workflows/deploy-telemetry.yml'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-telemetry
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    environment:
+      name: telemetry.bloodraven.dev
+      url: https://telemetry.bloodraven.dev
+    env:
+      RAILWAY_SERVICE: ${{ vars.RAILWAY_TELEMETRY_SERVICE || 'bloodraven-telemetry' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Test
+        working-directory: telemetry-server
+        run: cargo test --locked
+
+      - name: Resolve the latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # `gh release view` with no tag is the release marked Latest, which
+          # excludes drafts and prereleases.
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Latest release tag '$tag' is not a plain vX.Y.Z release."
+            exit 1
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${tag#v}" > telemetry-server/latest-version
+          echo "Latest release: ${tag#v}"
+
+      - name: Require RAILWAY_TOKEN
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::RAILWAY_TOKEN is not set; see the header of .github/workflows/deploy-site.yml."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli@5.41.0
+
+      - name: Deploy telemetry-server/ to Railway
+        # --path-as-root uploads only telemetry-server/ (without it the CLI
+        # uploads the repository and builds its root Dockerfile). --ci
+        # streams the build log and exits when the build finishes. --service
+        # is explicit so the CLI never creates a service.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up telemetry-server --path-as-root --ci --service "$RAILWAY_SERVICE"
+
+      - name: Check the live answer
+        env:
+          WANT: ${{ steps.latest.outputs.version }}
+        run: |
+          # The new deployment takes over after its health check passes.
+          for _ in $(seq 1 30); do
+            got=$(curl -fsS https://telemetry.bloodraven.dev/v1/latest \
+              | jq -r .latestVersion || true)
+            if [ "$got" = "$WANT" ]; then
+              echo "telemetry.bloodraven.dev answers $got"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::telemetry.bloodraven.dev answers '$got', want '$WANT'"
+          exit 1
+
+      - name: Summarize
+        if: success()
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          {
+            echo "### Telemetry server deployed"
+            echo
+            echo "Service \`$RAILWAY_SERVICE\` updated from \`$(git rev-parse --short HEAD)\`; it answers latest version \`$VERSION\`."
+          } >> "$GITHUB_STEP_SUMMARY"

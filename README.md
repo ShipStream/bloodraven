@@ -238,6 +238,8 @@ Bloodraven is **source-available**, not open source. It is licensed under the [B
 
 **Every version converts to Apache 2.0 two years after publication.** That is written into the license as the Change Date and cannot be revoked, so code you depend on cannot be taken away from you.
 
-There is no license server, activation, feature gating, or phone-home. The software is fully functional without a key. Compliance is on the honor system.
+There is no license server, activation, or feature gating, and nothing about your license ever leaves the cluster. The software is fully functional without a key. Compliance is on the honor system.
+
+**Usage reporting.** Once a day the operator sends an anonymous report: a random install ID, its version, and its counts of failover groups, sites and nodes, nothing else. It tells you when a newer release is out. Turn it off with the Helm value `telemetry.enabled=false` or `DO_NOT_TRACK=1`; [what is sent and kept](https://bloodraven.dev/docs/configuration/usage-reporting).
 
 Contributions are welcome from everyone — see [CONTRIBUTING.md](./CONTRIBUTING.md) and the [CLA](./CLA.md). Licensing questions: licensing@shipstream.io

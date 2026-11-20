@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,8 +37,15 @@ import (
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/sidecar"
+	"github.com/shipstream/bloodraven/internal/telemetry"
 	"github.com/shipstream/bloodraven/internal/util"
 )
+
+// Version is the release this binary was built from, set with
+// -ldflags "-X main.Version=<version>" (the Dockerfile's VERSION build
+// argument). It is sent in the usage report and compared with the latest
+// release.
+var Version = "dev"
 
 func main() {
 	// Subcommand dispatcher. Each subcommand bypasses manager setup
@@ -122,6 +130,8 @@ func main() {
 	fs := flag.NewFlagSet("bloodraven", flag.ExitOnError)
 	leaderElect := fs.Bool("leader-elect", true, "enable manager leader election")
 	licenseToken := fs.String("license", os.Getenv("BLOODRAVEN_LICENSE"), "optional organization license JWT (public assertion, not a secret)")
+	telemetryDefault, telemetryEnvErr := envBool("BLOODRAVEN_TELEMETRY", true)
+	telemetryEnabled := fs.Bool("telemetry", telemetryDefault, "send the daily anonymous usage report (install ID, version, group, site and node counts); default from BLOODRAVEN_TELEMETRY. DO_NOT_TRACK=1 also turns it off. See https://bloodraven.dev/docs/configuration/usage-reporting")
 	crdCheck := fs.String("crd-check", crdCheckEnforce, `what to do when the installed CRDs are older than this operator needs or a stored object does not fit them: "enforce" (exit) or "warn" (log and start; break-glass only)`)
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "parse flags: %v\n", err)
@@ -129,6 +139,16 @@ func main() {
 	}
 
 	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
+	if telemetryEnvErr != nil {
+		logger.Error("invalid usage reporting configuration", "error", telemetryEnvErr.Error())
+		os.Exit(1)
+	}
+	telemetrySettings, err := telemetry.ResolveSettings(*telemetryEnabled, os.Getenv)
+	if err != nil {
+		logger.Error("invalid usage reporting configuration", "error", err.Error())
+		os.Exit(1)
+	}
+	telemetry.LogSettings(logger, telemetrySettings)
 	controller.LogOperatorLicense(logger, *licenseToken, license.ProductionKey, time.Now())
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
@@ -440,11 +460,38 @@ func main() {
 		}
 	}
 
-	logger.Info("starting bloodraven manager")
+	if telemetrySettings.Enabled {
+		if err := mgr.Add(&telemetry.Reporter{
+			Reader:    mgr.GetAPIReader(),
+			Writer:    mgr.GetClient(),
+			Logger:    logger,
+			Endpoint:  telemetrySettings.Endpoint,
+			Version:   Version,
+			Namespace: telemetry.OperatorNamespace(os.Getenv),
+		}); err != nil {
+			logger.Error("unable to add usage reporter", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	logger.Info("starting bloodraven manager", "version", Version)
 	if err := mgr.Start(signalCtx); err != nil {
 		logger.Error("manager exited with error", "error", err)
 		os.Exit(1)
 	}
+}
+
+// envBool reads a boolean environment variable; unset or empty is def.
+func envBool(name string, def bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return def, fmt.Errorf("%s=%q is not a boolean", name, raw)
+	}
+	return v, nil
 }
 
 // runnableFunc adapts a function to the manager.Runnable interface.

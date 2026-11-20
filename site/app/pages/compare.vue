@@ -83,7 +83,7 @@ const sections: Section[] = [
         'b|No',
       ] },
       { label: 'Features behind a paid tier', cells: [
-        'g|None. No licence server, no phone-home',
+        'g|None. No licence server or activation',
         'b|Physical and incremental backup (MEB), PITR, ClusterSet, Vault/KMIP/OCI keyrings, audit log',
         'g|None',
         'g|None',

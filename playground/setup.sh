@@ -403,6 +403,7 @@ helm upgrade --install bloodraven "$CHART_DIR" \
   --set 'tolerations[1].operator=Exists' \
   --set 'tolerations[1].effect=NoExecute' \
   --set leaderElection.enabled="$LEADER_ELECTION_ENABLED" \
+  --set telemetry.enabled=false \
   "${ESCROW_TLS_HELM_ARGS[@]}" \
   --timeout=180s
 # Don't use --wait; the operator may take a moment to pass readiness after

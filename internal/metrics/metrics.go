@@ -531,6 +531,14 @@ var LicenseUpdatesExpiry = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help: "Unix timestamp when the paid update period ends for a failover group's license.",
 }, []string{"namespace", "group", "organization", "edition"})
 
+// UpdateAvailable is 1, labelled with the release, when the usage report's
+// response names a release newer than the running operator. No series
+// exists while the operator is current or the report is off.
+var UpdateAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "bloodraven_update_available",
+	Help: "1 when a newer Bloodraven release exists; latest_version names it. Absent when current or when usage reporting is off.",
+}, []string{"latest_version"})
+
 // SiteIdentity is the shared identity of a site-scoped gauge series.
 // Extra labels (role, state, thread) are not included so callers can
 // DeletePartialMatch without knowing the last emitted role.
@@ -590,7 +598,7 @@ func Register(reg prometheus.Registerer) {
 		KeyringPhase, KeyringEscrowVersion, KeyringEscrowPushesTotal, KeyringRotationsTotal,
 		KeyringPromotionsBlockedTotal,
 		EncryptionCoverageGaps, EncryptionCoverageFlag,
-		LicenseInfo, LicenseUpdatesExpiry,
+		LicenseInfo, LicenseUpdatesExpiry, UpdateAvailable,
 		RolloutGroups, RolloutGroupPhase, RolloutAdmissionsTotal, RolloutDeferralsTotal,
 		RolloutStallsTotal, RolloutCompletionsTotal, RolloutRecordNotStored)
 }

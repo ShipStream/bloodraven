@@ -153,6 +153,20 @@ spec:
               value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "" | quote }}
             - name: BLOODRAVEN_WS_MAX_CLIENTS
               value: {{ include "bloodraven.wsMaxClients" . | quote }}
+            # The install ID of the usage report lives in a ConfigMap in this
+            # namespace. A missing telemetry key (`helm upgrade
+            # --reuse-values` from a release before it) leaves it on.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- $telemetry := .Values.telemetry | default dict }}
+            - name: BLOODRAVEN_TELEMETRY
+              value: {{ if hasKey $telemetry "enabled" }}{{ $telemetry.enabled | quote }}{{ else }}"true"{{ end }}
+            {{- with $telemetry.endpoint }}
+            - name: BLOODRAVEN_TELEMETRY_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.license }}
             - name: BLOODRAVEN_LICENSE
               value: {{ .Values.license | quote }}
