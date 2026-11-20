@@ -658,6 +658,20 @@ type TopologyManager struct {
 	// nil.
 	PodReady func(ctx context.Context, siteName string) (PodReadiness, error)
 
+	// KeyringRollRefusal is a callback provided by the runner, wired
+	// together with ApplyUpdate, that reports why a site's pod must not be
+	// replaced now: its memory-backed keyring holds keys the pod its
+	// Deployment would get does not (KeyringRollRefusedError). The ordered
+	// update asks it before it rolls a site and before it hands off the
+	// active one (UpdateTarget.KeyringRollBlocked). Nil turns the check
+	// off; only tests leave it nil.
+	KeyringRollRefusal func(ctx context.Context, siteName string) error
+
+	// keyringRollRetryAt is when checkUpdate may start another attempt
+	// after one held sites for their keyring (KeyringRollHeldError).
+	// Protected by mu.
+	keyringRollRetryAt time.Time
+
 	// updateStall is why the ordered update last stopped on a pod that is
 	// not Ready, empty when it is not stalled, and updateStallSite the site
 	// it stopped on. updateStallRetryAt is when checkUpdate may try again.
@@ -4178,6 +4192,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	driftSites := append([]string(nil), tm.specDriftSites...)
 	refusedSites := append([]string(nil), tm.specRefusedSites...)
 	stallRetryAt := tm.updateStallRetryAt
+	keyringRetryAt := tm.keyringRollRetryAt
 	tm.mu.RUnlock()
 	if activeName == "" {
 		return false
@@ -4185,7 +4200,7 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	if len(driftSites) == 0 {
 		return false
 	}
-	if tm.clock.Now().Before(stallRetryAt) {
+	if tm.clock.Now().Before(stallRetryAt) || tm.clock.Now().Before(keyringRetryAt) {
 		return false
 	}
 	drifted := make(map[string]bool, len(driftSites))
@@ -4197,7 +4212,8 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 		Name: activeName, Host: activeSite.host, Checker: activeSite.mysql, Promotable: true, Drifted: drifted[activeName],
 		SelectorRefused: slices.Contains(refusedSites, activeName),
 		ReplUser:        tm.bootstrapCfg.ReplUser, ReplPassword: tm.bootstrapCfg.ReplPassword, UseSSL: tm.bootstrapCfg.UseSSL,
-		PodReady: tm.podReadyProbe(activeName),
+		PodReady:           tm.podReadyProbe(activeName),
+		KeyringRollBlocked: tm.keyringRollProbe(activeName),
 	}
 	followers := make([]UpdateTarget, 0, len(tm.sites)-1)
 	for i := range tm.sites {
@@ -4214,8 +4230,9 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 			RotationBlocked: block.rotation, ReclonePending: block.reclonePending,
 			DivergenceBlocked:     block.divergence.state == v1beta1.RecoveryStateBlocked,
 			DivergentTransactions: block.divergence.divergentCount, DivergentGtid: block.divergence.divergentGtid,
-			PodReady:       tm.podReadyProbe(site.name),
-			HandoffBlocked: tm.liveHandoffRefusal(site.name),
+			PodReady:           tm.podReadyProbe(site.name),
+			HandoffBlocked:     tm.liveHandoffRefusal(site.name),
+			KeyringRollBlocked: tm.keyringRollProbe(site.name),
 		})
 	}
 	if drifted[activeName] {
@@ -4326,7 +4343,14 @@ func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 		processed, err := tm.updater.ExecuteTargets(ctx, active, followers, applyUpdate, func(target, promotionGTID string) {
 			tm.recordHandoffPromotion(ctx, activeName, target, promotionGTID)
 		})
-		if err != nil {
+		var keyringHeld *KeyringRollHeldError
+		if errors.As(err, &keyringHeld) {
+			// Logged per site by the updater. The escrow that ends the
+			// hold takes seconds, so retry soon, not at poll frequency.
+			tm.mu.Lock()
+			tm.keyringRollRetryAt = tm.clock.Now().Add(keyringRollHoldRetry)
+			tm.mu.Unlock()
+		} else if err != nil {
 			tm.logger.Error("ordered update failed", "error", err)
 			// Only the audit records divergence; let it look at the
 			// refused candidate on the next poll instead of after its
@@ -4383,6 +4407,20 @@ func followerTarget(followers []UpdateTarget, name string) *UpdateTarget {
 // orderedUpdateStallRetry is how long checkUpdate waits after the ordered
 // update stopped on a pod that is not Ready before it tries again.
 const orderedUpdateStallRetry = 30 * time.Second
+
+// keyringRollHoldRetry is how long checkUpdate waits after an attempt held
+// sites for their keyring before it tries again.
+const keyringRollHoldRetry = 10 * time.Second
+
+// keyringRollProbe returns the UpdateTarget.KeyringRollBlocked check for
+// site, or nil when the runner wired none.
+func (tm *TopologyManager) keyringRollProbe(site string) func(context.Context) error {
+	check := tm.KeyringRollRefusal
+	if check == nil {
+		return nil
+	}
+	return func(ctx context.Context) error { return check(ctx, site) }
+}
 
 // podReadyProbe returns the UpdateTarget.PodReady probe for site, or nil
 // when the runner wired none.

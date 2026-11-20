@@ -1883,3 +1883,32 @@ The operator declared the primary `Unreachable` (`failureThreshold` failed polls
 
 - Do not make the candidate writable by hand while the old primary answers: that discards the transactions only the old primary holds and makes two primaries.
 - Do not unfence a `leftFenced` old primary by hand without comparing its `GTID_EXECUTED` with the candidate's; the re-assert does that comparison.
+
+## 54. An encrypted site's roll is held for its keyring, or its pod crash-loops with `MY-013279` after an ordered update
+
+### Symptoms
+- Held (the operator protecting the site): operator INFO `ordered update: holding site; replacing its pod now would lose keyring keys` with `site` and `reason`, every 10s, or with `updateStrategy: Recreate` INFO `site deployment held; replacing its pod would lose keyring keys`. The site keeps its pod and its spec drift; an active site is not handed off. Typical right after a clone (`bootstrap completed successfully` for an auto-clone, reclone or post-restore reclone) or a rotation, while `status.encryptionAtRest.sites[<site>].phase` is `Unsealed`.
+- Broken (an operator up to v1.8.0 rolled the site anyway): the site's new mysql container exits at once and restarts forever; its previous log reads `[ERROR] [MY-013279] [Repl] Can't find key from keyring`, then `[MY-010958] Cannot get file password for encrypted replication log file`, `[MY-010041] Can't init tc log`, `Aborting`. The ordered update reports `ordered update: stalled; site pod not Ready` for the site. `status.encryptionAtRest.sites[<site>]` shows `phase: Unsealed` with no `unsealReason`, message `waiting for the Deployment to roll onto the writable keyring rendering`, and its sidecar escrows a "new" version with the digest of an older one.
+
+### Cause
+An unsealed site (bootstrap, a clone, a rotation) runs its keyring in a memory-backed `emptyDir`. A key MySQL stores there, such as the binary log encryption key the restart after a clone stores for the recipient's new `server_uuid`, exists only in that pod until the sidecar escrows it and the operator records the escrow in `status.encryptionAtRest.sites[].keyringSecret`. A new pod takes its keyring from the recorded Secret (projected when sealed, copied in as the seed when unsealed). Replacing the pod before the record therefore starts mysqld without keys its data directory needs. The operator now checks the running keyring's digest (sidecar `/keyring/status`) before any write that replaces an unsealed pod and holds the write until the record catches up; up to v1.8.0 it did not, and an ordered update that had been waiting for a fresh clone recipient to replicate rolled it seconds after the clone.
+
+### Diagnostic steps
+1. The site's keyring state and the escrow versions it has:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name} phase={.phase} reason={.unsealReason} secret={.keyringSecret} digest={.keyringDigest} msg={.message}{"\n"}{end}'
+   kubectl get secret -n <ns> -l app.kubernetes.io/name=mysql-keyring,bloodraven.shipstream.io/failover-group=<group>,bloodraven.shipstream.io/site=<site> -o custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp
+   ```
+2. The running keyring: `scripts/sidecar-probe.sh -n <ns> <group> keyring` (`digest`, `escrowedDigest`, `lastError`). For a hold, compare `digest` with the recorded `keyringDigest`: they differ until the escrow is recorded.
+3. Which Secret the pod takes its keyring from: `kubectl get deploy mysql-<group>-<site> -n <ns> -o jsonpath='{range .spec.template.spec.volumes[?(@.name=="keyring")]}{.secret.secretName}{.emptyDir}{end} seed={.spec.template.spec.volumes[?(@.name=="keyring-seed")].secret.secretName}{"\n"}'`.
+4. For a crash loop, the mysql container's previous log: `kubectl logs -n <ns> <pod> -c mysql --previous | grep -E 'MY-013279|MY-010958|MY-013288'`.
+
+### Safe remediation
+- Held: wait. The sidecar retries its escrow push every 5s and the operator records a matching escrow on its next pass, after which the roll goes ahead. A hold that lasts is an escrow that does not complete: the site's `message` and the sidecar's `lastError` say why (escrow listener, CA, token), as in [playbook 3](#3-keyring--encryption-at-rest-troubleshooting). Fix that; the hold then ends by itself. A hold whose `reason` is `cannot read the keyring of its running pod … from the sidecar` needs the sidecar reachable again.
+- Held, and you decide to give up that site's unescrowed keys (it is a replica that will be recloned): delete its pod. The replacement starts from the same seed; once its mysqld has failed without storing a key (the usual case), its keyring is the seed again and the roll is no longer held. Then replace its claim as below. Never do this to the active primary.
+- Broken (crash loop on `MY-013279` after an upgrade from v1.8.0 or older): the site is a replica whose keys are gone from its keyring, and the operator does not repair that. Upgrade the operator first, so the replacement is not rolled the same way, then follow the PVC loss recovery runbook, step 3 "Replace an unusable replica claim" (https://bloodraven.dev/docs/operations/operations#pvc-loss-recovery-runbook): the replacement claim is cloned from the primary and escrowed and sealed before its next roll.
+
+### What NOT to do
+- Do not delete or restart the pod of a held site you mean to keep, and never the active primary's: that is what discards the keys the hold protects.
+- Do not patch `status.encryptionAtRest` by hand to end a hold. Pointing `keyringSecret` at a version that lacks the running keys is the failure itself; the operator records the right version on its own.
+- Do not edit or copy keyring files into the pod.

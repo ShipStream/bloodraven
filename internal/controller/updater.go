@@ -162,6 +162,62 @@ type UpdateTarget struct {
 	// the update was planned, which can be minutes older after follower
 	// rollouts. Production always sets it; nil skips the live check.
 	HandoffBlocked func() error
+	// KeyringRollBlocked, when set, reports why the site's pod must not be
+	// replaced now: its memory-backed keyring holds keys the new pod would
+	// not get (SiteKeyringRollRefusal). It is asked live before a follower
+	// is rolled and before the active site is handed off, so a refused
+	// active site is never fenced. Production always sets it; nil skips
+	// the check (the Deployment write refuses on its own as well).
+	KeyringRollBlocked func(context.Context) error
+}
+
+// keyringRollProbeTimeout bounds one KeyringRollBlocked check: uncached
+// reads of the group, its Deployment, its pods and an escrow Secret, and
+// the sidecar's keyring status.
+const keyringRollProbeTimeout = 10 * time.Second
+
+// KeyringRollHeldError reports that the ordered update did not roll sites
+// because replacing their pods now would lose keyring keys that only the
+// running pods hold (see KeyringRollRefusedError). Nothing was changed on
+// those sites and their drift stays queued; the hold ends once the running
+// keyring is escrowed and recorded, which the encryption lifecycle does on
+// its own.
+type KeyringRollHeldError struct {
+	Sites   []string
+	Reasons []string
+}
+
+func (e *KeyringRollHeldError) Error() string {
+	return "keyring roll held: " + strings.Join(e.Reasons, "; ")
+}
+
+func (e *KeyringRollHeldError) add(site string, err error) {
+	e.Sites = append(e.Sites, site)
+	e.Reasons = append(e.Reasons, err.Error())
+}
+
+// orNil returns e when it holds a site, else nil.
+func (e *KeyringRollHeldError) orNil() error {
+	if len(e.Sites) == 0 {
+		return nil
+	}
+	return e
+}
+
+// keyringRollBlocked runs target's KeyringRollBlocked check, logging a
+// refusal. A check that cannot decide refuses as well.
+func (u *UpdateController) keyringRollBlocked(ctx context.Context, target UpdateTarget) error {
+	if target.KeyringRollBlocked == nil {
+		return nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, keyringRollProbeTimeout)
+	defer cancel()
+	err := target.KeyringRollBlocked(probeCtx)
+	if err != nil {
+		u.logger.Info("ordered update: holding site; replacing its pod now would lose keyring keys",
+			"site", target.Name, "reason", err.Error())
+	}
+	return err
 }
 
 // podReadinessProbeTimeout bounds one pod-readiness probe.
@@ -346,6 +402,11 @@ func (u *UpdateController) Execute(ctx context.Context,
 // Ready pod, so a template that breaks pods stops at the first site it
 // broke, in this run or an earlier one. Such a stop returns an error that
 // wraps a *PodNotReadyError.
+//
+// A site whose KeyringRollBlocked check refuses is not rolled: a follower
+// is skipped and the others are still rolled, an active site is neither
+// handed off nor rolled. The update then returns a *KeyringRollHeldError
+// (unless it stopped for another reason first), and their drift stays.
 func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarget, followers []UpdateTarget,
 	applyUpdate func(context.Context, string) error, onPromoted func(string, string)) (processed []string, err error) {
 	u.mu.Lock()
@@ -363,12 +424,17 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	}()
 
 	onTemplate := sitesOnTemplate(active, followers)
+	held := &KeyringRollHeldError{}
 	for _, follower := range followers {
 		if !follower.Drifted {
 			continue
 		}
 		if err := u.requireDirectReplica(ctx, follower); err != nil {
 			u.logger.Warn("ordered update: retaining unsafe follower drift", "site", follower.Name, "error", err)
+			continue
+		}
+		if err := u.keyringRollBlocked(ctx, follower); err != nil {
+			held.add(follower.Name, err)
 			continue
 		}
 		if err := u.requirePodsReady(ctx, onTemplate, "updating follower "+follower.Name); err != nil {
@@ -389,7 +455,14 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 
 	if !active.Drifted {
 		u.setPhase(UpdatePhaseNone)
-		return processed, nil
+		return processed, held.orNil()
+	}
+	// Before the handoff: an active site whose pod must not be replaced
+	// is not fenced or handed off for an update that could not roll it.
+	if err := u.keyringRollBlocked(ctx, active); err != nil {
+		held.add(active.Name, err)
+		u.setPhase(UpdatePhaseNone)
+		return processed, held
 	}
 
 	// The handoff is where the active site leaves service, and the
@@ -442,6 +515,11 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		}
 	}
 	if handoff == nil {
+		if len(held.Sites) > 0 {
+			// The standby the handoff needs is still on the old template,
+			// held for its keyring; the hold ends on its own.
+			return processed, held
+		}
 		if len(rotatingStandby) > 0 {
 			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted", strings.Join(rotatingStandby, ", "))
 		}
@@ -472,7 +550,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 			// Nothing is left to apply to it, so it leaves the drift set
 			// with the followers instead of starting the next attempt.
 			u.logger.Info("ordered update: active site no longer needs an update; skipping its handoff", "site", active.Name)
-			return append(processed, active.Name), nil
+			return append(processed, active.Name), held.orNil()
 		}
 	}
 	u.setPhase(v1beta1.UpdatePhaseFailover)
@@ -536,7 +614,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	}
 	processed = append(processed, active.Name)
 	u.setPhase(UpdatePhaseNone)
-	return processed, nil
+	return processed, held.orNil()
 }
 
 // requireOldActiveContained refuses to repoint the old active at the new

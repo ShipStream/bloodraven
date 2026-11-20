@@ -570,6 +570,24 @@ func (r *MysqlFailoverGroupReconciler) advanceEscrowedSite(
 	}
 
 	if !deploymentRendersSealedKeyring(&deploy) {
+		// The seal roll has not happened, so the pod still runs the
+		// writable keyring this escrow was taken from. A key MySQL stored
+		// since (a restart stores the binary log key of a new server_uuid)
+		// is in no escrow, and the escrow handler refuses pushes from an
+		// Escrowed site. Sealing against this version would start the
+		// sealed pod without that key, and the roll guard
+		// (keyringRollRefusal) would rightly hold the roll forever: go
+		// back to Unsealed, so the running keyring is escrowed and
+		// recorded and the seal roll projects that.
+		if deploymentRendersUnsealedKeyring(&deploy) {
+			if live, err := fetch(ctx, fg, site.Name); err == nil && live.Enabled && live.Digest != "" && live.Digest != site.KeyringDigest {
+				now := metav1.Now()
+				site.Phase = v1beta1.KeyringPhaseUnsealed
+				site.UnsealTime = &now
+				site.Message = fmt.Sprintf("the running keyring changed after it was escrowed as %s; waiting for it to be escrowed again", site.KeyringSecret)
+				return true, nil
+			}
+		}
 		site.Message = "waiting for the Deployment to roll onto the sealed keyring rendering"
 		return true, nil
 	}

@@ -124,6 +124,14 @@ type DeploymentReconciler interface {
 	SitePodReadiness(ctx context.Context, fgName types.NamespacedName, siteName string) (PodReadiness, error)
 }
 
+// KeyringRollGuard is implemented by a DeploymentReconciler that can tell
+// whether replacing a site's pod now would lose keyring keys only the
+// running pod holds (MysqlFailoverGroupReconciler.SiteKeyringRollRefusal).
+// The runner wires it into the ordered update when the reconciler has it.
+type KeyringRollGuard interface {
+	SiteKeyringRollRefusal(ctx context.Context, fgName types.NamespacedName, siteName string) error
+}
+
 // TopologyManagerRunner manages TopologyManager instances for all MysqlFailoverGroup resources.
 // It implements manager.Runnable and runs only on the leader-elected instance.
 type TopologyManagerRunner struct {
@@ -1313,6 +1321,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1beta1.My
 		}
 		tm.PodReady = func(probeCtx context.Context, siteName string) (PodReadiness, error) {
 			return r.deployReconciler.SitePodReadiness(probeCtx, nn, siteName)
+		}
+		if guard, ok := r.deployReconciler.(KeyringRollGuard); ok {
+			tm.KeyringRollRefusal = func(checkCtx context.Context, siteName string) error {
+				return guard.SiteKeyringRollRefusal(checkCtx, nn, siteName)
+			}
 		}
 	}
 
