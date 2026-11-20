@@ -39,9 +39,10 @@ func TestFailover_DrainAppliesBacklogDespiteIOErrorFromDeadPrimary(t *testing.T)
 	checker := candidate.Checker()
 	defer checker.Close()
 
-	// The old primary is gone: its fence fails, as it does against a dead
-	// host.
+	// The old primary is gone: its read_only probe and its fence fail, as
+	// they do against a dead host, so nothing is waited for.
 	oldPrimary := &mockMySQL{readOnly: false, gtidExecuted: retrieved}
+	oldPrimary.failNextCalls("CheckReadOnly", 1)
 	oldPrimary.failNextSuperRO(1)
 
 	var logs bytes.Buffer

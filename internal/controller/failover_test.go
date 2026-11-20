@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -12,11 +13,13 @@ import (
 
 // trackingMock records which methods were called and in what order.
 type trackingMock struct {
-	mu           sync.Mutex
-	calls        []string
-	readOnly     bool
-	drainErr     error
-	fenceErr     error
+	mu       sync.Mutex
+	calls    []string
+	readOnly bool
+	drainErr error
+	fenceErr error
+	// checkErr fails CheckReadOnly: an old primary that does not answer.
+	checkErr     error
 	gtidExecuted string
 	// flushFn, when set, is FlushBinaryLogs' body (run without the lock).
 	flushFn func(ctx context.Context) error
@@ -40,7 +43,7 @@ func (t *trackingMock) CheckReadOnly(_ context.Context) (bool, error) {
 	t.record("CheckReadOnly")
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.readOnly, nil
+	return t.readOnly, t.checkErr
 }
 
 func (t *trackingMock) Promote(_ context.Context) error {
@@ -174,9 +177,11 @@ func TestFailoverExecute_FullSequence(t *testing.T) {
 		t.Errorf("promotionGtid: got %q, want %q", promotionGtid, "uuid1:1-10")
 	}
 
-	// Verify old primary was fenced and connections killed.
+	// Verify the old primary's read_only was probed, then it was fenced,
+	// its connections killed and its fenced GTID set read for the
+	// catch-up gate.
 	opCalls := oldPrimary.getCalls()
-	opExpected := []string{"SetSuperReadOnly(ON)", "KillAppConnections"}
+	opExpected := []string{"CheckReadOnly", "SetSuperReadOnly(ON)", "KillAppConnections", "GetGtidExecuted"}
 	if len(opCalls) != len(opExpected) {
 		t.Fatalf("old primary calls: got %v, want %v", opCalls, opExpected)
 	}
@@ -186,9 +191,9 @@ func TestFailoverExecute_FullSequence(t *testing.T) {
 		}
 	}
 
-	// Verify candidate sequence: drain -> stop -> reset -> getGtid -> rotate the binary log -> clear super_read_only -> set read_only=0.
+	// Verify candidate sequence: catch-up check -> drain -> stop -> reset -> getGtid -> rotate the binary log -> clear super_read_only -> set read_only=0.
 	candCalls := candidate.getCalls()
-	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "FlushBinaryLogs", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
+	expected := []string{"GetGtidExecuted", "WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "FlushBinaryLogs", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
 	if len(candCalls) != len(expected) {
 		t.Fatalf("candidate calls: got %v, want %v", candCalls, expected)
 	}
@@ -245,20 +250,21 @@ func TestFailoverExecute_DrainTimeout(t *testing.T) {
 
 	// Verify promotion still happened.
 	candCalls := candidate.getCalls()
-	if len(candCalls) != 7 {
-		t.Fatalf("expected 7 calls, got %v", candCalls)
+	if len(candCalls) != 8 {
+		t.Fatalf("expected 8 calls, got %v", candCalls)
 	}
-	if candCalls[6] != "SetReadOnly(OFF)" {
-		t.Errorf("last call should be SetReadOnly(OFF), got %q", candCalls[6])
+	if candCalls[7] != "SetReadOnly(OFF)" {
+		t.Errorf("last call should be SetReadOnly(OFF), got %q", candCalls[7])
 	}
 }
 
 func TestFailoverExecute_FenceError(t *testing.T) {
 	candidate := &trackingMock{readOnly: true}
-	oldPrimary := &trackingMock{fenceErr: errors.New("connection refused")}
+	unreachable := errors.New("connection refused")
+	oldPrimary := &trackingMock{fenceErr: unreachable, checkErr: unreachable}
 	fc := NewFailoverController(testLogger())
 
-	// Fence error is ignored, promotion should proceed.
+	// An unreachable old primary is not waited for: promotion proceeds.
 	_, err := fc.Execute(context.Background(), candidate, oldPrimary, "site1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -267,5 +273,10 @@ func TestFailoverExecute_FenceError(t *testing.T) {
 	candCalls := candidate.getCalls()
 	if len(candCalls) != 7 {
 		t.Fatalf("expected 7 calls, got %v", candCalls)
+	}
+	// Nothing but the probe and the fence: an unfenced old primary keeps
+	// its connections (it would only take them back).
+	if got, want := oldPrimary.getCalls(), []string{"CheckReadOnly", "SetSuperReadOnly(ON)"}; !slices.Equal(got, want) {
+		t.Fatalf("old primary calls: got %v, want %v", got, want)
 	}
 }

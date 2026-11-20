@@ -14,9 +14,13 @@ import (
 // FailoverController orchestrates MySQL failover between sites.
 type FailoverController struct {
 	logger *slog.Logger
-	// clock bounds the best-effort binary log rotations (rotateBinlog), so
-	// a simulation's fake clock decides when one has taken too long.
+	// clock bounds the best-effort binary log rotations (rotateBinlog) and
+	// the emergency catch-up gate, so a simulation's fake clock decides
+	// when one has taken too long.
 	clock clock.Clock
+	// catchUpSleep, when set, replaces the wait between the catch-up
+	// gate's probes (SetCatchUpSleepForSim).
+	catchUpSleep func(ctx context.Context, d time.Duration) error
 }
 
 // NewFailoverController creates a new FailoverController.
@@ -107,26 +111,65 @@ func (f *FailoverController) rotateBinlog(ctx context.Context, c binlogFlusher, 
 	return true
 }
 
-// Execute performs a failover: fences old primary, drains relay logs on candidate, promotes candidate.
+// Execute performs an emergency failover with the default options; see
+// ExecuteWithOptions.
 // Returns the candidate's GTID executed set captured just before promotion (before it accepts writes).
 func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checker, oldPrimary mysql.Checker, candidateSite string) (string, error) {
-	// 1. Fence old primary: SET GLOBAL super_read_only=ON (ignore error if unreachable).
-	if oldPrimary != nil {
-		if err := oldPrimary.SetSuperReadOnly(ctx, true); err != nil {
-			f.logger.Warn("failed to fence old primary (may be unreachable)", "error", err)
-		} else {
-			f.logger.Info("fenced old primary with super_read_only=ON")
-		}
+	return f.ExecuteWithOptions(ctx, candidate, oldPrimary, candidateSite, FailoverOptions{})
+}
 
-		// 2. Kill app connections on old primary to force reconnection via DNS.
-		if killed, err := oldPrimary.KillAppConnections(ctx); err != nil {
-			f.logger.Warn("failed to kill app connections on old primary", "error", err)
-		} else {
-			f.logger.Info("killed app connections on old primary", "count", killed)
+// ExecuteWithOptions performs an emergency failover: it fences the old
+// primary best effort, waits for the candidate to catch up with it when the
+// fence was answered, drains the candidate's relay log and promotes it.
+//
+// When the old primary answers the fence it is still the only holder of
+// whatever it committed that the candidate has not received, so the
+// candidate must execute the old primary's whole fenced GTID_EXECUTED
+// before it is promoted (waitForEmergencyCatchUp, within opts.CatchUp). If
+// it does not, nothing is sent to the candidate and a
+// *CandidateNotCaughtUpError is returned; the old primary is made writable
+// again if it was writable before this fence (releaseFence) and left
+// fenced otherwise. An old primary that answers writable after its fence
+// failed refuses the failover too (*OldPrimaryNotFencedError).
+//
+// When the old primary does not answer (the usual emergency, a dead
+// primary), or stops answering during the wait, nothing is waited for: the
+// candidate drains what it has and is promoted. Availability comes first
+// then, and what the candidate never received is reported by old-primary
+// recovery. opts.AllowDivergentOldPrimary skips the wait for a split-brain
+// winner, which can never contain the loser's writes.
+//
+// Application connections on the old primary are killed only once it is
+// fenced: an unfenced primary would take them back, and an unreachable one
+// only costs another timeout.
+func (f *FailoverController) ExecuteWithOptions(ctx context.Context, candidate mysql.Checker, oldPrimary mysql.Checker, candidateSite string, opts FailoverOptions) (string, error) {
+	opts = opts.withDefaults()
+	if oldPrimary != nil {
+		wasWritable, fenced, err := f.fenceOldPrimary(ctx, oldPrimary, opts.OldPrimarySite)
+		if err != nil {
+			return "", err
+		}
+		if fenced {
+			var killed int
+			if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+				var err error
+				killed, err = oldPrimary.KillAppConnections(probeCtx)
+				return err
+			}); err != nil {
+				f.logger.Warn("failed to kill app connections on old primary", "error", err)
+			} else {
+				f.logger.Info("killed app connections on old primary", "count", killed)
+			}
+		}
+		if fenced && !opts.AllowDivergentOldPrimary {
+			_, held, _, refusal := f.waitForEmergencyCatchUp(ctx, candidate, oldPrimary, candidateSite, opts)
+			if refusal != nil {
+				return "", f.refuseEmergencyFailover(ctx, candidateSite, oldPrimary, wasWritable, held, refusal, opts)
+			}
 		}
 	}
 
-	// 3. On candidate: WaitForRelayLogDrain (30s timeout).
+	// On candidate: WaitForRelayLogDrain (30s timeout).
 	if err := candidate.WaitForRelayLogDrain(ctx, 30*time.Second); err != nil {
 		f.logger.Warn("relay log drain did not complete cleanly, proceeding with promotion", "error", err)
 	} else {

@@ -1851,3 +1851,35 @@ kubectl -n "$NAMESPACE" get mysqlfailovergroup "$MFG_NAME" \
 - **Unsupported.** Read the live claim's StorageClass and its `allowVolumeExpansion` setting. For storage that cannot expand in place, plan a storage migration.
 - **Failed or Retrying.** Inspect the site's message, PVC events, quota, the operator's `get` on `storageclasses`, and driver health. Keep the source data until the underlying issue is resolved. The group's size cannot be lowered, and the operator raises a lowered PVC request again unless it records the lowering: after a failed expansion, lower the PVC request (the Kubernetes recovery) and confirm the site shows `abandonedSize`, as in [Recovering from a failed expansion](https://bloodraven.dev/docs/operations/operations#recovering-from-a-failed-expansion).
 - **FileSystemResizePending.** Check whether the driver expands a mounted filesystem online. If it requires a remount, follow the [storage procedure](https://bloodraven.dev/docs/operations/operations#scaling-storage). Monitor MySQL disk space until the reported capacity reaches the request.
+
+## 53. Emergency failover refused: the candidate has not caught up with a reachable old primary
+
+### Symptoms
+
+- Warning Event `PromotionRefusedCandidateBehind`: `emergency failover to <candidate> refused: the old primary <site> answered the fence and <candidate> did not catch up with it (N transactions missing, waited …: <reason>); old primary <outcome>; next attempt at <time>`.
+- `bloodraven_failover_catchup_refusals_total{target_site="<candidate>"}` increases.
+- Operator WARN `failover refused: candidate has not caught up with the old primary, which answered the fence`, then INFO `failover deferred: backing off after a catch-up refusal; the old primary still answers` while the backoff runs.
+
+### Cause
+
+The operator declared the primary `Unreachable` (`failureThreshold` failed polls) and started an emergency failover, but the primary answered the fence: it is alive, and it holds transactions the candidate had not received. Promoting the candidate would have discarded them (issue #202), so the operator waited up to 30s, with the old primary fenced, for the candidate's `GTID_EXECUTED` to contain the old primary's, and it did not. Typical causes: the candidate lags (large transactions, a slow applier), its applier stopped with an error, its receiver stopped (for example error 1236: the old primary purged binary logs the candidate needs) or cannot connect to the old primary, or the old primary flaps under load so its polls fail.
+
+### Diagnostic steps
+
+1. Read the outcome in the Event or the `oldPrimaryFence` log field:
+   - `unfenced`: the old primary was writable and serves again; the group is up on it.
+   - `leftFenced`: it was read-only before the failover (its sidecar's fence, or a restarted `mysqld`); the group is `NoPrimary` until the re-assert restores it or the candidate catches up and the next attempt promotes it.
+   - `notReleased`: it was writable, but it restarted, no longer holds the set it was fenced with, or could not be unfenced; the ERROR `emergency failover: …` line before the refusal says which.
+2. On the candidate, `SHOW REPLICA STATUS\G`: `Last_SQL_Error`, `Last_IO_Error`, `Replica_IO_Running`, `Retrieved_Gtid_Set` and `Executed_Gtid_Set`. Compare with the old primary's `SELECT @@global.gtid_executed`.
+3. On the operator, why the primary's polls failed: `state transition` lines for the site, probe errors, the network path from the operator to the primary, its load.
+
+### Safe remediation
+
+- Fix what keeps the candidate behind (the applier error, the receiver's connection or purged logs, the lag). The next attempt then promotes it, or the old primary stabilises and no failover is needed.
+- Fix what makes the primary's polls fail, if it should stay the primary.
+- To give up the old primary and its unreplicated transactions, stop it so it no longer answers (scale its site down, or cut it off from the operator): the next decision promotes the candidate at once without waiting, and old primary recovery reports what was lost (`divergentGtid`).
+
+### What NOT to do
+
+- Do not make the candidate writable by hand while the old primary answers: that discards the transactions only the old primary holds and makes two primaries.
+- Do not unfence a `leftFenced` old primary by hand without comparing its `GTID_EXECUTED` with the candidate's; the re-assert does that comparison.

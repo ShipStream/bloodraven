@@ -347,6 +347,14 @@ func (r *trialRunner) newManager(view *v1beta1.MysqlFailoverGroup) *controller.T
 	// The trial's clock bounds the failover controller's best-effort binary
 	// log rotations, so a slow FLUSH BINARY LOGS is abandoned in fake time.
 	fc := controller.NewFailoverControllerWithClock(r.logger, r.clk)
+	// The emergency catch-up gate's waits pass on the trial's clock. The
+	// data plane does not advance inside a Poll, so a candidate behind an
+	// old primary that answers the fence does not catch up mid-Execute:
+	// the gate spends its budget in fake time and refuses.
+	fc.SetCatchUpSleepForSim(func(_ context.Context, d time.Duration) error {
+		r.clk.Advance(d)
+		return nil
+	})
 	// The bootstrap controller is real and non-nil, exactly as the runner
 	// wires it whenever replication credentials exist — a nil controller
 	// with credentials set is a production-impossible combination that

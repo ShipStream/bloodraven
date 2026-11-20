@@ -82,6 +82,19 @@ const (
 	// without a writable primary until the primary returns (the sites are
 	// then recloned from it) or an administrator promotes one by hand.
 	EventPromotionRefusedOwnTransactionsLost = "PromotionRefusedOwnTransactionsLost"
+	// Emergency failover refused: the old primary answered the fence, so
+	// it is alive and holds transactions the candidate has not received,
+	// and the candidate did not execute its whole fenced GTID set within
+	// 30s (or its applier or receiver stopped short of it). Nothing was
+	// sent to the candidate. An old primary that was writable before the
+	// fence was unfenced and keeps serving; one that was already read-only
+	// stays fenced for the primary re-assert. The message names both sites,
+	// the missing transaction count, what was done with the old primary and
+	// when the failover is tried again: consecutive refusals of the same
+	// pair back off from 10s to 2 minutes, unless the old primary stops
+	// answering. See [Catch-up with a reachable old
+	// primary](/docs/operations/failover#catch-up-with-a-reachable-old-primary).
+	EventPromotionRefusedCandidateBehind = "PromotionRefusedCandidateBehind"
 	// A site carrying an `OwnTransactionsLost` report became the primary
 	// without a reclone (an administrator made it writable) while every
 	// other site is read-only. Unless its

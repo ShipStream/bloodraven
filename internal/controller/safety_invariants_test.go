@@ -574,7 +574,7 @@ func TestInvariant_DNSFlipsOnlyOnce(t *testing.T) {
 }
 
 // INVARIANT: Failover uses correct step sequence.
-// Fence -> Kill connections -> Drain -> Stop -> Reset -> GetGtid -> Clear super_read_only -> Set read_only=0
+// Probe -> Fence -> Kill connections -> Catch up with the fenced old primary -> Drain -> Stop -> Reset -> GetGtid -> Clear super_read_only -> Set read_only=0
 func TestInvariant_FailoverSequence(t *testing.T) {
 	candidate := &trackingMock{readOnly: true}
 	oldPrimary := &trackingMock{}
@@ -585,9 +585,10 @@ func TestInvariant_FailoverSequence(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Old primary must be fenced and have connections killed
+	// Old primary must be fenced and have connections killed, and its
+	// fenced GTID set read so the candidate can be checked against it.
 	opCalls := oldPrimary.getCalls()
-	opExpected := []string{"SetSuperReadOnly(ON)", "KillAppConnections"}
+	opExpected := []string{"CheckReadOnly", "SetSuperReadOnly(ON)", "KillAppConnections", "GetGtidExecuted"}
 	if len(opCalls) != len(opExpected) {
 		t.Fatalf("SAFETY VIOLATION: old primary calls: %v, want %v", opCalls, opExpected)
 	}
@@ -599,7 +600,7 @@ func TestInvariant_FailoverSequence(t *testing.T) {
 
 	// Candidate must follow exact sequence
 	candCalls := candidate.getCalls()
-	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "FlushBinaryLogs", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
+	expected := []string{"GetGtidExecuted", "WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "FlushBinaryLogs", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
 	if len(candCalls) != len(expected) {
 		t.Fatalf("SAFETY VIOLATION: wrong number of candidate calls: %v, want %v", candCalls, expected)
 	}
