@@ -135,8 +135,12 @@ func LogSettings(logger *slog.Logger, s Settings) {
 		logger.Info(msgDisabled, "reason", s.Reason)
 		return
 	}
+	endpoint := s.Endpoint
+	if u, err := url.Parse(endpoint); err == nil {
+		endpoint = u.Redacted()
+	}
 	logger.Info(msgEnabled,
-		"endpoint", s.Endpoint,
+		"endpoint", endpoint,
 		"fields", "installId,version,groups,sites,nodes",
 		"disable", "helm value telemetry.enabled=false, --telemetry=false or DO_NOT_TRACK=1",
 		"docs", "https://bloodraven.dev/docs/configuration/usage-reporting")
@@ -314,14 +318,23 @@ func validInstallID(id string) bool {
 }
 
 func (r *Reporter) countGroups(ctx context.Context) (groups, sites int, err error) {
-	reader := r.Groups
-	if reader == nil {
-		reader = r.Reader
+	if r.Groups != nil {
+		// The cache is in memory and returns no continue token, so a
+		// paged read of it would stop at the first page.
+		var list v1beta1.MysqlFailoverGroupList
+		if err := r.Groups.List(ctx, &list); err != nil {
+			return 0, 0, err
+		}
+		for i := range list.Items {
+			groups++
+			sites += len(list.Items[i].Spec.Sites)
+		}
+		return groups, sites, nil
 	}
 	opts := []client.ListOption{client.Limit(listPageSize)}
 	for {
 		var list v1beta1.MysqlFailoverGroupList
-		if err := reader.List(ctx, &list, opts...); err != nil {
+		if err := r.Reader.List(ctx, &list, opts...); err != nil {
 			return 0, 0, err
 		}
 		for i := range list.Items {

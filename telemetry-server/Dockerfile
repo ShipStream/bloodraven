@@ -2,7 +2,7 @@
 # it with `railway up --path-as-root`). The workflow writes latest-version
 # (the latest release) and build-id (the commit) first; a build without them
 # fails rather than ship a server that announces no release.
-FROM rust:1.100-slim-bookworm AS build
+FROM rust:1.100.0-slim-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN test -s latest-version && test -s build-id \

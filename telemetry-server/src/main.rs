@@ -34,26 +34,30 @@ const GEO_FAILURE_TTL: Duration = Duration::from_secs(60 * 60);
 const GEO_TIMEOUT: Duration = Duration::from_secs(3);
 const RATE_WINDOW: Duration = Duration::from_secs(60 * 60);
 
-/// Bounds on what one hour of traffic can cost. A report a day per install
-/// is far below them; a flood is refused instead of filling the volume.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Bounds on what traffic can cost. A report a day per install is far below
+/// them; a flood is refused instead of filling the volume.
 #[derive(Clone, Copy)]
 struct Limits {
     /// Reports per hour from one address (one /64 for IPv6).
     per_source: u32,
-    /// Reports per hour in total.
+    /// Reports per hour in total. It also bounds the sources tracked.
     global: u32,
-    /// Sources tracked at once; past it new sources are refused until the
-    /// window turns.
-    sources: usize,
     /// Cached lookups.
     geo_entries: usize,
+    /// Rows a UTC day may hold: a report from an install with no row that
+    /// day is refused past it. With the 400-day retention this caps the
+    /// database at a few GB.
+    rows_per_day: u32,
 }
 
 const LIMITS: Limits = Limits {
     per_source: 60,
     global: 20_000,
-    sources: 50_000,
     geo_entries: 50_000,
+    rows_per_day: 50_000,
 };
 
 #[derive(Clone)]
@@ -313,7 +317,27 @@ fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn insert(conn: &Connection, r: &Report, geo: &GeoInfo) -> rusqlite::Result<()> {
+#[derive(Debug, PartialEq)]
+enum Stored {
+    Yes,
+    /// The day's row budget is spent and this install has no row today.
+    DayFull,
+}
+
+fn insert(
+    conn: &Connection,
+    r: &Report,
+    geo: &GeoInfo,
+    rows_per_day: u32,
+) -> rusqlite::Result<Stored> {
+    let (today, has_row): (u32, bool) = conn.query_row(
+        "SELECT count(*), coalesce(sum(install_id = ?1), 0) > 0 FROM reports WHERE day = strftime('%Y-%m-%d', 'now')",
+        params![r.install_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if !has_row && today >= rows_per_day {
+        return Ok(Stored::DayFull);
+    }
     conn.execute(
         "INSERT INTO reports (day, received_at, install_id, version, groups, sites, nodes, asn, as_name, country)
          VALUES (strftime('%Y-%m-%d', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -323,7 +347,7 @@ fn insert(conn: &Connection, r: &Report, geo: &GeoInfo) -> rusqlite::Result<()> 
            as_name = excluded.as_name, country = excluded.country",
         params![r.install_id, r.version, r.groups, r.sites, r.nodes, geo.asn, geo.as_name, geo.country],
     )?;
-    Ok(())
+    Ok(Stored::Yes)
 }
 
 fn prune(conn: &Connection, retention_days: u32) -> rusqlite::Result<usize> {
@@ -359,30 +383,34 @@ impl Limiter {
     }
 
     /// Counts one report; false when it is over a limit. One fixed window
-    /// for every source keeps the map bounded and cheap to reset.
+    /// for every source keeps the map cheap to reset, and a source is only
+    /// added for an admitted report, so it never holds more than `global`.
     fn admit(&self, ip: IpAddr) -> bool {
         let mut st = self.state.lock().unwrap();
-        if st.window.elapsed() >= RATE_WINDOW {
-            st.window = Instant::now();
-            st.total = 0;
-            st.sources.clear();
-        }
+        Self::roll(&mut st);
         if st.total >= self.limits.global {
             return false;
         }
-        let key = self.keyer.source(ip);
-        let full = st.sources.len() >= self.limits.sources;
-        let count = match st.sources.get_mut(&key) {
-            Some(n) => n,
-            None if full => return false,
-            None => st.sources.entry(key).or_insert(0),
-        };
+        let count = st.sources.entry(self.keyer.source(ip)).or_insert(0);
         if *count >= self.limits.per_source {
             return false;
         }
         *count += 1;
         st.total += 1;
         true
+    }
+
+    fn roll(st: &mut LimiterState) {
+        if st.window.elapsed() >= RATE_WINDOW {
+            st.window = Instant::now();
+            st.total = 0;
+            st.sources.clear();
+        }
+    }
+
+    /// Drops an ended window without waiting for the next report.
+    fn sweep(&self) {
+        Self::roll(&mut self.state.lock().unwrap());
     }
 }
 
@@ -404,16 +432,20 @@ async fn report(
     }
     let geo = state.geo.lookup(ip).await;
     let db = state.db.clone();
+    let rows_per_day = state.limiter.limits.rows_per_day;
     let stored = {
         let geo = geo.clone();
         tokio::task::spawn_blocking(move || {
             let conn = db.lock().unwrap();
-            insert(&conn, &report, &geo).map(|_| report)
+            insert(&conn, &report, &geo, rows_per_day).map(|s| (s, report))
         })
         .await
     };
     match stored {
-        Ok(Ok(r)) => {
+        Ok(Ok((Stored::DayFull, _))) => {
+            (StatusCode::TOO_MANY_REQUESTS, "too many reports today").into_response()
+        }
+        Ok(Ok((Stored::Yes, r))) => {
             println!(
                 "report version={} groups={} sites={} nodes={} asn={} country={}",
                 r.version,
@@ -454,6 +486,11 @@ fn app(state: AppState) -> Router {
         .route("/v1/report", post(report))
         .route("/v1/latest", get(latest))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // A slow client cannot hold a request, or shutdown, open.
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
         .with_state(state)
 }
 
@@ -520,13 +557,16 @@ async fn main() {
 
     let db = state.db.clone();
     let geo = state.geo.clone();
+    let limiter = state.limiter.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
-        let mut hours = 0u32;
+        let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+        let per_day = (24 * 60 * 60 / SWEEP_INTERVAL.as_secs()) as u32;
+        let mut ticks = 0u32;
         loop {
             tick.tick().await;
             geo.sweep();
-            if hours.is_multiple_of(24) {
+            limiter.sweep();
+            if ticks.is_multiple_of(per_day) {
                 let db = db.clone();
                 match tokio::task::spawn_blocking(move || {
                     prune(&db.lock().unwrap(), retention_days)
@@ -538,7 +578,7 @@ async fn main() {
                     Err(e) => eprintln!("prune: {e}"),
                 }
             }
-            hours = hours.wrapping_add(1);
+            ticks = ticks.wrapping_add(1);
         }
     });
 
@@ -881,30 +921,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn global_and_source_caps_hold() {
+    async fn global_cap_holds() {
         let limits = Limits {
             per_source: 10,
             global: 5,
-            sources: 2,
             geo_entries: 2,
+            rows_per_day: 100,
         };
         let st = state_with("http://127.0.0.1:9", None, limits);
         let from = |ip: &str| post_report(body(ID), &[("x-real-ip", ip)]);
-        assert_eq!(send(&st, from("10.0.0.2")).await, StatusCode::OK);
-        assert_eq!(send(&st, from("10.0.0.3")).await, StatusCode::OK);
-        // The source table is full: a third source is refused.
-        assert_eq!(
-            send(&st, from("10.0.0.4")).await,
-            StatusCode::TOO_MANY_REQUESTS
-        );
-        for _ in 0..3 {
-            assert_eq!(send(&st, from("10.0.0.2")).await, StatusCode::OK);
+        for ip in ["10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.2", "10.0.0.2"] {
+            assert_eq!(send(&st, from(ip)).await, StatusCode::OK);
         }
         // Five admitted in this window: the global budget is spent.
         assert_eq!(
-            send(&st, from("10.0.0.3")).await,
+            send(&st, from("10.0.0.5")).await,
             StatusCode::TOO_MANY_REQUESTS
         );
+        assert!(st.limiter.state.lock().unwrap().sources.len() <= 5);
+    }
+
+    #[tokio::test]
+    async fn day_row_budget_keeps_known_installs() {
+        let limits = Limits {
+            per_source: 100,
+            global: 100,
+            geo_entries: 2,
+            rows_per_day: 1,
+        };
+        let st = state_with("http://127.0.0.1:9", None, limits);
+        assert_eq!(send(&st, post_report(body(ID), &[])).await, StatusCode::OK);
+        // A new install past the day's budget is refused...
+        assert_eq!(
+            send(&st, post_report(body(ID2), &[])).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // ...and one that already has a row today still updates it.
+        assert_eq!(send(&st, post_report(body(ID), &[])).await, StatusCode::OK);
+        assert_eq!(rows(&st).len(), 1);
     }
 
     #[test]
@@ -975,7 +1029,10 @@ mod tests {
             sites: 1,
             nodes: 1,
         };
-        insert(&conn, &r, &GeoInfo::default()).unwrap();
+        assert_eq!(
+            insert(&conn, &r, &GeoInfo::default(), 10).unwrap(),
+            Stored::Yes
+        );
         assert_eq!(prune(&conn, 400).unwrap(), 1);
         let left: i64 = conn
             .query_row("SELECT count(*) FROM reports", [], |r| r.get(0))

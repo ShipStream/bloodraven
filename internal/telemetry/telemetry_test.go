@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -391,5 +392,47 @@ func TestStartClearsUpdateMetricWhenItStops(t *testing.T) {
 	}
 	if n := testutil.CollectAndCount(metrics.UpdateAvailable); n != 0 {
 		t.Fatalf("%d update series left after the reporter stopped", n)
+	}
+}
+
+// truncatingReader is how the manager's cache answers a paged list: it
+// stops at Limit and returns no continue token.
+type truncatingReader struct{ client.Reader }
+
+func (t truncatingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	o := &client.ListOptions{}
+	o.ApplyOptions(opts)
+	if err := t.Reader.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if g, ok := list.(*v1beta1.MysqlFailoverGroupList); ok && o.Limit > 0 && int64(len(g.Items)) > o.Limit {
+		g.Items = g.Items[:o.Limit]
+		g.Continue = ""
+	}
+	return nil
+}
+
+func TestCachedGroupsAreCountedInFull(t *testing.T) {
+	b := fake.NewClientBuilder().WithScheme(newScheme(t))
+	for i := 0; i < listPageSize+3; i++ {
+		b = b.WithObjects(group("a", fmt.Sprintf("g%03d", i), 2))
+	}
+	c := b.Build()
+	r := newReporter(t, c, DefaultEndpoint)
+	r.Groups = truncatingReader{c}
+	got, err := r.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Groups != listPageSize+3 || got.Sites != 2*(listPageSize+3) {
+		t.Fatalf("counted %d groups and %d sites", got.Groups, got.Sites)
+	}
+}
+
+func TestEnabledLogRedactsEndpointCredentials(t *testing.T) {
+	var logs bytes.Buffer
+	LogSettings(slog.New(slog.NewJSONHandler(&logs, nil)), Settings{Enabled: true, Endpoint: "https://user:secret@proxy.example/r"})
+	if strings.Contains(logs.String(), "secret") {
+		t.Fatalf("the endpoint password was logged: %s", logs.String())
 	}
 }

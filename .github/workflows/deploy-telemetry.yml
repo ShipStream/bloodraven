@@ -65,16 +65,19 @@ jobs:
           # (v1.7.5 after v1.8.0) is marked Latest too, and answering it
           # would hide newer releases from current installs.
           tag=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
-            --limit 200 --json tagName --jq '.[].tagName' \
+            --limit 1000 --json tagName --jq '.[].tagName' \
             | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
           if [ -z "$tag" ]; then
             echo "::error::No plain vX.Y.Z release found."
             exit 1
           fi
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-          echo "build=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+          # The commit plus the run, so a re-run of the same commit is still
+          # told apart from the deployment it replaces.
+          build="$(git rev-parse --short=12 HEAD)-$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
           printf '%s\n' "${tag#v}" > telemetry-server/latest-version
-          git rev-parse --short=12 HEAD > telemetry-server/build-id
+          printf '%s\n' "$build" > telemetry-server/build-id
           echo "Latest release: ${tag#v}"
 
       - name: Require RAILWAY_TOKEN

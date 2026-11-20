@@ -30,10 +30,11 @@ LATEST_VERSION=1.8.0 DATABASE_PATH=/tmp/telemetry.db cargo run
 | `LATEST_VERSION` | the `latest-version` file | Overrides the release the server answers with. |
 | `IPINFO_TOKEN` | unset | With a token the unlimited [ipinfo Lite](https://ipinfo.io/lite) API is used; without one the free endpoint, which is rate limited. |
 | `RETENTION_DAYS` | `400` | Reports older than this are deleted daily. |
-| `BUILD_ID` | the `build-id` file | The commit, answered by `/v1/latest` so the deploy check can tell a new deployment from the old one. |
+| `BUILD_ID` | the `build-id` file | The commit and workflow run, answered by `/v1/latest` so the deploy check can tell a new deployment from the old one. |
 
 Limits: 60 reports an hour from one address (one /64 for IPv6), 20,000 an hour
-in total, 50,000 sources tracked an hour. Past them the server answers 429.
+in total, and 50,000 rows a day (an install that already has a row that day can
+still update it). Past them the server answers 429. A request has 15 seconds.
 
 ## Deploying
 

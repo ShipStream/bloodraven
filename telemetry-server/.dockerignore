@@ -3,3 +3,5 @@ target/
 *.db-shm
 *.db-wal
 .git
+# CI-only (it adds clippy and rustfmt); the image pins the same release.
+rust-toolchain.toml

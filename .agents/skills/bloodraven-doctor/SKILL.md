@@ -313,7 +313,7 @@ The administrator's controls are the annotations `bloodraven.shipstream.io/rollo
 ### 11. Operator is behind the latest release, or asks about usage reporting
 
 - **Symptom**: `bloodraven_update_available{latest_version="…"} 1`, or the operator log `newer bloodraven release available`. Neither affects failover.
-- **Probe**: the operator's startup line `anonymous usage reporting enabled` / `disabled` (with `reason`) says whether the daily report is on; `usage report failed` (INFO once per process) means no report is going out (egress, proxy, NetworkPolicy). The install ID is the ConfigMap `bloodraven-telemetry` in the operator's namespace.
+- **Probe**: the operator's startup line `anonymous usage reporting enabled` / `disabled` (with `reason`) says whether the daily report is on; `usage report failed` (INFO once per process) means a report attempt did not complete (egress, proxy, NetworkPolicy, or a lost answer; the service may still have received it). The install ID is the ConfigMap `bloodraven-telemetry` in the operator's namespace.
 - **Action**: read the release notes before upgrading (upgrade policy applies; never jump CRDs). To turn the report off: chart value `telemetry.enabled=false` (or `DO_NOT_TRACK=1`); deleting the ConfigMap resets the install ID. A failed report needs no fix. What is sent and kept: https://bloodraven.dev/docs/configuration/usage-reporting.
 
 ## Phase 4: Standard Diagnostic Report Format
