@@ -175,8 +175,10 @@ is fully functional without a license key.
 The operator sends Licensor a daily anonymous usage report: a random install
 ID, the operator version, and the number of failover groups, sites and cluster
 nodes. Licensor keeps it with the network operator and country of the sending
-address, never the address itself. The report and what Licensor keeps are
-described at https://bloodraven.dev/docs/configuration/usage-reporting.
+address and does not store the address itself; the address is sent to a lookup
+service for that purpose and appears in the hosting provider's request logs.
+The report and what Licensor keeps are described at
+https://bloodraven.dev/docs/configuration/usage-reporting.
 Licensee may turn the report off at any time; doing so never affects operator
 behavior or this license.
 

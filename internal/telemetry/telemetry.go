@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -54,12 +55,14 @@ const (
 	DefaultInterval = 24 * time.Hour
 
 	requestTimeout   = 10 * time.Second
+	attemptTimeout   = time.Minute
 	maxResponseBytes = 4 << 10
 	listPageSize     = 500
 
 	msgEnabled         = "anonymous usage reporting enabled"
 	msgDisabled        = "anonymous usage reporting disabled"
 	msgUpdateAvailable = "newer bloodraven release available"
+	msgFailed          = "usage report failed"
 )
 
 // Report is the whole payload. Adding a field is a change to the published
@@ -80,38 +83,54 @@ type response struct {
 type Settings struct {
 	Enabled bool
 	// Reason says why the report is off; empty when Enabled.
-	Reason   string
+	Reason string
+	// Invalid is set when the report is off because a setting could not be
+	// read.
+	Invalid  bool
 	Endpoint string
 }
 
 // ResolveSettings reads the opt-out. telemetryFlag is the --telemetry value
-// (true unless the operator was told otherwise). DO_NOT_TRACK set to
-// anything but empty, "0" or "false" also turns the report off, as the
-// convention at consoledonottrack.com asks. BLOODRAVEN_TELEMETRY_ENDPOINT
-// replaces the endpoint, for a proxy or a test server.
-func ResolveSettings(telemetryFlag bool, getenv func(string) string) (Settings, error) {
+// (true unless the operator was told otherwise) and flagErr the error from
+// reading its BLOODRAVEN_TELEMETRY default. DO_NOT_TRACK set to anything but
+// empty, "0" or "false" also turns the report off, as the convention at
+// consoledonottrack.com asks. BLOODRAVEN_TELEMETRY_ENDPOINT replaces the
+// endpoint, for a proxy or a test server.
+//
+// A setting that cannot be read turns the report off rather than stopping
+// the operator: the report must never keep failover from running, and when
+// in doubt it is not sent. An unreadable endpoint is never replaced by the
+// default, since it was meant to route the report elsewhere.
+func ResolveSettings(telemetryFlag bool, flagErr error, getenv func(string) string) Settings {
+	if flagErr != nil {
+		return Settings{Reason: flagErr.Error(), Invalid: true}
+	}
+	if !telemetryFlag {
+		return Settings{Reason: "--telemetry=false"}
+	}
+	if dnt := strings.TrimSpace(getenv("DO_NOT_TRACK")); dnt != "" {
+		if off, err := strconv.ParseBool(dnt); err != nil || off {
+			return Settings{Reason: "DO_NOT_TRACK is set"}
+		}
+	}
 	endpoint := strings.TrimSpace(getenv("BLOODRAVEN_TELEMETRY_ENDPOINT"))
 	if endpoint == "" {
 		endpoint = DefaultEndpoint
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return Settings{}, fmt.Errorf("BLOODRAVEN_TELEMETRY_ENDPOINT %q is not an http(s) URL", endpoint)
+		return Settings{Reason: fmt.Sprintf("BLOODRAVEN_TELEMETRY_ENDPOINT %q is not an http(s) URL", endpoint), Invalid: true}
 	}
-	if !telemetryFlag {
-		return Settings{Reason: "--telemetry=false", Endpoint: endpoint}, nil
-	}
-	if dnt := strings.TrimSpace(getenv("DO_NOT_TRACK")); dnt != "" {
-		if off, err := strconv.ParseBool(dnt); err != nil || off {
-			return Settings{Reason: "DO_NOT_TRACK is set", Endpoint: endpoint}, nil
-		}
-	}
-	return Settings{Enabled: true, Endpoint: endpoint}, nil
+	return Settings{Enabled: true, Endpoint: endpoint}
 }
 
 // LogSettings writes the one startup line that tells an administrator
 // whether the report is on and how to turn it off.
 func LogSettings(logger *slog.Logger, s Settings) {
+	if s.Invalid {
+		logger.Warn(msgDisabled, "reason", s.Reason)
+		return
+	}
 	if !s.Enabled {
 		logger.Info(msgDisabled, "reason", s.Reason)
 		return
@@ -126,8 +145,12 @@ func LogSettings(logger *slog.Logger, s Settings) {
 // Reporter sends the report while its manager holds the leader lease, so a
 // highly available operator reports once.
 type Reporter struct {
-	// Reader reads uncached: one daily read must not start an informer.
+	// Reader reads uncached (the install ID ConfigMap and node metadata):
+	// one daily read must not start an informer.
 	Reader client.Reader
+	// Groups lists the failover groups, from the manager's cache, which
+	// already watches them. Nil uses Reader.
+	Groups client.Reader
 	// Writer creates and repairs the install ID ConfigMap.
 	Writer client.Writer
 	// HTTP sends the report. Nil uses a client with a 10s timeout that
@@ -147,8 +170,11 @@ type Reporter struct {
 	// value within an hour either way, so installs do not report in step.
 	Jitter func() time.Duration
 
-	mu     sync.Mutex
-	latest string
+	mu       sync.Mutex
+	latest   string
+	failed   bool
+	client   *http.Client
+	initOnce sync.Once
 }
 
 // NeedLeaderElection makes the manager run the reporter on the leader only.
@@ -157,6 +183,9 @@ func (r *Reporter) NeedLeaderElection() bool { return true }
 // Start reports until ctx ends. It never returns an error: a failed report
 // is logged at debug level and retried at the next interval.
 func (r *Reporter) Start(ctx context.Context) error {
+	// A replica that stops reporting (it lost the lease) stops exporting
+	// what its last report said.
+	defer metrics.UpdateAvailable.Reset()
 	wait := r.firstDelay()
 	for {
 		t := time.NewTimer(wait)
@@ -166,14 +195,35 @@ func (r *Reporter) Start(ctx context.Context) error {
 			return nil
 		case <-t.C:
 		}
-		if err := r.ReportOnce(ctx); err != nil && ctx.Err() == nil {
-			r.logger().Debug("usage report failed", "error", err.Error())
+		if err := r.reportWithDeadline(ctx); err != nil && ctx.Err() == nil {
+			r.logFailure(err)
 		}
 		wait = r.interval() + r.jitter()
 		if wait < time.Minute {
 			wait = time.Minute
 		}
 	}
+}
+
+func (r *Reporter) reportWithDeadline(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
+	return r.ReportOnce(ctx)
+}
+
+// logFailure says once per process, at INFO, that a report failed, so an
+// administrator who blocked egress can see the report is not going out.
+// Later failures are DEBUG.
+func (r *Reporter) logFailure(err error) {
+	r.mu.Lock()
+	first := !r.failed
+	r.failed = true
+	r.mu.Unlock()
+	if first {
+		r.logger().Info(msgFailed, "error", err.Error(), "next", "retried daily; later failures are logged at debug level")
+		return
+	}
+	r.logger().Debug(msgFailed, "error", err.Error())
 }
 
 // ReportOnce builds and sends one report and acts on the response.
@@ -264,10 +314,14 @@ func validInstallID(id string) bool {
 }
 
 func (r *Reporter) countGroups(ctx context.Context) (groups, sites int, err error) {
+	reader := r.Groups
+	if reader == nil {
+		reader = r.Reader
+	}
 	opts := []client.ListOption{client.Limit(listPageSize)}
 	for {
 		var list v1beta1.MysqlFailoverGroupList
-		if err := r.Reader.List(ctx, &list, opts...); err != nil {
+		if err := reader.List(ctx, &list, opts...); err != nil {
 			return 0, 0, err
 		}
 		for i := range list.Items {
@@ -368,10 +422,22 @@ func (r *Reporter) httpClient() *http.Client {
 	if r.HTTP != nil {
 		return r.HTTP
 	}
-	return &http.Client{
-		Timeout:   requestTimeout,
-		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, TLSHandshakeTimeout: 5 * time.Second},
-	}
+	r.initOnce.Do(func() {
+		r.client = &http.Client{
+			Timeout: requestTimeout,
+			// One request a day: no connection is kept open between them.
+			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment,
+				DialContext:         (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+				TLSHandshakeTimeout: 5 * time.Second,
+				DisableKeepAlives:   true,
+			},
+			// The report goes to the configured endpoint or nowhere: a
+			// redirect would replay it to another origin.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	})
+	return r.client
 }
 
 func (r *Reporter) logger() *slog.Logger {

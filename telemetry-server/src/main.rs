@@ -1,14 +1,16 @@
 //! Receives the Bloodraven operator's daily anonymous usage report, stores it
 //! in SQLite and answers with the latest release.
 //!
-//! The sending address is used once, to look up its network operator and
-//! country at ipinfo.io, and is never written to disk or to a log. What is
-//! stored is documented at
+//! The sending address is sent to ipinfo.io to look up its network operator
+//! and country, then dropped: it is never written to disk or to a log, and the
+//! in-memory lookup cache and rate limiter key on a hash of it with a key made
+//! at start, not on the address. What is stored is documented at
 //! https://bloodraven.dev/docs/configuration/usage-reporting; keep that page
 //! and this file in step.
 
 use std::{
     collections::HashMap,
+    hash::BuildHasher,
     net::{IpAddr, SocketAddr},
     path::Path,
     sync::{Arc, Mutex},
@@ -28,17 +30,39 @@ use serde::{Deserialize, Serialize};
 const MAX_BODY_BYTES: usize = 4 * 1024;
 const MAX_COUNT: u32 = 1_000_000;
 const GEO_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const GEO_FAILURE_TTL: Duration = Duration::from_secs(60 * 60);
 const GEO_TIMEOUT: Duration = Duration::from_secs(3);
-const CACHE_CAP: usize = 10_000;
 const RATE_WINDOW: Duration = Duration::from_secs(60 * 60);
-const RATE_LIMIT: u32 = 60;
+
+/// Bounds on what one hour of traffic can cost. A report a day per install
+/// is far below them; a flood is refused instead of filling the volume.
+#[derive(Clone, Copy)]
+struct Limits {
+    /// Reports per hour from one address (one /64 for IPv6).
+    per_source: u32,
+    /// Reports per hour in total.
+    global: u32,
+    /// Sources tracked at once; past it new sources are refused until the
+    /// window turns.
+    sources: usize,
+    /// Cached lookups.
+    geo_entries: usize,
+}
+
+const LIMITS: Limits = Limits {
+    per_source: 60,
+    global: 20_000,
+    sources: 50_000,
+    geo_entries: 50_000,
+};
 
 #[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<Connection>>,
     latest: Arc<String>,
+    build: Arc<String>,
     geo: Arc<Geo>,
-    limiter: Arc<Mutex<HashMap<IpAddr, (Instant, u32)>>>,
+    limiter: Arc<Limiter>,
 }
 
 /// The report the operator sends (internal/telemetry.Report). Unknown fields
@@ -66,11 +90,36 @@ struct GeoInfo {
     country: Option<String>,
 }
 
+/// Hashes an address with a key made at start, so the maps never hold one.
+struct Keyer(std::collections::hash_map::RandomState);
+
+impl Keyer {
+    fn new() -> Self {
+        Keyer(std::collections::hash_map::RandomState::new())
+    }
+    fn key(&self, ip: IpAddr) -> u64 {
+        self.0.hash_one(ip)
+    }
+    /// The rate-limit source: the address, or its /64 for IPv6, where one
+    /// host can hold a whole prefix.
+    fn source(&self, ip: IpAddr) -> u64 {
+        match ip {
+            IpAddr::V6(v6) => {
+                let s = v6.segments();
+                self.0.hash_one([s[0], s[1], s[2], s[3]])
+            }
+            v4 => self.key(v4),
+        }
+    }
+}
+
 struct Geo {
     http: reqwest::Client,
     base: String,
     token: Option<String>,
-    cache: Mutex<HashMap<IpAddr, (Instant, GeoInfo)>>,
+    keyer: Keyer,
+    entries: usize,
+    cache: Mutex<HashMap<u64, (Instant, Duration, GeoInfo)>>,
 }
 
 impl Geo {
@@ -78,24 +127,37 @@ impl Geo {
         if !is_public(ip) {
             return GeoInfo::default();
         }
-        if let Some((at, info)) = self.cache.lock().unwrap().get(&ip)
-            && at.elapsed() < GEO_TTL
+        let key = self.keyer.key(ip);
+        if let Some((at, ttl, info)) = self.cache.lock().unwrap().get(&key)
+            && at.elapsed() < *ttl
         {
             return info.clone();
         }
-        let info = match self.fetch(ip).await {
-            Ok(info) => info,
+        let (info, ttl) = match self.fetch(ip).await {
+            Ok(info) => (info, GEO_TTL),
             Err(err) => {
                 eprintln!("ipinfo lookup failed: {err}");
-                return GeoInfo::default();
+                // Cached briefly so a failing lookup is not retried for
+                // every report.
+                (GeoInfo::default(), GEO_FAILURE_TTL)
             }
         };
         let mut cache = self.cache.lock().unwrap();
-        if cache.len() >= CACHE_CAP {
-            cache.clear();
+        if cache.len() >= self.entries {
+            cache.retain(|_, (at, ttl, _)| at.elapsed() < *ttl);
+            if cache.len() >= self.entries {
+                cache.clear();
+            }
         }
-        cache.insert(ip, (Instant::now(), info.clone()));
+        cache.insert(key, (Instant::now(), ttl, info.clone()));
         info
+    }
+
+    fn sweep(&self) {
+        self.cache
+            .lock()
+            .unwrap()
+            .retain(|_, (at, ttl, _)| at.elapsed() < *ttl);
     }
 
     async fn fetch(&self, ip: IpAddr) -> Result<GeoInfo, String> {
@@ -109,6 +171,7 @@ impl Geo {
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
+        // without_url: the error must not carry the address into the log.
         let resp = req.send().await.map_err(|e| e.without_url().to_string())?;
         if !resp.status().is_success() {
             return Err(format!("status {}", resp.status()));
@@ -152,7 +215,7 @@ fn parse_geo(body: &serde_json::Value) -> GeoInfo {
 }
 
 fn is_public(ip: IpAddr) -> bool {
-    match ip {
+    match ip.to_canonical() {
         IpAddr::V4(v4) => {
             !(v4.is_private()
                 || v4.is_loopback()
@@ -172,18 +235,24 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
-/// Railway's edge overwrites X-Real-IP and appends the connecting address to
-/// X-Forwarded-For, whose leftmost values the caller controls.
+/// The sender's address. Railway's edge, which reaches the service from a
+/// private address, overwrites X-Real-IP and appends the connecting address
+/// to X-Forwarded-For, whose leftmost values the caller controls. A public
+/// peer did not come through the edge, so its headers are not trusted.
 fn client_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
+    let peer = peer.to_canonical();
+    if is_public(peer) {
+        return peer;
+    }
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    if let Some(ip) = header("x-real-ip").and_then(|v| v.trim().parse().ok()) {
-        return ip;
+    if let Some(ip) = header("x-real-ip").and_then(|v| v.trim().parse::<IpAddr>().ok()) {
+        return ip.to_canonical();
     }
     if let Some(ip) = header("x-forwarded-for")
         .and_then(|v| v.rsplit(',').next())
-        .and_then(|v| v.trim().parse().ok())
+        .and_then(|v| v.trim().parse::<IpAddr>().ok())
     {
-        return ip;
+        return ip.to_canonical();
     }
     peer
 }
@@ -218,6 +287,8 @@ impl Report {
     }
 }
 
+/// One row per install per UTC day: a later report the same day replaces
+/// the earlier one, so storage grows with installs, not with reports.
 fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
@@ -225,7 +296,8 @@ fn open_db(path: &Path) -> rusqlite::Result<Connection> {
          PRAGMA busy_timeout = 5000;
          CREATE TABLE IF NOT EXISTS reports (
            id          INTEGER PRIMARY KEY,
-           received_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+           day         TEXT    NOT NULL,
+           received_at TEXT    NOT NULL,
            install_id  TEXT    NOT NULL,
            version     TEXT    NOT NULL,
            groups      INTEGER NOT NULL,
@@ -233,50 +305,85 @@ fn open_db(path: &Path) -> rusqlite::Result<Connection> {
            nodes       INTEGER NOT NULL,
            asn         TEXT,
            as_name     TEXT,
-           country     TEXT
+           country     TEXT,
+           UNIQUE (install_id, day)
          );
-         CREATE INDEX IF NOT EXISTS reports_received_at ON reports (received_at);
-         CREATE INDEX IF NOT EXISTS reports_install_id ON reports (install_id, received_at);",
+         CREATE INDEX IF NOT EXISTS reports_day ON reports (day);",
     )?;
     Ok(conn)
 }
 
 fn insert(conn: &Connection, r: &Report, geo: &GeoInfo) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO reports (install_id, version, groups, sites, nodes, asn, as_name, country)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            r.install_id,
-            r.version,
-            r.groups,
-            r.sites,
-            r.nodes,
-            geo.asn,
-            geo.as_name,
-            geo.country
-        ],
+        "INSERT INTO reports (day, received_at, install_id, version, groups, sites, nodes, asn, as_name, country)
+         VALUES (strftime('%Y-%m-%d', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (install_id, day) DO UPDATE SET
+           received_at = excluded.received_at, version = excluded.version, groups = excluded.groups,
+           sites = excluded.sites, nodes = excluded.nodes, asn = excluded.asn,
+           as_name = excluded.as_name, country = excluded.country",
+        params![r.install_id, r.version, r.groups, r.sites, r.nodes, geo.asn, geo.as_name, geo.country],
     )?;
     Ok(())
 }
 
 fn prune(conn: &Connection, retention_days: u32) -> rusqlite::Result<usize> {
     conn.execute(
-        "DELETE FROM reports WHERE received_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?1)",
+        "DELETE FROM reports WHERE day < strftime('%Y-%m-%d', 'now', ?1)",
         params![format!("-{retention_days} days")],
     )
 }
 
-fn rate_limited(limiter: &Mutex<HashMap<IpAddr, (Instant, u32)>>, ip: IpAddr) -> bool {
-    let mut map = limiter.lock().unwrap();
-    if map.len() >= CACHE_CAP {
-        map.retain(|_, (start, _)| start.elapsed() < RATE_WINDOW);
+struct Limiter {
+    limits: Limits,
+    keyer: Keyer,
+    state: Mutex<LimiterState>,
+}
+
+struct LimiterState {
+    window: Instant,
+    total: u32,
+    sources: HashMap<u64, u32>,
+}
+
+impl Limiter {
+    fn new(limits: Limits) -> Self {
+        Limiter {
+            limits,
+            keyer: Keyer::new(),
+            state: Mutex::new(LimiterState {
+                window: Instant::now(),
+                total: 0,
+                sources: HashMap::new(),
+            }),
+        }
     }
-    let entry = map.entry(ip).or_insert((Instant::now(), 0));
-    if entry.0.elapsed() >= RATE_WINDOW {
-        *entry = (Instant::now(), 0);
+
+    /// Counts one report; false when it is over a limit. One fixed window
+    /// for every source keeps the map bounded and cheap to reset.
+    fn admit(&self, ip: IpAddr) -> bool {
+        let mut st = self.state.lock().unwrap();
+        if st.window.elapsed() >= RATE_WINDOW {
+            st.window = Instant::now();
+            st.total = 0;
+            st.sources.clear();
+        }
+        if st.total >= self.limits.global {
+            return false;
+        }
+        let key = self.keyer.source(ip);
+        let full = st.sources.len() >= self.limits.sources;
+        let count = match st.sources.get_mut(&key) {
+            Some(n) => n,
+            None if full => return false,
+            None => st.sources.entry(key).or_insert(0),
+        };
+        if *count >= self.limits.per_source {
+            return false;
+        }
+        *count += 1;
+        st.total += 1;
+        true
     }
-    entry.1 += 1;
-    entry.1 > RATE_LIMIT
 }
 
 async fn report(
@@ -292,7 +399,7 @@ async fn report(
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
     let ip = client_ip(&headers, peer.ip());
-    if rate_limited(&state.limiter, ip) {
+    if !state.limiter.admit(ip) {
         return (StatusCode::TOO_MANY_REQUESTS, "too many reports").into_response();
     }
     let geo = state.geo.lookup(ip).await;
@@ -332,6 +439,10 @@ async fn report(
     }
 }
 
+async fn latest(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({ "latestVersion": *state.latest, "build": *state.build }))
+}
+
 async fn index() -> &'static str {
     "Bloodraven usage report endpoint. What is sent and kept: https://bloodraven.dev/docs/configuration/usage-reporting\n"
 }
@@ -341,26 +452,28 @@ fn app(state: AppState) -> Router {
         .route("/", get(index))
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/report", post(report))
-        .route(
-            "/v1/latest",
-            get(|State(state): State<AppState>| async move {
-                Json(serde_json::json!({ "latestVersion": *state.latest }))
-            }),
-        )
+        .route("/v1/latest", get(latest))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
 
-/// The latest release: LATEST_VERSION, else the file the release workflow
-/// writes into the image (LATEST_VERSION_FILE, default ./latest-version).
-fn latest_version() -> String {
-    if let Ok(v) = std::env::var("LATEST_VERSION") {
-        return v.trim().trim_start_matches('v').to_string();
+/// A value the deploy workflow bakes into the image: the env var NAME, else
+/// the file `file` in the working directory.
+fn baked(name: &str, file: &str) -> String {
+    let raw = std::env::var(name)
+        .ok()
+        .or_else(|| std::fs::read_to_string(file).ok())
+        .unwrap_or_default();
+    raw.trim().trim_start_matches('v').to_string()
+}
+
+async fn shutdown_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
     }
-    let path = std::env::var("LATEST_VERSION_FILE").unwrap_or_else(|_| "latest-version".into());
-    std::fs::read_to_string(path)
-        .map(|v| v.trim().trim_start_matches('v').to_string())
-        .unwrap_or_default()
 }
 
 #[tokio::main]
@@ -375,7 +488,8 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(8080);
     let conn = open_db(Path::new(&db_path)).unwrap_or_else(|e| panic!("open {db_path}: {e}"));
-    let latest = latest_version();
+    let latest = baked("LATEST_VERSION", "latest-version");
+    let build = baked("BUILD_ID", "build-id");
 
     let token = std::env::var("IPINFO_TOKEN")
         .ok()
@@ -389,6 +503,7 @@ async fn main() {
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         latest: Arc::new(latest.clone()),
+        build: Arc::new(build.clone()),
         geo: Arc::new(Geo {
             http: reqwest::Client::builder()
                 .user_agent("bloodraven-telemetry")
@@ -396,25 +511,34 @@ async fn main() {
                 .expect("http client"),
             base: std::env::var("IPINFO_URL").unwrap_or_else(|_| default_base.into()),
             token,
+            keyer: Keyer::new(),
+            entries: LIMITS.geo_entries,
             cache: Mutex::new(HashMap::new()),
         }),
-        limiter: Arc::new(Mutex::new(HashMap::new())),
+        limiter: Arc::new(Limiter::new(LIMITS)),
     };
 
     let db = state.db.clone();
+    let geo = state.geo.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+        let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        let mut hours = 0u32;
         loop {
             tick.tick().await;
-            let db = db.clone();
-            let result =
-                tokio::task::spawn_blocking(move || prune(&db.lock().unwrap(), retention_days))
-                    .await;
-            match result {
-                Ok(Ok(n)) => println!("pruned {n} reports older than {retention_days} days"),
-                Ok(Err(e)) => eprintln!("prune: {e}"),
-                Err(e) => eprintln!("prune: {e}"),
+            geo.sweep();
+            if hours.is_multiple_of(24) {
+                let db = db.clone();
+                match tokio::task::spawn_blocking(move || {
+                    prune(&db.lock().unwrap(), retention_days)
+                })
+                .await
+                {
+                    Ok(Ok(n)) => println!("pruned {n} reports older than {retention_days} days"),
+                    Ok(Err(e)) => eprintln!("prune: {e}"),
+                    Err(e) => eprintln!("prune: {e}"),
+                }
             }
+            hours = hours.wrapping_add(1);
         }
     });
 
@@ -422,8 +546,7 @@ async fn main() {
         .await
         .expect("bind");
     println!(
-        "listening on :{port}, database {db_path}, latest version {:?}, ipinfo token {}",
-        latest,
+        "listening on :{port}, database {db_path}, latest version {latest:?}, build {build:?}, ipinfo token {}",
         if state.geo.token.is_some() {
             "set"
         } else {
@@ -434,9 +557,7 @@ async fn main() {
         listener,
         app(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .expect("serve");
 }
@@ -449,30 +570,43 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn state(base: &str, token: Option<&str>) -> AppState {
+    fn state_with(base: &str, token: Option<&str>, limits: Limits) -> AppState {
         AppState {
             db: Arc::new(Mutex::new(open_db(Path::new(":memory:")).unwrap())),
             latest: Arc::new("1.9.0".into()),
+            build: Arc::new("abc123".into()),
             geo: Arc::new(Geo {
                 http: reqwest::Client::builder().no_proxy().build().unwrap(),
                 base: base.into(),
                 token: token.map(Into::into),
+                keyer: Keyer::new(),
+                entries: limits.geo_entries,
                 cache: Mutex::new(HashMap::new()),
             }),
-            limiter: Arc::new(Mutex::new(HashMap::new())),
+            limiter: Arc::new(Limiter::new(limits)),
         }
     }
 
-    const ID: &str = "5f0c1e9a-3b7d-4c2e-9a41-6d8f2b7e0c13";
+    fn state(base: &str, token: Option<&str>) -> AppState {
+        state_with(base, token, LIMITS)
+    }
 
+    const ID: &str = "5f0c1e9a-3b7d-4c2e-9a41-6d8f2b7e0c13";
+    const ID2: &str = "6e3a8af3-71ed-4368-bd93-c17431aa9290";
+
+    /// A request as Railway's edge delivers it: from a private peer.
     fn post_report(body: String, headers: &[(&str, &str)]) -> Request<Body> {
+        post_from("10.0.0.1:1234", body, headers)
+    }
+
+    fn post_from(peer: &str, body: String, headers: &[(&str, &str)]) -> Request<Body> {
         let mut req = Request::post("/v1/report").header("content-type", "application/json");
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
         let mut req = req.body(Body::from(body)).unwrap();
         req.extensions_mut()
-            .insert(ConnectInfo::<SocketAddr>("10.0.0.1:1234".parse().unwrap()));
+            .insert(ConnectInfo::<SocketAddr>(peer.parse().unwrap()));
         req
     }
 
@@ -536,6 +670,10 @@ mod tests {
         (format!("http://{addr}"), seen)
     }
 
+    async fn send(st: &AppState, req: Request<Body>) -> StatusCode {
+        app(st.clone()).oneshot(req).await.unwrap().status()
+    }
+
     #[tokio::test]
     async fn stores_report_with_network_and_never_the_address() {
         let (base, seen) = fake_ipinfo().await;
@@ -575,7 +713,7 @@ mod tests {
         let conn = st.db.lock().unwrap();
         let dump: String = conn
             .query_row(
-                "SELECT group_concat(received_at || install_id || version || coalesce(asn, '') || coalesce(as_name, '') || coalesce(country, '')) FROM reports",
+                "SELECT group_concat(day || received_at || install_id || version || coalesce(asn, '') || coalesce(as_name, '') || coalesce(country, '')) FROM reports",
                 [],
                 |r| r.get(0),
             )
@@ -584,20 +722,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_row_per_install_per_day() {
+        let st = state("http://127.0.0.1:9", None);
+        assert_eq!(send(&st, post_report(body(ID), &[])).await, StatusCode::OK);
+        let later =
+            format!(r#"{{"installId":"{ID}","version":"1.9.0","groups":3,"sites":6,"nodes":7}}"#);
+        assert_eq!(send(&st, post_report(later, &[])).await, StatusCode::OK);
+        assert_eq!(send(&st, post_report(body(ID2), &[])).await, StatusCode::OK);
+        let r = rows(&st);
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            (r[0].0.as_str(), r[0].1.as_str(), r[0].2),
+            (ID, "1.9.0", 3),
+            "the later report replaces the earlier one"
+        );
+    }
+
+    #[tokio::test]
     async fn free_endpoint_and_cache() {
         let (base, seen) = fake_ipinfo().await;
         let st = state(&base, None);
-        for _ in 0..2 {
-            let resp = app(st.clone())
-                .oneshot(post_report(body(ID), &[("x-real-ip", "1.1.1.1")]))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+        for id in [ID, ID2] {
+            assert_eq!(
+                send(&st, post_report(body(id), &[("x-real-ip", "1.1.1.1")])).await,
+                StatusCode::OK
+            );
         }
         let r = rows(&st);
         assert_eq!(r.len(), 2);
         assert_eq!(
-            (r[0].5.as_deref(), r[0].6.as_deref(), r[0].7.as_deref()),
+            (r[1].5.as_deref(), r[1].6.as_deref(), r[1].7.as_deref()),
             (Some("AS13335"), Some("Cloudflare, Inc."), Some("AU"))
         );
         assert_eq!(
@@ -608,16 +762,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_lookup_is_cached_and_report_kept() {
+        // Nothing listens on port 9.
+        let st = state("http://127.0.0.1:9", None);
+        for id in [ID, ID2] {
+            assert_eq!(
+                send(&st, post_report(body(id), &[("x-real-ip", "1.1.1.1")])).await,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(rows(&st).len(), 2);
+        let cache = st.geo.cache.lock().unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(
+            cache
+                .values()
+                .all(|(_, ttl, info)| *ttl == GEO_FAILURE_TTL && *info == GeoInfo::default())
+        );
+    }
+
+    #[tokio::test]
     async fn private_address_skips_lookup() {
         let (base, seen) = fake_ipinfo().await;
         let st = state(&base, None);
-        let resp = app(st.clone())
-            .oneshot(post_report(body(ID), &[]))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(send(&st, post_report(body(ID), &[])).await, StatusCode::OK);
         assert!(seen.lock().unwrap().is_empty());
         assert_eq!(rows(&st)[0].5, None);
+    }
+
+    #[tokio::test]
+    async fn public_peer_headers_are_ignored() {
+        let (base, seen) = fake_ipinfo().await;
+        let st = state(&base, None);
+        let status = send(
+            &st,
+            post_from("1.1.1.1:443", body(ID), &[("x-real-ip", "8.8.8.8")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().as_slice(), ["/1.1.1.1/json "]);
     }
 
     #[tokio::test]
@@ -629,7 +812,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&bytes[..], br#"{"latestVersion":"1.9.0"}"#);
+        assert_eq!(&bytes[..], br#"{"build":"abc123","latestVersion":"1.9.0"}"#);
         assert!(rows(&st).is_empty());
     }
 
@@ -639,8 +822,7 @@ mod tests {
         let b = format!(
             r#"{{"installId":"{ID}","version":"2.0.0","groups":1,"sites":2,"nodes":3,"future":true}}"#
         );
-        let resp = app(st.clone()).oneshot(post_report(b, &[])).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(send(&st, post_report(b, &[])).await, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -663,51 +845,93 @@ mod tests {
                 "1".repeat(65)
             ),
         ] {
-            let resp = app(st.clone())
-                .oneshot(post_report(b.clone(), &[]))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{b}");
+            assert_eq!(
+                send(&st, post_report(b.clone(), &[])).await,
+                StatusCode::BAD_REQUEST,
+                "{b}"
+            );
         }
         let big = format!(
             r#"{{"installId":"{ID}","version":"1.8.0","groups":1,"sites":1,"nodes":1,"pad":"{}"}}"#,
             "x".repeat(5000)
         );
-        let resp = app(st.clone())
-            .oneshot(post_report(big, &[]))
-            .await
-            .unwrap();
-        assert!(resp.status().is_client_error());
+        assert!(send(&st, post_report(big, &[])).await.is_client_error());
         assert!(rows(&st).is_empty());
     }
 
     #[tokio::test]
-    async fn rate_limits_one_address() {
+    async fn rate_limits_one_source() {
         let st = state("http://127.0.0.1:9", None);
-        for i in 0..RATE_LIMIT {
-            let resp = app(st.clone())
-                .oneshot(post_report(body(ID), &[]))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK, "report {i}");
+        for i in 0..LIMITS.per_source {
+            assert_eq!(
+                send(&st, post_report(body(ID), &[])).await,
+                StatusCode::OK,
+                "report {i}"
+            );
         }
-        let resp = app(st.clone())
-            .oneshot(post_report(body(ID), &[]))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(rows(&st).len(), RATE_LIMIT as usize);
+        assert_eq!(
+            send(&st, post_report(body(ID), &[])).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Another address is not limited by the first.
+        assert_eq!(
+            send(&st, post_report(body(ID), &[("x-real-ip", "10.9.9.9")])).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn global_and_source_caps_hold() {
+        let limits = Limits {
+            per_source: 10,
+            global: 5,
+            sources: 2,
+            geo_entries: 2,
+        };
+        let st = state_with("http://127.0.0.1:9", None, limits);
+        let from = |ip: &str| post_report(body(ID), &[("x-real-ip", ip)]);
+        assert_eq!(send(&st, from("10.0.0.2")).await, StatusCode::OK);
+        assert_eq!(send(&st, from("10.0.0.3")).await, StatusCode::OK);
+        // The source table is full: a third source is refused.
+        assert_eq!(
+            send(&st, from("10.0.0.4")).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        for _ in 0..3 {
+            assert_eq!(send(&st, from("10.0.0.2")).await, StatusCode::OK);
+        }
+        // Five admitted in this window: the global budget is spent.
+        assert_eq!(
+            send(&st, from("10.0.0.3")).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     #[test]
-    fn client_ip_trusts_the_edge() {
-        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+    fn ipv6_sources_share_their_64() {
+        let k = Keyer::new();
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:ffff::9".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(k.source(a), k.source(b));
+        assert_ne!(k.source(a), k.source(c));
+        assert_ne!(k.key(a), k.key(b));
+    }
+
+    #[test]
+    fn client_ip_trusts_only_the_edge() {
+        let edge: IpAddr = "10.0.0.1".parse().unwrap();
         let mut h = HeaderMap::new();
-        assert_eq!(client_ip(&h, peer), peer);
+        assert_eq!(client_ip(&h, edge), edge);
         h.insert("x-forwarded-for", "6.6.6.6, 9.9.9.9".parse().unwrap());
-        assert_eq!(client_ip(&h, peer), "9.9.9.9".parse::<IpAddr>().unwrap());
+        assert_eq!(client_ip(&h, edge), "9.9.9.9".parse::<IpAddr>().unwrap());
         h.insert("x-real-ip", "8.8.4.4".parse().unwrap());
-        assert_eq!(client_ip(&h, peer), "8.8.4.4".parse::<IpAddr>().unwrap());
+        assert_eq!(client_ip(&h, edge), "8.8.4.4".parse::<IpAddr>().unwrap());
+        // An IPv4 peer on the dual-stack listener.
+        let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert_eq!(client_ip(&h, mapped), "8.8.4.4".parse::<IpAddr>().unwrap());
+        let direct: IpAddr = "::ffff:1.2.3.4".parse().unwrap();
+        assert_eq!(client_ip(&h, direct), "1.2.3.4".parse::<IpAddr>().unwrap());
     }
 
     #[test]
@@ -721,10 +945,17 @@ mod tests {
             "::1",
             "fd00::1",
             "fe80::1",
+            "::ffff:10.0.0.1",
+            "::ffff:100.64.0.1",
         ] {
             assert!(!is_public(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["8.8.8.8", "100.128.0.1", "2001:4860:4860::8888"] {
+        for ip in [
+            "8.8.8.8",
+            "100.128.0.1",
+            "2001:4860:4860::8888",
+            "::ffff:8.8.8.8",
+        ] {
             assert!(is_public(ip.parse().unwrap()), "{ip}");
         }
     }
@@ -733,7 +964,7 @@ mod tests {
     fn prune_keeps_recent() {
         let conn = open_db(Path::new(":memory:")).unwrap();
         conn.execute(
-            "INSERT INTO reports (received_at, install_id, version, groups, sites, nodes) VALUES ('2020-01-01T00:00:00Z', ?1, '1.0.0', 1, 1, 1)",
+            "INSERT INTO reports (day, received_at, install_id, version, groups, sites, nodes) VALUES ('2020-01-01', '2020-01-01T00:00:00Z', ?1, '1.0.0', 1, 1, 1)",
             [ID],
         )
         .unwrap();

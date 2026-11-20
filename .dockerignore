@@ -21,3 +21,5 @@ playground/chaos-results
 **/__pycache__
 **/*.py[cod]
 *.log
+telemetry-server
+.railway

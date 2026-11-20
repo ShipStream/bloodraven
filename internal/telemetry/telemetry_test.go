@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -32,37 +33,35 @@ func env(vars map[string]string) func(string) string {
 }
 
 func TestResolveSettings(t *testing.T) {
+	bad := map[string]string{"BLOODRAVEN_TELEMETRY_ENDPOINT": "telemetry.example"}
 	cases := []struct {
 		name     string
 		flag     bool
+		flagErr  error
 		vars     map[string]string
 		enabled  bool
+		invalid  bool
 		endpoint string
-		wantErr  bool
 	}{
 		{name: "default on", flag: true, enabled: true, endpoint: DefaultEndpoint},
-		{name: "flag off", flag: false, endpoint: DefaultEndpoint},
-		{name: "do not track 1", flag: true, vars: map[string]string{"DO_NOT_TRACK": "1"}, endpoint: DefaultEndpoint},
-		{name: "do not track true", flag: true, vars: map[string]string{"DO_NOT_TRACK": "true"}, endpoint: DefaultEndpoint},
-		{name: "do not track word", flag: true, vars: map[string]string{"DO_NOT_TRACK": "yes"}, endpoint: DefaultEndpoint},
+		{name: "flag off", flag: false},
+		{name: "do not track 1", flag: true, vars: map[string]string{"DO_NOT_TRACK": "1"}},
+		{name: "do not track true", flag: true, vars: map[string]string{"DO_NOT_TRACK": "true"}},
+		{name: "do not track word", flag: true, vars: map[string]string{"DO_NOT_TRACK": "yes"}},
 		{name: "do not track 0", flag: true, vars: map[string]string{"DO_NOT_TRACK": "0"}, enabled: true, endpoint: DefaultEndpoint},
 		{name: "do not track false", flag: true, vars: map[string]string{"DO_NOT_TRACK": "false"}, enabled: true, endpoint: DefaultEndpoint},
 		{name: "endpoint override", flag: true, vars: map[string]string{"BLOODRAVEN_TELEMETRY_ENDPOINT": "http://proxy.local/r"}, enabled: true, endpoint: "http://proxy.local/r"},
-		{name: "bad endpoint", flag: true, vars: map[string]string{"BLOODRAVEN_TELEMETRY_ENDPOINT": "telemetry.example"}, wantErr: true},
+		// Unreadable settings turn the report off and never stop the operator.
+		{name: "bad endpoint", flag: true, vars: bad, invalid: true},
+		{name: "bad BLOODRAVEN_TELEMETRY", flag: true, flagErr: errors.New(`BLOODRAVEN_TELEMETRY="off" is not a boolean`), invalid: true},
+		// An opt-out wins over a bad endpoint, which is then not a problem.
+		{name: "bad endpoint, flag off", flag: false, vars: bad},
+		{name: "bad endpoint, do not track", flag: true, vars: map[string]string{"BLOODRAVEN_TELEMETRY_ENDPOINT": "x", "DO_NOT_TRACK": "1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := ResolveSettings(tc.flag, env(tc.vars))
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected an error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if s.Enabled != tc.enabled || s.Endpoint != tc.endpoint {
+			s := ResolveSettings(tc.flag, tc.flagErr, env(tc.vars))
+			if s.Enabled != tc.enabled || s.Invalid != tc.invalid || s.Endpoint != tc.endpoint {
 				t.Fatalf("got %+v", s)
 			}
 			if !s.Enabled && s.Reason == "" {
@@ -350,5 +349,47 @@ func TestStartReportsUntilCancelled(t *testing.T) {
 func TestOperatorNamespacePrefersPodNamespace(t *testing.T) {
 	if got := OperatorNamespace(env(map[string]string{"POD_NAMESPACE": " ops "})); got != "ops" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestReportRefusesRedirects(t *testing.T) {
+	var redirected int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected++ }))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	r := newReporter(t, c, srv.URL)
+	if err := r.ReportOnce(context.Background()); err == nil {
+		t.Fatal("a redirect must fail the report")
+	}
+	if redirected != 0 {
+		t.Fatal("the report was replayed to the redirect target")
+	}
+}
+
+func TestFailureLoggedAtInfoOnce(t *testing.T) {
+	var logs bytes.Buffer
+	r := &Reporter{Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	r.logFailure(errors.New("dial tcp: no route"))
+	r.logFailure(errors.New("dial tcp: no route"))
+	if n := strings.Count(logs.String(), msgFailed); n != 1 {
+		t.Fatalf("logged %d failures at INFO, want 1:\n%s", n, logs.String())
+	}
+}
+
+func TestStartClearsUpdateMetricWhenItStops(t *testing.T) {
+	metrics.UpdateAvailable.Reset()
+	metrics.UpdateAvailable.WithLabelValues("9.9.9").Set(1)
+	r := &Reporter{FirstDelay: func() time.Duration { return time.Hour }}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := testutil.CollectAndCount(metrics.UpdateAvailable); n != 0 {
+		t.Fatalf("%d update series left after the reporter stopped", n)
 	}
 }

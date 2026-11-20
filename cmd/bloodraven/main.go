@@ -139,15 +139,7 @@ func main() {
 	}
 
 	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
-	if telemetryEnvErr != nil {
-		logger.Error("invalid usage reporting configuration", "error", telemetryEnvErr.Error())
-		os.Exit(1)
-	}
-	telemetrySettings, err := telemetry.ResolveSettings(*telemetryEnabled, os.Getenv)
-	if err != nil {
-		logger.Error("invalid usage reporting configuration", "error", err.Error())
-		os.Exit(1)
-	}
+	telemetrySettings := telemetry.ResolveSettings(*telemetryEnabled, telemetryEnvErr, os.Getenv)
 	telemetry.LogSettings(logger, telemetrySettings)
 	controller.LogOperatorLicense(logger, *licenseToken, license.ProductionKey, time.Now())
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
@@ -463,14 +455,15 @@ func main() {
 	if telemetrySettings.Enabled {
 		if err := mgr.Add(&telemetry.Reporter{
 			Reader:    mgr.GetAPIReader(),
+			Groups:    mgr.GetClient(),
 			Writer:    mgr.GetClient(),
 			Logger:    logger,
 			Endpoint:  telemetrySettings.Endpoint,
 			Version:   Version,
 			Namespace: telemetry.OperatorNamespace(os.Getenv),
 		}); err != nil {
-			logger.Error("unable to add usage reporter", "error", err)
-			os.Exit(1)
+			// Only possible before Start; the operator runs without it.
+			logger.Warn(msgUsageReporterNotAdded, "error", err.Error())
 		}
 	}
 
@@ -480,6 +473,8 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+const msgUsageReporterNotAdded = "usage reporter not started"
 
 // envBool reads a boolean environment variable; unset or empty is def.
 func envBool(name string, def bool) (bool, error) {

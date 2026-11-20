@@ -13,7 +13,10 @@ import { defineRailway, project, service, volume } from 'railway/iac'
  *
  * bloodraven-telemetry is the usage report server (telemetry-server/). Its
  * SQLite database lives on the volume at /data: one replica only, since two
- * would each write their own copy.
+ * would each write their own copy. Keep telemetry.bloodraven.dev a plain
+ * CNAME (no CDN proxy): the server trusts forwarding headers only from
+ * Railway's edge. Variables are unmanaged (set with `railway variables`):
+ * PORT=8080, which the domain targets, and optionally IPINFO_TOKEN.
  */
 export const partial = 'bloodraven'
 

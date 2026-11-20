@@ -310,6 +310,12 @@ The administrator's controls are the annotations `bloodraven.shipstream.io/rollo
   - `pointInTime.sites`, `allowUnverifiedCrossSite`, `PITRBackupBoundUnknown`, `PITRCrossSiteOrder`, `PITRArchiveSiteOmitted` and `PointInTimeCrossSiteUnverified` are gone in v1.7.0. `initFromBackup.pointInTime.archiveProfileName` is required and may not resolve to the group's own active PITR destination.
 - **Action**: do not rewrite manifests or `archive.json`, rewrite archived timestamps, or point a restored group's own PITR profile at the source archive. Refusals after the dump load leave the bootstrap target loaded; empty it before retrying. See [playbook 32](./references/troubleshooting_playbooks.md#32-pitr-restore-or-verification-refused-archive-identity-dump-target-coverage) and, for divergent history, split brain, gap, order and reuse, [playbook 42](./references/troubleshooting_playbooks.md#42-pitr-refused-divergent-history-lost-at-promotion-split-brain-gap-order-conflict-or-inversion-reuse); the marker is [playbook 40](./references/troubleshooting_playbooks.md#40-pitr-unsafe-history-marker-archiveunsafehistory) and reissue risk [playbook 41](./references/troubleshooting_playbooks.md#41-reissue-risk-a-server-that-could-reissue-archived-gtids-pitrarchivereissueriskdetected).
 
+### 11. Operator is behind the latest release, or asks about usage reporting
+
+- **Symptom**: `bloodraven_update_available{latest_version="…"} 1`, or the operator log `newer bloodraven release available`. Neither affects failover.
+- **Probe**: the operator's startup line `anonymous usage reporting enabled` / `disabled` (with `reason`) says whether the daily report is on; `usage report failed` (INFO once per process) means no report is going out (egress, proxy, NetworkPolicy). The install ID is the ConfigMap `bloodraven-telemetry` in the operator's namespace.
+- **Action**: read the release notes before upgrading (upgrade policy applies; never jump CRDs). To turn the report off: chart value `telemetry.enabled=false` (or `DO_NOT_TRACK=1`); deleting the ConfigMap resets the install ID. A failed report needs no fix. What is sent and kept: https://bloodraven.dev/docs/configuration/usage-reporting.
+
 ## Phase 4: Standard Diagnostic Report Format
 
 When reporting findings to the operator, structure your analysis as follows:

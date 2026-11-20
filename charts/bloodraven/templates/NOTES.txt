@@ -20,8 +20,7 @@ It moves the stored objects to shipstream.io/v1beta1. See
 https://bloodraven.dev/docs/operations/upgrade-policy#upgrading-from-v170-to-v180
 {{- end }}
 
-{{- $telemetry := .Values.telemetry | default dict }}
-{{- if or (not (hasKey $telemetry "enabled")) $telemetry.enabled }}
+{{- if eq (include "bloodraven.telemetryEnabled" .) "true" }}
 
 Usage reporting is on: once a day the operator sends a random install ID, its
 version, and its counts of failover groups, sites and nodes. Nothing else.

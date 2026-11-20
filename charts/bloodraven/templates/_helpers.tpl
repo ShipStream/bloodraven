@@ -126,3 +126,43 @@ adding its own (two mounts at one path make the pod invalid).
 {{- if eq (trimSuffix "/" (.mountPath | default "")) "/tmp" -}}true{{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+"true" or "false": whether the usage report is on. A missing telemetry key
+(`helm upgrade --reuse-values` from a release before it) is on;
+`telemetry: false` is off. Anything that is not a map or a boolean fails.
+*/}}
+{{- define "bloodraven.telemetryEnabled" -}}
+{{- $t := .Values.telemetry -}}
+{{- if kindIs "invalid" $t -}}
+true
+{{- else if kindIs "bool" $t -}}
+{{- $t -}}
+{{- else if kindIs "map" $t -}}
+{{- if not (hasKey $t "enabled") -}}
+true
+{{- else if kindIs "bool" $t.enabled -}}
+{{- $t.enabled -}}
+{{- else -}}
+{{- fail (printf "telemetry.enabled must be true or false, got %v" $t.enabled) -}}
+{{- end -}}
+{{- else -}}
+{{- fail (printf "telemetry must be a map (telemetry.enabled: true|false), got %v" $t) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The usage report endpoint override, empty for the default. It must be an
+http(s) URL: the operator turns the report off for anything else.
+*/}}
+{{- define "bloodraven.telemetryEndpoint" -}}
+{{- $t := .Values.telemetry -}}
+{{- if kindIs "map" $t -}}
+{{- with $t.endpoint -}}
+{{- if not (regexMatch "^https?://[^/\\s]+" .) -}}
+{{- fail (printf "telemetry.endpoint must be an http(s) URL, got %q" .) -}}
+{{- end -}}
+{{- . -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

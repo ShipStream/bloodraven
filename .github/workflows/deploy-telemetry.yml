@@ -7,8 +7,9 @@ name: Deploy Telemetry
 # `RAILWAY_TELEMETRY_SERVICE` if the service has another name.
 #
 # The server answers every report with the latest release, which is baked
-# into the image: each run writes the latest plain vX.Y.Z GitHub Release into
-# telemetry-server/latest-version before uploading. So it runs:
+# into the image: each run writes the highest plain vX.Y.Z GitHub Release into
+# telemetry-server/latest-version, and the commit into build-id, before
+# uploading. So it runs:
 #
 #   * after every release (release.yml calls it once the release is
 #     published), so operators learn about the new release;
@@ -50,22 +51,30 @@ jobs:
 
       - name: Test
         working-directory: telemetry-server
-        run: cargo test --locked
+        # rustup installs the release and components rust-toolchain.toml pins.
+        run: |
+          rustup toolchain install
+          cargo test --locked
 
       - name: Resolve the latest release
         id: latest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # `gh release view` with no tag is the release marked Latest, which
-          # excludes drafts and prereleases.
-          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
-          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Latest release tag '$tag' is not a plain vX.Y.Z release."
+          # The highest plain release, not the one marked Latest: a backport
+          # (v1.7.5 after v1.8.0) is marked Latest too, and answering it
+          # would hide newer releases from current installs.
+          tag=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 200 --json tagName --jq '.[].tagName' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ -z "$tag" ]; then
+            echo "::error::No plain vX.Y.Z release found."
             exit 1
           fi
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "build=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
           printf '%s\n' "${tag#v}" > telemetry-server/latest-version
+          git rev-parse --short=12 HEAD > telemetry-server/build-id
           echo "Latest release: ${tag#v}"
 
       - name: Require RAILWAY_TOKEN
@@ -95,12 +104,15 @@ jobs:
 
       - name: Check the live answer
         env:
-          WANT: ${{ steps.latest.outputs.version }}
+          WANT: ${{ steps.latest.outputs.version }} ${{ steps.latest.outputs.build }}
         run: |
-          # The new deployment takes over after its health check passes.
+          # `railway up --ci` returns when the build ends; the new deployment
+          # takes over after its health check passes. The build ID tells it
+          # from the deployment it replaces.
+          got=""
           for _ in $(seq 1 30); do
-            got=$(curl -fsS https://telemetry.bloodraven.dev/v1/latest \
-              | jq -r .latestVersion || true)
+            got=$(curl -fsS -m 10 https://telemetry.bloodraven.dev/v1/latest \
+              | jq -r '"\(.latestVersion) \(.build)"' || true)
             if [ "$got" = "$WANT" ]; then
               echo "telemetry.bloodraven.dev answers $got"
               exit 0

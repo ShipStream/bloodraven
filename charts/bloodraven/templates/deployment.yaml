@@ -160,10 +160,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- $telemetry := .Values.telemetry | default dict }}
             - name: BLOODRAVEN_TELEMETRY
-              value: {{ if hasKey $telemetry "enabled" }}{{ $telemetry.enabled | quote }}{{ else }}"true"{{ end }}
-            {{- with $telemetry.endpoint }}
+              value: {{ include "bloodraven.telemetryEnabled" . | quote }}
+            {{- with include "bloodraven.telemetryEndpoint" . }}
             - name: BLOODRAVEN_TELEMETRY_ENDPOINT
               value: {{ . | quote }}
             {{- end }}

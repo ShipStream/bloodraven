@@ -106,8 +106,9 @@ telemetry:
   # operator logs and exports as bloodraven_update_available. Set false to
   # turn it off. See https://bloodraven.dev/docs/configuration/usage-reporting
   enabled: true
-  # -- Override the report endpoint (for example a forwarding proxy). Empty
-  # uses https://telemetry.bloodraven.dev/v1/report.
+  # -- Override the report endpoint (for example a forwarding proxy): an
+  # http(s) URL, or the render fails. Empty uses
+  # https://telemetry.bloodraven.dev/v1/report.
   endpoint: ""
 
 # -- Additional environment variables for the operator container
