@@ -314,6 +314,60 @@ func (f *FailoverController) abortHandoff(ctx context.Context, candidateSite str
 }
 
 func (f *FailoverController) abortHandoffWithin(ctx context.Context, budget time.Duration, candidateSite string, source mysql.Checker, held mysql.GTIDSet, cause error) error {
+	return f.releaseFence(ctx, budget, handoffFenceRelease, candidateSite, source, held, cause)
+}
+
+// fenceReleaseText is the wording of one caller of releaseFence: its log
+// messages (each is in the log schema) and the suffixes it appends to the
+// cause. The *Err formats take the cause (%w), then a transaction count
+// (%d) or, for failedErr, the unfence error (%v).
+type fenceReleaseText struct {
+	restartedLog, restartedErr       string
+	writableLossLog, writableLossErr string
+	unknownLossLog, unknownLossErr   string
+	readOnlyLossLog, readOnlyLossErr string
+	failedLog, failedErr             string
+	doneLog                          string
+}
+
+var (
+	// handoffFenceRelease is the maintenance handoff's abort.
+	handoffFenceRelease = fenceReleaseText{
+		restartedLog:    "maintenance handoff: source left read-only: it restarted during the handoff",
+		restartedErr:    "%w; source left read-only: it restarted during the handoff and is read-only by its own start, not by the handoff's fence",
+		writableLossLog: "maintenance handoff: source is writable and no longer holds transactions it held before the handoff",
+		writableLossErr: "%w; source is writable without %d transactions it held before the handoff (restarted on older data, and not fenced by the handoff any more); it was left as found",
+		unknownLossLog:  "maintenance handoff: source not unfenced: it no longer holds transactions it held before the handoff",
+		unknownLossErr:  "%w; source not unfenced: it lacks %d transactions it held before the handoff (restarted on older data?); whether it is read-only could not be read",
+		readOnlyLossLog: "maintenance handoff: source left read-only: it no longer holds transactions it held before the handoff",
+		readOnlyLossErr: "%w; source left read-only: it lacks %d transactions it held before the handoff (restarted on older data?)",
+		failedLog:       "maintenance handoff: rollback failed: source may be left read-only",
+		failedErr:       "%w; source unfence failed: %v",
+		doneLog:         "maintenance handoff aborted; source unfenced",
+	}
+	// emergencyFenceRelease is the abort of an emergency failover whose
+	// candidate did not catch up with the old primary it fenced.
+	emergencyFenceRelease = fenceReleaseText{
+		restartedLog:    "emergency failover: old primary left read-only: it restarted during the failover",
+		restartedErr:    "%w; old primary left read-only: it restarted during the failover and is read-only by its own start, not by the failover's fence",
+		writableLossLog: "emergency failover: old primary is writable and no longer holds transactions it held at the fence",
+		writableLossErr: "%w; old primary is writable without %d transactions it held at the fence (restarted on older data, and not fenced by the failover any more); it was left as found",
+		unknownLossLog:  "emergency failover: old primary not unfenced: it no longer holds transactions it held at the fence",
+		unknownLossErr:  "%w; old primary not unfenced: it lacks %d transactions it held at the fence (restarted on older data?); whether it is read-only could not be read",
+		readOnlyLossLog: "emergency failover: old primary left read-only: it no longer holds transactions it held at the fence",
+		readOnlyLossErr: "%w; old primary left read-only: it lacks %d transactions it held at the fence (restarted on older data?)",
+		failedLog:       "emergency failover: unfence failed: old primary may be left read-only",
+		failedErr:       "%w; old primary unfence failed: %v",
+		doneLog:         "emergency failover aborted; old primary unfenced",
+	}
+)
+
+// releaseFence lifts the fence one operation set on source and nothing
+// else, after that operation aborted before any other site could accept
+// writes; see abortHandoff for what it refuses to lift. held is the
+// source's GTID set as the operation last read it. It returns cause
+// annotated with the outcome, and logs it with t's wording.
+func (f *FailoverController) releaseFence(ctx context.Context, budget time.Duration, t fenceReleaseText, candidateSite string, source mysql.Checker, held mysql.GTIDSet, cause error) error {
 	rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 	// The source's flags as they are now. readOnlyKnown is false when the
@@ -332,44 +386,40 @@ func (f *FailoverController) abortHandoffWithin(ctx context.Context, budget time
 	})
 	readOnlyKnown := probeErr == nil
 	if readOnlyKnown && superKnown && readOnly && !superReadOnly {
-		f.logger.Error("maintenance handoff: source left read-only: it restarted during the handoff",
-			"candidate", candidateSite, "cause", cause)
-		return fmt.Errorf("%w; source left read-only: it restarted during the handoff and is read-only by its own start, not by the handoff's fence", cause)
+		f.logger.Error(t.restartedLog, "candidate", candidateSite, "cause", cause)
+		return fmt.Errorf(t.restartedErr, cause)
 	}
 	_, now, readErr := readGTIDSetRaw(rbCtx, source)
 	if missing := held.Subtract(now); readErr == nil && !missing.IsEmpty() {
 		switch {
 		case readOnlyKnown && !readOnly:
 			// Not behind any fence: it restarted on older data and came up
-			// writable, or something else made it writable. The handoff
-			// sends it nothing. It is the group's primary now, without
+			// writable, or something else made it writable. Nothing is
+			// sent to it. It is the group's primary now, without
 			// transactions it issued; the replica GTID audit reports them
 			// on the site that still holds them, and that it is the
 			// primary which lacks them (crossCheckOwnLoss).
-			f.logger.Error("maintenance handoff: source is writable and no longer holds transactions it held before the handoff",
+			f.logger.Error(t.writableLossLog,
 				"candidate", candidateSite, "cause", cause,
 				"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
-			return fmt.Errorf("%w; source is writable without %d transactions it held before the handoff (restarted on older data, and not fenced by the handoff any more); it was left as found",
-				cause, missing.TransactionCount())
+			return fmt.Errorf(t.writableLossErr, cause, missing.TransactionCount())
 		case !readOnlyKnown:
-			f.logger.Error("maintenance handoff: source not unfenced: it no longer holds transactions it held before the handoff",
+			f.logger.Error(t.unknownLossLog,
 				"candidate", candidateSite, "cause", cause, "error", probeErr,
 				"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
-			return fmt.Errorf("%w; source not unfenced: it lacks %d transactions it held before the handoff (restarted on older data?); whether it is read-only could not be read",
-				cause, missing.TransactionCount())
+			return fmt.Errorf(t.unknownLossErr, cause, missing.TransactionCount())
 		}
-		f.logger.Error("maintenance handoff: source left read-only: it no longer holds transactions it held before the handoff",
+		f.logger.Error(t.readOnlyLossLog,
 			"candidate", candidateSite, "cause", cause,
 			"missingTransactions", missing.TransactionCount(), "missingGtid", truncateGtidSet(missing.String()))
-		return fmt.Errorf("%w; source left read-only: it lacks %d transactions it held before the handoff (restarted on older data?)",
-			cause, missing.TransactionCount())
+		return fmt.Errorf(t.readOnlyLossErr, cause, missing.TransactionCount())
 	}
 	rbErr := unfenceSite(rbCtx, source)
 	if rbErr != nil {
-		f.logger.Error("maintenance handoff: rollback failed: source may be left read-only", "candidate", candidateSite, "cause", cause, "error", rbErr)
-		return fmt.Errorf("%w; source unfence failed: %v", cause, rbErr)
+		f.logger.Error(t.failedLog, "candidate", candidateSite, "cause", cause, "error", rbErr)
+		return fmt.Errorf(t.failedErr, cause, rbErr)
 	}
-	f.logger.Warn("maintenance handoff aborted; source unfenced", "candidate", candidateSite, "error", cause)
+	f.logger.Warn(t.doneLog, "candidate", candidateSite, "error", cause)
 	return cause
 }
 

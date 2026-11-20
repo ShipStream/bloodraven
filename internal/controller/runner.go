@@ -85,6 +85,9 @@ type managedTopology struct {
 	// lastOwnLossPromotionRefused is the same for promotions refused
 	// because the candidates lack transactions they issued themselves.
 	lastOwnLossPromotionRefused []string
+	// lastCatchUpRefusalSeq is the Seq of the last
+	// PromotionRefusedCandidateBehind Event emitted.
+	lastCatchUpRefusalSeq uint64
 	// ownLossAnnounced is, by site, the own-loss report the last status
 	// write announced (emitOwnLossEvents). It takes the place of the
 	// stored status for the comparison once a write has happened: an
@@ -3122,6 +3125,13 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1beta1.MysqlFail
 		}
 		mt.lastOwnLossPromotionRefused = append([]string(nil), snap.OwnLossPromotionRefused...)
 	}
+	if c := snap.PromotionCatchUpRefusal; c != nil && c.Seq != mt.lastCatchUpRefusalSeq {
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventPromotionRefusedCandidateBehind,
+			"emergency failover to %s refused: the old primary %s answered the fence and %s did not catch up with it (%d transactions missing, waited %s: %s); old primary %s; next attempt at %s",
+			c.Candidate, c.OldPrimary, c.Candidate, c.MissingTransactions, c.Waited.Round(time.Millisecond), c.Reason,
+			catchUpOldPrimaryOutcomeText(c.OldPrimaryOutcome), c.RetryAt.UTC().Format(time.RFC3339))
+		mt.lastCatchUpRefusalSeq = c.Seq
+	}
 	if snap.BootstrapRefusedRestoreHold != mt.lastBootstrapRefusedRestoreHold {
 		if snap.BootstrapRefusedRestoreHold != "" {
 			r.recorder.Eventf(fg, corev1.EventTypeWarning, v1beta1.EventBootstrapRefusedRestoreHold,
@@ -3623,4 +3633,17 @@ func buildSiteDSNFromCreds(username, password string, fg *v1beta1.MysqlFailoverG
 		cfg.TLSConfig = tlsConfigName
 	}
 	return cfg.FormatDSN()
+}
+
+// catchUpOldPrimaryOutcomeText words CandidateNotCaughtUpError.OldPrimary
+// for the PromotionRefusedCandidateBehind Event.
+func catchUpOldPrimaryOutcomeText(outcome string) string {
+	switch outcome {
+	case OldPrimaryUnfenced:
+		return "unfenced and serving writes again"
+	case OldPrimaryLeftFenced:
+		return "left fenced: it was read-only before the failover fenced it"
+	default:
+		return "not unfenced (see the operator log: it restarted, lost transactions, or the unfence failed)"
+	}
 }

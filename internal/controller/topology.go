@@ -297,6 +297,27 @@ type TopologySnapshot struct {
 	// refused because an in-place restore holds it ("" once a clone
 	// started). Used by the runner to emit an Event; not persisted.
 	BootstrapRefusedRestoreHold string
+
+	// PromotionCatchUpRefusal is the last emergency failover the catch-up
+	// gate refused (nil before the first). Its Seq changes with each
+	// refusal; the runner emits one Event per Seq. Not persisted.
+	PromotionCatchUpRefusal *PromotionCatchUpRefusal
+}
+
+// PromotionCatchUpRefusal records an emergency failover refused because
+// the old primary answered the fence and the candidate did not catch up
+// with it (CandidateNotCaughtUpError).
+type PromotionCatchUpRefusal struct {
+	Seq                 uint64
+	Candidate           string
+	OldPrimary          string
+	MissingTransactions int64
+	Waited              time.Duration
+	Reason              string
+	// OldPrimaryOutcome is OldPrimaryUnfenced, OldPrimaryLeftFenced or
+	// OldPrimaryNotReleased.
+	OldPrimaryOutcome string
+	RetryAt           time.Time
 }
 
 // siteTracker tracks debounce counters and current state for one site.
@@ -589,6 +610,24 @@ type TopologyManager struct {
 	pendingDivergentPromotion    *DivergentPromotion
 	lastDivergentStallLog        time.Time
 	lastFollowerDriftDeferredLog time.Time
+
+	// catchUpRefusal is the last emergency failover the catch-up gate
+	// refused, and catchUpRefusalSeq its sequence number. catchUpRefusals
+	// counts consecutive refusals of the same candidate and old primary
+	// (catchUpRefusedCandidate, catchUpRefusedOldPrimary), each spaced
+	// further apart up to catchUpRefusalMaxBackoff; catchUpRetryAt is when
+	// the next attempt may pause the old primary's writes again. Reset by a
+	// promotion. All protected by mu.
+	catchUpRefusal           *PromotionCatchUpRefusal
+	catchUpRefusalSeq        uint64
+	catchUpRefusals          int
+	catchUpRefusedCandidate  string
+	catchUpRefusedOldPrimary string
+	lastCatchUpRefusal       time.Time
+	catchUpRetryAt           time.Time
+	// catchUpDeferLoggedSeq is the refusal whose backoff deferral was
+	// last logged at Info.
+	catchUpDeferLoggedSeq uint64
 
 	// lastReassert is when checkPrimaryReassert last restored (or attempted
 	// to restore) writability on a fenced promoted primary. Rate-limits the
@@ -1031,6 +1070,16 @@ const (
 	// failed, so a persistently failing candidate is not re-fenced and
 	// re-drained on every poll.
 	failoverRetryBackoff = 10 * time.Second
+	// catchUpRefusalMaxBackoff caps the delay between emergency failovers
+	// the catch-up gate keeps refusing for the same candidate and old
+	// primary. Each refusal paused the old primary's writes for up to the
+	// gate's 30s, so consecutive refusals are spaced 10s, 20s, 40s, 80s,
+	// then 2 minutes apart. An old primary that stops answering is failed
+	// over from at once (deferAfterCatchUpRefusal probes it).
+	catchUpRefusalMaxBackoff = 2 * time.Minute
+	// catchUpRefusalResetAfter starts the refusal count again when the
+	// previous refusal is this old.
+	catchUpRefusalResetAfter = 10 * time.Minute
 )
 
 // siteRecovery tracks one site's old-primary recovery lifecycle.
@@ -2524,6 +2573,10 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		BootstrapRefusedRestoreHold:    tm.bootstrapRefusedSite,
 		BootstrapFailureResolved:       tm.bootstrapFailureResolvedLocked(),
 	}
+	if r := tm.catchUpRefusal; r != nil {
+		cp := *r
+		snap.PromotionCatchUpRefusal = &cp
+	}
 	if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
 		snap.DeploymentEpoch = 0
 	}
@@ -2888,6 +2941,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// may carry unique writes, and the operator's designated
 	// authority is what matters.
 	promote := ""
+	// splitBrainWinner marks a promotion chosen by split-brain policy. The
+	// winner cannot contain the losers' writes, so Execute's catch-up gate
+	// must not wait for them (FailoverOptions.AllowDivergentOldPrimary).
+	splitBrainWinner := false
 	if action.SplitBrain && lastFailoverTarget == "" && !tm.bootstrapBlocksCrossSite() && len(tm.cfg.SitePriorities) > 0 {
 		// A writable site that lacks transactions it issued itself is no
 		// contender: it is fenced (fenceWritableOwnLossSites), and the
@@ -2929,6 +2986,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				}
 			}
 			promote = winner
+			splitBrainWinner = true
 		}
 	}
 	if promote == "" && len(action.PromotionCandidates) > 0 {
@@ -3066,6 +3124,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			}
 		}
 
+		if tm.deferAfterCatchUpRefusal(ctx, candidate.name, oldPrimaryName, oldPrimaryChecker, splitBrainWinner) {
+			return
+		}
+
 		tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
 		if tm.beforePromotionClaim != nil {
 			tm.beforePromotionClaim(candidate.name)
@@ -3089,7 +3151,12 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 		defer tm.finishDeploymentTopologyChange()
 
-		promotionGtid, err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name)
+		promotionGtid, err := tm.failover.ExecuteWithOptions(ctx, candidate.mysql, oldPrimaryChecker, candidate.name,
+			FailoverOptions{OldPrimarySite: oldPrimaryName, AllowDivergentOldPrimary: splitBrainWinner})
+		if refusal := (*CandidateNotCaughtUpError)(nil); errors.As(err, &refusal) {
+			tm.recordCatchUpRefusal(refusal)
+			return
+		}
 		if err != nil {
 			retryAt := tm.clock.Now().Add(failoverRetryBackoff)
 			tm.logger.Error("failover failed", "error", err, "retryAt", retryAt)
@@ -3114,6 +3181,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		// operator no longer forgets the promotion.
 		tm.recordFailover(ctx, tm.clock.Now(), candidate.name, promotionGtid)
 		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
+		tm.resetCatchUpRefusals()
 
 		if err := tm.applyDNS(ctx, candidate.name, candidate.lbIP); err != nil {
 			tm.logger.Error("DNS flip failed after successful promotion", "site", candidate.name, "error", err)
@@ -3412,6 +3480,17 @@ func (tm *TopologyManager) previousPrimary(newPrimary string) string {
 		}
 		if tm.sites[i].state == state.StateWritable {
 			return tm.sites[i].name
+		}
+	}
+	// A group that has never failed over has no target, and its lost
+	// primary is not writable in the operator's view any more: the last
+	// site it saw as the unique writable primary is the one to fence (and,
+	// if it answers, the one the candidate must catch up with).
+	if tm.lastActiveSite != "" && tm.lastActiveSite != newPrimary {
+		for i := range tm.sites {
+			if tm.sites[i].name == tm.lastActiveSite && tm.sites[i].isPromotable() {
+				return tm.lastActiveSite
+			}
 		}
 	}
 	return ""

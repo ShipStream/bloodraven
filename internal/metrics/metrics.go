@@ -34,6 +34,15 @@ var (
 		Help: "Total number of failovers executed. Incremented after successful MySQL promotion.",
 	}, []string{"target_site"})
 
+	// FailoverCatchUpRefusalsTotal counts emergency failovers refused
+	// because the old primary answered the fence and the candidate did not
+	// catch up with its fenced GTID set (issue #202). Each one paused the
+	// old primary's writes for up to 30s.
+	FailoverCatchUpRefusalsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_failover_catchup_refusals_total",
+		Help: "Total emergency failovers refused because the old primary answered the fence and the candidate did not catch up with it. The label is the candidate.",
+	}, []string{"target_site"})
+
 	DeployLeasesActive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_deploy_leases_active",
 		Help: "Number of active deployment leases per group and kind.",
@@ -577,7 +586,7 @@ func DeleteKeyringSiteMetrics(namespace, group, site string) {
 
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
-	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
+	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal, FailoverCatchUpRefusalsTotal,
 		PlannedFailoversTotal, PlannedFailoverDurationSeconds, PlannedFailoverLagWaitSeconds,
 		DeployLeasesActive, DeployLeaseGrantsTotal, DeployLeaseExpirationsTotal,
 		DeployLeaseRevocationsTotal, DeployLeaseAgeSeconds, PlannedFailoversDeferredTotal,

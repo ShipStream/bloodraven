@@ -394,6 +394,12 @@ func (s *rolloutSim) startProcess() {
 			checkers[i] = g.cluster.NewChecker(sc.Name)
 		}
 		fc := controller.NewFailoverControllerWithClock(s.logger, s.clk)
+		// As in the failover trials (newManager): the emergency catch-up
+		// gate waits on the trial's clock.
+		fc.SetCatchUpSleepForSim(func(_ context.Context, d time.Duration) error {
+			s.clk.Advance(d)
+			return nil
+		})
 		uc := controller.NewUpdateController(fc, s.logger)
 		uc.SetTickIntervalForTest(time.Millisecond)
 		uc.SetRolledSiteTimeoutForTest(3 * time.Millisecond)

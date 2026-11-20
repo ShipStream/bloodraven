@@ -285,6 +285,10 @@ func (m *mockMySQL) SetSuperReadOnly(_ context.Context, on bool) error {
 
 func (m *mockMySQL) setSuperReadOnly(pin *int, on bool) error {
 	return m.stmt("SetSuperReadOnly", pin, func() error {
+		// A server that does not answer takes no fence.
+		if m.err != nil {
+			return m.err
+		}
 		if m.superROFailN > 0 {
 			m.superROFailN--
 			return errors.New("transient: connection reset by peer")
@@ -302,6 +306,9 @@ func (m *mockMySQL) setSuperReadOnly(pin *int, on bool) error {
 
 func (m *mockMySQL) KillAppConnections(_ context.Context) (killed int, err error) {
 	err = m.stmt("KillAppConnections", nil, func() error {
+		if m.err != nil {
+			return m.err
+		}
 		i := m.killConnectionCalls
 		m.killConnectionCalls++
 		if i < len(m.killConnectionResults) {
