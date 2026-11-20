@@ -21,6 +21,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -496,7 +497,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Reconcile per-site resources
 	storageSites := make([]v1beta1.SiteStorageStatus, 0, len(fg.Spec.Sites))
-	var storageRequeue time.Duration
+	var storageRequeue, keyringRollRequeue time.Duration
 	for _, site := range fg.Spec.Sites {
 		serverID, err := site.MySQLServerID()
 		if err != nil {
@@ -529,7 +530,15 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			} else {
 				err := r.reconcileDeployment(ctx, &fg, site, serverID, image, pitrRender)
 				var mismatch *workloadSelectorMismatchError
-				if stderrors.As(err, &mismatch) {
+				var keyringHeld *KeyringRollRefusedError
+				if stderrors.As(err, &keyringHeld) {
+					// The site keeps its pod until its running keyring is
+					// escrowed and recorded; the encryption lifecycle
+					// requeues this reconcile while the site is unsealed.
+					logger.Info("site deployment held; replacing its pod would lose keyring keys",
+						"site", site.Name, "reason", keyringHeld.Reason)
+					keyringRollRequeue = encryptionRequeue
+				} else if stderrors.As(err, &mismatch) {
 					// Refused, not retried: the next reconcile checks again
 					// without writing.
 					r.noteWorkloadSelector(&fg, "Deployment", deployName, mismatch)
@@ -590,7 +599,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
 	// any previously managed Dragonfly resources so MySQL-only deployments are
 	// unaffected.
-	deferredRequeue := minPositiveDuration(minPositiveDuration(bindingRequeue, dfUpgrade.wait), storageRequeue)
+	deferredRequeue := minPositiveDuration(minPositiveDuration(minPositiveDuration(bindingRequeue, dfUpgrade.wait), storageRequeue), keyringRollRequeue)
 	if dragonflyRequeue, err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
 	} else if dragonflyRequeue > 0 {
@@ -1540,6 +1549,12 @@ func (r *MysqlFailoverGroupReconciler) renderSiteDeployment(ctx context.Context,
 		if pitr.action == pitrRenderDefer && deploy.ResourceVersion != "" {
 			return nil
 		}
+		// The Deployment as it is, to decide below whether this write
+		// replaces a pod whose keyring holds keys the new one would lack.
+		var running *appsv1.Deployment
+		if deploy.ResourceVersion != "" {
+			running = deploy.DeepCopy()
+		}
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
 			return err
 		}
@@ -2008,6 +2023,15 @@ func (r *MysqlFailoverGroupReconciler) renderSiteDeployment(ctx context.Context,
 			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = fg.Spec.TerminationGracePeriodSeconds
 		}
 		deploy.Spec.Template.Spec.AutomountServiceAccountToken = mysqlPodAutomountToken(fg)
+		// A pod template change replaces the pod (every path writes here:
+		// the ordered update, Recreate and a storage restart). With an
+		// unsealed keyring the new pod starts from the escrow the status
+		// records, so it must hold every key the running pod's does.
+		if running != nil && !equality.Semantic.DeepEqual(running.Spec.Template, deploy.Spec.Template) {
+			if err := r.keyringRollRefusal(ctx, fg, site.Name, running, siteEscrowSecretName(fg, site.Name)); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	// A Deployment another operator release rendered is written only once
