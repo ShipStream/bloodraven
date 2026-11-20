@@ -16,6 +16,7 @@ playground/chaos-results/
 
 # Docus site (site/) build artefacts
 site/node_modules/
+.railway/node_modules/
 site/.nuxt/
 site/.output/
 site/.data/

@@ -213,6 +213,8 @@ upgrade_to_checkout() {
     --set "sidecar.image.repository=${prefix}bloodraven-sidecar"
     --set sidecar.image.tag=playground
     --set "rollout.soak=$ROLLOUT_SOAK"
+    # A test cluster is not an install: keep it out of the usage counts.
+    --set telemetry.enabled=false
     --timeout=180s
   )
 

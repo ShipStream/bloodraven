@@ -1,6 +1,6 @@
 # Bloodraven Commercial License
 
-**ShipStream, LLC — Commercial License Terms, Version 1.0 (2026-08-13)**
+**ShipStream, LLC — Commercial License Terms, Version 1.1 (2026-11-19)**
 
 Bloodraven is distributed under the [Business Source License 1.1](./LICENSE)
 (BSL). The BSL grants free Production Use to individuals, non-commercial users,
@@ -166,11 +166,21 @@ email **licensing@shipstream.io** and ask; the answer is free.
 
 ---
 
-## 8. License Verification
+## 8. License Verification and Usage Reporting
 
-Licensor does not use license servers, activation checks, phone-home telemetry,
-or feature gating. The Software is fully functional without a license key and
-does not contact Licensor.
+Licensor does not use license servers, activation checks, or feature gating,
+and the Software never reports anything about Licensee's license. The Software
+is fully functional without a license key.
+
+The operator sends Licensor a daily anonymous usage report: a random install
+ID, the operator version, and the number of failover groups, sites and cluster
+nodes. Licensor keeps it with the network operator and country of the sending
+address and does not store the address itself; the address is sent to a lookup
+service for that purpose and appears in the hosting provider's request logs.
+The report and what Licensor keeps are described at
+https://bloodraven.dev/docs/configuration/usage-reporting.
+Licensee may turn the report off at any time; doing so never affects operator
+behavior or this license.
 
 On purchase, Licensee receives a license key. Recording it in the
 `MySQLFailoverGroup` spec causes the operator to log the licensee name, edition,

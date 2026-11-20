@@ -24,10 +24,11 @@
 # name the Dragonfly image the playground and the CRD examples pin.
 # workload gates the native dashboard test against the example scrape config,
 # the default MySQL image, and the monitor account's provisioning.
+# telemetry gates the usage report server's Rust checks (telemetry-server/).
 set -euo pipefail
 
-go=false site=false course=false pitr=false dragonfly=false workload=false any=false
-all() { go=true; site=true; course=true; pitr=true; dragonfly=true; workload=true; }
+go=false site=false course=false pitr=false dragonfly=false workload=false telemetry=false any=false
+all() { go=true; site=true; course=true; pitr=true; dragonfly=true; workload=true; telemetry=true; }
 while IFS= read -r f || [ -n "$f" ]; do
   [ -n "$f" ] || continue
   any=true
@@ -43,6 +44,7 @@ while IFS= read -r f || [ -n "$f" ]; do
   esac
   case "$f" in
     .github/workflows/ci.yml|.github/actions/*|.github/scripts/*|Makefile|.gitignore) all ;;
+    telemetry-server/*|.github/workflows/deploy-telemetry.yml) telemetry=true ;;
     site/public/courses/*) site=true; course=true ;;
     site/*) site=true ;;
     course/*) course=true ;;
@@ -59,4 +61,4 @@ while IFS= read -r f || [ -n "$f" ]; do
   esac
 done
 $any || all
-printf 'go=%s\nsite=%s\ncourse=%s\npitr=%s\ndragonfly=%s\nworkload=%s\n' "$go" "$site" "$course" "$pitr" "$dragonfly" "$workload"
+printf 'go=%s\nsite=%s\ncourse=%s\npitr=%s\ndragonfly=%s\nworkload=%s\ntelemetry=%s\n' "$go" "$site" "$course" "$pitr" "$dragonfly" "$workload" "$telemetry"

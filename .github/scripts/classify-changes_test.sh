@@ -4,8 +4,8 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cases=0
 check() {
-  local name="$1" paths="$2" go="$3" site="$4" course="$5" pitr="$6" dragonfly="$7" workload="${8:-false}" expected actual
-  expected="$(printf 'go=%s\nsite=%s\ncourse=%s\npitr=%s\ndragonfly=%s\nworkload=%s\n' "$go" "$site" "$course" "$pitr" "$dragonfly" "$workload")"
+  local name="$1" paths="$2" go="$3" site="$4" course="$5" pitr="$6" dragonfly="$7" workload="${8:-false}" telemetry="${9:-false}" expected actual
+  expected="$(printf 'go=%s\nsite=%s\ncourse=%s\npitr=%s\ndragonfly=%s\nworkload=%s\ntelemetry=%s\n' "$go" "$site" "$course" "$pitr" "$dragonfly" "$workload" "$telemetry")"
   actual="$(printf '%s' "$paths" | "$script_dir/classify-changes.sh")"
   if [ "$actual" != "$expected" ]; then
     printf 'FAIL %s\nexpected:\n%s\nactual:\n%s\n' "$name" "$expected" "$actual" >&2
@@ -21,28 +21,28 @@ check course-output 'site/public/courses/a.html'      false true  true  false fa
 check go 'internal/x.go'                              true  false false false false
 check root-doc 'README.md'                            false false false false false
 check playground-doc 'playground/chaos-scenarios.md'  true  false false false false
-check makefile 'Makefile'                             true  true  true  true  true true
-check ci-workflow '.github/workflows/ci.yml'          true  true  true  true  true true
+check makefile 'Makefile'                             true  true  true  true  true true true
+check ci-workflow '.github/workflows/ci.yml'          true  true  true  true  true true true
 check release-workflow '.github/workflows/release.yml' false false false false false
 check module 'go.sum'                                 true  false false true  true true
 check mixed $'internal/x.go\nsite/a.ts\n'             true  true  false false false
-check empty ''                                        true  true  true  true  true true
-check blank-lines $'\n\n'                             true  true  true  true  true true
-check unknown-root 'new-build-config'                 true  true  true  true  true true
-check unknown-tree 'new-tool/config.yaml'             true  true  true  true  true true
-check unknown-nested-doc 'new-tool/README.md'         true  true  true  true  true true
-check unknown-dotfile '.new-build-config'             true  true  true  true  true true
-check mixed-unknown $'site/a.ts\nnew-tool/config.yaml\n' true true true true true true
-check ci-action '.github/actions/setup/action.yml'    true  true  true  true  true true
-check ci-script '.github/scripts/classify-changes.sh' true  true  true  true  true true
+check empty ''                                        true  true  true  true  true true true
+check blank-lines $'\n\n'                             true  true  true  true  true true true
+check unknown-root 'new-build-config'                 true  true  true  true  true true true
+check unknown-tree 'new-tool/config.yaml'             true  true  true  true  true true true
+check unknown-nested-doc 'new-tool/README.md'         true  true  true  true  true true true
+check unknown-dotfile '.new-build-config'             true  true  true  true  true true true
+check mixed-unknown $'site/a.ts\nnew-tool/config.yaml\n' true true true true true true true
+check ci-action '.github/actions/setup/action.yml'    true  true  true  true  true true true
+check ci-script '.github/scripts/classify-changes.sh' true  true  true  true  true true true
 check proposals 'proposals/design.md'                 false false false false false
 check go-config '.golangci.yml'                       true  false false false false
 check removed-go-path $'site/new.go\ninternal/old.go\n' true true false false false
-check gitignore '.gitignore'                          true  true  true  true  true true
+check gitignore '.gitignore'                          true  true  true  true  true true true
 check site-go 'site/helper.go'                        true  true  false false false
 check course-go 'course/helper.go'                    true  false true  false false
 check ignored-tree-go 'proposals/example.go'          true  false false false false
-check unknown-tree-go 'new-tool/helper.go'            true  true  true  true  true true
+check unknown-tree-go 'new-tool/helper.go'            true  true  true  true  true true true
 check pitr-download 'cmd/bloodraven/pitr_download.go' true  false false true  false
 check pitr-planner 'internal/pitrplan/plan.go'        true  false false true  false
 check pitr-sidecar 'internal/sidecar/binlog_txindex.go' true false false true false
@@ -89,5 +89,9 @@ check workload-dashboard 'charts/bloodraven/dashboards/mysql-workload.json' true
 check workload-example 'examples/mysqld-exporter-scrape.yaml' true false false false false true
 check workload-native 'internal/controller/mysql_workload_native_test.go' true false false false false true
 check workload-credentials 'internal/controller/init_users.go' true false false false false true
+
+check telemetry-server 'telemetry-server/src/main.rs'  false false false false false false true
+check telemetry-workflow '.github/workflows/deploy-telemetry.yml' false false false false false false true
+check telemetry-readme 'telemetry-server/README.md'   false false false false false false true
 
 printf 'Passed %s classifier cases.\n' "$cases"

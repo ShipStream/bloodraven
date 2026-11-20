@@ -82,8 +82,8 @@ async function copyToken() {
         Fetch your Bloodraven token
       </h1>
       <p class="lede">
-        You do not need this key to run Bloodraven. There is no activation, no
-        license server, and no phone-home. The software is fully functional
+        You do not need this key to run Bloodraven. There is no activation and no
+        license server, and the token never leaves your cluster. The software is fully functional
         without it. The token is a signed record of your purchase for your own
         files, expense report, and cluster inventory.
       </p>

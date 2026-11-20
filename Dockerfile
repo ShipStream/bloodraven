@@ -6,9 +6,12 @@ RUN go mod download
 COPY . .
 
 # One compile stage per target: `--target bloodraven` must not compile the sidecar.
+# VERSION is the release (release.yml passes the tag without its "v"); the
+# operator reports it and compares it with the latest release.
 FROM deps AS build-bloodraven
 ARG TARGETOS TARGETARCH
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o bloodraven ./cmd/bloodraven
+ARG VERSION=dev
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w -X main.Version=${VERSION}" -o bloodraven ./cmd/bloodraven
 
 FROM deps AS build-sidecar
 ARG TARGETOS TARGETARCH

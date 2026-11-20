@@ -20,6 +20,14 @@ It moves the stored objects to shipstream.io/v1beta1. See
 https://bloodraven.dev/docs/operations/upgrade-policy#upgrading-from-v170-to-v180
 {{- end }}
 
+{{- if eq (include "bloodraven.telemetryEnabled" .) "true" }}
+
+Usage reporting is on: once a day the operator sends a random install ID, its
+version, and its counts of failover groups, sites and nodes. Nothing else.
+Turn it off with --set telemetry.enabled=false. Details:
+https://bloodraven.dev/docs/configuration/usage-reporting
+{{- end }}
+
 {{- if .Values.metrics.service.enabled }}
 
 Metrics are available at:

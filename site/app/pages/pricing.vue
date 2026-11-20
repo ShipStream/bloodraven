@@ -117,8 +117,9 @@ const renewals = [
         is a one-time license.
       </p>
       <p class="note">
-        There is no activation, no license server, no feature gating, and no
-        phone-home. <strong>The software is fully functional without a key</strong>,
+        There is no activation, no license server, and no feature gating, and
+        nothing about your license leaves the cluster.
+        <strong>The software is fully functional without a key</strong>,
         on every tier. What you buy is the right to run it in production and a
         signed receipt to file — not an unlock code.
       </p>

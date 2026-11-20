@@ -1,0 +1,5 @@
+[toolchain]
+# The Dockerfile image pins the same release.
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
